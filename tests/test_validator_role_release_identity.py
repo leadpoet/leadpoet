@@ -8,7 +8,6 @@ import pytest
 
 from tests.restart_rehearsal.verify_evidence import (
     selected_validator_fulfillment_worker_ids,
-    selected_validator_qualification_worker_ids,
     verify_validator_role_release_identity,
 )
 
@@ -27,19 +26,13 @@ RELEASE_VARIABLES = (
 def _role_state(tmp_path: Path) -> dict:
     containers = {}
     names = ["leadpoet-validator-main"] + [
-        f"leadpoet-qual-worker-{worker_id}"
-        for worker_id in selected_validator_qualification_worker_ids((ROOT,))
-    ] + [
         f"leadpoet-ff-worker-{worker_id}"
         for worker_id in selected_validator_fulfillment_worker_ids((ROOT,))
     ]
     for ordinal, name in enumerate(names, start=1):
         log_path = tmp_path / f"{name}.log"
         log_path.write_text("started\n", encoding="utf-8")
-        if name.startswith("leadpoet-qual-worker-"):
-            worker_id = name.removeprefix("leadpoet-qual-worker-")
-            role = "validator.qualification_worker"
-        elif name.startswith("leadpoet-ff-worker-"):
+        if name.startswith("leadpoet-ff-worker-"):
             worker_id = name.removeprefix("leadpoet-ff-worker-")
             role = "validator.fulfillment_worker"
         else:
@@ -84,7 +77,7 @@ def test_candidate_derived_validator_fleet_has_exact_release_identity(
     ("mutation", "message"),
     (
         ("missing_worker", "candidate-derived validator worker fleet differs"),
-        ("missing_qualification_worker", "candidate-derived validator worker fleet differs"),
+        ("unexpected_qualification_worker", "candidate-derived validator worker fleet differs"),
         ("wrong_image", "validator role final release state is invalid"),
         ("wrong_revision", "validator role final release state is invalid"),
         ("wrong_commit_environment", "exact release environment is invalid"),
@@ -104,13 +97,11 @@ def test_validator_role_identity_rejects_release_drift(
     )
     if mutation == "missing_worker":
         state["containers"].pop(first_worker)
-    elif mutation == "missing_qualification_worker":
-        first_qualification = next(
-            name
-            for name in state["containers"]
-            if name.startswith("leadpoet-qual-worker-")
-        )
-        state["containers"].pop(first_qualification)
+    elif mutation == "unexpected_qualification_worker":
+        retired = deepcopy(state["containers"][first_worker])
+        retired["role"] = "validator.qualification_worker"
+        retired["worker_id"] = "1"
+        state["containers"]["leadpoet-qual-worker-1"] = retired
     elif mutation == "wrong_image":
         state["containers"][first_worker]["image_id"] = "sha256:" + "c" * 64
     elif mutation == "wrong_revision":
@@ -149,25 +140,19 @@ def test_rehearsal_secret_enables_every_candidate_selected_worker(
     specification.loader.exec_module(adapter)
     monkeypatch.setattr(adapter, "_candidate_root", lambda: ROOT)
 
-    expected_qualification_ids = selected_validator_qualification_worker_ids(
-        (ROOT,)
-    )
     expected_fulfillment_ids = selected_validator_fulfillment_worker_ids((ROOT,))
-    assert (
-        adapter._candidate_qualification_worker_ids()
-        == expected_qualification_ids
-    )
     assert adapter._candidate_fulfillment_worker_ids() == expected_fulfillment_ids
     secret = adapter._validator_secret()
-    assert secret["ENABLE_QUALIFICATION_WORKERS"] == "true"
     assert secret["ENABLE_FULFILLMENT"] == "true"
-    enabled_qualification_ids = tuple(
-        sorted(
-            int(key.rsplit("_", 1)[1])
-            for key, value in secret.items()
-            if key.startswith("QUALIFICATION_WEBSHARE_PROXY_") and value
-        )
+    assert "ENABLE_QUALIFICATION_WORKERS" not in secret
+    assert "ENABLE_QUALIFICATION_EVALUATION" not in secret
+    assert not any(
+        key.startswith("QUALIFICATION_WEBSHARE_PROXY_") for key in secret
     )
+    restart = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
+    required_keys = restart.split("required_keys=(", 1)[1].split(")", 1)[0].split()
+    assert "ENABLE_QUALIFICATION_EVALUATION" not in required_keys
+    assert "QUALIFICATION_WEBSHARE_PROXY_1" not in required_keys
     enabled_fulfillment_ids = tuple(
         sorted(
             int(key.rsplit("_", 1)[1])
@@ -175,7 +160,6 @@ def test_rehearsal_secret_enables_every_candidate_selected_worker(
             if key.startswith("FULFILLMENT_WEBSHARE_PROXY_") and value
         )
     )
-    assert enabled_qualification_ids == expected_qualification_ids
     assert enabled_fulfillment_ids == expected_fulfillment_ids
     assert secret["LEADPOET_SENTRY_RELEASE"] != CANDIDATE_SHA
 
@@ -223,10 +207,6 @@ def test_deployer_pins_release_identity_in_every_validator_launch_path() -> None
         deploy[
             deploy.index("start_container() {") :
             deploy.index("# Deploy containers")
-        ],
-        deploy[
-            deploy.index("# SPAWN QUALIFICATION WORKERS") :
-            deploy.index("# SPAWN FULFILLMENT WORKERS")
         ],
         deploy[
             deploy.index("# Auto-detect FULFILLMENT proxies") :

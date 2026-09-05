@@ -273,7 +273,6 @@ def test_behavior_workers_preserve_the_exact_candidate_inventory(
         epoch_count=1,
     )
     scenarios = list(contract["behavior_scenarios"])
-    assert len(scenarios) == 28
     assert set(scenarios) == set(workflow.BEHAVIOR_ACTIONS)
     behavior_helper(scenarios)
     stages: list[dict] = []

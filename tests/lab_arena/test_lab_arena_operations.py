@@ -34,6 +34,8 @@ VALID = {
     "exa.search": {"query": "acme series b", "type": "auto", "numResults": 5, "contents": {"highlights": {"query": "series b", "maxCharacters": 400}}},
     "exa.contents": {"ids": ["https://example.com/news"], "text": {"maxCharacters": 12000}, "maxAgeHours": 0},
     "scrapingdog.google": {"query": "acme corp", "country": "gb"},
+    "scrapingdog.google_news": {"query": "acme launch", "country": "gb"},
+    "scrapingdog.google_jobs": {"query": "acme cloud jobs", "country": "gb"},
     "openrouter.chat": {
         "model": "openai/gpt-4o-mini",
         "messages": [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}],
@@ -117,7 +119,16 @@ def reject(operation_id: str, parameters, code=None):
 
 def test_table_is_closed_and_every_operation_uses_host_credentials():
     judge_scrapingdog = {"scrapingdog.x_post", "scrapingdog.x_profile", "scrapingdog.profile", "scrapingdog.profile_post", "scrapingdog.linkedinjobs", "scrapingdog.jobs", "scrapingdog.indeed", "scrapingdog.instagram_profile", "scrapingdog.tiktok_profile", "scrapingdog.youtube_video", "scrapingdog.youtube_transcripts", "scrapingdog.youtube_channel", "scrapingdog.youtube_search"}
-    assert set(ops.OPERATIONS) == {"deepline.execute", "exa.search", "exa.contents", "scrapingdog.scrape", "scrapingdog.google", "openrouter.chat"} | judge_scrapingdog
+    assert set(ops.OPERATIONS) == {
+        "deepline.execute",
+        "exa.search",
+        "exa.contents",
+        "scrapingdog.scrape",
+        "scrapingdog.google",
+        "scrapingdog.google_news",
+        "scrapingdog.google_jobs",
+        "openrouter.chat",
+    } | judge_scrapingdog
     assert ops.PROVIDERS == contracts.PROVIDERS == ("scrapingdog", "deepline", "openrouter")
     assert ops.FUNDING_SOURCES == ("host",)
     for operation_id, operation in ops.OPERATIONS.items():
@@ -141,6 +152,8 @@ def test_table_is_closed_and_every_operation_uses_host_credentials():
     assert deepline.credential.location == "header" and deepline.credential.scheme == "Bearer"
     assert ops.OPERATIONS["scrapingdog.scrape"].fixed_params == {}
     assert ops.OPERATIONS["scrapingdog.google"].fixed_params == {"results": 10}
+    assert ops.OPERATIONS["scrapingdog.google_news"].fixed_params == {"results": 10}
+    assert ops.OPERATIONS["scrapingdog.google_jobs"].fixed_params == {}
     chat = ops.OPERATIONS["openrouter.chat"].fixed_params
     assert chat["stream"] is False
     assert chat["provider"] == {"data_collection": "deny", "allow_fallbacks": False, "zdr": True}
@@ -197,7 +210,40 @@ def test_normalization_fills_defaults_and_passes_tool_payloads_through():
     chat = ops.validate_operation_request("openrouter.chat", {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]})
     assert chat["max_tokens"] == ops.OPENROUTER_MAX_OUTPUT_TOKENS
     assert ops.validate_operation_request("scrapingdog.google", {"query": "acme"})["country"] == "us"
+    assert ops.validate_operation_request("scrapingdog.google_news", {"query": "acme"})["country"] == "us"
+    assert ops.validate_operation_request("scrapingdog.google_jobs", {"query": "acme"})["country"] == "us"
     assert ops.validate_operation_request("scrapingdog.scrape", {"url": "https://example.com/"})["dynamic"] is False
+
+
+def test_public_pydantic_baseline_provider_routes_are_allowed() -> None:
+    for tool in (
+        "hunter_discover",
+        "free_simple_company_search",
+        "predictleads_company_job_openings",
+        "predictleads_company_financing_events",
+        "predictleads_company_news_events",
+    ):
+        operation, parameters = ops.match_request(
+            "POST",
+            "https://code.deepline.com/api/v2/integrations/%s/execute" % tool,
+            b'{"payload":{"query":"x"}}',
+            {"content-type": "application/json"},
+        )
+        assert operation == "deepline.execute"
+        assert parameters["tool"] == tool
+    for endpoint, operation_id in (
+        ("google", "scrapingdog.google"),
+        ("google_news", "scrapingdog.google_news"),
+        ("google_jobs", "scrapingdog.google_jobs"),
+    ):
+        operation, parameters = ops.match_request(
+            "GET",
+            "https://api.scrapingdog.com/%s?query=acme" % endpoint,
+            b"",
+            {},
+        )
+        assert operation == operation_id
+        assert parameters["query"] == "acme"
 
 
 def test_null_optional_fields_are_dropped_and_null_required_fields_are_missing():

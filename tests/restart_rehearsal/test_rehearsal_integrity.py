@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -46,6 +47,7 @@ from tests.restart_rehearsal.fixture_contract import (
 )
 from tests.restart_rehearsal.gateway_boundary_service import (
     EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE as GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE,
+    LocalPostgRESTServer,
     LocalPostgRESTState,
     RUNTIME_TABLES,
     _apply_table_query,
@@ -57,6 +59,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _migration_schema_contract,
     _schema_contract,
     _source_add_claim_control_contract,
+    _source_add_claim_control_contract_v2,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ALLOCATION_MIGRATION_PREREQUISITES_SQL,
@@ -66,7 +69,6 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
-    ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
     DisposablePostgres,
@@ -88,7 +90,6 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
-    _git_tree_ticket_seed_row,
     _json_insert_sql,
     _validate_required_migration_declarations,
 )
@@ -97,12 +98,9 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
     SanitizedWeightFixture,
 )
 from tests.restart_rehearsal.verify_evidence import (
-    EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
-    REQUIRED_GIT_TREE_RELATION_CONTRACT,
     events,
     selected_weight_storage_preflight_capability,
-    verify_gateway_private_model_environment,
-    verify_gateway_provider_preflight,
+    selected_weight_storage_preflight_pins_epoch,
     verify_migration_backed_database_contract,
     verify_gateway_weight_readiness_invocations,
     verify_chain_settlement_durable_readback,
@@ -113,14 +111,6 @@ from gateway.tee.rehearsal_behavior_contract_v2 import (
     RESTART_INVARIANTS,
     build_rehearsal_behavior_contract_v2,
 )
-from gateway.research_lab.git_tree_models import (
-    TreePolicy,
-    TreeReplacement,
-    derive_child_slot,
-    derive_tree_id,
-)
-
-
 @contextmanager
 def _production_named_temp_directory(prefix: str):
     path = Path("/tmp") / f"{prefix}{uuid.uuid4().hex}"
@@ -156,15 +146,6 @@ def python39_import_event_loop():
             if previous_loop is not None and not previous_loop.is_closed()
             else None
         )
-
-
-def test_git_tree_rehearsal_ticket_seed_includes_required_miner() -> None:
-    ticket_id = "00000000-0000-4000-8000-000000000096"
-
-    assert _git_tree_ticket_seed_row(ticket_id) == {
-        "ticket_id": ticket_id,
-        "miner_hotkey": "5F-rehearsal-miner-hotkey",
-    }
 
 
 def _provider_persistence_batch_fixture() -> dict[str, Any]:
@@ -1566,6 +1547,36 @@ def test_gateway_rehearsal_rejects_columns_absent_from_migration_schema() -> Non
         )
 
 
+def test_gateway_rehearsal_icp_schema_covers_runtime_contract() -> None:
+    match = re.search(
+        r"CREATE TABLE public\.qualification_private_icp_sets \((.*?)\n\);",
+        ALLOCATION_MIGRATION_PREREQUISITES_SQL,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    columns = {
+        line.strip().split()[0].rstrip(",")
+        for line in match.group(1).splitlines()
+        if line.strip()
+    }
+    assert columns == {
+        "set_id",
+        "icps",
+        "icp_set_hash",
+        "industry_distribution",
+        "active_from",
+        "active_until",
+        "generation_seed",
+        "is_active",
+    }
+    assert _apply_table_query(
+        [],
+        "select=set_id,icps,icp_set_hash,active_from,active_until"
+        "&is_active=eq.True&limit=1",
+        allowed_columns=frozenset(columns),
+    ) == []
+
+
 def test_migration_backed_contract_is_candidate_bound_and_complete(
     tmp_path,
 ) -> None:
@@ -1595,8 +1606,13 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_candidate_model_unit_terminals",
             "research_lab_candidate_waterfall_receipts",
             "research_lab_candidate_waterfall_metrics",
-            "research_lab_source_add_provenance_leg1_authority_v1",
-            "research_lab_source_add_miner_status_v1",
+                "research_lab_source_add_provenance_leg1_authority_v1",
+                "research_lab_source_add_miner_status_v1",
+                "lab_arena_rounds",
+                "lab_arena_submissions",
+                "lab_arena_runs",
+                "lab_arena_ledger",
+                "lab_arena_reward_basis_v1",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -1667,8 +1683,14 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_source_add_reconcile_provenance_leg1_v1",
             "research_lab_source_add_reserve_leg1_slot_v4",
             "research_lab_source_add_reserve_leg1_slot_v3",
-            "research_lab_source_add_finalize_leg1_v3",
-            "research_lab_routing_exact_model_transition_contract_v1",
+                "research_lab_source_add_finalize_leg1_v3",
+                "lab_arena_current_daily_icp_set",
+                "lab_arena_register_submission",
+                "lab_arena_update_submission",
+                "lab_arena_claim_assignment",
+                "lab_arena_activate_reward",
+                "lab_arena_schema_version_v1",
+                "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",
             "research_lab_routing_load_model_transition_v2",
             "research_lab_candidate_append_model_unit_terminal_v1",
@@ -1895,50 +1917,9 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["metric_id", "experiment_hash"],
             },
-            "research_lab_autoresearch_trees": {
-                "kind": "r",
-                "columns": ["tree_id", "run_id"],
-            },
-            "research_lab_autoresearch_tree_nodes": {
-                "kind": "r",
-                "columns": ["tree_id", "node_id"],
-            },
-            "research_lab_autoresearch_tree_events": {
-                "kind": "r",
-                "columns": ["tree_id", "event_hash"],
-            },
-            "research_lab_autoresearch_operation_settlements": {
-                "kind": "r",
-                "columns": ["logical_operation_id", "tree_id"],
-            },
-            "research_lab_autoresearch_frontier_commitments": {
-                "kind": "r",
-                "columns": ["tree_id", "frontier_hash"],
-            },
-            "research_lab_autoresearch_tree_handoffs": {
-                "kind": "r",
-                "columns": ["tree_id", "handoff_hash"],
-            },
-            "research_lab_autoresearch_tree_node_current": {
-                "kind": "v",
-                "columns": ["tree_id", "node_id", "current_event_hash"],
-            },
-            "research_lab_autoresearch_operation_current": {
-                "kind": "v",
-                "columns": ["logical_operation_id", "operation_status"],
-            },
-            "research_lab_autoresearch_tree_current": {
-                "kind": "v",
-                "columns": ["tree_id", "current_event_hash"],
-            },
-            "research_lab_autoresearch_run_tree_current": {
-                "kind": "v",
-                "columns": ["run_id", "tree_id", "tree_generation"],
-            },
         },
         "rpcs": [
             "research_lab_acquire_maintenance_lease",
-            "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
             "persist_research_lab_allocation_settlement_frontier_v2",
             "persist_research_lab_allocation_frontier_bootstrap_v2",
@@ -1950,15 +1931,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "put_research_lab_provider_evidence_cache_v2",
             "append_research_lab_provider_outcome_checkpoints_v2",
             "research_lab_provider_persistence_batch_contract_v1",
-            "create_research_lab_autoresearch_tree",
-            "plan_research_lab_autoresearch_tree_node",
-            "append_research_lab_autoresearch_tree_event",
-            "transition_research_lab_autoresearch_operation",
-            "commit_research_lab_autoresearch_frontier",
-            "select_research_lab_autoresearch_tree_final",
-            "record_research_lab_autoresearch_tree_handoff",
-            "create_research_lab_git_tree_candidate_handoff",
-            "research_lab_autoresearch_run_evaluation_usage",
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
@@ -1981,11 +1953,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_add_reserve_leg1_slot_v4",
             "research_lab_source_add_reserve_leg1_slot_v3",
             "research_lab_source_add_finalize_leg1_v3",
-            "research_lab_routing_exact_model_transition_contract_v1",
-            "research_lab_routing_exact_model_transition_contract_v2",
-            "research_lab_candidate_append_model_unit_terminal_v1",
-            "research_lab_candidate_append_waterfall_receipt_v1",
-            "research_lab_candidate_append_waterfall_metric_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
@@ -2044,7 +2011,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "frontier_count": 1,
             "activation_count": 1,
         },
-        "git_tree_autoresearch": {},
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
@@ -2072,147 +2038,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             ],
             **graph_seed_rows,
         },
-    }
-    for relation, expected in REQUIRED_GIT_TREE_RELATION_CONTRACT.items():
-        contract["relations"][relation] = {
-            "kind": expected["kind"],
-            "columns": sorted(expected["columns"]),
-        }
-    policy = TreePolicy(mode="active")
-    run_id = "00000000-0000-4000-8000-000000000095"
-    root_a = sha256_json({"root": "a"})
-    root_b = sha256_json({"root": "b"})
-    manifest_a = sha256_json({"manifest": "a"})
-    manifest_b = sha256_json({"manifest": "b"})
-    tree_a = derive_tree_id(
-        run_id=run_id,
-        root_artifact_hash=root_a,
-        policy=policy,
-    )
-    cancellation_doc = {
-        "schema_version": "research_lab.git_tree_root_change.v2",
-        "run_id": run_id,
-        "tree_id": tree_a,
-        "next_generation": 1,
-        "old_root_artifact_hash": root_a,
-        "new_root_artifact_hash": root_b,
-        "old_root_manifest_hash": manifest_a,
-        "new_root_manifest_hash": manifest_b,
-        "old_policy_hash": policy.policy_hash,
-        "new_policy_hash": policy.policy_hash,
-        "reason": "tree_authority_changed_before_resume",
-    }
-    selected_slot = derive_child_slot(
-        tree_id=tree_a,
-        parent_node_id="root",
-        root_branch_id="",
-        depth=1,
-        slot_index=0,
-    )
-    candidate_artifact_hash = sha256_json({"candidate": "selected"})
-    selected_lineage_hash = sha256_json(
-        {
-            "schema_version": "research_lab.git_tree_lineage.v1",
-            "tree_id": tree_a,
-            "node_id": selected_slot.node_id,
-            "git_commit": "c" * 64,
-            "composition": {"root_git_commit": "a" * 64},
-        }
-    )
-    selection = {
-        "tree_id": tree_a,
-        "selected_node_id": selected_slot.node_id,
-        "paid_finalist_count": 1,
-        "selected_candidate_artifact_hash": candidate_artifact_hash,
-        "selected_node_git_commit": "c" * 64,
-        "selected_lineage_hash": selected_lineage_hash,
-    }
-    predecessor_doc = {
-        "selection_hash": sha256_json(selection),
-        "selection": selection,
-    }
-    predecessor_previous_hash = sha256_json(
-        {"fixture": "previous-tree-event"}
-    )
-    predecessor_event_hash = sha256_json(
-        {
-            "schema_version": "research_lab.git_tree_event.v1",
-            "tree_id": tree_a,
-            "event_type": "final_selected",
-            "node_id": selected_slot.node_id,
-            "previous_event_hash": predecessor_previous_hash,
-            "event_doc": predecessor_doc,
-        }
-    )
-    cancellation_event_hash = sha256_json(
-        {
-            "schema_version": "research_lab.git_tree_event.v1",
-            "tree_id": tree_a,
-            "event_type": "tree_cancelled_root_changed",
-            "node_id": "",
-            "previous_event_hash": predecessor_event_hash,
-            "event_doc": cancellation_doc,
-        }
-    )
-    replacement = TreeReplacement(
-        generation=1,
-        replaces_tree_id=tree_a,
-        cancellation_event_hash=cancellation_event_hash,
-        prior_root_artifact_hash=root_a,
-        prior_root_manifest_hash=manifest_a,
-        prior_policy_hash=policy.policy_hash,
-        root_artifact_hash=root_b,
-        root_manifest_hash=manifest_b,
-        policy_hash=policy.policy_hash,
-    )
-    contract["git_tree_autoresearch"] = {
-        "run_id": run_id,
-        "policy": policy.to_dict(),
-        "initial_tree_id": tree_a,
-        "replacement_tree_id": derive_tree_id(
-            run_id=run_id,
-            root_artifact_hash=root_b,
-            policy=policy,
-            replacement=replacement,
-        ),
-        "replacement_hash": replacement.replacement_hash,
-        "replacement": replacement.to_dict(),
-        "predecessor_event": {
-            "tree_id": tree_a,
-            "seq": 5,
-            "event_type": "final_selected",
-            "node_id": selected_slot.node_id,
-            "previous_event_hash": predecessor_previous_hash,
-            "event_doc": predecessor_doc,
-            "event_hash": predecessor_event_hash,
-        },
-        "cancellation_event": {
-            "tree_id": tree_a,
-            "event_type": "tree_cancelled_root_changed",
-            "node_id": "",
-            "previous_event_hash": predecessor_event_hash,
-            "event_doc": cancellation_doc,
-            "event_hash": cancellation_event_hash,
-        },
-        "candidate_id": (
-            "candidate:" + candidate_artifact_hash.split(":", 1)[1]
-        ),
-        "candidate_artifact_hash": candidate_artifact_hash,
-        "evaluation_usage": {
-            "settled_cost_microusd": 250,
-            "provider_call_count": 4,
-            "terminal_operation_count": 2,
-            "unsettled_operation_ids": [],
-            "indeterminate_operation_ids": [],
-        },
-        "row_counts": {
-            "trees": 2,
-            "handoffs": 1,
-            "candidates": 1,
-            "evaluation_events": 1,
-        },
-        "restart_replay_exact": True,
-        "stale_root_rejected_atomically": True,
     }
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
     original_is_file = Path.is_file
@@ -2270,51 +2095,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         "resumed_run"
     ] = 3
     invalid_contracts.append(altered_atomic_credit_resume)
-    missing_relation = json.loads(json.dumps(contract))
-    del missing_relation["relations"][
-        "research_lab_autoresearch_tree_current"
-    ]
-    invalid_contracts.append(missing_relation)
-    missing_base_column = json.loads(json.dumps(contract))
-    missing_base_column["relations"][
-        "research_lab_autoresearch_tree_events"
-    ]["columns"].remove("event_doc")
-    invalid_contracts.append(missing_base_column)
-    missing_view_column = json.loads(json.dumps(contract))
-    missing_view_column["relations"][
-        "research_lab_autoresearch_tree_current"
-    ]["columns"].remove("current_event_doc")
-    invalid_contracts.append(missing_view_column)
-    wrong_relation_kind = json.loads(json.dumps(contract))
-    wrong_relation_kind["relations"][
-        "research_lab_autoresearch_tree_current"
-    ]["kind"] = "r"
-    invalid_contracts.append(wrong_relation_kind)
-    missing_rpc = json.loads(json.dumps(contract))
-    missing_rpc["rpcs"].remove(
-        "create_research_lab_git_tree_candidate_handoff"
-    )
-    invalid_contracts.append(missing_rpc)
-    fabricated_tree = json.loads(json.dumps(contract))
-    fabricated_tree["git_tree_autoresearch"]["initial_tree_id"] = (
-        "sha256:" + "9" * 64
-    )
-    invalid_contracts.append(fabricated_tree)
-    fabricated_candidate = json.loads(json.dumps(contract))
-    fabricated_candidate_hash = "sha256:" + "8" * 64
-    fabricated_candidate["git_tree_autoresearch"][
-        "candidate_artifact_hash"
-    ] = fabricated_candidate_hash
-    fabricated_candidate["git_tree_autoresearch"]["candidate_id"] = (
-        "candidate:" + fabricated_candidate_hash.split(":", 1)[1]
-    )
-    invalid_contracts.append(fabricated_candidate)
-    detached_predecessor = json.loads(json.dumps(contract))
-    detached_predecessor["git_tree_autoresearch"]["cancellation_event"][
-        "previous_event_hash"
-    ] = "sha256:" + "7" * 64
-    invalid_contracts.append(detached_predecessor)
-
     for invalid in invalid_contracts:
         contract_path.write_text(json.dumps(invalid), encoding="utf-8")
         with pytest.raises(
@@ -3587,88 +3367,6 @@ def test_gateway_rehearsal_git_adapter_keeps_non_fetch_local_git(
     assert observed == [[contract_adapter.REAL_GIT, *argv]]
 
 
-def test_private_model_rehearsal_boundary_is_signed_and_fail_closed(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "EVENT_PATH",
-        tmp_path / "events.jsonl",
-    )
-    rehearsal_sitecustomize._clear_private_model_s3_objects()
-    bucket = rehearsal_sitecustomize._PRIVATE_MODEL_BUCKET
-    immutable_key = rehearsal_sitecustomize._PRIVATE_MODEL_PREFIX + "fixture.json"
-    pointer_key = rehearsal_sitecustomize._PRIVATE_MODEL_POINTER_KEY
-    client = rehearsal_sitecustomize._LocalS3()
-    rehearsal_sitecustomize._install_private_model_s3_object(
-        bucket=bucket,
-        key=immutable_key,
-        body=b'{"version":7}',
-    )
-    assert (
-        client.get_object(Bucket=bucket, Key=immutable_key)["Body"].read()
-        == b'{"version":7}'
-    )
-    with pytest.raises(ValueError, match="immutable object differs"):
-        rehearsal_sitecustomize._install_private_model_s3_object(
-            bucket=bucket,
-            key=immutable_key,
-            body=b'{"version":8}',
-        )
-
-    rehearsal_sitecustomize._install_private_model_s3_object(
-        bucket=bucket,
-        key=pointer_key,
-        body=b'{"version":7}',
-    )
-    rehearsal_sitecustomize._install_private_model_s3_object(
-        bucket=bucket,
-        key=pointer_key,
-        body=b'{"version":8}',
-    )
-    assert (
-        client.get_object(Bucket=bucket, Key=pointer_key)["Body"].read()
-        == b'{"version":8}'
-    )
-
-    manifest_hash = "sha256:" + "4" * 64
-    signature = rehearsal_sitecustomize._sign_private_model_manifest_hash(manifest_hash)
-    kms = rehearsal_sitecustomize._LocalKMS()
-    valid = kms.verify(
-        KeyId=rehearsal_sitecustomize._PRIVATE_MODEL_SIGNING_KEY_ID,
-        Message=manifest_hash.encode("utf-8"),
-        MessageType="RAW",
-        Signature=signature,
-        SigningAlgorithm="ECDSA_SHA_256",
-    )
-    assert valid["SignatureValid"] is True
-    corrupted = signature[:-1] + bytes((signature[-1] ^ 1,))
-    invalid = kms.verify(
-        KeyId=rehearsal_sitecustomize._PRIVATE_MODEL_SIGNING_KEY_ID,
-        Message=manifest_hash.encode("utf-8"),
-        MessageType="RAW",
-        Signature=corrupted,
-        SigningAlgorithm="ECDSA_SHA_256",
-    )
-    assert invalid["SignatureValid"] is False
-    with pytest.raises(ValueError, match="verify contract differs"):
-        kms.verify(
-            KeyId=rehearsal_sitecustomize._PRIVATE_MODEL_SIGNING_KEY_ID,
-            Message=manifest_hash.encode("utf-8"),
-            MessageType="DIGEST",
-            Signature=signature,
-            SigningAlgorithm="ECDSA_SHA_256",
-        )
-    operations = [
-        json.loads(line)["operation"]
-        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    assert operations.count("verify") == 2
-    rehearsal_sitecustomize._clear_private_model_s3_objects()
-
-
 def test_gateway_rehearsal_provider_boundary_rejects_unknown_hosts() -> None:
     with pytest.raises(ValueError, match="unknown host"):
         rehearsal_sitecustomize._local_provider_transport(
@@ -3722,26 +3420,29 @@ def test_gateway_boundary_registers_background_startup_schema_contracts() -> Non
     repository_root = Path(__file__).resolve().parents[2]
     tables, rpcs = _schema_contract(repository_root)
     assert {
+        "research_lab_gateway_control_current",
+        "lab_arena_rounds",
+        "lab_arena_submissions",
+        "lab_arena_runs",
+        "lab_arena_ledger",
+        "lab_arena_reward_basis_v1",
+    } <= tables
+    assert {
+        "research_lab_source_add_claim_work",
+        "lab_arena_current_daily_icp_set",
+        "lab_arena_register_submission",
+        "lab_arena_update_submission",
+        "lab_arena_claim_assignment",
+        "lab_arena_activate_reward",
+        "lab_arena_schema_version_v1",
+    } <= rpcs
+    assert {
         "research_lab_candidate_evaluation_current",
         "research_lab_candidate_promotion_events",
-        "research_lab_gateway_control_current",
         "research_lab_public_benchmark_report_current",
-    } <= tables
-    assert "research_lab_source_add_claim_work" in rpcs
+    }.isdisjoint(tables)
     assert "research_lab_gateway_control_current" in (
         repository_root / "scripts/44-research-lab-maintenance-pause.sql"
-    ).read_text(encoding="utf-8")
-    assert "research_lab_public_benchmark_report_current" in (
-        repository_root
-        / "scripts/53-research-lab-benchmark-quality-current-views.sql"
-    ).read_text(encoding="utf-8")
-    assert "research_lab_candidate_evaluation_current" in (
-        repository_root
-        / "scripts/52-research-lab-image-build-candidate-current-view.sql"
-    ).read_text(encoding="utf-8")
-    assert "research_lab_candidate_promotion_events" in (
-        repository_root
-        / "scripts/37-research-lab-promotion-and-public-benchmarks.sql"
     ).read_text(encoding="utf-8")
     assert "research_lab_source_add_claim_work" in (
         repository_root
@@ -3806,50 +3507,6 @@ def test_local_urlopen_routes_authenticated_weight_handoff_to_real_gateway(
         )
 
 
-def test_gateway_secret_enables_the_production_weight_authority(
-    monkeypatch,
-) -> None:
-    adapter_path = (
-        Path(__file__).resolve().parent / "contract_adapter.py"
-    )
-    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
-    spec = importlib.util.spec_from_file_location(
-        "_rehearsal_gateway_secret_contract",
-        adapter_path,
-    )
-    assert spec is not None and spec.loader is not None
-    adapter = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(adapter)
-    values = adapter._gateway_secret()
-    for name, value in values.items():
-        monkeypatch.setenv(name, value)
-
-    from gateway.research_lab.config import ResearchLabGatewayConfig
-
-    config = ResearchLabGatewayConfig.from_env()
-    assert values["BITTENSOR_NETWORK"] == "finney"
-    assert values["BITTENSOR_NETUID"] == "71"
-    assert config.api_enabled is True
-    assert config.production_writes_enabled is True
-    assert config.receipts_enabled is True
-    assert config.evaluation_bundles_enabled is True
-    assert config.weight_mutation_enabled is True
-    assert config.internal_api_key == "rehearsal-internal"
-
-    from gateway.research_lab.capture_health import (
-        capture_health_violations,
-        collect_capture_health,
-    )
-
-    capture_health = collect_capture_health(config)
-    assert capture_health["production_writes_enabled"] is True
-    assert capture_health_violations(capture_health) == []
-    assert all(
-        channel["status"] == "ok"
-        for channel in capture_health["channels"].values()
-    )
-
-
 def test_deferred_gateway_rehearsal_keeps_legacy_and_selects_v2_tls_proxies(
     monkeypatch,
 ) -> None:
@@ -3868,15 +3525,9 @@ def test_deferred_gateway_rehearsal_keeps_legacy_and_selects_v2_tls_proxies(
     spec.loader.exec_module(adapter)
 
     values = adapter._gateway_secret()
-    assert values["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
-        "http://"
-    )
     assert values[
         "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"
     ].startswith("http://")
-    assert values[
-        "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"
-    ].startswith("https://")
     assert values["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"].startswith(
         "https://"
     )
@@ -3896,17 +3547,8 @@ def test_gateway_secret_exercises_tls_proxy_success_and_plaintext_failure(
     spec.loader.exec_module(adapter)
 
     success = adapter._gateway_secret()
-    assert success["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
-        "http://"
-    )
     assert success["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"].startswith(
         "http://"
-    )
-    assert success["RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"].startswith(
-        "https://"
-    )
-    assert success["RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"].endswith(
-        ":443"
     )
     assert success["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"].startswith(
         "https://"
@@ -3918,11 +3560,7 @@ def test_gateway_secret_exercises_tls_proxy_success_and_plaintext_failure(
         "plaintext_proxy_rejected",
     )
     failure = adapter._gateway_secret()
-    assert "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1" not in failure
     assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1" not in failure
-    assert failure["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
-        "http://"
-    )
     assert failure["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"].startswith(
         "http://"
     )
@@ -4065,91 +3703,6 @@ def test_sitecustomize_installs_vsock_adapter_under_production_safe_path(
     assert "Error in sitecustomize" not in observed_stderr
 
 
-def test_sitecustomize_bootstraps_exact_meminfo_without_candidate_pythonpath(
-    tmp_path,
-) -> None:
-    harness_root = Path(__file__).resolve().parent
-    repository_root = Path(__file__).resolve().parents[2]
-    state_root = tmp_path / "state"
-    ordinary_path = tmp_path / "ordinary.txt"
-    ordinary_path.write_text("ordinary-boundary", encoding="utf-8")
-    environment = {
-        **os.environ,
-        "PYTHONPATH": str(harness_root),
-        "PYTHONSAFEPATH": "1",
-        "REHEARSAL_CANDIDATE_SHA": COMMIT,
-        "REHEARSAL_SCOPE": "exact",
-        "REHEARSAL_SOURCE_ROOT": str(repository_root),
-        "REHEARSAL_STATE_ROOT": str(state_root),
-        "AWS_EC2_METADATA_DISABLED": "true",
-    }
-    safe_path_flag = ["-P"] if sys.version_info >= (3, 11) else []
-    stderr_path = tmp_path / "meminfo.stderr"
-    with stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(
-            [
-                sys.executable,
-                *safe_path_flag,
-                "-c",
-                "\n".join(
-                    (
-                    "import builtins",
-                    "import json",
-                    "import os",
-                    "import sitecustomize",
-                    "import sys",
-                    "from pathlib import Path",
-                    f"source_root = Path({str(repository_root)!r})",
-                    "assert str(source_root) not in sys.path",
-                    "assert 'gateway' not in sys.modules",
-                    "assert Path(sitecustomize._rehearsal_topology_module.__file__).resolve() == (source_root / 'gateway/tee/topology.py').resolve()",
-                    "sys.path.insert(0, str(source_root))",
-                    "from gateway.research_lab.scoring_worker import _read_mem_available_mb",
-                    "from gateway.tee.restart_preflight_v2 import _observed_capacity",
-                    "from gateway.tee.topology import validate_manifest",
-                    f"ordinary_path = Path({str(ordinary_path)!r})",
-                    f"state_root = Path({str(state_root)!r})",
-                    "topology = validate_manifest(json.loads((source_root / 'gateway/tee/topology.json').read_text(encoding='utf-8')))",
-                    "expected_parent_mib = int(topology['production_parent_memory_mib'])",
-                    "expected_available_mib = int(topology['host_reserved_memory_mib'])",
-                    "assert _read_mem_available_mb() == expected_available_mib",
-                    "assert _observed_capacity() == (int(topology['production_parent_vcpus']), expected_parent_mib)",
-                    "with builtins.open('/proc/meminfo', 'r', encoding='utf-8') as handle:",
-                    "    builtin_text = handle.read()",
-                    "path_text = Path('/proc/meminfo').read_text(encoding='utf-8')",
-                    "def memory_values(value):",
-                    "    return {line.split(':', 1)[0]: int(line.split()[1]) // 1024 for line in value.splitlines()}",
-                    "assert memory_values(builtin_text) == {'MemTotal': expected_parent_mib, 'MemAvailable': expected_available_mib}",
-                    "assert memory_values(path_text) == {'MemTotal': expected_parent_mib, 'MemAvailable': expected_available_mib}",
-                    "with builtins.open(ordinary_path, 'rb', buffering=0) as handle:",
-                    "    assert handle.read() == b'ordinary-boundary'",
-                    "assert ordinary_path.read_text(encoding='utf-8') == 'ordinary-boundary'",
-                    "event_rows = [json.loads(line) for line in (state_root / 'events.jsonl').read_text(encoding='utf-8').splitlines()]",
-                    "memory_rows = [row for row in event_rows if row.get('boundary') == 'host_kernel' and row.get('operation') == 'memory_capacity']",
-                    "assert {row.get('read_interface') for row in memory_rows} == {'builtins.open', 'pathlib.Path.read_text'}",
-                    "assert all(row.get('memory_capacity_source') == 'candidate_topology.production_parent_memory_mib' for row in memory_rows)",
-                    "assert all(row.get('available_memory_capacity_source') == 'candidate_topology.host_reserved_memory_mib' for row in memory_rows)",
-                    "assert all(row.get('topology_hash') == topology['topology_hash'] for row in memory_rows)",
-                    "assert all(int(row.get('memory_mib') or 0) == expected_parent_mib for row in memory_rows)",
-                    "assert all(int(row.get('available_memory_mib') or 0) == expected_available_mib for row in memory_rows)",
-                    "os._exit(0)",
-                    )
-                ),
-            ],
-            cwd=tmp_path,
-            env=environment,
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr,
-            check=False,
-            timeout=30,
-        )
-
-    observed_stderr = stderr_path.read_text(encoding="utf-8")
-    assert result.returncode == 0, observed_stderr
-    assert "Error in sitecustomize" not in observed_stderr
-
-
 def test_sitecustomize_fails_closed_when_candidate_topology_is_unavailable(
     tmp_path,
 ) -> None:
@@ -4253,115 +3806,6 @@ def test_gateway_enclave_service_uses_the_image_import_layout(
     assert Path(
         importlib.import_module("gateway.tee.nsm_lib").__file__
     ).resolve() == (gateway_root / "tee/nsm_lib.py").resolve()
-
-
-def _measured_metadata_oci_fixture(tmp_path: Path, monkeypatch):
-    from gateway.tee.model_sandbox_v2 import _oci_config
-
-    monkeypatch.setitem(sys.modules, "sitecustomize", rehearsal_sitecustomize)
-    boundary_module = importlib.import_module(
-        "tests.restart_rehearsal.gateway_enclave_service"
-    )
-    rootfs = tmp_path / "rootfs"
-    visible_root = rootfs / "leadpoet-model-sandboxes"
-    source = visible_root / ("lp-job-" + "a" * 16) / "source"
-    source.mkdir(parents=True)
-    visible_root.chmod(0o711)
-    config = SimpleNamespace(
-        rootfs_path=rootfs,
-        uid=os.getuid(),
-        gid=os.getgid(),
-        memory_limit_bytes=1024 * 1024,
-        cpu_quota=100000,
-        cpu_period=100000,
-        pids_limit=32,
-        python_path="/usr/local/bin/python3",
-    )
-    bootstrap = "print('metadata')"
-    sandbox_id = "lp-test"
-    document = _oci_config(
-        config=config,
-        source_root=source,
-        broker_root=None,
-        process_args=[
-            config.python_path,
-            "-I",
-            "-B",
-            "-c",
-            bootstrap,
-            "research_lab_adapter",
-            "adapter_metadata",
-        ],
-        environment={},
-        cgroups_path="leadpoet-model/" + sandbox_id,
-    )
-    boundary = boundary_module._MeasuredRunscBoundary(
-        config,
-        metadata_bootstrap=bootstrap,
-    )
-    boundary._verify_metadata_oci_document(
-        document=document,
-        sandbox_id=sandbox_id,
-    )
-    return boundary, document, sandbox_id
-
-
-@pytest.mark.parametrize(
-    "nested_path",
-    ("process", "linux", "linux.seccomp"),
-)
-def test_measured_runsc_boundary_rejects_extra_nested_oci_fields(
-    tmp_path,
-    monkeypatch,
-    nested_path,
-) -> None:
-    boundary, document, sandbox_id = _measured_metadata_oci_fixture(
-        tmp_path,
-        monkeypatch,
-    )
-    mutated = copy.deepcopy(document)
-    target = mutated
-    for key in nested_path.split("."):
-        target = target[key]
-    target["unexpected"] = True
-
-    with pytest.raises(ValueError, match="differs"):
-        boundary._verify_metadata_oci_document(
-            document=mutated,
-            sandbox_id=sandbox_id,
-        )
-
-
-def test_measured_runsc_boundary_rejects_source_path_traversal(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    boundary, document, sandbox_id = _measured_metadata_oci_fixture(
-        tmp_path,
-        monkeypatch,
-    )
-    mutated = copy.deepcopy(document)
-    traversal = (
-        "/leadpoet-model-sandboxes/lp-job-"
-        + "a" * 16
-        + "/../../escape"
-    )
-    environment = dict(
-        item.split("=", 1) for item in mutated["process"]["env"]
-    )
-    environment["LEADPOET_MODEL_SOURCE_ROOT"] = traversal
-    environment["PYTHONPATH"] = (
-        "/app:/app/gateway/_attested_runtime:" + traversal
-    )
-    mutated["process"]["env"] = [
-        "%s=%s" % item for item in sorted(environment.items())
-    ]
-
-    with pytest.raises(ValueError, match="source path"):
-        boundary._verify_metadata_oci_document(
-            document=mutated,
-            sandbox_id=sandbox_id,
-        )
 
 
 def test_gateway_event_signer_uses_local_nitro_boundary(
@@ -4549,8 +3993,11 @@ def test_gateway_runtime_identity_uses_the_installed_local_nsm_boundary(
 
 
 def test_external_build_identities_match_the_production_image_normalizer(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
     from validator_tee.host.docker_image_normalizer_v2 import (
         normalize_saved_image,
     )
@@ -4571,6 +4018,17 @@ def test_external_build_identities_match_the_production_image_normalizer(
         assert image_id == normalized_image_id(COMMIT, role)
         assert image_id not in observed
         observed.add(image_id)
+        images = {}
+        assert contract_adapter._docker_load(
+            normalized,
+            images,
+            {},
+        ) == [f"rehearsal:{role}"]
+        assert images[f"rehearsal:{role}"]["rootfs_layers"]
+        assert all(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", layer)
+            for layer in images[f"rehearsal:{role}"]["rootfs_layers"]
+        )
 
 
 def test_release_channel_uses_the_same_commit_bound_external_artifacts(
@@ -4611,20 +4069,109 @@ def test_release_channel_uses_the_same_commit_bound_external_artifacts(
         "SOURCE_ROOT",
         Path(__file__).resolve().parents[2],
     )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     channel = rehearsal_sitecustomize._release_channel(COMMIT)
     gateway = channel["gateway_release_manifest"]
+    assert gateway["schema_version"] == "leadpoet.gateway_local_release.v1"
+    assert gateway["verified_build_count"] == len(ROLE_SPECS)
     for role, release in gateway["roles"].items():
+        assert release["verified_build_count"] == 1
         assert release["normalized_image_hash"] == normalized_image_id(
             COMMIT,
             role,
         )
-        assert eif_hash(COMMIT, role) in release["eif_hashes"]
-    validator = channel["validator_release_manifest"]["release"]
+    validator_manifest = channel["validator_release_manifest"]
+    assert validator_manifest["schema_version"] == (
+        "leadpoet.validator_local_release.v1"
+    )
+    assert validator_manifest["verified_build_count"] == 1
+    validator = validator_manifest["release"]
     assert validator["normalized_image_hash"] == normalized_image_id(
         COMMIT,
         "validator_weights",
     )
     assert validator["eif_hash"] == eif_hash(COMMIT, "validator_weights")
+
+
+def test_release_channel_preserves_the_exact_historical_role_topology(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from gateway.tee.release_manifest_v2 import (
+        HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+    )
+    from gateway.tee.topology import ROLE_SPECS
+
+    historical_commit = "2" * 40
+    role_names = {*ROLE_SPECS, "gateway_autoresearch"}
+    roles = {}
+    for role in role_names:
+        historical_role = role == "gateway_autoresearch"
+        roles[role] = {
+            "build_identity_hash": "sha256:" + "1" * 64,
+            "commit_sha": historical_commit,
+            "dependency_lock_hash": "sha256:" + "2" * 64,
+            "dockerfile_hash": "sha256:" + "3" * 64,
+            "eif_hash": (
+                "sha256:" + "5" * 64
+                if historical_role
+                else eif_hash(historical_commit, role)
+            ),
+            "execution_manifest_hash": "sha256:" + "4" * 64,
+            "normalized_image_hash": (
+                "sha256:" + "9" * 64
+                if historical_role
+                else normalized_image_id(
+                    historical_commit,
+                    role,
+                )
+            ),
+            "pcr0": pcr0(historical_commit),
+            "service_role": role,
+            "source_manifest_hash": "sha256:" + "6" * 64,
+            "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        }
+    (tmp_path / "release-build-input.json").write_text(
+        json.dumps(
+            {
+                "commit_sha": historical_commit,
+                "gateway_roles": roles,
+                "validator_app_manifest_hash": "sha256:" + "7" * 64,
+                "validator_dependency_lock_hash": "sha256:" + "8" * 64,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "SOURCE_ROOT",
+        Path(__file__).resolve().parents[2],
+    )
+
+    channel = rehearsal_sitecustomize._release_channel(historical_commit)
+
+    gateway = channel["gateway_release_manifest"]
+    assert gateway["topology_hash"] == HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    assert set(gateway["roles"]) == role_names
+    assert gateway["verified_build_count"] == 18
+
+    roles["gateway_autoresearch"]["service_role"] = "gateway_scoring"
+    (tmp_path / "release-build-input.json").write_text(
+        json.dumps(
+            {
+                "commit_sha": historical_commit,
+                "gateway_roles": roles,
+                "validator_app_manifest_hash": "sha256:" + "7" * 64,
+                "validator_dependency_lock_hash": "sha256:" + "8" * 64,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="release role service mismatch"):
+        rehearsal_sitecustomize._release_channel(historical_commit)
 
 
 def test_release_channel_resolves_both_transition_release_inputs(
@@ -5088,99 +4635,6 @@ def test_local_gateway_kms_boundary_unwraps_boot_credential_in_candidate(
             decrypted["CiphertextForRecipient"]
         ).decode("ascii"),
     ) == credential
-
-
-def test_local_nitro_boundary_preserves_optional_recipient_key_binding(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    from gateway.tee.kms_recipient_v2 import KMSRecipientV2
-    from leadpoet_canonical import credential_recipient_v2
-    from leadpoet_canonical.attested_v2 import canonical_json
-
-    pcr0_value = pcr0(COMMIT)
-    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "EVENT_PATH",
-        tmp_path / "events.jsonl",
-    )
-    boot = {
-        "boot_identity_hash": "sha256:" + "3" * 64,
-        "pcr0": pcr0_value,
-    }
-
-    def attestation_supplier(
-        *,
-        user_data: bytes,
-        signing_pubkey: bytes,
-    ) -> bytes:
-        return canonical_json(
-            {
-                "schema_version": "leadpoet.local_nitro_document.v1",
-                "pcr0": pcr0_value,
-                "public_key_b64": base64.b64encode(signing_pubkey).decode(
-                    "ascii"
-                ),
-                "user_data_b64": base64.b64encode(user_data).decode("ascii"),
-                "nonce_b64": "",
-            }
-        ).encode("ascii")
-
-    recipient_authority = KMSRecipientV2(
-        boot_identity_supplier=lambda: dict(boot),
-        expected_credential_ref_hashes={
-            "openrouter": "sha256:" + "4" * 64,
-        },
-        attestation_supplier=attestation_supplier,
-    )
-    miner_hotkey = "5" + "M" * 47
-    recipient = recipient_authority.openrouter_ingress_recipient_request(
-        miner_hotkey=miner_hotkey,
-        credential_kind="runtime",
-    )
-    monkeypatch.setattr(
-        credential_recipient_v2,
-        "verify_nitro_attestation_full",
-        rehearsal_sitecustomize._local_verify_nitro_attestation_full,
-    )
-
-    encrypted = (
-        credential_recipient_v2.verify_and_encrypt_openrouter_credential_v2(
-            recipient,
-            "sanitized-local-recipient-credential",
-            miner_hotkey=miner_hotkey,
-            credential_kind="runtime",
-            verified_coordinator_boot_identity=boot,
-        )
-    )
-
-    assert encrypted["request_id"] == recipient["request_id"]
-    assert base64.b64decode(encrypted["ciphertext_b64"], validate=True)
-
-    tampered = dict(recipient)
-    attestation = json.loads(
-        base64.b64decode(
-            tampered["attestation_document_b64"], validate=True
-        )
-    )
-    attestation["public_key_b64"] = base64.b64encode(
-        b"different-attested-key"
-    ).decode("ascii")
-    tampered["attestation_document_b64"] = base64.b64encode(
-        canonical_json(attestation).encode("utf-8")
-    ).decode("ascii")
-    with pytest.raises(
-        credential_recipient_v2.CredentialRecipientV2Error,
-        match="not bound",
-    ):
-        credential_recipient_v2.verify_and_encrypt_openrouter_credential_v2(
-            tampered,
-            "sanitized-local-recipient-credential",
-            miner_hotkey=miner_hotkey,
-            credential_kind="runtime",
-            verified_coordinator_boot_identity=boot,
-        )
 
 
 def test_local_vsock_listener_enforces_the_production_contract(
@@ -6123,6 +5577,14 @@ def test_rehearsal_build_stages_compact_weight_readiness_dependency(
     assert result.returncode == 0
 
 
+def test_rehearsal_does_not_recreate_removed_acceptance_corpus() -> None:
+    harness_root = Path(__file__).resolve().parent
+    for name in ("contract_adapter.py", "run_inside.sh"):
+        source = (harness_root / name).read_text(encoding="utf-8")
+        assert "acceptance-corpus-v2" not in source
+        assert "leadpoet.acceptance_corpus.v2" not in source
+
+
 def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> None:
     harness_root = Path(__file__).resolve().parent
     run_inside = (harness_root / "run_inside.sh").read_text(encoding="utf-8")
@@ -6164,10 +5626,7 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "tests/restart_rehearsal/fixture_contract.py"
         in rehearsal.COMMITTED_HARNESS_PATHS
     )
-    assert (
-        "for role in gateway_coordinator gateway_scoring gateway_autoresearch"
-        in run_inside
-    )
+    assert "for role in gateway_coordinator gateway_scoring" in run_inside
     assert "for _attempt in $(seq 1 600)" in run_inside
     assert (
         'REHEARSAL_GATEWAY_CANDIDATE_ROOT="$SELECTED_GATEWAY_SOURCE_ROOT/gateway" \\'
@@ -6179,19 +5638,7 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "Materializing the exact measured gateway-enclave filesystem"
         in run_inside
     )
-    assert "--python-version 3.9.24" in run_inside
     assert "_prepare_candidate_role_root(role)" in gateway_service
-    assert (
-        "_install_measured_runtime_boundary(gateway_root)"
-        in gateway_service
-    )
-    assert "verify_runsc_artifact(" in gateway_service
-    assert '"measured_runtime_surface"' in gateway_service
-    assert (
-        "metadata_process_runner=self._rehearsal_runsc_boundary"
-        in gateway_service
-    )
-    assert "rehearsal_metadata_requires_external_runsc_evidence" in gateway_service
     assert (
         'os.environ["GATEWAY_ROOT"] = str(gateway_root)'
         in gateway_service
@@ -6233,49 +5680,15 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         profile="prepush",
         epoch_count=1,
     )
-    assert "signed-private-model-contract-transition" in set(
-        behavior_contract["behavior_scenarios"]
-    )
-    assert "signed_private_model_contract_transition_exact" in set(
-        behavior_contract["required_invariant_ids"]
-    )
-    assert "delayed_private_source_manifest_recovery_verified" in set(
-        behavior_contract["required_invariant_ids"]
-    )
-    assert "rebenchmark-provider-transport-evidence" in set(
-        behavior_contract["behavior_scenarios"]
-    )
-    assert "coordinator_broker_owned_sync_httpx_grant_exact" in set(
-        behavior_contract["required_invariant_ids"]
-    )
-    assert "dynamic-rebenchmark-restart-recovery" in set(
-        behavior_contract["behavior_scenarios"]
-    )
-    assert "dynamic_rebenchmark_restart_recovery_verified" in set(
-        behavior_contract["required_invariant_ids"]
-    )
-    assert "dynamic-docker-lifecycle-collision" in set(
-        behavior_contract["behavior_scenarios"]
-    )
-    assert "dynamic_docker_lifecycle_collision_verified" in set(
-        behavior_contract["required_invariant_ids"]
-    )
     assert "restart-summary-deadline-classification" in set(
         behavior_contract["behavior_scenarios"]
     )
     assert "restart_summary_deadline_classification_exact" in set(
         behavior_contract["required_invariant_ids"]
     )
-    assert "gateway-startup-transition-safety" in set(
-        behavior_contract["behavior_scenarios"]
-    )
     assert "validator_role_release_identity_exact" in set(
         behavior_contract["required_restart_invariant_ids"]
     )
-    assert {
-        "gateway_restart_invocation_timing_ledger_exact",
-        "gateway_worker_supervisor_start_event_loop_safe",
-    } <= set(behavior_contract["required_invariant_ids"])
     assert "compact-weight-joined-path" in set(
         behavior_contract["behavior_scenarios"]
     )
@@ -6289,26 +5702,16 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/provider_outcome_store_v2.py",
         "gateway/tee/rpc_authority.py",
         "gateway/main.py",
-        "gateway/research_lab/worker_autostart.py",
-        "gateway/research_lab/code_build.py",
         "gateway/research_lab/source_add_trial_runner.py",
-        "gateway/research_lab/worker_process.py",
         "gateway/tee/code_hash.py",
         "gateway/tee/prepare_gateway_envelopes_v2.py",
         "gateway/tee/protected_workflows.py",
         "gateway/tee/stage_attested_runtime.sh",
         "gateway/tee/topology.json",
-        "scripts/run_research_lab_scoring_worker.py",
-        "scripts/run_research_lab_scoring_worker_fleet.py",
-        "scripts/record_research_lab_dev_snapshots.py",
         "research_lab/docker_operation_lock_v2.py",
         "validator_tee/host/docker_operation_guard_v2.py",
         "validator_tee/scripts/docker_operation_lock_v2.sh",
         "validator_tee/scripts/reclaim_docker_storage_v2.sh",
-        "tests/restart_rehearsal/dynamic_rebenchmark_n_minus_one.py",
-        "tests/restart_rehearsal/dynamic_docker_collision_workflow.py",
-        "tests/restart_rehearsal/dynamic_rebenchmark_workflow.py",
-        "tests/restart_rehearsal/dynamic_rebenchmark_workflow_v2.py",
     } <= set(behavior_contract["production_source_paths"])
     assert "leadpoet_observability/sentry_operations.py" not in set(
         behavior_contract["production_source_paths"]
@@ -6372,39 +5775,6 @@ def test_coordinator_broker_httpx_grant_evidence_is_exact_and_fail_closed() -> N
         )
 
 
-def test_rebenchmark_provider_transport_action_requires_httpx_grant_evidence(
-    monkeypatch,
-) -> None:
-    source_root = Path(__file__).resolve().parents[2]
-    candidate_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    from_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=source_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    monkeypatch.setenv("REHEARSAL_SOURCE_ROOT", str(source_root))
-    monkeypatch.setenv("REHEARSAL_FROM_SHA", from_sha)
-    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
-    evidence = (
-        production_workflow_runner._exercise_rebenchmark_provider_transport_evidence()
-    )
-    assert evidence["assigned_provider_direct_supabase_sidecars_bound"] is True
-    assert (
-        production_workflow_runner._coordinator_broker_httpx_evidence_is_complete(
-            evidence["coordinator_broker_owned_httpx_grant"]
-        )
-        is True
-    )
-
-
 def test_restart_summary_deadline_action_is_exact_and_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6466,56 +5836,6 @@ def test_restart_summary_deadline_action_is_exact_and_fail_closed(
     assert (
         production_workflow_runner._restart_summary_deadline_evidence_is_complete(
             {**evidence, "unexpected": True}
-        )
-        is False
-    )
-
-
-def test_gateway_startup_transition_action_is_dynamic_and_fail_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_root = Path(__file__).resolve().parents[2]
-    candidate_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    monkeypatch.setattr(production_workflow_runner, "SOURCE_ROOT", source_root)
-    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
-
-    evidence = (
-        production_workflow_runner._exercise_gateway_startup_transition_safety()
-    )
-    assert (
-        production_workflow_runner._gateway_startup_transition_evidence_is_complete(
-            evidence,
-            candidate_sha=candidate_sha,
-        )
-        is True
-    )
-    for field in (
-        production_workflow_runner._GATEWAY_STARTUP_TRANSITION_EVIDENCE_FIELDS
-    ):
-        assert (
-            production_workflow_runner._gateway_startup_transition_evidence_is_complete(
-                {**evidence, field: False},
-                candidate_sha=candidate_sha,
-            )
-            is False
-        )
-    assert (
-        production_workflow_runner._gateway_startup_transition_evidence_is_complete(
-            {**evidence, "source_identities": []},
-            candidate_sha=candidate_sha,
-        )
-        is False
-    )
-    assert (
-        production_workflow_runner._gateway_startup_transition_evidence_is_complete(
-            {**evidence, "unexpected": True},
-            candidate_sha=candidate_sha,
         )
         is False
     )
@@ -6625,6 +5945,9 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     verifier = (harness_root / "verify_evidence.py").read_text(
         encoding="utf-8"
     )
+    release_builder = (
+        harness_root.parents[1] / "gateway/tee/build_local_release_v2.sh"
+    ).read_text(encoding="utf-8")
     contract = json.loads(
         (harness_root / "boundary_contract.json").read_text(encoding="utf-8")
     )
@@ -6641,6 +5964,11 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     } <= allowed
     assert verifier.count('"nitro:build_enclave"') == 2
     assert verifier.count('"nitro:run_enclave"') == 2
+    assert "len(GATEWAY_ROLE_SPECS)" in verifier
+    assert "exact three-enclave topology" not in verifier
+    assert "python3 -m gateway.tee.local_release_v2" in release_builder
+    assert verifier.count('"module:gateway.tee.local_release_v2"') == 2
+    assert '"module:gateway.tee.release_channel_v2"' not in verifier
 
 
 def test_evidence_verifier_keeps_stdout_json_channel_clean() -> None:
@@ -7129,31 +6457,10 @@ def test_behavior_contract_tracks_candidate_runtime_policies(
         epoch_count=1,
     )
 
-    monkeypatch.setenv(
-        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
-        "18",
-    )
-    monkeypatch.setenv(
-        "RESEARCH_LAB_TREE_MAX_NODES",
-        "8",
-    )
-    changed = build_rehearsal_behavior_contract_v2(
-        source_root=source_root,
-        candidate_sha=COMMIT,
-        profile="prepush",
-        epoch_count=1,
-    )
-
-    assert (
-        changed["policy_commitments"]["conditional_icp"]["total_icps"]
-        == baseline["policy_commitments"]["conditional_icp"]["total_icps"] - 2
-    )
-    assert changed["policy_commitments"]["git_tree"]["max_nodes"] == 8
-    assert changed["policy_commitments"]["chain_source"] == {
+    assert baseline["policy_commitments"]["chain_source"] == {
         "policy": chain_source_policy_document(),
         "policy_hash": chain_source_policy_hash(),
     }
-    assert changed["contract_hash"] != baseline["contract_hash"]
 
     monkeypatch.setattr(
         chain_source,
@@ -7169,10 +6476,10 @@ def test_behavior_contract_tracks_candidate_runtime_policies(
     assert layout_changed["policy_commitments"]["chain_source"][
         "policy"
     ]["selective_result_last_fields"] == [73, 76, 80]
-    assert layout_changed["contract_hash"] != changed["contract_hash"]
+    assert layout_changed["contract_hash"] != baseline["contract_hash"]
 
 
-def test_candidate_behavior_scenarios_follow_nondefault_policy(
+def test_candidate_behavior_scenario_follows_chain_source_policy(
     monkeypatch,
 ) -> None:
     from leadpoet_canonical.chain_source_v2 import (
@@ -7186,33 +6493,10 @@ def test_candidate_behavior_scenarios_follow_nondefault_policy(
         "SOURCE_ROOT",
         source_root,
     )
-    monkeypatch.setenv(
-        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
-        "18",
-    )
-    monkeypatch.setenv(
-        "RESEARCH_LAB_TREE_MAX_NODES",
-        "8",
-    )
-
-    assignment = (
-        production_workflow_runner._exercise_conditional_icp_policy()
-    )
-    candidate_gate = (
-        production_workflow_runner._exercise_conditional_candidate_gate()
-    )
-    replacement = (
-        production_workflow_runner._exercise_git_tree_replacement()
-    )
     historical_layouts = (
         production_workflow_runner._exercise_historical_metagraph_layouts()
     )
 
-    assert assignment["category_counts"]["conditional"] == 18
-    assert candidate_gate["initial_count"] == 20
-    assert candidate_gate["conditional_count"] == 18
-    assert candidate_gate["final_count"] == 38
-    assert replacement["max_nodes"] == 8
     assert historical_layouts["policy_hash"] == chain_source_policy_hash()
     assert historical_layouts["accepted_layouts"] == (
         chain_source_policy_document()["selective_result_last_fields"]
@@ -7221,468 +6505,6 @@ def test_candidate_behavior_scenarios_follow_nondefault_policy(
         str(last_field): 6
         for last_field in historical_layouts["accepted_layouts"]
     }
-
-
-def test_dynamic_rebenchmark_restart_recovery_follows_exact_launch(
-    monkeypatch,
-) -> None:
-    from gateway.research_lab import scoring_worker as scoring_worker_module
-
-    source_root = Path(__file__).resolve().parents[2]
-    candidate_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    docker_lock_introduction_sha = subprocess.run(
-        [
-            "git",
-            "log",
-            "-1",
-            "--diff-filter=A",
-            "--format=%H",
-            candidate_sha,
-            "--",
-            "research_lab/docker_operation_lock_v2.py",
-        ],
-        cwd=source_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if (
-        len(docker_lock_introduction_sha) != 40
-        or any(
-            character not in "0123456789abcdef"
-            for character in docker_lock_introduction_sha
-        )
-    ):
-        raise AssertionError("Docker lifecycle lock introduction is unavailable")
-    # Follow-up rehearsal-only commits may sit above the coordination change.
-    # Derive the exact pre-lock N-1 tree from the production path addition
-    # instead of incorrectly treating the candidate's immediate parent as N-1.
-    from_sha = subprocess.run(
-        ["git", "rev-parse", f"{docker_lock_introduction_sha}^"],
-        cwd=source_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    monkeypatch.setenv("REHEARSAL_SOURCE_ROOT", str(source_root))
-    monkeypatch.setenv("REHEARSAL_FROM_SHA", from_sha)
-    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
-    import contract_adapter as rehearsal_contract_adapter
-
-    original_gateway_secret = rehearsal_contract_adapter._gateway_secret
-    launch_overrides = {
-        "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS": "7",
-        "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL": "4",
-        "RESEARCH_LAB_PRIVATE_HOLDOUT_TOTAL_ICPS": "7",
-        "RESEARCH_LAB_PRIVATE_HOLDOUT_WEAK_TOTAL": "3",
-        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS": "8",
-        "RESEARCH_LAB_CONDITIONAL_FRESH_ICP_COUNT": "8",
-        "RESEARCH_LAB_BENCHMARK_CONCURRENCY": "3",
-        "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY": "4",
-        "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS": "3",
-        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "5",
-        "RESEARCH_LAB_PROVIDER_PREFLIGHT_TTL_SECONDS": "73",
-        "RESEARCH_LAB_SCORING_WORKER_MODEL_TIMEOUT_SECONDS": "43",
-        "RESEARCH_LAB_SCORING_WORKER_RECYCLE_RSS_MB": "2304",
-        "RESEARCH_LAB_SCORING_WORKER_MIN_AVAILABLE_MEMORY_MB": "3584",
-        "RESEARCH_LAB_SCORING_WORKER_MAX_LOAD_PER_CPU": "1.5",
-    }
-
-    def nondefault_gateway_secret():
-        return {**original_gateway_secret(), **launch_overrides}
-
-    monkeypatch.setattr(
-        rehearsal_contract_adapter,
-        "_gateway_secret",
-        nondefault_gateway_secret,
-    )
-    monkeypatch.setattr(
-        production_workflow_runner,
-        "SOURCE_ROOT",
-        source_root,
-    )
-    evidence = (
-        production_workflow_runner
-        ._exercise_dynamic_rebenchmark_restart_recovery()
-    )
-
-    assert evidence["configured_icp_count"] == evidence["completed_icp_count"]
-    assert evidence["baseline_concurrency"] == int(
-        launch_overrides["RESEARCH_LAB_BENCHMARK_CONCURRENCY"]
-    )
-    assert evidence["retry_concurrency"] == int(
-        launch_overrides["RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY"]
-    )
-    assert evidence["retry_rounds"] == int(
-        launch_overrides["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"]
-    )
-    assert evidence["scoring_worker_count"] == int(
-        launch_overrides["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"]
-    )
-    assert evidence["provider_preflight_ttl_seconds"] == float(
-        launch_overrides["RESEARCH_LAB_PROVIDER_PREFLIGHT_TTL_SECONDS"]
-    )
-    configured_icps = int(evidence["configured_icp_count"])
-    candidate_policy = evidence["candidate_config"]["policy"]
-    expected_first_pass_successes = min(
-        configured_icps - 1,
-        max(1, int(candidate_policy["public_strong_total"])),
-    )
-    expected_first_pass_retryables = configured_icps - expected_first_pass_successes
-    assert evidence["first_pass_success_count"] == expected_first_pass_successes
-    assert evidence["first_pass_retryable_count"] == expected_first_pass_retryables
-    assert expected_first_pass_retryables > evidence["retry_concurrency"]
-    assert evidence["retry_attempt_counts_by_round"] == [
-        expected_first_pass_retryables for _round in range(evidence["retry_rounds"])
-    ]
-    assert evidence["retry_wave_counts_by_round"] == [
-        math.ceil(expected_first_pass_retryables / evidence["retry_concurrency"])
-        for _round in range(evidence["retry_rounds"])
-    ]
-    assert all(count > 1 for count in evidence["retry_wave_counts_by_round"])
-    assert 0 < evidence["maximum_first_pass_active"] <= evidence[
-        "n_minus_one_baseline_concurrency"
-    ]
-    assert 0 < evidence["maximum_n_minus_retry_active"] <= evidence[
-        "n_minus_one_retry_concurrency"
-    ]
-    assert 0 < evidence["maximum_retry_active"] <= evidence[
-        "retry_concurrency"
-    ]
-    assert evidence["watchdog_timeout_seconds"] > evidence[
-        "model_invocation_timeout_seconds"
-    ]
-    assert evidence["topology_parent_memory_mib"] > evidence[
-        "topology_reserved_memory_mib"
-    ]
-    assert {row["commit_sha"] for row in evidence["source_identities"]} == {
-        from_sha,
-        candidate_sha,
-    }
-    assert all(
-        evidence[name] is True
-        for name in (
-            "dynamic_launch_config_candidate_n_minus_one_bound",
-            "dynamic_exact_n_minus_one_worker_executed",
-            "dynamic_n_minus_one_envelope_launcher_supervisor_exact",
-            "dynamic_skewed_retry_round_checkpointed",
-            "dynamic_all_retry_rounds_and_exhaustion_exact",
-            "dynamic_retry_concurrency_bounded",
-            "dynamic_preflight_actual_owned_matrix",
-            "dynamic_preflight_fresh_and_stale_admission",
-            "dynamic_full_fleet_lease_refresh_bound",
-            "dynamic_pressure_checkpoint_recycle_bound",
-            "dynamic_pressure_negative_boundaries_exact",
-            "dynamic_watchdog_supervised_resume_bound",
-            "dynamic_n_minus_one_candidate_resume_exact",
-            "dynamic_peer_interruption_resume_exact",
-            "dynamic_docker_collision_exact",
-            "dynamic_recovered_bank_publication_join_exact",
-        )
-    )
-    assert evidence["retry_rounds_exercised"] == list(
-        range(int(launch_overrides["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"]) + 1)
-    )
-    assert evidence["retry_exhaustion_rounds_exercised"] == evidence[
-        "retry_rounds_exercised"
-    ]
-    assert evidence["rss_below_threshold_no_recycle"] is True
-    assert evidence["memory_at_floor_no_recycle"] is True
-    assert evidence["rss_pressure_checkpoint_count"] > 0
-    assert evidence["host_pressure_checkpoint_count"] > 0
-    assert evidence["pressure_exercised_icp_count"] == expected_first_pass_retryables
-    assert evidence["rss_below_threshold_checkpoint_count"] == (
-        expected_first_pass_retryables
-    )
-    assert evidence["memory_at_floor_checkpoint_count"] == (
-        expected_first_pass_retryables
-    )
-    assert evidence["lease_non_owner_measurement_count"] == 0
-    assert (
-        evidence["lease_owner_forced_measurement_count"]
-        == evidence["scoring_worker_count"]
-    )
-    assert evidence["n_minus_one_checkpoint_attempt_count"] == configured_icps + 1
-    assert evidence["n_minus_one_started_attempt_count"] == (
-        configured_icps + evidence["retry_concurrency"]
-    )
-    assert evidence["n_minus_one_completed_attempt_count"] == configured_icps + 2
-    assert evidence["n_minus_one_uncheckpointed_peer_count"] == (
-        evidence["retry_concurrency"] - 1
-    )
-    assert evidence["candidate_replayed_uncheckpointed_peer_count"] == (
-        evidence["retry_concurrency"] - 1
-    )
-    assert (
-        evidence["n_minus_one_checkpointed_peer_call"]
-        != evidence["n_minus_one_interrupted_peer_call"]
-    )
-    assert production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
-        evidence["docker_collision"]
-    )
-    assert (
-        evidence["receipt_frontier_count"]
-        == evidence["expected_receipt_frontier_count"]
-    )
-    completed_receipts_per_attempt = int(
-        scoring_worker_module._V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP
-    )
-    retryable_receipts_per_attempt = completed_receipts_per_attempt - 1
-    expected_receipt_frontier = (
-        expected_first_pass_successes * completed_receipts_per_attempt
-        + expected_first_pass_retryables
-        * (
-            evidence["retry_rounds"] * retryable_receipts_per_attempt
-            + completed_receipts_per_attempt
-        )
-    )
-    assert evidence["receipt_frontier_count"] == expected_receipt_frontier
-    assert evidence["receipt_frontier_count"] <= evidence[
-        "receipt_frontier_capacity"
-    ]
-    publication_evidence = evidence["publication"]
-    assert publication_evidence["model_invocation_count"] == 0
-    assert publication_evidence["scorer_invocation_count"] == 0
-    assert publication_evidence["recovered_terminal_rows_hash"] == evidence[
-        "terminal_rows_hash"
-    ]
-    assert publication_evidence["published_checkpoint_document_hash"] == evidence[
-        "checkpoint_document_hash"
-    ]
-    assert publication_evidence["published_receipt_frontier_hash"] == evidence[
-        "receipt_frontier_hash"
-    ]
-    assert production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
-        evidence
-    )
-    corrupted = copy.deepcopy(evidence)
-    corrupted["publication"]["recovered_terminal_rows_hash"] = "sha256:" + "0" * 64
-    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
-        corrupted
-    )
-    corrupted_skew = copy.deepcopy(evidence)
-    corrupted_skew["first_pass_success_count"] += 1
-    corrupted_skew["first_pass_retryable_count"] -= 1
-    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
-        corrupted_skew
-    )
-    corrupted_lease = copy.deepcopy(evidence)
-    corrupted_lease["lease_non_owner_measurement_count"] = 1
-    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
-        corrupted_lease
-    )
-    corrupted_peer = copy.deepcopy(evidence)
-    corrupted_peer["candidate_replayed_uncheckpointed_peer_count"] -= 1
-    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
-        corrupted_peer
-    )
-    corrupted_collision = copy.deepcopy(evidence)
-    corrupted_collision["docker_collision"][
-        "host_live_prevented_docker_stop_or_reset"
-    ] = False
-    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
-        corrupted_collision
-    )
-    assert (
-        not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
-            corrupted_collision["docker_collision"]
-        )
-    )
-    corrupted_collision_inventory = copy.deepcopy(evidence)
-    corrupted_collision_inventory["docker_collision"]["source_inventory"][
-        candidate_sha
-    ].remove("gateway/tee/protected_workflows.json")
-    assert (
-        not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
-            corrupted_collision_inventory["docker_collision"]
-        )
-    )
-    corrupted_collision_identity = copy.deepcopy(evidence)
-    protected_manifest_identity = next(
-        row
-        for row in corrupted_collision_identity["docker_collision"]["source_identities"]
-        if row["commit_sha"] == candidate_sha
-        and row["path"] == "gateway/tee/protected_workflows.json"
-    )
-    protected_manifest_identity["sha256"] = "0" * 64
-    assert (
-        not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
-            corrupted_collision_identity["docker_collision"]
-        )
-    )
-    corrupted_recovery_identity = copy.deepcopy(evidence)
-    corrupted_recovery_identity["source_identities"][0]["sha256"] = "0" * 64
-    assert not production_workflow_runner._dynamic_rebenchmark_evidence_is_complete(
-        corrupted_recovery_identity
-    )
-
-
-def test_candidate_owned_guard_probe_does_not_mutate_rollback_transition_ledger(
-) -> None:
-    source = Path(production_workflow_runner.__file__).read_text(encoding="utf-8")
-
-    assert source.count("activate(new_id)\n") == 1
-    assert source.count("activate(new_id, record_transition=False)\n") == 1
-    assert "if record_transition:\n            transitions.append(" in source
-
-
-def test_full_rebenchmark_publication_scenario_exercises_configured_fleet(
-    monkeypatch,
-    python39_import_event_loop,
-) -> None:
-    from gateway.research_lab.config import ResearchLabGatewayConfig
-    from tests.restart_rehearsal.dynamic_rebenchmark_workflow import (
-        patched_rebenchmark_launch_environment,
-        rebenchmark_launch_environment,
-    )
-
-    source_root = Path(__file__).resolve().parents[2]
-    monkeypatch.setattr(
-        production_workflow_runner,
-        "SOURCE_ROOT",
-        source_root,
-    )
-    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
-
-    evidence = (
-        production_workflow_runner._exercise_full_rebenchmark_publication_path()
-    )
-
-    assert evidence["configured_icp_count"] > 0
-    assert evidence["model_invocation_count"] == evidence["configured_icp_count"]
-    assert evidence["scorer_invocation_count"] == evidence["configured_icp_count"]
-    assert evidence["aggregate_score"] > 0.0
-    assert evidence["positive_score_verified"] is True
-    assert evidence["every_configured_icp_positive"] is True
-    assert evidence["configured_icp_identity_exact"] is True
-    assert evidence["candidate_release_identity_exact"] is True
-    assert evidence["strict_external_model_execution_adapted"] is True
-    assert evidence["active_model_lineage_gate_adapted"] is True
-    assert evidence["model_lineage_sync_actor_counts"] == {
-        "rehearsal-rebenchmark-worker": 1,
-        "rehearsal-rebenchmark-checkpoint-restarted": 1,
-        "rehearsal-rebenchmark-worker-restarted": 1,
-    }
-    assert evidence["source_admission_exercised"] is False
-    assert evidence["pair_only_contract_fixture_structural_only"] is True
-    assert evidence["production_scorer_path_exact"] is True
-    assert evidence["model_attested_outcome_count"] == evidence["configured_icp_count"]
-    assert evidence["scorer_attested_outcome_count"] == evidence["configured_icp_count"]
-    assert evidence["complete_company_fit_receipt_count"] == evidence[
-        "configured_icp_count"
-    ]
-    assert evidence["incomplete_company_fit_receipt_rejected"] is True
-    assert evidence["model_input_artifact_sets_exact"] is True
-    assert evidence["scorer_input_artifact_sets_exact"] is True
-    assert evidence["baseline_parent_receipt_count"] == 2 * evidence[
-        "configured_icp_count"
-    ]
-    assert evidence["per_nonempty_icp_two_unique_receipt_roots"] is True
-    assert evidence["baseline_input_artifact_count"] == 1
-    assert evidence["independent_baseline_authority_exact"] is True
-    with patched_rebenchmark_launch_environment(rebenchmark_launch_environment()):
-        launch_config = ResearchLabGatewayConfig.from_env()
-    policy = launch_config.conditional_validation_policy()
-    assert evidence["configured_icp_count"] == policy.total_icps
-    assert evidence["baseline_concurrency"] == (
-        launch_config.private_baseline_concurrency
-    )
-    assert evidence["retry_concurrency"] == (
-        launch_config.private_baseline_retry_concurrency
-    )
-    assert evidence["retry_rounds"] == (
-        launch_config.private_baseline_provider_retry_rounds
-    )
-    assert evidence["scoring_worker_count"] == (
-        launch_config.scoring_worker_total_workers
-    )
-    assert evidence["category_counts"] == {
-        "public": policy.public_total_icps,
-        "private": policy.private_total_icps,
-        "conditional": policy.conditional_total_icps,
-    }
-    assert evidence["candidate_scoring_ready"] is True
-    assert evidence["external_dashboard_projection_adapter_verified"] is True
-    assert evidence["live_dashboard_readback_claimed"] is False
-    assert evidence["production_active_model_sync_load_exact"] is True
-    assert evidence["production_active_model_assertion_exact"] is True
-    assert evidence["production_repo_head_guard_exact"] is True
-    assert evidence["repo_head_change_rejected"] is True
-    assert evidence["production_catalog_loader_exact"] is True
-    assert evidence["production_icp_window_loader_exact"] is True
-    assert evidence["provider_preflight_production_facade_exact"] is True
-    assert evidence["maintenance_boundary_production_exact"] is True
-    assert evidence["provider_preflight_boundary_adapted"] is True
-    assert evidence["checkpoint_boundary_adapted"] is True
-    assert evidence["checkpoint_write_count"] >= evidence["configured_icp_count"]
-    assert evidence["checkpoint_full_bank_persisted"] is True
-    assert evidence["checkpoint_restart_status"] == "completed"
-    assert evidence["checkpoint_restart_reused_without_provider_spend"] is True
-    assert evidence["actual_audit_publication_verified"] is True
-    assert evidence["audit_completed_dispatch_count"] >= 1
-    assert evidence["production_artifact_link_hash_exact"] is True
-    assert evidence["artifact_link_conflict_rejected"] is True
-    assert evidence["business_artifact_link_count"] >= 4
-    assert evidence["restart_status"] == "already_benchmarked"
-    assert evidence["restart_reused_without_provider_spend"] is True
-
-
-def test_full_rebenchmark_publication_derives_window_shape_from_candidate(
-    monkeypatch,
-    python39_import_event_loop,
-) -> None:
-    from gateway.research_lab import config as config_module
-    from gateway.research_lab import icp_window as icp_window_module
-
-    source_root = Path(__file__).resolve().parents[2]
-    monkeypatch.setattr(production_workflow_runner, "SOURCE_ROOT", source_root)
-    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
-    original_config = config_module.ResearchLabGatewayConfig
-    original_selector = icp_window_module.select_rolling_icp_window_from_sets
-    observed: list[dict[str, object]] = []
-
-    def _candidate_config(**kwargs):
-        return original_config(
-            lab_champion_eval_days=7,
-            lab_champion_icps_per_day=3,
-            **kwargs,
-        )
-
-    def _candidate_from_env():
-        return replace(
-            original_config.from_env(),
-            lab_champion_eval_days=7,
-            lab_champion_icps_per_day=3,
-        )
-
-    _candidate_config.from_env = _candidate_from_env
-
-    def _candidate_selector(rows, **kwargs):
-        observed.append(dict(kwargs))
-        return original_selector(rows, **kwargs)
-
-    monkeypatch.setattr(config_module, "ResearchLabGatewayConfig", _candidate_config)
-    monkeypatch.setattr(
-        icp_window_module,
-        "select_rolling_icp_window_from_sets",
-        _candidate_selector,
-    )
-
-    evidence = (
-        production_workflow_runner._exercise_full_rebenchmark_publication_path()
-    )
-
-    assert evidence["configured_icp_count"] > 0
-    assert observed
-    assert observed[0]["days"] == 7
-    assert observed[0]["icps_per_day"] == 3
-    assert observed[0]["window_mode"] == "hybrid_fresh_retained"
 
 
 def test_historical_layout_scenario_follows_candidate_policy(
@@ -7754,114 +6576,108 @@ def test_weight_storage_preflight_capability_tracks_selected_release(
     )
     assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
-
-def test_gateway_rehearsal_requires_canonical_private_model_environment() -> None:
-    row = {
-        "kind": "process",
-        "process": "gateway.main",
-        "status": "started",
-        "environment_contract": dict(EXPECTED_GATEWAY_PRIVATE_MODEL_ENV),
-    }
-    verify_gateway_private_model_environment([row])
-
-    row["environment_contract"][
-        "RESEARCH_LAB_PRIVATE_REPO_BRANCH"
-    ] = "main"
-    with pytest.raises(SystemExit, match="private-model source environment"):
-        verify_gateway_private_model_environment([row])
-
-    with pytest.raises(SystemExit, match="exactly one gateway.main"):
-        verify_gateway_private_model_environment([])
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "parser.add_argument('--epoch', type=int)\n",
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
 
-def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
-    rows = [
-        {
-            "operation": "provider_transport",
-            "host": "api.exa.ai",
-            "path": "/search",
-            "status": 200,
-        },
-        {
-            "operation": "provider_transport",
-            "host": "api.scrapingdog.com",
-            "path": "/account",
-            "status": 200,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 0,
-            "checkpoint_hashes": [],
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_appended",
-            "status": "ok",
-            "method": "POST",
-            "target": "append_research_lab_provider_outcome_checkpoint_v2",
-            "result_status": "inserted",
-            "checkpoint_hash": "sha256:" + "1" * 64,
-            "sequence": 1,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_appended",
-            "status": "ok",
-            "method": "POST",
-            "target": "append_research_lab_provider_outcome_checkpoint_v2",
-            "result_status": "inserted",
-            "checkpoint_hash": "sha256:" + "2" * 64,
-            "sequence": 2,
-        },
-    ]
-    verify_gateway_provider_preflight(rows, transition="forward")
-    verify_gateway_provider_preflight([], transition="rollback")
+def test_weight_storage_preflight_epoch_binding_tracks_restart_wrapper(
+    tmp_path,
+) -> None:
+    restart = tmp_path / "gw_restart.sh"
+    prefix = (
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"\n'
+        "run_prepared_gateway_module \\\n"
+        "  gateway.tee.verify_weight_submission_ready_v2 \\\n"
+    )
+    suffix = 'GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"\n'
+    restart.write_text(
+        prefix + "  --storage-read-preflight\n" + suffix,
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_pins_epoch((tmp_path,)) is False
 
-    with pytest.raises(SystemExit, match="both authenticated provider"):
-        verify_gateway_provider_preflight(rows[1:], transition="forward")
+    restart.write_text(
+        prefix
+        + "  --storage-read-preflight \\\n"
+        + '  --epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"\n'
+        + suffix,
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_pins_epoch((tmp_path,)) is True
+    assert selected_weight_storage_preflight_pins_epoch(
+        (Path(__file__).resolve().parents[2],)
+    ) is True
 
-    failed = [dict(row) for row in rows]
-    failed[1]["status"] = 503
-    with pytest.raises(SystemExit, match="both authenticated provider"):
-        verify_gateway_provider_preflight(failed, transition="forward")
-    with pytest.raises(SystemExit, match="durably append both"):
-        verify_gateway_provider_preflight(rows[:3], transition="forward")
-    with pytest.raises(SystemExit, match="restart recovery"):
-        verify_gateway_provider_preflight(
-            [*rows[:2], *rows[3:]],
-            transition="forward",
-        )
-    redundant_readback = [
-        *rows,
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 1,
-            "checkpoint_hashes": ["sha256:" + "2" * 64],
-        },
-    ]
-    with pytest.raises(SystemExit, match="redundant checkpoint readback"):
-        verify_gateway_provider_preflight(
-            redundant_readback,
-            transition="forward",
-        )
-    rejected = [
-        *rows,
-        {
-            "kind": "local-postgrest",
-            "operation": "request_validation",
-            "status": "rejected",
-            "path": (
-                "/rest/v1/rpc/"
-                "append_research_lab_provider_outcome_checkpoint_v2"
-            ),
-        },
-    ]
-    with pytest.raises(SystemExit, match="rejected checkpoint"):
-        verify_gateway_provider_preflight(rejected, transition="forward")
+
+def test_gateway_rehearsal_has_no_retired_provider_preflight_receipt_gate() -> None:
+    verifier = (
+        Path(__file__).resolve().parent / "verify_evidence.py"
+    ).read_text(encoding="utf-8")
+
+    assert "def verify_gateway_provider_preflight(" not in verifier
+    assert "gateway provider preflight did not durably append" not in verifier
+
+
+def test_gateway_rehearsal_serves_source_add_restart_contracts(
+    tmp_path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    fixture = json.loads(
+        (
+            source_root
+            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    admission_rpc = "research_lab_source_add_admission_control_contract_v1"
+    restart_rpc = "research_lab_source_add_claim_control_contract_v2"
+    state = LocalPostgRESTState(
+        state_root=tmp_path,
+        fixture=fixture,
+        source_root=source_root,
+        tables=set(),
+        rpcs={admission_rpc, restart_rpc},
+    )
+    server = LocalPostgRESTServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        responses = {}
+        for rpc_name in (admission_rpc, restart_rpc):
+            request = urllib.request.Request(
+                "http://127.0.0.1:%d/rest/v1/rpc/%s"
+                % (server.server_address[1], rpc_name),
+                data=b"{}",
+                headers={
+                    "apikey": "rehearsal-secret",
+                    "authorization": "Bearer rehearsal-secret",
+                    "content-type": "application/json",
+                },
+                method="POST",
+            )
+            with opener.open(request, timeout=2.0) as response:
+                assert response.status == 200
+                responses[rpc_name] = json.loads(response.read())
+        assert responses == {
+            admission_rpc: {
+                "schema_version": (
+                    "leadpoet.source_add_admission_control_contract.v1"
+                ),
+                "control_row_present": True,
+                "trigger_enabled": True,
+                "pause_rpc": "research_lab_source_add_set_paused",
+                "admission_trigger": "trg_source_add_work_admission_control",
+            },
+            restart_rpc: _source_add_claim_control_contract_v2(source_root),
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
 
 
 def test_gateway_rehearsal_provider_checkpoint_rpc_matches_migration_134(
@@ -8284,12 +7100,10 @@ def test_rehearsal_scoring_provider_calls_cross_the_coordinator_process() -> Non
     ]
 
     assert "rehearsal_inter_enclave_provider_execute" in runtime
-    assert "rehearsal_inter_enclave_provider_probe_resolve" in runtime
     assert "seal_artifact_over_attested_tls_v2" in runtime
     assert "_PersistentInterEnclaveArtifactClient" in runtime
     assert "handle_inter_enclave_rpc(" in handler
     assert '"provider_execute"' in handler
-    assert '"provider_probe_resolve"' in handler
     assert '"rehearsal_inter_enclave_artifact_call"' in handler
     assert '"artifact_seal_finish"' in handler
 
@@ -8576,14 +7390,6 @@ def test_rehearsal_routes_credential_ingress_to_candidate_runtime(
         },
         "v2_seal_source_add_ingress_credential": {
             "request_id": "sha256:" + "3" * 64,
-            "ciphertext_b64": "Y2lwaGVydGV4dA==",
-        },
-        "v2_get_openrouter_ingress_recipient": {
-            "miner_hotkey": "miner",
-            "credential_kind": "runtime",
-        },
-        "v2_seal_openrouter_ingress_credential": {
-            "request_id": "sha256:" + "4" * 64,
             "ciphertext_b64": "Y2lwaGVydGV4dA==",
         },
     }
@@ -9159,9 +7965,6 @@ def test_workflow_runner_continues_across_failed_release_epochs(
             "candidate_identity_exact",
             "protected_source_identity_exact",
             "chain_settlement_state_space_complete",
-            "conditional_icp_policy_config_bound",
-            "conditional_candidate_advancement_exact",
-            "git_tree_replacement_deterministic",
             "canonical_vector_primary_auditor_equal",
             "receipt_ancestry_verified",
             "sdk_signing_bridge_verified",
@@ -9170,10 +7973,7 @@ def test_workflow_runner_continues_across_failed_release_epochs(
             "boundary_cleanup_complete",
             "unknown_boundaries_rejected",
         ],
-        "policy_commitments": {
-            "conditional_icp": {},
-            "git_tree": {},
-        },
+        "policy_commitments": {},
         "contract_hash": "sha256:" + "a" * 64,
     }
     monkeypatch.setattr(
@@ -9190,9 +7990,6 @@ def test_workflow_runner_continues_across_failed_release_epochs(
         production_workflow_runner,
         "_run_independent_epoch_diagnostics",
         lambda **_kwargs: None,
-    )
-    assert not production_workflow_runner._dynamic_docker_collision_evidence_is_complete(
-        {}
     )
     monkeypatch.setattr(
         sys,
@@ -9331,6 +8128,7 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
     assert "prepare_gateway_final_active_lineage_v2(" in script
     assert "load_source_add_graphs=no_active_graphs" in script
     assert "validate_active_release_requirements_v2(conflicting)" in script
+    assert "fetch_prior_release_channel_v2(" in script
     assert "running_channel[\"gateway_release_manifest\"]" in script
     assert '"leadpoet-validator-main" in containers' in script
     assert 'f"VALIDATOR_V2_DEPLOY_COMMIT={running_commit}"' in script
@@ -9408,7 +8206,12 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
     assert "miner-maintenance N-1 handoff lost its cwd or timing ledger" in script
     assert "gateway restart timing ledger is unavailable" in script
     assert 'bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"' in script
-    assert 'bash /home/ec2-user/gw_restart.sh\n' in script
+    assert 'GATEWAY_RESTART_AUTHORITY_ROOT="$FORWARD_AUTHORITY_ROOT"' in script
+    assert 'GATEWAY_RESTART_AUTHORITY_COMMIT="$CANDIDATE_SHA"' in script
+    assert (
+        'bash "$FORWARD_AUTHORITY_ROOT/gw_restart.sh" --commit "$CANDIDATE_SHA"'
+        in script
+    )
     assert "direct miner-maintenance restart performed secret writes" in script
     launcher = script.split(
         '  set +e\n  if [ "$TRANSITION" = "rollback" ]; then', 1
@@ -9417,6 +8220,7 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
         '  elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then', 1
     )
     first_rollout, direct = remaining.split("  else\n", 1)
+    assert "bash /home/ec2-user/gw_restart.sh" not in direct
     git_environment_overrides = (
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_CEILING_DIRECTORIES",
@@ -9460,7 +8264,16 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
         }
 
     rows = [
-        row(["-m", module, "--storage-read-preflight"], "candidate_archive"),
+        row(
+            [
+                "-m",
+                module,
+                "--storage-read-preflight",
+                "--epoch",
+                "24304",
+            ],
+            "candidate_archive",
+        ),
         row(
             ["-m", module, "--repair-chain-settlements"],
             "candidate_checkout",
@@ -9484,6 +8297,7 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
     verify_gateway_weight_readiness_invocations(
         rows,
         candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
     )
 
     recovered_rows = [
@@ -9497,14 +8311,167 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
     verify_gateway_weight_readiness_invocations(
         recovered_rows,
         candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
     )
+
+    advanced_epoch_rows = copy.deepcopy(rows)
+    advanced_epoch_rows[0]["argv"][-1] = "24303"
+    verify_gateway_weight_readiness_invocations(
+        advanced_epoch_rows,
+        candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
+    )
+
+    malformed_epoch_rows = copy.deepcopy(rows)
+    malformed_epoch_rows[0]["argv"][-1] = "not-an-epoch"
+    with pytest.raises(SystemExit, match="exact production"):
+        verify_gateway_weight_readiness_invocations(
+            malformed_epoch_rows,
+            candidate_sha=COMMIT,
+            storage_preflight_pins_epoch=True,
+        )
 
     rows[3]["argv"][-1] = "30"
     with pytest.raises(SystemExit, match="launcher contract"):
         verify_gateway_weight_readiness_invocations(
             rows,
             candidate_sha=COMMIT,
+            storage_preflight_pins_epoch=True,
         )
+
+    legacy_rows = copy.deepcopy(rows)
+    legacy_rows[0]["argv"] = ["-m", module, "--storage-read-preflight"]
+    legacy_rows[3]["argv"][-1] = "360"
+    verify_gateway_weight_readiness_invocations(
+        legacy_rows,
+        candidate_sha=COMMIT,
+    )
+
+
+def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    modules = (
+        "gateway.main",
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+        "gateway.tee.prepare_active_release_lineage_v2",
+        "gateway.tee.verify_weight_submission_ready_v2",
+    )
+    for module in modules:
+        monkeypatch.setenv(
+            "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+        )
+        contract_adapter._route_host_storage_preflight_to_local_postgrest(module)
+        assert (
+            os.environ["SUPABASE_URL"]
+            == contract_adapter.LOCAL_POSTGREST_ORIGIN
+        )
+
+        monkeypatch.setenv("SUPABASE_URL", "https://unexpected.invalid")
+        with pytest.raises(ValueError, match="Supabase origin differs"):
+            contract_adapter._route_host_storage_preflight_to_local_postgrest(
+                module
+            )
+
+    contract_adapter._route_host_storage_preflight_to_local_postgrest(
+        "gateway.tee.restart_preflight_v2"
+    )
+    assert os.environ["SUPABASE_URL"] == "https://unexpected.invalid"
+
+
+@pytest.mark.parametrize(
+    "module",
+    (
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+        "gateway.tee.prepare_active_release_lineage_v2",
+    ),
+)
+def test_gateway_storage_helpers_route_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+    module: str,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    observed: dict[str, Any] = {}
+    monkeypatch.setenv(
+        "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    monkeypatch.setenv("PYTHONPATH", "/source")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_record_production_module",
+        lambda name, argv: observed.update(module=name, recorded_argv=argv),
+    )
+
+    def fake_exec(executable: str, argv: list[str]) -> None:
+        observed.update(
+            executable=executable,
+            exec_argv=argv,
+            supabase_url=os.environ["SUPABASE_URL"],
+        )
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = ["-m", module, "--help"]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_python(argv)
+
+    assert observed == {
+        "module": module,
+        "recorded_argv": argv,
+        "executable": contract_adapter.REAL_PYTHON,
+        "exec_argv": [contract_adapter.REAL_PYTHON, *argv],
+        "supabase_url": contract_adapter.LOCAL_POSTGREST_ORIGIN,
+    }
+
+
+def test_gateway_main_routes_storage_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    observed: dict[str, Any] = {}
+    monkeypatch.setenv(
+        "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    monkeypatch.setenv("PYTHONPATH", "/source")
+    monkeypatch.setattr(
+        contract_adapter, "_locked_state", lambda: (object(), {})
+    )
+    monkeypatch.setattr(contract_adapter, "_save_state", lambda *_args: None)
+    monkeypatch.setattr(contract_adapter, "_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        contract_adapter, "_module_source", lambda _module: Path("gateway/main.py")
+    )
+    monkeypatch.setattr(
+        contract_adapter, "_source_identity", lambda _path: {}
+    )
+
+    def fake_exec(executable: str, argv: list[str]) -> None:
+        observed.update(
+            executable=executable,
+            argv=argv,
+            supabase_url=os.environ["SUPABASE_URL"],
+        )
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = ["-m", "gateway.main"]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter._exec_long_lived_production_module(
+            "gateway.main", "gateway.main", argv
+        )
+
+    assert observed == {
+        "executable": contract_adapter.REAL_PYTHON,
+        "argv": [contract_adapter.REAL_PYTHON, *argv],
+        "supabase_url": contract_adapter.LOCAL_POSTGREST_ORIGIN,
+    }
 
 
 def test_gateway_readiness_accepts_missing_optional_preflight_only_for_rollback() -> None:
@@ -9637,6 +8604,224 @@ def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(
                 Path("/home/ec2-user/leadpoet_repo"),
             )
 
+
+@pytest.mark.parametrize(
+    "prefix",
+    (
+        "gateway-restart-controller-bootstrap.",
+        "validator-restart-controller-bootstrap.",
+    ),
+)
+def test_module_provenance_accepts_candidate_restart_authority_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    with _production_named_temp_directory(prefix) as bootstrap_root:
+        module_path = bootstrap_root / "authority/scripts/gateway_git_deploy.py"
+        module_path.parent.mkdir(parents=True)
+        module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+        outside = bootstrap_root / "outside.py"
+        outside.write_text("VALUE = 'outside authority'\n", encoding="utf-8")
+
+        relative, source_kind = contract_adapter._candidate_git_path(
+            module_path.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+        assert relative == Path("scripts/gateway_git_deploy.py")
+        assert source_kind == "candidate_archive"
+        with pytest.raises(RuntimeError, match="recognized candidate"):
+            contract_adapter._candidate_git_path(
+                outside.resolve(),
+                Path("/home/ec2-user/leadpoet_repo"),
+            )
+
+        escaped_link = bootstrap_root / "authority/escaped.py"
+        escaped_link.symlink_to(outside)
+        with pytest.raises(RuntimeError, match="recognized candidate"):
+            contract_adapter._candidate_git_path(
+                escaped_link.resolve(),
+                Path("/home/ec2-user/leadpoet_repo"),
+            )
+
+
+@pytest.mark.parametrize("tampered", (False, True))
+def test_frozen_local_release_archive_keeps_exact_source_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tampered: bool,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    candidate_sha = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setattr(contract_adapter, "_candidate_root", lambda: root)
+    relative = Path("gateway/tee/local_release_v2.py")
+    with _production_named_temp_directory("leadpoet-local-release-source.") as archive:
+        source = archive / relative
+        source.parent.mkdir(parents=True)
+        source.write_bytes((root / relative).read_bytes() + (b"\n# changed\n" if tampered else b""))
+        if tampered:
+            with pytest.raises(RuntimeError, match="source bytes differ"):
+                contract_adapter._source_identity(source)
+        else:
+            identity = contract_adapter._source_identity(source)
+            assert identity["source_kind"] == "candidate_archive"
+            assert identity["source_commit"] == candidate_sha
+            assert identity["source_git_path"] == relative.as_posix()
+
+
+def test_module_provenance_accepts_only_exact_candidate_local_release_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    build_root = tmp_path / "gateway-release-build-v2"
+    monkeypatch.setenv("GATEWAY_V2_BUILD_WORK_ROOT", str(build_root))
+    module_path = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+
+    relative, source_kind = contract_adapter._candidate_git_path(
+        module_path.resolve(),
+        Path("/home/ec2-user/leadpoet_repo"),
+    )
+
+    assert relative == Path("gateway/tee/build_identity.py")
+    assert source_kind == "candidate_archive"
+
+    wrong_candidate = (
+        build_root
+        / f"{'2' * 40}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    wrong_candidate.parent.mkdir(parents=True)
+    wrong_candidate.write_text("VALUE = 'wrong candidate'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_candidate.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    wrong_role = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_unknown/source/gateway/tee/build_identity.py"
+    )
+    wrong_role.parent.mkdir(parents=True)
+    wrong_role.write_text("VALUE = 'wrong role'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_role.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    outside_source = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/outside/gateway/tee/build_identity.py"
+    )
+    outside_source.parent.mkdir(parents=True)
+    outside_source.write_text("VALUE = 'outside source'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            outside_source.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    wrong_root = (
+        tmp_path
+        / "untrusted/gateway-release-build-v2"
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    wrong_root.parent.mkdir(parents=True)
+    wrong_root.write_text("VALUE = 'wrong root'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_root.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+
+def test_gateway_verification_image_build_is_bound_to_role_and_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    context = Path("/build/gateway_coordinator/source/gateway")
+    argv = [
+        "build",
+        "--pull",
+        "--no-cache",
+        "--build-arg",
+        "SOURCE_DATE_EPOCH=0",
+        "--build-arg",
+        "LEADPOET_ENCLAVE_ROLE=gateway_coordinator",
+        "-f",
+        str(context / "tee/Dockerfile.enclave"),
+        "-t",
+        f"leadpoet-gateway-verify:gateway_coordinator-{COMMIT[:12]}-1-raw",
+        str(context),
+    ]
+
+    assert (
+        contract_adapter._external_build_role(argv, argv[-2])
+        == "gateway_coordinator"
+    )
+
+    for invalid_tag in (
+        f"leadpoet-gateway-verify:gateway_coordinator-{'2' * 12}-1-raw",
+        f"leadpoet-gateway-verify:gateway_unknown-{COMMIT[:12]}-1-raw",
+        f"leadpoet-gateway-verify:gateway_coordinator-{COMMIT[:12]}-raw",
+    ):
+        with pytest.raises(ValueError, match="gateway verification image"):
+            contract_adapter._external_build_role(argv, invalid_tag)
+
+
+def test_gateway_verification_normalized_image_is_bound_to_role_and_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    role = "gateway_coordinator"
+    record = {
+        "commit": COMMIT,
+        "id": normalized_image_id(COMMIT, role),
+        "role": role,
+    }
+    image = f"leadpoet-gateway-verify:{role}-{COMMIT[:12]}-1"
+    assert contract_adapter._gateway_verification_image_is_bound(
+        image=image,
+        record=record,
+    )
+
+    invalid_cases = (
+        (f"leadpoet-gateway-verify:{role}-{'2' * 12}-1", record),
+        (f"leadpoet-gateway-verify:gateway_scoring-{COMMIT[:12]}-1", record),
+        (f"leadpoet-gateway-verify:{role}-{COMMIT[:12]}-0", record),
+        (image + "-raw", record),
+        (image, {**record, "id": "sha256:" + "2" * 64}),
+        (image, {**record, "provenance": "copied"}),
+    )
+    for invalid_image, invalid_record in invalid_cases:
+        assert not contract_adapter._gateway_verification_image_is_bound(
+            image=invalid_image,
+            record=invalid_record,
+        )
 
 def test_docker_contract_inherits_name_only_environment_without_argv_secret(
     monkeypatch: pytest.MonkeyPatch,

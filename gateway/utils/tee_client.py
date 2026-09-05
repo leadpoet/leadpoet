@@ -585,34 +585,6 @@ class TEEClient:
             },
         )
 
-    async def v2_get_openrouter_ingress_recipient(
-        self,
-        *,
-        miner_hotkey: str,
-        credential_kind: str,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_get_openrouter_ingress_recipient",
-            {
-                "miner_hotkey": miner_hotkey,
-                "credential_kind": credential_kind,
-            },
-        )
-
-    async def v2_seal_openrouter_ingress_credential(
-        self,
-        *,
-        request_id: str,
-        ciphertext_b64: str,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_seal_openrouter_ingress_credential",
-            {
-                "request_id": request_id,
-                "ciphertext_b64": ciphertext_b64,
-            },
-        )
-
     async def v2_provision_encrypted_secret(
         self,
         *,
@@ -666,16 +638,6 @@ class TEEClient:
     ) -> Dict:
         return await self._send_rpc(
             "v2_provision_job_sealed_source_add_secret",
-            {"envelope": envelope},
-        )
-
-    async def v2_provision_job_sealed_openrouter_secret(
-        self,
-        *,
-        envelope: Dict,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_provision_job_sealed_openrouter_secret",
             {"envelope": envelope},
         )
 
@@ -901,137 +863,6 @@ class TEEClient:
             "coordinator_v2_get_host_operations", {"job_id": job_id}
         )
 
-    async def autoresearch_v2_health(self) -> Dict:
-        return await self._send_rpc("autoresearch_v2_health", {})
-
-    async def autoresearch_v2_submit_job(self, manifest: Dict) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_submit_job", {"manifest": manifest}
-        )
-
-    async def autoresearch_v2_put_chunk(
-        self,
-        *,
-        job_id: str,
-        offset: int,
-        data: bytes,
-    ) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_put_chunk",
-            {
-                "job_id": job_id,
-                "offset": offset,
-                "data_b64": base64.b64encode(data).decode("ascii"),
-                "chunk_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
-            },
-        )
-
-    async def autoresearch_v2_seal_job(self, job_id: str) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_seal_job", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_status(self, job_id: str) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_get_status", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_cancel_job(self, job_id: str) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_cancel_job", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_result(
-        self,
-        job_id: str,
-        *,
-        offset: int = 0,
-        max_bytes: int = 512 * 1024,
-    ) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_get_result",
-            {"job_id": job_id, "offset": offset, "max_bytes": max_bytes},
-        )
-
-    async def autoresearch_v2_get_receipt(self, job_id: str) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_get_receipt", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_receipts(self, job_id: str) -> List[Dict]:
-        return await self._send_rpc(
-            "autoresearch_v2_get_receipts", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_ancestry_compact_proof(
-        self, job_id: str
-    ) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_get_ancestry_compact_proof", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_transitions(self, job_id: str) -> List[Dict]:
-        return await self._send_rpc(
-            "autoresearch_v2_get_transitions", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_transport_attempts(
-        self, job_id: str
-    ) -> List[Dict]:
-        return await self._send_rpc(
-            "autoresearch_v2_get_transport_attempts", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_artifact_hashes(self, job_id: str) -> List[str]:
-        return await self._send_rpc(
-            "autoresearch_v2_get_artifact_hashes", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_next_host_operation(
-        self,
-        job_id: str,
-        *,
-        wait_ms: int = 0,
-    ) -> Optional[Dict]:
-        return await self._send_rpc(
-            "autoresearch_v2_next_host_operation",
-            {"job_id": job_id, "wait_ms": wait_ms},
-        )
-
-    async def autoresearch_v2_complete_host_operation(
-        self,
-        *,
-        job_id: str,
-        request_hash: str,
-        terminal_status: str,
-        response: Optional[Dict],
-        failure_code: Optional[str] = None,
-    ) -> Dict:
-        return await self._send_rpc(
-            "autoresearch_v2_complete_host_operation",
-            {
-                "job_id": job_id,
-                "request_hash": request_hash,
-                "terminal_status": terminal_status,
-                "response": response,
-                "failure_code": failure_code,
-            },
-        )
-
-    async def autoresearch_v2_get_host_operations(
-        self, job_id: str
-    ) -> List[Dict]:
-        return await self._send_rpc(
-            "autoresearch_v2_get_host_operations", {"job_id": job_id}
-        )
-
-    async def autoresearch_v2_get_external_receipt_graphs(
-        self, job_id: str
-    ) -> List[Dict]:
-        return await self._send_rpc(
-            "autoresearch_v2_get_external_receipt_graphs", {"job_id": job_id}
-        )
-    
     def close(self):
         """Compatibility no-op: RPC sockets are call-scoped and self-closing."""
 
@@ -1041,5 +872,4 @@ class TEEClient:
 coordinator_tee_client = TEEClient(cid=16)
 scoring_tee_client = TEEClient(cid=17)
 scoring_tee_clients = (scoring_tee_client,)
-autoresearch_tee_client = TEEClient(cid=18)
 tee_client = coordinator_tee_client

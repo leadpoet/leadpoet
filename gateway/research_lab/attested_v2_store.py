@@ -126,49 +126,12 @@ _EXACT_INSERT_BATCH_ROWS = 100
 _DUPLICATE_READBACK_ATTEMPTS = 4
 _DUPLICATE_READBACK_BACKOFF_SECONDS = (0.1, 0.25, 0.5)
 _ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0)
-_MODEL_COMPATIBILITY_PURPOSE_V2 = "research_lab.model_compatibility.v2"
-_RECEIPT_IDEMPOTENCY_FIELDS_V2 = (
-    "role",
-    "purpose",
-    "job_id",
-    "epoch_id",
-    "input_root",
-    "config_hash",
-)
-_MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2 = (
-    # Per-boot identity and signer fields intentionally differ after an
-    # enclave restart; each receipt and the stored graph are verified
-    # independently before semantic reuse.
-    "schema_version",
-    "role",
-    "purpose",
-    "job_id",
-    "epoch_id",
-    "sequence",
-    "commit_sha",
-    "pcr0",
-    "build_manifest_hash",
-    "dependency_lock_hash",
-    "config_hash",
-    "input_root",
-    "output_root",
-    "transport_root",
-    "host_operation_root",
-    "artifact_root",
-    "parent_receipt_hashes",
-    "status",
-    "failure_code",
-)
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {
         ("research_lab_allocation", "research_lab.allocation.v2"),
         (
             "allocation_settlement_frontier_bootstrap_v2",
             "research_lab.allocation_settlement_frontier_bootstrap.v2",
-        ),
-        (
-            "attest_active_private_model",
-            "research_lab.active_private_model.v2",
         ),
         (
             "source_add_catalog_snapshot_v2",
@@ -617,74 +580,6 @@ def _assert_stored_row(
             raise AttestedV2StoreError(
                 "%s stored row conflicts at %s" % (table, field)
             )
-
-
-async def load_compatible_model_compatibility_receipt_v2(
-    expected_receipt: Mapping[str, Any],
-) -> Optional[dict[str, Any]]:
-    """Load one semantically identical durable metadata receipt.
-
-    A scoring-enclave restart can reproduce the same immutable compatibility
-    operation with a later issuance time and therefore a different signature
-    and receipt hash.  The receipt table's idempotency constraint intentionally
-    admits only one row for that operation.  Reuse is allowed solely after both
-    signed documents validate and every immutable execution commitment agrees.
-    """
-
-    validate_signed_execution_receipt(expected_receipt)
-    if expected_receipt.get("purpose") != _MODEL_COMPATIBILITY_PURPOSE_V2:
-        return None
-    if (
-        expected_receipt.get("role") != "gateway_scoring"
-        or expected_receipt.get("status") != "succeeded"
-        or expected_receipt.get("failure_code") is not None
-    ):
-        raise AttestedV2StoreError(
-            "model compatibility receipt is not a succeeded scoring authority"
-        )
-
-    filters = tuple(
-        (field, expected_receipt[field])
-        for field in _RECEIPT_IDEMPOTENCY_FIELDS_V2
-    )
-    rows = await select_many(
-        RECEIPT_TABLE,
-        filters=filters,
-        order_by=(("receipt_hash", False),),
-        limit=2,
-    )
-    if not rows:
-        return None
-    if len(rows) != 1:
-        raise AttestedV2StoreError(
-            "model compatibility idempotency tuple is not unique"
-        )
-    stored_row = rows[0]
-    for field, value in filters:
-        if not _stored_value_matches(field, stored_row.get(field), value):
-            raise AttestedV2StoreError(
-                "model compatibility durable selector conflicts at %s" % field
-            )
-    stored_receipt = stored_row.get("receipt_doc")
-    if not isinstance(stored_receipt, Mapping):
-        raise AttestedV2StoreError(
-            "model compatibility durable receipt document is unavailable"
-        )
-    stored_projection = receipt_storage_row(stored_receipt)
-    _assert_stored_row(RECEIPT_TABLE, stored_row, stored_projection)
-    if (
-        stored_receipt.get("status") != "succeeded"
-        or stored_receipt.get("failure_code") is not None
-    ):
-        raise AttestedV2StoreError(
-            "model compatibility durable receipt did not succeed"
-        )
-    for field in _MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2:
-        if stored_receipt.get(field) != expected_receipt.get(field):
-            raise AttestedV2StoreError(
-                "model compatibility durable receipt conflicts at %s" % field
-            )
-    return dict(stored_receipt)
 
 
 async def _select_by_values(

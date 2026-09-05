@@ -761,16 +761,15 @@ def test_country_eu_shorthand_expands_to_europe() -> None:
 
 @pytest.mark.asyncio
 async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> None:
-    # Durability proof: the receipt must survive all the way into the
-    # LeadScoreBreakdown the evaluator persists — not just the out-param.
+    # The score detail must survive in the Arena's persisted breakdown.
     from qualification.scoring.lead_scorer import (
-        score_company_autoresearch_intent_v2,
+        score_company_competition_intent,
     )
 
     monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
     monkeypatch.delenv("VERIFIER_SEMANTIC_GATES_MODE", raising=False)
     # Canonical conflict zeroes deterministically at pre-checks: no network.
-    breakdown = await score_company_autoresearch_intent_v2(
+    breakdown = await score_company_competition_intent(
         _company("Manufacturing"),
         _icp("Software"),
         run_cost_usd=0.0,
@@ -793,8 +792,6 @@ async def test_clean_pass_carries_no_receipt(monkeypatch) -> None:
     # Payload discipline: a trivial deterministic pass must NOT attach an
     # audit receipt — otherwise a shadow-mode run would bloat every
     # persisted breakdown in every benchmark.
-    from qualification.scoring.lead_scorer import _run_autoresearch_binary_fit_checks
-
     monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
     receipts: list = []
     passed, reason = await pre_checks.run_company_zero_checks(

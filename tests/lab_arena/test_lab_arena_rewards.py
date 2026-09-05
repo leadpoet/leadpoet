@@ -201,8 +201,8 @@ def test_new_king_resets_the_schedule_and_defense_keeps_it():
     assert values["champion_share"] == 0.25
     assert values["champion_uid"] == 2
     assert values["reward_week_index"] == 0
-    first_baseline_defense = _basis(outcome="defended", finalized_epoch=1019)
-    assert first_baseline_defense["king_start_epoch"] == first_baseline_defense["effective_reward_epoch"] == 1020
+    with pytest.raises(ValueError, match="previous reward basis"):
+        _basis(outcome="defended", finalized_epoch=1019)
     with pytest.raises(ValueError):
         _basis(outcome="defended", finalized_epoch=1019, previous_start=1020)
 

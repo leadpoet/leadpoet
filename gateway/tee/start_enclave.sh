@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the approved three-role Nitro topology, or one role for component tests.
+# Start the approved two-role Nitro topology, or one role for component tests.
 
 set -euo pipefail
 
@@ -24,13 +24,11 @@ esac
 ALL_ROLES=(
   gateway_coordinator
   gateway_scoring
-  gateway_autoresearch
 )
 # Nitro limits the number of discontiguous memory regions backing one enclave.
 # Allocate the largest EIFs first so smaller roles cannot fragment that pool.
 FULL_LAUNCH_ORDER=(
   gateway_scoring
-  gateway_autoresearch
   gateway_coordinator
 )
 
@@ -64,7 +62,7 @@ if [ "$TOPOLOGY_MODE" = "full" ]; then
 elif [ "$TOPOLOGY_MODE" = "component" ]; then
   COMPONENT_ROLE="${GATEWAY_TEE_COMPONENT_ROLE:-gateway_coordinator}"
   case "$COMPONENT_ROLE" in
-    gateway_coordinator|gateway_scoring|gateway_autoresearch) ;;
+    gateway_coordinator|gateway_scoring) ;;
     *) echo "ERROR: invalid GATEWAY_TEE_COMPONENT_ROLE" >&2; exit 1 ;;
   esac
   ROLES=("$COMPONENT_ROLE")

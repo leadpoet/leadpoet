@@ -212,6 +212,39 @@ def test_httpx_sync_and_async(worker):
     assert worker.frames[1]["parameters"]["max_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
 
 
+def test_httpx_accepts_baseline_unix_socket_urls_for_closed_provider_operations(worker):
+    transport = httpx.HTTPTransport(uds=worker.path)
+    with httpx.Client(transport=transport) as client:
+        response = client.post(
+            "http://code.deepline.com/api/v2/integrations/hunter_discover/execute",
+            json={"payload": {"domain": "example.com"}},
+        )
+        assert response.status_code == 200
+        response = client.get(
+            "http://api.scrapingdog.com/google_news",
+            params={"query": "example launch"},
+        )
+        assert response.status_code == 200
+
+    async def run_async():
+        transport = httpx.AsyncHTTPTransport(uds=worker.path)
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await client.post(
+                "http://openrouter.ai/api/v1/chat/completions",
+                json={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    response = asyncio.run(run_async())
+    assert response.status_code == 200
+    assert [frame["operation_id"] for frame in worker.frames] == [
+        "deepline.execute",
+        "scrapingdog.google_news",
+        "openrouter.chat",
+    ]
+    assert worker.frames[0]["parameters"] == {"tool": "hunter_discover", "payload": {"domain": "example.com"}}
+    assert worker.frames[1]["parameters"] == {"query": "example launch", "country": "us"}
+
+
 def test_aiohttp_get_and_post(worker):
     async def run():
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=9)) as session:
@@ -255,8 +288,10 @@ def test_aiohttp_error_status_raise_for_status(worker):
     "url",
     [
         "https://example.com/",
+        "http://example.com/",
         "http://127.0.0.1:8080/",
         "http://localhost/",
+        "http://api.scrapingdog.com:81/google?query=acme",
         "https://code.deepline.com/api/v2/integrations/exa_search/execute/extra",
         "https://code.deepline.com:8443/api/v2/integrations/exa_search/execute",
         "https://user@code.deepline.com/api/v2/integrations/exa_search/execute",

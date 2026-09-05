@@ -901,25 +901,6 @@ def _controller_policy(
     distribution_arn = (
         f"arn:aws:cloudfront::{account_id}:distribution/*"
     )
-    sourcing_artifact_bucket = (
-        f"arn:aws:s3:::leadpoet-private-model-artifacts-{account_id}"
-    )
-    sourcing_artifact_prefix = "research-lab/sourcing-model"
-    sourcing_artifact_objects = [
-        sourcing_artifact_bucket
-        + f"/{sourcing_artifact_prefix}/branches/leadpoet-lab/current.json",
-        sourcing_artifact_bucket
-        + f"/{sourcing_artifact_prefix}/"
-        + "?" * 40
-        + ".json",
-        sourcing_artifact_bucket
-        + f"/{sourcing_artifact_prefix}/"
-        + "?" * 40
-        + ".sig.b64",
-    ]
-    sourcing_model_repository_arn = (
-        f"arn:aws:ecr:{region}:{account_id}:repository/leadpoet/sourcing-model"
-    )
     parity_tag_keys = [
         "Name",
         "leadpoet:candidate-sha",
@@ -1332,41 +1313,6 @@ def _controller_policy(
                 "Action": ["s3:ListAllMyBuckets", "secretsmanager:ListSecrets"],
                 "Resource": "*",
             },
-            {
-                "Sid": "ReadExactSignedSourcingArtifact",
-                "Effect": "Allow",
-                "Action": "s3:GetObject",
-                "Resource": sourcing_artifact_objects,
-            },
-            {
-                "Sid": "AuthenticateExactSourcingArtifactRegistry",
-                "Effect": "Allow",
-                "Action": "ecr:GetAuthorizationToken",
-                "Resource": "*",
-            },
-            {
-                "Sid": "PullExactSignedSourcingArtifact",
-                "Effect": "Allow",
-                "Action": [
-                    "ecr:BatchGetImage",
-                    "ecr:GetDownloadUrlForLayer",
-                    "ecr:BatchCheckLayerAvailability",
-                ],
-                "Resource": sourcing_model_repository_arn,
-            },
-            {
-                "Sid": "VerifyExactSourcingArtifactSignature",
-                "Effect": "Allow",
-                "Action": "kms:Verify",
-                "Resource": f"arn:aws:kms:{region}:{account_id}:key/*",
-                "Condition": {
-                    "ForAnyValue:StringEquals": {
-                        "kms:ResourceAliases": (
-                            "alias/leadpoet-research-lab-artifact-signing"
-                        ),
-                    },
-                },
-            },
         ],
     }
 
@@ -1618,24 +1564,6 @@ def _simulate_controller_policy(
     image = f"arn:aws:ec2:{region}::image/{PRODUCTION_AMI_ID}"
     distribution = f"arn:aws:cloudfront::{account_id}:distribution/E123456789ABCD"
     document = f"arn:aws:ssm:{region}::document/AWS-RunShellScript"
-    sourcing_prefix = (
-        f"arn:aws:s3:::leadpoet-private-model-artifacts-{account_id}/"
-        "research-lab/sourcing-model"
-    )
-    sourcing_pointer = sourcing_prefix + "/branches/leadpoet-lab/current.json"
-    sourcing_archive = sourcing_prefix + "/" + "a" * 40 + ".json"
-    sourcing_signature = sourcing_prefix + "/" + "a" * 40 + ".sig.b64"
-    sourcing_short_archive = sourcing_prefix + "/" + "a" * 39 + ".json"
-    sourcing_long_signature = sourcing_prefix + "/" + "a" * 41 + ".sig.b64"
-    sourcing_decoy = sourcing_prefix + "/branches/main/current.json"
-    sourcing_repository = (
-        f"arn:aws:ecr:{region}:{account_id}:repository/leadpoet/sourcing-model"
-    )
-    sourcing_repository_decoy = (
-        f"arn:aws:ecr:{region}:{account_id}:repository/leadpoet/other-model"
-    )
-    signing_key = f"arn:aws:kms:{region}:{account_id}:key/fixture-signing-key"
-    signing_key_decoy = f"arn:aws:kms:{region}:{account_id}:key/other-key"
     tags = {
         "Name": "leadpoet-parity-pp-123456-1",
         "leadpoet:candidate-sha": "a" * 40,
@@ -2010,81 +1938,6 @@ def _simulate_controller_policy(
             },
             "implicitDeny",
         ),
-        (
-            "signed-artifact-pointer-read",
-            "s3:GetObject",
-            [sourcing_pointer],
-            session,
-            "allowed",
-        ),
-        (
-            "signed-artifact-archive-read",
-            "s3:GetObject",
-            [sourcing_archive],
-            session,
-            "allowed",
-        ),
-        (
-            "signed-artifact-signature-read",
-            "s3:GetObject",
-            [sourcing_signature],
-            session,
-            "allowed",
-        ),
-        (
-            "signed-artifact-short-archive-decoy",
-            "s3:GetObject",
-            [sourcing_short_archive],
-            session,
-            "implicitDeny",
-        ),
-        (
-            "signed-artifact-long-signature-decoy",
-            "s3:GetObject",
-            [sourcing_long_signature],
-            session,
-            "implicitDeny",
-        ),
-        (
-            "signed-artifact-same-service-decoy",
-            "s3:GetObject",
-            [sourcing_decoy],
-            session,
-            "implicitDeny",
-        ),
-        (
-            "signed-artifact-ecr-pull",
-            "ecr:BatchGetImage",
-            [sourcing_repository],
-            session,
-            "allowed",
-        ),
-        (
-            "signed-artifact-ecr-same-service-decoy",
-            "ecr:BatchGetImage",
-            [sourcing_repository_decoy],
-            session,
-            "implicitDeny",
-        ),
-        (
-            "signed-artifact-kms-verify",
-            "kms:Verify",
-            [signing_key],
-            {
-                **session,
-                "kms:ResourceAliases": (
-                    "alias/leadpoet-research-lab-artifact-signing"
-                ),
-            },
-            "allowed",
-        ),
-        (
-            "signed-artifact-kms-same-service-decoy",
-            "kms:Verify",
-            [signing_key_decoy],
-            {**session, "kms:ResourceAliases": "alias/other-key"},
-            "implicitDeny",
-        ),
     ]
     for name, action, resources, context, expected in cases:
         response = iam.simulate_principal_policy(
@@ -2171,7 +2024,6 @@ def _runner_policy(
                 "Action": ["s3:ListBucket"],
                 "Resource": [
                     parity_bucket,
-                    "arn:aws:s3:::leadpoet-private-model-artifacts-*",
                     "arn:aws:s3:::leadpoet-attested-v2-artifacts-*",
                 ],
             },
@@ -2180,7 +2032,6 @@ def _runner_policy(
                 "Action": ["s3:GetObject"],
                 "Resource": [
                     run_objects,
-                    "arn:aws:s3:::leadpoet-private-model-artifacts-*/*",
                     "arn:aws:s3:::leadpoet-attested-v2-artifacts-*/*",
                 ],
             },

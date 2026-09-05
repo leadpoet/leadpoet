@@ -172,6 +172,20 @@ def test_role_build_archives_only_after_local_release_verification():
     assert '--last-good-manifest "$LAST_GOOD_MANIFEST"' in script
 
 
+def test_cold_role_build_matches_attested_pcr_builder_inputs():
+    script = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
+    build = script[script.index("sudo env") : script.index("sudo python3")]
+
+    assert "DOCKER_BUILDKIT=1" in build
+    assert "BUILDX_NO_DEFAULT_ATTESTATIONS=1" in build
+    assert "docker build" in build
+    assert "--pull" in build
+    assert '--build-arg "SOURCE_DATE_EPOCH=0"' in build
+    assert '--build-arg "LEADPOET_ENCLAVE_ROLE=${role}"' in build
+
+
 def test_cold_build_verifies_complete_staging_set_before_transactional_install():
     script = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
         encoding="utf-8"

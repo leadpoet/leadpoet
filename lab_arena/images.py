@@ -1,16 +1,10 @@
-"""Container images named by a public tag or digest.
+"""Resolve and materialize the organizer-owned Arena runtime image.
 
-A miner names one image in any public registry. The Arena resolves its tag or
-digest once,
-the manifest, checks it against the public image rules, copies its blobs into
-the Arena repository, and pins the single-platform manifest digest. A runner
-materializes the root filesystem of a pinned digest from that repository with
-a hardened extractor. No Docker daemon takes part on either side, so no host
-unpacks attacker-controlled layers through a root daemon.
-
-Every rejection maps to a published rule id (``IMAGE_RULE_IDS``). The client
-speaks the OCI distribution API over ``httpx`` with the bearer challenge flow
-registries use for anonymous pulls and credentialed pushes.
+The Arena resolves one configured OCI tag or digest, validates its platform
+and size, and pins the single-platform manifest digest. A runner materializes
+that digest with a hardened extractor. No Docker daemon unpacks image layers.
+The read-only registry client supports anonymous and credentialed pulls so the
+common runtime image can be held in a public or private registry.
 """
 
 from __future__ import annotations
@@ -31,8 +25,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
-from typing import Any, Callable, Dict, IO, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -51,7 +44,6 @@ RULE_LAYER_UNSUPPORTED = "image.layer_unsupported"
 RULE_LAYER_INVALID = "image.layer_invalid"
 RULE_CONFIG_INVALID = "image.config_invalid"
 RULE_DIGEST_MISMATCH = "image.digest_mismatch"
-RULE_MIRROR_FAILED = "image.mirror_failed"
 
 IMAGE_RULE_IDS = (
     RULE_REFERENCE_INVALID,
@@ -64,7 +56,6 @@ IMAGE_RULE_IDS = (
     RULE_LAYER_INVALID,
     RULE_CONFIG_INVALID,
     RULE_DIGEST_MISMATCH,
-    RULE_MIRROR_FAILED,
 )
 
 IMAGE_RULES_SCHEMA_VERSION = "leadpoet.lab_arena.image_rules.v1"
@@ -121,7 +112,7 @@ class ImageError(RuntimeError):
 
 @dataclass(frozen=True)
 class ImageReference:
-    """A public ``registry/repository:tag`` or digest reference."""
+    """An OCI ``registry/repository:tag`` or digest reference."""
 
     registry: str
     repository: str
@@ -155,7 +146,7 @@ class ImageReference:
 
 
 def parse_reference(text: Any) -> ImageReference:
-    """Parse a miner's public reference. A registry host and tag or digest are required."""
+    """Parse a registry reference. A host and tag or digest are required."""
 
     if not isinstance(text, str) or not text or len(text) > MAX_REFERENCE_LENGTH or any(ch.isspace() or ord(ch) < 32 for ch in text):
         raise ImageError(RULE_REFERENCE_INVALID, "reference must be a bounded single-line string")
@@ -251,31 +242,16 @@ class BlobDescriptor:
 
 @dataclass(frozen=True)
 class ImageDescriptor:
-    """A resolved single-platform image: what the Arena pins and publishes."""
+    """A resolved single-platform runtime image."""
 
-    reference: ImageReference  # the single-platform manifest, at its source
-    manifest_bytes: bytes
-    manifest_media_type: str
-    config: BlobDescriptor
-    layers: Tuple[BlobDescriptor, ...]
+    reference: ImageReference
 
     @property
     def image_digest(self) -> str:
-        return self.reference.digest
-
-    @property
-    def image_size_bytes(self) -> int:
-        return int(self.config.size) + sum(int(layer.size) for layer in self.layers)
-
-    def to_document(self) -> Dict[str, Any]:
-        """The public, byte-free description recorded on the submission."""
-
-        return {
-            "image_digest": self.image_digest,
-            "manifest_media_type": self.manifest_media_type,
-            "image_size_bytes": self.image_size_bytes,
-            "layer_count": len(self.layers),
-        }
+        digest = self.reference.digest
+        if digest is None:
+            raise ImageError(RULE_MANIFEST_INVALID, "resolved image has no digest")
+        return digest
 
 
 def _json_object(data: bytes, rule_id: str) -> Dict[str, Any]:
@@ -396,14 +372,13 @@ def _is_public_address(address: Any) -> bool:
 
 
 class RegistryClient:
-    """A minimal OCI distribution client: manifests, blobs, uploads, and tokens.
+    """A minimal read-only OCI client for manifests, blobs, and tokens.
 
-    ``credentials(registry)`` returns the push credential for the Arena's own
-    registry and ``None`` elsewhere; pulls from miners' registries use the
-    anonymous bearer challenge flow. Blob downloads follow the registry's
-    redirect to its content store without forwarding the authorization header.
-    ``address_resolver`` is an injection seam for hermetic tests; production
-    callers use the system resolver.
+    ``credentials(registry)`` can return a read credential for the configured
+    runtime registry and ``None`` elsewhere. Blob downloads follow redirects
+    without forwarding the registry authorization header. ``address_resolver``
+    is an injection seam for hermetic tests; production uses the system
+    resolver.
     """
 
     def __init__(
@@ -569,39 +544,31 @@ class RegistryClient:
 
     def _send(
         self,
-        method: str,
         registry: str,
         path: str,
         *,
         headers: Optional[Mapping[str, str]] = None,
-        params: Optional[Mapping[str, str]] = None,
-        content: Any = None,
         stream: bool = False,
-        absolute_url: Optional[str] = None,
         deadline: Optional[float] = None,
     ) -> httpx.Response:
-        """Send once; on a 401 challenge, obtain a token and send once more."""
+        """Read once; on a 401 challenge, obtain a token and read once more."""
 
         registry_url = self.base_url(registry)
-        registry_origin = self._validate_network_url(registry_url, "registry")
-        url = urljoin(registry_url + "/", absolute_url) if absolute_url else registry_url + path
-        request_origin = self._validate_network_url(url, "registry")
-        same_origin = request_origin == registry_origin
+        self._validate_network_url(registry_url, "registry")
+        url = registry_url + path
+        self._validate_network_url(url, "registry")
         request_headers = dict(headers or {})
         with self._lock:
             bearer = self._last_token.get(registry)
-        basic = self._basic(registry) if same_origin else None
-        if not same_origin:
-            request_headers.pop("Authorization", None)
-        elif "Authorization" not in request_headers:
-            # A bearer already obtained for this registry is sent first: a
-            # streamed upload body cannot be replayed after a challenge.
+        basic = self._basic(registry)
+        if "Authorization" not in request_headers:
+            # Reuse the newest bearer obtained for this registry.
             if bearer:
                 request_headers["Authorization"] = "Bearer " + bearer
             elif basic:
                 request_headers["Authorization"] = basic
         try:
-            request = self._build_request(method, url, deadline=deadline, headers=request_headers, params=params, content=content)
+            request = self._build_request("GET", url, deadline=deadline, headers=request_headers)
             response = self._http.send(request, stream=stream, follow_redirects=False)
         except httpx.HTTPError as exc:
             raise ImageError(RULE_UNAVAILABLE, "registry unreachable: %s" % type(exc).__name__) from exc
@@ -613,9 +580,6 @@ class RegistryClient:
         self._validate_response_peer(response, "registry")
         if response.status_code != 401:
             return response
-        if not same_origin:
-            response.close()
-            raise ImageError(RULE_UNAVAILABLE, "cross-origin registry endpoint refused the request")
         challenge_header = response.headers.get("www-authenticate", "")
         response.close()
         scheme = challenge_header.split(" ", 1)[0].strip().lower()
@@ -624,10 +588,8 @@ class RegistryClient:
         challenge = {key.lower(): value for key, value in _CHALLENGE_RE.findall(challenge_header)}
         token = self._token(registry, challenge, deadline=deadline)
         request_headers["Authorization"] = "Bearer " + token
-        if hasattr(content, "seek"):
-            content.seek(0)
         try:
-            request = self._build_request(method, url, deadline=deadline, headers=request_headers, params=params, content=content)
+            request = self._build_request("GET", url, deadline=deadline, headers=request_headers)
             response = self._http.send(request, stream=stream, follow_redirects=False)
         except httpx.HTTPError as exc:
             raise ImageError(RULE_UNAVAILABLE, "registry unreachable: %s" % type(exc).__name__) from exc
@@ -652,7 +614,6 @@ class RegistryClient:
 
         selector = reference.selector
         response = self._send(
-            "GET",
             reference.registry,
             "/v2/%s/manifests/%s" % (reference.repository, selector),
             headers={"Accept": ACCEPT_MANIFESTS},
@@ -684,43 +645,7 @@ class RegistryClient:
             media_type = str(declared or media_type)
         return body, media_type
 
-    def put_manifest(
-        self,
-        registry: str,
-        repository: str,
-        digest: str,
-        media_type: str,
-        body: bytes,
-        *,
-        deadline: Optional[float] = None,
-    ) -> None:
-        if sha256_digest(body) != digest:
-            raise ImageError(RULE_MIRROR_FAILED, "manifest bytes do not hash to the digest being written")
-        response = self._send(
-            "PUT",
-            registry,
-            "/v2/%s/manifests/%s" % (repository, digest),
-            headers={"Content-Type": media_type},
-            content=body,
-            deadline=deadline,
-        )
-        response.close()
-        if response.status_code not in (200, 201, 202):
-            raise ImageError(RULE_MIRROR_FAILED, "manifest write answered %d" % response.status_code)
-        written = response.headers.get("docker-content-digest")
-        if written and written != digest:
-            raise ImageError(RULE_MIRROR_FAILED, "registry reports a different manifest digest")
-
     # -- blobs --------------------------------------------------------------------
-
-    def blob_exists(self, registry: str, repository: str, digest: str, *, deadline: Optional[float] = None) -> bool:
-        response = self._send("HEAD", registry, "/v2/%s/blobs/%s" % (repository, digest), deadline=deadline)
-        response.close()
-        if response.status_code == 200:
-            return True
-        if response.status_code == 404:
-            return False
-        raise ImageError(RULE_UNAVAILABLE, "blob check answered %d" % response.status_code)
 
     def stream_blob(
         self,
@@ -734,7 +659,7 @@ class RegistryClient:
     ) -> int:
         """Stream one blob into ``sink``; the byte count and digest must match."""
 
-        response = self._send("GET", registry, "/v2/%s/blobs/%s" % (repository, digest), stream=True, deadline=deadline)
+        response = self._send(registry, "/v2/%s/blobs/%s" % (repository, digest), stream=True, deadline=deadline)
         try:
             hops = 0
             while response.status_code in (301, 302, 303, 307, 308):
@@ -790,59 +715,6 @@ class RegistryClient:
         self.stream_blob(registry, repository, digest, expected_size=expected_size, sink=chunks.append, deadline=deadline)
         return b"".join(chunks)
 
-    def upload_blob(
-        self,
-        registry: str,
-        repository: str,
-        digest: str,
-        *,
-        size: int,
-        source: Callable[[], IO[bytes]],
-        mount_from: Optional[str] = None,
-        deadline: Optional[float] = None,
-    ) -> str:
-        """Ensure ``digest`` exists in ``repository``: existing, mounted, or uploaded.
-
-        ``source()`` opens a readable, seekable stream of the blob bytes and is
-        called only when an upload is needed. Returns ``existing``, ``mounted``,
-        or ``uploaded``.
-        """
-
-        if self.blob_exists(registry, repository, digest, deadline=deadline):
-            return "existing"
-        params: Dict[str, str] = {}
-        if mount_from:
-            params = {"mount": digest, "from": mount_from}
-        response = self._send(
-            "POST",
-            registry,
-            "/v2/%s/blobs/uploads/" % repository,
-            params=params or None,
-            headers={"Content-Length": "0"},
-            deadline=deadline,
-        )
-        response.close()
-        if response.status_code == 201:
-            return "mounted"
-        if response.status_code != 202:
-            raise ImageError(RULE_MIRROR_FAILED, "upload start answered %d" % response.status_code)
-        location = response.headers.get("location")
-        if not location:
-            raise ImageError(RULE_MIRROR_FAILED, "upload start returned no location")
-        location = urljoin(self.base_url(registry) + "/", location)
-        with source() as handle:
-            put = self._send(
-                "PUT", registry, "", absolute_url=location, params={"digest": digest},
-                headers={"Content-Type": "application/octet-stream", "Content-Length": str(int(size))}, content=handle,
-                deadline=deadline,
-            )
-        put.close()
-        if put.status_code not in (201, 204):
-            raise ImageError(RULE_MIRROR_FAILED, "blob upload answered %d" % put.status_code)
-        if not self.blob_exists(registry, repository, digest, deadline=deadline):
-            raise ImageError(RULE_MIRROR_FAILED, "uploaded blob did not read back")
-        return "uploaded"
-
     def close(self) -> None:
         self._http.close()
 
@@ -867,7 +739,7 @@ def _read_bounded(
 
 
 # ---------------------------------------------------------------------------
-# Resolve and mirror (Arena side)
+# Common runtime image resolution
 # ---------------------------------------------------------------------------
 
 
@@ -901,81 +773,7 @@ def resolve_image(
     )
     config_document = _json_object(config_bytes, RULE_CONFIG_INVALID)
     validate_config_platform(config_document, rules)
-    return ImageDescriptor(
-        reference=reference,
-        manifest_bytes=body,
-        manifest_media_type=media_type,
-        config=config,
-        layers=tuple(layers),
-    )
-
-
-def mirror_image(
-    source_client: RegistryClient,
-    descriptor: ImageDescriptor,
-    destination_repository: str,
-    *,
-    destination_client: Optional[RegistryClient] = None,
-    spool_dir: Optional[Path] = None,
-    deadline: Optional[float] = None,
-) -> ImageReference:
-    """Copy every blob of ``descriptor`` into the Arena repository and write the same manifest bytes.
-
-    The manifest digest is preserved because the exact bytes are written.
-    Nothing is unpacked: blobs are spooled to disk only long enough to upload.
-    """
-
-    registry, repository = parse_repository(destination_repository)
-    target = ImageReference(registry, repository, descriptor.image_digest)
-    source = descriptor.reference
-    target_client = destination_client or source_client
-    for blob in (descriptor.config, *descriptor.layers):
-        if target_client.blob_exists(target.registry, target.repository, blob.digest, deadline=deadline):
-            continue
-        spool = tempfile.NamedTemporaryFile(prefix="lab-arena-blob-", dir=str(spool_dir) if spool_dir else None, delete=False)
-        try:
-            def open_source(_blob: BlobDescriptor = blob, _path: str = spool.name) -> IO[bytes]:
-                with open(_path, "wb") as handle:
-                    source_client.stream_blob(
-                        source.registry,
-                        source.repository,
-                        _blob.digest,
-                        expected_size=_blob.size,
-                        sink=handle.write,
-                        deadline=deadline,
-                    )
-                return open(_path, "rb")
-
-            spool.close()
-            # Always read source bytes through the anonymous source client.
-            # Cross-repository mounts could grant the destination credential
-            # access to a miner-controlled repository on the same host.
-            target_client.upload_blob(
-                target.registry,
-                target.repository,
-                blob.digest,
-                size=blob.size,
-                source=open_source,
-                mount_from=None,
-                deadline=deadline,
-            )
-        finally:
-            try:
-                os.unlink(spool.name)
-            except OSError:
-                pass
-    target_client.put_manifest(
-        target.registry,
-        target.repository,
-        descriptor.image_digest,
-        descriptor.manifest_media_type,
-        descriptor.manifest_bytes,
-        deadline=deadline,
-    )
-    readback, _media = target_client.get_manifest(target, deadline=deadline)
-    if readback != descriptor.manifest_bytes:
-        raise ImageError(RULE_MIRROR_FAILED, "mirrored manifest did not read back byte-identical")
-    return target
+    return ImageDescriptor(reference=reference)
 
 
 # ---------------------------------------------------------------------------
@@ -1117,7 +915,7 @@ def _apply_layer(
 
 
 def apply_layer(archive_path: Path, rootfs: Path, *, compressed: bool, budget_bytes: int) -> int:
-    """Apply one bounded layer; retained as the small public test helper."""
+    """Apply one bounded layer; retained as a small test helper."""
 
     regular_bytes, _members = _apply_layer(
         archive_path,
@@ -1179,7 +977,6 @@ __all__ = [
     "apply_layer",
     "manifest_layers",
     "materialize_rootfs",
-    "mirror_image",
     "parse_reference",
     "parse_repository",
     "resolve_image",

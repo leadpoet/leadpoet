@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from gateway.tee.topology import (
-    AUTORESEARCH_ROLE,
     COORDINATOR_ROLE,
     HOST_RESERVED_MEMORY_MIB,
     HOST_RESERVED_VCPUS,
@@ -28,15 +27,14 @@ from gateway.tee import verify_topology
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_approved_three_enclave_topology_is_exact():
+def test_approved_two_enclave_topology_is_exact():
     validate_worker_partition()
+    assert set(ROLE_SPECS) == {COORDINATOR_ROLE, SCORING_ROLE}
     assert ROLE_SPECS[COORDINATOR_ROLE]["cid"] == 16
     assert ROLE_SPECS[SCORING_ROLE]["cid"] == 17
-    assert ROLE_SPECS[AUTORESEARCH_ROLE]["cid"] == 18
     assert ROLE_SPECS[SCORING_ROLE]["worker_assignment"] == "all_configured"
-    assert ROLE_SPECS[AUTORESEARCH_ROLE]["worker_assignment"] == "all_configured"
-    assert HOST_RESERVED_VCPUS == 4
-    assert HOST_RESERVED_MEMORY_MIB == 40 * 1024
+    assert HOST_RESERVED_VCPUS == 8
+    assert HOST_RESERVED_MEMORY_MIB == 64 * 1024
 
 
 def test_full_topology_requires_r7i_4xlarge_capacity_floor():
@@ -48,8 +46,8 @@ def test_full_topology_requires_r7i_4xlarge_capacity_floor():
         parent_vcpus=16,
         parent_memory_mib=128 * 1024,
     )
-    assert capacity["host_vcpus"] == 4
-    assert capacity["host_memory_mib"] == 40 * 1024
+    assert capacity["host_vcpus"] == 8
+    assert capacity["host_memory_mib"] == 64 * 1024
 
 
 def test_checked_in_topology_manifest_matches_code():
@@ -71,8 +69,8 @@ def test_restart_allocator_matches_exact_full_topology():
         encoding="utf-8"
     )
     restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    assert 'REQUIRED_CPUS" -ne 12' in allocator
-    assert 'REQUIRED_MEMORY_MIB" -ne 90112' in allocator
+    assert 'REQUIRED_CPUS" -ne 8' in allocator
+    assert 'REQUIRED_MEMORY_MIB" -ne 65536' in allocator
     assert "nitro-enclaves-allocator.service" in allocator
     assert 'sudo nitro-cli terminate-enclave --all' in allocator
     assert 'sudo systemctl restart "$ALLOCATOR_SERVICE"' in allocator
@@ -510,8 +508,7 @@ def test_startup_allocates_largest_roles_first_before_aggregate_release_check():
         encoding="utf-8"
     )
     scoring_order = script.index(
-        "FULL_LAUNCH_ORDER=(\n  gateway_scoring\n  gateway_autoresearch\n"
-        "  gateway_coordinator"
+        "FULL_LAUNCH_ORDER=(\n  gateway_scoring\n  gateway_coordinator"
     )
     cleanup = script.index("sudo nitro-cli terminate-enclave --all")
     launch_loop = script.index('for role in "${FULL_LAUNCH_ORDER[@]}"')

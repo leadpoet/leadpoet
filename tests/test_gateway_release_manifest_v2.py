@@ -8,12 +8,16 @@ import pytest
 
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
+    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
     ReleaseManifestV2Error,
     build_release_manifest,
     role_expectation,
+    validate_historical_release_manifest,
+    validate_prior_release_manifest,
     validate_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
+from leadpoet_canonical.attested_v2 import sha256_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,10 +66,37 @@ def _release(rows=None):
     )
 
 
+def _historical_release():
+    current = _release()
+    roles = copy.deepcopy(current["roles"])
+    for summary in roles.values():
+        summary["topology_hash"] = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    autoresearch = copy.deepcopy(roles["gateway_scoring"])
+    autoresearch.update(
+        {
+            "physical_role": "gateway_autoresearch",
+            "service_role": "gateway_autoresearch",
+            "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        }
+    )
+    roles["gateway_autoresearch"] = autoresearch
+    body = {
+        **{
+            key: value
+            for key, value in current.items()
+            if key != "release_hash"
+        },
+        "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        "roles": roles,
+        "verified_build_count": 18,
+    }
+    return {**body, "release_hash": sha256_json(body)}
+
+
 def test_release_requires_six_matching_builds_for_every_role():
     release = _release()
     assert validate_release_manifest(release) == release
-    assert release["verified_build_count"] == 18
+    assert release["verified_build_count"] == 6 * len(ROLE_SPECS)
     assert all(value["verified_build_count"] == 6 for value in release["roles"].values())
     expectation = role_expectation(release, "gateway_scoring")
     assert expectation["service_role"] == "gateway_scoring"
@@ -99,11 +130,45 @@ def test_release_commits_non_measured_eif_hashes_without_requiring_equality():
 
 def test_release_rejects_missing_or_duplicate_build_evidence():
     rows = _evidence()
-    with pytest.raises(ReleaseManifestV2Error, match="exactly 18"):
+    with pytest.raises(
+        ReleaseManifestV2Error,
+        match="exactly %s" % (6 * len(ROLE_SPECS)),
+    ):
         _release(rows[:-1])
     rows[-1] = copy.deepcopy(rows[-2])
     with pytest.raises(ReleaseManifestV2Error, match="duplicated"):
         _release(rows)
+
+
+def test_historical_release_is_accepted_only_for_prior_lineage():
+    release = _historical_release()
+
+    assert validate_historical_release_manifest(release) == release
+    assert validate_prior_release_manifest(release) == release
+    with pytest.raises(ReleaseManifestV2Error, match="roles|topology"):
+        validate_release_manifest(release)
+
+
+def test_historical_release_rejects_unknown_topology_and_role_tampering():
+    unknown = _historical_release()
+    unknown["topology_hash"] = _hash("9")
+    for summary in unknown["roles"].values():
+        summary["topology_hash"] = _hash("9")
+    body = {key: value for key, value in unknown.items() if key != "release_hash"}
+    unknown["release_hash"] = sha256_json(body)
+    with pytest.raises(ReleaseManifestV2Error, match="topology"):
+        validate_historical_release_manifest(unknown)
+
+    tampered = _historical_release()
+    tampered["roles"]["gateway_autoresearch"]["service_role"] = (
+        "gateway_scoring"
+    )
+    body = {
+        key: value for key, value in tampered.items() if key != "release_hash"
+    }
+    tampered["release_hash"] = sha256_json(body)
+    with pytest.raises(ReleaseManifestV2Error, match="service"):
+        validate_historical_release_manifest(tampered)
 
 
 def test_release_hash_detects_role_summary_tampering():

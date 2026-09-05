@@ -16,6 +16,8 @@ from gateway.tee.release_channel_v2 import (
     install_release_channel_v2,
     publish_release_channel_v2,
     release_channel_key,
+    validate_historical_release_channel_v2,
+    validate_prior_release_channel_v2,
     validate_release_channel_v2,
 )
 from gateway.tee.prepare_active_release_lineage_v2 import (
@@ -24,9 +26,11 @@ from gateway.tee.prepare_active_release_lineage_v2 import (
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
+    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
+from leadpoet_canonical.attested_v2 import sha256_json
 from validator_tee.host.release_v2 import (
     build_validator_build_evidence,
     build_validator_release,
@@ -97,6 +101,43 @@ def _validator_manifest(commit=COMMIT):
     return build_validator_release_manifest(evidence)
 
 
+def _historical_gateway_manifest(commit):
+    current = _gateway_manifest(commit)
+    roles = copy.deepcopy(current["roles"])
+    for summary in roles.values():
+        summary["topology_hash"] = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    autoresearch = copy.deepcopy(roles["gateway_scoring"])
+    autoresearch.update(
+        {
+            "physical_role": "gateway_autoresearch",
+            "service_role": "gateway_autoresearch",
+            "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        }
+    )
+    roles["gateway_autoresearch"] = autoresearch
+    body = {
+        **{
+            key: value
+            for key, value in current.items()
+            if key != "release_hash"
+        },
+        "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        "roles": roles,
+        "verified_build_count": 18,
+    }
+    return {**body, "release_hash": sha256_json(body)}
+
+
+def _historical_channel(commit):
+    body = {
+        "schema_version": "leadpoet.attested_release_channel.v2",
+        "commit_sha": commit,
+        "gateway_release_manifest": _historical_gateway_manifest(commit),
+        "validator_release_manifest": _validator_manifest(commit),
+    }
+    return {**body, "channel_hash": sha256_json(body)}
+
+
 class _Body:
     def __init__(self, value):
         self._value = value
@@ -156,6 +197,64 @@ def test_channel_binds_both_independent_release_manifests():
     tampered["commit_sha"] = "2" * 40
     with pytest.raises(ReleaseChannelV2Error, match="commit"):
         validate_release_channel_v2(tampered)
+
+
+def test_historical_channel_is_valid_only_for_prior_lineage():
+    historical = _historical_channel("2" * 40)
+
+    assert validate_historical_release_channel_v2(historical) == historical
+    assert validate_prior_release_channel_v2(historical) == historical
+    with pytest.raises(Exception):
+        validate_release_channel_v2(historical)
+    with pytest.raises(Exception):
+        build_release_channel_v2(
+            gateway_release_manifest=historical[
+                "gateway_release_manifest"
+            ],
+            validator_release_manifest=historical[
+                "validator_release_manifest"
+            ],
+        )
+
+
+def test_required_lineage_accepts_exact_legacy_prior_but_not_as_current():
+    historical_commit = "2" * 40
+    current = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    historical = _historical_channel(historical_commit)
+    s3 = _S3()
+    for channel in (current, historical):
+        s3.objects[("release-bucket", release_channel_key(channel["commit_sha"]))] = (
+            json.dumps(channel, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+
+    lineage = fetch_release_lineage_v2(
+        bucket="release-bucket",
+        current_commit=COMMIT,
+        s3_client=s3,
+        allowed_commits=(historical_commit, COMMIT),
+        required_commits=(historical_commit, COMMIT),
+    )
+
+    assert set(lineage["releases"][COMMIT]["roles"]) == {
+        *ROLE_SPECS,
+        "validator_weights",
+    }
+    assert set(lineage["releases"][historical_commit]["roles"]) == {
+        *ROLE_SPECS,
+        "gateway_autoresearch",
+        "validator_weights",
+    }
+    with pytest.raises(Exception):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=historical_commit,
+            s3_client=s3,
+            allowed_commits=(historical_commit,),
+            required_commits=(historical_commit,),
+        )
 
 
 def test_channel_rejects_cross_commit_manifests():
@@ -366,6 +465,35 @@ def test_required_release_lineage_direct_gets_only_explicit_commits():
         ("release-bucket", release_channel_key(COMMIT)),
         ("release-bucket", release_channel_key(historical_commit)),
     ]
+
+
+def test_required_release_lineage_uses_local_current_release_without_approved_fetch(
+    monkeypatch, tmp_path
+):
+    gateway_path = tmp_path / "gateway-release.json"
+    validator_path = tmp_path / "validator-release.json"
+    gateway_path.write_text(json.dumps(_gateway_manifest()), encoding="utf-8")
+    validator_path.write_text(json.dumps(_validator_manifest()), encoding="utf-8")
+    monkeypatch.setenv("LEADPOET_LOCAL_RELEASE_COMMIT_SHA", COMMIT)
+    monkeypatch.setenv("LEADPOET_LOCAL_GATEWAY_RELEASE", str(gateway_path))
+    monkeypatch.setenv("LEADPOET_LOCAL_VALIDATOR_RELEASE", str(validator_path))
+    s3 = _S3()
+
+    lineage = fetch_release_lineage_v2(
+        bucket="release-bucket",
+        current_commit=COMMIT,
+        s3_client=s3,
+        allowed_commits=(COMMIT,),
+        required_commits=(COMMIT,),
+    )
+
+    expected = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    assert lineage == build_release_lineage_v2([expected], current_commit=COMMIT)
+    assert s3.gets == []
+    assert s3.lists == []
 
 
 def test_required_release_lineage_rejects_more_than_bound_before_io():

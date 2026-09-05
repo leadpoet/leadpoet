@@ -1,4 +1,4 @@
-"""The public baseline enters through normal submission and admission."""
+"""The public baseline enters every daily round through source admission."""
 
 from __future__ import annotations
 
@@ -6,21 +6,37 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import service as service_module
+from lab_arena import source_bundle
 from lab_arena.service import ArenaService, ServiceError
 
 
 def _submission(submission_id: str, hotkey: str, *, status: str = "accepted") -> dict:
     return {
         "submission_id": submission_id,
+        "round_id": "arena-2026-09-05",
         "miner_hotkey": hotkey,
         "status": status,
-        "image_digest": "sha256:" + submission_id[-1] * 64,
-        "image_reference": "arena.example/agents/%s@sha256:%s" % (submission_id, submission_id[-1] * 64),
-        "submitted_reference": "public.example/agents/%s:latest" % submission_id,
+        "source_ref": "arena/arena-2026-09-05/sources/%s.tar.gz" % submission_id,
+        "source_size_bytes": 123,
         "consent": {"public_rerun": True},
         "is_king": False,
     }
+
+
+class _Objects:
+    def __init__(self) -> None:
+        self.values = {}
+
+    def put(self, ref, data):
+        self.values[ref] = bytes(data)
+
+    def get_bounded(self, ref, max_bytes):
+        if ref not in self.values:
+            raise KeyError(ref)
+        value = self.values[ref]
+        if len(value) > max_bytes:
+            raise ValueError("too large")
+        return value
 
 
 class _Store:
@@ -35,21 +51,29 @@ class _Store:
 
     def list_rounds(self, *, status=None, limit=None, **_kwargs):
         rows = list(reversed(list(self.rounds.values())))
-        return [row for row in rows if status is None or row.get("status") == status][:limit]
+        return [row for row in rows if status is None or row.get("status") == status][
+            :limit
+        ]
 
     def list_submissions(self, round_id, *, status=None):
-        rows = [row for row in self.submissions.values() if row.get("round_id", round_id) == round_id]
+        rows = [
+            row
+            for row in self.submissions.values()
+            if row.get("round_id") == round_id
+        ]
         return [dict(row) for row in rows if status is None or row["status"] == status]
 
     def get_submission(self, submission_id):
         row = self.submissions.get(submission_id)
         return dict(row) if row is not None else None
 
-    def update_submission(self, _round_id, submission_id, expected, target, patch):
+    def update_submission(
+        self, _round_id, submission_id, expected, target, patch=None
+    ):
         row = self.submissions[submission_id]
         if row["status"] != expected:
             return {"status": "stale"}
-        row.update(patch)
+        row.update(patch or {})
         row["status"] = target
         return {"status": "ok"}
 
@@ -58,123 +82,103 @@ class _Store:
             "round_id": round_id,
             "submission_id": submission_id,
             "miner_hotkey": hotkey,
-            "status": "uploaded",
+            "status": "uploading",
             **document,
         }
-        return {"status": "created"}
-
-
-def _service(store: _Store, *, mode: str = "live", baseline_hotkey: str = "baseline") -> ArenaService:
-    service = object.__new__(ArenaService)
-    service._store = store
-    service._config = SimpleNamespace(mode=mode, defaults=SimpleNamespace(baseline_hotkey=baseline_hotkey))
-    return service
+        return {
+            "status": "registered",
+            "submission_id": submission_id,
+            "source_ref": document["source_ref"],
+        }
 
 
 def _round(round_id: str = "arena-2026-09-05") -> dict:
     return {
         "round_id": round_id,
         "status": "open",
-        "configuration_doc": {"mode": "live", "max_challengers": 1, "baseline_hotkey": "baseline"},
+        "configuration_doc": {
+            "mode": "live",
+            "max_challengers": 1,
+            "baseline_hotkey": "baseline",
+            "baseline_source_url": "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
+        },
     }
 
 
-def test_first_same_mode_round_marks_the_normally_admitted_baseline_as_king():
+def _service(store: _Store, objects: _Objects, payload: bytes) -> ArenaService:
+    service = object.__new__(ArenaService)
+    service._store = store
+    service._objects = objects
+    service._config = SimpleNamespace(
+        mode="live",
+        defaults=SimpleNamespace(
+            baseline_source_url="https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+        ),
+        baseline_source_fetcher=lambda _url, _limit: payload,
+    )
+    return service
+
+
+def _archive(tmp_path) -> bytes:
+    source = tmp_path / "baseline"
+    source.mkdir()
+    (source / "harness.py").write_text(
+        "def run_icp(icp):\n    return []\n", encoding="utf-8"
+    )
+    target = tmp_path / "baseline.tar.gz"
+    source_bundle.write_source_archive(source, target)
+    return target.read_bytes()
+
+
+def test_baseline_download_uses_the_same_source_checks_and_freezes(tmp_path):
     current = _round()
-    baseline = _submission("sub-b", "baseline")
     challenger = _submission("sub-c", "challenger")
     overflow = _submission("sub-d", "overflow")
-    # A winner in another mode does not replace this mode's initial baseline.
-    shadow = {
-        "round_id": "arena-2026-09-04",
-        "status": "published",
-        "configuration_doc": {"mode": "shadow"},
-        "king_hotkey": "shadow-king",
-        "king_outcome": "defended",
-    }
-    store = _Store(current, [baseline, challenger, overflow], [shadow])
+    store = _Store(current, [challenger, overflow])
+    objects = _Objects()
+    service = _service(store, objects, _archive(tmp_path))
 
-    participants = _service(store).freeze_participants(current["round_id"])
+    participants = service.freeze_participants(current["round_id"])
 
     assert [(row["submission_id"], row["is_king"]) for row in participants] == [
-        ("sub-b", True),
         ("sub-c", False),
+        ("baseline-2026-09-05", True),
     ]
-    assert store.submissions["sub-b"]["status"] == "frozen"
-    assert store.submissions["sub-b"]["is_king"] is True
+    assert store.submissions["baseline-2026-09-05"]["status"] == "frozen"
+    assert "source_sha256" not in store.submissions["baseline-2026-09-05"]
+    assert "source_cache_key" not in store.submissions["baseline-2026-09-05"]
     assert store.submissions["sub-d"]["status"] == "rejected"
+    assert list(objects.values) == [
+        "arena/arena-2026-09-05/sources/baseline-2026-09-05.tar.gz"
+    ]
 
 
-def test_initial_baseline_must_complete_normal_image_admission():
+def test_yesterdays_miner_winner_never_replaces_todays_baseline(tmp_path):
     current = _round()
-    uploaded = _submission("sub-b", "baseline", status="uploaded")
-    challenger = _submission("sub-c", "challenger")
-    store = _Store(current, [uploaded, challenger])
-
-    with pytest.raises(ServiceError, match="baseline_submission_missing"):
-        _service(store).freeze_participants(current["round_id"])
-
-    assert store.submissions["sub-c"]["status"] == "accepted"
-
-
-def test_missing_carried_winner_fails_but_a_fresh_incumbent_submission_is_used():
-    current = _round()
+    baseline = _submission("baseline-2026-09-05", "baseline")
+    baseline["is_king"] = True
     previous = {
         "round_id": "arena-2026-09-04",
         "status": "published",
         "configuration_doc": {"mode": "live"},
         "publication_doc": {"king_decision": {"king_submission_id": "old-winner"}},
-        "king_hotkey": "incumbent",
-        "king_outcome": "defended",
+        "king_hotkey": "miner-winner",
+        "king_outcome": "crowned",
     }
-    missing_store = _Store(current, [], [previous])
-    with pytest.raises(ServiceError, match="incumbent_submission_missing"):
-        _service(missing_store).freeze_participants(current["round_id"])
+    store = _Store(current, [baseline], [previous])
+    service = _service(store, _Objects(), _archive(tmp_path))
 
-    fresh = _submission("sub-f", "incumbent")
-    fresh_store = _Store(current, [fresh], [previous])
-    participants = _service(fresh_store).freeze_participants(current["round_id"])
-    assert [(row["submission_id"], row["is_king"]) for row in participants] == [("sub-f", True)]
+    participants = service.freeze_participants(current["round_id"])
 
-
-def test_admission_passes_one_tick_deadline_to_resolve_and_mirror(monkeypatch):
-    current = _round()
-    uploaded = _submission("sub-b", "baseline", status="uploaded")
-    store = _Store(current, [uploaded])
-    source = object()
-    destination = object()
-    service = _service(store)
-    service._config.source_registry = source
-    service._config.registry = destination
-    calls = []
-    descriptor = SimpleNamespace(
-        reference="public.example/agents/sub-b@sha256:" + "b" * 64,
-        to_document=lambda: {"image_digest": "sha256:" + "b" * 64, "image_size_bytes": 123},
-    )
-
-    def resolve(client, _reference, _rules, *, deadline):
-        calls.append(("resolve", client, deadline))
-        return descriptor
-
-    def mirror(client, resolved, repository, *, destination_client, deadline):
-        calls.append(("mirror", client, destination_client, repository, deadline))
-        assert resolved is descriptor
-        return "arena.example/agents/sub-b@sha256:" + "b" * 64
-
-    monkeypatch.setattr(service_module.images, "resolve_image", resolve)
-    monkeypatch.setattr(service_module.images, "mirror_image", mirror)
-
-    outcome = service._admit_one(
-        current["round_id"],
-        uploaded,
-        rules=object(),
-        repository="arena.example/agents",
-        final=False,
-        deadline=123.5,
-    )
-
-    assert outcome == "accepted"
-    assert calls == [
-        ("resolve", source, 123.5),
-        ("mirror", source, destination, "arena.example/agents", 123.5),
+    assert [(row["miner_hotkey"], row["is_king"]) for row in participants] == [
+        ("baseline", True)
     ]
+    assert "king-arena-2026-09-05" not in store.submissions
+
+
+def test_invalid_public_baseline_source_prevents_the_round_from_starting():
+    current = _round()
+    service = _service(_Store(current, []), _Objects(), b"not a source archive")
+
+    with pytest.raises(ServiceError, match="baseline_source_invalid"):
+        service.freeze_participants(current["round_id"])

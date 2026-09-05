@@ -18,7 +18,6 @@ if str(ROOT) not in sys.path:
 from gateway.tee.rehearsal_behavior_contract_v2 import (  # noqa: E402
     build_rehearsal_behavior_contract_v2,
 )
-from gateway.research_lab.git_tree_models import TreePolicy  # noqa: E402
 from gateway.tee.research_lab_runtime_config_v2 import (  # noqa: E402
     ResearchLabRuntimeConfigV2Error,
     research_lab_config_from_document,
@@ -56,18 +55,15 @@ ALWAYS_COMMITTED_PATHS = (
     "gateway/research_lab/api.py",
     "gateway/research_lab/key_vault.py",
     "gateway/research_lab/models.py",
-    "leadpoet_canonical/credential_recipient_v2.py",
     "neurons/miner.py",
     "research_lab/source_add_miner.py",
     "gw_restart.sh",
     "validator_restart.sh",
     "scripts/build_production_parity_contract.py",
     "scripts/capture_production_parity_runtime_config.py",
-    "scripts/check_production_parity_rebenchmark.py",
     "scripts/cleanup_production_parity_staging.py",
     "scripts/materialize_production_parity_secrets.py",
     "scripts/operate_rebenchmark_iam_policy.py",
-    "scripts/production_parity_acceptance_transfer.py",
     "scripts/production_parity_snapshot.py",
     "scripts/provision_production_parity_staging.py",
     "scripts/resolve_production_parity_deployed_sha.py",
@@ -257,28 +253,16 @@ def _production_policy_commitments(
 ) -> dict[str, Any]:
     normalized = validate_research_lab_execution_config(execution_config)
     config = research_lab_config_from_document(normalized)
-    conditional_policy = config.conditional_validation_policy().to_dict()
     allocation_policy = config.reimbursement_policy_doc(enabled=True)
-    tree_environment = {
-        name: value
-        for name, value in normalized["behavior_environment"].items()
-        if value is not None
-    }
-    tree_policy = TreePolicy.from_env(tree_environment).to_dict()
     chain_policy = chain_source_policy_document()
     return {
         "chain_source": {
             "policy": chain_policy,
             "policy_hash": chain_source_policy_hash(),
         },
-        "conditional_icp": conditional_policy,
         "research_lab_allocation": {
             "policy": allocation_policy,
             "policy_hash": sha256_json(allocation_policy),
-        },
-        "git_tree": {
-            **tree_policy,
-            "policy_hash": TreePolicy.from_mapping(tree_policy).policy_hash,
         },
     }
 

@@ -74,7 +74,7 @@ def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
     assert "--commit conflicts with GATEWAY_DEPLOY_COMMIT" in conflict.stderr
 
 
-def test_unpinned_gateway_release_wait_follows_new_main_before_shutdown() -> None:
+def test_unpinned_gateway_local_build_follows_new_main_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     start = script.index("follow_superseding_gateway_release() {")
     follow = script[start : script.index("start_gateway_ancestry_checkpoint_bootstrap() {", start)]
@@ -92,12 +92,25 @@ def test_unpinned_gateway_release_wait_follows_new_main_before_shutdown() -> Non
         'bash "$superseding_tree/gw_restart.sh"'
     )
 
-    release_start = script.index('echo "Acquiring the independently built V2 release channel"')
-    release_loop = script[script.index("for attempt in $(seq 1 300); do", release_start) :]
-    release_loop = release_loop[: release_loop.index("done")]
-    assert release_loop.count("follow_superseding_gateway_release") == 2
-    assert release_loop.index("follow_superseding_gateway_release") < release_loop.index(
-        "gateway.tee.release_channel_v2"
+    acquisition_start = script.index(
+        'if ! follow_superseding_gateway_release; then',
+        script.index('if ! wait_for_gateway_offline_artifact_prepare; then'),
+    )
+    acquisition_end = script.index(
+        'echo "Preparing commit-bound KMS credential envelopes"',
+        acquisition_start,
+    )
+    release_build = script[acquisition_start:acquisition_end]
+    assert release_build.count("follow_superseding_gateway_release") == 3
+    assert release_build.index("follow_superseding_gateway_release") < (
+        release_build.index("gateway/tee/build_local_release_v2.sh")
+    )
+    assert "Acquiring the exact historical attested V2 release channel" in release_build
+    assert '--expected-commit "$PREPARED_GATEWAY_SHA"' in release_build
+    assert '--gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"' in release_build
+    assert '--validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"' in release_build
+    assert release_build.index('[ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]') < (
+        release_build.index("--ensure")
     )
     assert script.index("follow_superseding_gateway_release") < script.index(
         'echo "Stopping existing gateway and Research Lab worker processes"'
@@ -127,7 +140,8 @@ def test_pinned_gateway_rollback_preserves_newer_restart_controller() -> None:
     assert "GATEWAY_EXACT_COMMIT_HELPER" in script
     assert (
         'if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \\\n'
-        '    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ]; then'
+        '    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ] \\\n'
+        '    && [ -z "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then'
         in script
     )
     assert (
@@ -202,161 +216,6 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'finalize_deployment_record succeeded',
         ),
     )
-
-
-def test_gateway_restart_reconciles_retry_defaults_across_candidate_reexec() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    function_start = script.index(
-        "reconcile_gateway_rebenchmark_retry_runtime() {"
-    )
-    prepare_overlay = script.index('cat "$ENV_SECRET" >> "$ENV_CLONE"')
-    prepare_reconcile = script.index(
-        "reconcile_gateway_rebenchmark_retry_runtime",
-        prepare_overlay,
-    )
-    post_activate = script.index(
-        'elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then'
-    )
-    post_activate_reconcile = script.index(
-        "reconcile_gateway_rebenchmark_retry_runtime",
-        post_activate,
-    )
-    candidate_runtime = script.index(
-        'echo "Loading gateway runtime env for AWS/ECR checks"'
-    )
-
-    assert function_start < post_activate
-    assert prepare_overlay < prepare_reconcile
-    assert post_activate < post_activate_reconcile < candidate_runtime
-    assert (
-        "reconcile_gateway_rebenchmark_runtime_environment_file" in script
-    )
-    assert (
-        "unset RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" in script
-    )
-    assert "unset RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" in script
-
-
-def test_gateway_retry_reconciliation_uses_candidate_authority_over_n_minus_one(
-    tmp_path: Path,
-) -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    function = _shell_function_source(
-        script,
-        "reconcile_gateway_rebenchmark_retry_runtime",
-    )
-    old_root = tmp_path / "n-minus-one"
-    legacy_module = (
-        old_root / "gateway" / "tee" / "update_gateway_rebenchmark_retry_secret.py"
-    )
-    legacy_module.parent.mkdir(parents=True)
-    (old_root / "gateway" / "__init__.py").write_text("", encoding="utf-8")
-    (old_root / "gateway" / "tee" / "__init__.py").write_text(
-        "", encoding="utf-8"
-    )
-    legacy_module.write_text(
-        "# The deployed N-1 helper deliberately lacks candidate reconciliation.\n",
-        encoding="utf-8",
-    )
-    runtime = tmp_path / "runtime.env"
-    authority = tmp_path / "authority.env"
-    runtime.write_text(
-        "export UNRELATED=preserved\n"
-        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
-        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n",
-        encoding="utf-8",
-    )
-    authority.write_text("export UNRELATED=preserved\n", encoding="utf-8")
-    harness = tmp_path / "candidate-authority-reconcile.sh"
-    harness.write_text(
-        "#!/bin/bash\n"
-        "set -Eeuo pipefail\n"
-        f"LEADPOET_REPO_ROOT={shlex.quote(str(old_root))}\n"
-        f"GATEWAY_RESTART_AUTHORITY_ROOT={shlex.quote(str(ROOT))}\n"
-        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
-        f"ENV_CLONE={shlex.quote(str(runtime))}\n"
-        f"GATEWAY_ENV_FILE={shlex.quote(str(authority))}\n"
-        f"{function}\n"
-        "reconcile_gateway_rebenchmark_retry_runtime\n",
-        encoding="utf-8",
-    )
-
-    completed = subprocess.run(
-        ["bash", str(harness)],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        env={**os.environ, "PYTHONNOUSERSITE": "1"},
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert "Reconciled secret-authoritative rebenchmark retry controls" in (
-        completed.stdout
-    )
-    reconciled = runtime.read_text(encoding="utf-8")
-    assert "UNRELATED=preserved" in reconciled
-    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" not in reconciled
-    assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" not in reconciled
-
-
-def test_gateway_retry_reconciliation_survives_bootstrap_authority_teardown(
-    tmp_path: Path,
-) -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    function = _shell_function_source(
-        script,
-        "reconcile_gateway_rebenchmark_retry_runtime",
-    )
-    old_root = tmp_path / "n-minus-one"
-    legacy_module = (
-        old_root / "gateway" / "tee" / "update_gateway_rebenchmark_retry_secret.py"
-    )
-    legacy_module.parent.mkdir(parents=True)
-    legacy_module.write_text("# no reconciliation contract\n", encoding="utf-8")
-    runtime = tmp_path / "runtime.env"
-    authority = tmp_path / "authority.env"
-    runtime.write_text(
-        "export UNRELATED=preserved\n"
-        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
-        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n",
-        encoding="utf-8",
-    )
-    authority.write_text("export UNRELATED=preserved\n", encoding="utf-8")
-    helper = ROOT / "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
-    harness = tmp_path / "sealed-candidate-reconcile.sh"
-    harness.write_text(
-        "#!/bin/bash\n"
-        "set -Eeuo pipefail\n"
-        f"LEADPOET_REPO_ROOT={shlex.quote(str(old_root))}\n"
-        "GATEWAY_RESTART_AUTHORITY_ROOT=\n"
-        "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="
-        f"{shlex.quote(str(helper))}\n"
-        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
-        f"ENV_CLONE={shlex.quote(str(runtime))}\n"
-        f"GATEWAY_ENV_FILE={shlex.quote(str(authority))}\n"
-        f"{function}\n"
-        "reconcile_gateway_rebenchmark_retry_runtime\n",
-        encoding="utf-8",
-    )
-
-    completed = subprocess.run(
-        ["bash", str(harness)],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        env={**os.environ, "PYTHONNOUSERSITE": "1"},
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    reconciled = runtime.read_text(encoding="utf-8")
-    assert "export UNRELATED=preserved" in reconciled
-    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" not in reconciled
-    assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" not in reconciled
-    assert "managed=2 present=0 absent=2" in completed.stdout
 
 
 def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
@@ -559,7 +418,9 @@ def test_gateway_restart_installs_commit_bound_admin_wrapper_after_handoff() -> 
         'source_script="$LEADPOET_REPO_ROOT/scripts/'
         'research_lab_admin_wrapper_runtime.sh"'
     ) in script
-    assert 'RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"' in wrapper
+    assert "RESEARCH_LAB_PRIVATE_REPO_BRANCH" not in wrapper
+    assert "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI" not in wrapper
+    assert "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID" not in wrapper
     assert "LEADPOET_AWS_INSTANCE_ROLE_ONLY=true" in wrapper
 
 
@@ -665,7 +526,7 @@ def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
     assert '. "$ENV_CLONE"' in preflight_block
     assert "ast.parse(" in preflight_block
     assert (
-        'node.args[0].value == "--storage-read-preflight"'
+        'required_arguments = {"--storage-read-preflight", "--epoch"}'
         in preflight_block
     )
     assert (
@@ -688,12 +549,86 @@ def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
         "          gateway.tee.verify_weight_submission_ready_v2"
         in preflight_block
     )
+    assert "gateway_weight_preflight_epoch_from_restart_report" in preflight_block
+    assert '--epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"' in preflight_block
     assert "gateway_ancestry_safe_epoch_from_report" in preflight_block
     assert 'report["ancestry_safe_epoch"]' in script
     assert "Pinned active ancestry bootstrap to proven-safe epoch" in preflight_block
     assert "Gateway remains running; production shutdown has not started." in (
         preflight_block
     )
+
+
+def test_gateway_weight_preflight_reuses_exact_restart_epoch() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = _shell_function_source(
+        script,
+        "gateway_weight_preflight_epoch_from_restart_report",
+    )
+    manifest = json.loads(
+        (ROOT / "config/stateful-epoch-cutover-sn71.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    snapshot = {
+        "schema_version": "leadpoet.subnet_epoch_snapshot.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": manifest["network_genesis_hash"],
+        "netuid": 71,
+        "head_kind": "exact",
+        "block_hash": "0x" + "1" * 64,
+        "current_block": 100,
+        "last_epoch_block": 95,
+        "pending_epoch_at": 0,
+        "subnet_epoch_index": 24020,
+        "tempo": 360,
+        "blocks_since_last_step": 5,
+        "observed_at": "2026-09-04T00:00:00+00:00",
+    }
+    report = {
+        "schema_version": "leadpoet.restart_epoch_gate.v1",
+        "restart_allowed": True,
+        "snapshot": snapshot,
+    }
+    harness = f"""set -euo pipefail
+{helper_source}
+GATEWAY_PREFLIGHT_TREE="$1"
+GATEWAY_PYTHON_BIN="$2"
+GATEWAY_STATEFUL_CUTOVER_MANIFEST="$3"
+gateway_weight_preflight_epoch_from_restart_report "$4"
+"""
+    arguments = [
+        "bash",
+        "-c",
+        harness,
+        "gateway-restart-epoch-reuse-test",
+        str(ROOT),
+        sys.executable,
+        str(ROOT / "config/stateful-epoch-cutover-sn71.json"),
+        json.dumps(report, sort_keys=True),
+    ]
+
+    completed = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "24073"
+
+    report["snapshot"]["network_genesis_hash"] = "0x" + "2" * 64
+    arguments[-1] = json.dumps(report, sort_keys=True)
+    rejected = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert rejected.returncode != 0
+    assert "snapshot and cutover genesis hashes differ" in rejected.stderr
 
 
 def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
@@ -1034,8 +969,8 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     materialize = script.index(
         'echo "Materializing the prepared commit for pre-shutdown V2 tooling"'
     )
-    release_channel = script.index(
-        'run_prepared_gateway_module gateway.tee.release_channel_v2'
+    local_release = script.index(
+        'bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh"'
     )
     restart_window = script.index(
         'echo "Capturing the official subnet restart window before release acquisition"'
@@ -1053,13 +988,13 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         "if ! start_gateway_offline_artifact_prepare; then",
         artifact_prepare,
     )
-    release_ready = script.index(
-        'record_gateway_restart_timing "release_ready"',
-        release_channel,
-    )
     artifact_join = script.index(
         "if ! wait_for_gateway_offline_artifact_prepare; then",
-        release_ready,
+        artifact_start,
+    )
+    release_ready = script.index(
+        'record_gateway_restart_timing "local_release_ready"',
+        local_release,
     )
     preflight = script.index(
         'echo "Validating the prepared V2 release before production shutdown"'
@@ -1086,9 +1021,9 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         < checkpoint_prepare
         < artifact_prepare
         < artifact_start
-        < release_channel
-        < release_ready
         < artifact_join
+        < local_release
+        < release_ready
         < credential_envelopes
         < dependency_preflight
         < safe_frontier
@@ -1102,7 +1037,7 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         script.index(
             'git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA"'
         )
-        < release_channel
+        < local_release
     )
     assert (
         'PYTHONPATH="$LEADPOET_REPO_ROOT" '
@@ -1126,12 +1061,14 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         < shutdown
     )
     assert script.index('--parent-env-file "$ENV_CLONE"') < shutdown
-    assert script.index(
-        '--acceptance-corpus-manifest "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST"'
-    ) < shutdown
-    assert script.index(
-        '--acceptance-corpus-root "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT"'
-    ) < shutdown
+    acceptance = script.index("V2_PREFLIGHT_ACCEPTANCE_ARGS=()")
+    assert acceptance < shutdown
+    assert 'if [ -n "${GATEWAY_HISTORICAL_TOPOLOGY_HASH:-}" ]; then' in script[
+        acceptance:shutdown
+    ]
+    assert "--acceptance-corpus-manifest" in script[acceptance:shutdown]
+    assert "--acceptance-corpus-root" in script[acceptance:shutdown]
+    assert '"${V2_PREFLIGHT_ACCEPTANCE_ARGS[@]}"' in script[acceptance:shutdown]
     assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
     assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
     assert script.index("bootstrap_active_ancestry_checkpoints_v2.py") < shutdown
@@ -1158,10 +1095,10 @@ def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
         in pre_shutdown
     )
     release_start = pre_shutdown.index(
-        'echo "Acquiring the independently built V2 release channel"'
+        'echo "Building the exact local gateway and validator runtime identities"'
     )
     release_end = pre_shutdown.index(
-        'record_gateway_restart_timing "release_ready"', release_start
+        'record_gateway_restart_timing "local_release_ready"', release_start
     )
     release_acquisition = pre_shutdown[release_start:release_end]
     assert (
@@ -1218,6 +1155,7 @@ def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
     assert '"$GATEWAY_V2_RELEASE_LINEAGE"' in revalidator
     assert (
         '"$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \\\n'
+        '    "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \\\n'
         '    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \\\n'
         '    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"'
         in revalidator
@@ -1291,6 +1229,224 @@ def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> N
     assert "candidate runtime did not durably bound active receipt ancestry" in script
 
 
+def test_gateway_restart_counts_only_exact_live_gateway_as_reclaimable(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = _shell_function_source(
+        script,
+        "gateway_memory_ready_after_running_gateway_shutdown",
+    )
+    repo_root = tmp_path / "repo"
+    (repo_root / "gateway").mkdir(parents=True)
+    proc_root = tmp_path / "proc"
+    process_root = proc_root / "123"
+    process_root.mkdir(parents=True)
+    (process_root / "status").write_text(
+        f"Uid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n"
+        "VmRSS:\t12582912 kB\n",
+        encoding="utf-8",
+    )
+    (process_root / "stat").write_text(
+        "123 (python3) S " + " ".join(["1"] * 30) + "\n",
+        encoding="utf-8",
+    )
+    command_path = process_root / "cmdline"
+    command_path.write_bytes(
+        b"\0".join(
+            value.encode("utf-8")
+            for value in (sys.executable, "-u", "-m", "gateway.main", "")
+        )
+    )
+    (process_root / "cwd").symlink_to(repo_root)
+    report_path = tmp_path / "memory.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "available_memory_mib": 7000,
+                "minimum_available_memory_mib": 16384,
+                "schema_version": "leadpoet.gateway_host_memory_guard.v2",
+                "status": "blocked",
+            }
+        ),
+        encoding="utf-8",
+    )
+    harness = f"""set -euo pipefail
+{helper_source}
+GATEWAY_PYTHON_BIN="$1"
+LEADPOET_REPO_ROOT="$2"
+GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
+gateway_memory_ready_after_running_gateway_shutdown "$3" "$4" "$5"
+"""
+    arguments = [
+        "bash",
+        "-c",
+        harness,
+        "gateway-reclaimable-memory-test",
+        sys.executable,
+        str(repo_root),
+        str(report_path),
+        "123",
+        str(proc_root),
+    ]
+
+    completed = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "available_memory_mib": 7000,
+        "minimum_available_memory_mib": 16384,
+        "reclaimable_gateway_memory_mib": 12288,
+        "reclaimable_gateway_parent_memory_mib": 12288,
+        "reclaimable_gateway_worker_count": 0,
+        "reclaimable_gateway_worker_memory_mib": 0,
+        "safety_margin_mib": 2048,
+        "schema_version": "leadpoet.gateway_reclaimable_memory.v1",
+        "status": "ready_after_gateway_shutdown",
+    }
+
+    command_path.write_bytes(
+        b"\0".join(
+            value.encode("utf-8")
+            for value in (sys.executable, "-u", "-m", "gateway.other", "")
+        )
+    )
+    rejected = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert rejected.returncode != 0
+    assert "running gateway command differs" in rejected.stderr
+
+
+def test_gateway_restart_rechecks_real_memory_after_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    pre_shutdown = script.index("wait_for_gateway_build_memory 1")
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    post_shutdown = script.index("wait_for_gateway_build_memory 0 10", shutdown)
+    activation = script.index(
+        'echo "Activating prepared gateway Git commit after process shutdown"'
+    )
+
+    assert pre_shutdown < shutdown < post_shutdown < activation
+    assert "gateway_memory_ready_after_running_gateway_shutdown" in script[
+        :shutdown
+    ]
+    assert 'pkill -9 -f "/gateway/research_lab/worker_process[.]py"' in script[
+        shutdown:post_shutdown
+    ]
+
+
+def test_gateway_restart_counts_exact_direct_worker_children_as_reclaimable(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = _shell_function_source(
+        script,
+        "gateway_memory_ready_after_running_gateway_shutdown",
+    )
+    repo_root = tmp_path / "repo"
+    worker_script = repo_root / "gateway" / "research_lab" / "worker_process.py"
+    worker_script.parent.mkdir(parents=True)
+    worker_script.write_text("# worker\n", encoding="utf-8")
+    proc_root = tmp_path / "proc"
+
+    def write_process(pid: str, ppid: str, rss_kib: int, argv: tuple[str, ...]) -> None:
+        process_root = proc_root / pid
+        process_root.mkdir(parents=True)
+        (process_root / "status").write_text(
+            f"Uid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n"
+            f"VmRSS:\t{rss_kib} kB\n",
+            encoding="utf-8",
+        )
+        (process_root / "stat").write_text(
+            f"{pid} (python3) S {ppid} " + " ".join(["1"] * 29) + "\n",
+            encoding="utf-8",
+        )
+        (process_root / "cmdline").write_bytes(
+            b"\0".join(value.encode("utf-8") for value in (*argv, ""))
+        )
+        (process_root / "cwd").symlink_to(repo_root)
+
+    write_process("123", "1", 524288, (sys.executable, "-u", "-m", "gateway.main"))
+    for pid, kind, index, total, prefix in (
+        ("456", "hosted", "0", "10", "research-lab-worker"),
+        ("789", "scoring", "0", "25", "research-lab-scorer"),
+    ):
+        write_process(
+            pid,
+            "123",
+            2097152,
+            (
+                sys.executable,
+                str(worker_script),
+                "--kind",
+                kind,
+                "--worker-index",
+                index,
+                "--total-workers",
+                total,
+                "--worker-prefix",
+                prefix,
+                "--log-level",
+                "INFO",
+            ),
+        )
+
+    report_path = tmp_path / "memory.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "available_memory_mib": 14000,
+                "minimum_available_memory_mib": 16384,
+                "schema_version": "leadpoet.gateway_host_memory_guard.v2",
+                "status": "blocked",
+            }
+        ),
+        encoding="utf-8",
+    )
+    harness = f"""set -euo pipefail
+{helper_source}
+GATEWAY_PYTHON_BIN="$1"
+LEADPOET_REPO_ROOT="$2"
+GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
+gateway_memory_ready_after_running_gateway_shutdown "$3" "$4" "$5"
+"""
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "gateway-worker-memory-test",
+            sys.executable,
+            str(repo_root),
+            str(report_path),
+            "123",
+            str(proc_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["reclaimable_gateway_parent_memory_mib"] == 512
+    assert result["reclaimable_gateway_worker_count"] == 2
+    assert result["reclaimable_gateway_worker_memory_mib"] == 4096
+    assert result["reclaimable_gateway_memory_mib"] == 4608
+
+
 def test_gateway_active_release_selection_requires_paired_validator_authority(
     tmp_path: Path,
 ) -> None:
@@ -1329,6 +1485,123 @@ def test_gateway_active_release_selection_requires_paired_validator_authority(
         "paired validator active release requirements are unavailable"
         in completed.stderr
     )
+
+
+def test_gateway_final_release_selection_restores_prepared_local_identity(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function = _shell_function_source(
+        script, "prepare_gateway_active_release_lineage"
+    )
+    candidate_commit = "2" * 40
+    installed_commit = "1" * 40
+    candidate_gateway = tmp_path / "candidate-gateway.json"
+    candidate_validator = tmp_path / "candidate-validator.json"
+    installed_gateway = tmp_path / "installed-gateway.json"
+    installed_validator = tmp_path / "installed-validator.json"
+    running_gateway = tmp_path / "running-gateway.json"
+    installed_lineage = tmp_path / "installed-lineage.json"
+    validator_requirements = Path(
+        f"/tmp/leadpoet-{os.getpid()}-{time.time_ns()}.json"
+    )
+    env_clone = tmp_path / "gateway-env-clone.sh"
+    controller_log = tmp_path / "controller.log"
+    for path in (
+        candidate_gateway,
+        candidate_validator,
+        installed_gateway,
+        installed_validator,
+        installed_lineage,
+        running_gateway,
+        validator_requirements,
+    ):
+        path.write_text("{}\n", encoding="utf-8")
+    env_clone.write_text(
+        f"export LEADPOET_LOCAL_RELEASE_COMMIT_SHA={installed_commit}\n"
+        f"export LEADPOET_LOCAL_GATEWAY_RELEASE={installed_gateway}\n"
+        f"export LEADPOET_LOCAL_VALIDATOR_RELEASE={installed_validator}\n",
+        encoding="utf-8",
+    )
+    python_stub = tmp_path / "python"
+    python_stub.write_text(
+        "#!/bin/bash\nprintf 'sha256:%064d\\n' 0\n",
+        encoding="utf-8",
+    )
+    python_stub.chmod(0o755)
+    harness = tmp_path / "restore-local-release.sh"
+    harness.write_text(
+        "\n".join(
+            (
+                "#!/bin/bash",
+                "set -e",
+                function,
+                "run_gateway_active_release_controller_module() {",
+                "  printf '%s\\n%s\\n%s\\n' \"$LEADPOET_LOCAL_RELEASE_COMMIT_SHA\" \"$LEADPOET_LOCAL_GATEWAY_RELEASE\" \"$LEADPOET_LOCAL_VALIDATOR_RELEASE\" >> \"$CONTROLLER_LOG\"",
+                "  while [ \"$#\" -gt 0 ]; do",
+                "    case \"$1\" in",
+                "      --requirements-output) shift; printf '{}\\n' > \"$1\" ;;",
+                "      --lineage-output) shift; printf '{}\\n' > \"$1\" ;;",
+                "    esac",
+                "    shift",
+                "  done",
+                "}",
+                "prepare_gateway_active_release_lineage || exit 8",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prepared_requirements = tmp_path / "prepared-requirements.json"
+    prepared_lineage = tmp_path / "prepared-lineage.json"
+    try:
+        completed = subprocess.run(
+            ["bash", str(harness)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "CONTROLLER_LOG": str(controller_log),
+                "ENV_CLONE": str(env_clone),
+                "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "standalone",
+                "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID": "restart-1",
+                "GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT": str(running_gateway),
+                "GATEWAY_ANCESTRY_SAFE_EPOCH": "1",
+                "GATEWAY_COUNTERPART_RELEASE_LINEAGE": "",
+                "GATEWAY_HISTORICAL_TOPOLOGY_HASH": "",
+                "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED": "1",
+                "GATEWAY_PREFLIGHT_TREE": str(tmp_path),
+                "GATEWAY_PREPARED_V2_RELEASE_LINEAGE": str(prepared_lineage),
+                "GATEWAY_PREPARED_V2_RELEASE_MANIFEST": str(candidate_gateway),
+                "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS": str(prepared_requirements),
+                "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST": str(candidate_validator),
+                "GATEWAY_PYTHON_BIN": str(python_stub),
+                "GATEWAY_RESTART_AUTHORITY_COMMIT": candidate_commit,
+                "GATEWAY_RESTART_AUTHORITY_ROOT": "",
+                "GATEWAY_STATEFUL_CUTOVER_CEREMONY": "0",
+                "GATEWAY_V2_RELEASE_BUCKET": "bucket",
+                "GATEWAY_V2_RELEASE_LINEAGE": str(installed_lineage),
+                "GATEWAY_V2_RELEASE_MANIFEST": str(running_gateway),
+                "GATEWAY_V2_RELEASE_PREFIX": "prefix",
+                "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS": str(validator_requirements),
+                "LEADPOET_LOCAL_GATEWAY_RELEASE": str(candidate_gateway),
+                "LEADPOET_LOCAL_RELEASE_COMMIT_SHA": candidate_commit,
+                "LEADPOET_LOCAL_VALIDATOR_RELEASE": str(candidate_validator),
+                "LEADPOET_REPO_ROOT": str(tmp_path),
+                "PREPARED_GATEWAY_SHA": candidate_commit,
+            },
+        )
+    finally:
+        validator_requirements.unlink(missing_ok=True)
+
+    assert completed.returncode == 0, completed.stderr
+    assert controller_log.read_text(encoding="utf-8").splitlines() == [
+        candidate_commit,
+        str(candidate_gateway),
+        str(candidate_validator),
+    ]
 
 
 def test_gateway_standalone_active_release_uses_only_explicit_compact_fallback() -> None:
@@ -1831,10 +2104,13 @@ fi
     assert result.returncode == 0, result.stderr
 
 
-def test_gateway_worker_deferral_is_restart_scoped() -> None:
+def test_gateway_restart_has_no_retired_rebenchmark_maintenance() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     assert script.count('"GATEWAY_V2_DEFER_WORKER_FLEETS"') == 3
+    assert "reconcile_gateway_rebenchmark_retry_runtime" not in script
+    assert "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" not in script
+    assert "stop_research_lab_private_model_containers" not in script
 
 
 def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -> None:
@@ -1867,6 +2143,17 @@ def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -
     assert "write_tree_verification_evidence" in preflight_source
     assert 'phase="prepared_archive"' in preflight_source
     assert "strict_extras=True" in preflight_source
+
+
+def test_gateway_restart_repairs_retired_last_good_roles_before_local_build() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    repair = script.index("repair-last-good-role-pcr0s")
+    local_build = script.index('echo "Building the exact local gateway and validator runtime identities"')
+
+    assert repair < local_build
+    assert '--last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"' in script
+    assert '--archive-root "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT"' in script
 
 
 def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -> None:
@@ -1921,8 +2208,7 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
     assert 'record_gateway_restart_timing "invoked"' in script
     assert 'record_gateway_restart_timing "offline_artifact_prepare_started"' in script
     assert 'record_gateway_restart_timing "ancestry_precheckpoint_started"' in script
-    assert 'record_gateway_restart_timing "release_wait_started"' in script
-    assert 'record_gateway_restart_timing "release_ready"' in script
+    assert 'record_gateway_restart_timing "local_release_ready"' in script
     assert (
         'record_gateway_restart_timing "offline_artifact_prepare_complete" "passed"'
         in script
@@ -1979,7 +2265,7 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         "GATEWAY_RESTART_AUTHORITY_ROOT",
         "GATEWAY_RESTART_AUTHORITY_COMMIT",
     ):
-        assert script.count(f"-u {key} \\") == 6
+        assert script.count(f"-u {key} \\") == 7
 
     for key in (
         "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
@@ -2015,6 +2301,18 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         # Secrets-cache, prepared-secret, and live-process parsers must all
         # remove stale values before the active controller reasserts them.
         assert script.count(f'    "{key}",') == 3
+
+    # A prior gateway process must not redirect either half of the candidate
+    # local release pair to an older restart's retained manifest.
+    for key in (
+        "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
+        "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST",
+    ):
+        assert script.count(f'    "{key}",') == 3
+
+    cleanup = _shell_function_source(script, "on_gateway_restart_exit")
+    assert '"$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \\' in cleanup
+    assert '"$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \\' in cleanup
 
     merge_end = script.index(
         'if [ -f "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" ]; then', merge
@@ -2071,6 +2369,37 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         active_arweave_keyfile,
         active_git_ssh_command,
     ]
+
+
+def test_gateway_live_env_clone_removes_both_prepared_release_paths(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    marker = 'python3 - "$PID" "$ENV_CLONE" <<\'PY\'\n'
+    start = script.index(marker) + len(marker)
+    clone_source = script[start : script.index("\nPY\n", start)]
+    clone = tmp_path / "gateway-env-clone.sh"
+    inherited = tmp_path / "inherited-environ"
+    inherited.write_bytes(
+        b"SAFE_RUNTIME_VALUE=retained\0"
+        b"GATEWAY_PREPARED_V2_RELEASE_MANIFEST=/stale/f5-gateway.json\0"
+        b"GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST=/stale/f5-validator.json\0"
+    )
+    clone_source = clone_source.replace(
+        'f"/proc/{pid}/environ"', repr(str(inherited))
+    )
+    subprocess.run(
+        [sys.executable, "-", "unused-pid", str(clone)],
+        input=clone_source,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+
+    cloned = clone.read_text(encoding="utf-8")
+    assert "SAFE_RUNTIME_VALUE=retained" in cloned
+    assert "GATEWAY_PREPARED_V2_RELEASE_MANIFEST" not in cloned
+    assert "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" not in cloned
 
 
 def test_gateway_candidate_reexec_rebinds_restart_identity_before_telemetry() -> None:
@@ -2293,17 +2622,19 @@ def test_miner_bootstrap_exec_preserves_stable_cwd_and_timing_ledger(
     ]
 
 
-def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> None:
+def test_gateway_restart_checks_source_add_without_retired_admin_command() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     v2_health = "if ! wait_for_gateway_v2_authority; then"
     handoff = "-m gateway.tee.verify_weight_submission_ready_v2"
-    resume = (
-        "-m gateway.research_lab.admin resume-restart-maintenance \\\n"
-        '  --expected-commit "$GATEWAY_DEPLOY_SHA"'
+    source_add_status = (
+        "curl -fsS http://localhost:8000/research-lab/status"
+    )
+    source_add_runtime = (
+        "-m gateway.tee.gateway_miner_maintenance_restart_v1"
     )
     completed = 'GATEWAY_DEPLOY_STAGE="completed"'
 
-    assert "scoring and autoresearch remain operator-controlled" in script
+    assert "resume-restart-maintenance" not in script
     for command in (
         "pause-autoresearch",
         "resume-autoresearch",
@@ -2312,7 +2643,12 @@ def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> Non
     ):
         assert f"-m gateway.research_lab.admin {command}" not in script
     assert script.rindex(v2_health) < script.rindex(handoff)
-    assert script.rindex(handoff) < script.rindex(resume) < script.rindex(completed)
+    assert script.rindex(handoff) < script.rindex(source_add_status)
+    assert (
+        script.rindex(source_add_status)
+        < script.rindex(source_add_runtime)
+        < script.rindex(completed)
+    )
 
 
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:
@@ -2360,7 +2696,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
     )
     readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
@@ -2385,17 +2721,17 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
         '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
     gate = "Leadpoet.utils.restart_epoch_gate"
-    release = "gateway.tee.release_channel_v2"
+    release = "gateway/tee/build_local_release_v2.sh"
     shutdown = 'echo "Stopping existing gateway and Research Lab worker processes"'
     assert gate in script
     gate_offset = script.index(gate)
     assert gate_offset < script.index(release, gate_offset) < script.index(shutdown)
-    assert "waiting inside the valid restart invocation" in script
+    assert "Approved V2 release is not published yet" not in script
     assert "--maximum" not in script
 
 
@@ -2584,17 +2920,6 @@ def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
     )
 
 
-def test_worker_process_prefers_checkout_but_keeps_attested_fallback() -> None:
-    source = (ROOT / "gateway" / "research_lab" / "worker_process.py").read_text(
-        encoding="utf-8"
-    )
-    assert "for path in (ATTESTED_RUNTIME, PACKAGE_PARENT):" in source
-    assert "while str(path) in sys.path:" in source
-    assert source.index("for path in (ATTESTED_RUNTIME, PACKAGE_PARENT):") < source.index(
-        "from gateway.research_lab.config"
-    )
-
-
 def test_explicit_deployment_sha_beats_stale_build_info(
     tmp_path: Path,
     monkeypatch,
@@ -2643,26 +2968,12 @@ def test_gateway_docker_image_copies_complete_runtime_package_graph() -> None:
         assert f"COPY {path}/ ./{path}/" in dockerfile
 
 
-def test_gateway_restart_defaults_research_lab_to_branch_manifest() -> None:
+def test_gateway_restart_does_not_require_closed_model_identity() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    branch_pointer = (
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-    )
 
-    assert script.count(
-        'export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"'
-    ) == 2
-    assert script.count(
-        f'export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="{branch_pointer}"'
-    ) == 2
-    assert script.count(
-        'export RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID='
-        '"alias/leadpoet-research-lab-artifact-signing"'
-    ) == 2
-    assert 'RESEARCH_LAB_PRIVATE_REPO_BRANCH="${' not in script
-    assert 'RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${' not in script
-    assert 'RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="${' not in script
+    assert "RESEARCH_LAB_PRIVATE_REPO_BRANCH" not in script
+    assert "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI" not in script
+    assert "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID" not in script
 
 
 def test_gateway_restart_wires_automatic_signed_dev_snapshot_refresh() -> None:
@@ -2742,7 +3053,6 @@ def test_failed_miner_maintenance_cleanup_kills_all_new_runtime_groups(
     cleanup = _shell_function_source(
         script, "stop_failed_miner_maintenance_runtime"
     )
-    stopped_private_models = tmp_path / "private-models-stopped"
     late_runtime = tmp_path / "late-runtime"
     ready_paths = [tmp_path / f"ready-{index}" for index in range(3)]
     harness = tmp_path / "runtime-cleanup.sh"
@@ -2779,9 +3089,6 @@ def test_failed_miner_maintenance_cleanup_kills_all_new_runtime_groups(
         + cleanup
         + "\n"
         + "sudo() { return 0; }\n"
-        + "stop_research_lab_private_model_containers() { touch "
-        + shlex.quote(str(stopped_private_models))
-        + "; }\n"
         + "GATEWAY_ROOT="
         + shlex.quote(str(tmp_path / "gateway"))
         + "\n"
@@ -2813,5 +3120,4 @@ def test_failed_miner_maintenance_cleanup_kills_all_new_runtime_groups(
     )
 
     assert result.returncode == 0, result.stderr
-    assert stopped_private_models.exists()
     assert not late_runtime.exists()

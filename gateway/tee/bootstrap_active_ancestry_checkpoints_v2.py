@@ -34,8 +34,8 @@ from gateway.tee.release_lineage_v2 import (
     load_approved_release_lineage_v2,
 )
 from gateway.tee.release_manifest_v2 import (
-    role_expectation,
-    validate_release_manifest,
+    prior_role_expectation,
+    validate_prior_release_manifest,
 )
 from gateway.utils.tee_client import coordinator_tee_client
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
@@ -99,7 +99,7 @@ def _load_release_manifest(path: Path) -> dict[str, Any]:
         raise ActiveAncestryCheckpointBootstrapV2Error(
             "gateway release manifest is unavailable"
         ) from exc
-    return validate_release_manifest(value)
+    return validate_prior_release_manifest(value)
 
 
 class _LazyApprovedReleaseBootVerifier:
@@ -117,7 +117,7 @@ class _LazyApprovedReleaseBootVerifier:
             build_release_lineage_boot_verifier_v2
         ),
     ) -> None:
-        self._current_release = validate_release_manifest(current_release)
+        self._current_release = validate_prior_release_manifest(current_release)
         self._release_channel_loader = release_channel_loader
         self._lineage_loader = lineage_loader
         self._verifier_builder = verifier_builder
@@ -198,7 +198,7 @@ async def _verify_coordinator_capability(
         raise ActiveAncestryCheckpointBootstrapV2Error(
             "coordinator V2 health is invalid"
         )
-    expectation = role_expectation(release, _COORDINATOR_ROLE)
+    expectation = prior_role_expectation(release, _COORDINATOR_ROLE)
     boot_verifier(boot_identity)
     for field in (
         "commit_sha",
@@ -697,7 +697,7 @@ async def bootstrap_active_ancestry_checkpoints_v2(
             "active checkpoint netuid is invalid"
         )
     release = (
-        validate_release_manifest(release_manifest)
+        validate_prior_release_manifest(release_manifest)
         if (release_manifest is not None)
         else _load_release_manifest(release_manifest_path)
     )

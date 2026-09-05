@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -21,11 +22,7 @@ from research_lab.source_add_rewards import (
     stop_reward_forward,
     validate_source_add_reward_record,
 )
-from research_lab.validator_integration import (
-    allocation_can_proceed_without_score_bundles,
-    allocation_can_skip_score_bundle_verification,
-    verify_research_lab_allocation_bundle,
-)
+from research_lab.validator_integration import verify_research_lab_allocation_bundle
 
 
 def _allocation_authority_outcome(
@@ -608,57 +605,6 @@ class TestAllocationRails:
         )
         assert verification["passed"], verification["errors"]
 
-    @pytest.mark.parametrize(
-        ("allocation_doc", "expected"),
-        [
-            ({"source_add_allocations": [{"paid_alpha_percent": 1.0}]}, True),
-            ({"reimbursement_allocations": [{"paid_alpha_percent": 1.0}]}, True),
-            (
-                {
-                    "source_add_allocations": [{"paid_alpha_percent": 1.0}],
-                    "reimbursement_allocations": [{"paid_alpha_percent": 2.0}],
-                },
-                True,
-            ),
-            ({"champion_allocations": [{"paid_alpha_percent": 1.0}]}, False),
-            (
-                {
-                    "reimbursement_allocations": [],
-                    "champion_allocations": [],
-                    "queued_champion_allocations": [],
-                },
-                True,
-            ),
-            ({}, False),
-        ],
-    )
-    def test_only_evaluation_independent_rewards_can_skip_empty_score_bundle_page(
-        self,
-        allocation_doc,
-        expected,
-    ):
-        assert allocation_can_skip_score_bundle_verification(allocation_doc) is expected
-
-    def test_source_add_skip_is_limited_to_the_exact_empty_bundle_failure(self):
-        allocation_doc = {
-            "source_add_allocations": [{"paid_alpha_percent": 1.0}],
-            "reimbursement_allocations": [],
-            "champion_allocations": [],
-            "queued_champion_allocations": [],
-        }
-        assert allocation_can_proceed_without_score_bundles(
-            allocation_doc,
-            ["no_verified_evaluation_score_bundles"],
-        )
-        assert not allocation_can_proceed_without_score_bundles(
-            allocation_doc,
-            ["score_bundle_hash_diverged"],
-        )
-        assert not allocation_can_proceed_without_score_bundles(
-            allocation_doc,
-            ["no_verified_evaluation_score_bundles", "score_bundle_hash_diverged"],
-        )
-
     @pytest.mark.asyncio
     async def test_attested_allocator_uses_the_same_source_add_contract(self):
         from gateway.tee.scoring_executor import execute_scoring_operation
@@ -926,6 +872,7 @@ async def test_durable_allocation_retry_uses_failed_receipt_sequence(monkeypatch
                 "epoch_id": 24940,
                 "purpose": "research_lab.allocation.v2",
                 "role": "gateway_coordinator",
+                "issued_at": _ago_iso(minutes=10),
             }
         ]
 
@@ -940,6 +887,7 @@ async def test_durable_allocation_retry_uses_failed_receipt_sequence(monkeypatch
     assert observed["table"] == "research_lab_attested_execution_receipts_v2"
     assert ("receipt_status", "failed") in observed["filters"]
     assert ("commit_sha", commit) in observed["filters"]
+    assert "issued_at" in observed["columns"]
     assert "receipt_doc" not in observed["columns"]
 
 
@@ -951,16 +899,13 @@ async def test_durable_allocation_retry_exhaustion_fails_closed(monkeypatch):
 
     async def load(_table, **_kwargs):
         return [
-            {
-                "sequence": 7,
-                "receipt_status": "failed",
-                "failure_code": "execution_valueerror",
-                "job_id": "scoring-v2:research-lab-allocation:job-7",
-                "commit_sha": commit,
-                "epoch_id": 24941,
-                "purpose": "research_lab.allocation.v2",
-                "role": "gateway_coordinator",
-            }
+            _failed_receipt(
+                sequence=sequence,
+                commit=commit,
+                epoch_id=24941,
+                issued_at=_ago_iso(minutes=10 + sequence),
+            )
+            for sequence in range(8)
         ]
 
     monkeypatch.setattr(gateway_allocations, "_active_gateway_commit", lambda: commit)
@@ -970,6 +915,81 @@ async def test_durable_allocation_retry_exhaustion_fails_closed(monkeypatch):
         await gateway_allocations._load_durable_allocation_retry_generation(
             epoch_id=24941,
         )
+
+
+@pytest.mark.asyncio
+async def test_durable_allocation_retry_allowance_ages_out(monkeypatch):
+    """A spent allowance must not refuse an epoch for the life of the process."""
+
+    from gateway.research_lab import allocations as gateway_allocations
+
+    commit = "c" * 40
+
+    async def load(_table, **_kwargs):
+        return [
+            _failed_receipt(
+                sequence=sequence,
+                commit=commit,
+                epoch_id=24942,
+                issued_at=_ago_iso(minutes=120 + sequence),
+            )
+            for sequence in range(8)
+        ]
+
+    monkeypatch.setattr(gateway_allocations, "_active_gateway_commit", lambda: commit)
+    monkeypatch.setattr(gateway_allocations, "select_many", load)
+
+    generation = await gateway_allocations._load_durable_allocation_retry_generation(
+        epoch_id=24942,
+    )
+
+    assert generation == 8
+
+
+@pytest.mark.asyncio
+async def test_durable_allocation_retry_spaces_out_attempts(monkeypatch):
+    """A caller retrying immediately must not spend another generation."""
+
+    from gateway.research_lab import allocations as gateway_allocations
+
+    commit = "d" * 40
+
+    async def load(_table, **_kwargs):
+        return [
+            _failed_receipt(
+                sequence=0,
+                commit=commit,
+                epoch_id=24943,
+                issued_at=_ago_iso(seconds=20),
+            )
+        ]
+
+    monkeypatch.setattr(gateway_allocations, "_active_gateway_commit", lambda: commit)
+    monkeypatch.setattr(gateway_allocations, "select_many", load)
+
+    with pytest.raises(RuntimeError, match="cooling down"):
+        await gateway_allocations._load_durable_allocation_retry_generation(
+            epoch_id=24943,
+        )
+
+
+def _ago_iso(**delta) -> str:
+    moment = datetime.now(timezone.utc) - timedelta(**delta)
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+def _failed_receipt(*, sequence: int, commit: str, epoch_id: int, issued_at: str):
+    return {
+        "sequence": sequence,
+        "receipt_status": "failed",
+        "failure_code": "execution_valueerror",
+        "job_id": "scoring-v2:research-lab-allocation:job-%d" % sequence,
+        "commit_sha": commit,
+        "epoch_id": epoch_id,
+        "purpose": "research_lab.allocation.v2",
+        "role": "gateway_coordinator",
+        "issued_at": issued_at,
+    }
 
 
 def _disable_durable_allocation_retry(monkeypatch, gateway_allocations):

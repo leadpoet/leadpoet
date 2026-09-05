@@ -951,22 +951,23 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert 'test "$AWS_REGION" = "us-east-1"' in source
     assert "export AWS_REGION={q(required['AWS_REGION'])}" in source
     assert "export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}" in source
-    assert 'get("acceptance_corpus", {}).get("copied_exact") is not True' in source
-    assert 'get("acceptance_corpus", {}).get("candidate_sha")' in source
-    assert 'get("acceptance_corpus", {}).get("fixture_count", 0) <= 0' in source
-    transfer = source.index(
-        "python3 scripts/production_parity_acceptance_transfer.py"
-    )
-    execute = source.index(
-        '"$host_python" scripts/run_production_parity_full_host.py'
-    )
-    assert transfer < execute
-    assert "/home/ec2-user/.config/leadpoet/v2" in source
-    assert "acceptance-corpus-v2-binding.json" in source
-    assert '"validated_exact"' in source
-    assert '"run-scoped-object-lock"' in source
     assert 'get("external_write_boundaries", {}).get("arweave")' in source
     assert '!= "blocked-production-parity"' in source
+    assert "leadpoet.production_parity_arena_rebenchmark_evidence.v1" in source
+    assert (
+        "https://github.com/leadpoet/pydantic-harness/"
+        "archive/refs/heads/main.tar.gz"
+    ) in source
+    assert 'arena_counts.get("accepted_execute_runs")' in source
+    assert 'arena_counts.get("accepted_score_runs")' in source
+    assert "configured_icps != 20" in source
+    assert "per_icp_evidence_is_complete" in source
+    assert 'item.get("execute_accepted") is True' in source
+    assert 'item.get("score_accepted") is True' in source
+    assert '"valid_company_with_https_evidence_count"' in source
+    assert '"successful_openrouter_execute_call_count"' in source
+    assert '"successful_openrouter_score_settlement_count"' in source
+    assert 'arena_recovery.get("service_restarted") is not True' in source
 
 
 def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
@@ -1145,32 +1146,34 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
         "capture_snapshot(",
         "restore_snapshot(",
         "gw_restart.sh",
-        "_wait_rebenchmark(",
         "_validate_real_handoff(",
         "--production-allocation",
         "primary/audit workflow did not consume the clone allocation",
         '"chain_boundary": "strict-non-forwarding"',
         "_run_miner_intake_path(",
-        "/research-lab/openrouter-keys/credential-recipient",
-        "/research-lab/openrouter-keys",
         "/research-lab/source-adapters",
         '"chain_registration_boundary": "strict-ephemeral-hotkey"',
+        "_run_arena_rebenchmark_path(",
+        '"baseline_source_url": ARENA_BASELINE_SOURCE_URL',
+        '"sandbox": "gvisor-runsc"',
+        '"transport": "live-httpx"',
+        '"publication_visible": True',
         '"production_database_mutated": False',
         '"production_chain_mutated": False',
     )
     assert all(item in source for item in required)
     forbidden = ("chain.submit_extrinsic(", "subtensor.set_weights(", "testnet")
     assert all(item not in source for item in forbidden)
+    assert source.index("arena_rebenchmark = _run_arena_rebenchmark_path(") < source.index(
+        'failure_stage = "weight-readiness"'
+    )
 
 
 def test_full_miner_intake_keeps_public_source_credentials_forbidden():
     source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
     assert '"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false"' in source
     assert '"RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false"' in source
-    assert "closed_recipient_response.status_code != 403" in source
     assert '"global_miner_submissions_enabled": False' in source
-    assert '"autoresearch_paused": True' in source
-    assert '"scoring_paused": True' in source
     assert '"source_add_paused": False' in source
     assert 'retired_response.status_code != 410' in source
     assert 'forbidden_response.status_code != 422' in source
@@ -1188,7 +1191,6 @@ def test_fast_contract_binds_every_exact_miner_intake_source():
         "gateway/research_lab/api.py",
         "gateway/research_lab/models.py",
         "gateway/research_lab/key_vault.py",
-        "leadpoet_canonical/credential_recipient_v2.py",
         "neurons/miner.py",
         "research_lab/source_add_miner.py",
     ):

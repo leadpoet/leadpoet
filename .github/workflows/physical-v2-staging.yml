@@ -309,54 +309,6 @@ jobs:
             "$bundle_sha256" "$bundle_size_bytes" \
             "$binding_sha256" "$binding_size_bytes" >> "$GITHUB_OUTPUT"
 
-      - name: Transfer exact signed acceptance corpus
-        id: acceptance_transfer
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          umask 077
-          source_config="/home/ec2-user/.config/leadpoet/v2"
-          archive="$PARITY_TEMP/acceptance-corpus-v2.tar"
-          binding="$PARITY_TEMP/acceptance-corpus-v2-binding.json"
-          evidence="$PARITY_TEMP/acceptance-corpus-v2-transfer.json"
-          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          python3 scripts/production_parity_acceptance_transfer.py \
-            --candidate-sha "$CANDIDATE_SHA" \
-            --source-config-dir "$source_config" \
-            --archive "$archive" \
-            --binding "$binding" > "$evidence"
-          test -s "$archive" && test ! -L "$archive"
-          test -s "$binding" && test ! -L "$binding"
-          aws s3 cp "$archive" \
-            "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/acceptance-corpus-v2.tar" \
-            --only-show-errors
-          aws s3 cp "$binding" \
-            "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/acceptance-corpus-v2-binding.json" \
-            --only-show-errors
-          python3 - "$evidence" "$GITHUB_OUTPUT" "$CANDIDATE_SHA" <<'PY'
-          import json
-          from pathlib import Path
-          import re
-          import sys
-
-          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if (
-              value.get("candidate_sha") != sys.argv[3]
-              or not isinstance(value.get("fixture_count"), int)
-              or value["fixture_count"] <= 0
-              or re.fullmatch(
-                  r"sha256:[0-9a-f]{64}",
-                  str(value.get("binding_hash") or ""),
-              )
-              is None
-          ):
-              raise SystemExit("acceptance transfer evidence differs")
-          with open(sys.argv[2], "a", encoding="utf-8") as handle:
-              handle.write(f"fixture_count={value['fixture_count']}\n")
-              handle.write(f"binding_hash={value['binding_hash']}\n")
-          PY
-          rm -f -- "$archive" "$binding" "$evidence"
-
       - name: Start candidate production paths
         id: execute
         shell: bash
@@ -947,12 +899,91 @@ jobs:
           from pathlib import Path
           import sys
           value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          arena = value.get("arena_rebenchmark", {})
+          arena_counts = arena.get("counts", {})
+          arena_providers = arena.get("providers", {})
+          arena_recovery = arena.get("restart_recovery", {})
+          arena_runtime = arena.get("runtime", {})
+          arena_icp_results = arena.get("icp_results")
+          configured_icps = arena_counts.get("configured_icp_count")
+          stage_1_icps = arena_counts.get("stage_1_icp_count")
+          stage_2_icps = arena_counts.get("stage_2_icp_count")
+          per_icp_evidence_is_complete = (
+              isinstance(configured_icps, int)
+              and not isinstance(configured_icps, bool)
+              and isinstance(arena_icp_results, list)
+              and len(arena_icp_results) == configured_icps
+              and all(
+                  isinstance(item, dict)
+                  and item.get("icp_position") == position
+                  and item.get("execute_accepted") is True
+                  and item.get("score_accepted") is True
+                  and all(
+                      isinstance(item.get(field), int)
+                      and not isinstance(item.get(field), bool)
+                      and item.get(field) >= 1
+                      for field in (
+                          "company_count",
+                          "valid_company_with_https_evidence_count",
+                          "https_evidence_url_count",
+                          "successful_openrouter_execute_call_count",
+                          "successful_openrouter_score_settlement_count",
+                      )
+                  )
+                  for position, item in enumerate(arena_icp_results)
+              )
+          )
           if (
               value.get("schema_version") != "leadpoet.production_parity_full.v3"
               or value.get("status") != "passed"
               or value.get("candidate_sha") != sys.argv[2]
               or value.get("gateway", {}).get("commit_sha") != sys.argv[2]
-              or value.get("rebenchmark", {}).get("available") is not True
+              or arena.get("schema_version")
+                  != "leadpoet.production_parity_arena_rebenchmark_evidence.v1"
+              or arena.get("status") != "passed"
+              or arena.get("mode") != "shadow"
+              or arena.get("candidate_sha") != sys.argv[2]
+              or arena.get("baseline_source_url")
+                  != "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+              or not isinstance(stage_1_icps, int)
+              or isinstance(stage_1_icps, bool)
+              or stage_1_icps < 1
+              or not isinstance(stage_2_icps, int)
+              or isinstance(stage_2_icps, bool)
+              or stage_2_icps < 1
+              or configured_icps != 20
+              or configured_icps != stage_1_icps + stage_2_icps
+              or not per_icp_evidence_is_complete
+              or arena_counts.get("accepted_execute_runs") != configured_icps
+              or arena_counts.get("accepted_score_runs") != configured_icps
+              or arena_counts.get("scored_icp_count") != configured_icps
+              or arena_counts.get("unique_icp_positions") != configured_icps
+              or arena_counts.get("company_count", 0) < 1
+              or arena_counts.get("evidence_url_count", 0) < 1
+              or arena_providers.get(
+                  "execute_settled_provider_call_count", 0
+              ) < 1
+              or arena_providers.get("score_settled_provider_call_count", 0) < 1
+              or arena_providers.get(
+                  "successful_openrouter_execute_call_count", 0
+              ) < configured_icps
+              or arena_providers.get(
+                  "successful_openrouter_score_settlement_count", 0
+              ) < configured_icps
+              or "openrouter" not in arena_providers.get("names", [])
+              or arena_providers.get("transport") != "live-httpx"
+              or arena_runtime.get("runner") != "lab_arena.runner.Runner"
+              or arena_runtime.get("sandbox") != "gvisor-runsc"
+              or arena_runtime.get("api")
+                  != "lab_arena.api.loopback-http"
+              or arena_recovery.get("service_restarted") is not True
+              or arena_recovery.get("runner_restarted") is not True
+              or arena_recovery.get("persisted_execute_runs") != stage_1_icps
+              or arena.get("publication_visible") is not True
+              or arena.get("public_benchmark_visible") is not True
+              or arena.get("public_results_visible") is not True
+              or arena.get("production_database_mutated") is not False
+              or arena.get("production_chain_mutated") is not False
               or value.get("allocation_handoff", {}).get(
                   "validator_verification_passed"
               ) is not True
@@ -965,30 +996,12 @@ jobs:
               ) != value.get("allocation_handoff", {}).get("allocation_hash")
               or value.get("weight_path", {}).get("chain_boundary")
                   != "strict-non-forwarding"
-              or value.get("acceptance_corpus", {}).get("copied_exact") is not True
-              or value.get("acceptance_corpus", {}).get("candidate_sha")
-                  != sys.argv[2]
-              or value.get("acceptance_corpus", {}).get("fixture_count", 0) <= 0
-              or value.get("acceptance_corpus", {}).get("transfer", {}).get(
-                  "validated_exact"
-              ) is not True
-              or value.get("acceptance_corpus", {}).get("transfer", {}).get(
-                  "source"
-              ) != "run-scoped-object-lock"
               or value.get("external_write_boundaries", {}).get("arweave")
                   != "blocked-production-parity"
               or value.get("miner_intake", {}).get("status") != "passed"
-              or value.get("miner_intake", {}).get("provider_security_write")
-                  != "exact-idempotent-logging-disable"
               or value.get("miner_intake", {}).get(
                   "chain_registration_boundary"
               ) != "strict-ephemeral-hotkey"
-              or value.get("miner_intake", {}).get("openrouter", {}).get(
-                  "real_production_credentials"
-              ) is not True
-              or value.get("miner_intake", {}).get("openrouter", {}).get(
-                  "admitted"
-              ) is not True
               or value.get("miner_intake", {}).get("source_add", {}).get(
                   "live_provider_credential_verified"
               ) is not True

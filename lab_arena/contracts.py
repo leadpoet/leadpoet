@@ -6,6 +6,7 @@ no I/O and has no dependency on validator attestation code.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -19,12 +20,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------------
 
 # Every participant runs the first ten ICPs. The ten best challengers then run
-# the remaining twenty ICPs; the incumbent always runs both stages.
+# the remaining ten ICPs; the incumbent baseline always runs both stages.
+# These are the twenty ICPs in the organizer's current daily qualification set.
 STAGE_1_ICP_COUNT = 10
-STAGE_2_ICP_COUNT = 20
+STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
+DEFAULT_MAX_CHALLENGERS = 16  # fits one daily round on the default eight-slot runner while still making a stage-1 cut
 RUNNER_SLOT_CEILING = 8
 MAX_ATTEMPTS_PER_ASSIGNMENT = 2
 LAB_ARENA_POOL_PERCENT = 25  # default share of total emissions for the king's pool; LAB_ARENA_POOL_PERCENT overrides it per round
@@ -54,7 +57,9 @@ ICP_WALL_CLOCK_SECONDS = 300
 # providers; it gets its own wall clock, longer than a model's, under the same
 # lease; provider calls refresh the lease while the judge is working.
 SCORING_WALL_CLOCK_SECONDS = 900
-LEASE_TTL_SECONDS = 420
+# One lease covers the longest sandbox run, first-use source setup, and the
+# small completion retry window. Provider calls renew it while work continues.
+LEASE_TTL_SECONDS = 1200
 
 
 def stage_positions(stage: int) -> Tuple[int, ...]:
@@ -65,11 +70,6 @@ def stage_positions(stage: int) -> Tuple[int, ...]:
     if stage == 2:
         return tuple(range(STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT))
     raise ArenaContractError("stage must be 1 or 2")
-
-# Generation requests are fixed (section 8): 20 + 10 across the ordered
-# industry list; the second request covers the first ten industries.
-GENERATION_BATCH_SIZES = (20, 10)
-MAX_GENERATION_ATTEMPTS = 12
 
 # Signed request timestamp window (section 9.1).
 REQUEST_TIMESTAMP_WINDOW_SECONDS = 300
@@ -94,12 +94,14 @@ SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
 
 SCOPE_CLAIM = "lab_arena.claim.v1"
 SCOPE_COMPLETE = "lab_arena.complete.v1"
-SCOPE_SUBMISSION = "lab_arena.submission.v1"
+SCOPE_SUBMISSION_PRESIGN = "lab_arena.submission.presign.v1"
+SCOPE_SUBMISSION_FINALIZE = "lab_arena.submission.finalize.v1"
 REQUEST_SCOPES = frozenset(
     {
         SCOPE_CLAIM,
         SCOPE_COMPLETE,
-        SCOPE_SUBMISSION,
+        SCOPE_SUBMISSION_PRESIGN,
+        SCOPE_SUBMISSION_FINALIZE,
     }
 )
 
@@ -145,13 +147,14 @@ ROUND_TRANSITIONS = {
     "cancelled": (),
 }
 ATTEMPT_STATUSES = ("pending", "leased", "submitted", "accepted", "failed")
-SUBMISSION_STATUSES = ("uploaded", "accepted", "rejected", "frozen")
+SUBMISSION_STATUSES = ("uploading", "accepted", "rejected", "frozen")
 KING_OUTCOMES = ("crowned", "defended", "retained_ineligible", "no_king")
 TERMINAL_CAUSES = (
     "accepted",
     "model_timeout",
     "invalid_output",
     "budget_exhausted",
+    "credential_error",
     "model_error",
     "lease_expired",
     "worker_lost",
@@ -166,9 +169,9 @@ TERMINAL_CAUSES = (
 # gets one confirmation attempt (another validator when there is one); a
 # quota exhaustion does not, and a second failure stands as the zero.
 MODEL_CAUSED_TERMINAL_CAUSES = frozenset(
-    {"model_timeout", "invalid_output", "budget_exhausted", "model_error"}
+    {"model_timeout", "invalid_output", "budget_exhausted", "credential_error", "model_error"}
 )
-SCORE_TERMINAL_CAUSES = ("accepted", "judge_error", "judge_timeout")
+SCORE_TERMINAL_CAUSES = ("accepted", "credential_error", "judge_error", "judge_timeout")
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
 INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "result_rejected", "provider_error", "judge_error", "judge_timeout"})
 
@@ -260,6 +263,15 @@ PUBLICATION_LIMITS = StrictLimits(
     max_string_bytes=65_536,
     max_total_bytes=64 * 1_048_576,
 )
+# A completion can contain the judge's accepted 2 MiB scoring output. Keep one
+# small allowance for the signed request fields that wrap that output.
+COMPLETION_REQUEST_LIMITS = StrictLimits(
+    max_depth=16,
+    max_list_items=20_000,
+    max_object_keys=512,
+    max_string_bytes=65_536,
+    max_total_bytes=(2 * 1_048_576) + 65_536,
+)
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
@@ -342,6 +354,7 @@ SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 SS58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
 ROUND_ID_RE = re.compile(r"^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[a-z0-9]{1,16})?$")
+SUBMISSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 
 def document_hash(document: Any) -> str:
@@ -429,7 +442,7 @@ def validate_signed_request(
     now: int,
     verify_signature: Any,
     expected_round_id: Optional[str] = None,
-    limits: StrictLimits = REQUEST_LIMITS,
+    limits: Optional[StrictLimits] = None,
     window_seconds: int = REQUEST_TIMESTAMP_WINDOW_SECONDS,
 ) -> Dict[str, Any]:
     """Validate scope, window, shape, and signature. Returns the envelope.
@@ -438,6 +451,8 @@ def validate_signed_request(
     this module performs no chain or crypto import of its own.
     """
 
+    if limits is None:
+        limits = COMPLETION_REQUEST_LIMITS if expected_scope == SCOPE_COMPLETE else REQUEST_LIMITS
     if not isinstance(envelope, Mapping):
         raise ArenaContractError("signed request must be an object")
     check_strict_document(envelope, limits)
@@ -650,16 +665,6 @@ ROUND_CONFIGURATION_FIELDS = (
     F("mode", "str", choices=("shadow", "live")),
     F("rewards_enabled", "bool"),
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
-    F(
-        "generator",
-        "object",
-        fields=(
-            F("model", "str", minimum=1, maximum=128),
-            F("settings", "object"),
-            F("batch_sizes", "list[int]", minimum=2, maximum=2),
-            F("max_generation_attempts", "int", minimum=3, maximum=64),
-        ),
-    ),
     F("stage_1_icp_count", "int", minimum=1),
     F("stage_2_icp_count", "int", minimum=1),
     F("finalist_count", "int", minimum=1),
@@ -679,23 +684,9 @@ ROUND_CONFIGURATION_FIELDS = (
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
     F("baseline_hotkey", "hotkey"),
+    F("baseline_source_url", "str", minimum=8, maximum=2048),
     F("runner_hotkeys", "list[hotkey]", minimum=1, maximum=64),
     F("banned_hotkeys", "list[hotkey]", minimum=0, maximum=4096),
-    # Image by digest: the public limits every submitted image must meet and
-    # the Arena repository every accepted image is mirrored into.
-    F(
-        "image_rules",
-        "object",
-        fields=(
-            F("schema_version", "str", minimum=1, maximum=64),
-            F("max_image_bytes", "int", minimum=1),
-            F("max_layers", "int", minimum=1),
-            F("max_rootfs_bytes", "int", minimum=1),
-            F("platform", "object", fields=(F("os", "str", minimum=1, maximum=32), F("architecture", "str", minimum=1, maximum=32))),
-            F("layer_media_types", "list[str]", minimum=1, maximum=16),
-        ),
-    ),
-    F("registry_repository", "str", minimum=0, maximum=512),
     F("reward_constants", "object", fields=REWARD_CONSTANTS_FIELDS),
 )
 
@@ -718,10 +709,10 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("providers and call quotas are fixed public constants")
     if dict(config["scoring_call_quotas"]) != dict(SCORING_CALL_QUOTAS_PER_WORK_ITEM):
         raise ArenaContractError("scoring call quotas are fixed public constants")
-    if tuple(config["generator"]["batch_sizes"]) != GENERATION_BATCH_SIZES:
-        raise ArenaContractError("generation batch sizes are fixed public constants")
     if not config["scorer_image_reference"].endswith("@" + config["scorer_image_digest"]):
         raise ArenaContractError("scorer image reference must pin the scorer image digest")
+    if not config["baseline_source_url"].startswith("https://"):
+        raise ArenaContractError("baseline source URL must use https")
     rewards = config["reward_constants"]
     # ``pool_percent`` is the one adjustable reward setting (LAB_ARENA_POOL_PERCENT,
     # 0..100 by the field bounds); the decay, week length, and window are fixed.
@@ -756,19 +747,58 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
 SUBMISSION_CONSENT_FIELDS = (
     F("public_rerun", "bool"),
 )
-SUBMISSION_BODY_FIELDS = (
-    F("image_reference", "str", minimum=1, maximum=512),
+SUBMISSION_PRESIGN_BODY_FIELDS = (
+    F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
+    F("source_content_md5", "str", required=False, minimum=24, maximum=24),
     F("consent", "object", fields=SUBMISSION_CONSENT_FIELDS),
+)
+SUBMISSION_FINALIZE_BODY_FIELDS = (
+    F("submission_id", "str", minimum=1, maximum=64),
+    F("source_ref", "str", minimum=1, maximum=512),
+    F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
+    F("credentials", "object", fields=(
+        F("openrouter_api_key", "str", minimum=16, maximum=4096),
+        F("openrouter_management_key", "str", minimum=16, maximum=4096),
+        F("deepline_api_key", "str", minimum=16, maximum=4096),
+    )),
 )
 
 
-def validate_submission_body(body: Any) -> Dict[str, Any]:
-    """A miner's signed submission body: one image and public benchmark consent."""
+def validate_source_content_md5(value: Any) -> str:
+    """Return one canonical base64-encoded 128-bit transport checksum."""
 
-    document = validate_document(body, SUBMISSION_BODY_FIELDS)
+    if not isinstance(value, str):
+        raise ArenaContractError("source_content_md5 must be base64 MD5")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        raise ArenaContractError("source_content_md5 must be base64 MD5") from None
+    if len(decoded) != 16 or base64.b64encode(decoded).decode("ascii") != value:
+        raise ArenaContractError("source_content_md5 must be base64 MD5")
+    return value
+
+
+def validate_submission_presign_body(body: Any) -> Dict[str, Any]:
+    """Validate transport facts before the Arena permits one source upload."""
+
+    document = validate_document(body, SUBMISSION_PRESIGN_BODY_FIELDS)
+    checksum = document.get("source_content_md5")
+    if checksum is not None:
+        validate_source_content_md5(checksum)
     consent = document["consent"]
     if consent.get("public_rerun") is not True:
         raise ArenaContractError("public_rerun consent must be true")
+    return document
+
+
+def validate_submission_finalize_body(body: Any) -> Dict[str, Any]:
+    """Validate the facts repeated after the source upload."""
+
+    document = validate_document(body, SUBMISSION_FINALIZE_BODY_FIELDS)
+    if not SUBMISSION_ID_RE.match(document["submission_id"]):
+        raise ArenaContractError("submission_id has an invalid shape")
+    if not re.match(r"^arena/[A-Za-z0-9._:-]{1,64}/sources/[A-Za-z0-9._:-]{1,64}\.tar\.gz$", document["source_ref"]):
+        raise ArenaContractError("source_ref has an invalid shape")
     return document
 
 
@@ -785,7 +815,6 @@ SCORER_POLICY_FIELDS = (
     F("company_cap_rule", "str", choices=("icp_max_companies",)),
     F("max_scored_companies", "int", minimum=0, maximum=50),
     F("judge_models", "object"),
-    F("cache_version", "str", minimum=1, maximum=64),
     F("provider_profile", "str", minimum=1, maximum=64),
     F("pre_slice_rule", "str", choices=("first_n_model_order",)),
     F("employee_bucket_rule", "str", choices=("lab_relaxed_buckets",)),
@@ -863,7 +892,7 @@ RUN_RESULT_FIELDS = (
     ),
     F("started_at", "iso8601"),
     F("finished_at", "iso8601"),
-    F("terminal_status", "str", choices=("accepted", "model_timeout", "invalid_output", "budget_exhausted", "model_error", "provider_error", "judge_error", "judge_timeout")),
+    F("terminal_status", "str", choices=("accepted", "model_timeout", "invalid_output", "budget_exhausted", "credential_error", "model_error", "provider_error", "judge_error", "judge_timeout")),
 )
 
 

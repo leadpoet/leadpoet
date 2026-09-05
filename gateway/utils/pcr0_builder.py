@@ -151,10 +151,6 @@ MONITORED_FILES: Set[str] = {
     "gateway/tasks/__init__.py",
     "gateway/tasks/icp_generator.py",
     "qualification/__init__.py",
-    "scripts/run_research_lab_hosted_worker.py",
-    "scripts/run_research_lab_hosted_worker_fleet.py",
-    "scripts/run_research_lab_scoring_worker.py",
-    "scripts/run_research_lab_scoring_worker_fleet.py",
 }
 
 # Directories where any file change triggers rebuild
@@ -192,10 +188,6 @@ PCR0_COPY_PATHS: List[str] = [
     "gateway/tasks/__init__.py",
     "gateway/tasks/icp_generator.py",
     "qualification/__init__.py",
-    "scripts/run_research_lab_hosted_worker.py",
-    "scripts/run_research_lab_hosted_worker_fleet.py",
-    "scripts/run_research_lab_scoring_worker.py",
-    "scripts/run_research_lab_scoring_worker_fleet.py",
     "neurons/validator.py",
     "validator_models/automated_checks.py",
 ]
@@ -701,10 +693,6 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
         "/qualification/scoring/",
         "/neurons/validator.py",
         "/validator_models/automated_checks.py",
-        "/scripts/run_research_lab_hosted_worker.py",
-        "/scripts/run_research_lab_hosted_worker_fleet.py",
-        "/scripts/run_research_lab_scoring_worker.py",
-        "/scripts/run_research_lab_scoring_worker_fleet.py",
     ]
     
     if os.path.exists(os.path.join(repo_dir, ".git")):

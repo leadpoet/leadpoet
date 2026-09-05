@@ -101,10 +101,6 @@ COPY gateway/tasks/__init__.py /app/gateway/tasks/__init__.py
 COPY gateway/tasks/icp_generator.py /app/gateway/tasks/icp_generator.py
 COPY qualification/__init__.py /app/qualification/__init__.py
 COPY qualification/scoring/ /app/qualification/scoring/
-COPY scripts/run_research_lab_hosted_worker.py /app/scripts/run_research_lab_hosted_worker.py
-COPY scripts/run_research_lab_hosted_worker_fleet.py /app/scripts/run_research_lab_hosted_worker_fleet.py
-COPY scripts/run_research_lab_scoring_worker.py /app/scripts/run_research_lab_scoring_worker.py
-COPY scripts/run_research_lab_scoring_worker_fleet.py /app/scripts/run_research_lab_scoring_worker_fleet.py
 
 # =============================================================================
 # CRITICAL: Include validation logic for PCR0 verification

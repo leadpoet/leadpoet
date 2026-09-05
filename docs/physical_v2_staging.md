@@ -52,12 +52,11 @@ attestation and targets 5-10 minutes. It:
    Git-tree, ICP, settlement, retry, and cleanup contracts.
 
 The candidate contract's independent source commitments include the exact
-miner signing helpers, intake models and routes, OpenRouter recipient/privacy
-verifier, and SOURCE_ADD miner helper. Both lanes verify those commitments
+miner signing helpers, intake models and routes, and SOURCE_ADD miner helper.
+Both lanes verify those commitments
 against the candidate Git blobs and checkout. This prevents stale evidence
-without changing measured runtime identity or PCR0. Real credential admission
-remains in the authoritative full lane because it requires the candidate's
-attested Nitro recipient and measured provider path.
+without changing measured runtime identity or PCR0. The full lane exercises
+SOURCE_ADD admission through the candidate's measured provider path.
 
 No production rows are copied in the fast lane, and no database dump is
 uploaded as an artifact. The schema archive is destroyed on every exit path;
@@ -83,10 +82,10 @@ release succeeds. It dynamically:
    reads but redirects every mutable Research Lab write to the clone;
 7. runs the candidate's exact `gw_restart.sh --commit` and requires matching
    build, attestation, PCR0, and V2 readiness;
-8. keeps miner submissions, autoresearch claims, promotion, fulfillment, and
-   model/Git mutation disabled while enabling the real daily baseline;
-9. waits for every configured ICP, retries, aggregate, configurable
-   public/private/conditional assignment, persistence, and publication;
+8. keeps production writes and fulfillment disabled while running the public
+   PydanticAI baseline in a clone-local Arena shadow round;
+9. executes and scores all twenty daily ICPs, restarts the Arena service and
+   runner between stages, and checks recovery, persistence, and publication;
 10. fetches and verifies the real gateway allocation handoff with production
     validator integration; and
 11. hash-binds that verified allocation document into the exact candidate
@@ -94,21 +93,15 @@ release succeeds. It dynamically:
     to consume the same canonical vector through the strict non-forwarding
     chain boundary; and
 12. creates one in-memory ephemeral miner identity and exercises the exact
-    candidate OpenRouter and SOURCE_ADD HTTP request models, signatures,
+    candidate SOURCE_ADD HTTP request models, signatures,
     routes, measured credential verification, PostgREST/RPC calls, and durable
     writes against the clone.
 
-The OpenRouter intake uses the authorized production runtime and management
-credentials in memory. It verifies the exact coordinator release evidence,
-encrypts both credentials with the same miner-side implementation, submits
-the sealed pair to the real route, and requires the key reference plus both
-encrypted envelopes to exist in the clone with no plaintext in responses,
-rows, logs, or retained evidence.
-
-The production verifier deliberately performs one idempotent management API
-write that forces OpenRouter workspace logging off and then reads it back. The
-parity lane preserves that exact security behavior; it does not create, rotate,
-or delete provider keys. Production Supabase and the chain remain read-only.
+The Arena uses the organizer's runtime API keys for billable provider calls.
+The clone secret excludes OpenRouter management credentials. OpenRouter
+requests require `data_collection=deny` and `zdr=true`; the lane does not
+change workspace logging or create, rotate, or delete provider keys.
+Production Supabase and the chain remain read-only.
 
 SOURCE_ADD intentionally has a different production contract: miners submit
 credential-free source proposals, while an operator adds any provider
@@ -168,8 +161,8 @@ run, candidate, ephemeral, and Name ownership tags.
 
 ### IAM change boundary and recovery
 
-A Sourcing_model, `leadpoet-lab`, or Research Lab source release is not by
-itself an IAM change. Ordinary commits and model versions that retain the
+A public baseline or Research Lab source release is not by itself an IAM
+change. Ordinary commits and bundle versions that retain the
 declared AWS actions, resources, account, region, roles, attachments,
 permissions boundary, prefixes, and tag conditions reuse the existing
 authority without policy mutation. A release needs a new IAM plan only when it
@@ -178,7 +171,7 @@ S3, Secrets Manager, or role layout. Exact artifact and commit admission stays
 fail closed without coupling policy changes to every source release.
 
 The August 2026 rebenchmark recovery exposed mechanism defects, not missing
-operator access and not a Sourcing_model commit failure. First, AWS can return
+operator access and not a baseline commit failure. First, AWS can return
 `MissingContextValues` at both aggregate and resource-specific levels,
 including keys from statements that do not apply to the simulated action. For
 managed parity-controller changes, the commissioner evaluates those keys

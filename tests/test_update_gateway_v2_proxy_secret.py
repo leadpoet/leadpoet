@@ -89,7 +89,6 @@ def test_updates_only_v2_proxy_and_capacity_values(tmp_path):
         secrets_client=client,
         secret_id="gateway-secret",
         backup_directory=tmp_path,
-        autoresearch_proxy="https://auto-user:auto-pass@proxy.example.com:443",
         scoring_proxy="https://score-user:score-pass@proxy.example.com:443",
         proxy_fleet_probe=lambda fleets: probes.append(fleets),
         now=datetime(2026, 7, 26, tzinfo=timezone.utc),
@@ -97,9 +96,6 @@ def test_updates_only_v2_proxy_and_capacity_values(tmp_path):
 
     assert probes == [
         {
-            "gateway_autoresearch": (
-                "https://auto-user:auto-pass@proxy.example.com:443",
-            ),
             "gateway_scoring": (
                 "https://score-user:score-pass@proxy.example.com:443",
             ),
@@ -109,15 +105,10 @@ def test_updates_only_v2_proxy_and_capacity_values(tmp_path):
     assert "export UNRELATED_ONE='preserve me'\n" in persisted
     assert "UNRELATED_TWO=value-two\n" in persisted
     assert original.splitlines()[3] in persisted
-    assert (
-        "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1="
-        in persisted
-    )
+    assert "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1=" not in persisted
     assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1=" in persisted
-    assert "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT=10" in persisted
     assert "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT=25" in persisted
     assert result["worker_counts"] == {
-        "gateway_autoresearch": 10,
         "gateway_scoring": 25,
     }
     backup_path = Path(result["backup_path"])
@@ -137,7 +128,6 @@ def test_live_proxy_failure_does_not_write_or_create_backup(tmp_path):
             secrets_client=client,
             secret_id="gateway-secret",
             backup_directory=tmp_path,
-            autoresearch_proxy="https://auto.example.com:443",
             scoring_proxy="https://score.example.com:443",
             proxy_fleet_probe=lambda _fleets: (_ for _ in ()).throw(
                 RuntimeError("credential-bearing provider error")
@@ -159,8 +149,7 @@ def test_invalid_proxy_fails_before_write(tmp_path):
             secrets_client=client,
             secret_id="gateway-secret",
             backup_directory=tmp_path,
-            autoresearch_proxy="socks5://legacy.example.com:6100",
-            scoring_proxy="https://score.example.com:443",
+            scoring_proxy="socks5://legacy.example.com:6100",
             proxy_fleet_probe=lambda _fleets: None,
         )
 
@@ -198,7 +187,6 @@ def test_concurrent_secret_change_aborts_before_write(tmp_path):
             secrets_client=client,
             secret_id="gateway-secret",
             backup_directory=tmp_path,
-            autoresearch_proxy="https://auto.example.com:443",
             scoring_proxy="https://score.example.com:443",
             proxy_fleet_probe=lambda _fleets: None,
         )
@@ -229,7 +217,6 @@ def test_failed_exact_readback_restores_prior_secret(tmp_path):
             secrets_client=client,
             secret_id="gateway-secret",
             backup_directory=tmp_path,
-            autoresearch_proxy="https://auto.example.com:443",
             scoring_proxy="https://score.example.com:443",
             proxy_fleet_probe=lambda _fleets: None,
         )

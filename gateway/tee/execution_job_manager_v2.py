@@ -65,20 +65,6 @@ MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
 MAX_INPUT_BYTES = 64 * 1024 * 1024
-# Measured candidate evaluation carries two independently verified source
-# archives inside canonical JSON: the candidate source and the replay snapshot.
-# Each archive is bounded to 64 MiB before base64 encoding, so the ordinary
-# 64 MiB job ceiling cannot represent a valid near-limit evaluation request.
-# Keep the larger chunked-upload allowance tied to only the two measured dev
-# evaluation operation/purpose pairs; every other scoring job remains at the
-# ordinary ceiling.
-MAX_DEV_EVALUATION_INPUT_BYTES = 256 * 1024 * 1024
-_DEV_EVALUATION_JOB_SCOPES = frozenset(
-    {
-        ("run_dev_replay_v2", "research_lab.candidate_test.v2"),
-        ("run_dev_hybrid_v2", "research_lab.candidate_hybrid_test.v2"),
-    }
-)
 # Allocation authority and its direct weight-publication consumers carry the
 # same complete, independently validated receipt ancestry. Uploads remain
 # chunked; allow only these exact coordinator operation/purpose pairs to exceed
@@ -90,10 +76,6 @@ MAX_ALLOCATION_ANCESTRY_INPUT_BYTES = 256 * 1024 * 1024
 _ALLOCATION_FRONTIER_BOOTSTRAP_SCOPE = (
     "allocation_settlement_frontier_bootstrap_v2",
     "research_lab.allocation_settlement_frontier_bootstrap.v2",
-)
-_ROUTING_PROVIDER_AUTHORIZATION_SCOPE = (
-    "attest_routing_provider_call_v2",
-    "research_lab.routing_provider_evidence.v2",
 )
 _ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
     {
@@ -122,7 +104,6 @@ _DIRECT_SUPABASE_SIDECAR_NAMESPACES = frozenset(
     {
         "provider-outcome",
         "provider-evidence-cache",
-        "routing-budget-reservation",
     }
 )
 MAX_CHUNK_BYTES = 1024 * 1024
@@ -191,38 +172,9 @@ _CHECKPOINTED_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = (
 
 
 def _execution_failure_code(exc: Exception) -> str:
-    """Project only bounded safe sandbox observations into the signed code."""
+    """Project a bounded exception type into the signed failure code."""
 
-    generic = "execution_%s" % type(exc).__name__.lower()[:80]
-    try:
-        exc_type = type(exc)
-        if (
-            exc_type.__module__ != "gateway.tee.model_sandbox_v2"
-            or exc_type.__name__ != "ModelSandboxV2Error"
-        ):
-            return generic
-        from gateway.tee.model_sandbox_v2 import (
-            ModelSandboxV2Error,
-            validate_model_sandbox_failure_projection_v1,
-        )
-
-        if exc_type is not ModelSandboxV2Error:
-            return generic
-        projection = validate_model_sandbox_failure_projection_v1(
-            exc.failure_projection
-        )
-        exception_class_hash = projection.exception_class_hash or "none"
-        projected = "%s/%s/%s/%s" % (
-            generic,
-            projection.launcher_code,
-            exception_class_hash,
-            projection.stderr_hash,
-        )
-        if len(projected) > 256 or not _IDENTIFIER_RE.fullmatch(projected):
-            return generic
-        return projected
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError):
-        return generic
+    return "execution_%s" % type(exc).__name__.lower()[:80]
 
 
 class ExecutionJobV2Error(RuntimeError):
@@ -1121,8 +1073,6 @@ def _bounded_external_authority_limit(value: int) -> int:
 
 
 def _job_input_limit_bytes(*, operation: str, purpose: str) -> int:
-    if (operation, purpose) in _DEV_EVALUATION_JOB_SCOPES:
-        return MAX_DEV_EVALUATION_INPUT_BYTES
     if (operation, purpose) in _ALLOCATION_ANCESTRY_JOB_SCOPES:
         return MAX_ALLOCATION_ANCESTRY_INPUT_BYTES
     return MAX_INPUT_BYTES
@@ -1199,12 +1149,9 @@ def _manifest(
         normalized_provider_credentials[
             _identifier(provider_id, "provider credential provider_id")
         ] = _hash(digest, "provider credential reference")
-    normalized_parents = [_hash(item, "parent_receipt_hash") for item in parents]
-    if (operation, purpose) == _ROUTING_PROVIDER_AUTHORIZATION_SCOPE:
-        if len(set(normalized_parents)) != len(normalized_parents):
-            raise ExecutionJobV2Error("job parent receipt hashes contain duplicates")
-    else:
-        normalized_parents = sorted(set(normalized_parents))
+    normalized_parents = sorted(
+        {_hash(item, "parent_receipt_hash") for item in parents}
+    )
     return {
         "schema_version": JOB_SCHEMA_VERSION,
         "job_id": _identifier(value["job_id"], "job_id"),
@@ -1774,14 +1721,7 @@ class ExecutionJobManagerV2:
             parent_graphs = payload.pop(PARENT_RECEIPT_GRAPHS_FIELD, None)
             parent_graph_set = payload.pop(PARENT_RECEIPT_GRAPH_SET_FIELD, None)
             payload_parent_hashes = payload.pop("parent_receipt_hashes", None)
-            if (manifest["operation"], manifest["purpose"]) == (
-                _ROUTING_PROVIDER_AUTHORIZATION_SCOPE
-            ):
-                if payload_parent_hashes != manifest["parent_receipt_hashes"]:
-                    raise ExecutionJobV2Error(
-                        "routing provider authorization payload ancestry differs"
-                    )
-            elif payload_parent_hashes is not None and (
+            if payload_parent_hashes is not None and (
                 payload_parent_hashes != manifest["parent_receipt_hashes"]
             ):
                 raise ExecutionJobV2Error(
@@ -2025,14 +1965,7 @@ class ExecutionJobManagerV2:
             root_parents.extend(context.external_receipt_roots())
             if not checkpoint_bootstrap_scope:
                 root_parents.extend(context.external_ancestry_roots())
-            if (manifest["operation"], manifest["purpose"]) == (
-                _ROUTING_PROVIDER_AUTHORIZATION_SCOPE
-            ):
-                root_manifest["parent_receipt_hashes"] = list(
-                    dict.fromkeys(root_parents)
-                )
-            else:
-                root_manifest["parent_receipt_hashes"] = sorted(set(root_parents))
+            root_manifest["parent_receipt_hashes"] = sorted(set(root_parents))
             transport_attempts = context.freeze_transport_attempts()
             artifact_hashes = context.freeze_artifact_hashes()
             host_operation_records = tuple(context.host_operation_records())
@@ -2145,22 +2078,9 @@ class ExecutionJobManagerV2:
                     failure_parent_roots.update(
                         context.external_ancestry_roots()
                     )
-                if (manifest["operation"], manifest["purpose"]) == (
-                    _ROUTING_PROVIDER_AUTHORIZATION_SCOPE
-                ):
-                    ordered_failure_roots = list(manifest["parent_receipt_hashes"])
-                    ordered_failure_roots.extend(
-                        root
-                        for root in context.external_receipt_roots()
-                        if root not in ordered_failure_roots
-                    )
-                    failure_manifest["parent_receipt_hashes"] = list(
-                        dict.fromkeys(ordered_failure_roots)
-                    )
-                else:
-                    failure_manifest["parent_receipt_hashes"] = sorted(
-                        failure_parent_roots
-                    )
+                failure_manifest["parent_receipt_hashes"] = sorted(
+                    failure_parent_roots
+                )
                 try:
                     failure_host_operations = tuple(
                         context.host_operation_records()

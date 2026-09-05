@@ -2,7 +2,7 @@
 
 The first release containing the fixed-purpose miner-submission maintenance
 helper cannot run that helper from the deployed N-1 checkout.  This module is
-instead executed from a fully verified archive of the exact attested candidate
+instead executed from a verified archive of the exact candidate
 while the canonical gateway restart lock is held.  It acquires the retry-stable
 production SOURCE_ADD restart guard, drains every lease, disables the existing
 global miner setting, and carries only non-secret commitments through that
@@ -44,17 +44,12 @@ from gateway.tee.disable_gateway_miner_submissions_secret import (
     _FORBIDDEN_AWS_ENV_NAMES,
     _apply_gateway_miner_submissions_secret,
     _instance_role_secrets_client,
-    _instance_role_aws_clients,
     _open_recovery_journal_parent_fd,
     _parse_environment,
     _read_current_secret,
     _recover_orphan_transaction,
     _verify_protected_source,
     disable_gateway_miner_submissions_secret,
-)
-from gateway.tee.release_channel_v2 import (
-    release_channel_key,
-    validate_release_channel_v2,
 )
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.supabase_schema_preflight_v2 import (
@@ -63,7 +58,6 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     SupabaseSchemaPreflightV2Error,
     _verify_source_add_claim_control_contract_v2,
 )
-from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.production_parity_boundary_v2 import (
     PRODUCTION_SUPABASE_ORIGIN,
@@ -76,9 +70,7 @@ from scripts.gateway_git_deploy import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.gateway_miner_maintenance_restart.v3"
-DEFAULT_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
-DEFAULT_RELEASE_PREFIX = "attested-v2/releases"
+SCHEMA_VERSION = "leadpoet.gateway_miner_maintenance_restart.v5"
 CANONICAL_GATEWAY_RESTART_LOCK_PATH = Path(
     "/home/ec2-user/.config/leadpoet/gateway-restart.lock"
 )
@@ -86,20 +78,12 @@ CANONICAL_GATEWAY_ENV_PATH = Path(
     "/home/ec2-user/.config/leadpoet/gateway.env"
 )
 PROOF_FD_ENV_NAME = "GATEWAY_MINER_MAINTENANCE_PROOF_FD"
-RETRY_RECONCILIATION_HELPER_ENV_NAME = (
-    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER"
-)
 PROOF_FD_NUMBER = 190
 CONTROLLER_WRAPPER_FD_NUMBER = 191
 CONTROLLER_GIT_HELPER_FD_NUMBER = 192
 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER = 193
 CONTROLLER_MEMORY_GUARD_FD_NUMBER = 194
-RETRY_RECONCILIATION_HELPER_FD_NUMBER = 195
-RETRY_RECONCILIATION_HELPER_PATH = (
-    "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
-)
 MAX_PROOF_BYTES = 32 * 1024
-MAX_RELEASE_CHANNEL_BYTES = 4 * 1024 * 1024
 MAX_RUNTIME_STATUS_BYTES = 256 * 1024
 DEFAULT_RUNTIME_STATUS_URL = "http://127.0.0.1:8000/research-lab/status"
 SOURCE_ADD_PAUSE_RPC = "research_lab_source_add_set_paused"
@@ -182,7 +166,6 @@ _RESTART_AUTHORITY_NAMES = frozenset(
         "GATEWAY_GIT_HELPER",
         "GATEWAY_EXACT_COMMIT_HELPER",
         "GATEWAY_HOST_MEMORY_GUARD_PATH",
-        RETRY_RECONCILIATION_HELPER_ENV_NAME,
     }
 )
 _PROOF_FIELDS = frozenset(
@@ -191,14 +174,8 @@ _PROOF_FIELDS = frozenset(
         "candidate_commit",
         "candidate_tree_hash",
         "candidate_blob_manifest_sha256",
-        "candidate_retry_reconciliation_helper_sha256",
         "pre_hydration_runtime_commit",
         "n_minus_one_controller_commit",
-        "release_channel_hash",
-        "release_channel_object_version_id",
-        "release_channel_object_sha256",
-        "release_channel_retain_until",
-        "gateway_release_hash",
         "current_secret_version_id",
         "current_document_commitment",
         "current_hydrated_environment_commitment",
@@ -1613,12 +1590,13 @@ def _require_runtime_source_add_restored(
         )
 
 
-def _require_pre_activation_runtime_source_add_closed() -> None:
-    """Verify the still-running N-1 gateway before candidate activation."""
+def _require_pre_activation_runtime_source_add_closed(
+    *, live_process_commitment: str
+) -> str:
+    """Verify the unchanged N-1 gateway, or its proved absence, before activation."""
 
-    _require_runtime_source_add_closed(
-        _fetch_runtime_status(),
-        allow_legacy_missing_intake=True,
+    return _require_pre_hydration_runtime_source_add_closed(
+        live_process_commitment=live_process_commitment,
     )
 
 
@@ -1651,21 +1629,6 @@ def _require_fixed_bootstrap_authority(
         str(environment.get("LEADPOET_GATEWAY_ENV_SECRET_ID") or GATEWAY_SECRET_ID)
         != GATEWAY_SECRET_ID
         or str(
-            environment.get("GATEWAY_V2_RELEASE_BUCKET")
-            or DEFAULT_RELEASE_BUCKET
-        )
-        != DEFAULT_RELEASE_BUCKET
-        or str(
-            environment.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET")
-            or DEFAULT_RELEASE_BUCKET
-        )
-        != DEFAULT_RELEASE_BUCKET
-        or str(
-            environment.get("GATEWAY_V2_RELEASE_PREFIX")
-            or DEFAULT_RELEASE_PREFIX
-        )
-        != DEFAULT_RELEASE_PREFIX
-        or str(
             environment.get("GATEWAY_ENV_FILE")
             or CANONICAL_GATEWAY_ENV_PATH
         )
@@ -1686,21 +1649,12 @@ def _require_fixed_bootstrap_authority(
         )
 
 
-def _resolve_bootstrap_aws_clients(
-    *,
-    secrets_client: Any,
-    release_s3_client: Any,
-) -> tuple[Any, Any]:
-    if secrets_client is None and release_s3_client is None:
-        clients = _instance_role_aws_clients(
-            environ={**os.environ, "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true"}
-        )
-        return clients["secretsmanager"], clients["s3"]
-    if secrets_client is None or release_s3_client is None:
-        raise GatewayMinerMaintenanceRestartError(
-            "bootstrap AWS client authority is incomplete"
-        )
-    return secrets_client, release_s3_client
+def _resolve_bootstrap_secrets_client(secrets_client: Any) -> Any:
+    if secrets_client is not None:
+        return secrets_client
+    return _instance_role_secrets_client(
+        environ={**os.environ, "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true"}
+    )
 
 
 def _require_canonical_restart_lock_fd() -> None:
@@ -2076,258 +2030,6 @@ def _load_json_bytes(value: bytes, *, label: str) -> dict[str, Any]:
     if not isinstance(document, Mapping):
         raise GatewayMinerMaintenanceRestartError(f"{label} must be an object")
     return dict(document)
-
-
-def _s3_version_id(value: Any) -> str:
-    version_id = str(value or "")
-    encoded = version_id.encode("utf-8", errors="strict")
-    if (
-        version_id != version_id.strip()
-        or version_id == "null"
-        or not 1 <= len(encoded) <= 1024
-        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in version_id)
-    ):
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel object version is invalid"
-        )
-    return version_id
-
-
-def _retention_timestamp(value: Any, *, now: datetime) -> tuple[datetime, str]:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel retention is invalid"
-        )
-    normalized = value.astimezone(timezone.utc)
-    if normalized <= now:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel retention is not active"
-        )
-    return normalized, normalized.isoformat().replace("+00:00", "Z")
-
-
-def _object_metadata(
-    value: Mapping[str, Any],
-    *,
-    now: datetime,
-    expected_version_id: Optional[str] = None,
-) -> dict[str, Any]:
-    version_id = _s3_version_id(value.get("VersionId"))
-    if expected_version_id is not None and version_id != expected_version_id:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel object version changed"
-        )
-    if value.get("ObjectLockMode") != "COMPLIANCE":
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel lacks COMPLIANCE retention"
-        )
-    retain_until, retain_until_text = _retention_timestamp(
-        value.get("ObjectLockRetainUntilDate"),
-        now=now,
-    )
-    etag = str(value.get("ETag") or "")
-    length = value.get("ContentLength")
-    if not etag or len(etag) > 1024:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel object identity is invalid"
-        )
-    if (
-        not isinstance(length, int)
-        or isinstance(length, bool)
-        or not 2 <= length <= MAX_RELEASE_CHANNEL_BYTES
-    ):
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel object size is invalid"
-        )
-    return {
-        "version_id": version_id,
-        "lock_mode": "COMPLIANCE",
-        "retain_until": retain_until,
-        "retain_until_text": retain_until_text,
-        "etag": etag,
-        "content_length": length,
-    }
-
-
-def _version_history(
-    value: Mapping[str, Any],
-    *,
-    key: str,
-) -> dict[str, Any]:
-    if value.get("IsTruncated") is not False:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel object history is incomplete"
-        )
-    versions = [
-        item
-        for item in value.get("Versions") or []
-        if isinstance(item, Mapping) and item.get("Key") == key
-    ]
-    delete_markers = [
-        item
-        for item in value.get("DeleteMarkers") or []
-        if isinstance(item, Mapping) and item.get("Key") == key
-    ]
-    if len(versions) != 1 or delete_markers:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel object history is not a singleton"
-        )
-    version = dict(versions[0])
-    if version.get("IsLatest") is not True:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel singleton is not latest"
-        )
-    version_id = _s3_version_id(version.get("VersionId"))
-    etag = str(version.get("ETag") or "")
-    size = version.get("Size")
-    if (
-        not etag
-        or not isinstance(size, int)
-        or isinstance(size, bool)
-        or not 2 <= size <= MAX_RELEASE_CHANNEL_BYTES
-    ):
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel history identity is invalid"
-        )
-    return {
-        "version_id": version_id,
-        "etag": etag,
-        "content_length": size,
-    }
-
-
-def _require_same_object_identity(*values: Mapping[str, Any]) -> None:
-    fields = ("version_id", "etag", "content_length")
-    retained = [
-        value
-        for value in values
-        if "lock_mode" in value and "retain_until" in value
-    ]
-    if not values or any(
-        value.get(field) != values[0].get(field)
-        for value in values[1:]
-        for field in fields
-    ) or any(
-        value.get(field) != retained[0].get(field)
-        for value in retained[1:]
-        for field in ("lock_mode", "retain_until")
-    ):
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel HEAD, GET, and history identities differ"
-        )
-
-
-def _require_six_release_identities(
-    channel: Mapping[str, Any], *, expected_commit: str
-) -> None:
-    gateway_release = channel["gateway_release_manifest"]
-    validator_release = channel["validator_release_manifest"]
-    identities = [
-        channel["commit_sha"],
-        gateway_release["commit_sha"],
-        *(
-            gateway_release["roles"][role]["commit_sha"]
-            for role in sorted(ROLE_SPECS)
-        ),
-        validator_release["release"]["commit_sha"],
-    ]
-    if len(identities) != 6 or set(identities) != {expected_commit}:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel identities differ from the candidate"
-        )
-
-
-def _fetch_locked_release_channel(
-    *,
-    commit_sha: str,
-    s3_client: Any = None,
-    now: Optional[datetime] = None,
-) -> dict[str, Any]:
-    """Read one singleton COMPLIANCE-locked channel by exact S3 VersionId."""
-
-    commit = str(commit_sha or "").lower()
-    if not _COMMIT_RE.fullmatch(commit):
-        raise GatewayMinerMaintenanceRestartError("candidate commit is invalid")
-    if s3_client is None:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel requires the validated instance-role S3 client"
-        )
-    observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    key = release_channel_key(commit, prefix=DEFAULT_RELEASE_PREFIX)
-    arguments = {"Bucket": DEFAULT_RELEASE_BUCKET, "Key": key}
-    try:
-        history_before = _version_history(
-            s3_client.list_object_versions(
-                Bucket=DEFAULT_RELEASE_BUCKET,
-                Prefix=key,
-                MaxKeys=1000,
-            ),
-            key=key,
-        )
-        latest_before = _object_metadata(
-            s3_client.head_object(**arguments),
-            now=observed_now,
-        )
-        version_id = latest_before["version_id"]
-        pinned_head = _object_metadata(
-            s3_client.head_object(**arguments, VersionId=version_id),
-            now=observed_now,
-            expected_version_id=version_id,
-        )
-        response = s3_client.get_object(**arguments, VersionId=version_id)
-        body = response["Body"]
-        try:
-            pinned_get = _object_metadata(
-                response,
-                now=observed_now,
-                expected_version_id=version_id,
-            )
-            payload = body.read(MAX_RELEASE_CHANNEL_BYTES + 1)
-        finally:
-            body.close()
-        if len(payload) != pinned_get["content_length"]:
-            raise GatewayMinerMaintenanceRestartError(
-                "approved release channel object body length differs"
-            )
-        latest_after = _object_metadata(
-            s3_client.head_object(**arguments),
-            now=observed_now,
-            expected_version_id=version_id,
-        )
-        history_after = _version_history(
-            s3_client.list_object_versions(
-                Bucket=DEFAULT_RELEASE_BUCKET,
-                Prefix=key,
-                MaxKeys=1000,
-            ),
-            key=key,
-        )
-    except GatewayMinerMaintenanceRestartError:
-        raise
-    except Exception as exc:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel lock evidence is unavailable"
-        ) from exc
-    _require_same_object_identity(
-        history_before,
-        latest_before,
-        pinned_head,
-        pinned_get,
-        latest_after,
-        history_after,
-    )
-    channel = validate_release_channel_v2(
-        _load_json_bytes(payload, label="approved release channel"),
-        expected_commit=commit,
-    )
-    _require_six_release_identities(channel, expected_commit=commit)
-    return {
-        "channel": channel,
-        "object_version_id": version_id,
-        "object_sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
-        "object_lock_mode": "COMPLIANCE",
-        "object_retain_until": pinned_get["retain_until_text"],
-    }
 
 
 def _safe_git_environment() -> dict[str, str]:
@@ -3215,15 +2917,6 @@ def _validate_candidate_identity(
         host_restart_is_open_fd=host_restart_is_open_fd,
         reconcile_host_wrapper=reconcile_host_wrapper,
     )
-    retry_reconciliation_helper = _run_git_bytes(
-        repository,
-        "show",
-        f"{commit}:{RETRY_RECONCILIATION_HELPER_PATH}",
-    )
-    if not 2 <= len(retry_reconciliation_helper) <= 4 * 1024 * 1024:
-        raise GatewayMinerMaintenanceRestartError(
-            "candidate retry reconciliation helper size is invalid"
-        )
     _require_unmodified_git_object_authority(repository)
     return {
         **tree_evidence,
@@ -3232,11 +2925,6 @@ def _validate_candidate_identity(
             controller_bundle["controller_commit"]
         ),
         "controller_bundle": controller_bundle,
-        "retry_reconciliation_helper": {
-            "payload": retry_reconciliation_helper,
-            "commitment": "sha256:"
-            + hashlib.sha256(retry_reconciliation_helper).hexdigest(),
-        },
     }
 
 
@@ -3244,17 +2932,12 @@ def _proof_body(
     *,
     candidate_commit: str,
     tree_evidence: Mapping[str, Any],
-    release_evidence: Mapping[str, Any],
     final_secret_result: Mapping[str, str],
     source_add_pause_result: Mapping[str, str],
     source_add_quiescence_result: Mapping[str, str],
     restart_invocation_id: str,
     live_process_commitment: str,
 ) -> dict[str, str]:
-    release_channel = release_evidence["channel"]
-    gateway_release = validate_release_manifest(
-        release_channel["gateway_release_manifest"]
-    )
     controller = tree_evidence["controller_bundle"]
     commitments = controller["commitments"]
     body = {
@@ -3263,24 +2946,10 @@ def _proof_body(
         "candidate_tree_hash": str(tree_evidence["tree_hash"]),
         "candidate_blob_manifest_sha256": "sha256:"
         + str(tree_evidence["blob_manifest_sha256"]),
-        "candidate_retry_reconciliation_helper_sha256": str(
-            tree_evidence["retry_reconciliation_helper"]["commitment"]
-        ),
         "pre_hydration_runtime_commit": str(tree_evidence["previous_sha"]),
         "n_minus_one_controller_commit": str(
             tree_evidence["n_minus_one_controller_commit"]
         ),
-        "release_channel_hash": str(release_channel["channel_hash"]),
-        "release_channel_object_version_id": str(
-            release_evidence["object_version_id"]
-        ),
-        "release_channel_object_sha256": str(
-            release_evidence["object_sha256"]
-        ),
-        "release_channel_retain_until": str(
-            release_evidence["object_retain_until"]
-        ),
-        "gateway_release_hash": str(gateway_release["release_hash"]),
         "current_secret_version_id": str(final_secret_result["current_version_id"]),
         "current_document_commitment": str(
             final_secret_result["current_document_commitment"]
@@ -3347,10 +3016,6 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
     }
     commitment_fields = (
         "candidate_blob_manifest_sha256",
-        "candidate_retry_reconciliation_helper_sha256",
-        "release_channel_hash",
-        "release_channel_object_sha256",
-        "gateway_release_hash",
         "current_document_commitment",
         "current_hydrated_environment_commitment",
         "current_stage_topology_commitment",
@@ -3377,13 +3042,11 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
         )
         or normalized["source_add_restart_guard_restore_paused"]
         not in {"true", "false"}
-        or not _s3_version_id(normalized["release_channel_object_version_id"])
         or not _VERSION_ID_RE.fullmatch(normalized["current_secret_version_id"])
         or not re.fullmatch(
             r"[1-9][0-9]*",
             normalized["source_add_restart_guard_generation"],
         )
-        or not normalized["release_channel_retain_until"].endswith("Z")
         or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}",
             normalized["restart_invocation_id"],
@@ -3431,7 +3094,6 @@ def _require_reserved_memfd_numbers_available() -> None:
         CONTROLLER_GIT_HELPER_FD_NUMBER,
         CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
         CONTROLLER_MEMORY_GUARD_FD_NUMBER,
-        RETRY_RECONCILIATION_HELPER_FD_NUMBER,
     ):
         try:
             os.fstat(descriptor)
@@ -3619,34 +3281,12 @@ def _require_disabled_secret_readback(
     return current
 
 
-def _verify_locked_release_matches(
-    *,
-    deploy_commit: str,
-    gateway_release_hash: str,
-    release_s3_client: Any,
-) -> dict[str, Any]:
-    release_evidence = _fetch_locked_release_channel(
-        commit_sha=str(deploy_commit).lower(),
-        s3_client=release_s3_client,
-    )
-    if (
-        release_evidence["channel"]["gateway_release_manifest"]["release_hash"]
-        != str(gateway_release_hash)
-    ):
-        raise GatewayMinerMaintenanceRestartError(
-            "immutable release channel differs from the candidate"
-        )
-    return release_evidence
-
-
 def _verify_proof_against_state(
     *,
     proof: Mapping[str, str],
     deploy_commit: str,
     candidate_tree_hash: str,
-    gateway_release_hash: str,
     client: Any,
-    release_s3_client: Any,
     tree_evidence: Optional[Mapping[str, Any]] = None,
     restart_invocation_id: Optional[str] = None,
     live_process_commitment: Optional[str] = None,
@@ -3656,7 +3296,6 @@ def _verify_proof_against_state(
     if (
         validated["candidate_commit"] != str(deploy_commit).lower()
         or validated["candidate_tree_hash"] != str(candidate_tree_hash).lower()
-        or validated["gateway_release_hash"] != str(gateway_release_hash)
     ):
         raise GatewayMinerMaintenanceRestartError(
             "miner-maintenance invocation proof differs from the candidate"
@@ -3675,37 +3314,6 @@ def _verify_proof_against_state(
     ):
         raise GatewayMinerMaintenanceRestartError(
             "running gateway process differs from the invocation proof"
-        )
-    release_evidence = _verify_locked_release_matches(
-        deploy_commit=deploy_commit,
-        gateway_release_hash=gateway_release_hash,
-        release_s3_client=release_s3_client,
-    )
-    release_channel = release_evidence["channel"]
-    if (
-        validated["release_channel_hash"] != release_channel["channel_hash"]
-        or validated["release_channel_object_version_id"]
-        != release_evidence["object_version_id"]
-        or validated["release_channel_object_sha256"]
-        != release_evidence["object_sha256"]
-    ):
-        raise GatewayMinerMaintenanceRestartError(
-            "miner-maintenance immutable release differs from the invocation proof"
-        )
-    try:
-        prepared_retention = datetime.fromisoformat(
-            validated["release_channel_retain_until"].replace("Z", "+00:00")
-        )
-        current_retention = datetime.fromisoformat(
-            str(release_evidence["object_retain_until"]).replace("Z", "+00:00")
-        )
-    except ValueError as exc:
-        raise GatewayMinerMaintenanceRestartError(
-            "miner-maintenance release retention is invalid"
-        ) from exc
-    if current_retention < prepared_retention:
-        raise GatewayMinerMaintenanceRestartError(
-            "miner-maintenance release retention was shortened"
         )
     current = _require_disabled_secret_readback(
         client=client,
@@ -3804,10 +3412,6 @@ def _verify_proof_against_state(
         if (
             validated["candidate_blob_manifest_sha256"]
             != "sha256:" + str(tree_evidence["blob_manifest_sha256"])
-            or validated["candidate_retry_reconciliation_helper_sha256"]
-            != str(
-                tree_evidence["retry_reconciliation_helper"]["commitment"]
-            )
             or validated["pre_hydration_runtime_commit"]
             != str(tree_evidence["previous_sha"])
             or validated["n_minus_one_controller_commit"]
@@ -3844,9 +3448,6 @@ def _verify_proof_against_state(
             "source_add_quiescence_commitment"
         ],
         "proof_hash": validated["proof_hash"],
-        "release_channel_object_version_id": validated[
-            "release_channel_object_version_id"
-        ],
     }
 
 
@@ -3861,7 +3462,6 @@ def prepare_gateway_miner_maintenance_restart(
     restart_invocation_id: str,
     recovery_journal_path: Path = DEFAULT_RECOVERY_JOURNAL_PATH,
     secrets_client: Any = None,
-    release_s3_client: Any = None,
 ) -> dict[str, Any]:
     """Apply false and return one non-persistent invocation proof."""
 
@@ -3874,10 +3474,7 @@ def prepare_gateway_miner_maintenance_restart(
         raise GatewayMinerMaintenanceRestartError(
             "gateway restart invocation identity is invalid"
         )
-    secrets_client, release_s3_client = _resolve_bootstrap_aws_clients(
-        secrets_client=secrets_client,
-        release_s3_client=release_s3_client,
-    )
+    secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
     tree_evidence = _validate_candidate_identity(
         repo_root=repo_root,
         candidate_root=candidate_root,
@@ -3891,15 +3488,6 @@ def prepare_gateway_miner_maintenance_restart(
     live_process_commitment = _pre_hydration_live_process_commitment(
         tree_evidence
     )
-    release_evidence = _fetch_locked_release_channel(
-        commit_sha=expected_commit,
-        s3_client=release_s3_client,
-    )
-    channel = release_evidence["channel"]
-    if str(channel.get("commit_sha") or "") != expected_commit:
-        raise GatewayMinerMaintenanceRestartError(
-            "approved release channel is for another candidate"
-        )
     source_add_pause_result = _pause_source_add_for_restart(
         secrets_client=secrets_client,
         restart_invocation_id=restart_invocation_id,
@@ -3990,7 +3578,6 @@ def prepare_gateway_miner_maintenance_restart(
     proof = _proof_body(
         candidate_commit=expected_commit,
         tree_evidence=tree_evidence,
-        release_evidence=release_evidence,
         final_secret_result=final_result,
         source_add_pause_result=source_add_pause_result,
         source_add_quiescence_result=source_add_quiescence_result,
@@ -4002,9 +3589,6 @@ def prepare_gateway_miner_maintenance_restart(
         "status": "prepared",
         "proof": proof,
         "tree_evidence": tree_evidence,
-        "gateway_release_hash": str(
-            channel["gateway_release_manifest"]["release_hash"]
-        ),
     }
 
 
@@ -4012,10 +3596,8 @@ def verify_gateway_miner_maintenance_state(
     *,
     deploy_commit: str,
     candidate_tree_hash: str,
-    gateway_release_hash: str,
     parent_environment: Mapping[str, str],
     secrets_client: Any = None,
-    release_s3_client: Any = None,
     bind_live_process_to_proof: bool = True,
     acquire_source_add_restart_guard: bool = True,
     hydrated_environment_path: Path = CANONICAL_GATEWAY_ENV_PATH,
@@ -4024,10 +3606,7 @@ def verify_gateway_miner_maintenance_state(
 
     _require_fixed_bootstrap_authority(parent_environment)
     _require_disabled_parent_environment(parent_environment)
-    secrets_client, release_s3_client = _resolve_bootstrap_aws_clients(
-        secrets_client=secrets_client,
-        release_s3_client=release_s3_client,
-    )
+    secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
     proof_fd = _proof_fd_from_environment(parent_environment)
     if proof_fd is not None:
         proof = _proof_from_fd(proof_fd)
@@ -4058,9 +3637,7 @@ def verify_gateway_miner_maintenance_state(
             proof=validated_proof,
             deploy_commit=deploy_commit,
             candidate_tree_hash=candidate_tree_hash,
-            gateway_release_hash=gateway_release_hash,
             client=secrets_client,
-            release_s3_client=release_s3_client,
             restart_invocation_id=parent_environment.get(
                 "GATEWAY_RESTART_INVOCATION_ID"
             ),
@@ -4166,11 +3743,6 @@ def verify_gateway_miner_maintenance_state(
             else None
         ),
     )
-    release_evidence = _verify_locked_release_matches(
-        deploy_commit=deploy_commit,
-        gateway_release_hash=gateway_release_hash,
-        release_s3_client=release_s3_client,
-    )
     return {
         "status": "durable_false_verified",
         "current_secret_version_id": str(current["current_version_id"]),
@@ -4194,9 +3766,6 @@ def verify_gateway_miner_maintenance_state(
         "source_add_restart_guard_restore_paused": source_add_quiescence[
             "source_add_restart_guard_restore_paused"
         ],
-        "release_channel_object_version_id": str(
-            release_evidence["object_version_id"]
-        ),
     }
 
 
@@ -4281,7 +3850,9 @@ def _wait_for_handoff_marker(
             str(path),
         )
         or not re.fullmatch(r"[0-9a-f]{64}", str(nonce))
-        or not 1 <= int(timeout_seconds) <= 300
+        or not 1
+        <= int(timeout_seconds)
+        <= SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS
     ):
         raise GatewayMinerMaintenanceRestartError(
             "miner-maintenance handoff request is invalid"
@@ -4430,32 +4001,6 @@ def _install_controller_bundle_memfds(
         )
 
 
-def _install_retry_reconciliation_helper_memfd(
-    tree_evidence: Mapping[str, Any],
-) -> None:
-    helper = tree_evidence.get("retry_reconciliation_helper")
-    if not isinstance(helper, Mapping):
-        raise GatewayMinerMaintenanceRestartError(
-            "candidate retry reconciliation helper is incomplete"
-        )
-    payload = helper.get("payload")
-    commitment = helper.get("commitment")
-    if (
-        not isinstance(payload, bytes)
-        or commitment
-        != "sha256:" + hashlib.sha256(payload).hexdigest()
-    ):
-        raise GatewayMinerMaintenanceRestartError(
-            "candidate retry reconciliation helper differs from its commitment"
-        )
-    _seal_payload_at_fd_number(
-        payload=payload,
-        fd_number=RETRY_RECONCILIATION_HELPER_FD_NUMBER,
-        name="leadpoet-retry-reconciliation-helper",
-        max_bytes=4 * 1024 * 1024,
-    )
-
-
 def _controller_exec_environment(
     parent_environment: Mapping[str, str],
 ) -> dict[str, str]:
@@ -4479,7 +4024,6 @@ def bootstrap_gateway_miner_maintenance_restart(
     handoff_nonce: str,
     restart_invocation_id: str,
     secrets_client: Any = None,
-    release_s3_client: Any = None,
 ) -> None:
     """Prepare, fence, and exec the immutable installed N-1 controller."""
 
@@ -4490,10 +4034,7 @@ def bootstrap_gateway_miner_maintenance_restart(
         _require_canonical_restart_lock_fd()
         _require_reserved_memfd_numbers_available()
         _require_fixed_bootstrap_authority(os.environ)
-        secrets_client, release_s3_client = _resolve_bootstrap_aws_clients(
-            secrets_client=secrets_client,
-            release_s3_client=release_s3_client,
-        )
+        secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
         prepared = prepare_gateway_miner_maintenance_restart(
             repo_root=repo_root,
             candidate_root=candidate_root,
@@ -4503,7 +4044,6 @@ def bootstrap_gateway_miner_maintenance_restart(
             host_restart_path=host_restart_path,
             restart_invocation_id=restart_invocation_id,
             secrets_client=secrets_client,
-            release_s3_client=release_s3_client,
         )
         proof = prepared["proof"]
         _seal_payload_at_fd_number(
@@ -4525,7 +4065,10 @@ def bootstrap_gateway_miner_maintenance_restart(
             path=handoff_file,
             expected_commit=expected_commit,
             nonce=handoff_nonce,
-            timeout_seconds=300,
+            # The paired operator builds both exact runtime releases after this
+            # bootstrap proves the durable pause.  Keep this wait on the same
+            # bounded deadline as that existing paired coordination window.
+            timeout_seconds=SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS,
         )
         _require_canonical_restart_lock_fd()
         final_tree = _validate_candidate_identity(
@@ -4538,26 +4081,23 @@ def bootstrap_gateway_miner_maintenance_restart(
             reconcile_host_wrapper=True,
         )
         _verify_protected_source()
-        secrets_client, release_s3_client = _resolve_bootstrap_aws_clients(
-            secrets_client=secrets_client,
-            release_s3_client=release_s3_client,
+        secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
+        final_live_process_commitment = _pre_hydration_live_process_commitment(
+            final_tree
         )
         _verify_proof_against_state(
             proof=_proof_from_fd(PROOF_FD_NUMBER),
             deploy_commit=expected_commit,
             candidate_tree_hash=str(final_tree["tree_hash"]),
-            gateway_release_hash=str(prepared["gateway_release_hash"]),
             client=secrets_client,
-            release_s3_client=release_s3_client,
             tree_evidence=final_tree,
             restart_invocation_id=restart_invocation_id,
-            live_process_commitment=(
-                _pre_hydration_live_process_commitment(final_tree)
-            ),
+            live_process_commitment=final_live_process_commitment,
         )
-        _require_pre_activation_runtime_source_add_closed()
+        _require_pre_activation_runtime_source_add_closed(
+            live_process_commitment=final_live_process_commitment,
+        )
         _install_controller_bundle_memfds(final_tree["controller_bundle"])
-        _install_retry_reconciliation_helper_memfd(final_tree)
         controller_fds_open = True
         for descriptor in (
             PROOF_FD_NUMBER,
@@ -4565,7 +4105,6 @@ def bootstrap_gateway_miner_maintenance_restart(
             CONTROLLER_GIT_HELPER_FD_NUMBER,
             CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
             CONTROLLER_MEMORY_GUARD_FD_NUMBER,
-            RETRY_RECONCILIATION_HELPER_FD_NUMBER,
         ):
             os.set_inheritable(descriptor, True)
         _require_canonical_restart_lock_fd()
@@ -4590,15 +4129,7 @@ def bootstrap_gateway_miner_maintenance_restart(
                 "GATEWAY_HOST_MEMORY_GUARD_PATH": (
                     f"/proc/self/fd/{CONTROLLER_MEMORY_GUARD_FD_NUMBER}"
                 ),
-                RETRY_RECONCILIATION_HELPER_ENV_NAME: (
-                    f"/proc/self/fd/{RETRY_RECONCILIATION_HELPER_FD_NUMBER}"
-                ),
                 "LEADPOET_GATEWAY_ENV_SECRET_ID": GATEWAY_SECRET_ID,
-                "GATEWAY_V2_RELEASE_BUCKET": DEFAULT_RELEASE_BUCKET,
-                "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET": (
-                    DEFAULT_RELEASE_BUCKET
-                ),
-                "GATEWAY_V2_RELEASE_PREFIX": DEFAULT_RELEASE_PREFIX,
                 "AWS_REGION": EXPECTED_AWS_REGION,
                 "AWS_DEFAULT_REGION": EXPECTED_AWS_REGION,
                 "GIT_CONFIG_NOSYSTEM": "1",
@@ -4636,7 +4167,6 @@ def bootstrap_gateway_miner_maintenance_restart(
                 CONTROLLER_GIT_HELPER_FD_NUMBER,
                 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
                 CONTROLLER_MEMORY_GUARD_FD_NUMBER,
-                RETRY_RECONCILIATION_HELPER_FD_NUMBER,
             ):
                 try:
                     os.close(descriptor)
@@ -4828,11 +4358,9 @@ def verify_gateway_miner_maintenance_runtime_state(
     *,
     deploy_commit: str,
     candidate_tree_hash: str,
-    gateway_release_hash: str,
     runtime_environment: Mapping[str, str],
     runtime_status: Mapping[str, Any],
     secrets_client: Any = None,
-    release_s3_client: Any = None,
     hydrated_environment_path: Path = CANONICAL_GATEWAY_ENV_PATH,
 ) -> dict[str, str]:
     """Recheck the exact false state against the activated live runtime."""
@@ -4841,17 +4369,12 @@ def verify_gateway_miner_maintenance_runtime_state(
     _require_disabled_parent_environment(runtime_environment)
     _require_runtime_miner_disabled(runtime_status)
     _require_runtime_source_add_closed(runtime_status)
-    secrets_client, release_s3_client = _resolve_bootstrap_aws_clients(
-        secrets_client=secrets_client,
-        release_s3_client=release_s3_client,
-    )
+    secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
     result = verify_gateway_miner_maintenance_state(
         deploy_commit=deploy_commit,
         candidate_tree_hash=candidate_tree_hash,
-        gateway_release_hash=gateway_release_hash,
         parent_environment=runtime_environment,
         secrets_client=secrets_client,
-        release_s3_client=release_s3_client,
         bind_live_process_to_proof=False,
         acquire_source_add_restart_guard=False,
         hydrated_environment_path=hydrated_environment_path,
@@ -5032,7 +4555,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 candidate_tree_hash=_active_tree_hash(
                     args.repo_root, expected_commit
                 ),
-                gateway_release_hash=release["release_hash"],
                 runtime_environment=os.environ,
                 runtime_status=_fetch_runtime_status(),
             )

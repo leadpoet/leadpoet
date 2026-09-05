@@ -99,7 +99,6 @@ _PUBLIC_VERIFY_WALLET_MODULES = frozenset(
     {"bittensor_wallet", "bittensor_wallet.bittensor_wallet"}
 )
 _EXPECTED_RELEASE_IDENTITY_ROLES = {
-    "gateway_autoresearch": "gateway_autoresearch",
     "gateway_coordinator": "gateway_coordinator",
     "gateway_scoring": "gateway_scoring",
     "validator_weights": "validator_weights",
@@ -2105,7 +2104,7 @@ def _validate_release_identity_cache(
     roles = dict(release_contract["roles"])
     counts = dict(release_contract["build_counts"])
     entries = identity_cache.get("entries")
-    if not isinstance(entries, list) or len(entries) != 4:
+    if not isinstance(entries, list) or len(entries) != len(roles):
         _fail("release_identity_invalid")
     observed: Dict[str, str] = {}
     for item in entries:

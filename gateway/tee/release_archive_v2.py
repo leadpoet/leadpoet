@@ -15,7 +15,12 @@ import stat
 import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from gateway.tee.release_manifest_v2 import validate_release_manifest
+from gateway.tee.release_manifest_v2 import (
+    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+    historical_three_role_specs,
+    validate_prior_release_manifest,
+    validate_release_manifest,
+)
 from gateway.tee.topology import ROLE_SPECS
 from gateway.tee.verify_release_artifacts_v2 import (
     ReleaseArtifactVerificationError,
@@ -102,10 +107,18 @@ def _load_regular_json(path: Path, field: str) -> Dict[str, Any]:
 
 
 def _normalize_role_pcr0s(value: Any, field: str) -> Dict[str, str]:
-    if not isinstance(value, Mapping) or set(value) != set(ROLE_SPECS):
+    historical_roles = set(
+        historical_three_role_specs(
+            expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+        )
+    )
+    if not isinstance(value, Mapping) or set(value) not in (
+        set(ROLE_SPECS),
+        historical_roles,
+    ):
         raise ReleaseArchiveV2Error("%s is incomplete" % field)
     normalized: Dict[str, str] = {}
-    for role in sorted(ROLE_SPECS):
+    for role in sorted(value):
         pcr0 = str(value.get(role) or "").strip().lower()
         if not _PCR0_RE.fullmatch(pcr0) or pcr0 == "0" * 96:
             raise ReleaseArchiveV2Error("%s is invalid: %s" % (field, role))
@@ -140,7 +153,7 @@ def _release_role_pcr0s(release: Mapping[str, Any]) -> Dict[str, str]:
             role: roles.get(role, {}).get("pcr0")
             if isinstance(roles.get(role), Mapping)
             else None
-            for role in ROLE_SPECS
+            for role in roles
         },
         "gateway release role PCR0s",
     )
@@ -150,7 +163,7 @@ def _archived_role_pcr0s(root: Path, item: Mapping[str, Any]) -> Dict[str, str]:
     release_hash = str(item.get("release_hash") or "").lower()
     if not _HASH_RE.fullmatch(release_hash):
         raise ReleaseArchiveV2Error("gateway release archive identity is invalid")
-    release = validate_release_manifest(
+    release = validate_prior_release_manifest(
         _load_regular_json(
             root
             / release_hash.split(":", 1)[1]
@@ -383,11 +396,17 @@ def verify_archive_directory(path: Path) -> Dict[str, Any]:
     files = document.get("files")
     if not isinstance(files, Mapping) or not files:
         raise ReleaseArchiveV2Error("gateway release archive inventory is empty")
+    release = validate_prior_release_manifest(
+        _load_regular_json(
+            root / "gateway-v2-release-manifest.json",
+            "archived gateway release manifest",
+        )
+    )
     expected_files = {
         "gateway-v2-release-manifest.json",
         "gateway-v2-local-verification.json",
     }
-    for role in ROLE_SPECS:
+    for role in release["roles"]:
         expected_files.update(
             {
                 "tee-enclave-%s.eif" % role,
@@ -417,12 +436,6 @@ def verify_archive_directory(path: Path) -> Dict[str, Any]:
     body = {key: document[key] for key in expected_fields if key != "archive_hash"}
     if document.get("archive_hash") != sha256_json(body):
         raise ReleaseArchiveV2Error("gateway release archive manifest was altered")
-    release = validate_release_manifest(
-        _load_json(
-            root / "gateway-v2-release-manifest.json",
-            "archived gateway release manifest",
-        )
-    )
     if (
         release["release_hash"] != document["release_hash"]
         or release["commit_sha"] != document["commit_sha"]
@@ -458,7 +471,7 @@ def verify_archive_directory(path: Path) -> Dict[str, Any]:
         for item in verification.get("roles", [])
         if isinstance(item, Mapping)
     }
-    if set(verification_roles) != set(ROLE_SPECS):
+    if set(verification_roles) != set(release["roles"]):
         raise ReleaseArchiveV2Error("archived local verification roles are incomplete")
     for role, item in verification_roles.items():
         if item.get("eif_hash") != files["tee-enclave-%s.eif" % role]["sha256"]:

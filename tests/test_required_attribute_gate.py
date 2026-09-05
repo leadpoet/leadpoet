@@ -12,7 +12,7 @@ from gateway.qualification.models import (
     ICPPrompt,
     RequiredAttributeClaim,
 )
-from qualification.scoring.lead_scorer import _run_autoresearch_binary_fit_checks
+from qualification.scoring.lead_scorer import _run_competition_binary_fit_checks
 
 
 def _icp(attribute=""):
@@ -45,24 +45,24 @@ def _ok_claim(**over):
 
 
 def test_no_icp_attribute_no_gate():
-    ok, reason = _run_autoresearch_binary_fit_checks(_company(None), _icp(""))
+    ok, reason = _run_competition_binary_fit_checks(_company(None), _icp(""))
     assert ok, reason
 
 
 def test_backed_claim_passes():
-    ok, reason = _run_autoresearch_binary_fit_checks(
+    ok, reason = _run_competition_binary_fit_checks(
         _company(_ok_claim()), _icp("The company is privately held"))
     assert ok, reason
 
 
 def test_missing_claim_fails():
-    ok, reason = _run_autoresearch_binary_fit_checks(
+    ok, reason = _run_competition_binary_fit_checks(
         _company(None), _icp("The company is privately held"))
     assert not ok and "Missing required_attribute" in reason
 
 
 def test_unpassed_claim_fails():
-    ok, reason = _run_autoresearch_binary_fit_checks(
+    ok, reason = _run_competition_binary_fit_checks(
         _company(_ok_claim(passed=False)), _icp("The company is privately held"))
     assert not ok and "did not pass" in reason
 
@@ -71,13 +71,13 @@ def test_urlless_claim_with_reasoning_passes():
     # Some attributes validate only indirectly (negative attributes,
     # absence-of-evidence): a URL-less claim with reasoning is accepted and
     # the web re-verification pass becomes its truth check.
-    ok, reason = _run_autoresearch_binary_fit_checks(
+    ok, reason = _run_competition_binary_fit_checks(
         _company(_ok_claim(evidence_url="")), _icp("The company is privately held"))
     assert ok, reason
 
 
 def test_bare_claim_without_url_or_reasoning_fails():
-    ok, reason = _run_autoresearch_binary_fit_checks(
+    ok, reason = _run_competition_binary_fit_checks(
         _company(_ok_claim(evidence_url="", evidence_quote="", explanation="")),
         _icp("The company is privately held"))
     assert not ok and "neither evidence" in reason

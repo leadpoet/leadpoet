@@ -9,6 +9,18 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 MIGRATION = SCRIPTS / "179-lab-arena-v1.sql"
 SQL = MIGRATION.read_text(encoding="utf-8")
+DAILY_SQL = (SCRIPTS / "180-lab-arena-daily-competition.sql").read_text(
+    encoding="utf-8"
+)
+SOURCE_SQL = (SCRIPTS / "181-lab-arena-source-submissions.sql").read_text(
+    encoding="utf-8"
+)
+SOURCE_EXECUTION_SQL = (SCRIPTS / "182-lab-arena-source-execution.sql").read_text(
+    encoding="utf-8"
+)
+CREDENTIAL_SQL = (SCRIPTS / "185-lab-arena-miner-credentials.sql").read_text(
+    encoding="utf-8"
+)
 
 SERVICE_FUNCTIONS = (
     "lab_arena_whoami",
@@ -47,7 +59,13 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
             numbered.setdefault(int(match.group(1)), []).append(path.name)
     assert numbered[178] == ["178-research-lab-source-add-miner-status.sql"]
     assert numbered[179] == ["179-lab-arena-v1.sql"]
-    assert max(numbered) == 179, "179 must sit directly above the production frontier"
+    assert numbered[180] == ["180-lab-arena-daily-competition.sql"]
+    assert numbered[181] == ["181-lab-arena-source-submissions.sql"]
+    assert numbered[182] == ["182-lab-arena-source-execution.sql"]
+    assert numbered[183] == ["183-lab-arena-miner-reward-basis.sql"]
+    assert numbered[184] == ["184-lab-arena-scoring-failure-isolation.sql"]
+    assert numbered[185] == ["185-lab-arena-miner-credentials.sql"]
+    assert max(numbered) == 185, "185 must sit directly above the production frontier"
 
 
 def test_migration_transaction_and_reload_shape():
@@ -65,10 +83,10 @@ def test_roles_follow_the_migration_156_pattern():
     assert "CREATE ROLE lab_arena_owner NOLOGIN" in SQL
     assert "CREATE ROLE lab_arena_service NOLOGIN" in SQL
     assert "pg_advisory_xact_lock" in SQL
-    assert "ALTER ROLE lab_arena_service WITH NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION" in SQL
+    assert "ALTER ROLE lab_arena_service WITH NOCREATEDB NOCREATEROLE NOINHERIT;" in SQL
     code_lines = [line for line in SQL.splitlines() if not line.lstrip().startswith("--")]
     assert not any("NOSUPERUSER" in line or "NOBYPASSRLS" in line for line in code_lines)
-    assert "rolsuper OR rolbypassrls OR rolcanlogin" in SQL
+    assert "rolsuper OR rolbypassrls OR rolcanlogin OR rolreplication" in SQL
     assert "rolname = 'authenticator'" in SQL
     assert "GRANT lab_arena_service TO authenticator" in SQL
     assert "REVOKE CREATE ON SCHEMA public FROM lab_arena_service" in SQL
@@ -112,7 +130,7 @@ def test_state_vocabularies_match_contracts():
     for outcome in contracts.KING_OUTCOMES:
         assert f"'{outcome}'" in SQL
     for cause in contracts.TERMINAL_CAUSES:
-        assert f"'{cause}'" in SQL
+        assert f"'{cause}'" in SQL + CREDENTIAL_SQL
     for kind in contracts.LEDGER_ENTRY_KINDS:
         assert f"'{kind}'" in SQL
 
@@ -135,6 +153,16 @@ def test_unique_indexes_enforce_plan_invariants():
     assert "'lab_arena.runner:' || p_round_id || ':' || p_runner_hotkey" in SQL
     assert "DROP INDEX IF EXISTS public.lab_arena_submissions_image_digest_uq" in SQL
     assert "CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_submissions_image_digest_uq" not in SQL
+
+
+def test_miner_credentials_are_ciphertext_only_and_miner_calls_cannot_use_host_funds():
+    assert "CREATE TABLE IF NOT EXISTS public.lab_arena_submission_credentials" in CREDENTIAL_SQL
+    assert "ciphertext BYTEA NOT NULL" in CREDENTIAL_SQL
+    assert "openrouter_management" not in CREDENTIAL_SQL
+    assert "funding_source IN ('host', 'miner_key')" in CREDENTIAL_SQL
+    assert "lab_arena_funding_source_mismatch" in CREDENTIAL_SQL
+    assert "lab_arena_submission_credentials_required" in CREDENTIAL_SQL
+    assert "pg_catalog.replace(" in CREDENTIAL_SQL
 
 
 def test_attempt_completion_stores_only_the_result_and_output():
@@ -196,9 +224,64 @@ def test_two_stage_cut_uses_plain_finalist_ids_and_fixed_position_ranges():
     assert "v_patch -> 'final_scores_ref'" not in SQL
     assert "p_stage NOT IN (1, 2)" in SQL
     assert "ARRAY[0,1,2,3,4,5,6,7,8,9]" in SQL
-    assert "ARRAY[10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]" in SQL
+    assert "ARRAY[10,11,12,13,14,15,16,17,18,19]" in DAILY_SQL
     assert "pg_catalog.jsonb_array_length(v_patch -> 'finalists') <> LEAST(10, v_challenger_count)" in SQL
     assert "AVG(" not in SQL
+
+
+def test_daily_migration_has_one_private_input_and_no_parallel_baseline_state():
+    assert "qualification_private_icp_sets" in DAILY_SQL
+    assert "jsonb_array_length(source.icps) = 20" in DAILY_SQL
+    assert "research_lab_daily_rebenchmarks" not in DAILY_SQL
+    assert "receipt" not in DAILY_SQL.lower()
+    assert "manifest" not in DAILY_SQL.lower()
+    assert "hash_chain" not in DAILY_SQL.lower()
+
+
+def test_source_intake_migration_has_one_active_slot_and_no_image_identity():
+    assert "source_ref TEXT" in SOURCE_SQL
+    assert "source_cache_key" not in SOURCE_SQL
+    assert "ADD COLUMN IF NOT EXISTS source_sha256" not in SOURCE_SQL
+    assert "source_size_bytes BIGINT" in SOURCE_SQL
+    assert "status IN ('uploading', 'accepted', 'frozen')" in SOURCE_SQL
+    assert "lab_arena_submissions_one_active_per_miner_uq" in SOURCE_SQL
+    assert "submitted_reference" not in SOURCE_SQL
+    assert "image_digest" not in SOURCE_SQL
+    assert "manifest" not in SOURCE_SQL.lower()
+    assert "receipt" not in SOURCE_SQL.lower()
+    assert "hash_chain" not in SOURCE_SQL.lower()
+
+
+def test_source_execution_leases_source_and_removes_miner_image_columns():
+    assert SOURCE_EXECUTION_SQL.lstrip().startswith(
+        "-- 182-lab-arena-source-execution.sql"
+    )
+    assert "\nBEGIN;\n" in SOURCE_EXECUTION_SQL
+    assert SOURCE_EXECUTION_SQL.rstrip().endswith("COMMIT;")
+    assert "NOTIFY pgrst, 'reload schema';" in SOURCE_EXECUTION_SQL
+    assert "CREATE OR REPLACE FUNCTION public.lab_arena_claim_assignment(" in SOURCE_EXECUTION_SQL
+    assert "'source_ref', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
+    assert "source_cache_key" not in SOURCE_EXECUTION_SQL
+    assert "'source_sha256', CASE WHEN v_run.kind = 'execute'" not in SOURCE_EXECUTION_SQL
+    assert "'source_size_bytes', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
+    assert "'image_digest'," not in SOURCE_EXECUTION_SQL
+    assert "source_submission.status = 'frozen'" in SOURCE_EXECUTION_SQL
+    assert "PERFORM public.lab_arena_cancel_round(v_round_id, 'source_bundle_cutover')" in SOURCE_EXECUTION_SQL
+    assert "DISABLE TRIGGER lab_arena_submissions_frozen" in SOURCE_EXECUTION_SQL
+    assert "ENABLE TRIGGER lab_arena_submissions_frozen" in SOURCE_EXECUTION_SQL
+    assert "baseline_submission.is_king" in SOURCE_EXECUTION_SQL
+    assert "(v_round.configuration_doc ->> 'baseline_hotkey')" in SOURCE_EXECUTION_SQL
+    for column in (
+        "submitted_reference",
+        "image_reference",
+        "image_digest",
+        "image_size_bytes",
+    ):
+        assert "DROP COLUMN IF EXISTS %s" % column in SOURCE_EXECUTION_SQL
+    assert "CASCADE" not in SOURCE_EXECUTION_SQL
+    assert "manifest" not in SOURCE_EXECUTION_SQL.lower()
+    assert "receipt" not in SOURCE_EXECUTION_SQL.lower()
+    assert "hash_chain" not in SOURCE_EXECUTION_SQL.lower()
 
 
 def test_host_openrouter_money_caps_are_atomic_and_round_wide_per_submission():

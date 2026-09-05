@@ -4,19 +4,20 @@ The gateway runs all host code from the complete checkout at
 `/home/ec2-user/leadpoet_repo`. The canonical paired operator command is:
 
 ```bash
-: "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
+: "${EXPECTED_SHA:?set the full release SHA}"
 : "${LOCAL_READINESS_PYTHON:?set an absolute venv bin/python path}"
 cd /path/to/the/exact/candidate/checkout
 bash scripts/restart_attested_release_local.sh \
-  --commit "$EXPECTED_ATTESTED_SHA" \
+  --commit "$EXPECTED_SHA" \
   --local-python "$LOCAL_READINESS_PYTHON" \
   --component all
 ```
 
-The restart selects the supplied exact attested commit,
+The restart selects the supplied exact commit,
 stops the existing processes, fast-forwards the checkout to that exact commit,
-and then runs the existing cleanup, PCR0, enclave, dependency, process launch,
-and health workflow. Gateway and validator controllers may run concurrently,
+builds the local gateway and validator runtime identities, and then runs the
+cleanup, PCR0, enclave, dependency, process launch, and health workflow. It
+does not wait for GitHub attestation or GitHub Actions. Gateway and validator controllers may run concurrently,
 but validator activation is not independent: preparation may overlap the
 gateway restart, while every exact-release validator waits at the
 application-image boundary for the same gateway release described below.
@@ -24,7 +25,7 @@ application-image boundary for the same gateway release described below.
 `--commit <full-sha>` is the canonical operator-only, one-invocation release
 selector. The host keeps selector-aware restart controllers and their
 pre-selection helpers outside the mutable runtime checkout. A rollback changes
-only the attested runtime checkout; it cannot replace the newer controller with
+only the exact runtime checkout; it cannot replace the newer controller with
 the selected older script. `GATEWAY_DEPLOY_COMMIT` remains accepted for
 installed-launcher compatibility during an N-1-to-N handoff. Persistent copies
 in Secrets Manager or the cached/runtime environment are ignored and are not
@@ -35,10 +36,10 @@ the fetched head of `GITHUB_BRANCH`.
 
 Invoke the cutover operator at or before official SN71 block 300. The operator
 must capture that start as its first operational action. The same captured
-start remains valid while GitHub attestation, release acquisition, gateway
-restart, and validator restart continue after block 300; later stages must not
-reapply the deadline. The intended migration commit must already be on the
-configured GitHub branch.
+start remains valid while local release preparation, gateway restart, and
+validator restart continue after block 300; later stages must not reapply the
+deadline. The intended migration commit must already be on the configured Git
+branch.
 
 ```bash
 /home/ec2-user/bin/research-lab-admin pause-scoring \
@@ -367,11 +368,12 @@ worker until all of these conditions hold:
 - Public gateway V2 authority health, build-info, and immutable release
   evidence all report that exact SHA.
 
-The coordinator does not approve a release itself: both installed restart
-controllers still independently require the immutable attested release
-channel, exact manifests and artifacts, PCR0 verification, current-auditor
-workflow compatibility, and their normal readiness checks. The validator
-wrapper repeats the three live gateway checks after coordinator startup.
+The coordinator does not approve a release itself. Both installed restart
+controllers independently build and verify the selected local source, runtime
+artifacts, PCR0, current-auditor compatibility, and normal readiness checks.
+These local checks do not require a GitHub release, attestation job, or test
+job. The validator wrapper repeats the three live gateway checks after
+coordinator startup.
 If a failed attempt already completed the N-1-to-N Git handoff, a retry may
 invoke the repository launcher only after proving that its checkout and
 launcher blob equal the selected SHA. The coordinated expected SHA is checked

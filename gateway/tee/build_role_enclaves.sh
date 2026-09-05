@@ -14,7 +14,6 @@ TOPOLOGY_MODE="${GATEWAY_TEE_TOPOLOGY_MODE:-full}"
 ROLES=(
   gateway_coordinator
   gateway_scoring
-  gateway_autoresearch
 )
 
 publish_built_eif_for_verification() {
@@ -76,7 +75,7 @@ cleanup_cold_build_root() {
 trap cleanup_cold_build_root EXIT
 
 # A prior interrupted cold build can leave root-owned final-path files behind.
-# Make only the three fixed, regular artifacts readable so the transactional
+# Make only the fixed, regular artifacts readable so the transactional
 # restore path can retain or replace the complete previous set.
 for role in "${ROLES[@]}"; do
   live_output="$EIF_ROOT/tee-enclave-${role}.eif"
@@ -120,8 +119,13 @@ if [ "$RESTORED_EXACT_RELEASE" != "1" ]; then
     output="$BUILD_EIF_ROOT/tee-enclave-${role}.eif"
     measurements="$BUILD_EIF_ROOT/enclave-build-${role}.json"
     rm -f "$output" "$measurements"
-    sudo docker build \
+    sudo env \
+      DOCKER_BUILDKIT=1 \
+      BUILDX_NO_DEFAULT_ATTESTATIONS=1 \
+      docker build \
+      --pull \
       --no-cache \
+      --build-arg "SOURCE_DATE_EPOCH=0" \
       --build-arg "LEADPOET_ENCLAVE_ROLE=${role}" \
       -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" \
       -t "$raw_image" \

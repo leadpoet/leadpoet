@@ -196,7 +196,13 @@ def test_restart_accepts_exact_commit_argument_and_rejects_conflicts():
     assert "Pulling latest GitHub main" not in invalid_forward.stdout
 
 
-def test_unpinned_validator_release_wait_follows_new_main_before_shutdown():
+def test_restart_uses_the_arena_runner_capacity_default():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert 'LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-8}"' in script
+
+
+def test_unpinned_validator_local_build_follows_new_main_before_shutdown():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     start = script.index("follow_superseding_validator_release() {")
     end = script.index("\n}\n", start) + 3
@@ -215,11 +221,28 @@ def test_unpinned_validator_release_wait_follows_new_main_before_shutdown():
     assert 'LEADPOET_USE_CAPTURED_RESTART_START=1' in follow
     assert 'VALIDATOR_RELEASE_SUPERSESSION_COUNT="$next_count"' in follow
 
-    release_loop = script[script.index("for attempt in $(seq 1 300); do") :]
-    release_loop = release_loop[: release_loop.index("done")]
-    assert release_loop.count("follow_superseding_validator_release") == 2
-    assert release_loop.index("follow_superseding_validator_release") < release_loop.index(
-        "gateway.tee.release_channel_v2"
+    release_build = script[
+        script.index(
+            'echo "Preparing exact local build inputs before production shutdown"'
+        ) : script.index('record_validator_restart_timing "local_release_ready"')
+    ]
+    assert release_build.count("follow_superseding_validator_release") == 1
+    assert release_build.index("follow_superseding_validator_release") < (
+        release_build.index("gateway/tee/build_local_release_v2.sh")
+    )
+    acquisition_start = script.index(
+        'if ! follow_superseding_validator_release; then',
+        script.index('echo "Capturing the official subnet restart start before release acquisition"'),
+    )
+    acquisition_end = script.index("VALIDATOR_V2_MISSING_INPUTS=()", acquisition_start)
+    acquisition = script[acquisition_start:acquisition_end]
+    assert acquisition.count("follow_superseding_validator_release") == 4
+    assert "Acquiring the exact historical attested V2 release channel" in acquisition
+    assert '--expected-commit "$VALIDATOR_DEPLOY_SHA"' in acquisition
+    assert '--gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"' in acquisition
+    assert '--validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"' in acquisition
+    assert acquisition.index('[ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]') < (
+        acquisition.index("--ensure")
     )
     assert script.index("follow_superseding_validator_release") < script.index(
         'echo "Stopping validator processes and containers"'
@@ -434,13 +457,13 @@ def test_validator_restart_uses_bounded_active_release_handoff_before_shutdown()
     ]
 
     release_start = script.index(
-        'echo "Acquiring the independently built V2 release channel"'
+        'echo "Building the exact local gateway and validator runtime identities"'
     )
     release_ready = script.index(
-        'record_validator_restart_timing "release_ready"', release_start
+        'record_validator_restart_timing "local_release_ready"', release_start
     )
     release = script[release_start:release_ready]
-    assert "gateway.tee.release_channel_v2" in release
+    assert "gateway/tee/build_local_release_v2.sh" in release
     assert '--gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"' in release
     assert '--validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"' in release
     assert "--lineage-output" not in release
@@ -558,7 +581,8 @@ def test_standalone_active_release_sidecars_use_bounded_nofollow_reads() -> None
     assert "stat.S_ISREG(metadata.st_mode)" in standalone
     assert "max_document_bytes = 4 * 1024 * 1024" in standalone
     assert "os.read(fd, max_document_bytes + 1)" in standalone
-    assert standalone.count("load_bounded_json(") == 3
+    assert standalone.count("load_bounded_json(") == 4
+    assert "validate_historical_compact_release_lineage_v2" in standalone
     assert ".read_text(" not in standalone
     assert ".read_bytes(" not in standalone
 
@@ -611,6 +635,7 @@ def _make_forward_restart_fixture(tmp_path: Path) -> tuple[Path, str, Path]:
         Path("validator_restart.sh"),
         Path("Leadpoet/utils/exact_commit_restart_v2.py"),
         Path("gateway/tee/prepare_active_release_lineage_v2.py"),
+        Path("gateway/tee/topology.json"),
         Path("validator_tee/scripts/verify_pinned_gateway_release_v2.sh"),
     ):
         target = repo / relative
@@ -787,9 +812,153 @@ def test_exact_restart_preserves_newer_validator_restart_controller():
         in script
     )
     initial = script.index("--phase validator-initial")
-    assert 'PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT"' in script[
+    active_release_runner = script[
         script.index("run_validator_active_release_phase() {"):initial
     ]
+    assert (
+        'PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT"'
+        in active_release_runner
+    )
+    assert '"$VALIDATOR_ACTIVE_RELEASE_PREPARER"' in active_release_runner
+    assert "-m gateway.tee.prepare_active_release_lineage_v2" not in active_release_runner
+
+
+def test_active_release_phase_cannot_load_helper_from_historical_checkout(
+    tmp_path: Path,
+):
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("run_validator_active_release_phase() {")
+    end = script.index("\n}\n", start) + 3
+    function = script[start:end]
+
+    controller = tmp_path / "controller"
+    target = tmp_path / "target"
+    for root in (controller, target):
+        helper = root / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+        helper.parent.mkdir(parents=True)
+        (helper.parent.parent / "__init__.py").write_text("", encoding="utf-8")
+        (helper.parent / "__init__.py").write_text("", encoding="utf-8")
+    controller_helper = (
+        controller / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+    )
+    controller_helper.write_text(
+        "import sys\n"
+        "print('controller-helper', *sys.argv[1:])\n",
+        encoding="utf-8",
+    )
+    target_helper = target / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+    target_helper.write_text(
+        "raise SystemExit('historical checkout helper was selected')\n",
+        encoding="utf-8",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sudo = bin_dir / "sudo"
+    sudo.write_text('#!/bin/bash\nexec "$@"\n', encoding="utf-8")
+    sudo.chmod(0o755)
+    historical_hash = "sha256:" + "a" * 64
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            + function
+            + '\ncd "$TARGET_ROOT"\n'
+            + "run_validator_active_release_phase --phase validator-initial\n",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "TARGET_ROOT": str(target),
+            "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_PREPARER": str(controller_helper),
+            "VALIDATOR_HISTORICAL_TOPOLOGY_HASH": historical_hash,
+            "VALIDATOR_PYTHON_BIN": sys.executable,
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
+        },
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "controller-helper" in result.stdout
+    assert f"--historical-topology-hash {historical_hash}" in result.stdout
+    assert "historical checkout helper was selected" not in result.stderr
+
+
+def test_active_release_phase_preserves_candidate_local_release_authority_across_sudo(
+    tmp_path: Path,
+):
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("run_validator_active_release_phase() {")
+    end = script.index("\n}\n", start) + 3
+    function = script[start:end]
+
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    controller = tmp_path / "controller"
+    helper = controller / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+    helper.parent.mkdir(parents=True)
+    (helper.parent.parent / "__init__.py").write_text("", encoding="utf-8")
+    (helper.parent / "__init__.py").write_text("", encoding="utf-8")
+    helper.write_text(
+        "import json, os\n"
+        "candidate = os.environ['LEADPOET_LOCAL_RELEASE_COMMIT_SHA']\n"
+        "for name in ('LEADPOET_LOCAL_GATEWAY_RELEASE', 'LEADPOET_LOCAL_VALIDATOR_RELEASE'):\n"
+        "    with open(os.environ[name], encoding='utf-8') as handle:\n"
+        "        assert json.load(handle)['commit_sha'] == candidate\n"
+        "print(candidate)\n",
+        encoding="utf-8",
+    )
+    gateway_release = tmp_path / "gateway-release.json"
+    validator_release = tmp_path / "validator-release.json"
+    for path in (gateway_release, validator_release):
+        path.write_text('{"commit_sha":"%s"}\n' % candidate, encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sudo = bin_dir / "sudo"
+    sudo.write_text('#!/bin/bash\nenv -i PATH="$PATH" "$@"\n', encoding="utf-8")
+    sudo.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            + function
+            + "\nrun_validator_active_release_phase --phase validator-initial\n",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_PREPARER": str(helper),
+            "VALIDATOR_HISTORICAL_TOPOLOGY_HASH": "sha256:" + "a" * 64,
+            "VALIDATOR_PYTHON_BIN": sys.executable,
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
+            "LEADPOET_LOCAL_RELEASE_COMMIT_SHA": candidate,
+            "LEADPOET_LOCAL_GATEWAY_RELEASE": str(gateway_release),
+            "LEADPOET_LOCAL_VALIDATOR_RELEASE": str(validator_release),
+        },
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == candidate
 
 
 def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation():
@@ -802,7 +971,7 @@ def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation(
     ).read_text(encoding="utf-8")
 
     release_ready = script.index(
-        'if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]'
+        'record_validator_restart_timing "local_release_ready"'
     )
     pre_shutdown_alignment = script.index(
         'echo "Checking same-SHA gateway readiness before stopping the running validator"'
@@ -951,7 +1120,7 @@ def test_validator_restart_records_nonblocking_commit_bound_stage_timings():
 
     assert "leadpoet.validator_restart_timing.v1" in script
     assert 'record_validator_restart_timing "invoked"' in script
-    assert 'record_validator_restart_timing "release_ready"' in script
+    assert 'record_validator_restart_timing "local_release_ready"' in script
     assert (
         'record_validator_restart_timing "pre_shutdown_checks_complete"'
         in script

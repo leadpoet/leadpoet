@@ -113,6 +113,12 @@ def test_gateway_eif_uses_pinned_python39_offline_lock_and_unchanged_outer_conte
     assert "--no-deps" in prepare
     assert "--require-hashes" in prepare
     assert "verify-wheelhouse" in stage
+    assert "DEPLOY_SOURCE_DIRTY" not in stage
+    assert "A clean Git status does not account for ignored runtime artifacts" in stage
+    assert (
+        'git -C "$CLEAN_SOURCE_ROOT" fetch -q --depth=1 origin '
+        '"$ATTESTED_COMMIT_SHA"'
+    ) in stage
     assert prepare.count(
         'PYTHONPATH="$REPO_ROOT" python3 '
         '"$SCRIPT_DIR/sandbox_runtime_artifact.py" verify'

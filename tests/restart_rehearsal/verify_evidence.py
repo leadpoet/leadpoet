@@ -20,18 +20,8 @@ if candidate_source_root.is_dir():
     sys.path.insert(0, str(candidate_source_root))
 
 with redirect_stdout(sys.stderr):
-    from gateway.research_lab.git_tree_models import (
-        GitTreeContractError,
-        TreePolicy,
-        TreeReplacement,
-        derive_child_slot,
-        derive_tree_id,
-    )
-    from gateway.tee.supabase_schema_preflight_v2 import (
-        REQUIRED_SUPABASE_V2_RPCS,
-        REQUIRED_SUPABASE_V2_SCHEMA,
-    )
-    from leadpoet_canonical.attested_v2 import sha256_json
+    from gateway.tee.topology import ROLE_SPECS as GATEWAY_ROLE_SPECS
+
     if __package__:
         from .postgres_v2_contract_probe import (
             EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
@@ -51,34 +41,6 @@ VALIDATOR_GATEWAY_ACTIVATION_INVARIANT = (
     "validator_activation_requires_exact_gateway_release"
 )
 VALIDATOR_ROLE_RELEASE_INVARIANT = "validator_role_release_identity_exact"
-EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
-    "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
-    "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-    ),
-    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
-        "alias/leadpoet-research-lab-artifact-signing"
-    ),
-}
-GIT_TREE_SCHEMA_MIGRATIONS = {
-    "scripts/95-research-lab-git-tree-autoresearch.sql",
-    "scripts/115-research-lab-git-tree-root-replacement.sql",
-}
-GIT_TREE_VIEW_RELATIONS = {
-    "research_lab_autoresearch_tree_node_current",
-    "research_lab_autoresearch_operation_current",
-    "research_lab_autoresearch_tree_current",
-    "research_lab_autoresearch_run_tree_current",
-}
-REQUIRED_GIT_TREE_RELATION_CONTRACT = {
-    relation: {
-        "kind": "v" if relation in GIT_TREE_VIEW_RELATIONS else "r",
-        "columns": frozenset(columns),
-    }
-    for migration, relation, columns in REQUIRED_SUPABASE_V2_SCHEMA
-    if migration in GIT_TREE_SCHEMA_MIGRATIONS
-}
 KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
     "Leadpoet.utils.restart_epoch_gate",
     "gateway.tee.prepare_gateway_envelopes_v2",
@@ -272,17 +234,6 @@ def selected_validator_worker_ids(
     )
 
 
-def selected_validator_qualification_worker_ids(
-    candidate_roots: tuple[Path, ...],
-) -> tuple[int, ...]:
-    return selected_validator_worker_ids(
-        candidate_roots,
-        section_start="# Auto-detect QUALIFICATION proxies",
-        section_end="# Get enclave CID for TEE signing",
-        role="qualification",
-    )
-
-
 def selected_validator_fulfillment_worker_ids(
     candidate_roots: tuple[Path, ...],
 ) -> tuple[int, ...]:
@@ -316,13 +267,6 @@ def verify_validator_role_release_identity(
     expected_fulfillment = {
         f"leadpoet-ff-worker-{worker_id}" for worker_id in worker_ids
     }
-    qualification_ids = selected_validator_qualification_worker_ids(
-        candidate_roots
-    )
-    expected_qualification = {
-        f"leadpoet-qual-worker-{worker_id}"
-        for worker_id in qualification_ids
-    }
     containers = state.get("containers", {})
     if not isinstance(containers, dict):
         raise SystemExit("validator container evidence is unavailable")
@@ -331,14 +275,14 @@ def verify_validator_role_release_identity(
         for name in containers
         if re.fullmatch(r"leadpoet-ff-worker-[1-9][0-9]*", name)
     }
-    actual_qualification = {
+    retired_qualification = {
         name
         for name in containers
         if re.fullmatch(r"leadpoet-qual-worker-[1-9][0-9]*", name)
     }
     if (
         actual_fulfillment != expected_fulfillment
-        or actual_qualification != expected_qualification
+        or retired_qualification
     ):
         raise SystemExit(
             "candidate-derived validator worker fleet differs from the "
@@ -350,7 +294,7 @@ def verify_validator_role_release_identity(
         for name in containers
         if name == "leadpoet-validator-main"
         or re.fullmatch(
-            r"leadpoet-(?:validator|qual|ff)-worker-[1-9][0-9]*", name
+            r"leadpoet-(?:validator|ff)-worker-[1-9][0-9]*", name
         )
     }
     if "leadpoet-validator-main" not in role_names:
@@ -398,13 +342,12 @@ def verify_validator_role_release_identity(
             expected_worker_id = ""
         else:
             worker_match = re.fullmatch(
-                r"leadpoet-(validator|qual|ff)-worker-([1-9][0-9]*)", name
+                r"leadpoet-(validator|ff)-worker-([1-9][0-9]*)", name
             )
             assert worker_match is not None
             worker_kind, expected_worker_id = worker_match.groups()
             expected_role = {
                 "validator": "validator.sourcing_worker",
-                "qual": "validator.qualification_worker",
                 "ff": "validator.fulfillment_worker",
             }[worker_kind]
         if (
@@ -1031,257 +974,6 @@ def verify_migration_backed_database_contract(
         raise SystemExit(
             "migration-backed maintenance lease evidence is missing"
         )
-    git_tree = document.get("git_tree_autoresearch")
-    expected_git_tree_fields = {
-        "run_id",
-        "policy",
-        "initial_tree_id",
-        "replacement_tree_id",
-        "replacement_hash",
-        "replacement",
-        "predecessor_event",
-        "cancellation_event",
-        "candidate_id",
-        "candidate_artifact_hash",
-        "evaluation_usage",
-        "row_counts",
-        "restart_replay_exact",
-        "stale_root_rejected_atomically",
-    }
-    git_tree_commitments_valid = False
-    if isinstance(git_tree, dict) and set(git_tree) == expected_git_tree_fields:
-        try:
-            policy = TreePolicy.from_mapping(git_tree.get("policy") or {})
-            replacement = TreeReplacement.from_mapping(
-                git_tree.get("replacement") or {}
-            )
-            predecessor = git_tree.get("predecessor_event")
-            cancellation = git_tree.get("cancellation_event")
-            candidate_artifact_hash = str(
-                git_tree.get("candidate_artifact_hash") or ""
-            )
-            expected_run_id = "00000000-0000-4000-8000-000000000095"
-            expected_initial_root = sha256_json({"root": "a"})
-            expected_replacement_root = sha256_json({"root": "b"})
-            expected_initial_manifest = sha256_json({"manifest": "a"})
-            expected_replacement_manifest = sha256_json({"manifest": "b"})
-            expected_candidate_artifact = sha256_json(
-                {"candidate": "selected"}
-            )
-            expected_policy = TreePolicy(mode="active")
-            expected_initial_slot = derive_child_slot(
-                tree_id=derive_tree_id(
-                    run_id=expected_run_id,
-                    root_artifact_hash=expected_initial_root,
-                    policy=expected_policy,
-                ),
-                parent_node_id="root",
-                root_branch_id="",
-                depth=1,
-                slot_index=0,
-            )
-            expected_initial_lineage_hash = sha256_json(
-                {
-                    "schema_version": "research_lab.git_tree_lineage.v1",
-                    "tree_id": expected_initial_slot.tree_id,
-                    "node_id": expected_initial_slot.node_id,
-                    "git_commit": "c" * 64,
-                    "composition": {"root_git_commit": "a" * 64},
-                }
-            )
-            expected_initial_selection = {
-                "tree_id": expected_initial_slot.tree_id,
-                "selected_node_id": expected_initial_slot.node_id,
-                "paid_finalist_count": 1,
-                "selected_candidate_artifact_hash": expected_candidate_artifact,
-                "selected_node_git_commit": "c" * 64,
-                "selected_lineage_hash": expected_initial_lineage_hash,
-            }
-            expected_predecessor_doc = {
-                "selection_hash": sha256_json(expected_initial_selection),
-                "selection": expected_initial_selection,
-            }
-            predecessor_doc = (
-                dict(predecessor.get("event_doc") or {})
-                if isinstance(predecessor, dict)
-                else {}
-            )
-            predecessor_hash = (
-                sha256_json(
-                    {
-                        "schema_version": "research_lab.git_tree_event.v1",
-                        "tree_id": str(predecessor.get("tree_id") or ""),
-                        "event_type": str(predecessor.get("event_type") or ""),
-                        "node_id": str(predecessor.get("node_id") or ""),
-                        "previous_event_hash": str(
-                            predecessor.get("previous_event_hash") or ""
-                        ),
-                        "event_doc": predecessor_doc,
-                    }
-                )
-                if isinstance(predecessor, dict)
-                else ""
-            )
-            cancellation_doc = (
-                dict(cancellation.get("event_doc") or {})
-                if isinstance(cancellation, dict)
-                else {}
-            )
-            cancellation_hash = (
-                sha256_json(
-                    {
-                        "schema_version": "research_lab.git_tree_event.v1",
-                        "tree_id": str(cancellation.get("tree_id") or ""),
-                        "event_type": str(
-                            cancellation.get("event_type") or ""
-                        ),
-                        "node_id": str(cancellation.get("node_id") or ""),
-                        "previous_event_hash": str(
-                            cancellation.get("previous_event_hash") or ""
-                        ),
-                        "event_doc": cancellation_doc,
-                    }
-                )
-                if isinstance(cancellation, dict)
-                else ""
-            )
-            expected_initial_tree = derive_tree_id(
-                run_id=expected_run_id,
-                root_artifact_hash=expected_initial_root,
-                policy=expected_policy,
-            )
-            expected_replacement_tree = derive_tree_id(
-                run_id=expected_run_id,
-                root_artifact_hash=expected_replacement_root,
-                policy=expected_policy,
-                replacement=replacement,
-            )
-            git_tree_commitments_valid = bool(
-                git_tree.get("run_id") == expected_run_id
-                and policy == expected_policy
-                and replacement.generation == 1
-                and replacement.replaces_tree_id == expected_initial_tree
-                and replacement.cancellation_event_hash == cancellation_hash
-                and replacement.prior_root_artifact_hash
-                == expected_initial_root
-                and replacement.prior_root_manifest_hash
-                == expected_initial_manifest
-                and replacement.prior_policy_hash == expected_policy.policy_hash
-                and replacement.root_artifact_hash
-                == expected_replacement_root
-                and replacement.root_manifest_hash
-                == expected_replacement_manifest
-                and replacement.policy_hash == expected_policy.policy_hash
-                and git_tree.get("initial_tree_id") == expected_initial_tree
-                and git_tree.get("replacement_tree_id")
-                == expected_replacement_tree
-                and git_tree.get("replacement_hash")
-                == replacement.replacement_hash
-                and isinstance(predecessor, dict)
-                and set(predecessor)
-                == {
-                    "tree_id",
-                    "seq",
-                    "event_type",
-                    "node_id",
-                    "previous_event_hash",
-                    "event_doc",
-                    "event_hash",
-                }
-                and predecessor.get("tree_id") == expected_initial_tree
-                and isinstance(predecessor.get("seq"), int)
-                and not isinstance(predecessor.get("seq"), bool)
-                and int(predecessor["seq"]) >= 0
-                and predecessor.get("event_type") == "final_selected"
-                and predecessor.get("node_id")
-                == expected_initial_slot.node_id
-                and re.fullmatch(
-                    r"sha256:[0-9a-f]{64}",
-                    str(predecessor.get("previous_event_hash") or ""),
-                )
-                and predecessor_doc == expected_predecessor_doc
-                and predecessor.get("event_hash") == predecessor_hash
-                and isinstance(cancellation, dict)
-                and set(cancellation)
-                == {
-                    "tree_id",
-                    "event_type",
-                    "node_id",
-                    "previous_event_hash",
-                    "event_doc",
-                    "event_hash",
-                }
-                and cancellation.get("tree_id") == expected_initial_tree
-                and cancellation.get("event_type")
-                == "tree_cancelled_root_changed"
-                and cancellation.get("node_id") == ""
-                and cancellation.get("previous_event_hash")
-                == predecessor_hash
-                and re.fullmatch(
-                    r"sha256:[0-9a-f]{64}",
-                    str(cancellation.get("previous_event_hash") or ""),
-                )
-                and cancellation.get("event_hash") == cancellation_hash
-                and cancellation_doc.get("old_root_artifact_hash")
-                == expected_initial_root
-                and cancellation_doc.get("new_root_artifact_hash")
-                == expected_replacement_root
-                and cancellation_doc.get("old_root_manifest_hash")
-                == expected_initial_manifest
-                and cancellation_doc.get("new_root_manifest_hash")
-                == expected_replacement_manifest
-                and cancellation_doc.get("old_policy_hash")
-                == expected_policy.policy_hash
-                and cancellation_doc.get("new_policy_hash")
-                == expected_policy.policy_hash
-                and candidate_artifact_hash == expected_candidate_artifact
-                and git_tree.get("candidate_id")
-                == "candidate:" + expected_candidate_artifact.split(":", 1)[1]
-            )
-        except (GitTreeContractError, TypeError, ValueError):
-            git_tree_commitments_valid = False
-    if (
-        not isinstance(git_tree, dict)
-        or not git_tree_commitments_valid
-        or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(git_tree.get("initial_tree_id") or ""),
-        )
-        or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(git_tree.get("replacement_tree_id") or ""),
-        )
-        or git_tree.get("initial_tree_id")
-        == git_tree.get("replacement_tree_id")
-        or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(git_tree.get("replacement_hash") or ""),
-        )
-        or not re.fullmatch(
-            r"candidate:[0-9a-f]{64}",
-            str(git_tree.get("candidate_id") or ""),
-        )
-        or git_tree.get("restart_replay_exact") is not True
-        or git_tree.get("stale_root_rejected_atomically") is not True
-        or git_tree.get("evaluation_usage")
-        != {
-            "settled_cost_microusd": 250,
-            "provider_call_count": 4,
-            "terminal_operation_count": 2,
-            "unsettled_operation_ids": [],
-            "indeterminate_operation_ids": [],
-        }
-        or git_tree.get("row_counts")
-        != {
-            "trees": 2,
-            "handoffs": 1,
-            "candidates": 1,
-            "evaluation_events": 1,
-        }
-    ):
-        raise SystemExit(
-            "migration-backed Git-tree autoresearch evidence is missing"
-        )
     provider_append = document.get("provider_outcome_append")
     if (
         not isinstance(provider_append, dict)
@@ -1304,30 +996,12 @@ def verify_migration_backed_database_contract(
             "research_lab_attested_ancestry_activations_v2",
             "research_lab_allocation_settlement_frontiers_v2",
             "research_lab_allocation_settlement_frontier_activation_v2",
-            *REQUIRED_GIT_TREE_RELATION_CONTRACT,
         } <= set(relations)
     ):
         raise SystemExit(
             "migration-backed durable relation evidence is missing"
         )
-    for relation, expected in REQUIRED_GIT_TREE_RELATION_CONTRACT.items():
-        observed = relations.get(relation)
-        if (
-            not isinstance(observed, dict)
-            or observed.get("kind") != expected["kind"]
-            or not isinstance(observed.get("columns"), list)
-            or not expected["columns"].issubset(observed["columns"])
-        ):
-            raise SystemExit(
-                "migration-backed Git-tree relation evidence differs: "
-                + relation
-            )
     rpcs = document.get("rpcs")
-    required_git_tree_rpcs = {
-        function_name
-        for migration, function_name in REQUIRED_SUPABASE_V2_RPCS
-        if migration in GIT_TREE_SCHEMA_MIGRATIONS
-    }
     if (
         not isinstance(rpcs, list)
         or "persist_research_lab_ancestry_checkpoint_v2" not in rpcs
@@ -1337,7 +1011,6 @@ def verify_migration_backed_database_contract(
         or "research_lab_ancestry_checkpoint_bootstrap_contract_v2" not in rpcs
         or "research_lab_allocation_frontier_bootstrap_contract_v2" not in rpcs
         or "research_lab_compact_checkpoint_graph_contract_v1" not in rpcs
-        or not required_git_tree_rpcs.issubset(rpcs)
     ):
         raise SystemExit(
             "migration-backed ancestry checkpoint RPC evidence is missing"
@@ -1502,162 +1175,6 @@ def verify_durable_boundary_state(
     }
 
 
-def verify_gateway_private_model_environment(rows: list[dict]) -> None:
-    gateway_processes = [
-        row
-        for row in rows
-        if row.get("kind") == "process"
-        and row.get("process") == "gateway.main"
-        and row.get("status") == "started"
-    ]
-    if len(gateway_processes) != 1:
-        raise SystemExit(
-            "gateway rehearsal did not launch exactly one gateway.main process"
-        )
-    if (
-        gateway_processes[0].get("environment_contract")
-        != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
-    ):
-        raise SystemExit(
-            "gateway.main private-model source environment differs from "
-            "the canonical restart contract"
-        )
-
-
-def verify_gateway_provider_preflight(
-    rows: list[dict],
-    *,
-    transition: str,
-) -> None:
-    if transition != "forward":
-        return
-    expected = {
-        ("api.exa.ai", "/search"),
-        ("api.scrapingdog.com", "/account"),
-    }
-    observed = {
-        (str(row.get("host") or ""), str(row.get("path") or ""))
-        for row in rows
-        if row.get("operation") == "provider_transport"
-        and row.get("status") == 200
-    }
-    if not expected <= observed:
-        raise SystemExit(
-            "gateway provider preflight did not complete through both "
-            "authenticated provider boundaries"
-        )
-    append_rows = [
-        (ordinal, row)
-        for ordinal, row in enumerate(rows)
-        if row.get("kind") == "local-postgrest"
-        and row.get("operation")
-        in {
-            "provider_outcome_checkpoint_appended",
-            "provider_outcome_checkpoint_batch_appended",
-        }
-        and row.get("status") == "ok"
-        and row.get("result_status") in {"inserted", "existing"}
-    ]
-    checkpoint_hashes = {
-        str(row.get("checkpoint_hash") or "")
-        for _ordinal, row in append_rows
-    }
-    appended_sequence_count = sum(
-        (
-            int(row.get("checkpoint_count") or 0)
-            if row.get("operation")
-            == "provider_outcome_checkpoint_batch_appended"
-            else 1
-        )
-        for _ordinal, row in append_rows
-    )
-    if not append_rows or appended_sequence_count < 2 or not checkpoint_hashes:
-        raise SystemExit(
-            "gateway provider preflight did not durably append both "
-            "provider outcomes"
-        )
-    for _append_ordinal, append_row in append_rows:
-        batch = (
-            append_row.get("operation")
-            == "provider_outcome_checkpoint_batch_appended"
-        )
-        if (
-            append_row.get("method") != "POST"
-            or append_row.get("target")
-            != (
-                "append_research_lab_provider_outcome_checkpoints_v2"
-                if batch
-                else "append_research_lab_provider_outcome_checkpoint_v2"
-            )
-            or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(append_row.get("checkpoint_hash") or ""),
-            )
-        ):
-            raise SystemExit(
-                "gateway provider preflight atomic checkpoint "
-                "acknowledgement is invalid"
-            )
-        if batch:
-            sequences = append_row.get("sequences")
-            if (
-                not isinstance(sequences, list)
-                or len(sequences)
-                != int(append_row.get("checkpoint_count") or 0)
-                or not sequences
-                or any(
-                    not isinstance(sequence, int)
-                    or isinstance(sequence, bool)
-                    or sequence <= 0
-                    for sequence in sequences
-                )
-            ):
-                raise SystemExit(
-                    "gateway provider preflight batch checkpoint "
-                    "acknowledgement is invalid"
-                )
-        elif (
-            not isinstance(append_row.get("sequence"), int)
-            or isinstance(append_row.get("sequence"), bool)
-            or int(append_row["sequence"]) <= 0
-        ):
-            raise SystemExit(
-                "gateway provider preflight checkpoint sequence is invalid"
-            )
-    first_append_ordinal = append_rows[0][0]
-    readback_rows = [
-        (ordinal, row)
-        for ordinal, row in enumerate(rows)
-        if row.get("kind") == "local-postgrest"
-        and row.get("operation")
-        == "provider_outcome_checkpoint_readback"
-        and row.get("status") == "ok"
-    ]
-    if not any(ordinal < first_append_ordinal for ordinal, _row in readback_rows):
-        raise SystemExit(
-            "gateway provider preflight did not exercise checkpoint "
-            "restart recovery before appending"
-        )
-    if any(ordinal > first_append_ordinal for ordinal, _row in readback_rows):
-        raise SystemExit(
-            "gateway provider preflight issued a redundant checkpoint "
-            "readback after atomic append"
-        )
-    if any(
-        row.get("kind") == "local-postgrest"
-        and row.get("status") == "rejected"
-        and (
-            "provider_outcome" in str(row.get("target") or "")
-            or "provider_outcome" in str(row.get("path") or "")
-        )
-        for row in rows
-    ):
-        raise SystemExit(
-            "gateway provider preflight encountered a rejected checkpoint "
-            "operation"
-        )
-
-
 def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
     persistence_ordinals = [
         ordinal
@@ -1772,23 +1289,97 @@ def selected_weight_storage_preflight_capability(
     )
 
 
+def selected_weight_storage_preflight_pins_epoch(
+    candidate_roots: tuple[Path, ...],
+) -> bool:
+    relative = Path("gw_restart.sh")
+    stage_marker = (
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"'
+    )
+    end_marker = 'GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"'
+    module = "gateway.tee.verify_weight_submission_ready_v2"
+    for root in candidate_roots:
+        source_path = root / relative
+        if not source_path.is_file():
+            continue
+        source = source_path.read_text(encoding="utf-8")
+        stage_start = source.find(stage_marker)
+        stage_end = source.find(end_marker, stage_start + len(stage_marker))
+        if stage_start < 0 or stage_end < 0:
+            raise SystemExit(
+                "candidate gateway restart storage preflight stage is unavailable"
+            )
+        stage_lines = source[stage_start:stage_end].splitlines()
+        invocations: list[list[str]] = []
+        for ordinal, line in enumerate(stage_lines):
+            if line.strip() != "run_prepared_gateway_module \\":
+                continue
+            arguments: list[str] = []
+            for argument_line in stage_lines[ordinal + 1 :]:
+                argument = argument_line.strip()
+                continued = argument.endswith("\\")
+                if continued:
+                    argument = argument[:-1].rstrip()
+                arguments.append(argument)
+                if not continued:
+                    break
+            if arguments[:2] == [module, "--storage-read-preflight"]:
+                invocations.append(arguments)
+        legacy_arguments = [module, "--storage-read-preflight"]
+        pinned_arguments = [
+            *legacy_arguments,
+            '--epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"',
+        ]
+        if invocations == [legacy_arguments]:
+            return False
+        if invocations == [pinned_arguments]:
+            return True
+        raise SystemExit(
+            "candidate gateway restart storage preflight invocation is unknown"
+        )
+    raise SystemExit(
+        "candidate gateway restart source is unavailable for capability proof"
+    )
+
+
 def verify_gateway_weight_readiness_invocations(
     rows: list[dict],
     *,
     candidate_sha: str,
     transition: str = "forward",
     storage_preflight_supported: bool = True,
+    storage_preflight_pins_epoch: bool = False,
 ) -> None:
     module = "gateway.tee.verify_weight_submission_ready_v2"
     if not storage_preflight_supported and transition != "rollback":
         raise SystemExit(
             "current release does not declare the required weight storage preflight"
         )
+    observed = [
+        row
+        for row in rows
+        if row.get("kind") == "python-module"
+        and row.get("module") == module
+    ]
     expected_prefix = []
     if storage_preflight_supported:
+        argv = ["-m", module, "--storage-read-preflight"]
+        if storage_preflight_pins_epoch:
+            observed_argv = observed[0].get("argv") if observed else None
+            if (
+                not isinstance(observed_argv, list)
+                or len(observed_argv) != 5
+                or observed_argv[:4] != [*argv, "--epoch"]
+                or not str(observed_argv[4]).isdigit()
+            ):
+                raise SystemExit(
+                    "gateway launcher did not execute the exact production "
+                    f"weight storage preflight: {observed!r}"
+                )
+            argv = list(observed_argv)
         expected_prefix.append(
             {
-                "argv": ["-m", module, "--storage-read-preflight"],
+                "argv": argv,
                 "source_kind": "candidate_archive",
             }
         )
@@ -1807,12 +1398,6 @@ def verify_gateway_weight_readiness_invocations(
         ],
         "source_kind": "candidate_checkout",
     }
-    observed = [
-        row
-        for row in rows
-        if row.get("kind") == "python-module"
-        and row.get("module") == module
-    ]
     prefix_count = len(expected_prefix)
     if (
         len(observed) > prefix_count
@@ -1968,19 +1553,26 @@ def main() -> int:
             raise SystemExit(
                 "targeted fault scenario cannot satisfy exact restart evidence"
             )
+        candidate_roots = (
+            Path("/home/ec2-user/leadpoet_repo"),
+            Path("/home/ec2-user/leadpoet/leadpoet"),
+        )
         storage_preflight_supported = (
             selected_weight_storage_preflight_capability(
-                (
-                    Path("/home/ec2-user/leadpoet_repo"),
-                    Path("/home/ec2-user/leadpoet/leadpoet"),
-                )
+                candidate_roots
             )
+        )
+        storage_preflight_pins_epoch = (
+            selected_weight_storage_preflight_pins_epoch(candidate_roots)
+            if storage_preflight_supported
+            else False
         )
         verify_gateway_weight_readiness_invocations(
             rows,
             candidate_sha=candidate_sha,
             transition=transition,
             storage_preflight_supported=storage_preflight_supported,
+            storage_preflight_pins_epoch=storage_preflight_pins_epoch,
         )
         if transition == "forward":
             launcher_log = Path(
@@ -2001,7 +1593,7 @@ def main() -> int:
                 )
         verify_chain_settlement_durable_readback(rows)
         required_gateway_order = [
-            "module:gateway.tee.release_channel_v2",
+            "module:gateway.tee.local_release_v2",
             "module:gateway.tee.prepare_gateway_envelopes_v2",
         ]
         if storage_preflight_supported:
@@ -2022,13 +1614,15 @@ def main() -> int:
             ]
         )
         require_order(labels, required_gateway_order)
-        verify_gateway_private_model_environment(rows)
-        verify_gateway_provider_preflight(rows, transition=transition)
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")
         )
-        if len(state.get("enclaves", [])) != 3:
-            raise SystemExit("gateway did not start the exact three-enclave topology")
+        expected_enclave_count = len(GATEWAY_ROLE_SPECS)
+        if len(state.get("enclaves", [])) != expected_enclave_count:
+            raise SystemExit(
+                "gateway did not start the candidate-defined "
+                f"{expected_enclave_count}-enclave topology"
+            )
     else:
         restart_invariants = verify_validator_gateway_activation_barrier(
             serialized_adapter_events(),
@@ -2046,7 +1640,7 @@ def main() -> int:
         require_order(
             labels,
             [
-                "module:gateway.tee.release_channel_v2",
+                "module:gateway.tee.local_release_v2",
                 "module:validator_tee.host.refresh_hotkey_config_v2",
                 "module:validator_tee.host.restart_preflight_v2",
                 "nitro:build_enclave",

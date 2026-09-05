@@ -630,7 +630,7 @@ class LeadOutputRedacted(BaseModel):
 #   * The genuinely hard part of fulfillment is surfacing companies with
 #     intent, not finding employees once you have the company.  Making
 #     the competition target that hard part lets every fulfillment miner
-#     benefit from a constantly-improving company-sourcing model.
+#     benefit from the best agent selected by the daily competition.
 #
 # This is THE output schema for the model competition (as of May 2026).
 # ``LeadOutput`` below is retained because gateway-side fulfillment code
@@ -702,17 +702,6 @@ class CompanyOutput(BaseModel):
     # parse — they fail the scorer's attribute gate instead of the schema.
     required_attribute: Optional[RequiredAttributeClaim] = Field(
         None, description="Model-reported required_attribute validation (scorer-enforced)")
-
-    # Retain the model-owned proof as an opaque optional mapping at this shared
-    # parsing boundary. Only the exact Research Lab v2 scorer validates and
-    # requires its closed schema; v1/public paths must continue to ignore it.
-    company_fit_proof_receipt: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Model-owned company-fit audit receipt; validated only by the "
-            "exact Research Lab v2 scorer"
-        ),
-    )
 
     @field_validator('company_name')
     @classmethod
@@ -952,14 +941,14 @@ class LeadScoreBreakdown(BaseModel):
     Detailed score breakdown for a single company.
     Used internally during scoring and included in transparency logs.
 
-    Score caps used by ``score_company`` / opt-in Research Lab scorers:
+    Score caps used by ``score_company`` and the Arena scorer:
       * ``icp_fit``        ≤ 40
       * ``decision_maker`` = 0   (no contact dimension in the model
                                   competition; field kept on the
                                   breakdown for backward compatibility
                                   with downstream readers)
-      * ``intent_signal``  ≤ 100  (after time decay; legacy scorer caps at 60,
-                                   autoresearch intent_v2 caps at 100)
+      * ``intent_signal``  ≤ 100  (after time decay; the public scorer caps at
+                                   60 and the Arena scorer caps at 100)
       * Total              ≤ 100
 
     NOTE: The historical class name ``LeadScoreBreakdown`` is retained
@@ -987,7 +976,7 @@ class LeadScoreBreakdown(BaseModel):
     # Failure tracking
     failure_reason: Optional[str] = Field(None, description="Set when pre-checks fail (score = 0)")
 
-    # Per-signal detail (autoresearch / Research Lab benchmark only).  One row
+    # Per-signal detail for the Arena benchmark. One row
     # per company intent signal: {raw, after_decay, decay, confidence,
     # date_status, matched_icp_signal, evidence_type}.  Optional and defaults to
     # None so legacy lead-mode callers and persisted breakdown readers are
@@ -995,7 +984,7 @@ class LeadScoreBreakdown(BaseModel):
     # coverage stats without re-scoring.
     intent_signals_detail: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="Per-signal scoring detail (autoresearch benchmark); None for lead-mode",
+        description="Per-signal Arena scoring detail; None for lead-mode",
     )
     # Durable verifier-gate receipts (PR-28 audit): audit documents from the
     # deterministic/semantic industry gate — modes, deterministic detail,

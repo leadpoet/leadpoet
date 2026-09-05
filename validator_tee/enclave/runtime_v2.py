@@ -29,14 +29,16 @@ VALIDATOR_PHYSICAL_ROLE = "validator_weights"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
-_APPROVED_RELEASE_ROLES = frozenset(
+_CURRENT_RELEASE_ROLES = frozenset(
     {
         "gateway_coordinator",
         "gateway_scoring",
-        "gateway_autoresearch",
         "validator_weights",
     }
 )
+_HISTORICAL_RELEASE_ROLES = _CURRENT_RELEASE_ROLES | {
+    "gateway_autoresearch"
+}
 _STATEFUL_EPOCH_MODE = "stateful_v1"
 _EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
 _CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
@@ -313,7 +315,13 @@ def validate_gateway_release_lineage(value: Mapping[str, Any]) -> Dict[str, Any]
                 "validator gateway release lineage entry is invalid"
             )
         roles = release.get("roles")
-        if not isinstance(roles, Mapping) or set(roles) != _APPROVED_RELEASE_ROLES:
+        observed_roles = set(roles) if isinstance(roles, Mapping) else set()
+        allowed_roles = (
+            {_CURRENT_RELEASE_ROLES}
+            if commit == current_commit
+            else {_CURRENT_RELEASE_ROLES, _HISTORICAL_RELEASE_ROLES}
+        )
+        if not isinstance(roles, Mapping) or frozenset(observed_roles) not in allowed_roles:
             raise ValidatorRuntimeV2Error(
                 "validator approved release lineage roles are incomplete"
             )

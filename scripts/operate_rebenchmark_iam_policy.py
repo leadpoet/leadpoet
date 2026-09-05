@@ -129,7 +129,7 @@ MANAGED_POLICY_DOCUMENT_HASHES = {
         "sha256:f7095b6fe01bdf5f26ee1adc9e5bfa82ba3246acf293113c5d14fdd5410ec731"
     ),
     "LeadpoetParityControllerData": (
-        "sha256:bf9b4b1fd543cbec1a64fecd79fb76eb7c79f8309e138f8cdb227e7ff11fb9b8"
+        "sha256:572c3931b63b87053ae923b483cb39acd61a8ffe33278fb6f77250c65b242618"
     ),
     "LeadpoetParityControllerEc2Launch": (
         "sha256:5466df394b6369c338ff9efdae6d6e7ba945506bca9dec1f21db11d0edcace3e"

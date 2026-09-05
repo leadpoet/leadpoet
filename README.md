@@ -75,16 +75,16 @@ python neurons/miner.py \
 
 The miner will ask which mode to run:
 
-- **Auto Research**
+- **Agent Competition**
 - **Fulfillment**
 - **Submit API Source**
 - **Check API Source Submissions**
 
 ### Research Lab
 
-Research Lab supports the agent-bundle Arena and the existing research reward
-path. They are separate. The Arena can be disabled without changing the old
-path.
+Research Lab now operates the agent-bundle Arena. It creates no model changes
+and runs no autoresearch or code-edit loop. Existing reward settlement remains
+downstream of the Arena result.
 
 #### Agent Bundle Arena
 
@@ -93,25 +93,92 @@ miner-submitted forks on the same ICPs. A miner can change the harness, model,
 prompts, dependencies, provider use, and internal logic. The benchmark score is
 the quality authority.
 
-The stable boundary is one public OCI image and one fixed `/agent/run`
-entrypoint. The bundle reads the documented ICP input and writes the documented
-company output. Provider credentials come from the host. Miners do not submit
-keys or OCI process settings. The image location does not determine identity,
-rank, or the winner.
+The public starting point is
+[`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
+Fork it or replace any part of it. The one source-code contract is:
+
+```python
+def run_icp(icp: dict) -> list[dict]:
+    """Return at most five companies for one ICP."""
+```
+
+`harness.py` must expose this function. It can define the function or re-export
+it from vendored code. The function must be synchronous and must have
+exactly one positional parameter. It cannot have keyword-only parameters,
+`*args`, or `**kwargs`. It must return JSON-ready company objects in the schema
+below. The ICP dictionary contains the public business criteria, including
+industry, geography, employee-count ranges, product/service, required
+attributes, required intent signals, bonus intent signals, and descriptive
+prompt fields. Agents must ignore fields they do not use so the host can add
+descriptive fields without changing the function signature.
+
+Each returned company must have this shape:
+
+```json
+{
+  "company_name": "Example",
+  "company_website": "https://example.com/",
+  "company_linkedin": "https://www.linkedin.com/company/example/",
+  "industry": "Software",
+  "employee_count": "51-200",
+  "company_stage": "Series A",
+  "country": "United States",
+  "state": "California",
+  "fit_summary": "Why this company fits the ICP.",
+  "fit_evidence_urls": ["https://example.com/about"],
+  "intent_signals": [{
+    "matched_icp_signal": 0,
+    "description": "The required recent event.",
+    "date": "2026-08-20",
+    "why_now": "Why a sales representative should contact the company now.",
+    "url": "https://example.com/news/event",
+    "snippet": "Source text that supports the claim."
+  }],
+  "required_attribute": {
+    "text": "The required company characteristic.",
+    "passed": true,
+    "evidence_url": "https://example.com/about",
+    "evidence_quote": "Source text that proves the characteristic.",
+    "explanation": "Why the evidence satisfies the requirement."
+  }
+}
+```
+
+`company_linkedin`, `company_stage`, `state`, and `required_attribute` can be
+empty or omitted only where the public contract permits it. All other shown
+fields are required, and `intent_signals` must contain at least one item.
+Provider credentials come from the Arena host and never from a miner
+submission. The public harness README contains a complete ICP example.
+
+An agent can vendor its Python code and can include an optional
+`requirements.txt`. The runner accepts normal package names and version
+constraints and installs binary wheels only. URLs, local paths, nested
+requirements files, VCS dependencies, and source builds are not accepted.
+Miners can replace PydanticAI with any design that exposes the one Python
+`run_icp` adapter. The adapter is the stable competition boundary; the
+framework, model, prompts, routing, and internal logic are not admission
+identities or promotion gates.
+
+Submit the local source directory. No Dockerfile, public registry, image tag,
+commit identity, receipt, or release manifest is part of miner admission:
+
+```bash
+python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
+  --wallet-name default --hotkey-name default
+```
 
 Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
 [input contract](lab_arena/runner.py), [output contract](lab_arena/output.py),
 [provider adapter and socket protocol](lab_arena/shim.py), and
-[submission helper](scripts/lab_arena_miner.py). The existing
-[qualification model](miner_models/qualification_model/README.md) is an
-optional sourcing-logic example; a competition image must wrap any chosen
-logic with `/agent/run`. Examples are documentation, not admission or scoring
-requirements.
+[submission helper](scripts/lab_arena_miner.py). Examples are documentation,
+not admission or scoring requirements.
 
-The registered `LAB_ARENA_BASELINE_HOTKEY` submits the initial public baseline
-for each mode through the same endpoint and image checks as every miner. It
-becomes that mode's first incumbent. Later winners use the normal carry-forward
-behavior.
+At the first cutoff, the Arena automatically enters the configured public
+PydanticAI source archive through the same source checks, runner, provider
+limits, and scorer as miner bundles. The downloaded bytes are frozen for that
+round. Every new daily round downloads and scores the public baseline again;
+the previous miner winner remains in reward history but is not the next day's
+threshold.
 
 #### Submit API Source
 
@@ -131,7 +198,8 @@ that passes the measured provenance precheck automatically receives **0.2% of
 emissions per epoch for 20 epochs**. Leg 1 is processed FIFO and currently
 allows up to 50 approvals per UTC day; separate per-hotkey anti-spam limits also
 apply. Operator testing and catalog provisioning happen later and do not gate
-Leg 1; only provisioned catalog sources can be used by improvement loops.
+Leg 1; only provisioned catalog sources can be used by approved product
+integrations.
 
 Choose **Check API Source Submissions** to view your own submission decisions
 and Leg 1 reward state. The miner signs this read request with the same hotkey
@@ -141,69 +209,6 @@ raw validation evidence, duplicate matches, catalog contents, or sources used
 by the current model. An **approved** result means that the automated Leg 1
 approval boundary passed; it does not mean that the source is already in the
 catalog or model.
-
-#### Auto Research
-
-How it works:
-
-1. The miner securely provides an OpenRouter API key and management key.
-2. The miner enters a research direction.
-3. The miner pays the loop-start fee in TAO to cover benchmark costs.
-4. The TEE gateway runs the auto-research loop.
-5. Candidate improvements are scored.
-6. Miners are provided with their respective rewards.
-
-Research Lab rewards result from provided compute or model improvements:
-
-- Compute reimbursement covers a portion of verified compute spend from research loops based on the amount of participation.
-- Verified model improvements result in substantial rewards when a candidate improvement beats the current model benchmark.
-
-At a high level, rewards are calculated per reward epoch:
-
-```text
-lab_allocation = subnet_emissions * research_lab_allocation_rate
-compute_credit = verified_openrouter_spend * participation_multiplier
-improvement_credit = max(0, candidate_score - benchmark_score - improvement_threshold)
-```
-
-If there are no winning improvements, the Research Lab allocation is split across participating miners by compute credit:
-
-```text
-miner_reward = lab_allocation * miner_compute_credit / total_compute_credit
-```
-
-If there are winning improvements, verified compute reimbursement is paid first, capped by the miner's remaining verified spend. If reimbursement demand is larger than available reimbursement capacity, reimbursements are prorated by compute credit. If reimbursement demand is smaller than available capacity, the unused amount flows to winning improvements.
-
-```text
-reimbursement_reward = min(remaining_verified_spend, reimbursement_capacity * miner_compute_credit / total_compute_credit)
-winner_reward = remaining_lab_allocation * winner_improvement_credit / total_winner_improvement_credit
-```
-
-The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. The validator and verifier code contain the replayable reward and weight checks.
-
-### Existing Research Runtime
-
-Research Lab runs daily rebenchmarks and candidate scoring against the current model runtime image listed in the `current.json` manifest. Hosted auto-research builds start from that same image, which gives every candidate the same baseline before changes are tested.
-
-For each candidate, the gateway extracts the runtime app from `/app` and gives the research model limited access to inspect that extracted source. The model can read the code it needs in order to suggest an improvement, but it does not get general repository access, shell access, credentials, deployment access, or access to files outside the runtime scope.
-
-After the model proposes a patch, the system checks that the patch only touches files the model actually read during that loop and only within the allowed edit paths. If the patch passes those checks, it is applied to the extracted runtime source, rebuilt into a candidate image, and evaluated through the normal scoring and benchmarking pipeline.
-
-The research model itself is not public to prevent miners from overfitting to the model's suggestions, prompts, hidden assumptions, or internal scoring preferences. Miners compete on the measured quality of their submitted candidates, not on reverse-engineering the improvement model.
-
-The TEE runs the non-public improvement model in an isolated environment while recording the runtime image, inspected files, proposed patch, scope checks, rebuilt candidate, and evaluation result.
-
-Candidate patches are limited to the extracted runtime code paths inside the runtime image:
-
-- `gateway/`
-- `qualification/`
-- `sourcing_model/`
-- `validator_models/`
-- `research_lab_adapter.py`
-
-`requirements.txt` may be used as a build/runtime dependency when present in the image, but it is not an editable candidate target. New top-level folders, Dockerfiles, dependency files, CI files, deployment scripts, lockfiles, env files, and credential handling are outside the Research Lab edit scope.
-
-These are runtime image paths, so some entries may not exist as top-level folders in this repository.
 
 ### Fulfillment
 
@@ -276,7 +281,7 @@ python neurons/validator.py \
   --subtensor_network finney
 ```
 
-Validators verify Research Lab receipts, evaluation bundles, fulfillment scoring, and final weight allocation.
+Validators verify the canonical weight allocation and submit the resulting subnet weights.
 
 Useful validator environment variables:
 
@@ -290,30 +295,25 @@ See [`env.example`](env.example) for the full configuration template.
 
 ## Rewards
 
-Rewards are designed around both Research Lab and Fulfillment:
+Rewards are designed around both the Research Lab competition and Fulfillment:
 
-- Research Lab miners can earn reimbursement-style emissions for verified compute they provide.
-- Research Lab miners that produce benchmarked model improvements can earn larger improvement rewards.
+- Research Lab miners submit agent bundles that are scored against the daily public baseline.
+- Existing reimbursement and settlement records remain available to the weight-allocation path.
 - Fulfillment rewards winning leads from client requests.
 - The weekly leaderboard rewards top fulfillment performance.
 
-Exact weights are computed by validators from signed gateway bundles, verified compute records, benchmark results, allocation records, and current subnet policy. Research Lab reward calculations can be independently checked from the emitted receipts, signed audit logs, and Arweave-anchored checkpoints.
+Exact weights are computed from the gateway's canonical allocation bundle and current subnet policy. The validator and auditor verify and submit the same bundle.
 
 ## Transparency
 
-Leadpoet uses a gateway TEE for Research Lab and Fulfillment outputs. The gateway enclave signs receipts, scoring bundles, allocation records, and compact audit anchors with an enclave-held signing key.
+The validator weight path remains attested. Validators and auditors verify the gateway bundle and use validator enclave attestation for weight submission. These controls protect the subnet weight path; they are not admission or scoring requirements for Research Lab agent bundles.
 
-The gateway attestation binds the enclave public key to the gateway runtime measurement. Validators and auditors verify the Nitro attestation, verify enclave signatures before treating signed artifacts as gateway outputs, and verify validator weight submissions by matching the validator's attested PCR0 to an independently rebuilt validator enclave PCR0 from the same repository commit.
-
-Audit artifacts include the hashes, status transitions, signatures, and reward inputs needed to check validator behavior. They do not expose model code, hidden ICPs, provider secrets, raw private data, or candidate patch internals.
-
-Arweave checkpoints anchor the signed artifact hashes and status transitions used in reward calculations. Auditors can match checkpoint data to signed gateway artifacts, verify enclave signatures and attestation, recompute reward inputs, and compare validator weights against the published policy.
+Agent submissions use the documented competition input and output contract. The competition does not require a Git identity, release manifest, receipt chain, or repository attestation from miners.
 
 Useful tools:
 
 ```bash
 python scripts/verify_attestation.py
-python scripts/decompress_arweave_checkpoint.py
 ```
 
 For more detail, see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md).

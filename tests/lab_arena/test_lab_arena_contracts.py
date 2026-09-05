@@ -33,14 +33,13 @@ def signed(keypair: Keypair, **overrides):
 
 
 def test_public_constants_are_the_plan_values():
-    assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.BENCHMARK_ICP_COUNT, c.FINALIST_COUNT) == (10, 20, 30, 10)
-    assert c.GENERATION_BATCH_SIZES == (20, 10)
+    assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.BENCHMARK_ICP_COUNT, c.FINALIST_COUNT) == (10, 10, 20, 10)
     assert (c.MAX_CHALLENGERS, c.RUNNER_SLOT_CEILING, c.MAX_ATTEMPTS_PER_ASSIGNMENT) == (256, 8, 2)
     assert c.LAB_ARENA_POOL_PERCENT == 25
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert (c.EPOCHS_PER_REWARD_WEEK, c.ELIGIBILITY_MAX_EPOCHS) == (140, 45)
     assert c.PROVIDERS == ("scrapingdog", "deepline", "openrouter") and c.CALL_QUOTAS_PER_ICP == {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
-    assert (c.ICP_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 420)
+    assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 900, 1200)
     from leadpoet_canonical.constants import EPOCH_LENGTH
 
     assert EPOCH_LENGTH * 12 * c.EPOCHS_PER_REWARD_WEEK == 7 * 24 * 3600
@@ -100,6 +99,45 @@ def test_signed_request_roundtrip_and_rejections():
         signed(keypair, scope="lab_arena.other.v1")
 
 
+def test_completion_signed_request_uses_its_larger_shared_limit():
+    keypair = Keypair.create_from_uri("//Alice")
+    chunks = ["x" * 65_000 for _ in range(32)]
+    envelope = signed(
+        keypair,
+        scope=c.SCOPE_COMPLETE,
+        body={"run_id": "run-1", "output": {"chunks": chunks}},
+    )
+    assert len(c.canonical_json(envelope).encode("utf-8")) > c.REQUEST_LIMITS.max_total_bytes
+    assert c.COMPLETION_REQUEST_LIMITS.max_total_bytes > 2 * 1024 * 1024
+    assert c.validate_signed_request(
+        envelope,
+        expected_scope=c.SCOPE_COMPLETE,
+        now=int(time.time()),
+        verify_signature=wallet_verifier,
+    ) == envelope
+
+    oversized = signed(
+        keypair,
+        scope=c.SCOPE_COMPLETE,
+        body={"run_id": "run-1", "output": {"chunks": chunks + chunks[:2]}},
+    )
+    with pytest.raises(c.ArenaContractError):
+        c.validate_signed_request(
+            oversized,
+            expected_scope=c.SCOPE_COMPLETE,
+            now=int(time.time()),
+            verify_signature=wallet_verifier,
+        )
+
+    with pytest.raises(c.ArenaContractError):
+        c.validate_signed_request(
+            envelope,
+            expected_scope=c.SCOPE_CLAIM,
+            now=int(time.time()),
+            verify_signature=wallet_verifier,
+        )
+
+
 def test_hashed_documents():
     document = c.hashed_document({"b": 2, "a": [1, {"z": None}]}, "doc_hash")
     assert c.verify_hashed_document(document, "doc_hash") == document["doc_hash"]
@@ -125,14 +163,8 @@ def base_round_configuration():
             "final_scoring_close": "2026-09-02T12:00:01Z",
             "publication_deadline": "2026-09-02T12:00:02Z",
         },
-        "generator": {
-            "model": "perplexity/sonar-pro",
-            "settings": {"temperature": 0.7, "max_tokens": 16000},
-            "batch_sizes": [20, 10],
-            "max_generation_attempts": 12,
-        },
         "stage_1_icp_count": 10,
-        "stage_2_icp_count": 20,
+        "stage_2_icp_count": 10,
         "finalist_count": 10,
         "max_challengers": 15,
         "runner_slot_ceiling": 8,
@@ -150,10 +182,9 @@ def base_round_configuration():
         "scorer_image_digest": "sha256:" + "a" * 64,
         "scorer_image_reference": "registry.example/lab/scorer@sha256:" + "a" * 64,
         "baseline_hotkey": Keypair.create_from_uri("//Baseline").ss58_address,
+        "baseline_source_url": "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
         "runner_hotkeys": [Keypair.create_from_uri("//Alice").ss58_address, Keypair.create_from_uri("//Floor").ss58_address],
         "banned_hotkeys": [],
-        "image_rules": {"schema_version": "leadpoet.lab_arena.image_rules.v1", "max_image_bytes": 2147483648, "max_layers": 64, "max_rootfs_bytes": 8589934592, "platform": {"os": "linux", "architecture": "amd64"}, "layer_media_types": ["application/vnd.oci.image.layer.v1.tar+gzip"]},
-        "registry_repository": "arena.example/lab-arena/models",
         "reward_constants": {"pool_percent": 25, "pool_basis": "total_emissions", "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
     }
 
@@ -163,7 +194,7 @@ def test_round_configuration_contains_only_plain_public_settings():
     assert config == base_round_configuration()
     for mutate in (
         lambda d: d.update(stage_1_icp_count=9),
-        lambda d: d.update(stage_2_icp_count=19),
+        lambda d: d.update(stage_2_icp_count=9),
         lambda d: d.update(finalist_count=9),
         lambda d: d.update(max_challengers=257),
         lambda d: d.update(runner_slot_ceiling=9),
@@ -171,8 +202,8 @@ def test_round_configuration_contains_only_plain_public_settings():
         lambda d: d.update(providers=["scrapingdog"]),
         lambda d: d["reward_constants"].update(epochs_per_reward_week=141),
         lambda d: d["reward_constants"].update(pool_basis="fulfillment_residual"),
-        lambda d: d["generator"].update(batch_sizes=[15, 15]),
         lambda d: d.update(scorer_image_reference="registry.example/lab/scorer:latest"),
+        lambda d: d.update(baseline_source_url="http://example.test/source.tar.gz"),
         lambda d: d.update(runner_hotkeys=[Keypair.create_from_uri("//Zed").ss58_address] * 2),
         lambda d: d["schedule"].update(stage_1_scoring_close="2026-09-02T00:00:00Z"),
         lambda d: d.update(unexpected=1),
@@ -186,6 +217,46 @@ def test_round_configuration_contains_only_plain_public_settings():
     adjustable = base_round_configuration()
     adjustable["reward_constants"]["pool_percent"] = 5
     assert c.validate_round_configuration(adjustable)["reward_constants"]["pool_percent"] == 5
+
+
+def test_source_submission_contract_has_two_small_signed_steps():
+    presign = {
+        "source_size_bytes": 123,
+        "consent": {"public_rerun": True},
+    }
+    assert c.validate_submission_presign_body(presign) == presign
+    finalize = {
+        "submission_id": "sub-abc123",
+        "source_ref": "arena/arena-2026-09-02/sources/sub-abc123.tar.gz",
+        "source_size_bytes": 123,
+        "credentials": {
+            "openrouter_api_key": "sk-or-v1-" + "a" * 32,
+            "openrouter_management_key": "sk-or-v1-" + "b" * 32,
+            "deepline_api_key": "deepline-" + "c" * 32,
+        },
+    }
+    assert c.validate_submission_finalize_body(finalize) == finalize
+    for bad in (
+        dict(presign, consent={"public_rerun": False}),
+        dict(presign, source_size_bytes=10 * 1024 * 1024 + 1),
+        dict(presign, source_sha256="sha256:" + "a" * 64),
+        dict(presign, source_cache_key="src-" + "a" * 32),
+        dict(presign, image_reference="registry.example/agent:latest"),
+    ):
+        with pytest.raises(c.ArenaContractError):
+            c.validate_submission_presign_body(bad)
+    with pytest.raises(c.ArenaContractError):
+        c.validate_submission_finalize_body(
+            dict(finalize, source_sha256="sha256:" + "a" * 64)
+        )
+    with pytest.raises(c.ArenaContractError):
+        c.validate_submission_finalize_body(
+            dict(finalize, source_cache_key="src-" + "a" * 32)
+        )
+    with pytest.raises(c.ArenaContractError):
+        c.validate_submission_finalize_body(
+            dict(finalize, credentials={"openrouter_api_key": "x" * 16})
+        )
 
 
 def test_run_result_reward_basis_and_scoring_plan_contracts():

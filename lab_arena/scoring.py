@@ -1,7 +1,7 @@
 """Arena scoring: the plain scorer policy, scoring assignments, judge
 execution, and per-run score calculation.
 
-The Lab scorer (``QualificationStyleCompanyScorer``) is imported lazily inside
+The competition scorer is imported lazily inside
 the worker only after the policy has been applied to the process environment,
 because it reads credentials and behavior knobs at import time.
 """
@@ -45,10 +45,8 @@ POLICY_ENV_BINDINGS = {
     "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": "",
     "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID": "",
     "RESEARCH_LAB_OPENROUTER_TRACE_CAPTURE": "0",
-    "RESEARCH_LAB_AUDIT_SECRET_SCAN_MODE": "raise",
 }
 CREDENTIAL_ENV_NAMES = ("OPENROUTER_API_KEY", "QUALIFICATION_OPENROUTER_API_KEY", "SCRAPINGDOG_API_KEY", "EXA_API_KEY")
-CACHE_DIR_ENV = "RESEARCH_LAB_SCORING_CACHE_DIR"
 MAX_JUDGE_RETRIES = 3
 
 
@@ -69,7 +67,6 @@ class ScorerPolicyConflict(ScoringError):
 def build_scorer_policy(
     *,
     judge_models: Mapping[str, str] = DEFAULT_JUDGE_MODELS,
-    cache_version: str = "day_scoped_v1",
     provider_profile: str = "lab_arena",
     scoring_adapter_version: str = SCORING_ADAPTER_VERSION_V1,
 ) -> Dict[str, Any]:
@@ -85,7 +82,6 @@ def build_scorer_policy(
         "company_cap_rule": "icp_max_companies",
         "max_scored_companies": int(bindings["RESEARCH_LAB_EVAL_MAX_SCORED_COMPANIES"]),
         "judge_models": dict(judge_models),
-        "cache_version": cache_version,
         "provider_profile": provider_profile,
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
@@ -97,14 +93,13 @@ def apply_policy_to_environment(
     policy: Mapping[str, Any],
     *,
     environ: MutableMapping[str, str],
-    cache_dir: str,
     credentials: Mapping[str, str],
 ) -> str:
     """Bind the policy into ``environ`` before the evaluator is imported.
 
     Refuses to start when any bound variable already holds a conflicting
-    value, when the cache directory is empty, or when a credential is
-    missing. Returns the applied scoring adapter version.
+    value or when a credential is missing. Returns the applied scoring
+    adapter version.
     """
 
     validated = contracts.validate_scorer_policy(policy)
@@ -112,11 +107,6 @@ def apply_policy_to_environment(
         existing = environ.get(name)
         if existing is not None and existing != value:
             raise ScorerPolicyConflict("environment %s conflicts with the scorer policy" % name)
-    if not str(cache_dir or "").strip():
-        raise ScorerPolicyConflict("scoring cache directory is required")
-    existing_cache = environ.get(CACHE_DIR_ENV)
-    if existing_cache is not None and existing_cache != cache_dir:
-        raise ScorerPolicyConflict("environment %s conflicts with the scoring worker cache" % CACHE_DIR_ENV)
     for name in CREDENTIAL_ENV_NAMES:
         secret = credentials.get(name)
         if not secret:
@@ -126,7 +116,6 @@ def apply_policy_to_environment(
             raise ScorerPolicyConflict("environment %s conflicts with the Arena scoring credential" % name)
     for name, value in validated["env_bindings"].items():
         environ[name] = value
-    environ[CACHE_DIR_ENV] = cache_dir
     for name in CREDENTIAL_ENV_NAMES:
         environ[name] = credentials[name]
     return str(validated["scoring_adapter_version"])
@@ -216,15 +205,12 @@ def lab_scorer(policy: Mapping[str, Any]) -> Scorer:
     Lab's reference model.
     """
 
-    from research_lab.eval.evaluator import QualificationStyleCompanyScorer
+    from qualification.scoring.competition import CompetitionCompanyScorer
 
     validated = contracts.validate_scorer_policy(policy)
     adapter = validated["scoring_adapter_version"]
-    scorer = QualificationStyleCompanyScorer(
-        attested_provider_profile=validated["provider_profile"],
-        reference_scoring_adapter_version=_lab_adapter_version(adapter),
-        candidate_scoring_adapter_version=_lab_adapter_version(adapter),
-    )
+    _lab_adapter_version(adapter)
+    scorer = CompetitionCompanyScorer()
 
     def score(companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any], is_reference_model: bool) -> Any:
         return scorer.score_with_breakdowns(list(companies), dict(icp), bool(is_reference_model))
@@ -233,10 +219,10 @@ def lab_scorer(policy: Mapping[str, Any]) -> Scorer:
 
 
 def _lab_adapter_version(arena_version: str) -> str:
-    from research_lab.eval import evaluator
+    from qualification.scoring.competition import SCORING_ADAPTER_VERSION
 
     if arena_version == SCORING_ADAPTER_VERSION_V1:
-        return evaluator.QUALIFICATION_SCORING_ADAPTER_VERSION_V1
+        return SCORING_ADAPTER_VERSION
     raise ScoringError("unsupported scoring adapter version")
 
 
@@ -267,7 +253,9 @@ def score_work_item(
     recomputes; any other count is a scorer contract failure.
     """
 
-    from research_lab.eval.evaluator import scorer_breakdown_has_retryable_infrastructure_failure
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_retryable_infrastructure_failure,
+    )
 
     sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
     scored_indexes, _skipped = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +11,6 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     Handler,
     LocalPostgRESTState,
     SOURCE_ADD_CONTROL_COLUMNS,
-    _candidate_hybrid_constraint_definition,
     _matches_filter,
     _source_add_claim_control_contract,
     _source_add_claim_control_contract_v2,
@@ -20,7 +18,6 @@ from tests.restart_rehearsal.gateway_boundary_service import (
 from gateway.tee.supabase_schema_preflight_v2 import (
     _verify_source_add_claim_control_contract_v2,
 )
-from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
     frontier_artifact_hashes_v2,
@@ -177,23 +174,6 @@ def test_postgrest_boundary_persists_source_add_restart_guard(
     assert final["guard_active"] is False
     assert final["guard_generation"] == 1
     assert final["restore_paused"] is None
-
-
-def test_candidate_hybrid_contract_is_derived_from_candidate_roles() -> None:
-    definition = _candidate_hybrid_constraint_definition()
-    clauses = re.findall(
-        r"\(role = '([^']+)'::text\)\s+AND\s+"
-        r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
-        definition,
-        flags=re.DOTALL,
-    )
-    observed = {
-        role: frozenset(re.findall(r"'([^']+)'::text", purposes))
-        for role, purposes in clauses
-    }
-    assert observed == {
-        role: frozenset(purposes) for role, purposes in ROLE_PURPOSES.items()
-    }
 
 
 def _maintenance_lease_state(tmp_path: Path) -> LocalPostgRESTState:

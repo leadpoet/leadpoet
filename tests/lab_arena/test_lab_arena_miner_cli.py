@@ -1,55 +1,53 @@
-"""Miner helper: image submission bodies and signed requests."""
+"""The miner CLI accepts local source and has no image workflow."""
 
 from __future__ import annotations
 
-import json
 import runpy
 from pathlib import Path
 
-from bittensor_wallet import Keypair
-import pytest
-
-from lab_arena import contracts, images
 
 ROOT = Path(__file__).resolve().parents[2]
-MINER = runpy.run_path(str(ROOT / "scripts/lab_arena_miner.py"), run_name="lab_arena_miner_module")
-DIGEST = "sha256:" + "c" * 64
+MINER = runpy.run_path(
+    str(ROOT / "scripts" / "lab_arena_miner.py"), run_name="lab_arena_miner_module"
+)
 
 
-def verify(hotkey, signature, message):
-    raw = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
-    return bool(Keypair(ss58_address=hotkey).verify(message.encode(), raw))
+def test_submit_model_uses_source_wallet_and_environment_credentials():
+    parser = MINER["build_parser"]()
+    args = parser.parse_args(
+        [
+            "submit-model",
+            "--source",
+            "./agent",
+            "--wallet-name",
+            "miner",
+            "--hotkey-name",
+            "default",
+            "--wallet-path",
+            "/var/lib/miner-wallets",
+        ]
+    )
+    assert args.source == "./agent"
+    assert args.wallet_path == "/var/lib/miner-wallets"
+    assert not hasattr(args, "image")
+    assert not hasattr(args, "openrouter_api_key")
+    assert not hasattr(args, "openrouter_management_key")
+    assert not hasattr(args, "deepline_api_key")
 
 
-def test_submission_body_accepts_a_tag_or_digest_with_one_consent(tmp_path, capsys):
-    out = tmp_path / "body.json"
-    assert MINER["main"](["submission-body", "--image", "ghcr.io/acme/agent:v3@" + DIGEST, "--out", str(out)]) == 0
-    report = json.loads(capsys.readouterr().out)
-    body = json.loads(out.read_text())
-    assert body == {"image_reference": "ghcr.io/acme/agent:v3@" + DIGEST, "consent": {"public_rerun": True}}
-    assert report["image_reference"] == body["image_reference"] and contracts.validate_submission_body(body)
-    # Docker Hub's short form is normalized; a public tag is also accepted.
-    assert MINER["main"](["submission-body", "--image", "docker.io/python@" + DIGEST, "--out", str(out)]) == 0
-    assert json.loads(out.read_text())["image_reference"] == "docker.io/library/python@" + DIGEST
-    assert MINER["main"](["submission-body", "--image", "ghcr.io/acme/agent:v3", "--out", str(out)]) == 0
-    assert json.loads(out.read_text())["image_reference"] == "ghcr.io/acme/agent:v3"
-    for bad in ("acme/agent@" + DIGEST, "ghcr.io/acme/agent"):
-        assert MINER["main"](["submission-body", "--image", bad, "--out", str(out)]) == 2
-        assert "image reference refused" in capsys.readouterr().err
-    with pytest.raises(images.ImageError):
-        MINER["submission_body_document"]("ghcr.io/acme/agent")
+def test_submit_source_remains_a_compatibility_alias():
+    args = MINER["build_parser"]().parse_args(
+        ["submit-source", "--source", "./agent"]
+    )
+    assert args.command == "submit-source"
 
 
-def test_sign_produces_a_valid_scoped_request(tmp_path, capsys):
-    body = tmp_path / "body.json"
-    body.write_text(json.dumps({"image_reference": "ghcr.io/acme/agent@" + DIGEST, "consent": {"public_rerun": True}}))
-    out = tmp_path / "envelope.json"
-    assert MINER["main"](["sign", "--scope", "submission", "--round-id", "arena-2026-09-02", "--body", str(body), "--out", str(out), "--hotkey-uri", "//Alice"]) == 0
-    envelope = json.loads(out.read_text())
-    import time
-
-    validated = contracts.validate_signed_request(envelope, expected_scope=contracts.SCOPE_SUBMISSION, now=int(time.time()), verify_signature=verify, expected_round_id="arena-2026-09-02")
-    assert validated["hotkey"] == Keypair.create_from_uri("//Alice").ss58_address
-    assert contracts.validate_submission_body(validated["body"])["image_reference"] == "ghcr.io/acme/agent@" + DIGEST
-    with pytest.raises(contracts.ArenaContractError):
-        contracts.validate_signed_request(envelope, expected_scope=contracts.SCOPE_CLAIM, now=int(time.time()), verify_signature=verify)
+def test_retired_image_and_manual_envelope_commands_are_absent():
+    parser = MINER["build_parser"]()
+    for command in ("submission-body", "sign"):
+        try:
+            parser.parse_args([command])
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:  # pragma: no cover
+            raise AssertionError("retired command remained available")

@@ -94,15 +94,15 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
     assert policy["env_bindings"]["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"] == "10" and policy["max_scored_companies"] == 0
     environ = {}
     credentials = {name: "secret-" + name for name in scoring.CREDENTIAL_ENV_NAMES}
-    applied = scoring.apply_policy_to_environment(policy, environ=environ, cache_dir="/tmp/cache", credentials=credentials)
-    assert applied == policy["scoring_adapter_version"] and environ["RESEARCH_LAB_SCORING_CACHE_DIR"] == "/tmp/cache"
+    applied = scoring.apply_policy_to_environment(
+        policy, environ=environ, credentials=credentials
+    )
+    assert applied == policy["scoring_adapter_version"]
     assert environ["RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE"] == "0" and environ["OPENROUTER_API_KEY"] == credentials["OPENROUTER_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):
-        scoring.apply_policy_to_environment(policy, environ={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "25"}, cache_dir="/tmp/cache", credentials=credentials)
+        scoring.apply_policy_to_environment(policy, environ={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "25"}, credentials=credentials)
     with pytest.raises(scoring.ScorerPolicyConflict):
-        scoring.apply_policy_to_environment(policy, environ={}, cache_dir="", credentials=credentials)
-    with pytest.raises(scoring.ScorerPolicyConflict):
-        scoring.apply_policy_to_environment(policy, environ={}, cache_dir="/tmp/cache", credentials=dict(credentials, EXA_API_KEY=""))
+        scoring.apply_policy_to_environment(policy, environ={}, credentials=dict(credentials, EXA_API_KEY=""))
 
 
 def test_plan_makes_one_work_item_per_accepted_assignment_and_synthesizes_zero_rows():
@@ -160,7 +160,7 @@ def test_judge_infrastructure_failures_retry_then_raise_never_zero():
         scoring.score_work_item(item, icp=_ICPS[0], companies=[company(1)], scorer=broken)
 
 
-def test_stage_cut_uses_ten_then_twenty_and_final_mean_uses_all_thirty():
+def test_stage_cut_uses_ten_then_ten_and_final_mean_uses_all_twenty():
     policy = scoring.build_scorer_policy()
     counter = {"executions": 0, "lock": threading.Lock()}
     companies = [company(1), company(2, "10,001+"), company(3)]  # the second is outside the buckets and is skipped
@@ -192,20 +192,20 @@ def test_stage_cut_uses_ten_then_twenty_and_final_mean_uses_all_thirty():
         breakdowns_by_item=stage_2_result.breakdowns_by_item,
     )
     assert stage_2_bundle["stage"] == 2
-    assert len([row for row in stage_2_bundle["rows"] if row["submission_id"] == "c1"]) == 20
+    assert len([row for row in stage_2_bundle["rows"] if row["submission_id"] == "c1"]) == 10
     all_rows = bundle["rows"] + stage_2_bundle["rows"]
     king_scores = [row["per_icp_score"] for row in all_rows if row["submission_id"] == "king"]
     challenger_scores = [row["per_icp_score"] for row in all_rows if row["submission_id"] == "c1"]
-    assert verify.stage_score(king_scores, 30) == expected
-    assert verify.stage_score(challenger_scores, 30) == verify.stage_score([expected] * 29 + [0.0], 30)
-    assert len(scoring.run_scores_for_store(stage_2_bundle, stage_2_runs)) == 40
+    assert verify.stage_score(king_scores, 20) == expected
+    assert verify.stage_score(challenger_scores, 20) == verify.stage_score([expected] * 19 + [0.0], 20)
+    assert len(scoring.run_scores_for_store(stage_2_bundle, stage_2_runs)) == 20
 
 
-def test_exact_final_tie_keeps_the_incumbent():
+def test_exact_final_tie_crowns_no_miner():
     king = {"submission_id": "king", "hotkey": "king-hotkey", "final_score": 75.0, "is_king": True}
     challenger = {"submission_id": "c1", "hotkey": "challenger-hotkey", "final_score": 75.0, "is_king": False}
     assert verify.final_ranking([challenger, king])[0]["submission_id"] == "king"
-    assert verify.king_decision([challenger], king)["outcome"] == "defended"
+    assert verify.king_decision([challenger], king)["outcome"] == "no_king"
     challenger["final_score"] = 75.000001
     decision = verify.king_decision([challenger], king)
     assert (decision["outcome"], decision["winner_submission_id"]) == ("crowned", "c1")

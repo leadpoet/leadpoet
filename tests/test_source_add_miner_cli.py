@@ -47,7 +47,7 @@ def _source_add_flow(result, monkeypatch):
 
     namespace = {
         "Optional": Optional,
-        "QUALIFICATION_GATEWAY_URL": "https://gateway.example.test",
+        "GATEWAY_URL": "https://gateway.example.test",
         "_get_research_lab_status": lambda _url: {"source_add": {"intake_enabled": True}},
         "source_add_submission_ready": lambda _status: True,
         "SOURCE_ADD_SOURCE_KINDS": ("web",),
@@ -187,6 +187,7 @@ def test_source_add_cli_accepts_only_complete_admission_receipt(
     output = capsys.readouterr().out
     assert "SOURCE_ADD submission received" in output
     assert f"Submission ID: {SUBMISSION_ID}" in output
+    assert "select Submit SOURCE_ADD, then check your submissions" in output
 
 
 @pytest.mark.parametrize(

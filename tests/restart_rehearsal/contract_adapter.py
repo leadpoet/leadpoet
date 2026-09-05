@@ -55,6 +55,7 @@ _PCR0_CANDIDATE = os.environ.get("REHEARSAL_CANDIDATE_SHA", "").encode("ascii")
 PCR0 = artifact_pcr0(_PCR0_CANDIDATE.decode("ascii"))
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
 PRODUCTION_SUPABASE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
+LOCAL_POSTGREST_ORIGIN = "http://127.0.0.1:54321"
 ACCOUNT = "493765492819"
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
 PCR0_CACHE_PROVENANCE = "validator_pcr0_cache_v1"
@@ -62,16 +63,6 @@ _PCR0_CACHE_RAW_TAG = re.compile(r"validator-enclave-build-[1-9][0-9]*\Z")
 _PCR0_CACHE_NORMALIZED_TAG = re.compile(
     r"validator-enclave-build-[1-9][0-9]*-normalized:latest\Z"
 )
-EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
-    "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
-    "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-    ),
-    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
-        "alias/leadpoet-research-lab-artifact-signing"
-    ),
-}
 RUNSC_LOCK_PATH = Path("/opt/leadpoet/runsc-runtime.lock.json")
 EXTERNAL_ARTIFACT_ROOT = Path("/opt/leadpoet/external-artifacts")
 GITHUB_GIT_FIXTURE_REMOTE = Path("/srv/origin.git")
@@ -202,6 +193,21 @@ def _targeted_substitutions_allowed() -> bool:
     return _rehearsal_scope() == TARGETED_REGRESSION_SCOPE
 
 
+def _route_host_storage_preflight_to_local_postgrest(module: str) -> None:
+    if module not in {
+        "gateway.main",
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+        "gateway.tee.prepare_active_release_lineage_v2",
+        "gateway.tee.verify_weight_submission_ready_v2",
+    }:
+        return
+    configured = os.environ.get("SUPABASE_URL", "").strip()
+    if configured not in {PRODUCTION_SUPABASE_ORIGIN, LOCAL_POSTGREST_ORIGIN}:
+        raise ValueError("host storage preflight Supabase origin differs")
+    os.environ["SUPABASE_URL"] = LOCAL_POSTGREST_ORIGIN
+
+
 def _candidate_root() -> Path:
     gateway_root = Path("/home/ec2-user/leadpoet_repo")
     if gateway_root.is_dir():
@@ -220,7 +226,10 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
     for parent in resolved.parents:
         if (
             parent.parent == archive_parent
-            and re.fullmatch(r"gateway-v2-preflight\.[A-Za-z0-9]+", parent.name)
+            and re.fullmatch(
+                r"(?:gateway-v2-preflight|leadpoet-local-release-source)\.[A-Za-z0-9]+",
+                parent.name,
+            )
         ):
             return resolved.relative_to(parent), "candidate_archive"
         if (
@@ -236,6 +245,41 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
                     resolved.relative_to(candidate_archive),
                     "candidate_archive",
                 )
+        if (
+            parent.parent == archive_parent
+            and re.fullmatch(
+                r"(?:gateway|validator)-restart-controller-bootstrap\.[A-Za-z0-9]+",
+                parent.name,
+            )
+        ):
+            candidate_archive = parent / "authority"
+            if candidate_archive in resolved.parents:
+                return (
+                    resolved.relative_to(candidate_archive),
+                    "candidate_archive",
+                )
+
+    configured_build_root = Path(
+        os.environ.get(
+            "GATEWAY_V2_BUILD_WORK_ROOT",
+            "/home/ec2-user/.cache/leadpoet/gateway-release-build-v2",
+        )
+    )
+    if configured_build_root.is_absolute():
+        candidate_build_root = (
+            configured_build_root.resolve() / f"{_candidate_sha()}-local"
+        )
+        try:
+            relative = resolved.relative_to(candidate_build_root)
+        except ValueError:
+            pass
+        else:
+            if (
+                len(relative.parts) >= 3
+                and relative.parts[0] in GATEWAY_ROLES
+                and relative.parts[1] == "source"
+            ):
+                return Path(*relative.parts[2:]), "candidate_archive"
 
     raise RuntimeError(
         "production source is outside the candidate checkout or a recognized "
@@ -510,16 +554,6 @@ def _gateway_secret() -> dict[str, str]:
         "TRUELIST_API_KEY": "rehearsal-truelist",
         "RESEARCH_LAB_TEE_PROTOCOL": "v2",
         "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "true",
-        # Exercise an installed N-1 secret with stale source values. The
-        # candidate restart must replace all three before gateway.main starts.
-        "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "main",
-        "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
-            "s3://leadpoet-private-model-artifacts-493765492819/"
-            "research-lab/sourcing-model/current.json"
-        ),
-        "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
-            "alias/rehearsal-stale-private-model-signing"
-        ),
         "RESEARCH_LAB_RAW_TRACE_S3_PREFIX": (
             "s3://leadpoet-private-model-artifacts-493765492819/"
             "research-lab/rehearsal/raw-traces"
@@ -556,9 +590,6 @@ def _gateway_secret() -> dict[str, str]:
         "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",
-        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": (
-            "http://legacy-auto:legacy-password@legacy-proxy.example.com:6162"
-        ),
         "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": (
             "http://legacy-scoring:legacy-password@legacy-proxy.example.com:7421"
         ),
@@ -577,10 +608,6 @@ def _gateway_secret() -> dict[str, str]:
     ):
         values.update(
             {
-                "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1": (
-                    "https://rehearsal-auto:rehearsal-auto-password@"
-                    "93.184.216.34:443"
-                ),
                 "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
                     "https://rehearsal-scoring:rehearsal-scoring-password@"
                     "93.184.216.34:443"
@@ -673,14 +700,6 @@ def _candidate_worker_ids(
     return tuple(range(first, last + 1))
 
 
-def _candidate_qualification_worker_ids() -> tuple[int, ...]:
-    return _candidate_worker_ids(
-        section_start="# Auto-detect QUALIFICATION proxies",
-        section_end="# Get enclave CID for TEE signing",
-        role="qualification",
-    )
-
-
 def _candidate_fulfillment_worker_ids() -> tuple[int, ...]:
     return _candidate_worker_ids(
         section_start="# Auto-detect FULFILLMENT proxies",
@@ -692,9 +711,7 @@ def _candidate_fulfillment_worker_ids() -> tuple[int, ...]:
 def _validator_secret() -> dict[str, str]:
     values = {
         "ENABLE_FULFILLMENT": "true",
-        "ENABLE_QUALIFICATION_WORKERS": "true",
         "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED": "false",
-        "ENABLE_QUALIFICATION_EVALUATION": "true",
         "LEADPOET_WRAPPER_ACTIVE": "1",
         "GATEWAY_URL": "http://gateway.invalid:8000",
         "VALIDATOR_V2_GATEWAY_URL": "http://gateway.invalid:8000",
@@ -703,22 +720,15 @@ def _validator_secret() -> dict[str, str]:
         "SUPABASE_SERVICE_ROLE_KEY": "rehearsal-secret",
         "OPENROUTER_API_KEY": "rehearsal-openrouter",
         "OPENROUTER_KEY": "rehearsal-openrouter",
-        "QUALIFICATION_OPENROUTER_API_KEY": "rehearsal-openrouter",
         "FULFILLMENT_OPENROUTER_API_KEY": "rehearsal-openrouter",
         "EXA_API_KEY": "rehearsal-exa",
         "SCRAPINGDOG_API_KEY": "rehearsal-scrapingdog",
-        "QUALIFICATION_SCRAPINGDOG_API_KEY": "rehearsal-scrapingdog",
         "TRUELIST_API_KEY": "rehearsal-truelist",
         "COMPANIES_HOUSE_API_KEY": "rehearsal-companies-house",
         "AWS_REGION": "us-east-1",
         "AWS_DEFAULT_REGION": "us-east-1",
         "RESEARCH_LAB_VALIDATOR_FETCH_ENABLED": "true",
-        "RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED": "true",
-        "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": "true",
-        "RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT": "true",
-        "RESEARCH_LAB_REQUIRE_EVALUATION_VERIFICATION_BEFORE_SUBMIT": "true",
         "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",
-        "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID": "rehearsal-kms",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED": "true",
         "LEADPOET_SENTRY_RELEASE": "stale-n-minus-one-release",
@@ -726,10 +736,6 @@ def _validator_secret() -> dict[str, str]:
         "NO_PROXY": "127.0.0.1,localhost",
         "VALIDATOR_WEIGHT_PROTOCOL": "authoritative_v2",
     }
-    for worker_id in _candidate_qualification_worker_ids():
-        values[f"QUALIFICATION_WEBSHARE_PROXY_{worker_id}"] = (
-            f"http://rehearsal-qual-{worker_id}.invalid:8080"
-        )
     for worker_id in _candidate_fulfillment_worker_ids():
         values[f"FULFILLMENT_WEBSHARE_PROXY_{worker_id}"] = (
             f"http://rehearsal-ff-{worker_id}.invalid:8080"
@@ -974,13 +980,35 @@ def _external_build_role(argv: list[str], tag: str) -> str:
         role = match.group(1)
         if role not in GATEWAY_ROLES:
             raise ValueError("gateway enclave build used an unknown role")
-        build_arg = _arg_value(argv, "--build-arg")
+        build_args = _arg_values(argv, "--build-arg")
         dockerfile = _arg_value(argv, "-f")
         if (
-            build_arg != f"LEADPOET_ENCLAVE_ROLE={role}"
+            "--pull" not in argv
+            or build_args
+            != ("SOURCE_DATE_EPOCH=0", f"LEADPOET_ENCLAVE_ROLE={role}")
             or not dockerfile.endswith("/gateway/tee/Dockerfile.enclave")
         ):
             raise ValueError("gateway enclave build contract is invalid")
+        return role
+    if tag.startswith("leadpoet-gateway-verify:"):
+        match = re.fullmatch(
+            r"leadpoet-gateway-verify:(gateway_[a-z]+)-([0-9a-f]{12})-([1-9][0-9]*)-raw",
+            tag,
+        )
+        if match is None:
+            raise ValueError("gateway verification image tag is invalid")
+        role, short_commit, _index = match.groups()
+        build_args = _arg_values(argv, "--build-arg")
+        dockerfile = Path(_arg_value(argv, "-f"))
+        context = Path(argv[-1]) if argv else Path()
+        if (
+            role not in GATEWAY_ROLES
+            or short_commit != _candidate_sha()[:12]
+            or build_args
+            != ("SOURCE_DATE_EPOCH=0", f"LEADPOET_ENCLAVE_ROLE={role}")
+            or dockerfile != context / "tee/Dockerfile.enclave"
+        ):
+            raise ValueError("gateway verification image build contract is invalid")
         return role
     return ""
 
@@ -1135,15 +1163,31 @@ def _docker_load(
         if isinstance(config.get("config"), dict)
         else {}
     )
+    rootfs = config.get("rootfs")
+    rootfs_layers = (
+        rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+    )
     commit = str(labels.get("org.leadpoet.rehearsal.commit") or "")
     role = str(labels.get("org.leadpoet.rehearsal.role") or "")
     image_id = "sha256:" + config_path.rsplit("/", 1)[-1]
     if (
         role not in ALL_ROLES
         or image_id != normalized_image_id(commit, role)
+        or not isinstance(rootfs_layers, list)
+        or not rootfs_layers
+        or any(
+            not isinstance(layer, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", layer) is None
+            for layer in rootfs_layers
+        )
     ):
         raise ValueError("Docker load image identity differs from build contract")
-    record = {"id": image_id, "commit": commit, "role": role}
+    record = {
+        "id": image_id,
+        "commit": commit,
+        "role": role,
+        "rootfs_layers": list(rootfs_layers),
+    }
     cache_tags = [
         tag for tag in tags if _PCR0_CACHE_NORMALIZED_TAG.fullmatch(tag)
     ]
@@ -1239,6 +1283,30 @@ def _official_normalized_image_tag(role: str) -> str:
     if role in GATEWAY_ROLES:
         return f"tee-enclave:{role}"
     return ""
+
+
+def _gateway_verification_image_is_bound(
+    *,
+    image: str,
+    record: dict[str, Any],
+) -> bool:
+    match = re.fullmatch(
+        r"leadpoet-gateway-verify:(gateway_[a-z]+)-([0-9a-f]{12})-([1-9][0-9]*)",
+        image,
+    )
+    if match is None:
+        return False
+    tagged_role, tagged_commit, _index = match.groups()
+    commit = str(record.get("commit") or "")
+    role = str(record.get("role") or "")
+    return (
+        commit == _candidate_sha()
+        and role == tagged_role
+        and role in GATEWAY_ROLES
+        and tagged_commit == commit[:12]
+        and not str(record.get("provenance") or "")
+        and _image_record_id(record) == normalized_image_id(commit, role)
+    )
 
 
 def _docker_run_contract(
@@ -1452,6 +1520,15 @@ def command_docker(argv: list[str]) -> int:
                     output = json.dumps([record], sort_keys=True)
                 elif "org.opencontainers.image.revision" in template:
                     output = str(record.get("commit") or "")
+                elif template == "{{json .RootFS.Layers}}":
+                    layers = record.get("rootfs_layers")
+                    if not isinstance(layers, list) or not layers:
+                        return _fail(
+                            "docker",
+                            argv,
+                            "Docker image rootfs layers are unavailable",
+                        )
+                    output = json.dumps(layers, separators=(",", ":"))
                 elif ".Id" in template:
                     output = _image_record_id(record)
                 else:
@@ -1753,7 +1830,7 @@ def command_docker(argv: list[str]) -> int:
                         )
                 else:
                     worker_match = re.fullmatch(
-                        r"leadpoet-(validator|qual|ff)-worker-([1-9][0-9]*)",
+                        r"leadpoet-(validator|ff)-worker-([1-9][0-9]*)",
                         name,
                     )
                     if not worker_match:
@@ -1763,12 +1840,10 @@ def command_docker(argv: list[str]) -> int:
                     worker_kind, worker_id = worker_match.groups()
                     expected_mode = {
                         "validator": "worker",
-                        "qual": "qualification_worker",
                         "ff": "fulfillment_worker",
                     }[worker_kind]
                     role = {
                         "validator": "validator.sourcing_worker",
-                        "qual": "validator.qualification_worker",
                         "ff": "validator.fulfillment_worker",
                     }[worker_kind]
                     if (
@@ -2016,7 +2091,13 @@ def command_nitro(argv: list[str]) -> int:
                 candidate_bound = (
                     commit == _candidate_sha()
                     and role in ALL_ROLES
-                    and image == _official_normalized_image_tag(role)
+                    and (
+                        image == _official_normalized_image_tag(role)
+                        or _gateway_verification_image_is_bound(
+                            image=image,
+                            record=record,
+                        )
+                    )
                     and not str(record.get("provenance") or "")
                     and _image_record_id(record)
                     == normalized_image_id(commit, role)
@@ -2433,18 +2514,6 @@ def command_pkill(argv: list[str]) -> int:
 
 def _long_lived_process(key: str, argv: list[str]) -> int:
     environment_contract: dict[str, str] = {}
-    if key == "gateway.main":
-        environment_contract = {
-            name: os.environ.get(name, "")
-            for name in EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
-        }
-        if environment_contract != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV:
-            return _fail(
-                "process",
-                argv,
-                "gateway private-model source environment differs from "
-                "the canonical restart contract",
-            )
     if _record_internal_substitution(
         kind="process",
         argv=argv,
@@ -2462,7 +2531,6 @@ def _long_lived_process(key: str, argv: list[str]) -> int:
         pid=os.getpid(),
         implementation="internal_substitution",
         scope=_rehearsal_scope(),
-        environment_contract=environment_contract,
     )
 
     def stop(_signum: int, _frame: Any) -> None:
@@ -2480,18 +2548,6 @@ def _exec_long_lived_production_module(
     argv: list[str],
 ) -> int:
     environment_contract: dict[str, str] = {}
-    if key == "gateway.main":
-        environment_contract = {
-            name: os.environ.get(name, "")
-            for name in EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
-        }
-        if environment_contract != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV:
-            return _fail(
-                "process",
-                argv,
-                "gateway private-model source environment differs from "
-                "the canonical restart contract",
-            )
     handle, state = _locked_state()
     state.setdefault("processes", {})[key] = os.getpid()
     _save_state(handle, state)
@@ -2503,7 +2559,6 @@ def _exec_long_lived_production_module(
         pid=os.getpid(),
         implementation="production_module",
         scope=_rehearsal_scope(),
-        environment_contract=environment_contract,
         **_source_identity(_module_source(module)),
     )
     current_python_path = os.environ.get("PYTHONPATH", "")
@@ -2511,6 +2566,7 @@ def _exec_long_lived_production_module(
     if "/harness" not in python_paths:
         python_paths.insert(0, "/harness")
     os.environ["PYTHONPATH"] = ":".join(python_paths)
+    _route_host_storage_preflight_to_local_postgrest(module)
     os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
     return 127
 
@@ -2599,17 +2655,6 @@ def _module_envelopes(argv: list[str]) -> int:
                 "credential_reference_hash": "sha256:" + HASH64,
             },
         )
-    corpus = output_dir / "acceptance-corpus-v2"
-    corpus.mkdir(parents=True, exist_ok=True)
-    (corpus / "fixture.json").write_text("{}\n", encoding="utf-8")
-    _write_json(
-        output_dir / "acceptance-corpus-v2.json",
-        {
-            "schema_version": "leadpoet.acceptance_corpus.v2",
-            "deploy_commit": deploy_commit,
-            "corpus_hash": "sha256:" + HASH64,
-        },
-    )
     _write_json(
         output_dir / "gateway-v2-env-transition.json",
         {"schema_version": "leadpoet.gateway_env_transition.v2", "status": "ready"},
@@ -2856,6 +2901,9 @@ def command_python(argv: list[str]) -> int:
             os.environ["PYTHONPATH"] = ":".join(python_paths)
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module in {
+            "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+            "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+            "gateway.tee.prepare_active_release_lineage_v2",
             "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",
             "gateway.research_lab.provider_profiles_v2",
@@ -2872,6 +2920,7 @@ def command_python(argv: list[str]) -> int:
             "gateway.tee.release_archive_v2",
         }:
             _record_production_module(module, argv)
+            _route_host_storage_preflight_to_local_postgrest(module)
             current_python_path = os.environ.get("PYTHONPATH", "")
             python_paths = [
                 item for item in current_python_path.split(":") if item
@@ -2892,6 +2941,7 @@ def command_python(argv: list[str]) -> int:
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.verify_weight_submission_ready_v2":
             _record_production_module(module, argv)
+            _route_host_storage_preflight_to_local_postgrest(module)
             if (
                 "--repair" in argv
                 and os.environ.get(

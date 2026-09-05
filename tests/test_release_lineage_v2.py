@@ -11,6 +11,7 @@ from gateway.tee.release_lineage_v2 import (
     build_release_lineage_boot_verifier_v2,
     load_approved_release_lineage_v2,
     validate_compact_release_lineage_v2,
+    validate_prior_compact_release_lineage_v2,
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
@@ -18,7 +19,10 @@ from gateway.tee.release_manifest_v2 import (
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
-from tests.test_release_channel_v2 import _validator_manifest
+from tests.test_release_channel_v2 import (
+    _historical_gateway_manifest,
+    _validator_manifest,
+)
 
 
 def test_lineage_import_does_not_require_validator_package():
@@ -166,6 +170,15 @@ def test_compact_lineage_verifies_historical_gateway_and_validator_boots():
         ("gateway_scoring", gateway_boot["pcr0"]),
         ("validator_weights", validator_boot["pcr0"]),
     ]
+
+
+def test_installed_prior_lineage_accepts_exact_legacy_current_role_set():
+    historical = _historical_gateway_manifest("2" * 40)
+    lineage = _compact_lineage(historical)
+
+    with pytest.raises(ReleaseLineageV2Error, match="roles are incomplete"):
+        validate_compact_release_lineage_v2(lineage)
+    assert validate_prior_compact_release_lineage_v2(lineage) == lineage
 
 
 def test_compact_lineage_fails_closed_on_hash_role_and_pcr_drift():

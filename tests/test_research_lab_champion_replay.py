@@ -472,7 +472,6 @@ def test_legacy_overpay_environment_switch_is_inert(monkeypatch):
 
     config = ResearchLabGatewayConfig.from_env()
 
-    assert config.lab_reimbursement_allow_overpay_without_champions is False
     assert (
         config.reimbursement_policy_doc(enabled=True)[
             "reimbursement_allow_overpay_without_champions"

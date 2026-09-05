@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 
 from gateway.tee.build_identity import load_identity
 from gateway.tee.mtls_identity import generate_ephemeral_tls_identity
-from gateway.tee.topology import role_spec
+from gateway.tee.topology import ROLE_SPECS, role_spec
 from leadpoet_canonical.attested_v2 import (
     build_boot_attestation_user_data,
     build_boot_identity_body,
@@ -215,11 +215,7 @@ def _validate_release_configuration(
         )
 
     release_roles = configuration.get("release_roles")
-    expected_release_roles = {
-        "gateway_coordinator",
-        "gateway_scoring",
-        "gateway_autoresearch",
-    }
+    expected_release_roles = set(ROLE_SPECS)
     if not isinstance(release_roles, Mapping) or set(release_roles) != expected_release_roles:
         raise RuntimeIdentityV2Error("V2 release role set is incomplete")
     for release_role, expectation in release_roles.items():
@@ -258,10 +254,7 @@ def _validate_release_configuration(
         raise RuntimeIdentityV2Error("V2 own release role differs from measured build")
 
     expected_peers = (
-        {
-            "gateway_scoring",
-            "gateway_autoresearch",
-        }
+        set(ROLE_SPECS) - {"gateway_coordinator"}
         if physical_role == "gateway_coordinator"
         else {"gateway_coordinator"}
     )
@@ -302,11 +295,7 @@ def _validate_release_configuration(
             and 0 < configured_worker_count <= 500
         )
     else:
-        valid_worker_counts = (
-            isinstance(configured_worker_count, int)
-            and 0 < configured_worker_count <= 500
-            and execution_worker_count == configured_worker_count
-        )
+        valid_worker_counts = False
     if not valid_worker_counts:
         raise RuntimeIdentityV2Error("V2 worker count differs from approved topology")
 

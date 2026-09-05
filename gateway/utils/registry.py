@@ -24,13 +24,8 @@ _metagraph_cache = None
 _cache_epoch = None  # Track which epoch the cache is from
 _cache_epoch_timestamp = None  # Track when we last calculated the epoch
 _cache_lock = threading.Lock()  # For quick cache read/write ONLY (no await inside!)
+_warm_lock = threading.Lock()  # Serialize long background refreshes
 _fetch_in_progress = False  # True while some caller is fetching a newer metagraph
-
-# Serializes background warms against each other. This is deliberately NOT
-# _cache_lock: a warm can run for many minutes (8 attempts x 60s timeout plus
-# backoff sleeps), and _cache_lock is acquired from the event loop, so holding
-# it across a network fetch freezes the whole gateway.
-_warm_lock = threading.Lock()
 
 # Coalesces concurrent request-path fetches into one. Without this, every signed
 # request that arrives during an epoch transition starts its own 8-attempt
@@ -656,14 +651,11 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
     global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp
     import time
     
-    # Serialize warms against each other, but NOT on _cache_lock: the retry loop
-    # below can run for minutes and _cache_lock is acquired from the event loop.
     if not _warm_lock.acquire(blocking=False):
         print(f"🔥 A metagraph warm is already running; skipping epoch {target_epoch}")
         return False
     try:
         with _cache_lock:
-            # Check if cache is already warmed for this epoch
             if _cache_epoch == target_epoch:
                 print(f"🔥 Cache already warmed for epoch {target_epoch}")
                 return True
@@ -693,8 +685,10 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
                     future = executor.submit(_fetch_metagraph)
                     metagraph = future.result(timeout=timeout_per_attempt)  # Hard 60s timeout
                 
-                # Update cache (lock held only for the write)
+                # Hold the cache lock only for the cache write.
                 with _cache_lock:
+                    if _cache_epoch is not None and _cache_epoch > target_epoch:
+                        return True
                     _metagraph_cache = metagraph
                     _cache_epoch = target_epoch
                     _cache_epoch_timestamp = time.time()

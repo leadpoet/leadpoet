@@ -1,6 +1,6 @@
 """Deepline evidence repair for Research Lab intent verification.
 
-When every intent signal on an autoresearch company scores zero, the company
+When every intent signal on an Arena company scores zero, the company
 is zeroed as a false positive — but a real company whose submitted evidence
 URL was weak (aggregator page, dead link, wrong article) dies as a false
 negative. Before finalizing that zero, this client asks the

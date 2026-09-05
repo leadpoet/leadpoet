@@ -165,3 +165,134 @@ def test_attested_wrapper_targets_attested_path(monkeypatch):
     monkeypatch.setattr(vi, "urlopen", _fake_urlopen)
     vi.fetch_research_lab_attested_allocation_bundle("http://gw/", 24124)
     assert seen["url"] == "http://gw/research-lab/allocations/attested/24124"
+
+
+def test_preparation_fetch_budget_fits_between_build_cost_and_block_margin():
+    """The block-180 preparation must not be cut off by its own deadline.
+
+    Measured 2026-09-04 on the gateway's server spans for the attested
+    allocation route (trailing 14 days, successful responses, sub-10s cache
+    hits excluded, 244 cold builds): worst build 299.0s, p99 238.6s. The
+    preparation budget must clear that worst observed build with real headroom
+    for the bounded retry, while still finishing inside the block margin it has
+    to spend.
+    """
+    from leadpoet_canonical.constants import (
+        ALLOCATION_PREPARATION_BLOCK,
+        WEIGHT_SUBMISSION_BLOCK,
+    )
+    from research_lab.validator_integration import (
+        ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS as PREP_BUDGET,
+        WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS as WINDOW_BUDGET,
+    )
+
+    worst_observed_cold_build_seconds = 299
+    # Not just "greater than" -- one second of headroom is not a budget. The
+    # budget has to absorb a repeat of the worst build with room to spare.
+    assert PREP_BUDGET >= 1.5 * worst_observed_cold_build_seconds
+    assert PREP_BUDGET > WINDOW_BUDGET
+
+    # ~12s Finney blocks; the preparation has to finish before the window opens.
+    block_margin_seconds = (
+        WEIGHT_SUBMISSION_BLOCK - ALLOCATION_PREPARATION_BLOCK
+    ) * 12
+    assert PREP_BUDGET < block_margin_seconds
+    # And it must leave the window itself room to breathe: a preparation that
+    # spends its whole budget still has to hand over before block 240.
+    assert block_margin_seconds - PREP_BUDGET >= WINDOW_BUDGET
+
+
+def test_ambient_preparation_budget_only_ever_raises_the_floor():
+    from research_lab.validator_integration import (
+        ALLOCATION_PREPARATION_FETCH_BUDGET,
+        resolve_allocation_fetch_budget,
+    )
+
+    assert resolve_allocation_fetch_budget(90) == 90.0
+
+    token = ALLOCATION_PREPARATION_FETCH_BUDGET.set(300)
+    try:
+        assert resolve_allocation_fetch_budget(90) == 300.0
+        # A caller that already asked for more than the preparation budget keeps
+        # its own number; this never shortens a deadline.
+        assert resolve_allocation_fetch_budget(600) == 600.0
+    finally:
+        ALLOCATION_PREPARATION_FETCH_BUDGET.reset(token)
+
+    assert resolve_allocation_fetch_budget(90) == 90.0
+
+
+def test_attested_fetch_default_budget_is_unchanged():
+    """The submission-window budget must stay at 90s with no preparation active."""
+    import inspect
+
+    from research_lab import validator_integration
+
+    assert (
+        inspect.signature(
+            validator_integration.fetch_research_lab_attested_allocation_bundle
+        )
+        .parameters["timeout_seconds"]
+        .default
+        == 90
+    )
+    assert validator_integration.ALLOCATION_PREPARATION_FETCH_BUDGET.get() is None
+
+
+def test_preparation_raises_the_budget_only_before_the_submission_window():
+    """Before block 240 the guard task sees the long budget; in-window it does not."""
+    import asyncio
+
+    from neurons import validator as validator_module
+    from research_lab.validator_integration import (
+        ALLOCATION_PREPARATION_FETCH_BUDGET,
+        ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS as PREP_BUDGET,
+    )
+
+    observed = []
+
+    def run_preparation(window_open: bool):
+        validator = validator_module.Validator.__new__(validator_module.Validator)
+
+        async def guard(epoch):
+            observed.append(ALLOCATION_PREPARATION_FETCH_BUDGET.get())
+            return {"verified": True, "abort_chain_submission": False}
+
+        async def window_open_probe():
+            return window_open
+
+        validator._research_lab_pre_weight_submission_guard = guard
+        validator._research_lab_allocation_submission_window_open = (
+            window_open_probe
+        )
+        asyncio.run(
+            validator._prepare_research_lab_allocation(77, wait=True)
+        )
+
+    run_preparation(window_open=False)
+    run_preparation(window_open=True)
+
+    assert observed == [PREP_BUDGET, None]
+    # The ambient value must not escape the task that set it.
+    assert ALLOCATION_PREPARATION_FETCH_BUDGET.get() is None
+
+
+def test_submission_window_probe_fails_safe_to_the_tight_budget():
+    """An unresolvable epoch state must select the 90s budget, not the long one."""
+    import asyncio
+
+    from neurons import validator as validator_module
+
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+
+    async def broken_epoch_state():
+        raise RuntimeError("subtensor unavailable")
+
+    validator._get_epoch_state_async = broken_epoch_state
+
+    assert (
+        asyncio.run(
+            validator._research_lab_allocation_submission_window_open()
+        )
+        is True
+    )

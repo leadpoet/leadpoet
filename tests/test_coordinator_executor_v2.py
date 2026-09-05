@@ -12,15 +12,11 @@ from gateway.tee.coordinator_executor_v2 import (
     OP_ATTEST_WEIGHT_PUBLICATION,
     OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
     OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
-    OP_REGISTER_OPENROUTER_CREDENTIAL_V2,
     OP_RESEARCH_LAB_ALLOCATION,
     CoordinatorExecutorV2,
     coordinator_receipt_output_v2,
 )
-from gateway.tee.execution_job_manager_v2 import (
-    ExecutionContextV2,
-    ExecutionResultV2,
-)
+from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
 from gateway.tee.scoring_executor import ScoringExecutionResult
 from leadpoet_canonical.attested_v2 import (
@@ -48,9 +44,6 @@ from leadpoet_canonical.weight_computation import (
 from leadpoet_canonical.weight_authority_v2 import (
     gateway_weight_input_value_documents_v2,
 )
-from research_lab.eval.promotion_metric import promotion_improvement_metric
-
-
 def test_reward_ancestry_accepts_checkpointed_source_add_parents() -> None:
     provenance_parent_hash = "sha256:" + "1" * 64
     precheck_doc = {
@@ -148,99 +141,6 @@ def test_reward_ancestry_rejects_checkpointed_parent_output_mismatch() -> None:
             },
             context,
         )
-
-
-@pytest.mark.asyncio
-async def test_coordinator_consumes_bound_provider_metadata_before_dispatch():
-    credential_refs = {
-        "openrouter": "sha256:" + "1" * 64,
-        "openrouter_management": "sha256:" + "2" * 64,
-    }
-    observed = []
-
-    def register(payload, context):
-        observed.append((dict(payload), context))
-        return ExecutionResultV2(output={"status": "registered"})
-
-    context = ExecutionContextV2(
-        job_id="openrouter-registration:test",
-        purpose="research_lab.openrouter_credential.v2",
-        epoch_id=100,
-        provider_credential_ref_hashes=credential_refs,
-    )
-    result = await CoordinatorExecutorV2(
-        openrouter_registration_resolver=register,
-    )(
-        OP_REGISTER_OPENROUTER_CREDENTIAL_V2,
-        {
-            "schema_version": (
-                "leadpoet.openrouter_credential_registration_request.v2"
-            ),
-            "miner_hotkey": "miner",
-            "key_label": None,
-            "runtime_credential": {"sealed": "runtime"},
-            "management_credential": {"sealed": "management"},
-            "_v2_provider_credential_ref_hashes": credential_refs,
-        },
-        context,
-    )
-
-    assert result.output == {"status": "registered"}
-    assert observed == [
-        (
-            {
-                "schema_version": (
-                    "leadpoet.openrouter_credential_registration_request.v2"
-                ),
-                "miner_hotkey": "miner",
-                "key_label": None,
-                "runtime_credential": {"sealed": "runtime"},
-                "management_credential": {"sealed": "management"},
-            },
-            context,
-        )
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "payload_metadata,context_refs,context_profile,match",
-    (
-        (None, {"openrouter": "sha256:" + "1" * 64}, "default", "missing"),
-        (
-            {"openrouter": "sha256:" + "1" * 64},
-            {"openrouter": "sha256:" + "2" * 64},
-            "default",
-            "differs",
-        ),
-        ("invalid", {}, "default", "invalid"),
-        ({}, {}, "benchmark_model", "differs"),
-    ),
-)
-async def test_coordinator_fails_closed_on_unbound_provider_metadata(
-    payload_metadata,
-    context_refs,
-    context_profile,
-    match,
-):
-    payload = {"schema_version": "request.v2"}
-    if payload_metadata is not None:
-        payload["_v2_provider_credential_ref_hashes"] = payload_metadata
-    context = ExecutionContextV2(
-        job_id="coordinator:test",
-        purpose="research_lab.openrouter_credential.v2",
-        epoch_id=100,
-        provider_credential_profile=context_profile,
-        provider_credential_ref_hashes=context_refs,
-    )
-
-    with pytest.raises(ValueError, match=match):
-        await CoordinatorExecutorV2()(
-            OP_REGISTER_OPENROUTER_CREDENTIAL_V2,
-            payload,
-            context,
-        )
-
 
 def _artifact_transport_attempts(
     artifact_id,
@@ -513,29 +413,10 @@ async def test_coordinator_chain_realized_authorities_are_measured_and_bound():
 
 
 @pytest.mark.asyncio
-async def test_coordinator_calls_unchanged_promotion_metric():
-    score_bundle = {"aggregates": {"mean_delta": 1.75}}
-    expected = promotion_improvement_metric(score_bundle)
-    result = await CoordinatorExecutorV2()(
-        "promotion_improvement",
-        {"score_bundle": score_bundle},
-        ExecutionContextV2(
-            job_id="promotion:test",
-            purpose="research_lab.ranking.v2",
-            epoch_id=1,
-        ),
-    )
-    assert result.output == {
-        "improvement_points": expected.improvement_points,
-        "event_doc": expected.event_doc(),
-    }
-
-
-@pytest.mark.asyncio
 async def test_coordinator_rejects_operation_outside_measured_authority():
     with pytest.raises(ValueError, match="unsupported"):
         await CoordinatorExecutorV2()(
-            "qualification_company_scores",
+            "promotion_improvement",
             {},
             ExecutionContextV2(
                 job_id="score:test",

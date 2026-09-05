@@ -11,20 +11,6 @@ import shlex
 from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.request import Request, urlopen
 
-from gateway.research_lab.provider_profiles_v2 import (
-    verify_required_worker_proxy_profiles_v2,
-)
-from gateway.research_lab.official_baseline_custody import (
-    official_baseline_custody_configuration,
-)
-from gateway.research_lab.worker_autostart import (
-    DeferredWorkerFleetConfigurationError,
-    build_research_lab_worker_autostart_plan,
-    deferred_worker_fleet_roles,
-)
-from gateway.tee.acceptance_corpus_v2 import (
-    load_and_validate_acceptance_corpus_v2,
-)
 from gateway.tee.artifact_persistence_v2 import validate_artifact_policy
 from gateway.tee.gateway_miner_maintenance_restart_v1 import (
     verify_gateway_miner_maintenance_state,
@@ -39,7 +25,6 @@ from gateway.tee.provider_broker_v2 import (
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.topology import ROLE_SPECS, validate_manifest
 from gateway.utils.tee_kms_provision_v2 import load_provider_envelopes
-from research_lab.canonical import sha256_text
 
 
 FULL_TOPOLOGY_INSTANCE_TYPE = "r7i.4xlarge"
@@ -235,14 +220,11 @@ def verify_gateway_restart_preflight_v2(
     topology_manifest: Mapping[str, Any],
     artifact_policy: Mapping[str, Any],
     credential_envelope_paths: Sequence[Path],
-    config_dir: Path,
     topology_mode: str,
     instance_type: str,
     parent_vcpus: int,
     parent_memory_mib: int,
     parent_environment: Mapping[str, str],
-    acceptance_corpus_manifest_path: Optional[Path] = None,
-    acceptance_corpus_root: Optional[Path] = None,
     artifact_s3_client: Any = None,
 ) -> Dict[str, Any]:
     commit = str(deploy_commit or "").lower()
@@ -251,7 +233,7 @@ def verify_gateway_restart_preflight_v2(
     release = validate_release_manifest(release_manifest)
     if release["commit_sha"] != commit:
         raise GatewayRestartPreflightV2Error(
-            "approved gateway V2 release is for another commit"
+            "local gateway V2 release is for another commit"
         )
     topology = validate_manifest(topology_manifest)
     mode = str(topology_mode or "")
@@ -268,24 +250,6 @@ def verify_gateway_restart_preflight_v2(
             raise GatewayRestartPreflightV2Error(
                 "full V2 deployment has insufficient parent capacity"
             )
-        if acceptance_corpus_manifest_path is None or acceptance_corpus_root is None:
-            raise GatewayRestartPreflightV2Error(
-                "full V2 deployment requires the signed acceptance corpus"
-            )
-        try:
-            acceptance_corpus = load_and_validate_acceptance_corpus_v2(
-                Path(acceptance_corpus_manifest_path),
-                corpus_root=Path(acceptance_corpus_root),
-                expected_signing_pubkey_hash=release[
-                    "acceptance_signer_pubkey_hash"
-                ],
-            )
-        except Exception as exc:
-            raise GatewayRestartPreflightV2Error(
-                "signed V2 acceptance corpus is invalid: %s" % exc
-            ) from exc
-    else:
-        acceptance_corpus = None
 
     normalized_policy = validate_artifact_policy(artifact_policy)
     artifact_storage = (
@@ -317,73 +281,6 @@ def verify_gateway_restart_preflight_v2(
         envelopes=envelopes,
         parent_environment=parent_environment,
     )
-    try:
-        official_baseline_custody = official_baseline_custody_configuration(
-            parent_environment
-        )
-    except Exception as exc:
-        raise GatewayRestartPreflightV2Error(
-            "official baseline encrypted custody configuration is unavailable"
-        ) from exc
-    profile_result = (
-        verify_required_worker_proxy_profiles_v2(config_dir=Path(config_dir))
-        if mode == "full"
-        else {
-            "schema_version": "leadpoet.worker_proxy_profile_set.v2",
-            "status": "component_only",
-            "profile_count": 0,
-        }
-    )
-    if mode == "full":
-        # Worker/proxy decoupling must be explicit in production: require both
-        # *_PROCESS_COUNT variables to be set to a positive integer. Without this
-        # gate a restart silently falls back to one-worker-per-proxy, preserving
-        # the oversized fleet the decoupling is meant to shrink. Failing the
-        # preflight forces the operator to size the fleet on purpose.
-        for count_env in (
-            "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT",
-            "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",
-        ):
-            raw = str(parent_environment.get(count_env, "")).strip()
-            try:
-                parsed = int(raw)
-            except ValueError:
-                parsed = 0
-            if parsed < 1:
-                raise GatewayRestartPreflightV2Error(
-                    "full V2 deployment requires %s to be set to a positive "
-                    "worker process count (got %r)" % (count_env, raw)
-                )
-        worker_plan = build_research_lab_worker_autostart_plan(parent_environment)
-        try:
-            deferred_roles = deferred_worker_fleet_roles(parent_environment)
-        except DeferredWorkerFleetConfigurationError as exc:
-            raise GatewayRestartPreflightV2Error(str(exc)) from exc
-        if not worker_plan.hosted.enabled or not worker_plan.scoring.enabled:
-            raise GatewayRestartPreflightV2Error(
-                "full V2 deployment requires both configured worker fleets"
-            )
-        expected_worker_counts = {
-            "gateway_autoresearch": int(worker_plan.hosted.worker_count),
-            "gateway_scoring": int(worker_plan.scoring.worker_count),
-        }
-        # Worker count is decoupled from proxy count: a fleet may run fewer
-        # workers than it has encrypted proxy profiles (each worker index still
-        # maps to its own profile). Require a profile for every worker index in
-        # range, not strict equality, so reducing the process count does not
-        # fail the preflight. Running more workers than profiles is still
-        # rejected (there would be no TLS envelope for the extra indices).
-        available_profile_counts = dict(profile_result.get("worker_counts") or {})
-        for role, required in expected_worker_counts.items():
-            available = int(available_profile_counts.get(role, 0))
-            if required < 1 or required > available:
-                raise GatewayRestartPreflightV2Error(
-                    "%s worker count %d has no encrypted proxy profile coverage "
-                    "(%d profiles available)" % (role, required, available)
-                )
-    else:
-        expected_worker_counts = {}
-        deferred_roles = frozenset()
     return {
         "schema_version": "leadpoet.gateway_restart_preflight.v2",
         "status": "ready",
@@ -399,21 +296,6 @@ def verify_gateway_restart_preflight_v2(
         "parent_plaintext_provider_slot_count": 0,
         "artifact_bucket_host": normalized_policy["bucket_host"],
         "artifact_bucket_protection": artifact_storage or "not_requested",
-        "official_baseline_custody": {
-            "bucket": official_baseline_custody["bucket"],
-            "prefix": official_baseline_custody["prefix"],
-            "kms_key_id_sha256": sha256_text(
-                official_baseline_custody["kms_key_id"]
-            ),
-        },
-        "worker_proxy_profile_count": int(profile_result["profile_count"]),
-        "worker_counts": expected_worker_counts,
-        "deferred_worker_fleet_roles": sorted(deferred_roles),
-        "acceptance_corpus_manifest_hash": (
-            str(acceptance_corpus["manifest_hash"])
-            if acceptance_corpus is not None
-            else "component_only"
-        ),
     }
 
 
@@ -427,8 +309,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--topology-mode", choices=("full", "component"), required=True)
     parser.add_argument("--credential-envelope", action="append", type=Path, default=[])
     parser.add_argument("--parent-env-file", required=True, type=Path)
-    parser.add_argument("--acceptance-corpus-manifest", type=Path)
-    parser.add_argument("--acceptance-corpus-root", type=Path)
     args = parser.parse_args(argv)
     try:
         from scripts.gateway_git_deploy import (
@@ -470,14 +350,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         topology_manifest=_json(args.topology_manifest, "gateway topology manifest"),
         artifact_policy=_json(args.artifact_policy, "encrypted artifact policy"),
         credential_envelope_paths=args.credential_envelope,
-        config_dir=args.config_dir,
         topology_mode=args.topology_mode,
         instance_type=_imds_instance_type(),
         parent_vcpus=parent_vcpus,
         parent_memory_mib=parent_memory_mib,
         parent_environment=parent_environment,
-        acceptance_corpus_manifest_path=args.acceptance_corpus_manifest,
-        acceptance_corpus_root=args.acceptance_corpus_root,
         artifact_s3_client=aws_clients["s3"],
     )
     result["prepared_candidate_tree"] = candidate_tree_evidence
@@ -485,10 +362,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         verify_gateway_miner_maintenance_state(
             deploy_commit=str(args.deploy_commit).lower(),
             candidate_tree_hash=str(candidate_tree_evidence["tree_hash"]),
-            gateway_release_hash=str(result["release_hash"]),
             parent_environment={**os.environ, **parent_environment},
             secrets_client=aws_clients["secretsmanager"],
-            release_s3_client=aws_clients["s3"],
         )
     )
     print(json.dumps(result, sort_keys=True, indent=2))

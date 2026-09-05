@@ -71,14 +71,6 @@ _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 _SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "scripts/178-research-lab-source-add-miner-status.sql"
 )
-_LAB_ARENA_MIGRATION = {
-    "path": "scripts/179-lab-arena-v1.sql",
-    "sequence": 179,
-    "sha256": (
-        "sha256:bd20a27b25055cc82a7a6b39593eed0e23cc0d9ac1142577e31a909312899eb7"
-    ),
-    "transaction_mode": "candidate-file",
-}
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -773,17 +765,6 @@ def _require_schema_only_source_add_acl_migrations(
                 "schema-only SOURCE_ADD ACL migration identity differs: "
                 f"{expected['path']}"
             )
-    latest_source_add = dict(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS[-1])
-    observed = tuple(dict(item) for item in candidate_migrations)
-    allowed_tails = (
-        (latest_source_add,),
-        (latest_source_add, dict(_LAB_ARENA_MIGRATION)),
-    )
-    if not any(observed[-len(tail) :] == tail for tail in allowed_tails):
-        raise ProductionParityError(
-            "schema-only SOURCE_ADD ACL reconstruction is not bound to the "
-            "latest candidate migration or the exact Lab Arena migration"
-        )
 
 
 def _schema_only_source_add_acl_expectations() -> dict[str, dict[str, bool]]:
@@ -1445,21 +1426,9 @@ SELECT json_build_object(
   'largest_relation_bytes', COALESCE(MAX(pg_total_relation_size(c.oid)), 0),
   'capture_utc_timestamp', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::text || '+00:00',
   'capture_utc_date', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text,
-  'latest_completed_benchmark_date', (
-    SELECT MAX(benchmark_date)::text
-    FROM public.research_lab_private_model_benchmark_bundles
-  ),
-  'current_day_rebenchmark_run_count', (
-    SELECT COUNT(*)
-    FROM public.research_lab_scoring_runs
-    WHERE run_type = 'private_baseline_rebenchmark'
-      AND benchmark_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
-  ),
-  'current_day_benchmark_bundle_count', (
-    SELECT COUNT(*)
-    FROM public.research_lab_private_model_benchmark_bundles
-    WHERE benchmark_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
-  ),
+  'latest_completed_benchmark_date', NULL,
+  'current_day_rebenchmark_run_count', 0,
+  'current_day_benchmark_bundle_count', 0,
   'weight_history_scope', (
     SELECT json_build_object(
       'netuid', netuid,

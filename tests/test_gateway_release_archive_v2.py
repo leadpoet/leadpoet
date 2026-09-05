@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from gateway.tee.release_archive_v2 import (
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
+    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
@@ -141,6 +143,86 @@ def _release_fixture(root: Path, commit_character: str):
     return gateway_root, eif_root, release_path, release
 
 
+def _convert_archive_to_historical_three_role(archive_root: Path, result):
+    archive = Path(result["archive_path"])
+    release_path = archive / "gateway-v2-release-manifest.json"
+    release = json.loads(release_path.read_text(encoding="utf-8"))
+    roles = copy.deepcopy(release["roles"])
+    for summary in roles.values():
+        summary["topology_hash"] = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    autoresearch = copy.deepcopy(roles["gateway_scoring"])
+    autoresearch.update(
+        {
+            "physical_role": "gateway_autoresearch",
+            "service_role": "gateway_autoresearch",
+            "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        }
+    )
+    roles["gateway_autoresearch"] = autoresearch
+    body = {
+        **{key: value for key, value in release.items() if key != "release_hash"},
+        "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        "roles": roles,
+        "verified_build_count": 18,
+    }
+    historical = {**body, "release_hash": sha256_json(body)}
+    release_path.write_text(json.dumps(historical), encoding="utf-8")
+
+    for template in (
+        "tee-enclave-%s.eif",
+        "enclave-build-%s.json",
+        "enclave-image-%s.txt",
+        "build-identities/%s.json",
+    ):
+        source = archive / (template % "gateway_scoring")
+        destination = archive / (template % "gateway_autoresearch")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+    verification_path = archive / "gateway-v2-local-verification.json"
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    row = copy.deepcopy(verification["roles"][1])
+    row["physical_role"] = "gateway_autoresearch"
+    verification["roles"].append(row)
+    verification["release_hash"] = historical["release_hash"]
+    verification_path.write_text(json.dumps(verification), encoding="utf-8")
+
+    archive_document_path = archive / "archive.json"
+    archive_document = json.loads(archive_document_path.read_text(encoding="utf-8"))
+    inventory = {}
+    for path in sorted(item for item in archive.rglob("*") if item.is_file()):
+        if path == archive_document_path:
+            continue
+        relative = str(path.relative_to(archive))
+        inventory[relative] = {
+            "sha256": _sha(path.read_bytes()),
+            "size_bytes": path.stat().st_size,
+        }
+    archive_body = {
+        **{
+            key: value
+            for key, value in archive_document.items()
+            if key != "archive_hash"
+        },
+        "release_hash": historical["release_hash"],
+        "files": inventory,
+    }
+    archived = {**archive_body, "archive_hash": sha256_json(archive_body)}
+    archive_document_path.write_text(json.dumps(archived), encoding="utf-8")
+    historical_archive = archive_root / historical["release_hash"].split(":", 1)[1]
+    archive.rename(historical_archive)
+    index_path = archive_root / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["current_release_hash"] = historical["release_hash"]
+    index["releases"][0] = {
+        "release_hash": historical["release_hash"],
+        "commit_sha": historical["commit_sha"],
+        "archive_hash": archived["archive_hash"],
+        "archived_at": archived["archived_at"],
+    }
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    return historical, historical_archive
+
+
 def test_verified_gateway_release_is_archived_as_complete_immutable_set(tmp_path):
     gateway_root, eif_root, release_path, release = _release_fixture(
         tmp_path / "build", "a"
@@ -155,7 +237,7 @@ def test_verified_gateway_release_is_archived_as_complete_immutable_set(tmp_path
     )
     archived = verify_archive_directory(Path(result["archive_path"]))
     assert archived["release_hash"] == release["release_hash"]
-    assert len(archived["files"]) == 14
+    assert len(archived["files"]) == 2 + 4 * len(ROLE_SPECS)
     assert result["retained_release_count"] == 1
 
 
@@ -203,6 +285,79 @@ def test_exact_gateway_release_restores_from_verified_archive(tmp_path, monkeypa
     assert verified_roots[0] == restored_root
     assert verified_roots[-1] == restored_root
     assert not list(tmp_path.glob(".gateway-eif-restore.*"))
+
+
+def test_current_release_restores_with_historical_three_role_archive_retained(
+    tmp_path,
+):
+    archive_root = tmp_path / "archive"
+    old_gateway, old_eifs, old_manifest, _old_release = _release_fixture(
+        tmp_path / "old-build", "a"
+    )
+    old_result = archive_verified_release(
+        release_manifest_path=old_manifest,
+        gateway_root=old_gateway,
+        eif_root=old_eifs,
+        archive_root=archive_root,
+    )
+    historical, historical_archive = _convert_archive_to_historical_three_role(
+        archive_root, old_result
+    )
+    assert verify_archive_directory(historical_archive)["release_hash"] == historical[
+        "release_hash"
+    ]
+    last_good = tmp_path / "last-good.json"
+    last_good.write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "target_sha": historical["commit_sha"],
+                "role_pcr0s": {
+                    role: summary["pcr0"]
+                    for role, summary in historical["roles"].items()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gateway_root, eif_root, release_path, release = _release_fixture(
+        tmp_path / "current-build", "b"
+    )
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+        last_good_manifest_path=last_good,
+    )
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    result = restore_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=restored_root,
+        archive_root=archive_root,
+    )
+    assert result["release_hash"] == release["release_hash"]
+    assert historical_archive.is_dir()
+
+    archive_document_path = historical_archive / "archive.json"
+    archive_document = json.loads(archive_document_path.read_text(encoding="utf-8"))
+    archive_document["files"]["unknown-role.eif"] = {
+        "sha256": _sha(b"unknown"),
+        "size_bytes": 7,
+    }
+    archive_document["archive_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in archive_document.items()
+            if key != "archive_hash"
+        }
+    )
+    archive_document_path.write_text(json.dumps(archive_document), encoding="utf-8")
+    with pytest.raises(ReleaseArchiveV2Error, match="inventory is incomplete"):
+        verify_archive_directory(historical_archive)
 
 
 def test_exact_gateway_release_skips_reinstall_when_live_set_is_verified(
@@ -499,7 +654,7 @@ def test_gateway_role_builder_cold_builds_only_on_exact_archive_miss():
     restore = script.index("--restore")
     miss = script.index('[ "$restore_status" -ne 3 ]', restore)
     cold_gate = script.index('[ "$RESTORED_EXACT_RELEASE" != "1" ]', miss)
-    cold_build = script.index("sudo docker build", cold_gate)
+    cold_build = script.index("docker build", cold_gate)
     assert restore < miss < cold_gate < cold_build
     assert "exit \"$restore_status\"" in script[miss:cold_gate]
 

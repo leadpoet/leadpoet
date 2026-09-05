@@ -22,7 +22,21 @@ import pytest
 from tests.test_source_add_end_to_end_postgres import SCRIPTS, _database_with_migrations
 
 LAB_ARENA_MIGRATION = "179-lab-arena-v1.sql"
-DEFAULT_MIGRATIONS = (LAB_ARENA_MIGRATION,)
+LAB_ARENA_DAILY_COMPETITION_MIGRATION = "180-lab-arena-daily-competition.sql"
+LAB_ARENA_SOURCE_SUBMISSIONS_MIGRATION = "181-lab-arena-source-submissions.sql"
+LAB_ARENA_SOURCE_EXECUTION_MIGRATION = "182-lab-arena-source-execution.sql"
+LAB_ARENA_MINER_REWARD_MIGRATION = "183-lab-arena-miner-reward-basis.sql"
+LAB_ARENA_SCORING_ISOLATION_MIGRATION = "184-lab-arena-scoring-failure-isolation.sql"
+LAB_ARENA_MINER_CREDENTIALS_MIGRATION = "185-lab-arena-miner-credentials.sql"
+DEFAULT_MIGRATIONS = (
+    LAB_ARENA_MIGRATION,
+    LAB_ARENA_DAILY_COMPETITION_MIGRATION,
+    LAB_ARENA_SOURCE_SUBMISSIONS_MIGRATION,
+    LAB_ARENA_SOURCE_EXECUTION_MIGRATION,
+    LAB_ARENA_MINER_REWARD_MIGRATION,
+    LAB_ARENA_SCORING_ISOLATION_MIGRATION,
+    LAB_ARENA_MINER_CREDENTIALS_MIGRATION,
+)
 
 _SHIM_SQL = """
 CREATE SCHEMA IF NOT EXISTS extensions;
@@ -30,6 +44,19 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 CREATE ROLE anon NOLOGIN;
 CREATE ROLE authenticated NOLOGIN;
 CREATE ROLE service_role NOLOGIN;
+"""
+
+_DAILY_SOURCE_SHIM_SQL = """
+CREATE TABLE public.qualification_private_icp_sets (
+  set_id BIGINT PRIMARY KEY,
+  icps JSONB NOT NULL,
+  active_from TIMESTAMPTZ,
+  active_until TIMESTAMPTZ,
+  is_active BOOLEAN NOT NULL DEFAULT FALSE
+);
+ALTER TABLE public.qualification_private_icp_sets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.qualification_private_icp_sets
+  FROM PUBLIC, anon, authenticated;
 """
 
 
@@ -88,6 +115,7 @@ def _local_database(migrations):
         connection.autocommit = True
         with connection.cursor() as cursor:
             cursor.execute(_SHIM_SQL)
+            cursor.execute(_DAILY_SOURCE_SHIM_SQL)
             for migration in migrations:
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
         connection.close()
@@ -115,7 +143,9 @@ def database_with_lab_arena_migration(migrations=DEFAULT_MIGRATIONS):
     # mistaken for a migration failure.
     last_error: BaseException | None = None
     for _attempt in range(3):
-        generator = _database_with_migrations(migrations)
+        generator = _database_with_migrations(
+            migrations, setup_sql=_DAILY_SOURCE_SHIM_SQL
+        )
         try:
             value = next(generator)
         except (subprocess.TimeoutExpired, pytest.fail.Exception) as exc:  # type: ignore[attr-defined]

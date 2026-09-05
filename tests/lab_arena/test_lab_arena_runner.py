@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import gzip
+import io
 import json
 import os
 import shutil
 import socket
+import subprocess
+import sys
 import tempfile
+import tarfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,9 +21,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+import httpx
 from bittensor_wallet import Keypair
 
-from lab_arena import contracts, runner as rn, runtime, shim
+from lab_arena import contracts, runner as rn, runtime, shim, source_bundle
 from lab_arena.output import output_document_from_bytes
 
 RUNNER = Keypair.create_from_uri("//Runner")
@@ -26,6 +33,35 @@ ROUND = "arena-2026-09-02"
 IMAGE = "sha256:" + "a" * 64
 ARENA_REPOSITORY = "arena.example/lab-arena/models"
 IMAGE_REFERENCE = ARENA_REPOSITORY + "@" + IMAGE
+
+
+def _source_archive() -> bytes:
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            data = b"def run_icp(icp):\n    return []\n"
+            info = tarfile.TarInfo("harness.py")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
+def _source_archive_with_requirements(requirement: str) -> bytes:
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            for name, data in (
+                ("harness.py", b"def run_icp(icp):\n    return []\n"),
+                ("requirements.txt", requirement.encode("utf-8")),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
+SOURCE_BYTES = _source_archive()
+SOURCE_REF = "arena/%s/sources/s1.tar.gz" % ROUND
 
 
 def sign(message: str) -> str:
@@ -41,10 +77,15 @@ def valid_company(index: int) -> Dict[str, Any]:
     return {
         "company_name": "Co %d" % index,
         "company_website": "https://co%d.example.com" % index,
+        "company_linkedin": "",
         "industry": "Software",
         "employee_count": "51-200",
+        "company_stage": "Series A",
         "country": "United States",
-        "intent_signals": [{"source": "news", "description": "Raised a round", "url": "https://news.example.com/%d" % index, "date": "2026-08-01", "snippet": "Co raised money", "matched_icp_signal": 0}],
+        "state": "",
+        "fit_summary": "The company matches the ICP.",
+        "fit_evidence_urls": ["https://co%d.example.com/about" % index],
+        "intent_signals": [{"description": "Raised a round", "url": "https://news.example.com/%d" % index, "date": "2026-08-01", "why_now": "The funding makes outreach timely.", "snippet": "Co raised money", "matched_icp_signal": 0}],
     }
 
 
@@ -56,6 +97,8 @@ class FakeApi:
         self.claims: List[Dict[str, Any]] = []
         self.provider_frames: List[Dict[str, Any]] = []
         self.completions: List[Dict[str, Any]] = []
+        self.source_requests: List[tuple[str, str]] = []
+        self.source_payload = SOURCE_BYTES
         self.broker_documents = list(broker_documents or [])
         self.lock = threading.Lock()
 
@@ -77,6 +120,10 @@ class FakeApi:
         self.completions.append(envelope)
         return {"status": "accepted"}
 
+    def source(self, run_id, lease_token):
+        self.source_requests.append((run_id, lease_token))
+        return self.source_payload
+
 
 def lease(run_id="r1", position=0):
     return {
@@ -85,6 +132,8 @@ def lease(run_id="r1", position=0):
         "lease_generation": 1, "stage_generation": 1, "lease_expires_at": "2026-09-02T01:07:00+00:00",
         "lease_token": "tok-" + run_id, "icp": {"icp_id": "arena:x", "prompt": "p", "max_companies": 5},
         "image_reference": IMAGE_REFERENCE,
+        "source_ref": SOURCE_REF,
+        "source_size_bytes": len(SOURCE_BYTES),
         "round_id": ROUND, "evaluation_date": "2026-09-02",
     }
 
@@ -119,9 +168,12 @@ def fake_exporter(reference, digest, target):
 
 def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
     cache = rn.ImageCache(tmp_path / "images", fake_exporter)
+    source_cache = rn.SourceCache(
+        tmp_path / "sources", api.source, dependency_installer=lambda _requirements, _target: None
+    )
     return rn.RunnerConfig(
         round_id=ROUND, identity=rn.RunnerIdentity(hotkey=RUNNER.ss58_address, sign=sign), api=api, sandbox_runtime=sandbox_runtime,
-        image_cache=cache, work_dir=tmp_path / "work", max_parallel_runs=parallel,
+        image_cache=cache, source_cache=source_cache, work_dir=tmp_path / "work", max_parallel_runs=parallel,
         evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc), completion_retry_seconds=(0.0, 0.0),
     )
 
@@ -144,6 +196,9 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     spec = sandbox.specs[0]
     assert spec.rootfs_path == tmp_path / "images" / IMAGE.replace(":", "-") / "rootfs" and spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS
     assert spec.entry_command == runtime.AGENT_ENTRY_COMMAND and spec.working_dir == runtime.AGENT_WORKING_DIR
+    assert spec.source_dir is not None and (spec.source_dir / "harness.py").is_file()
+    assert spec.dependency_dir is not None
+    assert spec.agent_entrypoint_path == rn.AGENT_ENTRYPOINT_PATH
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
 
@@ -182,6 +237,7 @@ def test_local_slots_bound_claims_and_images_export_once(tmp_path):
     runner_ = rn.Runner(config)
     assert runner_.run_once() == 3  # three local slots, then the loop waits for completions
     assert exports == [IMAGE]
+    assert len(api.source_requests) == 1
     assert runner_.run_once() == 2 and len(api.completions) == 5
     assert runner_.run_once() == 0
     assert all(c["body"]["declared_parallelism"] == 3 for c in api.claims)
@@ -214,6 +270,157 @@ def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_pat
     assert list((tmp_path / "small").iterdir()) == []
 
 
+def test_source_cache_extracts_once_and_installs_optional_binary_dependencies(tmp_path):
+    payload = _source_archive_with_requirements("pydantic-ai==1.0.0\n")
+    submission_id = "sub-first"
+    fetches = []
+    installs = []
+
+    def fetch(run_id, lease_token):
+        fetches.append((run_id, lease_token))
+        return payload
+
+    def install(requirements, target):
+        installs.append(requirements.read_text(encoding="utf-8"))
+        (target / "installed.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    cache = rn.SourceCache(tmp_path / "sources", fetch, dependency_installer=install)
+    arguments = ("run-1", "a" * 64, SOURCE_REF, submission_id, len(payload))
+    with cache.acquire(*arguments) as (source, dependencies):
+        assert (source / "harness.py").is_file()
+        assert (dependencies / "installed.py").is_file()
+    cache = rn.SourceCache(tmp_path / "sources", fetch, dependency_installer=install)
+    with cache.acquire("run-2", "b" * 64, SOURCE_REF, submission_id, len(payload)):
+        pass
+    second_submission_id = "sub-second"
+    with cache.acquire("run-3", "c" * 64, SOURCE_REF, second_submission_id, len(payload)):
+        pass
+    assert fetches == [("run-1", "a" * 64), ("run-3", "c" * 64)]
+    assert installs == ["pydantic-ai==1.0.0\n"] * 2
+    assert (tmp_path / "sources" / ("submission-" + submission_id)).is_dir()
+    assert (tmp_path / "sources" / ("submission-" + second_submission_id)).is_dir()
+
+
+def test_source_cache_prepares_different_bundles_in_parallel(tmp_path):
+    payloads = {
+        "run-1": _source_archive_with_requirements("package-one==1.0.0\n"),
+        "run-2": _source_archive_with_requirements("package-two==1.0.0\n"),
+    }
+    barrier = threading.Barrier(2)
+
+    def fetch(run_id, _lease_token):
+        return payloads[run_id]
+
+    def install(_requirements, target):
+        barrier.wait(timeout=2)
+        (target / "installed.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    cache = rn.SourceCache(
+        tmp_path / "sources", fetch, dependency_installer=install
+    )
+
+    def prepare(run_id):
+        payload = payloads[run_id]
+        with cache.acquire(
+            run_id, "a" * 64, SOURCE_REF, "submission-" + run_id, len(payload)
+        ) as paths:
+            assert (paths[0] / "harness.py").is_file()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(prepare, run_id) for run_id in sorted(payloads)]
+        for future in futures:
+            future.result(timeout=3)
+
+
+def test_binary_requirement_install_rejects_urls_options_and_source_builds(
+    tmp_path, monkeypatch
+):
+    requirements = tmp_path / "requirements.txt"
+    target = tmp_path / "deps"
+    target.mkdir()
+    for unsafe in ("-r other.txt\n", "agent @ https://example.test/a.whl\n", "../agent\n"):
+        requirements.write_text(unsafe, encoding="utf-8")
+        with pytest.raises(rn.RunnerError, match="package names and version constraints"):
+            rn.install_binary_requirements(requirements, target)
+
+    calls = []
+    requirements.write_text("pydantic-ai==1.0.0\n", encoding="utf-8")
+    monkeypatch.setattr(
+        rn.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or type("Result", (), {"returncode": 0})(),
+    )
+    rn.install_binary_requirements(requirements, target)
+    mount_command, mount_kwargs = calls[0]
+    command, kwargs = next(call for call in calls if "pip" in call[0])
+    assert mount_command[:3] == ["mount", "-t", "tmpfs"]
+    assert "size=%d" % rn.MAX_DEPENDENCY_BYTES in mount_command[4]
+    assert mount_kwargs["timeout"] == rn.DEPENDENCY_MOUNT_TIMEOUT_SECONDS
+    assert "--only-binary=:all:" in command
+    assert "--no-deps" not in command and "--no-compile" in command
+    assert kwargs["timeout"] == rn.DEPENDENCY_INSTALL_TIMEOUT_SECONDS
+    assert Path(kwargs["env"]["HOME"]).parent.name.startswith("lab-arena-deps-")
+    assert Path(kwargs["env"]["TMPDIR"]).parent == Path(kwargs["env"]["HOME"]).parent
+    assert calls[-1][0][0] == "umount"
+
+
+def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
+    tmp_path,
+):
+    payload = _source_archive_with_requirements("missing-package==1.0.0\n")
+    run_lease = lease()
+    run_lease.update(source_size_bytes=len(payload))
+    api = FakeApi([run_lease])
+    api.source_payload = payload
+
+    def reject_dependency(_requirements, _target):
+        raise rn.AgentDependencyError("binary dependency installation failed")
+
+    sandbox = BridgingRuntime(output={"companies": [valid_company(1)]})
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, sandbox)
+    config.source_cache = rn.SourceCache(
+        tmp_path / "failing-sources",
+        api.source,
+        dependency_installer=reject_dependency,
+    )
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert sandbox.specs == []
+    assert api.completions[0]["body"]["result"]["terminal_status"] == "model_error"
+    assert api.completions[0]["body"]["output"] is None
+
+
+def test_http_source_download_uses_the_existing_lease_header_and_a_byte_cap():
+    token = "a" * 64
+
+    def handler(request):
+        assert request.headers["x-lab-arena-lease"] == token
+        return httpx.Response(200, content=SOURCE_BYTES)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    api = rn.HttpArenaApiClient("http://localhost", client=client)
+    assert api.source("run-1", token) == SOURCE_BYTES
+
+    oversized = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={
+                    "content-length": str(source_bundle.MAX_SOURCE_ARCHIVE_BYTES + 1)
+                },
+                content=b"x",
+            )
+        )
+    )
+    api = rn.HttpArenaApiClient("http://localhost", client=oversized)
+    with pytest.raises(rn.RunnerError, match="exceeds the archive limit"):
+        api.source("run-1", token)
+
+
 def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_path):
     api = FakeApi([])
     state = rn.RunState(lease=lease(), lease_token="tok")
@@ -233,9 +440,11 @@ def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_pat
 
 
 def test_parallelism_env_and_http_boundary():
-    assert rn.max_parallel_runs_from_environment({}) == 1 and rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "4"}) == 4
+    assert rn.max_parallel_runs_from_environment({}) == 8 and rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "4"}) == 4
     with pytest.raises(rn.RunnerError):
         rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "0"})
+    with pytest.raises(rn.RunnerError):
+        rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "9"})
     with pytest.raises(rn.RunnerError):
         rn.HttpArenaApiClient("http://arena.example.com")
     with pytest.raises(rn.RunnerError):
@@ -306,21 +515,19 @@ def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path
         shutil.rmtree(socket_dir, ignore_errors=True)
 
 
-def test_miner_leases_outside_the_round_source_or_digest_are_refused(tmp_path):
-
-    foreign = lease("r1")
-    foreign["image_reference"] = "evil.example/models@" + IMAGE
+def test_invalid_submission_id_and_runtime_image_mismatches_are_refused(tmp_path):
+    wrong_source = lease("r1")
+    wrong_source["submission_id"] = "../unsafe"
     mismatched = lease("r2")
     mismatched["image_reference"] = ARENA_REPOSITORY + "@sha256:" + "b" * 64
     wrong_judge = scoring_lease("r3")
-    wrong_judge["image_reference"] = "arena.example/lab-arena/other@" + SCORER_IMAGE
-    api = FakeApi([foreign, mismatched, wrong_judge])
+    wrong_judge["image_reference"] = "arena.example/lab-arena/other@sha256:" + "b" * 64
+    api = FakeApi([wrong_source, mismatched, wrong_judge])
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
-    config.adopt_round({"registry_repository": ARENA_REPOSITORY})
     runner_ = rn.Runner(config)
     runner_.run_once()
-    assert runner_.abandoned == 2 and len(api.completions) == 1
+    assert runner_.abandoned == 3 and len(api.completions) == 0
     assert all(c["error"] == "RunnerError" for c in runner_.completed if "error" in c)
 
 
@@ -343,7 +550,7 @@ class FollowApi(FakeApi):
 
 
 def test_a_runner_without_a_pinned_round_follows_each_current_round_without_code_identity_gates(tmp_path):
-    configuration = {"registry_repository": ARENA_REPOSITORY}
+    configuration = {"schedule": {}}
     api = FollowApi([lease("r1")], rounds={ROUND: configuration, "arena-2026-09-03": configuration, "arena-2026-09-04": configuration})
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}))
@@ -352,7 +559,7 @@ def test_a_runner_without_a_pinned_round_follows_each_current_round_without_code
     # No round yet: nothing to claim, nothing signed.
     assert runner_.run_once() == 0 and runner_.round_id is None and api.claims == []
     api.current_round = ROUND
-    assert runner_.run_once() == 1 and runner_.round_id == ROUND and config.registry_repository == ARENA_REPOSITORY
+    assert runner_.run_once() == 1 and runner_.round_id == ROUND
     assert api.claims[-1]["round_id"] == ROUND and api.completions[0]["round_id"] == ROUND and api.completions[0]["body"]["run_id"] == "r1"
     api.current_round = "arena-2026-09-03"
     assert runner_.run_once() == 0 and runner_.round_id == "arena-2026-09-03"
@@ -364,7 +571,7 @@ def test_a_runner_without_a_pinned_round_follows_each_current_round_without_code
 
 @pytest.mark.parametrize("status", rn.WORKING_STATUSES)
 def test_an_unpinned_runner_follows_every_execution_and_scoring_window(tmp_path, status):
-    api = FollowApi([], rounds={ROUND: {"registry_repository": ARENA_REPOSITORY}})
+    api = FollowApi([], rounds={ROUND: {"schedule": {}}})
     api.current_round = ROUND
     api.current_status = status
     (tmp_path / "work").mkdir()
@@ -415,6 +622,88 @@ def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
             os.environ.pop(shim.WORKER_SOCKET_ENV, None)
         assert frame_status == 200 and json.loads(frame_body)["results"]
         assert len(state.calls) == 2  # only the two matched requests reached the Arena
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+def test_agent_entrypoint_loads_the_trusted_shim_for_a_standard_http_client(tmp_path):
+    """The OCI Python path installs the broker shim before a miner harness imports urllib."""
+
+    api = FakeApi([])
+    state = rn.RunState(lease=lease("r1"), lease_token="tok-r1")
+    socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
+    server = rn.WorkerSocketServer(
+        socket_dir / runtime.SANDBOX_SOCKET_NAME,
+        api,
+        state,
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "harness.py").write_text(
+        "import json\n"
+        "import urllib.request\n"
+        "def run_icp(icp):\n"
+        "    url = 'https://api.scrapingdog.com/scrape?url=https%3A%2F%2Fexample.com%2F'\n"
+        "    with urllib.request.urlopen(url, timeout=5) as response:\n"
+        "        result = json.load(response)\n"
+        "    return [{'company_name': result['results'][0]['url']}]\n",
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "icp.json"
+    input_path.write_text(
+        json.dumps({"icp": {"icp_id": "arena:test", "prompt": "find leads"}}),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "companies.json"
+    trusted_model = tmp_path / "model"
+    trusted_model.mkdir()
+    (trusted_model / "sitecustomize.py").write_text(
+        shim.SITECUSTOMIZE_SOURCE,
+        encoding="utf-8",
+    )
+    (trusted_model / "lab_arena").symlink_to(
+        Path(rn.__file__).resolve().parent,
+        target_is_directory=True,
+    )
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from lab_arena.agent_entrypoint import run\n"
+        "run(source_dir=Path(sys.argv[1]), input_path=Path(sys.argv[2]), "
+        "output_path=Path(sys.argv[3]))\n"
+    )
+    environment = {
+        "HOME": str(tmp_path),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": runtime.PROCESS_ENV["PATH"],
+        "PYTHONPATH": str(trusted_model),
+        shim.WORKER_SOCKET_ENV: str(socket_dir / runtime.SANDBOX_SOCKET_NAME),
+    }
+    server.start()
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(source),
+                str(input_path),
+                str(output_path),
+            ],
+            cwd=source,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+        assert json.loads(output_path.read_text(encoding="utf-8")) == {
+            "companies": [{"company_name": "https://co1.example.com"}]
+        }
+        assert api.provider_frames[-1]["operation_id"] == "scrapingdog.scrape"
     finally:
         server.stop()
         shutil.rmtree(socket_dir, ignore_errors=True)
@@ -551,6 +840,26 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
     assert api.provider_frames[0]["operation_id"] == "openrouter.chat"
 
 
+@pytest.mark.parametrize("scoring_run", [False, True])
+def test_miner_key_failure_does_not_become_an_infrastructure_failure(tmp_path, scoring_run):
+    from lab_arena import scoring
+
+    class MinerKeyApi(RefusingApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            document["call"].update(funding_source="miner_key", provider_status=401)
+            return document
+
+    failure = scoring.build_scoring_failure("r1", "judge_error", detail="provider error")
+    api = MinerKeyApi([scoring_lease() if scoring_run else lease()], code="miner_credentials_unavailable")
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=failure)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "credential_error"
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
 class FlakyCompletionApi(FakeApi):
     """The completion call fails a given number of times before the Arena accepts it."""
 
@@ -566,6 +875,21 @@ class FlakyCompletionApi(FakeApi):
         return super().complete(envelope)
 
 
+class CompletionDocumentApi(FakeApi):
+    """Return fixed completion documents and retain only envelope identities."""
+
+    def __init__(self, leases, responses):
+        super().__init__(leases)
+        self.responses = list(responses)
+        self.completion_attempts = []
+
+    def complete(self, envelope):
+        self.completion_attempts.append(envelope)
+        if not self.responses:
+            raise AssertionError("unexpected completion attempt")
+        return self.responses.pop(0)
+
+
 @pytest.mark.parametrize("failures, expect_abandoned", [(1, 0), (2, 0), (3, 1)])
 def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(tmp_path, failures, expect_abandoned):
     """Two retries cover a lost response or a transient Arena failure; a third failure fails closed."""
@@ -577,6 +901,103 @@ def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(t
     assert runner_.abandoned == expect_abandoned
     assert api.attempts == min(failures + 1, 3)
     assert len(api.completions) == (0 if expect_abandoned else 1)
+    if expect_abandoned:
+        assert runner_.completed[0]["error"] == "RunnerError"
+
+
+def test_accounting_open_retries_the_original_completion_until_accepted(
+    tmp_path, capsys
+):
+    api = CompletionDocumentApi(
+        [lease()],
+        [
+            {"status": "accounting_open", "open_calls": 1},
+            {"status": "accepted"},
+        ],
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    assert sum(config.accounting_open_retry_seconds) >= rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert (
+        sum(config.accounting_open_retry_seconds)
+        < contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
+    )
+    assert sum(config.accounting_open_retry_seconds) < contracts.LEASE_TTL_SECONDS
+    config.accounting_open_retry_seconds = (0.0,)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert runner_.completed == [
+        {"run_id": "r1", "result": {"status": "accepted"}}
+    ]
+    assert len(api.completion_attempts) == 2
+    assert api.completion_attempts[0] is api.completion_attempts[1]
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "Lab Arena completion status: accounting_open",
+        "Lab Arena completion status: accepted",
+    ]
+    assert captured.err == ""
+
+
+def test_accounting_open_retry_exhaustion_abandons_without_logging_the_envelope(
+    tmp_path, capsys
+):
+    api = CompletionDocumentApi(
+        [lease()],
+        [{"status": "accounting_open", "open_calls": 1}] * 3,
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    config.accounting_open_retry_seconds = (0.0, 0.0)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 1
+    assert len(api.completion_attempts) == 3
+    assert all(
+        envelope is api.completion_attempts[0]
+        for envelope in api.completion_attempts
+    )
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "Lab Arena completion status: accounting_open",
+    ] * 3
+    assert captured.err == "Lab Arena run abandoned: RunnerError\n"
+    assert "tok-r1" not in captured.out + captured.err
+    assert "signature" not in captured.out + captured.err
+
+
+def test_completion_rejection_is_logged_but_not_retried(tmp_path, capsys):
+    api = CompletionDocumentApi(
+        [lease()],
+        [{"status": "rejected", "detail": "must-not-log"}],
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    config.accounting_open_retry_seconds = (0.0, 0.0)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert len(api.completion_attempts) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "Lab Arena completion status: rejected\n"
+    assert captured.err == ""
+    assert "must-not-log" not in captured.out
 
 
 

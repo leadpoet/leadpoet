@@ -177,15 +177,9 @@ def _read_frame(connection: Any) -> Dict[str, Any]:
 
 def _pair_allowed(source_role: str, target_role: str) -> bool:
     if source_role == "gateway_coordinator":
-        return target_role in {
-            "gateway_scoring",
-            "gateway_autoresearch",
-        }
+        return target_role == "gateway_scoring"
     if target_role == "gateway_coordinator":
-        return source_role in {
-            "gateway_scoring",
-            "gateway_autoresearch",
-        }
+        return source_role == "gateway_scoring"
     return False
 
 

@@ -81,16 +81,6 @@ REHEARSAL_GATEWAY_BOOT_GENERATION_ENV = (
 _DEFAULT_GATEWAY_BOOT_GENERATION = hashlib.sha256(
     b"leadpoet-local-gateway-bootstrap-generation-v1"
 ).hexdigest()[:32]
-_PRIVATE_MODEL_BUCKET = "leadpoet-private-model-artifacts-493765492819"
-_PRIVATE_MODEL_PREFIX = "research-lab/sourcing-model/"
-_PRIVATE_MODEL_POINTER_KEY = (
-    _PRIVATE_MODEL_PREFIX + "branches/leadpoet-lab/current.json"
-)
-_PRIVATE_MODEL_SIGNING_KEY_ID = (
-    "alias/leadpoet-research-lab-artifact-signing"
-)
-_PRIVATE_MODEL_OBJECTS: dict[tuple[str, str], bytes] = {}
-_PRIVATE_MODEL_OBJECTS_LOCK = threading.Lock()
 _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
@@ -1301,7 +1291,6 @@ def _call_persistent_gateway_enclave(
     if method not in {
         "rehearsal_inter_enclave_artifact_call",
         "rehearsal_inter_enclave_provider_execute",
-        "rehearsal_inter_enclave_provider_probe_resolve",
     }:
         raise ValueError("persistent inter-enclave method is not authorized")
     if not isinstance(params, Mapping):
@@ -2278,73 +2267,6 @@ def _artifact_record_path(bucket: str, key: str) -> Path:
     return STATE_ROOT / "s3-artifacts" / (digest + ".json")
 
 
-def _private_model_signing_key() -> Any:
-    """Return a deterministic local P-256 equivalent of the production key."""
-
-    from cryptography.hazmat.primitives.asymmetric import ec
-
-    order = int(
-        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
-        16,
-    )
-    seed = hashlib.sha256(
-        b"leadpoet-local-private-model-signing-key-v1"
-    ).digest()
-    scalar = (int.from_bytes(seed, "big") % (order - 1)) + 1
-    return ec.derive_private_key(scalar, ec.SECP256R1())
-
-
-def _sign_private_model_manifest_hash(manifest_hash: str) -> bytes:
-    """Sign one canonical manifest hash through the strict local boundary."""
-
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec
-
-    normalized = str(manifest_hash)
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
-        raise ValueError("local private model manifest hash is invalid")
-    return _private_model_signing_key().sign(
-        normalized.encode("utf-8"),
-        ec.ECDSA(hashes.SHA256()),
-    )
-
-
-def _install_private_model_s3_object(
-    *,
-    bucket: str,
-    key: str,
-    body: bytes,
-) -> None:
-    """Install an immutable artifact or the one mutable branch pointer."""
-
-    normalized_bucket = str(bucket)
-    normalized_key = str(key)
-    payload = bytes(body)
-    if (
-        normalized_bucket != _PRIVATE_MODEL_BUCKET
-        or not normalized_key.startswith(_PRIVATE_MODEL_PREFIX)
-        or not payload
-    ):
-        raise ValueError("local private model S3 fixture contract differs")
-    identity = (normalized_bucket, normalized_key)
-    with _PRIVATE_MODEL_OBJECTS_LOCK:
-        existing = _PRIVATE_MODEL_OBJECTS.get(identity)
-        if (
-            existing is not None
-            and existing != payload
-            and normalized_key != _PRIVATE_MODEL_POINTER_KEY
-        ):
-            raise ValueError("local private model immutable object differs")
-        _PRIVATE_MODEL_OBJECTS[identity] = payload
-
-
-def _clear_private_model_s3_objects() -> None:
-    """Reset only test-owned private-model fixtures between scenarios."""
-
-    with _PRIVATE_MODEL_OBJECTS_LOCK:
-        _PRIVATE_MODEL_OBJECTS.clear()
-
-
 def _local_artifact_transport(
     *,
     method: str,
@@ -2511,32 +2433,23 @@ def _gateway_runtime_objects(
         tee_service.v2_artifact_persistence_verifier = persistence
         tee_service.v2_scoring_job_manager = None
         tee_service.v2_coordinator_job_manager = None
-        tee_service.v2_autoresearch_job_manager = None
         tee_service.v2_provider_semantics_authority = None
         tee_service.v2_kms_recipient = None
         tee_service.v2_inter_enclave_client = None
         tee_service.sign_data = lambda data: _local_signing_private_key(
             role
         ).sign(bytes(data))
-        # Candidate job managers still execute unchanged. Scoring and
-        # autoresearch cross the same coordinator-owned provider authority
-        # boundary as production; the coordinator is the only process that
-        # receives the measured job credential lease.
+        # Candidate job managers still execute unchanged. Scoring crosses the
+        # same coordinator-owned provider authority boundary as production;
+        # the coordinator is the only process that receives the measured job
+        # credential lease.
         if role == "gateway_coordinator":
             tee_service.execute_v2_provider_request = broker.execute
-            tee_service.execute_v2_provider_probe_request = broker.execute
         else:
             tee_service.execute_v2_provider_request = (
                 lambda request: _call_persistent_gateway_enclave(
                     "gateway_coordinator",
                     "rehearsal_inter_enclave_provider_execute",
-                    {"peer_role": role, "request": dict(request)},
-                )
-            )
-            tee_service.execute_v2_provider_probe_request = (
-                lambda request: _call_persistent_gateway_enclave(
-                    "gateway_coordinator",
-                    "rehearsal_inter_enclave_provider_probe_resolve",
                     {"peer_role": role, "request": dict(request)},
                 )
             )
@@ -2885,7 +2798,7 @@ def _handle_gateway_enclave_rpc(
         channel_id = str(params.get("channel_id") or "")
         peer_state = state.get("roles", {}).get(peer_role)
         if (
-            peer_role not in {"gateway_scoring", "gateway_autoresearch"}
+            peer_role != "gateway_scoring"
             or target_method
             not in {
                 "artifact_seal_begin",
@@ -2911,37 +2824,24 @@ def _handle_gateway_enclave_rpc(
                 ),
             },
         )
-    if role == "gateway_coordinator" and method in {
-        "rehearsal_inter_enclave_provider_execute",
-        "rehearsal_inter_enclave_provider_probe_resolve",
-    }:
+    if role == "gateway_coordinator" and method == (
+        "rehearsal_inter_enclave_provider_execute"
+    ):
         if set(params) != {"peer_role", "request"}:
             raise ValueError("local inter-enclave provider fields differ")
         peer_role = str(params.get("peer_role") or "")
         request = params.get("request")
-        target_method = {
-            "rehearsal_inter_enclave_provider_execute": "provider_execute",
-            "rehearsal_inter_enclave_provider_probe_resolve": (
-                "provider_probe_resolve"
-            ),
-        }[method]
-        allowed_peers = (
-            {"gateway_scoring", "gateway_autoresearch"}
-            if target_method == "provider_execute"
-            else {"gateway_autoresearch"}
-        )
-        if peer_role not in allowed_peers or not isinstance(request, Mapping):
+        if peer_role != "gateway_scoring" or not isinstance(request, Mapping):
             raise ValueError("local inter-enclave provider peer differs")
         objects = _gateway_runtime_objects(role, role_state)
         return objects["tee_service"].handle_inter_enclave_rpc(
-            target_method,
+            "provider_execute",
             dict(request),
             {"physical_role": peer_role},
         )
     execution_prefix = {
         "gateway_coordinator": "coordinator_v2_",
         "gateway_scoring": "scoring_v2_",
-        "gateway_autoresearch": "autoresearch_v2_",
     }[role]
     if method.startswith(execution_prefix):
         if role == "gateway_coordinator":
@@ -2959,12 +2859,9 @@ def _handle_gateway_enclave_rpc(
         "v2_get_job_kms_recipient",
         "v2_provision_job_encrypted_secret",
         "v2_provision_job_sealed_source_add_secret",
-        "v2_provision_job_sealed_openrouter_secret",
         "v2_release_job_credentials",
         "v2_get_source_add_ingress_recipient",
         "v2_seal_source_add_ingress_credential",
-        "v2_get_openrouter_ingress_recipient",
-        "v2_seal_openrouter_ingress_credential",
     }:
         objects = _gateway_runtime_objects(role, role_state)
         return _unwrap_candidate_rpc(
@@ -3453,6 +3350,57 @@ def _release_build_input_for_commit(commit: str) -> dict[str, Any]:
     return documents[0]
 
 
+def _historical_gateway_release_manifest(
+    gateway_rows: list[dict[str, Any]],
+    *,
+    acceptance_signer_pubkey_hash: str,
+) -> dict[str, Any]:
+    from gateway.tee.release_manifest_v2 import (
+        BUILDER_DOMAINS,
+        DETERMINISTIC_FIELDS,
+        HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        PROTECTED_BASELINE_COMMIT,
+        RELEASE_MANIFEST_SCHEMA_VERSION,
+        validate_historical_release_manifest,
+    )
+    from leadpoet_canonical.attested_v2 import sha256_json
+
+    roles: dict[str, Any] = {}
+    for role in sorted({row["physical_role"] for row in gateway_rows}):
+        rows = [row for row in gateway_rows if row["physical_role"] == role]
+        first = rows[0]
+        roles[role] = {
+            "physical_role": role,
+            "service_role": first["service_role"],
+            **{field: first[field] for field in DETERMINISTIC_FIELDS},
+            "eif_hashes": sorted({row["eif_hash"] for row in rows}),
+            "verified_build_count": len(rows),
+            "builder_domains": sorted(BUILDER_DOMAINS),
+        }
+    sorted_rows = sorted(
+        gateway_rows,
+        key=lambda row: (
+            row["physical_role"],
+            row["builder_domain"],
+            row["builder_id"],
+            row["build_ordinal"],
+        ),
+    )
+    body = {
+        "schema_version": RELEASE_MANIFEST_SCHEMA_VERSION,
+        "commit_sha": gateway_rows[0]["commit_sha"],
+        "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        "protected_baseline_commit": PROTECTED_BASELINE_COMMIT,
+        "acceptance_signer_pubkey_hash": acceptance_signer_pubkey_hash,
+        "roles": roles,
+        "build_evidence_root": sha256_json(sorted_rows),
+        "verified_build_count": len(sorted_rows),
+    }
+    return validate_historical_release_manifest(
+        {**body, "release_hash": sha256_json(body)}
+    )
+
+
 def _release_channel(commit: str) -> dict[str, Any]:
     from artifact_identity import (
         eif_hash,
@@ -3463,10 +3411,18 @@ def _release_channel(commit: str) -> dict[str, Any]:
     from gateway.tee.release_channel_v2 import build_release_channel_v2
     from gateway.tee.release_manifest_v2 import (
         BUILD_EVIDENCE_SCHEMA_VERSION,
+        HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        build_local_release_identity,
         build_release_manifest,
     )
-    from gateway.tee.topology import ROLE_SPECS
+    from gateway.tee.release_channel_v2 import (
+        SCHEMA_VERSION as RELEASE_CHANNEL_SCHEMA_VERSION,
+        validate_historical_release_channel_v2,
+    )
+    from gateway.tee.topology import ROLE_SPECS, topology_hash
+    from leadpoet_canonical.attested_v2 import sha256_json
     from validator_tee.host.release_v2 import (
+        build_local_validator_release_identity,
         build_validator_build_evidence,
         build_validator_release,
         build_validator_release_manifest,
@@ -3484,8 +3440,24 @@ def _release_channel(commit: str) -> dict[str, Any]:
     expected_roles = release_build_input.get("gateway_roles")
     if not isinstance(expected_roles, dict):
         raise ValueError("local release build input roles are unavailable")
+    role_names = set(expected_roles)
+    current_roles = set(ROLE_SPECS)
+    historical_roles = current_roles | {"gateway_autoresearch"}
+    topology_hashes = {
+        str(value.get("topology_hash") or "")
+        for value in expected_roles.values()
+        if isinstance(value, dict)
+    }
+    if role_names == current_roles and topology_hashes == {topology_hash()}:
+        historical = False
+    elif role_names == historical_roles and topology_hashes == {
+        HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    }:
+        historical = True
+    else:
+        raise ValueError("local release build input topology is unsupported")
     gateway_rows = []
-    for role, spec in sorted(ROLE_SPECS.items()):
+    for role in sorted(expected_roles):
         expected = expected_roles.get(role)
         if not isinstance(expected, dict):
             raise ValueError(
@@ -3515,7 +3487,11 @@ def _release_channel(commit: str) -> dict[str, Any]:
                         "builder_id": f"local-{domain}-parent",
                         "build_ordinal": ordinal,
                         "physical_role": role,
-                        "service_role": spec["service_role"],
+                        "service_role": str(
+                            expected.get("service_role")
+                            or ROLE_SPECS.get(role, {}).get("service_role")
+                            or ""
+                        ),
                         **deterministic,
                     }
                 )
@@ -3523,11 +3499,19 @@ def _release_channel(commit: str) -> dict[str, Any]:
         hashlib.sha256(b"leadpoet-local-acceptance-signer").digest()
     )
     acceptance_public_key = acceptance_key.public_key().public_bytes_raw()
-    gateway_manifest = build_release_manifest(
-        gateway_rows,
-        acceptance_signer_pubkey_hash=(
-            "sha256:" + hashlib.sha256(acceptance_public_key).hexdigest()
-        ),
+    acceptance_signer_pubkey_hash = (
+        "sha256:" + hashlib.sha256(acceptance_public_key).hexdigest()
+    )
+    gateway_manifest = (
+        _historical_gateway_release_manifest(
+            gateway_rows,
+            acceptance_signer_pubkey_hash=acceptance_signer_pubkey_hash,
+        )
+        if historical
+        else build_release_manifest(
+            gateway_rows,
+            acceptance_signer_pubkey_hash=acceptance_signer_pubkey_hash,
+        )
     )
     validator_release = build_validator_release(
         commit_sha=commit,
@@ -3543,6 +3527,33 @@ def _release_channel(commit: str) -> dict[str, Any]:
         dockerfile_hash=dockerfile_hash,
         base_dockerfile_hash=base_dockerfile_hash,
     )
+    if (
+        not historical
+        and commit == os.environ.get("REHEARSAL_CANDIDATE_SHA", "").strip()
+    ):
+        local_gateway_results = [
+            {
+                "role": role,
+                "commit_sha": expected["commit_sha"],
+                "pcr0": expected["pcr0"],
+                "image_id": expected["normalized_image_hash"],
+                "source_manifest_hash": expected["source_manifest_hash"],
+                "build_identity_hash": expected["build_identity_hash"],
+                "execution_manifest_hash": expected["execution_manifest_hash"],
+                "dependency_lock_hash": expected["dependency_lock_hash"],
+                "dockerfile_hash": expected["dockerfile_hash"],
+                "topology_hash": expected["topology_hash"],
+            }
+            for role, expected in sorted(expected_roles.items())
+        ]
+        return build_release_channel_v2(
+            gateway_release_manifest=build_local_release_identity(
+                local_gateway_results
+            ),
+            validator_release_manifest=build_local_validator_release_identity(
+                validator_release
+            ),
+        )
     validator_evidence = [
         build_validator_build_evidence(
             validator_release,
@@ -3553,11 +3564,24 @@ def _release_channel(commit: str) -> dict[str, Any]:
         for domain in ("gateway", "validator")
         for ordinal in (1, 2, 3)
     ]
-    return build_release_channel_v2(
-        gateway_release_manifest=gateway_manifest,
-        validator_release_manifest=build_validator_release_manifest(
+    if not historical:
+        return build_release_channel_v2(
+            gateway_release_manifest=gateway_manifest,
+            validator_release_manifest=build_validator_release_manifest(
+                validator_evidence
+            ),
+        )
+    channel_body = {
+        "schema_version": RELEASE_CHANNEL_SCHEMA_VERSION,
+        "commit_sha": commit,
+        "gateway_release_manifest": gateway_manifest,
+        "validator_release_manifest": build_validator_release_manifest(
             validator_evidence
         ),
+    }
+    return validate_historical_release_channel_v2(
+        {**channel_body, "channel_hash": sha256_json(channel_body)},
+        expected_commit=commit,
     )
 
 
@@ -3810,30 +3834,6 @@ class _LocalS3:
         Key: str,
         VersionId: str | None = None,
     ) -> dict[str, Any]:
-        private_model_identity = (str(Bucket), str(Key))
-        with _PRIVATE_MODEL_OBJECTS_LOCK:
-            private_model_body = _PRIVATE_MODEL_OBJECTS.get(
-                private_model_identity
-            )
-        if private_model_body is not None:
-            private_version = "local-private-model-" + hashlib.sha256(
-                private_model_body
-            ).hexdigest()[:24]
-            if VersionId is not None and VersionId != private_version:
-                raise ValueError("local S3 private-model version differs")
-            _external_event(
-                "aws_s3_object_lock",
-                "get_object",
-                service="s3",
-                bucket=Bucket,
-                key=Key,
-                private_model_artifact=True,
-            )
-            return {
-                "Body": io.BytesIO(private_model_body),
-                "ContentLength": len(private_model_body),
-                "VersionId": private_version,
-            }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -3886,29 +3886,6 @@ class _LocalS3:
         Key: str,
         VersionId: str | None = None,
     ) -> dict[str, Any]:
-        private_model_identity = (str(Bucket), str(Key))
-        with _PRIVATE_MODEL_OBJECTS_LOCK:
-            private_model_body = _PRIVATE_MODEL_OBJECTS.get(
-                private_model_identity
-            )
-        if private_model_body is not None:
-            private_version = "local-private-model-" + hashlib.sha256(
-                private_model_body
-            ).hexdigest()[:24]
-            if VersionId is not None and VersionId != private_version:
-                raise ValueError("local S3 private-model version differs")
-            _external_event(
-                "aws_s3_object_lock",
-                "head_object",
-                service="s3",
-                bucket=Bucket,
-                key=Key,
-                private_model_artifact=True,
-            )
-            return {
-                "ContentLength": len(private_model_body),
-                "VersionId": private_version,
-            }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -4236,62 +4213,6 @@ def _validate_local_boto3_client_options(
 
 
 class _LocalKMS:
-    def verify(
-        self,
-        *,
-        KeyId: str,
-        Message: bytes,
-        MessageType: str,
-        Signature: bytes,
-        SigningAlgorithm: str,
-    ) -> dict[str, Any]:
-        """Verify the production private-model ECDSA request contract."""
-
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import ec
-
-        if (
-            str(KeyId) != _PRIVATE_MODEL_SIGNING_KEY_ID
-            or str(MessageType) != "RAW"
-            or str(SigningAlgorithm) != "ECDSA_SHA_256"
-            or not isinstance(Message, (bytes, bytearray))
-            or not re.fullmatch(
-                rb"sha256:[0-9a-f]{64}", bytes(Message)
-            )
-            or not isinstance(Signature, (bytes, bytearray))
-            or not Signature
-        ):
-            raise ValueError("local KMS verify contract differs")
-        try:
-            _private_model_signing_key().public_key().verify(
-                bytes(Signature),
-                bytes(Message),
-                ec.ECDSA(hashes.SHA256()),
-            )
-        except (InvalidSignature, ValueError):
-            valid = False
-        else:
-            valid = True
-        _external_event(
-            "aws_kms",
-            "verify",
-            key_id_hash=_sha256(str(KeyId)),
-            message_hash=(
-                "sha256:" + hashlib.sha256(bytes(Message)).hexdigest()
-            ),
-            signature_hash=(
-                "sha256:" + hashlib.sha256(bytes(Signature)).hexdigest()
-            ),
-            signature_valid=valid,
-            signing_algorithm=str(SigningAlgorithm),
-        )
-        return {
-            "KeyId": str(KeyId),
-            "SignatureValid": valid,
-            "SigningAlgorithm": str(SigningAlgorithm),
-        }
-
     def encrypt(
         self,
         *,

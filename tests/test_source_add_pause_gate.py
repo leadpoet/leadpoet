@@ -7,7 +7,6 @@ import pytest
 from gateway.research_lab import api
 from gateway.research_lab.models import (
     ResearchLabSourceAdapterSubmissionRequest,
-    ResearchLabTicketCreateRequest,
 )
 from fastapi import HTTPException
 
@@ -71,11 +70,6 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
     )
     monkeypatch.setattr(
         api,
-        "get_autoresearch_maintenance_state",
-        _async_value({"paused": False, "status": "active"}),
-    )
-    monkeypatch.setattr(
-        api,
         "source_add_control_state",
         _async_value(
             {
@@ -86,12 +80,6 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr(
-        api,
-        "private_repo_head_alignment_status",
-        _async_value({"status": "aligned"}),
-    )
-
     status = await api.research_lab_status(_status_request())
 
     assert status["source_add"]["control"] == {
@@ -166,20 +154,9 @@ async def test_public_status_source_add_intake_gate_matches_admission_state(
     )
     monkeypatch.setattr(
         api,
-        "get_autoresearch_maintenance_state",
-        _async_value({"paused": values["autoresearch_paused"]}),
-    )
-    monkeypatch.setattr(
-        api,
         "source_add_control_state",
         _async_value({"paused": values["source_add_paused"]}),
     )
-    monkeypatch.setattr(
-        api,
-        "private_repo_head_alignment_status",
-        _async_value({"status": "aligned"}),
-    )
-
     status = await api.research_lab_status(
         _status_request(
             dispatcher_ready=values["source_add_dispatcher_ready"],
@@ -214,20 +191,9 @@ async def test_public_status_source_add_intake_fails_closed_without_any_authorit
     )
     monkeypatch.setattr(
         api,
-        "get_autoresearch_maintenance_state",
-        _async_value({"paused": True}),
-    )
-    monkeypatch.setattr(
-        api,
         "source_add_control_state",
         _async_value({"paused": False}),
     )
-    monkeypatch.setattr(
-        api,
-        "private_repo_head_alignment_status",
-        _async_value({"status": "aligned"}),
-    )
-
     status = await api.research_lab_status(
         _status_request(
             dispatcher_ready=False,
@@ -240,7 +206,7 @@ async def test_public_status_source_add_intake_fails_closed_without_any_authorit
 
 
 @pytest.mark.asyncio
-async def test_source_adapter_intake_remains_open_when_other_lanes_are_paused(
+async def test_source_adapter_intake_remains_open_when_miner_submissions_are_disabled(
     monkeypatch,
 ):
     from types import SimpleNamespace
@@ -259,20 +225,6 @@ async def test_source_adapter_intake_remains_open_when_other_lanes_are_paused(
                 source_add_max_per_30d_per_hotkey=10,
             )
         ),
-    )
-    from gateway.research_lab import maintenance
-
-    maintenance_reads = []
-
-    async def paused_maintenance(*_args, **_kwargs):
-        maintenance_reads.append(True)
-        return True
-
-    monkeypatch.setattr(
-        maintenance, "is_scoring_maintenance_paused", paused_maintenance
-    )
-    monkeypatch.setattr(
-        maintenance, "is_autoresearch_maintenance_paused", paused_maintenance
     )
     monkeypatch.setattr(
         api,
@@ -302,45 +254,6 @@ async def test_source_adapter_intake_remains_open_when_other_lanes_are_paused(
     response = await api.submit_research_lab_source_adapter(payload)
 
     assert response.stage == "provenance_queued"
-    assert maintenance_reads == []
-
-
-@pytest.mark.asyncio
-async def test_non_source_ticket_intake_remains_closed_by_shared_gate(monkeypatch):
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(
-        api.ResearchLabGatewayConfig,
-        "from_env",
-        staticmethod(
-            lambda: SimpleNamespace(
-                api_enabled=True,
-                production_writes_enabled=True,
-                miner_submissions_enabled=False,
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        api,
-        "_verify_signed_miner",
-        lambda *_args, **_kwargs: pytest.fail(
-            "closed non-SOURCE_ADD intake must fail before signature work"
-        ),
-    )
-    payload = ResearchLabTicketCreateRequest(
-        miner_hotkey="miner-hotkey-value",
-        signature="signature-value-123",
-        timestamp=int(time.time()),
-        idempotency_key="ticket-submit-disabled-1",
-        island="sourcing_model",
-        brief_sanitized_ref="brief-ref-value",
-    )
-
-    with pytest.raises(HTTPException) as exc:
-        await api.create_research_lab_ticket(payload, None)
-
-    assert exc.value.status_code == 403
-    assert exc.value.detail == "Research Lab miner submissions are disabled"
 
 
 @pytest.mark.asyncio

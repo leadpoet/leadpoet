@@ -444,10 +444,25 @@ _GOOGLE_COUNTRIES = ("us", "gb", "ca", "au", "de", "fr", "nl", "ie", "in", "sg")
 _SCRAPINGDOG_CREDENTIAL = CredentialPlacement("query", "api_key")
 _OPENROUTER_CREDENTIAL = CredentialPlacement("header", "authorization", scheme="Bearer")
 _DEEPLINE_CREDENTIAL = CredentialPlacement("header", "authorization", scheme="Bearer")
-# Deepline tools miners may execute (https://deepline.com/docs/providers/exa):
-# the Exa-backed search, contents, answer, people, and company tools plus the
-# public company search. Deepline owns each tool's payload schema.
-DEEPLINE_TOOLS = ("exa_answer", "exa_company_search", "exa_contents", "exa_people_search", "exa_search", "free_simple_company_search")
+# Deepline tools that the sourcing bundles and judge may execute. Deepline
+# owns each tool's payload schema.
+DEEPLINE_TOOLS = (
+    "exa_answer",
+    "exa_company_search",
+    "exa_contents",
+    "exa_people_search",
+    "exa_search",
+    "firecrawl_scrape",
+    "free_simple_company_search",
+    "generic_http_request",
+    "harvestapi_get_job",
+    "harvestapi_get_post",
+    "hunter_discover",
+    "predictleads_company_financing_events",
+    "predictleads_company_job_openings",
+    "predictleads_company_news_events",
+    "twitterapi_tweets_by_ids",
+)
 # Deepline's execute body names the upstream provider of each tool; pinned
 # from the official client (deepline_core 0.3.20) and the tool contracts.
 DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
@@ -456,7 +471,16 @@ DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
     "exa_contents": "exa",
     "exa_people_search": "exa",
     "exa_search": "exa",
+    "firecrawl_scrape": "firecrawl",
     "free_simple_company_search": "deepline_native",
+    "generic_http_request": "generic_http",
+    "harvestapi_get_job": "harvestapi",
+    "harvestapi_get_post": "harvestapi",
+    "hunter_discover": "hunter",
+    "predictleads_company_financing_events": "predictleads",
+    "predictleads_company_job_openings": "predictleads",
+    "predictleads_company_news_events": "predictleads",
+    "twitterapi_tweets_by_ids": "twitterapi",
 })
 # Asks Deepline for the provider's raw response under result.data instead of a
 # normalized view; captured from the official client and verified live.
@@ -506,6 +530,48 @@ _OPERATION_LIST = (
             "country": FieldSpec("str", choices=_GOOGLE_COUNTRIES),
         },
         fixed_params={"results": 10},
+        defaults={"country": "us"},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=1_048_576,
+        cost_rule=CALL_QUOTA_COST_RULE,
+        response_sanitizer="json",
+        funding_source="host",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.google_news",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/google_news",
+        parameter_location="query",
+        request_fields={
+            "query": FieldSpec("str", required=True, min_length=1, max_length=500),
+            "country": FieldSpec("str", choices=_GOOGLE_COUNTRIES),
+        },
+        fixed_params={"results": 10},
+        defaults={"country": "us"},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=1_048_576,
+        cost_rule=CALL_QUOTA_COST_RULE,
+        response_sanitizer="json",
+        funding_source="host",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.google_jobs",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/google_jobs",
+        parameter_location="query",
+        request_fields={
+            "query": FieldSpec("str", required=True, min_length=1, max_length=500),
+            "country": FieldSpec("str", choices=_GOOGLE_COUNTRIES),
+        },
+        fixed_params={},
         defaults={"country": "us"},
         timeout_seconds=45,
         max_request_bytes=4_096,

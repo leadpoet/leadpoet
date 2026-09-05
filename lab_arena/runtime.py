@@ -46,6 +46,10 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from lab_arena import contracts
 
 SANDBOX_MODEL_DIR = "/model"
+SANDBOX_AGENT_DIR = "/agent"
+SANDBOX_AGENT_SOURCE_DIR = SANDBOX_AGENT_DIR + "/source"
+SANDBOX_AGENT_DEPENDENCY_DIR = SANDBOX_AGENT_DIR + "/deps"
+SANDBOX_AGENT_ENTRYPOINT_PATH = SANDBOX_AGENT_DIR + "/entrypoint.py"
 SANDBOX_INPUT_DIR = "/input"
 SANDBOX_OUTPUT_DIR = "/output"
 SANDBOX_SOCKET_DIR = "/run/lab_arena"
@@ -56,8 +60,13 @@ OUTPUT_FILE_NAME = "companies.json"
 SANDBOX_INPUT_PATH = SANDBOX_INPUT_DIR + "/" + INPUT_FILE_NAME
 SANDBOX_OUTPUT_PATH = SANDBOX_OUTPUT_DIR + "/" + OUTPUT_FILE_NAME
 SANDBOX_HOSTNAME = "leadpoet-lab-arena"
-AGENT_ENTRY_COMMAND = ("/agent/run",)
-AGENT_WORKING_DIR = "/agent"
+# Isolated mode keeps the trusted scorer image's /model/sitecustomize.py from
+# changing submitted source execution.  The host-owned entrypoint explicitly
+# adds only the admitted source and dependency mounts after Python starts.
+# -I ignores PYTHON* environment settings, so keep log flushing and read-only
+# import behavior explicit. LAB_ARENA_RANDOM_SEED remains available to the agent.
+AGENT_ENTRY_COMMAND = ("python3", "-I", "-u", "-B", SANDBOX_AGENT_ENTRYPOINT_PATH)
+AGENT_WORKING_DIR = SANDBOX_AGENT_SOURCE_DIR
 SCORER_ENTRY_COMMAND = ("python3", "/model/scorer_entrypoint.py")
 SCORER_WORKING_DIR = "/model"
 
@@ -170,6 +179,12 @@ class SandboxSpec:
     entry_command: Tuple[str, ...]
     evaluation_date: str
     random_seed: int
+    # Execute assignments bind the admitted source, optional installed wheels,
+    # and the host-owned Python entrypoint. Scoring assignments leave these
+    # unset and use only the trusted scorer rootfs.
+    source_dir: Optional[Path] = None
+    dependency_dir: Optional[Path] = None
+    agent_entrypoint_path: Optional[Path] = None
     working_dir: str = ""
     cpu_quota: int = DEFAULT_CPU_QUOTA
     cpu_period: int = DEFAULT_CPU_PERIOD
@@ -197,12 +212,33 @@ class SandboxSpec:
             if not value.is_absolute():
                 raise SandboxSpecError("%s must be absolute" % name)
             object.__setattr__(self, name, value)
+        agent_paths = (
+            self.source_dir,
+            self.dependency_dir,
+            self.agent_entrypoint_path,
+        )
+        if any(value is not None for value in agent_paths) and not all(
+            value is not None for value in agent_paths
+        ):
+            raise SandboxSpecError("agent source mounts must be supplied together")
+        for name in ("source_dir", "dependency_dir", "agent_entrypoint_path"):
+            raw = getattr(self, name)
+            if raw is None:
+                continue
+            value = Path(raw)
+            if not value.is_absolute():
+                raise SandboxSpecError("%s must be absolute" % name)
+            object.__setattr__(self, name, value)
         if self.socket_path.name != SANDBOX_SOCKET_NAME:
             raise SandboxSpecError("worker socket must be named %s" % SANDBOX_SOCKET_NAME)
         command = tuple(self.entry_command) if isinstance(self.entry_command, (list, tuple)) else ()
         if not command or len(command) > 64 or any(not isinstance(item, str) or not item or len(item) > 4096 or "\x00" in item or "\n" in item for item in command):
             raise SandboxSpecError("entry command is invalid")
         object.__setattr__(self, "entry_command", command)
+        if command == AGENT_ENTRY_COMMAND and not all(
+            value is not None for value in agent_paths
+        ):
+            raise SandboxSpecError("agent source mounts are required")
         working_dir = str(self.working_dir or "")
         if working_dir and (not working_dir.startswith("/") or len(working_dir) > 4096 or "\x00" in working_dir or "\n" in working_dir):
             raise SandboxSpecError("working directory is invalid")
@@ -246,6 +282,7 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
+        "PYTHONPATH": SANDBOX_MODEL_DIR,
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
         "PYTHONHASHSEED": str(spec.random_seed),
@@ -298,6 +335,29 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
             "options": ["rbind", "rw", "nosuid", "nodev", "noexec"],
         },
     ]
+    if spec.source_dir is not None:
+        mounts.extend(
+            [
+                {
+                    "destination": SANDBOX_AGENT_SOURCE_DIR,
+                    "type": "bind",
+                    "source": str(spec.source_dir),
+                    "options": ["rbind", "ro", "nosuid", "nodev"],
+                },
+                {
+                    "destination": SANDBOX_AGENT_DEPENDENCY_DIR,
+                    "type": "bind",
+                    "source": str(spec.dependency_dir),
+                    "options": ["rbind", "ro", "nosuid", "nodev"],
+                },
+                {
+                    "destination": SANDBOX_AGENT_ENTRYPOINT_PATH,
+                    "type": "bind",
+                    "source": str(spec.agent_entrypoint_path),
+                    "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
+                },
+            ]
+        )
     linux = {
         # No "network" namespace: runsc --network=none is the isolation.
         "namespaces": [
@@ -604,6 +664,28 @@ def prepare_sandbox_access(
     os.chmod(spec.socket_path, 0o600)
 
 
+def require_safe_agent_mounts(spec: SandboxSpec) -> None:
+    """Check the host-owned source mounts immediately before runsc starts."""
+
+    if spec.source_dir is None:
+        return
+    try:
+        source_info = os.lstat(spec.source_dir)
+        dependency_info = os.lstat(spec.dependency_dir)
+        entrypoint_info = os.lstat(spec.agent_entrypoint_path)
+    except OSError as exc:
+        raise SandboxSpecError("agent source mount is unavailable") from exc
+    if (
+        not stat.S_ISDIR(source_info.st_mode)
+        or stat.S_ISLNK(source_info.st_mode)
+        or not stat.S_ISDIR(dependency_info.st_mode)
+        or stat.S_ISLNK(dependency_info.st_mode)
+        or not stat.S_ISREG(entrypoint_info.st_mode)
+        or stat.S_ISLNK(entrypoint_info.st_mode)
+    ):
+        raise SandboxSpecError("agent source mount has an unsafe type")
+
+
 def run_sandbox(
     config: RuntimeConfig,
     spec: SandboxSpec,
@@ -627,6 +709,7 @@ def run_sandbox(
         raise SandboxSpecError("runtime work directory is unavailable")
     if not spec.input_dir.is_dir() or not (spec.input_dir / INPUT_FILE_NAME).is_file():
         raise SandboxSpecError("input directory must contain %s" % INPUT_FILE_NAME)
+    require_safe_agent_mounts(spec)
     bundle = Path(tempfile.mkdtemp(prefix="lab-arena-%s-" % spec.sandbox_id, dir=config.work_dir))
     runsc_root = bundle / "runsc"
     cleanup_errors: List[str] = []

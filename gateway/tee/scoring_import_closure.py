@@ -1,9 +1,9 @@
-"""Build and verify the gateway enclave's Research Lab execution import closure.
+"""Build and verify the gateway enclave execution import closure.
 
 The production gateway checkout is split: ``gateway/`` lives under
 ``$HOME/gateway`` while shared packages live under ``$HOME`` and are staged
 under ``gateway/_attested_runtime`` before the EIF build. This module records
-the exact local Python files reachable from the scoring and auto-research
+the exact local Python files reachable from the coordinator and scoring
 entrypoints and fails the build if any recorded file is absent or has different
 contents.
 
@@ -28,7 +28,7 @@ except Exception:
     from normalize_attested_runtime import normalized_file_mode
 
 
-SCHEMA_VERSION = "leadpoet.gateway_execution_import_closure.v2"
+SCHEMA_VERSION = "leadpoet.gateway_execution_import_closure.v3"
 MANIFEST_RELATIVE_PATH = "_attested_runtime/scoring_import_closure.json"
 
 MEASURED_DATA_PATHS = (
@@ -43,35 +43,9 @@ MEASURED_DATA_PATHS = (
     "leadpoet_verifier/identity/public_suffix_list.dat",
     "leadpoet_verifier/leadpoet_industry_taxonomy.json",
     "leadpoet_canonical/subtensor_events_profile_v2.json",
-    "research_lab/sourcing_model_contract.json",
-    "research_lab/sourcing_model_contract_v11.json",
-    "research_lab/sourcing_model_contract_v12.json",
-    "research_lab/sourcing_model_contract_v13.json",
-    "research_lab/sourcing_model_contract_v26.json",
-    "research_lab/sourcing_model_contract_v46.json",
-    "research_lab/sourcing_model_contract_v47.json",
-    "research_lab/sourcing_model_contract_v52.json",
-    "research_lab/sourcing_model_contract_v52_82c.json",
-    "research_lab/sourcing_model_contract_v66_37b.json",
-    "research_lab/sourcing_model_contract_v7.json",
-    "research_lab/sourcing_model_parity_fixtures.json",
-    "research_lab/sourcing_model_parity_fixtures_v11.json",
-    "research_lab/sourcing_model_parity_fixtures_v12.json",
-    "research_lab/sourcing_model_parity_fixtures_v13.json",
-    "research_lab/sourcing_model_parity_fixtures_v26.json",
-    "research_lab/sourcing_model_parity_fixtures_v46.json",
-    "research_lab/sourcing_model_parity_fixtures_v47.json",
-    "research_lab/sourcing_model_parity_fixtures_v52.json",
-    "research_lab/sourcing_model_parity_fixtures_v52_82c.json",
-    "research_lab/sourcing_model_parity_fixtures_v66_37b.json",
-    "research_lab/sourcing_model_parity_fixtures_v7.json",
-    "research_lab/sourcing_model_semantic_compatibility_v1.json",
     "schemas/evidence_bundle.schema.json",
     "schemas/execution_trace.schema.json",
-    "schemas/research_evaluation_score_bundle.schema.json",
-    "schemas/research_loop_start_contract.schema.json",
     "schemas/research_reimbursement.schema.json",
-    "schemas/research_trajectory.schema.json",
     "schemas/results_ledger_row.schema.json",
 )
 
@@ -88,41 +62,14 @@ PACKAGE_NAMES = (
 ENTRYPOINT_MODULES = (
     "gateway.tee.tee_service",
     "gateway.tee.scoring_executor",
-    "gateway.research_lab.scoring_worker",
-    "gateway.research_lab.allocations",
-    "gateway.research_lab.promotion",
-    "research_lab.eval.evaluator",
     "qualification.scoring.lead_scorer",
     "leadpoet_canonical.attested_receipts",
     "leadpoet_canonical.attested_v2",
     "gateway.tee.protected_workflows",
 )
 
-# V2 autoresearch calculations execute in the measured autoresearch role. The
-# parent remains an I/O adapter for signed host operations only. Listing every
-# authority root here prevents the broad gateway tree COPY from hiding a
-# missing executable dependency in a role-specific release manifest.
-AUTORESEARCH_ENTRYPOINT_MODULES = (
-    "gateway.tee.autoresearch_executor_v2",
-    "gateway.tee.execution_job_manager_v2",
-    "gateway.tee.host_operation_channel_v2",
-    "gateway.tee.provider_client_v2",
-    "gateway.tee.source_bundle_v2",
-    "gateway.research_lab.worker_process",
-    "gateway.research_lab.worker",
-    "gateway.research_lab.autoresearch_runtime",
-    "gateway.research_lab.code_loop_engine",
-    "gateway.research_lab.code_build",
-    "gateway.research_lab.dev_eval_runner",
-    "gateway.research_lab.git_tree_evaluator",
-    "gateway.research_lab.git_tree_models",
-    "gateway.research_lab.git_tree_repository",
-    "gateway.research_lab.git_tree_scheduler",
-    "gateway.research_lab.git_tree_store",
-    "research_lab.code_editing",
-)
-
-# The evaluator loads these with importlib so AST imports cannot discover them.
+# The qualification path loads these with importlib, so AST imports cannot
+# discover them.
 DYNAMIC_IMPORT_MODULES = (
     "gateway.qualification.models",
     "gateway.qualification.config",
@@ -136,7 +83,6 @@ ROLE_ENTRYPOINT_MODULES = {
         "gateway.tee.tee_service",
         "gateway.tee.artifact_persistence_v2",
         "gateway.tee.artifact_vault_v2",
-        "gateway.tee.coordinator_active_model_source_v2",
         "gateway.tee.coordinator_allocation_source_v2",
         "gateway.tee.coordinator_chain_source_v2",
         "gateway.tee.coordinator_epoch_cutover_v2",
@@ -160,7 +106,6 @@ ROLE_ENTRYPOINT_MODULES = {
         "gateway.tee.runtime_identity_v2",
         "gateway.tee.topology",
         "gateway.tee.protected_workflows",
-        "gateway.research_lab.active_model_authority_v2",
         "leadpoet_canonical.allocation_handoff_v2",
         "leadpoet_canonical.attested_v2",
         "leadpoet_canonical.weight_authority_v2",
@@ -171,26 +116,12 @@ ROLE_ENTRYPOINT_MODULES = {
     + (
         "gateway.tee.execution_job_manager_v2",
         "gateway.tee.inter_enclave_artifact_v2",
-        "gateway.tee.model_sandbox_v2",
         "gateway.tee.mtls_identity",
         "gateway.tee.provider_client_v2",
         "gateway.tee.rpc_authority",
         "gateway.tee.runtime_identity_v2",
-        "gateway.tee.sandbox_http_shim_v2",
-        "gateway.tee.sandbox_provider_socket_v2",
         "gateway.tee.scoring_executor_v2",
-        "gateway.tee.source_bundle_v2",
         "validator_models.automated_checks",
-    ),
-    "gateway_autoresearch": AUTORESEARCH_ENTRYPOINT_MODULES
-    + (
-        "gateway.tee.tee_service",
-        "gateway.tee.topology",
-        "gateway.tee.protected_workflows",
-        "gateway.tee.mtls_identity",
-        "gateway.tee.rpc_authority",
-        "gateway.tee.runtime_identity_v2",
-        "leadpoet_canonical.attested_v2",
     ),
 }
 
@@ -398,7 +329,6 @@ def discover_scoring_modules(index: Dict[str, Path]) -> Tuple[str, ...]:
     return discover_modules(
         index,
         ENTRYPOINT_MODULES
-        + AUTORESEARCH_ENTRYPOINT_MODULES
         + DYNAMIC_IMPORT_MODULES,
     )
 
@@ -537,7 +467,6 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
     body = {
         "schema_version": SCHEMA_VERSION,
         "entrypoint_modules": list(ENTRYPOINT_MODULES),
-        "autoresearch_entrypoint_modules": list(AUTORESEARCH_ENTRYPOINT_MODULES),
         "dynamic_import_modules": list(DYNAMIC_IMPORT_MODULES),
         "role_manifests": role_manifests,
         "environment_variables": sorted(environment_variables),
@@ -575,10 +504,6 @@ def verify_staged_manifest(
         raise ScoringClosureError("unsupported scoring import manifest schema")
     if manifest.get("entrypoint_modules") != list(ENTRYPOINT_MODULES):
         raise ScoringClosureError("scoring import manifest entrypoints are invalid")
-    if manifest.get("autoresearch_entrypoint_modules") != list(
-        AUTORESEARCH_ENTRYPOINT_MODULES
-    ):
-        raise ScoringClosureError("auto-research import manifest entrypoints are invalid")
     if manifest.get("dynamic_import_modules") != list(DYNAMIC_IMPORT_MODULES):
         raise ScoringClosureError("scoring dynamic import manifest roots are invalid")
     role_manifests = manifest.get("role_manifests")

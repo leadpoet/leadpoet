@@ -375,7 +375,6 @@ expected_manifest = {
     "candidate_sha": candidate,
 }
 expected_identities = {
-    "gateway_autoresearch.json",
     "gateway_coordinator.json",
     "gateway_scoring.json",
 }
@@ -401,7 +400,6 @@ if release.get("commit_sha") != candidate:
         }
     )
 for relative_path, expected_kind in (
-    ("config-v2/acceptance-corpus-v2.json", "file"),
     ("validator-app", "directory"),
     ("gateway-attested-runtime/scoring_import_closure.json", "file"),
 ):
@@ -544,7 +542,7 @@ from gateway.tee.prepare_active_release_lineage_v2 import (
     prepare_gateway_final_active_lineage_v2,
     prepare_validator_initial_active_lineage_v2,
 )
-from gateway.tee.release_channel_v2 import fetch_release_channel_v2
+from gateway.tee.release_channel_v2 import fetch_prior_release_channel_v2
 from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from validator_tee.enclave.hotkey_authority_v2 import (
@@ -605,7 +603,7 @@ async def no_active_graphs(**_kwargs):
     return []
 
 
-running_channel = fetch_release_channel_v2(
+running_channel = fetch_prior_release_channel_v2(
     bucket="leadpoet-attested-v2-artifacts-493765492819",
     commit_sha=running,
     s3_client=s3_client,
@@ -798,36 +796,7 @@ if [ "$COMPONENT" = "gateway" ]; then
   rm -rf /app/gateway/_attested_runtime
   cp -a "$REHEARSAL_STATE_ROOT/gateway-attested-runtime" \
     /app/gateway/_attested_runtime
-  RUNSC_ARTIFACT_NAME="$(
-    /usr/bin/python3.11 - <<'PY'
-import json
-print(
-    json.load(
-        open(
-            "/app/gateway/tee/runsc-runtime.lock.json",
-            encoding="utf-8",
-        )
-    )["artifact_filename"]
-)
-PY
-  )"
-  install -m 0555 \
-    "/opt/leadpoet/external-artifacts/$RUNSC_ARTIFACT_NAME" \
-    /usr/local/bin/runsc
-  PYTHONPATH=/app:/app/gateway/_attested_runtime /usr/bin/python3.11 \
-    /app/gateway/tee/sandbox_runtime_artifact.py verify \
-      --lock /app/gateway/tee/runsc-runtime.lock.json \
-      --artifact /usr/local/bin/runsc
-  PYTHONPATH=/app:/app/gateway/_attested_runtime /usr/bin/python3.11 \
-    /app/gateway/tee/sandbox_runtime_artifact.py write-rootfs-manifest \
-      --lock /app/gateway/tee/runsc-runtime.lock.json \
-      --requirements-lock \
-        /app/gateway/tee/requirements-scoring-py39.lock \
-      --python-version 3.9.24 \
-      --output /leadpoet-model-rootfs.manifest.json
-  install -d -m 0711 -o 0 -g 0 /leadpoet-model-sandboxes
-
-  for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
+  for role in gateway_coordinator gateway_scoring; do
     REHEARSAL_GATEWAY_ENCLAVE_ROLE="$role" \
       REHEARSAL_GATEWAY_CANDIDATE_ROOT="$SELECTED_GATEWAY_SOURCE_ROOT/gateway" \
       REHEARSAL_GATEWAY_CANONICAL_APP_ROOT="/app/gateway" \
@@ -1096,6 +1065,14 @@ PY
       rm -rf -- "$MINER_BOOTSTRAP_ROOT"
     fi
   else
+    FORWARD_BOOTSTRAP_ROOT="$(
+      mktemp -d /tmp/gateway-restart-controller-bootstrap.XXXXXX
+    )"
+    FORWARD_AUTHORITY_ROOT="$FORWARD_BOOTSTRAP_ROOT/authority"
+    mkdir -m 700 "$FORWARD_AUTHORITY_ROOT"
+    GIT_NO_REPLACE_OBJECTS=1 \
+      git --git-dir=/srv/origin.git archive "$CANDIDATE_SHA" \
+      | tar -xf - -C "$FORWARD_AUTHORITY_ROOT"
     env \
       -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
       -u GIT_CEILING_DIRECTORIES \
@@ -1118,14 +1095,23 @@ PY
       GATEWAY_LOG_ROOT=/home/ec2-user/gateway \
       GATEWAY_LOG_FILE=/home/ec2-user/gateway/gateway.log \
       GATEWAY_HOST_RESTART_SCRIPT=/home/ec2-user/gw_restart.sh \
+      GATEWAY_RESTART_AUTHORITY_ROOT="$FORWARD_AUTHORITY_ROOT" \
+      GATEWAY_RESTART_AUTHORITY_COMMIT="$CANDIDATE_SHA" \
       GATEWAY_TEE_EIF_ROOT=/home/ec2-user/tee \
       GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       GATEWAY_TEE_TOPOLOGY_MODE=full \
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
       GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
       "${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \
-      bash /home/ec2-user/gw_restart.sh
+      bash "$FORWARD_AUTHORITY_ROOT/gw_restart.sh" --commit "$CANDIDATE_SHA"
     RESTART_STATUS=$?
+    if [[ "$FORWARD_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+$ ]]; then
+      chmod -R u+w -- "$FORWARD_BOOTSTRAP_ROOT" 2>/dev/null || true
+      rm -rf -- "$FORWARD_BOOTSTRAP_ROOT"
+    else
+      echo "ERROR: unsafe gateway restart controller cleanup path" >&2
+      RESTART_STATUS=1
+    fi
   fi
   set -e
 

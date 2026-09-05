@@ -5,8 +5,8 @@ dedicated ``lab_arena_service`` role over PostgREST: every write is one of
 the SECURITY DEFINER functions in ``scripts/179-lab-arena-v1.sql`` and reads
 are plain selects. The HTTP/1.1-pinned client construction is copied from
 ``gateway/db/client.py`` (never imported: the validator enclave image copies
-that file). The operator-minted JWT is sent as the ``Authorization`` header
-and the anon key as ``apikey``; the project service key is never held.
+that file). The preferred scoped ``sb_secret_`` API key is sent only as
+``apikey``. Legacy parity environments can still use an operator-minted JWT.
 
 ``PsycopgTransport`` exists for tests and local tooling only: it calls the
 same SQL functions through a PostgreSQL driver so disposable-PostgreSQL
@@ -41,11 +41,15 @@ SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_whoami": (),
+    "lab_arena_schema_version_v1": (),
+    "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
+    "lab_arena_accept_submission_with_credentials": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_credentials", "jsonb")),
+    "lab_arena_get_submission_credential": (("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_provider", "text")),
     "lab_arena_open_stage": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_participants", "jsonb"), ("p_icp_positions", "integer[]")),
     "lab_arena_claim_assignment": (("p_round_id", "text"), ("p_runner_hotkey", "text"), ("p_declared_parallelism", "integer"), ("p_slot_ceiling", "integer"), ("p_excluded_miner_hotkeys", "text[]"), ("p_request_id", "text"), ("p_request_hash", "text"), ("p_lease_token_hash", "text"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
@@ -139,14 +143,15 @@ def create_http1_client(timeout_seconds: float) -> httpx.Client:
 
 
 class PostgrestTransport(StoreTransport):
-    """PostgREST over HTTP/1.1 with the operator-minted service JWT."""
+    """PostgREST over HTTP/1.1 with one least-privilege credential."""
 
     def __init__(
         self,
         base_url: str,
         *,
         anon_key: str,
-        service_jwt: str,
+        service_jwt: str = "",
+        service_key: str = "",
         timeout_seconds: float = 8.0,
         http_client: Optional[httpx.Client] = None,
     ) -> None:
@@ -161,17 +166,20 @@ class PostgrestTransport(StoreTransport):
             or parsed.fragment
         ):
             raise ArenaStoreError("PostgREST base URL must be https (or loopback for tests)")
-        if not anon_key or not service_jwt:
-            raise ArenaStoreError("PostgREST anon key and service JWT are required")
-        if service_jwt.count(".") != 2:
-            raise ArenaStoreError("service JWT has an invalid shape")
+        if bool(service_key) == bool(service_jwt):
+            raise ArenaStoreError("exactly one PostgREST service credential is required")
+        if service_key and not service_key.startswith("sb_secret_"):
+            raise ArenaStoreError("scoped service key has an invalid shape")
+        if service_jwt and (not anon_key or service_jwt.count(".") != 2):
+            raise ArenaStoreError("anon key and valid service JWT are required")
         self._base_url = base_url.rstrip("/")
         self._headers = {
-            "apikey": anon_key,
-            "Authorization": "Bearer " + service_jwt,
+            "apikey": service_key or anon_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if service_jwt:
+            self._headers["Authorization"] = "Bearer " + service_jwt
         self._client = http_client or create_http1_client(timeout_seconds)
         self.deadlock_retries = 0
 
@@ -428,6 +436,16 @@ class ArenaStore:
             raise ArenaRoleError("database role must be NOLOGIN")
         return identity
 
+    def current_daily_icp_set(self, set_id: int) -> Dict[str, Any]:
+        """Read only the active UTC-day ICP set exposed to the Arena."""
+
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_current_daily_icp_set", {"p_set_id": int(set_id)}
+            ),
+            "current_daily_icp_set",
+        )
+
     # -- rounds -----------------------------------------------------------
 
     def create_round(self, round_id: str, configuration: Mapping[str, Any]) -> Dict[str, Any]:
@@ -472,7 +490,7 @@ class ArenaStore:
             order="effective_reward_epoch",
             descending=True,
             limit=limit,
-            columns="round_id,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,reward_activated_at,published_at",
+            columns="round_id,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,reward_activated_at,published_at,configuration_doc",
         )
         return [row for row in rows if row.get("reward_activated_at") and row.get("reward_basis_doc")]
 
@@ -495,6 +513,42 @@ class ArenaStore:
             ),
             "update_submission",
         )
+
+    def accept_submission_with_credentials(
+        self,
+        round_id: str,
+        submission_id: str,
+        miner_hotkey: str,
+        encrypted_credentials: Mapping[str, str],
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_accept_submission_with_credentials",
+                {
+                    "p_round_id": round_id,
+                    "p_submission_id": submission_id,
+                    "p_miner_hotkey": miner_hotkey,
+                    "p_credentials": dict(encrypted_credentials),
+                },
+            ),
+            "accept_submission_with_credentials",
+        )
+
+    def get_submission_credential(
+        self, submission_id: str, miner_hotkey: str, provider: str
+    ) -> Optional[Dict[str, Any]]:
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_get_submission_credential",
+                {
+                    "p_submission_id": submission_id,
+                    "p_miner_hotkey": miner_hotkey,
+                    "p_provider": provider,
+                },
+            ),
+            "get_submission_credential",
+        )
+        return result if result.get("status") == "available" else None
 
     def get_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_submissions", filters={"submission_id": submission_id}, limit=1)

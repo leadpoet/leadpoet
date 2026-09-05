@@ -1002,6 +1002,15 @@ EXCEPTION WHEN duplicate_object THEN
   ALTER ROLE authenticator WITH LOGIN PASSWORD '{self.authenticator_password}';
 END $$;
 GRANT anon, authenticated, service_role TO authenticator;
+DO $roles$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'lab_arena_service'
+  ) THEN
+    EXECUTE 'GRANT lab_arena_service TO authenticator';
+  END IF;
+END
+$roles$;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA extensions TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_role;

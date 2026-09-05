@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from lab_arena import contracts
 from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES
 from tests.lab_arena import test_lab_arena_service_round as rt
 from tests.lab_arena.test_lab_arena_postgrest_route import make_transport, stack  # noqa: F401  (module fixture)
@@ -86,35 +87,38 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     # With a current round, startup also compares the pinned identities of this build.
     assert harness.build_service().startup_checks()["current_round"] == round_id
     submissions = {flavor: harness.submit(flavor, round_id) for flavor in harness.challengers}
+    participant_count = len(harness.challengers) + 1  # challengers plus the daily public baseline
     assert service.advance_round(round_id)["status"] == "waiting"
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     committed = service.advance_round(round_id)
-    assert committed["status"] == "ok" and committed["participants"] == 3 and harness.status() == "committed"
+    assert committed["status"] == "ok" and committed["participants"] == participant_count and harness.status() == "committed"
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     opened = service.advance_round(round_id)
-    assert opened["status"] == "ok" and opened["assignments"] == 30 and harness.status() == "stage1"
+    assert opened["status"] == "ok" and opened["assignments"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1"
     harness.run_stage_with_runners(2)
     runs = service.store.list_runs(round_id, stage=1)
-    assert len(runs) == 30 and all(run["status"] == "accepted" for run in runs)
-    assert service.advance_round(round_id)["work_items"] == 30 and harness.status() == "stage1_closed"
-    assert service.advance_round(round_id)["work_items"] == 30 and harness.status() == "stage1_scoring"
+    assert len(runs) == contracts.STAGE_1_ICP_COUNT * participant_count and all(run["status"] == "accepted" for run in runs)
+    assert service.advance_round(round_id)["work_items"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1_closed"
+    assert service.advance_round(round_id)["work_items"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1_scoring"
     harness.run_stage_with_runners(2)
     assert service.advance_round(round_id)["status"] == "closed" and harness.status() == "stage1_judged"
     # A restarted service (a fresh PostgREST client) continues the same round.
     harness.service = harness.build_service()
     service = harness.service
-    assert service.advance_round(round_id)["judge_executions"] == 30 and harness.status() == "stage1_scored"
+    assert service.advance_round(round_id)["judge_executions"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1_scored"
     harness.advance_until("published", runners=2)
     assert harness.status() == "published"
     rt.assert_canary_absent(harness, harness.connect)
     row = service.store.get_round(round_id)
     publication = row["publication_doc"]
-    assert len(publication["participants"]) == 3
-    assert len(publication["stage1_ranking"]) == 2  # the incumbent is ranked separately from challengers
-    assert len(publication["final_ranking"]) == 3
-    assert publication["king_decision"]["outcome"] in ("crowned", "defended")
+    assert len(publication["participants"]) == participant_count
+    assert len(publication["stage1_ranking"]) == len(harness.challengers)
+    assert len(publication["final_ranking"]) == participant_count
+    assert publication["king_decision"]["outcome"] in ("crowned", "no_king")
     execution_runs = service.store.list_runs(round_id, kind="execute")
-    assert len(execution_runs) == 90
+    assert len(execution_runs) == (
+        contracts.STAGE_1_ICP_COUNT + contracts.STAGE_2_ICP_COUNT
+    ) * participant_count
     assert all(run["status"] == "accepted" and run["per_icp_score"] is not None for run in execution_runs)
     # Lease expiry runs on every driver tick; the round exercised it with nothing to expire.
     reached = set(harness.calls)
@@ -122,6 +126,10 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     # Every function the round did not reach is routed and coerced by PostgREST; only its own domain check refuses.
     for function in sorted(set(FUNCTION_SIGNATURES) - reached):
         params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}
+        if function == "lab_arena_current_daily_icp_set":
+            response = harness.transport.rpc(function, params)
+            assert response["status"] == "unavailable"
+            continue
         with pytest.raises(ArenaStoreError) as excinfo:
             harness.transport.rpc(function, params)
         message = str(excinfo.value)

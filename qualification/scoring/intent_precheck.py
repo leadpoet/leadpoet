@@ -606,31 +606,6 @@ async def llm_classify_evidence_type(text: str) -> Optional[str]:
                             continue
                         return None
                     body = await resp.json()
-                    # trajectoryimprovements.md P1: capture the evidence-type
-                    # classification exchange (label-producing call).
-                    try:
-                        from research_lab.openrouter_telemetry import (
-                            record_openrouter_trace,
-                        )
-
-                        record_openrouter_trace(
-                            channel="qualification",
-                            purpose="classify_evidence_type",
-                            stage="scorer_judgment",
-                            model_id="google/gemini-2.5-flash-lite",
-                            request_body={
-                                "model": "google/gemini-2.5-flash-lite",
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt},
-                                ],
-                                "max_tokens": 32,
-                                "temperature": 0,
-                            },
-                            response_doc=body,
-                        )
-                    except Exception:  # noqa: BLE001 - capture never affects the call
-                        pass
                     raw = body["choices"][0]["message"]["content"] or ""
                     norm = (
                         raw.strip().strip("\"'`. ").upper()
@@ -1119,17 +1094,9 @@ async def _call_openrouter(
       - on success:                ``({"verdict": ..., "reason": ...}, "")``
       - on transient failure:      ``(None, "<error_kind>")`` — caller fails-open
     """
-    # trajectoryimprovements.md P8 (dated decision 2026-07-02): the explicit
-    # ``reasoning: {"exclude": true}`` cost cut is REMOVED — this pre-gate's
-    # verdicts are training labels and their reasoning is corpus signal.
-    # Reasoning is requested per the fleet default
-    # (RESEARCH_LAB_LLM_INCLUDE_REASONING, default on) with the standard
-    # retry-without-reasoning fallback; flip that env to re-instate the cost
-    # cut fleet-wide rather than editing this body.
-    from research_lab.openrouter_telemetry import (
+    from qualification.scoring.openrouter_options import (
         include_reasoning_default,
         reasoning_request_unsupported,
-        record_openrouter_trace,
     )
 
     body = {
@@ -1188,17 +1155,6 @@ async def _call_openrouter(
                 )
                 return None, f"http_{r.status_code}"
             resp = r.json()
-            try:
-                record_openrouter_trace(
-                    channel="qualification",
-                    purpose="intent_precheck",
-                    stage="scorer_judgment",
-                    model_id=MODEL,
-                    request_body=body,
-                    response_doc=resp,
-                )
-            except Exception:  # noqa: BLE001 - capture never affects the gate
-                pass
             content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
             try:
                 parsed = json.loads(content)
@@ -1286,7 +1242,9 @@ async def precheck_lead_signals(
         )
         return [True] * len(lead_signals)
 
-    today = today_iso or date.today().isoformat()
+    from qualification.scoring.evaluation_clock import evaluation_date
+
+    today = today_iso or evaluation_date().isoformat()
     icp_texts = list(icp_intent_signal_texts or [])
     num_icp = len(icp_texts)
     # Per-target evidence_type override list, matched 1:1 with icp_texts.

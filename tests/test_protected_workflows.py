@@ -53,64 +53,6 @@ def test_miner_maintenance_protected_inventory_is_complete():
         )
 
 
-def test_sourcing_model_profile_authority_is_protected():
-    protected = set(
-        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
-    )
-    assert {
-        "REVIEWED_CONSUMER_SNAPSHOT_SPECS",
-        "REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS",
-        "_reviewed_consumer_snapshot_from_spec",
-        "reviewed_consumer_snapshots",
-        "reviewed_consumer_profiles",
-    } <= protected
-
-
-def test_qualification_branch_control_authority_is_protected():
-    protected = set(
-        PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"]
-    )
-    assert {
-        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1",
-        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1",
-        "_qualification_outcome_sha256",
-        "validate_qualification_branch_control_failure_v1",
-        "validate_qualification_route_completion_receipt_v1",
-        "validate_qualification_outcome_envelope_v2",
-    } <= protected
-
-
-def test_typed_dispatch_custody_v3_authority_is_protected():
-    contract_symbols = set(
-        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
-    )
-    assert {
-        "CONTRACT_V68_PATH",
-        "PARITY_FIXTURE_V28_PATH",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_ID",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_PARITY_SHA256",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION",
-        "_same_json_literal",
-        "approved_typed_dispatch_custody_v3_metadata_v1",
-        "validate_typed_dispatch_custody_v3_metadata_v1",
-        "validate_typed_dispatch_custody_v3_runtime_metadata_v1",
-        "_typed_dispatch_custody_v3_requested",
-        "_merge_typed_dispatch_policy",
-        "_typed_dispatch_metadata_violations",
-    } <= contract_symbols
-    assert "EXPECTED_SOURCING_ADAPTER_VERSIONS" in PROTECTED_SYMBOLS[
-        "research_lab/eval/private_runtime.py"
-    ]
-
-
 def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)
@@ -160,32 +102,7 @@ def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 
-def test_rebenchmark_runtime_retry_reconciliation_is_protected():
-    assert {
-        "reconcile_gateway_rebenchmark_runtime_environment",
-        "reconcile_gateway_rebenchmark_runtime_environment_file",
-    } <= set(
-        PROTECTED_SYMBOLS[
-            "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
-        ]
-    )
-
-
-def test_private_artifact_signature_boundary_is_protected():
-    assert {
-        "_REVIEWED_CONSUMER_MANIFEST_PAIRS",
-        "_verify_consumer_contract_manifest",
-        "verify_private_artifact_manifest_signature",
-        "_verify_private_artifact_manifest_signature_cached",
-        "_verify_private_artifact_manifest_signature_uncached",
-    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
-    assert {
-        "DEFAULT_PRIVATE_TEST_CMD",
-        "DEFAULT_PRIVATE_BUILD_CMD",
-    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/config.py"])
-
-
-def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
+def test_shared_docker_host_veto_and_source_add_lifecycle_are_protected():
     assert {
         "ATTESTED_RUNTIME_DIR",
         "ATTESTED_RUNTIME_PACKAGES",
@@ -247,73 +164,6 @@ def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
         ]
     )
     assert {
-        "MAX_SNAPSHOT_CLOSURE_ROUNDS",
-        "MAX_SNAPSHOT_RECORD_ATTEMPTS",
-        "SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS",
-        "DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS",
-        "SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS",
-        "SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS",
-        "SNAPSHOT_RECORD_CANCELLED_EXIT_CODE",
-        "SnapshotRecordingCancelled",
-        "_raise_if_snapshot_record_cancelled",
-        "_load_json_file",
-        "_load_source_export",
-        "snapshot_export_bank_size",
-        "snapshot_record_workflow_timeout_seconds",
-        "_terminate_snapshot_recorder_on_signal",
-        "_provider_key_presence",
-        "_subprocess_env",
-        "_snapshot_runtime_context",
-        "_run_named_docker",
-        "_record_icp_with_docker",
-        "_record_icp_with_retries",
-        "_close_snapshot_request_set",
-        "_replay_icp_with_docker",
-        "_recording_failure_summary",
-        "_recording_is_complete",
-        "_recorded_provider_model_ids",
-        "_resolve_provider_model_ids",
-        "_resolve_snapshot_provider_model_ids",
-        "main",
-    } <= set(
-        PROTECTED_SYMBOLS["scripts/record_research_lab_dev_snapshots.py"]
-    )
-    assert {
-        "COMMAND_TIMEOUT_ENV",
-        "DEFAULT_COMMAND_TIMEOUT_SECONDS",
-        "MAX_COMMAND_TIMEOUT_SECONDS",
-        "COMMAND_POLL_INTERVAL_SECONDS",
-        "COMMAND_TERMINATION_GRACE_SECONDS",
-        "COMMAND_KILL_WAIT_SECONDS",
-        "COMMAND_PIPE_DRAIN_TIMEOUT_SECONDS",
-        "_CommandCancellationRequested",
-        "_positive_env_int",
-        "_process_group_alive",
-        "_signal_process_group",
-        "_wait_for_process_group_exit",
-        "_terminate_process_group",
-        "_run_command",
-        "_await_command_completion",
-        "maybe_refresh_dev_snapshot",
-    } <= set(
-        PROTECTED_SYMBOLS["gateway/research_lab/snapshot_refresh.py"]
-    )
-    assert {"MAX_DEV_SNAPSHOT_BANK_ICP_COUNT"} <= set(
-        PROTECTED_SYMBOLS["gateway/research_lab/dev_eval_runner.py"]
-    )
-    assert {
-        "_DOCKER_OPERATION_LOCK_DEFAULT_TIMEOUT_SECONDS",
-        "_SHELL_PROCESS_GROUP_TERMINATION_SECONDS",
-        "_docker_operation_lock_timeout_seconds",
-        "_docker_operation_lock_scope",
-        "_extract_parent_image_source",
-        "_terminate_shell_process_group",
-        "_run_shell",
-        "_run_private_build_under_docker_operation_lock",
-        "_verify_built_candidate_artifact",
-        "CodeEditCandidateBuilder._build_under_deadline",
-    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/code_build.py"])
-    assert {
         "docker_operation_admission_lock_path",
         "docker_operation_lock_path",
         "_acquire_file_lock_until",
@@ -327,25 +177,9 @@ def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
         "_run_sync_build_step_to_completion",
         "_communicate_build_process_to_completion",
     } <= set(PROTECTED_SYMBOLS["gateway/utils/pcr0_builder.py"])
-    assert {
-        "_docker_private_model_lifecycle",
-        "DockerPrivateModelRunner._pull_image",
-        "DockerPrivateModelRunner._run_json",
-    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
-    assert "DockerReplayDevEvaluator._run_icp_in_docker_default" in (
-        PROTECTED_SYMBOLS["gateway/research_lab/dev_eval_runner.py"]
-    )
     assert "build_source_add_sandbox_runner" in PROTECTED_SYMBOLS[
         "gateway/research_lab/source_add_trial_runner.py"
     ]
-    assert {
-        "_promotion_reason_recorded",
-        "_ensure_source_add_leg2_reward_activation",
-        "reconcile_source_add_leg2_reward_activations",
-        "ResearchLabPromotionController._promote_built_image_candidate",
-        "ResearchLabPromotionController._maybe_create_source_add_implementation_rewards",
-        "_load_valid_artifact",
-    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/promotion.py"])
 
 
 def test_enclave_surface_stages_every_external_protected_source(tmp_path: Path):
@@ -368,9 +202,6 @@ def test_enclave_surface_stages_every_external_protected_source(tmp_path: Path):
         == expected_external_count
     )
     assert (
-        staged_root / "scripts" / "record_research_lab_dev_snapshots.py"
-    ).is_file()
-    assert (
         staged_root
         / "validator_tee"
         / "host"
@@ -383,7 +214,7 @@ def test_external_protected_source_staging_rejects_mismatched_existing_file(
     tmp_path: Path,
 ):
     staged = tmp_path / "staged"
-    target = staged / "scripts" / "record_research_lab_dev_snapshots.py"
+    target = staged / "validator_tee" / "host" / "docker_operation_guard_v2.py"
     target.parent.mkdir(parents=True)
     target.write_text("tampered\n", encoding="utf-8")
 
@@ -393,49 +224,13 @@ def test_external_protected_source_staging_rejects_mismatched_existing_file(
 
 def test_scoring_receipt_failure_policy_is_protected():
     assert {
-        "_baseline_failure_completed_icp_count",
-        "_benchmark_item_ref_for_progress",
-    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/scoring_worker.py"])
-    assert {
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
-        "_DEV_EVALUATION_JOB_SCOPES",
         "_job_input_limit_bytes",
         "ExecutionContextV2.record_transport",
-        "MAX_DEV_EVALUATION_INPUT_BYTES",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/execution_job_manager_v2.py"])
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"
     ]
-    assert {
-        "_PROVIDER_OUTAGE_TEXT_MARKERS",
-        "_provider_error_line_is_loop_ending",
-        "_raise_on_empty_provider_error",
-    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
-
-
-def test_official_provider_ingestion_and_proxy_ownership_are_protected():
-    assert {
-        "_V3_OFFICIAL_BASELINE_ROLES",
-        "_validate_provider_response_ingestion_contract",
-        "_validate_runner_role_contract",
-        "ArtifactRunnerProtocolGeneration",
-        "ResearchLabModelRunnerProtocol",
-    } <= set(PROTECTED_SYMBOLS["research_lab/model_runner_protocol.py"])
-    assert {
-        "_validated_durable_provider_ingestion",
-        "_bind_durable_provider_result",
-        "_validate_completion_provider_ingestion",
-    } <= set(
-        PROTECTED_SYMBOLS[
-            "gateway/research_lab/common_model_experiment.py"
-        ]
-    )
-    assert {
-        "_OfficialBaselineEvidenceProxyLease.close",
-        "ResearchLabGatewayScoringWorker._close_active_official_baseline_evidence_proxy",
-    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/scoring_worker.py"])
-
-
 def test_ancestry_unknown_commit_recovery_is_protected():
     assert {
         "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",
@@ -461,17 +256,6 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
         "write_identity_to_tmpfs",
         "create_mutual_tls_context",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/mtls_identity.py"])
-    assert {
-        "SandboxHTTPShimTransportCleanupError",
-        "_RETIRED_CLEANUP_LOCK",
-        "_RETIRED_CLEANUP_RESOURCES",
-        "_shutdown_and_close_socket",
-        "_retain_cleanup_failure",
-        "_require_retired_cleanup",
-        "_execute_broker_request",
-        "_run_blocking_transport",
-        "execute",
-    } <= set(PROTECTED_SYMBOLS["gateway/tee/sandbox_http_shim_v2.py"])
     assert {
         "REPLAY_WAIT_SECONDS",
         "TRANSPORT_HEALTH_SCHEMA_VERSION",
@@ -507,58 +291,6 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
     assert "_V2_RUNTIME_CONFIG_SCHEMA" in PROTECTED_SYMBOLS[
         "gateway/tee/verify_topology.py"
     ]
-
-
-def test_git_tree_source_authority_boundaries_are_protected():
-    assert {
-        "_GIT_STRUCTURAL_DIFF_PREFIXES",
-        "git_diff_structural_metadata",
-    } <= set(PROTECTED_SYMBOLS["research_lab/code_editing.py"])
-    assert "validate_private_code_edit_diff_artifact" in PROTECTED_SYMBOLS[
-        "gateway/research_lab/code_build.py"
-    ]
-    assert "_push_candidate_source_diff_to_repo" in PROTECTED_SYMBOLS[
-        "gateway/research_lab/promotion.py"
-    ]
-    assert "_load_candidate_source_diff" in PROTECTED_SYMBOLS[
-        "gateway/research_lab/scoring_worker.py"
-    ]
-    assert {
-        "_HostGitTreeRepository",
-        "_HostCandidateBuilder",
-    } <= set(PROTECTED_SYMBOLS["gateway/tee/autoresearch_executor_v2.py"])
-    assert {
-        "_snapshot_compatibility_identity",
-        "_tree_evaluator_commitment",
-        "_tree_authority_evaluator_commitment",
-        "ResearchLabHostedWorker._load_tree_snapshot_readiness",
-    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/worker.py"])
-    assert "compatibility_admission_mode_policy_identity" in PROTECTED_SYMBOLS[
-        "research_lab/sourcing_model_contract_check.py"
-    ]
-
-
-def test_model_sandbox_launcher_boundaries_are_protected():
-    assert {
-        "NATIVE_QUALIFY_RELEASE_IDENTITY_V1",
-        "_model_adapter_bootstrap_for_compatibility_receipt_v1",
-        "MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES",
-        "_pid_is_direct_cgroup_member",
-        "_normalized_cgroup_relative_path",
-        "_current_cgroup_path",
-        "_current_cgroup_v1_paths",
-        "_prepare_model_sandbox_cgroup_v1",
-        "_runsc_run_command",
-        "prepare_model_sandbox_cgroup_v2",
-        "model_sandbox_job_cgroup_path",
-        "_oci_config",
-        "RunscModelSandboxV2",
-    } <= set(PROTECTED_SYMBOLS["gateway/tee/model_sandbox_v2.py"])
-    assert {
-        "_PROVIDER_DIAGNOSTICS_BOOTSTRAP",
-        "_DOCKER_ADAPTER_BOOTSTRAP",
-        "_docker_adapter_bootstrap_for_qualify_compatibility",
-    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
 
 
 def test_artifact_egress_transport_boundaries_are_protected():
@@ -605,14 +337,11 @@ def test_artifact_egress_transport_boundaries_are_protected():
     assert "BrokeredProviderTransportV2.install" in PROTECTED_SYMBOLS[
         "gateway/tee/provider_client_v2.py"
     ]
-    assert "start_worker_supervisor_without_blocking_event_loop" in (
-        PROTECTED_SYMBOLS["gateway/research_lab/worker_autostart.py"]
-    )
     assert {
         "lifespan",
-        "_WORKER_STARTUP_DIAGNOSTIC_PATHS",
-        "_gateway_worker_startup_ready",
-        "require_worker_authority_after_liveness",
+        "_start_source_add_dispatcher_task",
+        "_SOURCE_ADD_INDEPENDENT_PATHS",
+        "_gateway_source_add_dispatcher_ready",
     } <= set(PROTECTED_SYMBOLS["gateway/main.py"])
     assert {
         "_TRANSIENT_ERROR_SIGNATURES",
@@ -671,10 +400,6 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "main",
     } <= set(PROTECTED_SYMBOLS["gateway/utils/tee_egress_forwarder.py"])
     assert {
-        "_shutdown_and_close_socket",
-        "SandboxProviderSocketServerV2",
-    } <= set(PROTECTED_SYMBOLS["gateway/tee/sandbox_provider_socket_v2.py"])
-    assert {
         "vsock_rpc_transport_health_lock",
         "vsock_rpc_pending_cleanup_failures",
         "vsock_rpc_terminal_failure_event",
@@ -705,16 +430,16 @@ def test_protected_manifest_detects_logic_change(tmp_path: Path):
         destination = copied_root / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    target = copied_root / "research_lab" / "eval" / "promotion_metric.py"
+    target = copied_root / "research_lab" / "employee_buckets.py"
     target.write_text(
         target.read_text(encoding="utf-8").replace(
-            "return PromotionGateDecision(",
-            "assert threshold_points >= 0\n    return PromotionGateDecision(",
+            "if isinstance(value, bool):",
+            "if value is None:\n        return str(default or \"\")\n    if isinstance(value, bool):",
             1,
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ProtectedWorkflowError, match="promotion_metric.py"):
+    with pytest.raises(ProtectedWorkflowError, match="employee_buckets.py"):
         verify_manifest(copied_root, manifest)
 
 
@@ -741,79 +466,3 @@ def test_protected_manifest_detects_policy_constant_change(
 
     with pytest.raises(ProtectedWorkflowError, match="policy.py:POLICY_VERSION"):
         verify_manifest(copied_root, manifest)
-
-
-def test_routing_dispatch_and_budget_contract_tampering_is_protected(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    relative_path = "gateway/research_lab/routing_provider_terminal_protected.py"
-    symbols = (
-        "ROUTING_PROVIDER_DISPATCH_OPERATION_V2",
-        "ROUTING_PROVIDER_DISPATCH_REQUEST_SCHEMA_V2",
-        "ROUTING_PROVIDER_DISPATCH_PURPOSE_V2",
-        "ROUTING_MODEL_COMPLETION_CONTRACT_SCHEMA_V1",
-        "ROUTING_MODEL_COMPLETION_MODE_RECEIPT_ONLY",
-        "ROUTING_MODEL_COMPLETION_MODE_MODEL_RUNNER",
-        "HOST_PROVIDER_RESPONSE_SCHEMA_VERSION",
-        "MODEL_PROVIDER_RESPONSE_SCHEMA_VERSION",
-        "MAX_ROUTING_MODEL_RESPONSE_BYTES",
-        "ROUTING_BUDGET_RESERVATION_SCHEMA_V3",
-        "ROUTING_BUDGET_RESERVATION_RESULT_SCHEMA_V3",
-        "ROUTING_BUDGET_RESERVATION_PROOF_SCHEMA_V3",
-        "ROUTING_BUDGET_RESERVATION_PURPOSE_V3",
-        "build_routing_budget_reservation_v3",
-        "validate_routing_budget_reservation_v3",
-        "validate_routing_budget_reservation_result_v3",
-        "routing_budget_reservation_proof_v3",
-        "build_routing_model_completion_contract_v1",
-        "validate_routing_model_completion_contract_v1",
-        "routing_provider_dispatch_receipt_output_v2",
-    )
-    assert set(symbols) <= set(PROTECTED_SYMBOLS[relative_path])
-    source = (ROOT / relative_path).read_text(encoding="utf-8")
-    copied_root = tmp_path / "repo"
-    copied_path = copied_root / relative_path
-    copied_path.parent.mkdir(parents=True, exist_ok=True)
-    copied_path.write_text(source, encoding="utf-8")
-    monkeypatch.setattr(
-        protected_workflows_module,
-        "PROTECTED_SYMBOLS",
-        {relative_path: symbols},
-    )
-    manifest = build_manifest(
-        copied_root,
-        baseline_commit="1" * 40,
-        protected_source_commit="2" * 40,
-    )
-
-    tampered_sources = (
-        source.replace(
-            'ROUTING_PROVIDER_DISPATCH_OPERATION_V2 = "routing_provider_dispatch_v2"',
-            'ROUTING_PROVIDER_DISPATCH_OPERATION_V2 = "routing_provider_dispatch_tampered_v2"',
-            1,
-        ),
-        source.replace(
-            '"leadpoet.routing_provider_dispatch_request.v2"',
-            '"leadpoet.routing_provider_dispatch_request.tampered.v2"',
-            1,
-        ),
-        source.replace(
-            'ROUTING_PROVIDER_DISPATCH_PURPOSE_V2 = ROUTING_PROVIDER_TERMINAL_PURPOSE_V2',
-            'ROUTING_PROVIDER_DISPATCH_PURPOSE_V2 = "tampered-purpose"',
-            1,
-        ),
-        source.replace(
-            '        "schema_version",\n        "reserved",',
-            '        "tampered_field",\n        "schema_version",\n        "reserved",',
-            1,
-        ),
-    )
-    for tampered in tampered_sources:
-        assert tampered != source
-        copied_path.write_text(tampered, encoding="utf-8")
-        with pytest.raises(
-            ProtectedWorkflowError,
-            match="routing_provider_terminal_protected.py",
-        ):
-            verify_manifest(copied_root, manifest)

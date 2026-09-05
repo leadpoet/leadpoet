@@ -77,7 +77,7 @@ class InterEnclaveArtifactIngestV2:
         if not isinstance(boot, Mapping):
             raise InterEnclaveArtifactV2Error("artifact peer boot is missing")
         boot_hash = _hash(boot.get("boot_identity_hash"), "artifact peer boot hash")
-        if service_role not in {"gateway_scoring", "gateway_autoresearch"}:
+        if service_role != "gateway_scoring":
             raise InterEnclaveArtifactV2Error("artifact peer role is not authorized")
         if boot.get("role") != service_role:
             raise InterEnclaveArtifactV2Error("artifact peer service role differs")

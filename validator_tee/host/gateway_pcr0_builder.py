@@ -38,7 +38,6 @@ DEFAULT_CACHE_SIZE = 20
 GATEWAY_ROLES = (
     "gateway_coordinator",
     "gateway_scoring",
-    "gateway_autoresearch",
 )
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
@@ -347,11 +346,12 @@ def build_reproducible_gateway_pcr0(
     builder_domain: str = "validator",
     builder_id: str = "validator-parent",
 ) -> dict[str, Any]:
-    if repetitions < 3:
+    local_single_build = repetitions == 1 and builder_domain == "local"
+    if repetitions < 3 and not local_single_build:
         raise GatewayPCR0BuildError("at least three independent builds are required")
     if role not in GATEWAY_ROLES:
         raise GatewayPCR0BuildError("gateway build role is invalid")
-    if builder_domain not in {"gateway", "validator"}:
+    if builder_domain not in {"gateway", "validator", "local"}:
         raise GatewayPCR0BuildError("gateway build evidence domain is invalid")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", builder_id):
         raise GatewayPCR0BuildError("gateway build evidence builder id is invalid")
@@ -598,7 +598,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument(
         "--builder-domain",
-        choices=("gateway", "validator"),
+        choices=("gateway", "validator", "local"),
         default="validator",
     )
     parser.add_argument("--builder-id", default="validator-parent")

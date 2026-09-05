@@ -1,4 +1,4 @@
-"""Canonical three-enclave topology for the two-host V2 gateway deployment."""
+"""Canonical two-enclave topology for the two-host V2 gateway deployment."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ PRODUCTION_PARENT_MEMORY_MIB = 128 * 1024
 
 COORDINATOR_ROLE = "gateway_coordinator"
 SCORING_ROLE = "gateway_scoring"
-AUTORESEARCH_ROLE = "gateway_autoresearch"
 
 ROLE_SPECS = {
     COORDINATOR_ROLE: {
@@ -33,14 +32,6 @@ ROLE_SPECS = {
         "worker_assignment": "all_configured",
         "configured_worker_source": "encrypted_proxy_profiles",
         "service_role": "gateway_scoring",
-    },
-    AUTORESEARCH_ROLE: {
-        "cid": 18,
-        "vcpus": 4,
-        "memory_mib": 24 * 1024,
-        "worker_assignment": "all_configured",
-        "configured_worker_source": "encrypted_proxy_profiles",
-        "service_role": "gateway_autoresearch",
     },
 }
 
@@ -128,12 +119,10 @@ def validate_production_capacity(*, parent_vcpus: int, parent_memory_mib: int) -
 def validate_topology() -> None:
     if ROLE_SPECS[SCORING_ROLE].get("worker_assignment") != "all_configured":
         raise TopologyError("scoring enclave must own all configured workers")
-    if ROLE_SPECS[AUTORESEARCH_ROLE].get("worker_assignment") != "all_configured":
-        raise TopologyError("autoresearch enclave must own all configured workers")
     cids = [int(spec["cid"]) for spec in ROLE_SPECS.values()]
-    if len(cids) != 3 or len(set(cids)) != 3:
-        raise TopologyError("gateway topology must use three unique enclave CIDs")
-    if HOST_RESERVED_VCPUS != 4 or HOST_RESERVED_MEMORY_MIB != 40 * 1024:
+    if len(cids) != 2 or len(set(cids)) != 2:
+        raise TopologyError("gateway topology must use two unique enclave CIDs")
+    if HOST_RESERVED_VCPUS != 8 or HOST_RESERVED_MEMORY_MIB != 64 * 1024:
         raise TopologyError("gateway host reservation differs from approved topology")
 
 

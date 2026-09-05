@@ -22,7 +22,14 @@ def _configuration():
     commit = "a" * 40
     historical_commit = "e" * 40
 
-    def roles(release_commit, characters):
+    def roles(release_commit, characters, *, include_retired=False):
+        role_names = [
+            "gateway_coordinator",
+            "gateway_scoring",
+            "validator_weights",
+        ]
+        if include_retired:
+            role_names.insert(0, "gateway_autoresearch")
         return {
             role: {
                 "commit_sha": release_commit,
@@ -30,27 +37,19 @@ def _configuration():
                 "build_manifest_hash": _hash(character),
                 "dependency_lock_hash": _hash("9"),
             }
-            for role, character in zip(
-                (
-                    "gateway_autoresearch",
-                    "gateway_coordinator",
-                    "gateway_scoring",
-                    "validator_weights",
-                ),
-                characters,
-            )
+            for role, character in zip(role_names, characters)
         }
 
     releases = {
         commit: {
             "channel_hash": _hash("1"),
             "gateway_release_hash": _hash("d"),
-            "roles": roles(commit, "1243"),
+            "roles": roles(commit, "243"),
         },
         historical_commit: {
             "channel_hash": _hash("2"),
             "gateway_release_hash": _hash("e"),
-            "roles": roles(historical_commit, "5678"),
+            "roles": roles(historical_commit, "5678", include_retired=True),
         },
     }
     lineage_body = {

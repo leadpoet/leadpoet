@@ -1,5 +1,5 @@
 #!/bin/bash
-# Configure Nitro's parent allocator for the measured three-enclave topology.
+# Configure Nitro's parent allocator for the measured two-enclave topology.
 
 set -euo pipefail
 
@@ -26,8 +26,8 @@ import sys
 
 document = json.load(open(sys.argv[1], encoding="utf-8"))
 roles = document.get("roles")
-if not isinstance(roles, dict) or len(roles) != 3:
-    raise SystemExit("full V2 topology must define exactly three roles")
+if not isinstance(roles, dict) or len(roles) != 2:
+    raise SystemExit("full V2 topology must define exactly two roles")
 print(
     sum(int(spec["vcpus"]) for spec in roles.values()),
     sum(int(spec["memory_mib"]) for spec in roles.values()),
@@ -42,7 +42,7 @@ if [ "$TOTAL_CPUS" -lt 16 ] || [ "$TOTAL_MEMORY_MIB" -lt 125000 ]; then
   echo "Observed CPUs=${TOTAL_CPUS} memory_mib=${TOTAL_MEMORY_MIB}" >&2
   exit 1
 fi
-if [ "$REQUIRED_CPUS" -ne 12 ] || [ "$REQUIRED_MEMORY_MIB" -ne 90112 ]; then
+if [ "$REQUIRED_CPUS" -ne 8 ] || [ "$REQUIRED_MEMORY_MIB" -ne 65536 ]; then
   echo "ERROR: measured V2 allocator totals changed without restart review" >&2
   echo "Observed enclave CPUs=${REQUIRED_CPUS} memory_mib=${REQUIRED_MEMORY_MIB}" >&2
   exit 1

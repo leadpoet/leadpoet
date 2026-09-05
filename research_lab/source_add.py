@@ -16,21 +16,6 @@ import re
 from typing import Any, Mapping, Optional, Sequence
 
 from .canonical import sha256_json
-from .fabric import (
-    ResearchSandboxJobRecord,
-    SandboxJobStatus,
-    validate_sandbox_job_record,
-    verify_research_lab_fabric,
-)
-from .loop_foundation import (
-    ArtifactReleaseState,
-    LoopWorkflowGuards,
-    ReleasePolicyRecord,
-    VisibilityPolicy,
-    assert_loop_workflows_disabled,
-    default_loop_workflow_guards,
-    validate_release_policy,
-)
 
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "source_add_fixtures.json"
@@ -246,6 +231,170 @@ class SourceAddIPState(str, Enum):
     REJECTED = "rejected"
 
 
+class SandboxJobStatus(str, Enum):
+    QUEUED = "queued"
+    COMPLETED = "completed"
+    CRASH = "crash"
+    TIMEOUT = "timeout"
+    GUARDRAIL_BREACH = "guardrail_breach"
+
+
+@dataclass(frozen=True)
+class SandboxResourceCaps:
+    cpu_cores: int
+    memory_mb: int
+    disk_mb: int
+    wall_clock_cap_s: int
+    max_cost_cents: int
+    network_disabled: bool = True
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "SandboxResourceCaps":
+        return cls(
+            cpu_cores=int(data["cpu_cores"]),
+            memory_mb=int(data["memory_mb"]),
+            disk_mb=int(data["disk_mb"]),
+            wall_clock_cap_s=int(data["wall_clock_cap_s"]),
+            max_cost_cents=int(data["max_cost_cents"]),
+            network_disabled=bool(data.get("network_disabled", True)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ResearchSandboxJobRecord:
+    job_id: str
+    ticket_id: str
+    image_ref: str
+    sandbox_policy_ref: str
+    resource_caps: SandboxResourceCaps
+    mounted_artifact_refs: tuple[str, ...]
+    status: str
+    estimated_cost_cents: int
+    actual_cost_cents: int = 0
+    crash_reason: Optional[str] = None
+    timeout_s: Optional[int] = None
+    guardrail_reason: Optional[str] = None
+    lab_only: bool = True
+    provisioned_host: bool = False
+    network_enabled: bool = False
+    enclave_attested: bool = False
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "ResearchSandboxJobRecord":
+        return cls(
+            job_id=str(data["job_id"]),
+            ticket_id=str(data["ticket_id"]),
+            image_ref=str(data["image_ref"]),
+            sandbox_policy_ref=str(data["sandbox_policy_ref"]),
+            resource_caps=SandboxResourceCaps.from_mapping(data["resource_caps"]),
+            mounted_artifact_refs=tuple(
+                str(ref) for ref in data.get("mounted_artifact_refs", [])
+            ),
+            status=str(data["status"]),
+            estimated_cost_cents=int(data["estimated_cost_cents"]),
+            actual_cost_cents=int(data.get("actual_cost_cents", 0)),
+            crash_reason=data.get("crash_reason"),
+            timeout_s=data.get("timeout_s"),
+            guardrail_reason=data.get("guardrail_reason"),
+            lab_only=bool(data.get("lab_only", True)),
+            provisioned_host=bool(data.get("provisioned_host", False)),
+            network_enabled=bool(data.get("network_enabled", False)),
+            enclave_attested=bool(data.get("enclave_attested", False)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["resource_caps"] = self.resource_caps.to_dict()
+        data["mounted_artifact_refs"] = list(self.mounted_artifact_refs)
+        return data
+
+
+@dataclass(frozen=True)
+class SourceAddWorkflowGuards:
+    public_miner_workflows: bool = False
+    paid_loops: bool = False
+    autopilot: bool = False
+    hosted_run_crowning: bool = False
+    source_add_payments: bool = False
+    scheduler_jobs: bool = False
+    production_writes: bool = False
+    supabase_writes: bool = False
+    live_champion_publication: bool = False
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "SourceAddWorkflowGuards":
+        return cls(
+            **{
+                name: bool(data.get(name, False))
+                for name in cls.__dataclass_fields__
+            }
+        )
+
+    def to_dict(self) -> dict[str, bool]:
+        return asdict(self)
+
+
+def validate_sandbox_job_record(
+    record: ResearchSandboxJobRecord | Mapping[str, Any],
+) -> list[str]:
+    if not isinstance(record, ResearchSandboxJobRecord):
+        record = ResearchSandboxJobRecord.from_mapping(record)
+    errors: list[str] = []
+    caps = record.resource_caps
+    for field in (
+        "cpu_cores",
+        "memory_mb",
+        "disk_mb",
+        "wall_clock_cap_s",
+        "max_cost_cents",
+    ):
+        if getattr(caps, field) <= 0:
+            errors.append(f"{field} must be positive")
+    if not caps.network_disabled:
+        errors.append("sandbox resource caps must keep network_disabled=true")
+    if record.status not in {status.value for status in SandboxJobStatus}:
+        errors.append(f"unknown sandbox job status: {record.status}")
+    if not record.mounted_artifact_refs:
+        errors.append("mounted_artifact_refs must not be empty")
+    if record.estimated_cost_cents < 0 or record.actual_cost_cents < 0:
+        errors.append("cost metadata must be non-negative")
+    if record.status == SandboxJobStatus.CRASH.value and not record.crash_reason:
+        errors.append("crash status requires crash_reason")
+    if record.status == SandboxJobStatus.TIMEOUT.value and not record.timeout_s:
+        errors.append("timeout status requires timeout_s")
+    if (
+        record.status == SandboxJobStatus.GUARDRAIL_BREACH.value
+        and not record.guardrail_reason
+    ):
+        errors.append("guardrail_breach status requires guardrail_reason")
+    if not record.lab_only:
+        errors.append("sandbox jobs must remain lab_only")
+    if record.provisioned_host:
+        errors.append("SOURCE_ADD review must not provision sandbox hosts")
+    if record.network_enabled:
+        errors.append("SOURCE_ADD sandbox jobs must not enable network")
+    if record.enclave_attested:
+        errors.append("SOURCE_ADD sandbox jobs are not enclave-attested")
+    return errors
+
+
+def _validate_source_add_workflow_guards(
+    guards: SourceAddWorkflowGuards | Mapping[str, Any],
+) -> list[str]:
+    if not isinstance(guards, SourceAddWorkflowGuards):
+        guards = SourceAddWorkflowGuards.from_mapping(guards)
+    enabled = [name for name, value in guards.to_dict().items() if value]
+    if not enabled:
+        return []
+    return [
+        "SOURCE_ADD review must keep these workflows disabled: "
+        + ", ".join(enabled)
+    ]
+
+
 @dataclass(frozen=True)
 class SourceAddAdapterManifest:
     adapter_id: str
@@ -267,8 +416,8 @@ class SourceAddAdapterManifest:
     arbitrary_code_execution_enabled: bool = False
     live_network_enabled: bool = False
     component_publicly_accepted: bool = False
-    visibility_policy: str = VisibilityPolicy.DEFAULT_PRIVATE.value
-    artifact_release_state: str = ArtifactReleaseState.PRIVATE_LIVE_CHAMPION.value
+    visibility_policy: str = "default_private"
+    artifact_release_state: str = "private_live_champion"
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "SourceAddAdapterManifest":
@@ -292,9 +441,9 @@ class SourceAddAdapterManifest:
             arbitrary_code_execution_enabled=bool(data.get("arbitrary_code_execution_enabled", False)),
             live_network_enabled=bool(data.get("live_network_enabled", False)),
             component_publicly_accepted=bool(data.get("component_publicly_accepted", False)),
-            visibility_policy=str(data.get("visibility_policy", VisibilityPolicy.DEFAULT_PRIVATE.value)),
+            visibility_policy=str(data.get("visibility_policy", "default_private")),
             artifact_release_state=str(
-                data.get("artifact_release_state", ArtifactReleaseState.PRIVATE_LIVE_CHAMPION.value)
+                data.get("artifact_release_state", "private_live_champion")
             ),
         )
 
@@ -512,19 +661,10 @@ def validate_source_add_adapter_manifest(
         errors.append("live_network_enabled must remain false")
     if manifest.component_publicly_accepted:
         errors.append("component_publicly_accepted must remain false in P1.5")
-    errors.extend(
-        validate_release_policy(
-            ReleasePolicyRecord(
-                artifact_ref=manifest.adapter_id,
-                artifact_type="source_add_adapter_manifest",
-                visibility_policy=manifest.visibility_policy,
-                artifact_release_state=manifest.artifact_release_state,
-                reason="SOURCE_ADD adapter manifests remain private until acceptance gate",
-            )
-        )
-    )
-    if manifest.artifact_release_state != ArtifactReleaseState.PRIVATE_LIVE_CHAMPION.value:
-        errors.append("SOURCE_ADD adapter manifest must remain private in P1.5")
+    if manifest.visibility_policy != "default_private":
+        errors.append("SOURCE_ADD adapter manifest visibility must remain private")
+    if manifest.artifact_release_state != "private_live_champion":
+        errors.append("SOURCE_ADD adapter manifest must remain private")
     return errors
 
 
@@ -556,15 +696,14 @@ def validate_source_add_trial_output(output: SourceAddTrialOutputRecord | Mappin
 def validate_source_add_sandbox_review(
     review: SourceAddSandboxReviewRecord | Mapping[str, Any],
     *,
-    guards: Optional[LoopWorkflowGuards | Mapping[str, Any]] = None,
+    guards: Optional[SourceAddWorkflowGuards | Mapping[str, Any]] = None,
 ) -> list[str]:
     if not isinstance(review, SourceAddSandboxReviewRecord):
         review = SourceAddSandboxReviewRecord.from_mapping(review)
     errors: list[str] = []
-    try:
-        assert_loop_workflows_disabled(guards or default_loop_workflow_guards())
-    except ValueError as exc:
-        errors.append(str(exc))
+    errors.extend(
+        _validate_source_add_workflow_guards(guards or SourceAddWorkflowGuards())
+    )
     errors.extend(validate_sandbox_job_record(review.sandbox_job))
     if review.status not in {status.value for status in SourceAddReviewStatus}:
         errors.append(f"unknown source-add review status: {review.status}")
@@ -684,7 +823,6 @@ def validate_source_add_ip_assignment(
 
 
 def verify_research_lab_source_add(fixture_path: Path | str = FIXTURE_PATH) -> dict[str, Any]:
-    fabric_summary = verify_research_lab_fabric()
     fixture = _load_fixture(Path(fixture_path))
 
     manifest = SourceAddAdapterManifest.from_mapping(fixture["adapter_manifest"])
@@ -730,7 +868,6 @@ def verify_research_lab_source_add(fixture_path: Path | str = FIXTURE_PATH) -> d
         _assert_expected_error(errors, record)
 
     return {
-        "fabric_invalid_records": fabric_summary["invalid_records"],
         "adapter_id": manifest.adapter_id,
         "trial_outputs": len(outputs),
         "measured_trial_yield": review.measured_trial_yield,

@@ -1,8 +1,8 @@
 """Arena runner: sandbox one bundle on one benchmark input.
 
 A runner follows every running Arena round, claims one pending assignment per
-free local slot, materializes the pinned image's root filesystem from the
-Arena registry, executes the fixed ``/agent/run`` entrypoint in a fresh gVisor
+free local slot, downloads and caches the admitted source bytes, materializes
+the trusted Python root filesystem, and executes the host-owned agent entrypoint in a fresh gVisor
 sandbox for that single ICP, bridges the sandbox's provider requests (plain
 HTTP over the worker socket, or the judge shim's operation frames) to the
 service's provider endpoint, appends an operational event log, and submits one
@@ -16,14 +16,18 @@ import base64
 import http.server
 import json
 import os
+import re
 import shutil
 import socket
 import socketserver
+import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,31 +37,50 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from lab_arena import contracts, images, operations, runtime, scoring, shim
+from lab_arena import contracts, images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
 
-DEFAULT_MAX_PARALLEL_RUNS = 1
+DEFAULT_MAX_PARALLEL_RUNS = contracts.RUNNER_SLOT_CEILING
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 DEFAULT_SOCKET_ROOT = "/tmp"
+AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
 # A request on the worker socket is either a length-prefixed operation frame
 # (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
 HTTP_FIRST_BYTES = b"GPHDO"
 HTTP_ERROR_STATUS = {"budget_exhausted": 402, "worker_unavailable": 503, "request_too_large": 413}
 IMAGE_DIGEST_RE = __import__("re").compile(r"^(?:[a-z0-9][a-z0-9._/-]{0,200}@)?sha256:[0-9a-f]{64}$")
+REQUIREMENT_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+    r"(?:\[[A-Za-z0-9_,.-]{1,255}\])?"
+    r"(?:\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]{0,127}"
+    r"(?:\s*,\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]{0,127})*)?$"
+)
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
 PROVIDER_API_TIMEOUT_GRACE_SECONDS = 15.0
 MAX_PROVIDER_API_TIMEOUT_SECONDS = 135.0
 DEFAULT_IMAGE_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_IMAGE_CACHE_MAX_ENTRIES = 32
+DEFAULT_SOURCE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_SOURCE_CACHE_MAX_ENTRIES = 64
+MAX_REQUIREMENTS_BYTES = 64 * 1024
+MAX_REQUIREMENTS = 128
+MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
+MAX_DEPENDENCY_FILES = 20_000
+DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
+DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
 
 
 class RunnerError(RuntimeError):
     """A runner-side failure; the attempt fails closed."""
+
+
+class AgentDependencyError(RunnerError):
+    """The submitted dependency declaration cannot run in the Arena."""
 
 
 class SignatureFn(Protocol):
@@ -75,6 +98,8 @@ class ArenaApiClient(Protocol):
     def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]: ...
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]: ...
+
+    def source(self, run_id: str, lease_token: str) -> bytes: ...
 
     def current(self) -> Dict[str, Any]: ...
 
@@ -151,6 +176,40 @@ class HttpArenaApiClient:
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         return self._post("/arena/v1/runs/%s/complete" % envelope["body"]["run_id"], envelope)
+
+    def source(self, run_id: str, lease_token: str) -> bytes:
+        """Download one bounded source archive under its active run lease."""
+
+        try:
+            with self._client.stream(
+                "GET",
+                self._base_url + "/arena/v1/runs/%s/source" % run_id,
+                headers={"x-lab-arena-lease": lease_token},
+                timeout=httpx.Timeout(API_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status_code != 200:
+                    raise RunnerError(
+                        "run source is unavailable: HTTP %d" % response.status_code
+                    )
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
+                            raise RunnerError("run source exceeds the archive limit")
+                    except ValueError as exc:
+                        raise RunnerError("run source length is invalid") from exc
+                chunks = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
+                        raise RunnerError("run source exceeds the archive limit")
+                    chunks.append(chunk)
+        except RunnerError:
+            raise
+        except httpx.HTTPError as exc:
+            raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
+        return b"".join(chunks)
 
     def round(self, round_id: str) -> Dict[str, Any]:
         return self._get("/arena/v1/rounds/%s" % round_id, "round %s" % round_id)
@@ -354,6 +413,409 @@ class ImageCache:
                 self._evict_locked()
 
 
+class SourceFetcher(Protocol):
+    def __call__(self, run_id: str, lease_token: str) -> bytes: ...
+
+
+class DependencyInstaller(Protocol):
+    def __call__(self, requirements_path: Path, target_dir: Path) -> None: ...
+
+
+def _validated_requirements(path: Path) -> List[str]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise AgentDependencyError("requirements.txt is unreadable") from exc
+    if len(data) > MAX_REQUIREMENTS_BYTES:
+        raise AgentDependencyError("requirements.txt exceeds the size limit")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AgentDependencyError("requirements.txt must be UTF-8") from exc
+    requirements = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if " #" in line:
+            line = line.split(" #", 1)[0].rstrip()
+        if not REQUIREMENT_RE.fullmatch(line):
+            raise AgentDependencyError(
+                "requirements.txt may contain only package names and version constraints"
+            )
+        requirements.append(line)
+        if len(requirements) > MAX_REQUIREMENTS:
+            raise AgentDependencyError("requirements.txt has too many packages")
+    return requirements
+
+
+def install_binary_requirements(requirements_path: Path, target_dir: Path) -> None:
+    """Install listed wheels in a size-capped temporary filesystem."""
+
+    requirements = _validated_requirements(requirements_path)
+    if not requirements:
+        return
+    target = Path(target_dir)
+    if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+        raise RunnerError("dependency target must be an empty directory")
+    staging = Path(tempfile.mkdtemp(prefix="lab-arena-deps-"))
+    mounted = False
+    unmounted = False
+    failure: Optional[Exception] = None
+    try:
+        mount = subprocess.run(
+            [
+                "mount",
+                "-t",
+                "tmpfs",
+                "-o",
+                "size=%d,mode=0700,nosuid,nodev,noexec" % MAX_DEPENDENCY_BYTES,
+                "tmpfs",
+                str(staging),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=DEPENDENCY_MOUNT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if mount.returncode != 0:
+            raise RunnerError("dependency filesystem mount failed")
+        mounted = True
+        install_target = staging / "target"
+        install_target.mkdir(mode=0o700)
+        home = staging / "home"
+        home.mkdir(mode=0o700)
+        temporary = staging / "tmp"
+        temporary.mkdir(mode=0o700)
+        environment = {
+            "HOME": str(home),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PIP_CONFIG_FILE": os.devnull,
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PYTHONNOUSERSITE": "1",
+            "TMPDIR": str(temporary),
+        }
+        command = [
+            sys.executable,
+            "-I",
+            "-m",
+            "pip",
+            "install",
+            "--isolated",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--no-cache-dir",
+            "--no-compile",
+            "--only-binary=:all:",
+            "--index-url=https://pypi.org/simple",
+            "--target",
+            str(install_target),
+            "--requirement",
+            str(requirements_path),
+        ]
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AgentDependencyError("binary dependency installation failed")
+        _lock_down_dependency_tree(install_target)
+        for child in install_target.iterdir():
+            destination = target / child.name
+            if child.is_dir():
+                shutil.copytree(child, destination)
+            else:
+                shutil.copy2(child, destination)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failure = (
+            AgentDependencyError("binary dependency installation failed")
+            if mounted
+            else RunnerError("dependency filesystem mount failed")
+        )
+        failure.__cause__ = exc
+    except Exception as exc:
+        failure = exc
+    finally:
+        if mounted:
+            try:
+                result = subprocess.run(
+                    ["umount", str(staging)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=DEPENDENCY_MOUNT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+                unmounted = result.returncode == 0
+                if not unmounted:
+                    result = subprocess.run(
+                        ["umount", "-l", str(staging)],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=DEPENDENCY_MOUNT_TIMEOUT_SECONDS,
+                        check=False,
+                    )
+                    unmounted = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                unmounted = False
+            if not unmounted:
+                cleanup_failure = RunnerError("dependency filesystem cleanup failed")
+                if failure is not None:
+                    cleanup_failure.__cause__ = failure
+                failure = cleanup_failure
+        if not mounted or unmounted:
+            shutil.rmtree(staging, ignore_errors=True)
+    if failure is not None:
+        raise failure
+
+
+def _lock_down_dependency_tree(path: Path) -> None:
+    total = 0
+    count = 0
+    directories = []
+    for directory, names, files in os.walk(path, topdown=True, followlinks=False):
+        directory_path = Path(directory)
+        directories.append(directory_path)
+        for name in list(names) + list(files):
+            candidate = directory_path / name
+            try:
+                details = candidate.lstat()
+            except OSError as exc:
+                raise RunnerError("installed dependency is unreadable") from exc
+            if not (stat.S_ISDIR(details.st_mode) or stat.S_ISREG(details.st_mode)):
+                raise AgentDependencyError("installed dependency has an unsafe type")
+            count += 1
+            total += int(details.st_size)
+            if count > MAX_DEPENDENCY_FILES or total > MAX_DEPENDENCY_BYTES:
+                raise AgentDependencyError("installed dependencies exceed the cache limit")
+            if stat.S_ISREG(details.st_mode):
+                os.chmod(candidate, 0o444)
+    for directory in reversed(directories):
+        os.chmod(directory, 0o555)
+
+
+class SourceCache:
+    """A bounded LRU keyed by the existing server-assigned submission id."""
+
+    def __init__(
+        self,
+        root: Path,
+        fetcher: SourceFetcher,
+        *,
+        dependency_installer: DependencyInstaller = install_binary_requirements,
+        max_bytes: int = DEFAULT_SOURCE_CACHE_MAX_BYTES,
+        max_entries: int = DEFAULT_SOURCE_CACHE_MAX_ENTRIES,
+    ) -> None:
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+            raise RunnerError("source cache byte limit is invalid")
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
+            raise RunnerError("source cache entry limit is invalid")
+        self._root = Path(root)
+        self._fetcher = fetcher
+        self._dependency_installer = dependency_installer
+        self._max_bytes = max_bytes
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._building: set[str] = set()
+        self._ready: "OrderedDict[str, Tuple[Path, Path]]" = OrderedDict()
+        self._sizes: Dict[str, int] = {}
+        self._in_use: Dict[str, int] = {}
+        self._root.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._load_existing_locked()
+
+    def _load_existing_locked(self) -> None:
+        existing = []
+        for target in sorted(self._root.glob("submission-*"), key=lambda item: item.name):
+            marker = target / ".ready"
+            archive = target / "source.tar.gz"
+            source = target / "source"
+            dependencies = target / "deps"
+            try:
+                marker_time = marker.stat().st_mtime_ns
+                archive_size = archive.stat().st_size
+            except OSError:
+                _remove_cache_path(target)
+                continue
+            submission_id = target.name.removeprefix("submission-")
+            if (
+                not contracts.SUBMISSION_ID_RE.fullmatch(submission_id)
+                or target.name != "submission-" + submission_id
+                or not 1 <= archive_size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+                or source.is_symlink()
+                or not source.is_dir()
+                or dependencies.is_symlink()
+                or not dependencies.is_dir()
+            ):
+                _remove_cache_path(target)
+                continue
+            try:
+                facts = source_bundle.validate_source_archive(archive.read_bytes())
+            except (OSError, source_bundle.SourceBundleError):
+                _remove_cache_path(target)
+                continue
+            if facts["source_size_bytes"] != archive_size:
+                _remove_cache_path(target)
+                continue
+            existing.append(
+                (marker_time, target.name, submission_id, source, dependencies, _cache_path_bytes(target))
+            )
+        for _time, _name, submission_id, source, dependencies, size in sorted(existing):
+            self._ready[submission_id] = (source, dependencies)
+            self._sizes[submission_id] = size
+        self._evict_locked()
+
+    def _within_limits_locked(self) -> bool:
+        return len(self._ready) <= self._max_entries and sum(self._sizes.values()) <= self._max_bytes
+
+    def _evict_locked(self, *, protected: Sequence[str] = ()) -> None:
+        protected_set = set(protected)
+        while not self._within_limits_locked():
+            victim = next(
+                (submission_id for submission_id in self._ready if submission_id not in protected_set and self._in_use.get(submission_id, 0) == 0),
+                None,
+            )
+            if victim is None:
+                return
+            source, _dependencies = self._ready.pop(victim)
+            self._sizes.pop(victim, None)
+            self._in_use.pop(victim, None)
+            _remove_cache_path(source.parent)
+
+    def _cached_source_locked(
+        self,
+        submission_id: str,
+        source_size_bytes: int,
+    ) -> Optional[Tuple[Path, Path]]:
+        cached = self._ready.get(submission_id)
+        if cached is None:
+            return None
+        archive = cached[0].parent / "source.tar.gz"
+        if archive.is_file() and archive.stat().st_size == source_size_bytes:
+            self._ready.move_to_end(submission_id)
+            return cached
+        self._ready.pop(submission_id, None)
+        self._sizes.pop(submission_id, None)
+        _remove_cache_path(cached[0].parent)
+        return None
+
+    def _prepare_source(
+        self,
+        run_id: str,
+        lease_token: str,
+        source_ref: str,
+        submission_id: str,
+        source_size_bytes: int,
+    ) -> Tuple[Tuple[Path, Path], int]:
+        target = self._root / ("submission-" + submission_id)
+        if target.exists() or target.is_symlink():
+            _remove_cache_path(target)
+        target.mkdir(parents=True, mode=0o700)
+        archive_path = target / "source.tar.gz"
+        source_path = target / "source"
+        dependency_path = target / "deps"
+        try:
+            payload = bytes(self._fetcher(run_id, lease_token))
+            if len(payload) != source_size_bytes:
+                raise RunnerError("run source size does not match its lease")
+            facts = source_bundle.validate_source_archive(payload)
+            if facts["source_size_bytes"] != source_size_bytes:
+                raise RunnerError("run source size does not match its lease")
+            archive_path.write_bytes(payload)
+            os.chmod(archive_path, 0o400)
+            source_path.mkdir(mode=0o700)
+            source_bundle.extract_source_archive(payload, source_path)
+            dependency_path.mkdir(mode=0o700)
+            requirements = source_path / "requirements.txt"
+            if requirements.is_file():
+                self._dependency_installer(requirements, dependency_path)
+            _lock_down_dependency_tree(dependency_path)
+            (target / ".ready").touch(mode=0o400)
+            size = _cache_path_bytes(target)
+            if size > self._max_bytes:
+                raise RunnerError("source exceeds runner cache capacity")
+        except source_bundle.SourceBundleError as exc:
+            _remove_cache_path(target)
+            raise RunnerError("run source archive is invalid: %s" % exc.code) from exc
+        except Exception:
+            _remove_cache_path(target)
+            raise
+        return (source_path, dependency_path), size
+
+    @contextmanager
+    def acquire(
+        self,
+        run_id: str,
+        lease_token: str,
+        source_ref: str,
+        submission_id: str,
+        source_size_bytes: int,
+    ) -> Iterator[Tuple[Path, Path]]:
+        if not isinstance(source_ref, str) or not source_ref or len(source_ref) > 1024:
+            raise RunnerError("source ref is invalid")
+        if not isinstance(submission_id, str) or not contracts.SUBMISSION_ID_RE.fullmatch(submission_id):
+            raise RunnerError("submission id is invalid")
+        if (
+            isinstance(source_size_bytes, bool)
+            or not isinstance(source_size_bytes, int)
+            or not 1 <= source_size_bytes <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+        ):
+            raise RunnerError("source size is invalid")
+        must_prepare = False
+        with self._condition:
+            while submission_id in self._building:
+                self._condition.wait()
+            paths = self._cached_source_locked(submission_id, source_size_bytes)
+            if paths is None:
+                self._building.add(submission_id)
+                must_prepare = True
+            else:
+                self._in_use[submission_id] = self._in_use.get(submission_id, 0) + 1
+        if must_prepare:
+            try:
+                paths, size = self._prepare_source(
+                    run_id,
+                    lease_token,
+                    source_ref,
+                    submission_id,
+                    source_size_bytes,
+                )
+                with self._condition:
+                    self._ready[submission_id] = paths
+                    self._sizes[submission_id] = size
+                    self._evict_locked(protected=(submission_id,))
+                    if not self._within_limits_locked():
+                        self._ready.pop(submission_id, None)
+                        self._sizes.pop(submission_id, None)
+                        _remove_cache_path(paths[0].parent)
+                        raise RunnerError("source cache capacity is in use")
+                    self._in_use[submission_id] = 1
+            finally:
+                with self._condition:
+                    self._building.discard(submission_id)
+                    self._condition.notify_all()
+        try:
+            yield paths
+        finally:
+            with self._lock:
+                remaining = self._in_use.get(submission_id, 0) - 1
+                if remaining > 0:
+                    self._in_use[submission_id] = remaining
+                else:
+                    self._in_use.pop(submission_id, None)
+                self._evict_locked()
+
+
 def registry_image_exporter(client: images.RegistryClient, *, rules: Optional[images.ImageRules] = None) -> ImageExporter:
     """Materialize a pinned image from the Arena registry with the hardened extractor (no Docker daemon)."""
 
@@ -441,7 +903,7 @@ class WorkerSocketServer:
         call = dict(document["call"])
         with state.lock:
             state.calls.append(call)
-            if call.get("error_code") in ("budget_refused", "budget_exhausted") or call.get("outcome") == "refused":
+            if call.get("error_code") in ("budget_refused", "budget_exhausted", "miner_credentials_unavailable", "miner_provider_not_configured") or call.get("outcome") == "refused":
                 state.refusals += 1
         return None, document
 
@@ -618,47 +1080,44 @@ class RunnerConfig:
     api: ArenaApiClient
     sandbox_runtime: SandboxRuntime
     image_cache: ImageCache
+    source_cache: SourceCache
     work_dir: Path
     max_parallel_runs: int = DEFAULT_MAX_PARALLEL_RUNS
     slot_ceiling: int = contracts.RUNNER_SLOT_CEILING
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
     # Waits between completion retries after a transport or server failure.
     completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
+    # A sandbox can end while its last provider request is still settling. The
+    # 142-second bound covers MAX_PROVIDER_API_TIMEOUT_SECONDS without holding
+    # the lease until its 20-minute expiry.
+    accounting_open_retry_seconds: Tuple[float, ...] = (
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        30.0,
+        45.0,
+        30.0,
+    )
     evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
-    # Where miner leases may point (empty: not checked).
-    registry_repository: str = ""
-    # Rounds overlap, so retain each followed round's repository.
-    round_sources: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    agent_entrypoint_path: Path = AGENT_ENTRYPOINT_PATH
 
     def __post_init__(self) -> None:
-        if isinstance(self.max_parallel_runs, bool) or not isinstance(self.max_parallel_runs, int) or self.max_parallel_runs < 1:
-            raise RunnerError("max_parallel_runs must be a positive integer")
+        if (
+            isinstance(self.max_parallel_runs, bool)
+            or not isinstance(self.max_parallel_runs, int)
+            or not 1 <= self.max_parallel_runs <= contracts.RUNNER_SLOT_CEILING
+        ):
+            raise RunnerError(
+                "max_parallel_runs must be between 1 and %d"
+                % contracts.RUNNER_SLOT_CEILING
+            )
         self.work_dir = Path(self.work_dir)
         self.socket_root = Path(self.socket_root)
+        self.agent_entrypoint_path = Path(self.agent_entrypoint_path)
         self.socket_root.mkdir(parents=True, exist_ok=True)
-
-    def adopt_round(self, configuration: Mapping[str, Any]) -> None:
-        """Use the miner image repository named by a round configuration.
-
-        The sources are kept per round because a runner follows every running
-        round at once; the flat fields hold the last adopted round's sources
-        for a runner pinned to one round.
-        """
-
-        sources = {
-            "registry_repository": str(configuration.get("registry_repository") or ""),
-        }
-        round_id = str(configuration.get("round_id") or "")
-        if round_id:
-            self.round_sources[round_id] = sources
-        self.registry_repository = sources["registry_repository"]
-
-    def sources_for(self, round_id: str) -> Dict[str, str]:
-        """The image sources pinned for ``round_id`` (the flat fields when the round was not adopted by id)."""
-
-        return dict(self.round_sources.get(str(round_id)) or {"registry_repository": self.registry_repository})
 
 
 def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) -> int:
@@ -669,8 +1128,11 @@ def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) 
         value = int(raw)
     except ValueError as exc:
         raise RunnerError("%s must be a positive integer" % MAX_PARALLEL_ENV) from exc
-    if value < 1:
-        raise RunnerError("%s must be a positive integer" % MAX_PARALLEL_ENV)
+    if not 1 <= value <= contracts.RUNNER_SLOT_CEILING:
+        raise RunnerError(
+            "%s must be between 1 and %d"
+            % (MAX_PARALLEL_ENV, contracts.RUNNER_SLOT_CEILING)
+        )
     return value
 
 
@@ -723,17 +1185,37 @@ class AssignmentExecutor:
                 }
                 extra_environment = {}
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
-            # The lease names immutable image bytes. The host owns both process
-            # commands; miner OCI ENTRYPOINT, CMD, ENV, and WORKDIR are ignored.
+            # Both assignment kinds use the service-selected trusted Python
+            # image. Execute assignments add the admitted source bundle under
+            # read-only mounts; no miner image metadata is accepted.
             image_reference = str(lease.get("image_reference") or "")
-            _check_lease_image(config, kind, image_reference, str(lease["image_digest"]), round_id=str(lease.get("round_id") or config.round_id or ""))
-            with config.image_cache.acquire(str(lease["image_digest"]), image_reference) as rootfs:
+            _check_runtime_image(image_reference, str(lease["image_digest"]))
+            with ExitStack() as resources:
+                rootfs = resources.enter_context(
+                    config.image_cache.acquire(str(lease["image_digest"]), image_reference)
+                )
+                source_dir = dependency_dir = None
+                if not scoring_run:
+                    source_dir, dependency_dir = resources.enter_context(
+                        config.source_cache.acquire(
+                            str(lease["run_id"]),
+                            lease_token,
+                            lease.get("source_ref"),
+                            lease.get("submission_id"),
+                            lease.get("source_size_bytes"),
+                        )
+                    )
                 spec = runtime.SandboxSpec(
                     sandbox_id="arena-%s" % contracts.document_hash(lease["run_id"])[7:39],
                     rootfs_path=rootfs,
                     input_dir=input_dir,
                     output_dir=output_dir,
                     socket_path=socket_path,
+                    source_dir=source_dir,
+                    dependency_dir=dependency_dir,
+                    agent_entrypoint_path=(
+                        None if scoring_run else config.agent_entrypoint_path
+                    ),
                     entry_command=runtime.SCORER_ENTRY_COMMAND if scoring_run else runtime.AGENT_ENTRY_COMMAND,
                     working_dir=runtime.SCORER_WORKING_DIR if scoring_run else runtime.AGENT_WORKING_DIR,
                     evaluation_date=evaluation_date,
@@ -769,10 +1251,30 @@ class AssignmentExecutor:
             # A shared host key or account failure is infrastructure when it
             # prevents an output. An agent that handles the failure and still
             # returns a valid output has completed the assignment.
-            provider_infrastructure_failed = any(operations.provider_status_is_infrastructure(call.get("provider_status")) for call in state.calls)
+            miner_credentials_failed = any(
+                call.get("funding_source") == "miner_key"
+                and call.get("error_code") == "miner_credentials_unavailable"
+                for call in state.calls
+            )
+            provider_infrastructure_failed = any(
+                call.get("error_code") in ("broker_unavailable", "provider_unavailable")
+                or (
+                    operations.provider_status_is_infrastructure(call.get("provider_status"))
+                    and not (call.get("funding_source") == "miner_key" and call.get("provider_status") in (401, 402, 403))
+                )
+                for call in state.calls
+            )
+            if miner_credentials_failed and terminal != "accepted":
+                terminal = "credential_error"
+                output_document = None
             if provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
+        except AgentDependencyError:
+            if scoring_run:  # the trusted scorer has no submitted dependency tree
+                raise
+            terminal = "model_error"
+            output_document = None
         finally:
             server.stop()
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -804,17 +1306,14 @@ class AssignmentExecutor:
         )
 
 
-def _check_lease_image(config: RunnerConfig, kind: str, image_reference: str, image_digest: str, *, round_id: str = "") -> None:
-    """A lease names pinned bytes; miner images stay in the Arena repository."""
+def _check_runtime_image(image_reference: str, image_digest: str) -> None:
+    """Require one pinned service-selected Python root filesystem."""
 
     if not image_reference:
         raise RunnerError("lease carries no image reference")
     reference = images.parse_reference(image_reference)
     if reference.digest != image_digest:
         raise RunnerError("lease image reference does not name the lease digest")
-    sources = config.sources_for(round_id)
-    if kind != "score" and sources["registry_repository"] and reference.name != sources["registry_repository"]:
-        raise RunnerError("lease image is outside the round's Arena repository")
 
 
 # ---------------------------------------------------------------------------
@@ -871,8 +1370,7 @@ class Runner:
                 wanted.append(str(row["round_id"]))
         for round_id in wanted:
             if round_id not in self._round_ids:
-                configuration = dict(config.api.round(round_id).get("configuration") or {})
-                config.adopt_round(dict(configuration, round_id=round_id))
+                config.api.round(round_id)
         self._round_ids = wanted
         return self.round_id
 
@@ -898,7 +1396,18 @@ class Runner:
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
-            self.completed.append({"run_id": lease.get("run_id"), "error": type(exc).__name__})
+            print(
+                "Lab Arena run abandoned: %s" % type(exc).__name__,
+                file=sys.stderr,
+                flush=True,
+            )
+            self.completed.append(
+                {
+                    "run_id": lease.get("run_id"),
+                    "error": type(exc).__name__,
+                    "detail": str(exc)[:200],
+                }
+            )
         finally:
             self._slots.release()
 
@@ -906,19 +1415,42 @@ class Runner:
         """Deliver the signed completion; a transport or server failure is retried briefly.
 
         The envelope is idempotent, so a lost response or a transient object
-        store failure on the Arena costs a retry, not the whole sandbox run.
-        A rejection the Arena returns as a document is never retried.
+        store failure on the Arena costs a retry, not the whole sandbox run. An
+        ``accounting_open`` document is retried separately while an in-flight
+        provider call settles. Other response documents are never retried.
         """
 
-        delays = tuple(self._config.completion_retry_seconds)
-        for attempt in range(len(delays) + 1):
+        failure_delays = iter(tuple(self._config.completion_retry_seconds))
+        accounting_delays = iter(
+            tuple(self._config.accounting_open_retry_seconds)
+        )
+        while True:
             try:
-                return self._config.api.complete(envelope)
-            except Exception:
-                if attempt >= len(delays):
-                    raise
-                time.sleep(max(0.0, float(delays[attempt])))
-        raise RunnerError("completion retries exhausted")  # pragma: no cover - the loop returns or raises
+                result = self._config.api.complete(envelope)
+            except Exception as exc:
+                try:
+                    delay = next(failure_delays)
+                except StopIteration:
+                    raise exc from None
+            else:
+                status = result.get("status")
+                safe_status = (
+                    status
+                    if status
+                    in ("accepted", "failed", "stale", "accounting_open", "rejected")
+                    else "other"
+                )
+                print(
+                    "Lab Arena completion status: %s" % safe_status,
+                    flush=True,
+                )
+                if status != "accounting_open":
+                    return result
+                try:
+                    delay = next(accounting_delays)
+                except StopIteration:
+                    raise RunnerError("completion remained accounting_open")
+            time.sleep(max(0.0, float(delay)))
 
     def run_once(self, *, max_claims: int = 1000) -> int:
         """Claim while a local slot is free; return the number of leases taken."""

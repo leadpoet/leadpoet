@@ -212,7 +212,6 @@ is_truthy() {
 
 ENABLE_LEGACY_SOURCING="${ENABLE_LEGACY_SOURCING:-false}"
 ENABLE_SOURCING_WORKERS="${ENABLE_SOURCING_WORKERS:-$ENABLE_LEGACY_SOURCING}"
-ENABLE_QUALIFICATION_WORKERS="${ENABLE_QUALIFICATION_WORKERS:-false}"
 ENABLE_FULFILLMENT="${ENABLE_FULFILLMENT:-false}"
 FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED="${FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED:-true}"
 
@@ -237,25 +236,6 @@ else
     echo "🚫 Legacy sourcing worker deployment disabled (set ENABLE_SOURCING_WORKERS=true to opt in)"
 fi
 
-# Auto-detect QUALIFICATION proxies from .env
-QUAL_PROXIES=()
-QUAL_PROXY_COUNT=0
-
-if is_truthy "$ENABLE_QUALIFICATION_WORKERS"; then
-    # Check for QUALIFICATION_WEBSHARE_PROXY_1, QUALIFICATION_WEBSHARE_PROXY_2, etc.
-    for i in {1..10}; do
-        PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
-        PROXY_VALUE="${!PROXY_VAR}"
-
-        if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
-            QUAL_PROXIES+=("$PROXY_VALUE")
-            QUAL_PROXY_COUNT=$((QUAL_PROXY_COUNT + 1))
-        fi
-    done
-else
-    echo "🚫 Qualification worker deployment disabled (set ENABLE_QUALIFICATION_WORKERS=true to opt in)"
-fi
-
 # Get enclave CID for TEE signing (if enclave is running)
 ENCLAVE_CID=""
 if command -v nitro-cli &> /dev/null; then
@@ -271,13 +251,9 @@ fi
 TOTAL_CONTAINERS=$((PROXY_COUNT + 1))
 
 echo "🔍 Auto-detected SOURCING proxies: $PROXY_COUNT"
-echo "🔍 Auto-detected QUALIFICATION proxies: $QUAL_PROXY_COUNT"
 echo "📦 Total SOURCING containers to deploy: $TOTAL_CONTAINERS"
 echo "   - 1x Main validator (EC2 native IP)"
 echo "   - ${PROXY_COUNT}x Worker containers (proxied)"
-if [ $QUAL_PROXY_COUNT -gt 0 ]; then
-    echo "📦 Total QUALIFICATION workers to spawn: $QUAL_PROXY_COUNT"
-fi
 echo ""
 
 if [ $PROXY_COUNT -eq 0 ] && (is_truthy "$ENABLE_SOURCING_WORKERS" || is_truthy "$ENABLE_LEGACY_SOURCING"); then
@@ -503,8 +479,6 @@ start_container() {
       -e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA" \
       -e EXPECTED_CHAIN="$EXPECTED_CHAIN" \
       -e VALIDATOR_WEIGHT_PROTOCOL=authoritative_v2 \
-      -e ENABLE_QUALIFICATION_EVALUATION="${ENABLE_QUALIFICATION_EVALUATION:-false}" \
-      -e ENABLE_QUALIFICATION_WORKERS="${ENABLE_QUALIFICATION_WORKERS:-false}" \
       -e ENABLE_FULFILLMENT="${ENABLE_FULFILLMENT:-false}" \
       -e FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED="$FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED" \
       -e FULFILLMENT_OPENROUTER_API_KEY="${FULFILLMENT_OPENROUTER_API_KEY:-}" \
@@ -523,19 +497,10 @@ start_container() {
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
       -e RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-}" \
       -e RESEARCH_LAB_VALIDATOR_FETCH_ENABLED="${RESEARCH_LAB_VALIDATOR_FETCH_ENABLED:-true}" \
-      -e RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED="${RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED:-true}" \
-      -e RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED="${RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED:-true}" \
-      -e RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT="${RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT:-true}" \
-      -e RESEARCH_LAB_REQUIRE_EVALUATION_VERIFICATION_BEFORE_SUBMIT="${RESEARCH_LAB_REQUIRE_EVALUATION_VERIFICATION_BEFORE_SUBMIT:-true}" \
       -e RESEARCH_LAB_REIMBURSEMENTS_ENABLED="${RESEARCH_LAB_REIMBURSEMENTS_ENABLED:-true}" \
       -e RESEARCH_LAB_WEIGHT_MUTATION_ENABLED="${RESEARCH_LAB_WEIGHT_MUTATION_ENABLED:-true}" \
       -e RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED="${RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED:-true}" \
       -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
-      -e QUALIFICATION_WEBSHARE_PROXY_1="${QUALIFICATION_WEBSHARE_PROXY_1:-}" \
-      -e QUALIFICATION_WEBSHARE_PROXY_2="${QUALIFICATION_WEBSHARE_PROXY_2:-}" \
-      -e QUALIFICATION_WEBSHARE_PROXY_3="${QUALIFICATION_WEBSHARE_PROXY_3:-}" \
-      -e QUALIFICATION_WEBSHARE_PROXY_4="${QUALIFICATION_WEBSHARE_PROXY_4:-}" \
-      -e QUALIFICATION_WEBSHARE_PROXY_5="${QUALIFICATION_WEBSHARE_PROXY_5:-}" \
       -e QUALIFICATION_SCRAPINGDOG_API_KEY="${QUALIFICATION_SCRAPINGDOG_API_KEY:-}" \
       -e QUALIFICATION_OPENROUTER_API_KEY="${QUALIFICATION_OPENROUTER_API_KEY:-}" \
       -e INTENT_GATE_STRICT_JUDGE_ENABLED="${INTENT_GATE_STRICT_JUDGE_ENABLED:-true}" \
@@ -584,91 +549,6 @@ for i in $(seq 1 $PROXY_COUNT); do
     CONTAINER_ID=$i
     start_container "leadpoet-validator-worker-$i" "$PROXY_URL" "$CONTAINER_ID" "Container $CONTAINER_ID: Worker #$i"
 done
-
-# ════════════════════════════════════════════════════════════════════════════════
-# SPAWN QUALIFICATION WORKERS (Docker containers with --restart unless-stopped)
-# ════════════════════════════════════════════════════════════════════════════════
-# Qualification workers evaluate miner models in parallel to sourcing.
-# They use their own proxies (QUALIFICATION_WEBSHARE_PROXY_*) for ddgs/free APIs.
-# Runs as Docker containers (same image as sourcing) for automatic restart on crash.
-# ════════════════════════════════════════════════════════════════════════════════
-
-if [ $QUAL_PROXY_COUNT -gt 0 ]; then
-    echo ""
-    echo "============================================================"
-    echo "🎯 DEPLOYING QUALIFICATION WORKER CONTAINERS"
-    echo "============================================================"
-    echo ""
-
-    # Stop and remove any existing qualification containers + bare processes
-    pkill -9 -f "qualification_worker" 2>/dev/null || true
-    for i in $(seq 1 $QUAL_PROXY_COUNT); do
-        docker rm -f "leadpoet-qual-worker-$i" 2>/dev/null || true
-    done
-    sleep 1
-
-    for i in $(seq 1 $QUAL_PROXY_COUNT); do
-        QUAL_PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
-        QUAL_PROXY_VALUE="${!QUAL_PROXY_VAR}"
-
-        echo "🚀 Starting Qualification Worker $i (Docker container)..."
-        if [ -n "$QUAL_PROXY_VALUE" ]; then
-            echo "   Proxy: configured (credentials redacted)"
-        fi
-
-        QUAL_PROXY_ARGS=""
-        if [ -n "$QUAL_PROXY_VALUE" ]; then
-            QUAL_PROXY_ARGS="-e HTTP_PROXY=$QUAL_PROXY_VALUE -e HTTPS_PROXY=$QUAL_PROXY_VALUE"
-        fi
-
-        docker run -d \
-          --name "leadpoet-qual-worker-$i" \
-          --network host \
-          --restart unless-stopped \
-          --log-driver=awslogs \
-          --log-opt awslogs-region=us-east-1 \
-          --log-opt awslogs-group=/leadpoet/validator/qualification \
-          --log-opt awslogs-stream=qual-worker-$i \
-          --log-opt awslogs-create-group=true \
-          -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
-          "${LEADPOET_SENTRY_ENV_ARGS[@]}" \
-          -e PYTHONUNBUFFERED=1 \
-          -e LEADPOET_CONTAINER_MODE=1 \
-          -e LEADPOET_WRAPPER_ACTIVE=1 \
-          -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
-          -e LEADPOET_SENTRY_RELEASE="$VALIDATOR_V2_DEPLOY_COMMIT" \
-          -e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
-          -e GITHUB_SHA="$VALIDATOR_V2_DEPLOY_COMMIT" \
-          -e GIT_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
-          -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
-          -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
-      -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
-          -e RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-}" \
-          -e QUALIFICATION_WEBSHARE_PROXY_1="${QUALIFICATION_WEBSHARE_PROXY_1:-}" \
-          -e QUALIFICATION_WEBSHARE_PROXY_2="${QUALIFICATION_WEBSHARE_PROXY_2:-}" \
-          -e QUALIFICATION_WEBSHARE_PROXY_3="${QUALIFICATION_WEBSHARE_PROXY_3:-}" \
-          -e QUALIFICATION_WEBSHARE_PROXY_4="${QUALIFICATION_WEBSHARE_PROXY_4:-}" \
-          -e QUALIFICATION_WEBSHARE_PROXY_5="${QUALIFICATION_WEBSHARE_PROXY_5:-}" \
-          -e QUALIFICATION_SCRAPINGDOG_API_KEY="${QUALIFICATION_SCRAPINGDOG_API_KEY:-}" \
-          -e QUALIFICATION_OPENROUTER_API_KEY="${QUALIFICATION_OPENROUTER_API_KEY:-}" \
-          -e EXA_API_KEY="${EXA_API_KEY:-}" \
-          -e INTENT_GATE_STRICT_JUDGE_ENABLED="${INTENT_GATE_STRICT_JUDGE_ENABLED:-true}" \
-          -e DESEARCH_API_KEY="${DESEARCH_API_KEY:-}" \
-          -e BUILTWITH_API_KEY="${BUILTWITH_API_KEY:-}" \
-          -e QUALIFICATION_LEADS_TABLE="${QUALIFICATION_LEADS_TABLE:-test_leads_for_miners}" \
-          $QUAL_PROXY_ARGS \
-          leadpoet-validator:latest \
-          --mode qualification_worker \
-          --container-id "$i" > /dev/null
-
-        echo "   ✅ Started: leadpoet-qual-worker-$i"
-        echo ""
-    done
-
-    echo "✅ All $QUAL_PROXY_COUNT qualification worker containers deployed"
-    echo "   (--restart unless-stopped: auto-recovers from crashes)"
-    echo ""
-fi
 
 # ════════════════════════════════════════════════════════════════════════════════
 # SPAWN FULFILLMENT WORKERS (Docker containers with --restart unless-stopped)
@@ -801,7 +681,7 @@ echo ""
 echo "============================================================"
 echo "📊 CONTAINER STATUS"
 echo "============================================================"
-docker ps --filter "name=leadpoet-validator" --filter "name=leadpoet-qual-worker" --filter "name=leadpoet-ff-worker" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker ps --filter "name=leadpoet-validator" --filter "name=leadpoet-ff-worker" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 echo ""
 
 # Verify proxies
@@ -1133,9 +1013,6 @@ echo "🔐 Verifying official epoch authority in every validator worker..."
 for i in $(seq 1 "$PROXY_COUNT"); do
     queue_worker_epoch_authority "leadpoet-validator-worker-$i"
 done
-for i in $(seq 1 "$QUAL_PROXY_COUNT"); do
-    queue_worker_epoch_authority "leadpoet-qual-worker-$i"
-done
 for i in "${FF_WORKER_IDS[@]}"; do
     queue_worker_epoch_authority "leadpoet-ff-worker-$i"
 done
@@ -1187,9 +1064,6 @@ echo "============================================================"
 echo ""
 echo "📊 Summary:"
 echo "   - Sourcing containers: $TOTAL_CONTAINERS (1 coordinator + $PROXY_COUNT workers)"
-if [ $QUAL_PROXY_COUNT -gt 0 ]; then
-    echo "   - Qualification containers: $QUAL_PROXY_COUNT (Docker, auto-restart)"
-fi
 echo "   - Lead distribution: FULLY DYNAMIC (adapts to gateway MAX_LEADS_PER_EPOCH)"
 echo "   - Unique IPs: $UNIQUE_COUNT / $TOTAL_COUNT"
 echo ""
@@ -1200,11 +1074,8 @@ echo "   - Gateway @ 1200 leads → Each container: 400 leads"
 echo ""
 echo "📋 Next Steps:"
 echo "   1. Monitor sourcing logs: docker logs -f leadpoet-validator-main"
-if [ $QUAL_PROXY_COUNT -gt 0 ]; then
-    echo "   2. Monitor qualification logs: docker logs -f leadpoet-qual-worker-1"
-fi
-echo "   3. Check resource usage: docker stats"
-echo "   4. Verify lead distribution in logs (each container shows its range)"
+echo "   2. Check resource usage: docker stats"
+echo "   3. Verify lead distribution in logs (each container shows its range)"
 echo ""
 echo "🔧 To scale up (add more containers):"
 echo "   1. Get another proxy from https://www.webshare.io/"

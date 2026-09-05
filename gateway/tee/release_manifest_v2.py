@@ -21,9 +21,18 @@ from gateway.tee.topology import ROLE_SPECS, topology_hash
 
 BUILD_EVIDENCE_SCHEMA_VERSION = "leadpoet.gateway_role_build_evidence.v2"
 RELEASE_MANIFEST_SCHEMA_VERSION = "leadpoet.gateway_release_manifest.v2"
+LOCAL_RELEASE_SCHEMA_VERSION = "leadpoet.gateway_local_release.v1"
 BUILDER_DOMAINS = frozenset({"gateway", "validator"})
 BUILDS_PER_DOMAIN = 3
 PROTECTED_BASELINE_COMMIT = "7c9766b71d4c08b0059f6e3230dbe742b1d58e79"
+HISTORICAL_THREE_ROLE_TOPOLOGY_HASH = (
+    "sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
+)
+_HISTORICAL_THREE_ROLE_SPECS = {
+    "gateway_autoresearch": {"service_role": "gateway_autoresearch"},
+    "gateway_coordinator": {"service_role": "gateway_coordinator"},
+    "gateway_scoring": {"service_role": "gateway_scoring"},
+}
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
@@ -46,6 +55,135 @@ OBSERVATION_FIELDS = ("eif_hash",)
 
 class ReleaseManifestV2Error(ValueError):
     """Independent build evidence is incomplete, divergent, or malformed."""
+
+
+def build_local_release_identity(
+    build_results: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Build the exact local runtime identity used by a restart.
+
+    This document records one real build of each role. It deliberately has no
+    independent-builder, receipt, publication, or GitHub workflow claims.
+    """
+
+    if len(build_results) != len(ROLE_SPECS):
+        raise ReleaseManifestV2Error(
+            "local release needs exactly one build of each gateway role"
+        )
+    roles: Dict[str, Any] = {}
+    release_commit: Optional[str] = None
+    for raw in build_results:
+        if not isinstance(raw, Mapping):
+            raise ReleaseManifestV2Error("local gateway build result is invalid")
+        role = str(raw.get("role") or "")
+        if role not in ROLE_SPECS or role in roles:
+            raise ReleaseManifestV2Error("local gateway build role is invalid")
+        commit = str(raw.get("commit_sha") or "").strip().lower()
+        pcr0 = str(raw.get("pcr0") or "").strip().lower()
+        if not _COMMIT_RE.fullmatch(commit):
+            raise ReleaseManifestV2Error("local gateway build commit is invalid")
+        if not _PCR0_RE.fullmatch(pcr0) or pcr0 == "0" * 96:
+            raise ReleaseManifestV2Error("local gateway build PCR0 is invalid")
+        summary = {
+            "physical_role": role,
+            "service_role": ROLE_SPECS[role]["service_role"],
+            "commit_sha": commit,
+            "pcr0": pcr0,
+            "normalized_image_hash": _hash(
+                raw.get("image_id"), "normalized_image_hash"
+            ),
+            "source_manifest_hash": _hash(
+                raw.get("source_manifest_hash"), "source_manifest_hash"
+            ),
+            "build_identity_hash": _hash(
+                raw.get("build_identity_hash"), "build_identity_hash"
+            ),
+            "execution_manifest_hash": _hash(
+                raw.get("execution_manifest_hash"), "execution_manifest_hash"
+            ),
+            "dependency_lock_hash": _hash(
+                raw.get("dependency_lock_hash"), "dependency_lock_hash"
+            ),
+            "dockerfile_hash": _hash(
+                raw.get("dockerfile_hash"), "dockerfile_hash"
+            ),
+            "topology_hash": _hash(raw.get("topology_hash"), "topology_hash"),
+            "verified_build_count": 1,
+        }
+        if summary["topology_hash"] != topology_hash():
+            raise ReleaseManifestV2Error(
+                "local gateway build topology differs from canonical topology"
+            )
+        if release_commit is None:
+            release_commit = commit
+        elif release_commit != commit:
+            raise ReleaseManifestV2Error(
+                "local gateway roles were built from different commits"
+            )
+        roles[role] = summary
+    if set(roles) != set(ROLE_SPECS):
+        raise ReleaseManifestV2Error("local gateway build roles are incomplete")
+    body = {
+        "schema_version": LOCAL_RELEASE_SCHEMA_VERSION,
+        "commit_sha": release_commit,
+        "topology_hash": topology_hash(),
+        "roles": {role: roles[role] for role in sorted(roles)},
+        "verified_build_count": len(roles),
+    }
+    return {**body, "release_hash": _sha256_json(body)}
+
+
+def _validate_local_release_identity(value: Mapping[str, Any]) -> Dict[str, Any]:
+    fields = {
+        "schema_version",
+        "commit_sha",
+        "topology_hash",
+        "roles",
+        "verified_build_count",
+        "release_hash",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ReleaseManifestV2Error("local release fields do not match schema")
+    roles = value.get("roles")
+    if not isinstance(roles, Mapping):
+        raise ReleaseManifestV2Error("local release roles are invalid")
+    results = []
+    for role, summary in roles.items():
+        if not isinstance(summary, Mapping):
+            raise ReleaseManifestV2Error("local release role is invalid")
+        results.append(
+            {
+                "role": role,
+                "commit_sha": summary.get("commit_sha"),
+                "pcr0": summary.get("pcr0"),
+                "image_id": summary.get("normalized_image_hash"),
+                "source_manifest_hash": summary.get("source_manifest_hash"),
+                "build_identity_hash": summary.get("build_identity_hash"),
+                "execution_manifest_hash": summary.get("execution_manifest_hash"),
+                "dependency_lock_hash": summary.get("dependency_lock_hash"),
+                "dockerfile_hash": summary.get("dockerfile_hash"),
+                "topology_hash": summary.get("topology_hash"),
+            }
+        )
+        if set(summary) != {
+            "physical_role",
+            "service_role",
+            *DETERMINISTIC_FIELDS,
+            "verified_build_count",
+        }:
+            raise ReleaseManifestV2Error("local release role fields are invalid")
+        if summary.get("physical_role") != role:
+            raise ReleaseManifestV2Error("local release role name differs")
+        if summary.get("service_role") != ROLE_SPECS.get(role, {}).get(
+            "service_role"
+        ):
+            raise ReleaseManifestV2Error("local release service role differs")
+        if summary.get("verified_build_count") != 1:
+            raise ReleaseManifestV2Error("local release build count is invalid")
+    rebuilt = build_local_release_identity(results)
+    if dict(value) != rebuilt:
+        raise ReleaseManifestV2Error("local release identity hash mismatch")
+    return rebuilt
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -223,7 +361,12 @@ def build_release_manifest(
     return {**body, "release_hash": _sha256_json(body)}
 
 
-def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
+def _validate_independent_release_manifest(
+    value: Mapping[str, Any],
+    *,
+    role_specs: Mapping[str, Mapping[str, Any]],
+    expected_topology_hash: str,
+) -> Dict[str, Any]:
     fields = {
         "schema_version",
         "commit_sha",
@@ -239,9 +382,9 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
         raise ReleaseManifestV2Error("release manifest fields do not match schema")
     if value.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
         raise ReleaseManifestV2Error("unsupported release manifest schema")
-    if set(value.get("roles") or {}) != set(ROLE_SPECS):
+    if set(value.get("roles") or {}) != set(role_specs):
         raise ReleaseManifestV2Error("release manifest roles are incomplete")
-    if value.get("topology_hash") != topology_hash():
+    if value.get("topology_hash") != expected_topology_hash:
         raise ReleaseManifestV2Error("release manifest topology hash mismatch")
     if value.get("protected_baseline_commit") != PROTECTED_BASELINE_COMMIT:
         raise ReleaseManifestV2Error("release protected baseline commit differs")
@@ -249,7 +392,7 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
         value.get("acceptance_signer_pubkey_hash"),
         "acceptance_signer_pubkey_hash",
     )
-    if value.get("verified_build_count") != len(ROLE_SPECS) * 6:
+    if value.get("verified_build_count") != len(role_specs) * 6:
         raise ReleaseManifestV2Error("release manifest build count is invalid")
     commit = str(value.get("commit_sha") or "").lower()
     if not _COMMIT_RE.fullmatch(commit):
@@ -268,11 +411,11 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
             raise ReleaseManifestV2Error("release role summary fields are invalid")
         if summary["physical_role"] != role:
             raise ReleaseManifestV2Error("release role summary name mismatch")
-        if summary["service_role"] != ROLE_SPECS[role]["service_role"]:
+        if summary["service_role"] != role_specs[role]["service_role"]:
             raise ReleaseManifestV2Error("release role service mismatch")
         if summary["commit_sha"] != commit:
             raise ReleaseManifestV2Error("release role commit mismatch")
-        if summary["topology_hash"] != topology_hash():
+        if summary["topology_hash"] != expected_topology_hash:
             raise ReleaseManifestV2Error("release role topology mismatch")
         if summary["verified_build_count"] != 6:
             raise ReleaseManifestV2Error("release role build count is invalid")
@@ -301,13 +444,77 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
     return dict(value)
 
 
-def role_expectation(manifest: Mapping[str, Any], role: str) -> Dict[str, str]:
-    release = validate_release_manifest(manifest)
-    if role not in ROLE_SPECS:
+def historical_three_role_specs(
+    *, expected_topology_hash: str
+) -> Dict[str, Dict[str, str]]:
+    """Return the one retired topology only after an exact caller opt-in."""
+
+    if expected_topology_hash != HISTORICAL_THREE_ROLE_TOPOLOGY_HASH:
+        raise ReleaseManifestV2Error(
+            "historical release topology hash is unsupported"
+        )
+    return {
+        role: dict(spec)
+        for role, spec in _HISTORICAL_THREE_ROLE_SPECS.items()
+    }
+
+
+def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
+    """Validate only the canonical topology used for a current release."""
+
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == LOCAL_RELEASE_SCHEMA_VERSION
+    ):
+        return _validate_local_release_identity(value)
+    return _validate_independent_release_manifest(
+        value,
+        role_specs=ROLE_SPECS,
+        expected_topology_hash=topology_hash(),
+    )
+
+
+def validate_historical_release_manifest(
+    value: Mapping[str, Any],
+    *,
+    expected_topology_hash: str = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+) -> Dict[str, Any]:
+    """Validate the exact known three-role release topology."""
+
+    role_specs = historical_three_role_specs(
+        expected_topology_hash=expected_topology_hash
+    )
+    return _validate_independent_release_manifest(
+        value,
+        role_specs=role_specs,
+        expected_topology_hash=expected_topology_hash,
+    )
+
+
+def validate_prior_release_manifest(
+    value: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate a current or exact known historical lineage release."""
+
+    if (
+        isinstance(value, Mapping)
+        and value.get("topology_hash") == HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    ):
+        return validate_historical_release_manifest(
+            value,
+            expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        )
+    return validate_release_manifest(value)
+
+
+def _role_expectation(
+    release: Mapping[str, Any], role: str
+) -> Dict[str, str]:
+    if role not in release["roles"]:
         raise ReleaseManifestV2Error("unknown release role")
     summary = release["roles"][role]
     return {
-        "physical_role": role,
+        "physical_role": summary["physical_role"],
         "service_role": summary["service_role"],
         "commit_sha": summary["commit_sha"],
         "pcr0": summary["pcr0"],
@@ -316,6 +523,29 @@ def role_expectation(manifest: Mapping[str, Any], role: str) -> Dict[str, str]:
         "build_identity_hash": summary["build_identity_hash"],
         "release_hash": release["release_hash"],
     }
+
+
+def role_expectation(manifest: Mapping[str, Any], role: str) -> Dict[str, str]:
+    return _role_expectation(validate_release_manifest(manifest), role)
+
+
+def prior_role_expectation(
+    manifest: Mapping[str, Any], role: str
+) -> Dict[str, str]:
+    return _role_expectation(validate_prior_release_manifest(manifest), role)
+
+
+def historical_role_expectation(
+    manifest: Mapping[str, Any],
+    role: str,
+    *,
+    expected_topology_hash: str,
+) -> Dict[str, str]:
+    release = validate_historical_release_manifest(
+        manifest,
+        expected_topology_hash=expected_topology_hash,
+    )
+    return _role_expectation(release, role)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

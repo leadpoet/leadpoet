@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from gateway.tee.active_release_requirements_v2 import (
 )
 from gateway.tee import prepare_active_release_lineage_v2 as prepare
 from gateway.tee.reward_executor_v2 import source_add_reward_row_projection_v2
+from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from tests.test_validator_hotkey_authority_v2 import _profile
 
@@ -52,11 +54,10 @@ def _lineage(commits, *, current_commit=CANDIDATE):
     releases = {}
     for index, commit in enumerate(sorted(commits), start=1):
         role_expectations = {}
+        current_roles = (*sorted(ROLE_SPECS), "validator_weights")
+        historical_roles = ("gateway_autoresearch", *current_roles)
         for role in (
-            "gateway_autoresearch",
-            "gateway_coordinator",
-            "gateway_scoring",
-            "validator_weights",
+            current_roles if commit == current_commit else historical_roles
         ):
             role_expectations[role] = {
                 "commit_sha": commit,
@@ -489,7 +490,7 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
     fetched = _patch_lineage_boundaries(monkeypatch)
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     initial = _requirements(transitions=(RUNNING_VALIDATOR, JOURNAL_COMMIT))
@@ -535,6 +536,71 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
     assert {call["current_epoch"] for call in source_add_calls} == {24_745}
 
 
+def test_gateway_final_uses_bound_validator_authority_after_n_minus_one_unsets_env(
+) -> None:
+    restart = (Path(__file__).resolve().parents[1] / "gw_restart.sh").read_text(
+        encoding="utf-8"
+    )
+    bootstrap_start = restart.index(
+        '  exec env \\\n    -u GATEWAY_RESTART_AUTHORITY_ROOT'
+    )
+    bootstrap = restart[
+        bootstrap_start : restart.index("\nfi\n", bootstrap_start)
+    ]
+    assert "-u GATEWAY_RESTART_AUTHORITY_COMMIT" in bootstrap
+
+    advanced_main = "9" * 40
+    validator_authority = "8" * 40
+    requirements = _requirements(authority=validator_authority)
+
+    assert prepare._gateway_final_authority_commit(
+        advanced_main,
+        requirements,
+    ) == validator_authority
+    assert prepare._gateway_final_authority_commit(
+        advanced_main,
+        None,
+    ) == advanced_main
+
+
+@pytest.mark.asyncio
+async def test_gateway_final_accepts_exact_legacy_running_topology(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from tests.test_release_channel_v2 import _historical_gateway_manifest
+
+    fetched = _patch_lineage_boundaries(monkeypatch)
+
+    async def empty(**_kwargs):
+        return []
+
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    result = await prepare.prepare_gateway_final_active_lineage_v2(
+        candidate_commit_sha=CANDIDATE,
+        authority_commit_sha=AUTHORITY,
+        restart_invocation_id=RESTART_INVOCATION_ID,
+        running_gateway_release_manifest=_historical_gateway_manifest(
+            RUNNING_GATEWAY
+        ),
+        validator_requirements=initial,
+        epoch_id=24_745,
+        netuid=71,
+        policy={},
+        repository=tmp_path,
+        expected_lineage_id=LINEAGE_ID,
+        load_allocation_graphs=empty,
+        load_sourcing_graphs=empty,
+        load_source_add_graphs=empty,
+    )
+
+    expected = sorted(
+        {CANDIDATE, RUNNING_GATEWAY, RUNNING_VALIDATOR}
+    )
+    assert fetched == [expected]
+    assert result["requirements"]["required_commits"] == expected
+
+
 @pytest.mark.asyncio
 async def test_gateway_final_explicit_standalone_fallback_unions_installed_lineage(
     monkeypatch, tmp_path
@@ -542,7 +608,7 @@ async def test_gateway_final_explicit_standalone_fallback_unions_installed_linea
     fetched = _patch_lineage_boundaries(monkeypatch)
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     fallback = _lineage(
@@ -586,7 +652,7 @@ async def test_gateway_final_fallback_fails_closed_when_union_exceeds_bound(
 ) -> None:
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     installed = {RUNNING_GATEWAY}
@@ -624,7 +690,7 @@ async def test_gateway_final_rejects_implicit_or_paired_fallback_context(
 ) -> None:
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     fallback = _lineage(
@@ -694,7 +760,7 @@ async def test_gateway_final_rejects_cross_invocation_or_authority_sidecar(
 ) -> None:
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
 
@@ -721,7 +787,7 @@ async def test_gateway_final_rejects_active_root_drift(monkeypatch, tmp_path) ->
     _patch_lineage_boundaries(monkeypatch)
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     initial = _requirements(transitions=(RUNNING_VALIDATOR,))
@@ -839,7 +905,13 @@ def test_validator_final_rejects_new_uncovered_journal_release(
         )
 
 
-def test_validator_final_rejects_handed_lineage_byte_drift(
+def _rehash_lineage(lineage):
+    body = {key: lineage[key] for key in lineage if key != "lineage_hash"}
+    lineage["lineage_hash"] = sha256_json(body)
+    return lineage
+
+
+def test_validator_final_accepts_prior_wrapper_drift_and_installs_handed_lineage(
     monkeypatch, tmp_path
 ) -> None:
     initial = _requirements(transitions=(RUNNING_VALIDATOR,))
@@ -849,17 +921,180 @@ def test_validator_final_rejects_handed_lineage_byte_drift(
     handed = _lineage(final["required_commits"])
     independent = json.loads(json.dumps(handed))
     independent["releases"][RUNNING_GATEWAY]["channel_hash"] = _hash("9")
-    body = {key: independent[key] for key in independent if key != "lineage_hash"}
-    independent["lineage_hash"] = sha256_json(body)
+    independent["releases"][RUNNING_GATEWAY]["gateway_release_hash"] = _hash("8")
+    _rehash_lineage(independent)
     monkeypatch.setattr(
         prepare,
         "_fetch_exact_release_lineage_v2",
         lambda **_kwargs: independent,
     )
+    from gateway.tee import release_lineage_v2
+
+    verified_lineages = []
+    original_compact_boot_verifier = prepare._compact_boot_verifier
+
+    def compact_boot_verifier_spy(lineage):
+        verified_lineages.append(lineage)
+        return original_compact_boot_verifier(lineage)
+
+    monkeypatch.setattr(
+        prepare,
+        "_compact_boot_verifier",
+        compact_boot_verifier_spy,
+    )
+    nitro_calls = []
+
+    def verify_nitro(identity, *, expected_pcr0, certificate_validity_at_attestation_time):
+        assert expected_pcr0 == identity["pcr0"]
+        assert certificate_validity_at_attestation_time is True
+        nitro_calls.append((identity, expected_pcr0))
+        return identity
+
+    monkeypatch.setattr(release_lineage_v2, "verify_boot_identity_nitro", verify_nitro)
+
+    result = prepare.prepare_validator_final_active_lineage_v2(
+        candidate_commit_sha=CANDIDATE,
+        authority_commit_sha=AUTHORITY,
+        restart_invocation_id=RESTART_INVOCATION_ID,
+        initial_requirements=initial,
+        final_requirements=final,
+        handed_lineage=handed,
+        journal_loader=lambda: None,
+        expected_validator_hotkey=VALIDATOR_HOTKEY,
+        chain_signing_profile=CHAIN_PROFILE,
+        repository=tmp_path,
+        expected_lineage_id=LINEAGE_ID,
+    )
+
+    assert result["lineage"] == handed
+    assert result["journal_hash"] is None
+    assert verified_lineages == [handed]
+    installed = tmp_path / "gateway-v2-release-lineage.json"
+    prepare._atomic_json_documents(((installed, result["lineage"]),))
+    installed_lineage = prepare._validate_selected_lineage(
+        json.loads(installed.read_text(encoding="utf-8")),
+        historical_topology_hash=None,
+        expected_current_commit=CANDIDATE,
+    )
+    assert installed_lineage == handed
+
+    role = sorted(handed["releases"][RUNNING_GATEWAY]["roles"])[0]
+    prior_identity = {
+        "role": role,
+        "physical_role": role,
+        **handed["releases"][RUNNING_GATEWAY]["roles"][role],
+    }
+    installed_boot_verifier = (
+        release_lineage_v2.build_compact_release_lineage_boot_verifier_v2(
+            installed_lineage
+        )
+    )
+    assert installed_boot_verifier(prior_identity) == prior_identity
+    assert nitro_calls == [(prior_identity, prior_identity["pcr0"])]
+
+    altered_prior_identity = {**prior_identity, "pcr0": "9" * 96}
+    with pytest.raises(
+        release_lineage_v2.ReleaseLineageV2Error,
+        match="boot pcr0 differs from compact release lineage",
+    ):
+        installed_boot_verifier(altered_prior_identity)
+    assert nitro_calls == [(prior_identity, prior_identity["pcr0"])]
+
+
+def test_validator_final_rejects_current_wrapper_drift(monkeypatch, tmp_path) -> None:
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    final = _requirements(
+        transitions=tuple(sorted({*initial["required_commits"], RUNNING_GATEWAY}))
+    )
+    handed = _lineage(final["required_commits"])
+    independent = json.loads(json.dumps(handed))
+    independent["releases"][CANDIDATE]["channel_hash"] = _hash("9")
+    _rehash_lineage(independent)
+    monkeypatch.setattr(
+        prepare, "_fetch_exact_release_lineage_v2", lambda **_kwargs: independent
+    )
 
     with pytest.raises(
         prepare.PrepareActiveReleaseLineageV2Error,
-        match="independent readback",
+        match="current release differs",
+    ):
+        prepare.prepare_validator_final_active_lineage_v2(
+            candidate_commit_sha=CANDIDATE,
+            authority_commit_sha=AUTHORITY,
+            restart_invocation_id=RESTART_INVOCATION_ID,
+            initial_requirements=initial,
+            final_requirements=final,
+            handed_lineage=handed,
+            journal_loader=lambda: None,
+            expected_validator_hotkey=VALIDATOR_HOTKEY,
+            chain_signing_profile=CHAIN_PROFILE,
+            repository=tmp_path,
+            expected_lineage_id=LINEAGE_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("commit_sha", NEW_JOURNAL_COMMIT),
+        ("pcr0", "9" * 96),
+        ("build_manifest_hash", _hash("9")),
+        ("dependency_lock_hash", _hash("9")),
+    ],
+)
+def test_validator_final_rejects_prior_role_identity_drift(
+    monkeypatch, tmp_path, field, value
+) -> None:
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    final = _requirements(
+        transitions=tuple(sorted({*initial["required_commits"], RUNNING_GATEWAY}))
+    )
+    handed = _lineage(final["required_commits"])
+    independent = json.loads(json.dumps(handed))
+    role = sorted(independent["releases"][RUNNING_GATEWAY]["roles"])[0]
+    independent["releases"][RUNNING_GATEWAY]["roles"][role][field] = value
+    _rehash_lineage(independent)
+    monkeypatch.setattr(
+        prepare, "_fetch_exact_release_lineage_v2", lambda **_kwargs: independent
+    )
+
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="prior release roles differ",
+    ):
+        prepare.prepare_validator_final_active_lineage_v2(
+            candidate_commit_sha=CANDIDATE,
+            authority_commit_sha=AUTHORITY,
+            restart_invocation_id=RESTART_INVOCATION_ID,
+            initial_requirements=initial,
+            final_requirements=final,
+            handed_lineage=handed,
+            journal_loader=lambda: None,
+            expected_validator_hotkey=VALIDATOR_HOTKEY,
+            chain_signing_profile=CHAIN_PROFILE,
+            repository=tmp_path,
+            expected_lineage_id=LINEAGE_ID,
+        )
+
+
+def test_validator_final_rejects_independent_membership_drift(
+    monkeypatch, tmp_path
+) -> None:
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    final = _requirements(
+        transitions=tuple(sorted({*initial["required_commits"], RUNNING_GATEWAY}))
+    )
+    handed = _lineage(final["required_commits"])
+    independent = json.loads(json.dumps(handed))
+    independent["releases"].pop(RUNNING_GATEWAY)
+    _rehash_lineage(independent)
+    monkeypatch.setattr(
+        prepare, "_fetch_exact_release_lineage_v2", lambda **_kwargs: independent
+    )
+
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="membership differs",
     ):
         prepare.prepare_validator_final_active_lineage_v2(
             candidate_commit_sha=CANDIDATE,

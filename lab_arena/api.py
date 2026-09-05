@@ -9,7 +9,7 @@ import json
 from typing import Any, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from lab_arena import contracts
@@ -31,7 +31,19 @@ def _refuse_declared_oversize(request: Request, limit: int) -> None:
             raise HTTPException(status_code=400, detail="content-length invalid")
 
 
-async def _read_json(request: Request, *, limit: int = MAX_JSON_BODY_BYTES) -> Any:
+async def _read_json(
+    request: Request,
+    *,
+    limits: Optional[contracts.StrictLimits] = None,
+) -> Any:
+    limits = limits or contracts.StrictLimits(
+        max_depth=12,
+        max_list_items=2048,
+        max_object_keys=256,
+        max_string_bytes=524_288,
+        max_total_bytes=MAX_JSON_BODY_BYTES,
+    )
+    limit = limits.max_total_bytes
     _refuse_declared_oversize(request, limit)
     chunks = []
     total = 0
@@ -46,7 +58,7 @@ async def _read_json(request: Request, *, limit: int = MAX_JSON_BODY_BYTES) -> A
     except (UnicodeDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="body is not JSON")
     try:
-        contracts.check_strict_document(document, contracts.PUBLICATION_LIMITS if limit > MAX_JSON_BODY_BYTES else contracts.StrictLimits(max_depth=12, max_list_items=2048, max_object_keys=256, max_string_bytes=524_288, max_total_bytes=limit))
+        contracts.check_strict_document(document, limits)
     except ArenaContractError as exc:
         raise HTTPException(status_code=400, detail=str(exc)[:120])
     return document
@@ -100,12 +112,24 @@ def create_app(service: ArenaService) -> FastAPI:
 
     # -- miner --------------------------------------------------------------
 
-    @app.post("/arena/v1/submissions")
-    async def submissions(request: Request) -> Any:
-        """A signed JSON body naming one public image by tag or digest."""
+    @app.post("/arena/v1/submissions/presign")
+    async def submission_presign(request: Request) -> Any:
+        """Reserve one bounded private source upload."""
 
         envelope = await _read_json(request)
-        return await run_in_threadpool(service.handle_submission, envelope)
+        return await run_in_threadpool(service.handle_submission_presign, envelope)
+
+    @app.post("/arena/v1/submissions/{submission_id}/finalize")
+    async def submission_finalize(submission_id: str, request: Request) -> Any:
+        """Verify and accept the source bytes uploaded for this submission."""
+
+        envelope = await _read_json(request)
+        body = envelope.get("body") if isinstance(envelope, dict) else None
+        if not isinstance(body, dict) or str(body.get("submission_id") or "") != submission_id:
+            raise HTTPException(status_code=400, detail="path submission id does not match body")
+        return await run_in_threadpool(
+            service.handle_submission_finalize, submission_id, envelope
+        )
 
     @app.get("/arena/v1/submissions/{submission_id}")
     async def submission_status(submission_id: str) -> Any:
@@ -129,9 +153,17 @@ def create_app(service: ArenaService) -> FastAPI:
         frame = await _read_json(request)
         return await run_in_threadpool(service.handle_provider, run_id, lease_token, frame)
 
+    @app.get("/arena/v1/runs/{run_id}/source")
+    async def source(run_id: str, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:
+        lease_token = _lease_header(x_lab_arena_lease)
+        payload = await run_in_threadpool(service.handle_source, run_id, lease_token)
+        return Response(content=payload, media_type="application/gzip")
+
     @app.post("/arena/v1/runs/{run_id}/complete")
     async def complete(run_id: str, request: Request) -> Any:
-        envelope = await _read_json(request)
+        envelope = await _read_json(
+            request, limits=contracts.COMPLETION_REQUEST_LIMITS
+        )
         body = envelope.get("body") if isinstance(envelope, dict) else None
         if not isinstance(body, dict) or str(body.get("run_id") or "") != run_id:
             raise HTTPException(status_code=400, detail="path run id does not match body")

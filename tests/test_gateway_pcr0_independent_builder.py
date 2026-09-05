@@ -383,7 +383,9 @@ def test_cache_retains_twenty_commits_per_physical_role(tmp_path):
                 },
             )
     document = json.loads(cache.read_text())
-    assert len(document["entries"]) == 60
+    assert len(document["entries"]) == 20 * len(
+        gateway_pcr0_builder.GATEWAY_ROLES
+    )
     for role in gateway_pcr0_builder.GATEWAY_ROLES:
         assert len([row for row in document["entries"] if row["role"] == role]) == 20
 

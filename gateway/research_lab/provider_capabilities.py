@@ -1,51 +1,57 @@
-"""Private provider-capability snapshots for Research Lab runtimes.
-
-The committed module defines only the generic contract and validation rules.
-Production provider inventories are append-only rows in Supabase and are never
-embedded here or projected into miner-visible activity.
-"""
+"""Provider capability catalog used by SOURCE_ADD and provider transport."""
 
 from __future__ import annotations
 
-import ast
 import base64
+
 import binascii
+
 from dataclasses import dataclass
+
 import hashlib
+
 import json
+
 import logging
+
 import math
+
 import os
-from pathlib import Path
+
 import re
-import tempfile
+
 import threading
+
 import time
+
 import urllib.parse
+
 import urllib.request
+
 from typing import Any, Callable, Mapping, Sequence
 
-from gateway.research_lab.code_build import CodeEditBuildError, _run_git_apply
-from gateway.research_lab.source_add_execution_plan import (
-    SourceAddExecutionPlanError,
-    bind_source_add_execution_plan_to_probes,
-    is_supported_source_add_execution_plan,
-    normalize_source_add_execution_plan,
-)
-from research_lab.canonical import sha256_json
+from gateway.research_lab.source_add_execution_plan import SourceAddExecutionPlanError, bind_source_add_execution_plan_to_probes, is_supported_source_add_execution_plan, normalize_source_add_execution_plan
 
+from research_lab.canonical import sha256_json
 
 logger = logging.getLogger(__name__)
 
 CAPABILITY_CATALOG_ENABLED_ENV = "RESEARCH_LAB_PROVIDER_CAPABILITY_CATALOG_ENABLED"
+
 CAPABILITY_ENFORCEMENT_ENV = "RESEARCH_LAB_PROVIDER_CAPABILITY_ENFORCEMENT"
+
 CAPABILITY_REFRESH_SECONDS_ENV = "RESEARCH_LAB_PROVIDER_CAPABILITY_REFRESH_SECONDS"
+
 MODEL_CATALOG_TTL_SECONDS_ENV = "RESEARCH_LAB_OPENROUTER_MODEL_CATALOG_TTL_SECONDS"
 
 _TRUTHY = {"1", "true", "yes", "on"}
+
 _VALID_AUTH_KINDS = {"header", "query", "bearer", "none"}
+
 _VALID_METHODS = {"GET", "POST"}
+
 _VALID_ENFORCEMENT = {"observe", "enforce"}
+
 _SECRET_MARKERS = (
     "sk-or-",
     "sb_secret",
@@ -62,27 +68,15 @@ _SECRET_MARKERS = (
     "private_manifest",
     "private_repo",
 )
-_NETWORK_IMPORT_RE = re.compile(
-    r"^\+\s*(?:from|import)\s+(?:aiohttp|httpx|requests|urllib3|http\.client)(?:\b|\.)",
-    re.IGNORECASE,
-)
-_ENV_READ_RE = re.compile(r"\b(?:os\.getenv|os\.environ|environ\.get|getenv)\s*[\[(]", re.IGNORECASE)
-_CREDENTIAL_NAME_RE = re.compile(r"\b(?:api[_-]?key|access[_-]?token|credential|client[_-]?secret)\b", re.IGNORECASE)
-_URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+
 _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
-_SOURCE_ADD_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
+
 _ROUTING_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
-_SOURCE_ADD_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
-_SOURCE_ADD_MODEL_RUNNER_PATH = "sourcing_model/model_runner.py"
+
 _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (
     "leadpoet.intent-source-binding-manifest:v1"
 )
-_SOURCE_ADD_V8_REQUEST_SCHEMA_VERSION = (
-    "leadpoet.routerverse_source_incorporation.v3"
-)
-_SOURCE_ADD_V7_REQUEST_SCHEMA_VERSION = (
-    "leadpoet.routerverse_source_incorporation.v2"
-)
+
 _SOURCE_ADD_REGISTRATION_FIELDS = (
     "provider_id",
     "stage",
@@ -106,70 +100,17 @@ _SOURCE_ADD_REGISTRATION_FIELDS = (
     "best_for_description",
     "avoid_when_description",
 )
+
 _SOURCE_ADD_EXECUTION_PLAN_FIELD = "execution_plan_identity"
-_SOURCE_ADD_V7_REGISTRATION_FIELDS = tuple(
-    field
-    for field in _SOURCE_ADD_REGISTRATION_FIELDS
-    if field
-    not in {
-        "execution_mode",
-        "category_contracts",
-        "binding_requirements",
-    }
-)
-_SOURCE_ADD_V7_LEGACY_REGISTRATION_FIELDS = tuple(
-    field
-    for field in _SOURCE_ADD_V7_REGISTRATION_FIELDS
-    if field
-    not in {
-        "best_for",
-        "avoid_when",
-        "best_for_description",
-        "avoid_when_description",
-    }
-)
-_SOURCE_ADD_V7_ORIGINAL_REGISTRATION_FIELDS = tuple(
-    field
-    for field in _SOURCE_ADD_V7_LEGACY_REGISTRATION_FIELDS
-    if field != "intent_categories"
-)
-_SOURCE_ADD_V7_GUIDANCE_WITHOUT_CATEGORIES_FIELDS = tuple(
-    field
-    for field in _SOURCE_ADD_V7_REGISTRATION_FIELDS
-    if field != "intent_categories"
-)
-_SOURCE_ADD_V8_REQUIRED_REGISTRATION_FIELDS = frozenset(
-    {"provider_id", "stage", "priority", "capabilities"}
-)
-_SOURCE_ADD_LITERAL_NAMES = {
-    "STAGE_CANDIDATE_ACQUISITION": "candidate_acquisition",
-    "STAGE_INTENT_EVIDENCE": "intent_evidence",
-    "EXECUTION_INVOKE": "invoke",
-    "EXECUTION_OBSERVE": "observe",
-    "EXECUTION_VIRTUAL": "virtual",
-    "COST_FREE": "free",
-    "COST_METERED": "metered",
-    "COST_PAID": "paid",
-    "IDEMPOTENT": "idempotent",
-    "RESUME_SAFE": "resume_safe",
-    "NON_IDEMPOTENT": "non_idempotent",
-}
+
 _SOURCE_ADD_EXECUTION_MODES = frozenset({"invoke", "observe", "virtual"})
+
 _SOURCE_ADD_IDEMPOTENCY_MODES = frozenset(
     {"idempotent", "resume_safe", "non_idempotent"}
 )
+
 _SOURCE_ADD_COST_CLASSES = frozenset({"free", "metered", "paid"})
-_SOURCE_ADD_MANIFEST_FORBIDDEN_KEYS = frozenset(
-    {
-        "api_key",
-        "authorization",
-        "credential",
-        "endpoint",
-        "password",
-        "secret",
-        "token",
-    }
-)
+
 _SOURCE_ADD_V8_PLANNER_FIELDS = (
     "stage",
     "execution_mode",
@@ -191,15 +132,6 @@ _SOURCE_ADD_V8_PLANNER_FIELDS = (
     "avoid_when",
     _SOURCE_ADD_EXECUTION_PLAN_FIELD,
 )
-_COMPANY_DISCOVERY_PATTERNS = (
-    re.compile(r"\b(?:company|candidate|account)\s+(?:discovery|sourcing|acquisition)\b"),
-    re.compile(r"\b(?:discover|source|find)\s+(?:companies|candidates|accounts)\b"),
-)
-_INTENT_DISCOVERY_PATTERNS = (
-    re.compile(r"\b(?:intent|signal|evidence)\s+(?:discovery|sourcing|acquisition)\b"),
-    re.compile(r"\b(?:discover|source|find)\s+(?:intent|signals|evidence)\b"),
-)
-
 
 def _source_add_model_string_tuple(
     values: Any,
@@ -208,12 +140,10 @@ def _source_add_model_string_tuple(
     maximum: int,
     allow_empty: bool,
 ) -> tuple[str, ...]:
-    """Mirror Sourcing_model v8 ``routing.contracts._string_tuple``.
+    """Mirror the retained v8 ``routing.contracts._string_tuple`` behavior.
 
-    This compatibility adapter is intentionally mechanical.  Semantic
-    ownership remains in ``leadpoet/Sourcing_model``; parity tests execute the
-    upstream v8 fixtures and this helper must be removed if the model exports a
-    stable public registration parser.
+    This compatibility adapter is intentionally mechanical. Parity tests
+    execute the retained v8 fixtures.
     """
 
     if not isinstance(values, (list, tuple)):
@@ -229,14 +159,13 @@ def _source_add_model_string_tuple(
         raise ValueError(f"{field_name} is out of bounds")
     return tuple(output)
 
-
 def _source_add_manifest_string_tuple(
     values: Any,
     *,
     field_name: str,
     maximum: int,
 ) -> tuple[str, ...]:
-    """Mirror Sourcing_model v8 ``runtime._source_add_string_tuple``."""
+    """Normalize a bounded SOURCE_ADD string sequence."""
 
     if not isinstance(values, (list, tuple)):
         raise ValueError(f"{field_name} must be a literal sequence")
@@ -255,7 +184,6 @@ def _source_add_manifest_string_tuple(
         raise ValueError(f"{field_name} is out of bounds")
     return normalized
 
-
 def _source_add_bounded_int(
     value: Any,
     *,
@@ -268,7 +196,6 @@ def _source_add_bounded_int(
     if not minimum <= value <= maximum:
         raise ValueError(f"{field_name} is out of bounds")
     return value
-
 
 def _source_add_bounded_float(
     value: Any,
@@ -285,7 +212,6 @@ def _source_add_bounded_float(
         raise ValueError(f"{field_name} is out of bounds")
     return round(number, precision) if precision is not None else number
 
-
 def _source_add_description(
     value: Any,
     *,
@@ -296,7 +222,6 @@ def _source_add_description(
     if len(text) > 500:
         raise ValueError(f"{field_name} exceeds 500 characters")
     return text
-
 
 def _source_add_binding_manifest(
     normalized: Mapping[str, Any],
@@ -340,7 +265,6 @@ def _source_add_binding_manifest(
         manifest[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = dict(execution_plan)
     return manifest
 
-
 def _source_add_binding_manifest_digest(
     normalized: Mapping[str, Any],
 ) -> str:
@@ -353,17 +277,10 @@ def _source_add_binding_manifest_digest(
     )
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
-
 def _normalize_source_add_v8_registration(
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Losslessly mirror Sourcing_model v8 registration normalization.
-
-    Source reference:
-    ``leadpoet/Sourcing_model@2d90daa8347daec34e8e7966eb6d208f47f52df2``
-    ``sourcing_model/routing/{contracts,runtime}.py``.  This code validates a
-    proposed model edit without importing or executing candidate code.
-    """
+    """Normalize one SOURCE_ADD provider registration."""
 
     normalized = dict(value)
     provider_id = str(normalized.get("provider_id") or "").strip().lower()
@@ -412,8 +329,7 @@ def _normalize_source_add_v8_registration(
     ):
         raise ValueError("cost_class and unit_cost differ")
     normalized["unit_cost"] = round(unit_cost, 6)
-    # Sourcing_model validates once before and once after normalizing the
-    # ToolDefinition, so a positive sub-micro-unit metered cost also fails.
+    # Reject a positive cost that rounds to zero at the stored precision.
     if cost_class != "free" and normalized["unit_cost"] <= 0.0:
         raise ValueError("cost_class and unit_cost differ after normalization")
     normalized["max_calls"] = _source_add_bounded_int(
@@ -607,7 +523,6 @@ def _normalize_source_add_v8_registration(
         ]
     return result
 
-
 def normalize_source_add_planner_contract(
     provider_id: str,
     contract: Mapping[str, Any],
@@ -616,13 +531,11 @@ def normalize_source_add_planner_contract(
     probe_endpoints: Sequence[Mapping[str, Any]] = (),
     tested_probes: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Validate a provisioning-time planner contract against v8 exactly.
+    """Validate a provisioning-time SOURCE_ADD planner contract.
 
-    The admin API persists this JSON-safe projection in ``planner_summary``;
-    the signed Sourcing_model artifact remains the semantic authority.  Empty
-    contracts retain the pre-v8 default behavior, while any explicit contract
-    must name one stage and may contain only v8 registration fields whose
-    manifest and revision are derived later from the canonical registration.
+    The admin API persists this JSON-safe projection in ``planner_summary``.
+    Each explicit contract names one stage and uses only reviewed registration
+    fields.
     """
 
     if not isinstance(contract, Mapping) or not contract:
@@ -742,146 +655,12 @@ def normalize_source_add_planner_contract(
         result[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = dict(execution_plan)
     return result
 
-
-def _normalize_source_add_v7_registration(
-    value: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Preserve the current v7 rollback validator without v8 reinterpretation."""
-
-    normalized = dict(value)
-    provider_id = normalized.get("provider_id")
-    stage = normalized.get("stage")
-    revision = normalized.get("revision")
-    manifest = normalized.get("manifest_sha256")
-    if not isinstance(provider_id, str) or not re.fullmatch(
-        r"[a-z][a-z0-9_-]{1,79}", provider_id
-    ):
-        raise ValueError("provider_id is invalid")
-    if stage not in {"candidate_acquisition", "intent_evidence"}:
-        raise ValueError("stage is invalid")
-    if (
-        not isinstance(manifest, str)
-        or not _SOURCE_ADD_MANIFEST_RE.fullmatch(manifest)
-        or revision != f"source-add-{manifest[:12]}"
-    ):
-        raise ValueError("registration revision is not manifest-bound")
-    for name in ("capabilities", "evidence_types", "best_for"):
-        field_value = normalized.get(name)
-        if (
-            not isinstance(field_value, (list, tuple))
-            or not field_value
-            or any(not isinstance(item, str) or not item for item in field_value)
-        ):
-            raise ValueError(f"{name} must be a literal sequence")
-        normalized[name] = tuple(field_value)
-    intent_categories = normalized.get("intent_categories")
-    if not isinstance(intent_categories, (list, tuple)) or any(
-        not isinstance(item, str)
-        or not item.strip()
-        or len(item.strip()) > 80
-        for item in intent_categories
-    ):
-        raise ValueError("intent_categories must be a literal sequence")
-    normalized["intent_categories"] = tuple(
-        dict.fromkeys(item.strip().upper() for item in intent_categories)
-    )
-    avoid_when = normalized.get("avoid_when")
-    if not isinstance(avoid_when, (list, tuple)) or any(
-        not isinstance(item, str) or not _ROUTING_FEATURE_RE.fullmatch(item)
-        for item in avoid_when
-    ):
-        raise ValueError("avoid_when must be a literal feature sequence")
-    normalized["avoid_when"] = tuple(avoid_when)
-    if any(not _ROUTING_FEATURE_RE.fullmatch(item) for item in normalized["best_for"]):
-        raise ValueError("best_for contains an invalid routing feature")
-    for name in ("best_for_description", "avoid_when_description"):
-        field_value = normalized.get(name)
-        if (
-            not isinstance(field_value, str)
-            or not field_value.strip()
-            or len(field_value) > 500
-        ):
-            raise ValueError(f"{name} must contain 1-500 characters")
-        normalized[name] = " ".join(field_value.split())
-    for name in ("priority", "max_calls", "max_results"):
-        field_value = normalized.get(name)
-        if isinstance(field_value, bool) or not isinstance(field_value, int):
-            raise ValueError(f"{name} must be an integer")
-    for name in ("unit_cost", "timeout_seconds"):
-        field_value = normalized.get(name)
-        if isinstance(field_value, bool) or not isinstance(field_value, (int, float)):
-            raise ValueError(f"{name} must be numeric")
-        field_value = float(field_value)
-        if not math.isfinite(field_value) or field_value < 0:
-            raise ValueError(f"{name} must be finite and non-negative")
-        normalized[name] = field_value
-    expected_by_stage = {
-        "candidate_acquisition": {
-            "priority": 80,
-            "capabilities": ("candidate.provider_discovery",),
-            "max_results": 100,
-            "timeout_seconds": 60.0,
-            "evidence_types": ("provider_database",),
-        },
-        "intent_evidence": {
-            "priority": 35,
-            "capabilities": ("intent.provider_evidence",),
-            "max_results": 1,
-            "timeout_seconds": 30.0,
-            "evidence_types": ("external",),
-        },
-    }
-    expected = expected_by_stage[str(stage)]
-    if any(
-        normalized.get(name) != expected_value
-        for name, expected_value in expected.items()
-    ):
-        raise ValueError("registration stage contract is invalid")
-    if stage == "candidate_acquisition" and normalized["intent_categories"]:
-        raise ValueError("candidate registrations must not declare intent categories")
-    if (
-        normalized.get("idempotency") != "idempotent"
-        or normalized.get("cost_class") not in {"free", "metered"}
-        or normalized.get("max_calls") != 1
-        or (
-            normalized.get("cost_class") == "free"
-            and normalized.get("unit_cost") != 0.0
-        )
-        or (
-            normalized.get("cost_class") == "metered"
-            and normalized.get("unit_cost") <= 0.0
-        )
-    ):
-        raise ValueError("registration execution contract is invalid")
-    return {
-        field: normalized[field]
-        for field in _SOURCE_ADD_REGISTRATION_FIELDS
-        if field
-        not in {"execution_mode", "category_contracts", "binding_requirements"}
-    }
-
-
-def _source_add_provisioning_provenance(provider: Mapping[str, Any]) -> str:
-    for field_name in (
-        "source_add_provisioning_provenance_sha256",
-        # Compatibility with provider documents projected before v8. This
-        # value is never used as a v8 binding-manifest digest.
-        "source_add_manifest_sha256",
-    ):
-        value = str(provider.get(field_name) or "").strip()
-        if _SOURCE_ADD_MANIFEST_RE.fullmatch(value):
-            return value
-    return ""
-
-
 def capability_catalog_enabled() -> bool:
     return str(os.getenv(CAPABILITY_CATALOG_ENABLED_ENV, "true") or "").strip().lower() in _TRUTHY
-
 
 def capability_enforcement_mode() -> str:
     value = str(os.getenv(CAPABILITY_ENFORCEMENT_ENV, "observe") or "observe").strip().lower()
     return value if value in _VALID_ENFORCEMENT else "observe"
-
 
 def capability_refresh_seconds() -> int:
     try:
@@ -889,13 +668,11 @@ def capability_refresh_seconds() -> int:
     except (TypeError, ValueError):
         return 60
 
-
 def model_catalog_ttl_seconds() -> int:
     try:
         return max(60, int(os.getenv(MODEL_CATALOG_TTL_SECONDS_ENV, "900") or 900))
     except (TypeError, ValueError):
         return 900
-
 
 def _contains_secret_material(value: Any) -> bool:
     try:
@@ -904,10 +681,8 @@ def _contains_secret_material(value: Any) -> bool:
         text = str(value).lower()
     return any(marker in text for marker in _SECRET_MARKERS)
 
-
 def _slug(value: Any) -> str:
     return str(value or "").strip()
-
 
 def _string_tuple(value: Any, *, limit: int = 100) -> tuple[str, ...]:
     if isinstance(value, str):
@@ -917,7 +692,6 @@ def _string_tuple(value: Any, *, limit: int = 100) -> tuple[str, ...]:
     else:
         values = []
     return tuple(str(item).strip() for item in values[:limit] if str(item or "").strip())
-
 
 def _safe_route_path(value: Any, *, allow_prefix: bool = False) -> bool:
     path = str(value or "").strip()
@@ -931,7 +705,6 @@ def _safe_route_path(value: Any, *, allow_prefix: bool = False) -> bool:
     if "\\" in decoded or any(part in {".", ".."} for part in decoded.split("/")):
         return False
     return not urllib.parse.urlsplit(path).netloc
-
 
 def normalize_candidate_route(rest: str) -> tuple[str, str] | None:
     """Return normalized (path, query) or None for an unsafe proxy route."""
@@ -956,7 +729,6 @@ def normalize_candidate_route(rest: str) -> tuple[str, str] | None:
     normalized = urllib.parse.quote(decoded, safe="/-._~")
     return normalized, parsed.query
 
-
 def _route_doc_valid(route: Mapping[str, Any]) -> bool:
     method = str(route.get("method") or "").upper()
     path = str(route.get("path") or "")
@@ -966,7 +738,6 @@ def _route_doc_valid(route: Mapping[str, Any]) -> bool:
     if bool(path) == bool(prefix):
         return False
     return _safe_route_path(path or prefix, allow_prefix=bool(prefix))
-
 
 def validate_capability_provider_doc(provider: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
@@ -1035,7 +806,6 @@ def validate_capability_provider_doc(provider: Mapping[str, Any]) -> list[str]:
         errors.append("non_source_add_provider_must_not_be_reward_eligible")
     return sorted(set(errors))
 
-
 @dataclass(frozen=True)
 class EffectiveProviderCapabilities:
     providers: tuple[dict[str, Any], ...]
@@ -1059,1496 +829,6 @@ class EffectiveProviderCapabilities:
             "source_add_provider_count": self.source_add_provider_count,
             "warning_count": len(self.warning_codes),
         }
-
-    def prompt_summary(
-        self,
-        *,
-        live_model_ids: Mapping[str, Sequence[str]] | None = None,
-        miner_focus: str = "",
-    ) -> dict[str, Any]:
-        """Private planner context; callers persist only diagnostic hash/count."""
-
-        summaries: list[dict[str, Any]] = []
-        live_ids = dict(live_model_ids or {})
-        for provider in self.providers:
-            if not provider.get("active", True) or provider.get("credential_ready") is not True:
-                continue
-            planner = provider.get("planner_summary")
-            if not isinstance(planner, Mapping):
-                planner = {}
-            summary = {
-                "provider_alias": str(planner.get("provider_alias") or provider.get("id") or "")[:80],
-                "endpoint_families": list(planner.get("endpoint_families") or [])[:40],
-                "model_policy": str(planner.get("model_policy") or "")[:500],
-                "probe_metadata": list(planner.get("probe_metadata") or [])[:40],
-                "best_for": str(planner.get("best_for") or "")[:500],
-                "avoid_when": str(planner.get("avoid_when") or "")[:500],
-                "best_for_features": [
-                    str(item)
-                    for item in (
-                        planner.get("best_for_features")
-                        if isinstance(
-                            planner.get("best_for_features"), (list, tuple)
-                        )
-                        else ()
-                    )
-                    if _ROUTING_FEATURE_RE.fullmatch(str(item))
-                ][:16],
-                "avoid_when_features": [
-                    str(item)
-                    for item in (
-                        planner.get("avoid_when_features")
-                        if isinstance(
-                            planner.get("avoid_when_features"), (list, tuple)
-                        )
-                        else ()
-                    )
-                    if _ROUTING_FEATURE_RE.fullmatch(str(item))
-                ][:16],
-            }
-            provider_id = str(provider.get("id") or "")
-            if provider_id in live_ids:
-                summary["live_text_model_ids"] = sorted({str(item) for item in live_ids[provider_id]})[:100]
-            if str(provider.get("origin") or "") == "source_add":
-                summary.update(
-                    {
-                        "governance_origin": "source_add",
-                        "provider_id": provider_id,
-                        "provisioning_provenance_sha256": (
-                            _source_add_provisioning_provenance(provider)
-                        ),
-                    }
-                )
-            summaries.append(summary)
-        output = {
-            "schema_version": "1.0",
-            "capability_hash": self.capability_hash,
-            "provider_count": len(summaries),
-            "providers": summaries,
-            "rules": {
-                "existing_provider_modules_only": True,
-                "new_credentials_forbidden": True,
-                "new_network_clients_forbidden": True,
-                "new_dependencies_forbidden": True,
-            },
-        }
-        source_context = approved_source_router_suggestions(
-            miner_focus,
-            self.providers,
-        )
-        if source_context["requests"] or source_context["clarifications"]:
-            output["routerverse_source_incorporation"] = source_context
-        return output
-
-
-def _normalized_words(value: Any) -> str:
-    return " ".join(
-        re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split()
-    )
-
-
-def _source_mention_forms(provider: Mapping[str, Any]) -> tuple[str, ...]:
-    planner = (
-        provider.get("planner_summary")
-        if isinstance(provider.get("planner_summary"), Mapping)
-        else {}
-    )
-    forms = {
-        _normalized_words(provider.get("id")),
-        _normalized_words(planner.get("provider_alias")),
-    }
-    return tuple(sorted(item for item in forms if len(item) >= 3))
-
-
-def _mentioned_source_add_providers(
-    miner_focus: str,
-    providers: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], ...]:
-    focus = f" {_normalized_words(miner_focus)} "
-    matches: list[dict[str, Any]] = []
-    for provider in providers:
-        if (
-            str(provider.get("origin") or "") != "source_add"
-            or provider.get("active", True) is not True
-            or provider.get("credential_ready") is not True
-        ):
-            continue
-        provenance = _source_add_provisioning_provenance(provider)
-        if not provenance:
-            continue
-        if any(f" {form} " in focus for form in _source_mention_forms(provider)):
-            matches.append(dict(provider))
-    return tuple(
-        sorted(matches, key=lambda item: str(item.get("id") or ""))
-    )
-
-
-def approved_source_router_suggestions(
-    miner_focus: str,
-    providers: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    """Translate an explicit miner mention into attested router registrations.
-
-    Only active, runtime-ready SOURCE_ADD providers can produce a request.
-    The miner must also name company discovery and/or intent discovery; a
-    provider mention without a stage is retained only as a clarification and
-    cannot authorize a model edit.
-    """
-
-    normalized_focus = _normalized_words(miner_focus)
-    stages: list[str] = []
-    if any(pattern.search(normalized_focus) for pattern in _COMPANY_DISCOVERY_PATTERNS):
-        stages.append("candidate_acquisition")
-    if any(pattern.search(normalized_focus) for pattern in _INTENT_DISCOVERY_PATTERNS):
-        stages.append("intent_evidence")
-    providers_mentioned = _mentioned_source_add_providers(
-        miner_focus,
-        providers,
-    )
-    focus_with_boundaries = f" {normalized_focus} "
-    directly_named = tuple(
-        provider
-        for provider in providers_mentioned
-        if f" {_normalized_words(provider.get('id'))} "
-        in focus_with_boundaries
-    )
-    if directly_named:
-        providers_mentioned = directly_named
-    elif len(providers_mentioned) > 1:
-        return {
-            "schema_version": "leadpoet.routerverse_source_suggestions.v3",
-            "requests": [],
-            "clarifications": [
-                {
-                    "provider_id": "",
-                    "provider_alias": "",
-                    "reason_code": "approved_source_mention_ambiguous",
-                }
-            ],
-            "rules": {
-                "approved_source_add_only": True,
-                "explicit_discovery_stage_required": True,
-                "model_registration_required": True,
-                "consumer_binding_activation_separate": True,
-                "provisioning_provenance_is_not_binding_manifest": True,
-                "v7_rollback_manifest_is_explicit": True,
-            },
-        }
-    requests: list[dict[str, Any]] = []
-    clarifications: list[dict[str, str]] = []
-    for provider in providers_mentioned:
-        provider_id = str(provider.get("id") or "")
-        planner = (
-            provider.get("planner_summary")
-            if isinstance(provider.get("planner_summary"), Mapping)
-            else {}
-        )
-        best_for = (
-            planner.get("best_for_features")
-            if "best_for_features" in planner
-            else ()
-        )
-        avoid_when = (
-            planner.get("avoid_when_features")
-            if "avoid_when_features" in planner
-            else ()
-        )
-        intent_categories: list[str] = []
-        for feature in (
-            best_for if isinstance(best_for, (list, tuple)) else ()
-        ):
-            feature = str(feature).strip()
-            if not feature.startswith("intent.") or feature == "intent.general":
-                continue
-            category = feature.split(".", 1)[1].upper()
-            if category and len(category) <= 80 and category not in intent_categories:
-                intent_categories.append(category)
-        provider_alias = str(
-            planner.get("provider_alias") or provider_id
-        )[:80]
-        if not stages:
-            clarifications.append(
-                {
-                    "provider_id": provider_id,
-                    "provider_alias": provider_alias,
-                    "reason_code": "discovery_stage_not_explicit",
-                }
-            )
-            continue
-        cost_model = (
-            provider.get("cost_model")
-            if isinstance(provider.get("cost_model"), Mapping)
-            else {}
-        )
-        try:
-            microusd = max(
-                0,
-                int(cost_model.get("est_cost_microusd_per_call") or 0),
-            )
-        except (TypeError, ValueError):
-            microusd = 0
-        provenance = _source_add_provisioning_provenance(provider)
-        for stage in stages:
-            candidate_stage = stage == "candidate_acquisition"
-            declared_stage = str(planner.get("stage") or "").strip()
-            if declared_stage and declared_stage != stage:
-                clarifications.append(
-                    {
-                        "provider_id": provider_id,
-                        "provider_alias": provider_alias,
-                        "reason_code": "approved_source_stage_contract_differs",
-                    }
-                )
-                continue
-            registration_value: dict[str, Any] = {
-                "provider_id": provider_id,
-                "stage": stage,
-                "execution_mode": planner.get("execution_mode", "invoke"),
-                "priority": planner.get(
-                    "priority", 80 if candidate_stage else 35
-                ),
-                "capabilities": planner.get("capabilities")
-                if "capabilities" in planner
-                else [
-                    "candidate.provider_discovery"
-                    if candidate_stage
-                    else "intent.provider_evidence"
-                ],
-                "idempotency": planner.get("idempotency", "idempotent"),
-                "cost_class": planner.get(
-                    "cost_class", "metered" if microusd else "free"
-                ),
-                "unit_cost": planner.get(
-                    "unit_cost",
-                    (
-                        round(max(microusd / 1_000_000, 0.000001), 6)
-                        if microusd
-                        else 0.0
-                    ),
-                ),
-                "max_calls": planner.get("max_calls", 1),
-                "max_results": planner.get(
-                    "max_results", 100 if candidate_stage else 1
-                ),
-                "timeout_seconds": planner.get(
-                    "timeout_seconds", 60.0 if candidate_stage else 30.0
-                ),
-                "intent_categories": planner.get(
-                    "intent_categories",
-                    intent_categories,
-                ),
-                "evidence_types": (
-                    planner.get("evidence_types")
-                    if "evidence_types" in planner
-                    else [
-                        "provider_database" if candidate_stage else "external"
-                    ]
-                ),
-                "category_contracts": planner.get("category_contracts", []),
-                "binding_requirements": planner.get(
-                    "binding_requirements", []
-                ),
-                "best_for": best_for
-                or (
-                    ["icp.structured_eligible"]
-                    if candidate_stage
-                    else ["intent.general"]
-                ),
-                "avoid_when": avoid_when,
-                "best_for_description": planner.get("best_for")
-                or (
-                    "Approved SOURCE_ADD company-discovery provider for "
-                    "structured ICP acquisition."
-                    if candidate_stage
-                    else "Approved SOURCE_ADD provider for company-scoped "
-                    "intent-evidence discovery."
-                ),
-                "avoid_when_description": planner.get("avoid_when")
-                or "Avoid when the consumer binding is unavailable, unhealthy, "
-                "outside its approved categories, or over budget.",
-            }
-            if planner.get(_SOURCE_ADD_EXECUTION_PLAN_FIELD):
-                registration_value[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = (
-                    planner[_SOURCE_ADD_EXECUTION_PLAN_FIELD]
-                )
-            try:
-                registration = _normalize_source_add_v8_registration(
-                    registration_value
-                )
-            except (TypeError, ValueError):
-                clarifications.append(
-                    {
-                        "provider_id": provider_id,
-                        "provider_alias": provider_alias,
-                        "reason_code": "approved_source_routing_contract_invalid",
-                    }
-                )
-                continue
-            requests.append(
-                {
-                    "schema_version": _SOURCE_ADD_V8_REQUEST_SCHEMA_VERSION,
-                    "provider_id": provider_id,
-                    "provider_alias": provider_alias,
-                    "stage": stage,
-                    "tool_id": (
-                        f"candidate.source_add.{provider_id}"
-                        if candidate_stage
-                        else f"intent.source_add.{provider_id}"
-                    ),
-                    "registration_symbol": (
-                        "sourcing_model/routing/runtime.py::"
-                        "SOURCE_ADD_ROUTING_REGISTRATIONS"
-                    ),
-                    "registration_type": "SourceAddRoutingRegistration",
-                    "provisioning_provenance_sha256": provenance,
-                    "legacy_v7_manifest_sha256": provenance,
-                    "binding_manifest": _source_add_binding_manifest(
-                        registration
-                    ),
-                    **{
-                        field: (
-                            [
-                                {
-                                    name: list(value)
-                                    if isinstance(value, tuple)
-                                    else value
-                                    for name, value in contract.items()
-                                }
-                                for contract in registration[field]
-                            ]
-                            if field == "category_contracts"
-                            else list(registration[field])
-                            if isinstance(registration[field], tuple)
-                            else registration[field]
-                        )
-                        for field in _SOURCE_ADD_REGISTRATION_FIELDS
-                    },
-                    **(
-                        {
-                            _SOURCE_ADD_EXECUTION_PLAN_FIELD: registration[
-                                _SOURCE_ADD_EXECUTION_PLAN_FIELD
-                            ]
-                        }
-                        if _SOURCE_ADD_EXECUTION_PLAN_FIELD in registration
-                        else {}
-                    ),
-                    "runtime_binding_id": provider_id,
-                }
-            )
-    return {
-        "schema_version": "leadpoet.routerverse_source_suggestions.v3",
-        "requests": requests,
-        "clarifications": clarifications,
-        "rules": {
-            "approved_source_add_only": True,
-            "explicit_discovery_stage_required": True,
-            "model_registration_required": True,
-            "consumer_binding_activation_separate": True,
-            "provisioning_provenance_is_not_binding_manifest": True,
-            "v7_rollback_manifest_is_explicit": True,
-        },
-    }
-
-
-def validate_source_add_registration_diff(
-    unified_diff: str,
-    source_context: Mapping[str, Any] | None,
-    *,
-    existing_runtime_source: str = "",
-) -> list[str]:
-    """Validate the complete patched Routerverse registration assignment.
-
-    Added-line parsing is insufficient here: changing one field in an existing
-    registration, adding an unknown keyword, or placing an approved constructor
-    in dead code can all look valid in isolation. Apply only the runtime file's
-    diff to the exact parent source, then compare the complete typed registry.
-    """
-
-    def function_name(node: ast.Call) -> str:
-        if isinstance(node.func, ast.Name):
-            return node.func.id
-        return ""
-
-    def normalize_registration(
-        value: Mapping[str, Any],
-        *,
-        contract_version: int,
-    ) -> dict[str, Any]:
-        if contract_version == 8:
-            return _normalize_source_add_v8_registration(value)
-        if contract_version == 7:
-            return _normalize_source_add_v7_registration(value)
-        raise ValueError("unsupported SOURCE_ADD registration contract")
-
-    def registration_from_request(
-        request: Mapping[str, Any],
-        *,
-        contract_version: int,
-    ) -> dict[str, Any]:
-        provider_id = request.get("provider_id")
-        stage = request.get("stage")
-        expected_tool_id = (
-            f"candidate.source_add.{provider_id}"
-            if stage == "candidate_acquisition"
-            else f"intent.source_add.{provider_id}"
-        )
-        schema_version = request.get("schema_version")
-        if (
-            stage not in {"candidate_acquisition", "intent_evidence"}
-            or request.get("registration_symbol")
-            != (
-                "sourcing_model/routing/runtime.py::"
-                "SOURCE_ADD_ROUTING_REGISTRATIONS"
-            )
-            or request.get("registration_type")
-            != "SourceAddRoutingRegistration"
-            or request.get("runtime_binding_id") != provider_id
-            or request.get("tool_id") != expected_tool_id
-            or not isinstance(request.get("provider_alias"), str)
-            or not 0 < len(request["provider_alias"]) <= 80
-        ):
-            raise ValueError("approved request metadata is invalid")
-        values = {
-            field: request.get(field)
-            for field in _SOURCE_ADD_REGISTRATION_FIELDS
-        }
-        if request.get(_SOURCE_ADD_EXECUTION_PLAN_FIELD):
-            values[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = request[
-                _SOURCE_ADD_EXECUTION_PLAN_FIELD
-            ]
-        if schema_version == _SOURCE_ADD_V8_REQUEST_SCHEMA_VERSION:
-            provenance = str(
-                request.get("provisioning_provenance_sha256") or ""
-            ).strip()
-            legacy_manifest = str(
-                request.get("legacy_v7_manifest_sha256") or ""
-            ).strip()
-            if (
-                not _SOURCE_ADD_MANIFEST_RE.fullmatch(provenance)
-                or legacy_manifest != provenance
-            ):
-                raise ValueError("approved request provenance is invalid")
-            registration = normalize_registration(
-                values,
-                contract_version=8,
-            )
-            binding_manifest = request.get("binding_manifest")
-            if not isinstance(binding_manifest, Mapping):
-                raise ValueError("approved request binding manifest is invalid")
-            try:
-                observed_manifest_json = json.dumps(
-                    dict(binding_manifest),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                    allow_nan=False,
-                )
-                expected_manifest_json = json.dumps(
-                    _source_add_binding_manifest(registration),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                    allow_nan=False,
-                )
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "approved request binding manifest is invalid"
-                ) from exc
-            if observed_manifest_json != expected_manifest_json:
-                raise ValueError("approved request binding manifest is invalid")
-            if contract_version == 8:
-                return registration
-            values = dict(registration)
-            values["manifest_sha256"] = legacy_manifest
-            values["revision"] = f"source-add-{legacy_manifest[:12]}"
-            return normalize_registration(values, contract_version=7)
-        if (
-            schema_version != _SOURCE_ADD_V7_REQUEST_SCHEMA_VERSION
-            or contract_version != 7
-        ):
-            raise ValueError("approved request schema is incompatible")
-        return normalize_registration(values, contract_version=7)
-
-    def registration_from_call(
-        node: ast.Call,
-        *,
-        contract_version: int,
-    ) -> tuple[dict[str, Any], bool]:
-        if function_name(node) != "SourceAddRoutingRegistration":
-            raise ValueError("registry contains a non-registration value")
-        if node.args or any(keyword.arg is None for keyword in node.keywords):
-            raise ValueError("registration must use explicit keyword literals")
-        keyword_names = [str(keyword.arg) for keyword in node.keywords]
-        keyword_set = set(keyword_names)
-        if len(keyword_names) != len(set(keyword_names)):
-            raise ValueError("registration fields differ from the contract")
-        if contract_version == 8:
-            if (
-                not _SOURCE_ADD_V8_REQUIRED_REGISTRATION_FIELDS <= keyword_set
-                or not keyword_set
-                <= set(_SOURCE_ADD_REGISTRATION_FIELDS)
-                | {_SOURCE_ADD_EXECUTION_PLAN_FIELD}
-            ):
-                raise ValueError(
-                    "registration fields differ from the v8 contract"
-                )
-        elif keyword_set not in (
-            set(_SOURCE_ADD_V7_REGISTRATION_FIELDS),
-            set(_SOURCE_ADD_V7_LEGACY_REGISTRATION_FIELDS),
-            set(_SOURCE_ADD_V7_ORIGINAL_REGISTRATION_FIELDS),
-            set(_SOURCE_ADD_V7_GUIDANCE_WITHOUT_CATEGORIES_FIELDS),
-        ):
-            raise ValueError("registration fields differ from the v7 contract")
-
-        def literal_registration_value(value_node: ast.AST) -> Any:
-            if isinstance(value_node, ast.Name) and contract_version == 8:
-                if value_node.id in _SOURCE_ADD_LITERAL_NAMES:
-                    return _SOURCE_ADD_LITERAL_NAMES[value_node.id]
-                raise ValueError("registration contains an unknown constant")
-            return ast.literal_eval(value_node)
-        values: dict[str, Any] = {}
-        for keyword in node.keywords:
-            try:
-                if keyword.arg == "category_contracts":
-                    if not isinstance(keyword.value, (ast.Tuple, ast.List)):
-                        raise ValueError("category_contracts must be a literal sequence")
-                    contracts: list[dict[str, Any]] = []
-                    for item in keyword.value.elts:
-                        if not isinstance(item, ast.Call) or function_name(item) != "SourceAddCategoryContract":
-                            raise ValueError("category_contracts entries must be constructors")
-                        if item.args or any(keyword.arg is None for keyword in item.keywords):
-                            raise ValueError("category contract must use explicit keyword literals")
-                        contract_keyword_names = [
-                            str(contract_keyword.arg)
-                            for contract_keyword in item.keywords
-                        ]
-                        if (
-                            len(contract_keyword_names)
-                            != len(set(contract_keyword_names))
-                            or set(contract_keyword_names)
-                            != {
-                                "category",
-                                "capabilities",
-                                "evidence_types",
-                                "requirements",
-                            }
-                        ):
-                            raise ValueError(
-                                "category contract fields differ from the contract"
-                            )
-                        contract_values: dict[str, Any] = {}
-                        for contract_keyword in item.keywords:
-                            contract_values[str(contract_keyword.arg)] = literal_registration_value(
-                                contract_keyword.value
-                            )
-                        contracts.append(contract_values)
-                    values[str(keyword.arg)] = tuple(contracts)
-                else:
-                    values[str(keyword.arg)] = literal_registration_value(keyword.value)
-            except (ValueError, TypeError, SyntaxError) as exc:
-                raise ValueError(
-                    "registration fields must be literal"
-                ) from exc
-        if contract_version == 8:
-            return normalize_registration(
-                values,
-                contract_version=8,
-            ), False
-
-        legacy_contract = not {
-            "best_for",
-            "avoid_when",
-            "best_for_description",
-            "avoid_when_description",
-        } <= keyword_set
-        if "intent_categories" not in values:
-            values["intent_categories"] = ()
-        if "best_for" not in values:
-            stage = values.get("stage")
-            values.update(
-                {
-                    "best_for": (
-                        ("icp.structured_eligible",)
-                        if stage == "candidate_acquisition"
-                        else ("intent.general",)
-                    ),
-                    "avoid_when": (),
-                    "best_for_description": (
-                        "Approved SOURCE_ADD company-discovery provider for "
-                        "structured ICP acquisition."
-                        if stage == "candidate_acquisition"
-                        else "Approved SOURCE_ADD provider for company-scoped "
-                        "intent-evidence discovery."
-                    ),
-                    "avoid_when_description": (
-                        "Avoid when the consumer binding is unavailable, "
-                        "unhealthy, outside its approved categories, or over "
-                        "budget."
-                    ),
-                }
-            )
-        return normalize_registration(
-            values,
-            contract_version=7,
-        ), legacy_contract
-
-    opaque_ast_field = "__signed_parent_registration_ast_sha256"
-    forward_parent_fields = {
-        "execution_plan_identity",
-        "requires_full_timeout",
-    }
-
-    def opaque_parent_registration(
-        node: ast.Call,
-        *,
-        contract_version: int,
-    ) -> tuple[tuple[str, str], dict[str, Any]]:
-        """Hash-lock one forward-version registration without executing it.
-
-        A signed model release may add constructor fields before this gateway
-        can normalize their semantics.  Such a parent entry can remain in the
-        registry only while its complete AST is unchanged.  New or modified
-        entries still have to pass the current literal normalizer.
-        """
-
-        if (
-            contract_version != 8
-            or function_name(node) != "SourceAddRoutingRegistration"
-            or node.args
-            or any(keyword.arg is None for keyword in node.keywords)
-        ):
-            raise ValueError("opaque registration shape is invalid")
-        keyword_names = [str(keyword.arg) for keyword in node.keywords]
-        keyword_set = set(keyword_names)
-        if (
-            len(keyword_names) != len(set(keyword_names))
-            or not _SOURCE_ADD_V8_REQUIRED_REGISTRATION_FIELDS
-            <= keyword_set
-            or not keyword_set
-            <= set(_SOURCE_ADD_REGISTRATION_FIELDS) | forward_parent_fields
-            or not keyword_set - set(_SOURCE_ADD_REGISTRATION_FIELDS)
-        ):
-            raise ValueError("opaque registration fields are invalid")
-        keywords = {
-            str(keyword.arg): keyword.value
-            for keyword in node.keywords
-        }
-        try:
-            literal_node = ast.Call(
-                func=node.func,
-                args=[],
-                keywords=[
-                    keyword
-                    for keyword in node.keywords
-                    if keyword.arg not in forward_parent_fields
-                ],
-            )
-            registration, _ = registration_from_call(
-                literal_node,
-                contract_version=contract_version,
-            )
-        except (KeyError, TypeError, ValueError, SyntaxError) as exc:
-            raise ValueError("opaque registration base fields are invalid") from exc
-        provider_id = str(registration.get("provider_id") or "")
-        stage = str(registration.get("stage") or "")
-        key = (provider_id, stage)
-        if "requires_full_timeout" in keywords:
-            try:
-                requires_full_timeout = ast.literal_eval(
-                    keywords["requires_full_timeout"]
-                )
-            except (TypeError, ValueError, SyntaxError) as exc:
-                raise ValueError(
-                    "requires_full_timeout must be static"
-                ) from exc
-            if not isinstance(requires_full_timeout, bool):
-                raise ValueError("requires_full_timeout must be a boolean")
-        if "execution_plan_identity" in keywords:
-            plan_node = keywords["execution_plan_identity"]
-            expected_tool_id = (
-                "candidate" if stage == "candidate_acquisition" else "intent"
-            ) + f".source_add.{provider_id}"
-            if (
-                not isinstance(plan_node, ast.Call)
-                or function_name(plan_node)
-                != "_predictleads_execution_plan_manifest"
-                or len(plan_node.args) != 1
-                or plan_node.keywords
-            ):
-                raise ValueError("execution plan identity helper is invalid")
-            try:
-                plan_tool_id = ast.literal_eval(plan_node.args[0])
-            except (TypeError, ValueError, SyntaxError) as exc:
-                raise ValueError(
-                    "execution plan identity tool is dynamic"
-                ) from exc
-            if plan_tool_id != expected_tool_id:
-                raise ValueError("execution plan identity tool differs")
-        ast_hash = hashlib.sha256(
-            ast.dump(node, include_attributes=False).encode("utf-8")
-        ).hexdigest()
-        return key, {**registration, opaque_ast_field: ast_hash}
-
-    def source_contract_version(tree: ast.Module) -> int:
-        manifest_assignments: list[ast.AST] = []
-        category_contract_classes = 0
-        routing_registration_classes = 0
-        for node in tree.body:
-            if (
-                isinstance(node, ast.ClassDef)
-                and node.name == "SourceAddCategoryContract"
-            ):
-                category_contract_classes += 1
-            if (
-                isinstance(node, ast.ClassDef)
-                and node.name == "SourceAddRoutingRegistration"
-            ):
-                routing_registration_classes += 1
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name)
-                and target.id == "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION"
-                for target in node.targets
-            ):
-                manifest_assignments.append(node.value)
-            elif (
-                isinstance(node, ast.AnnAssign)
-                and isinstance(node.target, ast.Name)
-                and node.target.id
-                == "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION"
-            ):
-                manifest_assignments.append(node.value)
-        if routing_registration_classes != 1:
-            raise ValueError("SOURCE_ADD routing contract class is ambiguous")
-        if not manifest_assignments and category_contract_classes == 0:
-            return 7
-        if (
-            len(manifest_assignments) != 1
-            or category_contract_classes != 1
-        ):
-            raise ValueError("v8 SOURCE_ADD contract marker is ambiguous")
-        try:
-            manifest_schema = ast.literal_eval(manifest_assignments[0])
-        except (ValueError, TypeError, SyntaxError) as exc:
-            raise ValueError("v8 SOURCE_ADD contract marker is dynamic") from exc
-        if manifest_schema != _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION:
-            raise ValueError("v8 SOURCE_ADD contract marker differs")
-        return 8
-
-    def assigned_names(target: ast.AST) -> set[str]:
-        if isinstance(target, ast.Name):
-            return {target.id}
-        if isinstance(target, (ast.Tuple, ast.List)):
-            return {
-                name
-                for item in target.elts
-                for name in assigned_names(item)
-            }
-        return set()
-
-    protected_names = {
-            "Any",
-            "Mapping",
-            "COST_FREE",
-            "COST_METERED",
-            "COST_PAID",
-            "EXECUTION_INVOKE",
-            "EXECUTION_OBSERVE",
-            "EXECUTION_VIRTUAL",
-            "FEATURE_STRUCTURED_ELIGIBLE",
-            "IDEMPOTENT",
-            "NON_IDEMPOTENT",
-            "ORIGIN_SOURCE_ADD",
-            "PolicyStep",
-            "RESUME_SAFE",
-            "RoutingContractError",
-            "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION",
-            "STAGE_CANDIDATE_ACQUISITION",
-            "STAGE_INTENT_EVIDENCE",
-            "SourceAddCategoryContract",
-            "SourceAddRoutingRegistration",
-            "ToolDefinition",
-            "_SOURCE_ADD_MANIFEST_FORBIDDEN_KEYS",
-            "_SOURCE_ADD_PROVIDER_ID_RE",
-            "_source_add_manifest_digest",
-            "_source_add_manifest_value",
-            "_source_add_string_tuple",
-            "dataclass",
-            "field",
-            "hashlib",
-            "json",
-            "math",
-            "re",
-    }
-
-    def protected_contract_signature(tree: ast.Module) -> tuple[str, ...]:
-        signature: list[str] = []
-        for node in tree.body:
-            if isinstance(node, ast.Import):
-                aliases = tuple(
-                    (alias.name, alias.asname)
-                    for alias in node.names
-                    if (alias.asname or alias.name.split(".", 1)[0])
-                    in protected_names
-                )
-                if aliases:
-                    signature.append(repr(("import", aliases)))
-                continue
-            if isinstance(node, ast.ImportFrom):
-                aliases = tuple(
-                    (alias.name, alias.asname)
-                    for alias in node.names
-                    if alias.name == "*"
-                    or (alias.asname or alias.name) in protected_names
-                )
-                if aliases:
-                    signature.append(
-                        repr(("from", node.level, node.module, aliases))
-                    )
-                continue
-            names: set[str] = set()
-            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                names.add(node.name)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    names.update(assigned_names(target))
-            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
-                names.update(assigned_names(node.target))
-            elif isinstance(node, ast.Delete):
-                for target in node.targets:
-                    names.update(assigned_names(target))
-            if names & protected_names:
-                signature.append(ast.dump(node, include_attributes=False))
-        return tuple(signature)
-
-    def is_canonical_registry_assignment(node: ast.AST) -> bool:
-        return (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
-        ) or (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
-        )
-
-    def canonical_registry_assignment_signature(node: ast.AST) -> str:
-        reviewed_value = ast.Constant(
-            value="SOURCE_ADD_ROUTING_REGISTRATIONS=<reviewed>"
-        )
-        if isinstance(node, ast.Assign):
-            skeleton: ast.AST = ast.Assign(
-                targets=node.targets,
-                value=reviewed_value,
-                type_comment=node.type_comment,
-            )
-        elif isinstance(node, ast.AnnAssign):
-            skeleton = ast.AnnAssign(
-                target=node.target,
-                annotation=node.annotation,
-                value=reviewed_value,
-                simple=node.simple,
-            )
-        else:
-            raise ValueError("registration assignment is not canonical")
-        return ast.dump(skeleton, include_attributes=False)
-
-    def source_add_sensitive_signature(tree: ast.Module) -> tuple[str, ...]:
-        """Commit all SOURCE_ADD-sensitive code outside the reviewed literal.
-
-        The registry assignment is the only code an approved registration diff
-        may alter. Bind the complete enclosing node whenever it references a
-        protected SOURCE_ADD symbol or Python namespace-reflection primitive.
-        The caller also compares every non-registry node because arbitrary
-        Python reflection cannot otherwise be proven unable to mutate the
-        registry after this static review.
-        """
-
-        sensitive_names = protected_names | {
-            "SOURCE_ADD_ROUTING_REGISTRATIONS",
-        }
-        dynamic_namespace_names = {
-            "__builtins__",
-            "__dict__",
-            "__delattr__",
-            "__delitem__",
-            "__getattr__",
-            "__getattribute__",
-            "__globals__",
-            "__import__",
-            "__setattr__",
-            "__setitem__",
-            "builtins",
-            "compile",
-            "delattr",
-            "eval",
-            "exec",
-            "getattr",
-            "globals",
-            "locals",
-            "setattr",
-            "vars",
-        }
-        guarded_names = sensitive_names | dynamic_namespace_names
-        match_as_type = getattr(ast, "MatchAs", ())
-        signature: list[str] = []
-        for node in tree.body:
-            if is_canonical_registry_assignment(node):
-                continue
-            sensitive = False
-            for descendant in ast.walk(node):
-                if (
-                    isinstance(descendant, ast.Name)
-                    and descendant.id in guarded_names
-                ) or (
-                    isinstance(descendant, ast.Constant)
-                    and isinstance(descendant.value, str)
-                    and descendant.value in guarded_names
-                ) or (
-                    isinstance(descendant, ast.Attribute)
-                    and descendant.attr in guarded_names
-                ) or (
-                    isinstance(descendant, ast.alias)
-                    and (
-                        descendant.name in guarded_names
-                        or (
-                            descendant.asname
-                            or descendant.name.split(".", 1)[0]
-                        ) in guarded_names
-                    )
-                ) or (
-                    isinstance(descendant, ast.ExceptHandler)
-                    and descendant.name in guarded_names
-                ) or (
-                    isinstance(descendant, match_as_type)
-                    and descendant.name in guarded_names
-                ) or (
-                    isinstance(
-                        descendant,
-                        (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
-                    )
-                    and descendant.name in guarded_names
-                ):
-                    sensitive = True
-                    break
-            if sensitive:
-                signature.append(ast.dump(node, include_attributes=False))
-        return tuple(signature)
-
-    def non_registry_signature(tree: ast.Module) -> tuple[str, ...]:
-        signature: list[str] = []
-        for node in tree.body:
-            signature.append(
-                canonical_registry_assignment_signature(node)
-                if is_canonical_registry_assignment(node)
-                else ast.dump(node, include_attributes=False)
-            )
-        return tuple(signature)
-
-    def registrations_from_source(
-        source: str,
-        *,
-        allow_opaque_parent: bool = False,
-        opaque_parent_hashes: Mapping[tuple[str, str], str] | None = None,
-    ) -> tuple[
-        dict[tuple[str, str], dict[str, Any]],
-        set[tuple[str, str]],
-        int,
-        tuple[str, ...],
-        tuple[str, ...],
-        tuple[str, ...],
-    ]:
-        tree = ast.parse(source)
-        contract_version = source_contract_version(tree)
-        assignments: list[ast.AST] = []
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name)
-                and target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
-                for target in node.targets
-            ):
-                assignments.append(node.value)
-            elif (
-                isinstance(node, ast.AnnAssign)
-                and isinstance(node.target, ast.Name)
-                and node.target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
-            ):
-                assignments.append(node.value)
-        registry_bindings = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-            and node.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-        ]
-        if len(assignments) != 1 or not isinstance(
-            assignments[0], (ast.List, ast.Tuple)
-        ) or len(registry_bindings) != 1:
-            raise ValueError("registration assignment is missing or ambiguous")
-        elements = assignments[0].elts
-        registration_calls = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and function_name(node) == "SourceAddRoutingRegistration"
-        ]
-        if len(registration_calls) != len(elements):
-            raise ValueError("registration constructor exists outside the registry")
-        registrations: dict[tuple[str, str], dict[str, Any]] = {}
-        legacy_guidance_keys: set[tuple[str, str]] = set()
-        for element in elements:
-            if not isinstance(element, ast.Call):
-                raise ValueError("registry contains a dynamic value")
-            try:
-                registration, legacy_guidance = registration_from_call(
-                    element,
-                    contract_version=contract_version,
-                )
-                key = (
-                    str(registration.get("provider_id") or ""),
-                    str(registration.get("stage") or ""),
-                )
-            except (SyntaxError, TypeError, ValueError):
-                key, registration = opaque_parent_registration(
-                    element,
-                    contract_version=contract_version,
-                )
-                legacy_guidance = False
-                observed_hash = str(registration[opaque_ast_field])
-                if not allow_opaque_parent and (
-                    opaque_parent_hashes is None
-                    or opaque_parent_hashes.get(key) != observed_hash
-                ):
-                    raise ValueError(
-                        "forward-version registration differs from signed parent"
-                    )
-            if (
-                not re.fullmatch(r"[a-z][a-z0-9_-]{1,79}", key[0])
-                or key[1] not in {"candidate_acquisition", "intent_evidence"}
-                or key in registrations
-            ):
-                raise ValueError("registration identity is invalid or duplicated")
-            registrations[key] = registration
-            if legacy_guidance:
-                legacy_guidance_keys.add(key)
-        return (
-            registrations,
-            legacy_guidance_keys,
-            contract_version,
-            protected_contract_signature(tree),
-            non_registry_signature(tree),
-            source_add_sensitive_signature(tree),
-        )
-
-    def diff_sections(diff_text: str) -> list[tuple[str, str, str]]:
-        sections: list[tuple[str, str, str]] = []
-        current: list[str] = []
-        old_path = ""
-        new_path = ""
-        for line in diff_text.splitlines(keepends=True):
-            match = re.fullmatch(
-                r"diff --git a/(\S+) b/(\S+)\r?\n?",
-                line,
-            )
-            if match is not None:
-                if current:
-                    sections.append((old_path, new_path, "".join(current)))
-                old_path, new_path = match.groups()
-                current = [line]
-            elif current:
-                current.append(line)
-        if current:
-            sections.append((old_path, new_path, "".join(current)))
-        return sections
-
-    def patched_runtime_source(
-        source: str,
-        runtime_diff: str,
-    ) -> str:
-        with tempfile.TemporaryDirectory(
-            prefix="leadpoet-source-registration-check-"
-        ) as raw:
-            root = Path(raw)
-            runtime_path = root / _SOURCE_ADD_RUNTIME_PATH
-            runtime_path.parent.mkdir(parents=True)
-            runtime_path.write_text(source, encoding="utf-8")
-            patch_path = root / "runtime.diff"
-            patch_path.write_text(runtime_diff, encoding="utf-8")
-            _run_git_apply(
-                patch_path,
-                cwd=root,
-                timeout_seconds=5,
-                check=False,
-            )
-            return runtime_path.read_text(encoding="utf-8")
-
-    requests = (
-        source_context.get("requests")
-        if isinstance(source_context, Mapping)
-        and isinstance(source_context.get("requests"), list)
-        else []
-    )
-    diff_text = str(unified_diff or "")
-    sections = diff_sections(diff_text)
-    runtime_sections = [
-        section
-        for old_path, new_path, section in sections
-        if old_path == _SOURCE_ADD_RUNTIME_PATH
-        and new_path == _SOURCE_ADD_RUNTIME_PATH
-    ]
-    touches_runtime = bool(runtime_sections)
-    added = "\n".join(
-        line[1:]
-        for line in diff_text.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    )
-    removed = "\n".join(
-        line[1:]
-        for line in diff_text.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    )
-    approved_tool_ids = {
-        str(item.get("tool_id") or "")
-        for item in requests
-        if isinstance(item, Mapping)
-    }
-    added_tool_ids = {
-        match.group(1)
-        for match in re.finditer(
-            r"['\"]((?:candidate|intent)\.source_add\.[a-z][a-z0-9_-]{1,79})['\"]",
-            added,
-        )
-    }
-    errors: list[str] = []
-    if added_tool_ids - approved_tool_ids:
-        errors.append("source_add_registration_unapproved_tool")
-    if (
-        "ToolDefinition(" in added
-        and (
-            "ORIGIN_SOURCE_ADD" in added
-            or "source_add" in added
-            or bool(added_tool_ids)
-        )
-    ):
-        errors.append("source_add_registration_direct_definition_forbidden")
-    source_markers_outside_runtime = any(
-        (
-            "SourceAddRoutingRegistration" in section
-            or "SOURCE_ADD_ROUTING_REGISTRATIONS" in section
-        )
-        for old_path, new_path, section in sections
-        if (
-            old_path != _SOURCE_ADD_RUNTIME_PATH
-            or new_path != _SOURCE_ADD_RUNTIME_PATH
-        )
-    )
-    if source_markers_outside_runtime:
-        errors.append("source_add_registration_wrong_model_target")
-
-    needs_registry_validation = bool(requests) or touches_runtime or any(
-        marker in added or marker in removed
-        for marker in (
-            "SourceAddRoutingRegistration",
-            "SOURCE_ADD_ROUTING_REGISTRATIONS",
-        )
-    )
-    if not needs_registry_validation:
-        return sorted(set(errors))
-    if not existing_runtime_source:
-        errors.append("source_add_registration_source_unavailable")
-        return sorted(set(errors))
-    try:
-        (
-            existing,
-            existing_legacy_guidance,
-            existing_contract_version,
-            existing_contract_signature,
-            existing_non_registry_signature,
-            existing_sensitive_signature,
-        ) = registrations_from_source(
-            existing_runtime_source,
-            allow_opaque_parent=True,
-        )
-    except (SyntaxError, ValueError):
-        errors.append("source_add_registration_existing_source_invalid")
-        return sorted(set(errors))
-
-    patched_source = existing_runtime_source
-    if touches_runtime:
-        if len(runtime_sections) != 1:
-            errors.append("source_add_registration_runtime_diff_ambiguous")
-            return sorted(set(errors))
-        try:
-            patched_source = patched_runtime_source(
-                existing_runtime_source,
-                runtime_sections[0],
-            )
-        except (CodeEditBuildError, OSError, ValueError):
-            errors.append("source_add_registration_runtime_diff_unapplicable")
-            return sorted(set(errors))
-    opaque_parent_hashes = {
-        key: str(registration[opaque_ast_field])
-        for key, registration in existing.items()
-        if opaque_ast_field in registration
-    }
-    try:
-        (
-            observed,
-            observed_legacy_guidance,
-            observed_contract_version,
-            observed_contract_signature,
-            observed_non_registry_signature,
-            observed_sensitive_signature,
-        ) = registrations_from_source(
-            patched_source,
-            opaque_parent_hashes=opaque_parent_hashes,
-        )
-    except (SyntaxError, ValueError):
-        errors.append("source_add_registration_patched_source_invalid")
-        return sorted(set(errors))
-    if (
-        observed_contract_version != existing_contract_version
-        or observed_contract_signature != existing_contract_signature
-        or observed_sensitive_signature != existing_sensitive_signature
-        or observed_non_registry_signature != existing_non_registry_signature
-    ):
-        errors.append("source_add_registration_patched_source_invalid")
-        return sorted(set(errors))
-    if any(
-        key not in existing
-        or key not in existing_legacy_guidance
-        or observed.get(key) != existing.get(key)
-        for key in observed_legacy_guidance
-    ):
-        errors.append("source_add_registration_patched_source_invalid")
-        return sorted(set(errors))
-
-    expected: dict[tuple[str, str], dict[str, Any]] = {}
-    try:
-        for request in requests:
-            if not isinstance(request, Mapping):
-                raise ValueError("approved request is invalid")
-            registration = registration_from_request(
-                request,
-                contract_version=existing_contract_version,
-            )
-            key = (
-                str(registration.get("provider_id") or ""),
-                str(registration.get("stage") or ""),
-            )
-            if key in expected:
-                raise ValueError("approved request is duplicated")
-            expected[key] = registration
-    except ValueError:
-        errors.append("source_add_approved_request_invalid")
-        return sorted(set(errors))
-
-    desired = dict(existing)
-    desired.update(expected)
-    if not requests:
-        if set(existing) - set(observed):
-            errors.append("source_add_registration_removal_forbidden")
-        if observed != existing:
-            errors.append("source_add_registration_without_approved_request")
-        return sorted(set(errors))
-
-    if any(observed.get(key) != registration for key, registration in expected.items()):
-        errors.append("source_add_registration_missing_approved_request")
-    if set(existing) - set(expected) - set(observed):
-        errors.append("source_add_registration_removal_forbidden")
-    if any(
-        key not in desired or desired[key] != registration
-        for key, registration in observed.items()
-    ):
-        errors.append("source_add_registration_unapproved_registration")
-    if any(
-        str(item.get("provider_id") or "") not in {
-            str(request.get("provider_id") or "")
-            for request in requests
-            if isinstance(request, Mapping)
-        }
-        for item in observed.values()
-        if item not in existing.values()
-    ):
-        errors.append("source_add_registration_unapproved_provider")
-    if expected and not touches_runtime and any(
-        existing.get(key) != registration
-        for key, registration in expected.items()
-    ):
-        errors.append("source_add_registration_wrong_model_target")
-    return sorted(set(errors))
-
-
-def validate_source_add_model_activation_diff(
-    unified_diff: str,
-    source_context: Mapping[str, Any] | None,
-    *,
-    existing_model_runner_source: str = "",
-) -> list[str]:
-    """Require an exact static model-owned category activation for intent sources."""
-
-    requests = (
-        source_context.get("requests")
-        if isinstance(source_context, Mapping)
-        and isinstance(source_context.get("requests"), list)
-        else []
-    )
-    expected: dict[str, str] = {}
-    for request in requests:
-        if not isinstance(request, Mapping) or request.get("stage") != "intent_evidence":
-            continue
-        tool_id = str(request.get("tool_id") or "")
-        provider_id = str(request.get("provider_id") or "")
-        if tool_id != f"intent.source_add.{provider_id}":
-            return ["source_add_model_activation_request_invalid"]
-        categories = request.get("intent_categories")
-        if not isinstance(categories, list) or not categories:
-            return ["source_add_model_activation_request_invalid"]
-        for raw_category in categories:
-            category = str(raw_category or "").strip()
-            if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", category):
-                return ["source_add_model_activation_request_invalid"]
-            if category in expected and expected[category] != tool_id:
-                return ["source_add_model_activation_ambiguous"]
-            expected[category] = tool_id
-    if not expected:
-        return []
-    if not existing_model_runner_source:
-        return ["source_add_model_activation_source_unavailable"]
-
-    def sections(diff_text: str) -> list[tuple[str, str, str]]:
-        result: list[tuple[str, str, str]] = []
-        current: list[str] = []
-        old_path = ""
-        new_path = ""
-        for line in diff_text.splitlines(keepends=True):
-            match = re.fullmatch(
-                r"diff --git a/(\S+) b/(\S+)\r?\n?",
-                line,
-            )
-            if match is not None:
-                if current:
-                    result.append((old_path, new_path, "".join(current)))
-                old_path, new_path = match.groups()
-                current = [line]
-            elif current:
-                current.append(line)
-        if current:
-            result.append((old_path, new_path, "".join(current)))
-        return result
-
-    def assignment(node: ast.AST) -> ast.AST | None:
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "_COMMON_SOURCE_ADD_BY_INTENT"
-        ):
-            return node.value
-        if (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "_COMMON_SOURCE_ADD_BY_INTENT"
-        ):
-            return node.value
-        return None
-
-    def parse(source: str) -> tuple[dict[str, str], tuple[str, ...]]:
-        tree = ast.parse(source)
-        bindings = [node for node in tree.body if assignment(node) is not None]
-        stores = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-            and node.id == "_COMMON_SOURCE_ADD_BY_INTENT"
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-        ]
-        if len(bindings) != 1 or len(stores) != 1:
-            raise ValueError("SOURCE_ADD activation binding is ambiguous")
-        value = assignment(bindings[0])
-        if not isinstance(value, ast.Dict) or len(value.keys) != len(value.values):
-            raise ValueError("SOURCE_ADD activation must be a static dict")
-        mapping: dict[str, str] = {}
-        for key, item in zip(value.keys, value.values):
-            if (
-                not isinstance(key, ast.Constant)
-                or not isinstance(key.value, str)
-                or not isinstance(item, ast.Constant)
-                or not isinstance(item.value, str)
-                or key.value in mapping
-            ):
-                raise ValueError("SOURCE_ADD activation must use unique strings")
-            mapping[key.value] = item.value
-        signature: list[str] = []
-        for node in tree.body:
-            if assignment(node) is None:
-                signature.append(ast.dump(node, include_attributes=False))
-                continue
-            placeholder = ast.Constant(value="_COMMON_SOURCE_ADD_BY_INTENT=<reviewed>")
-            if isinstance(node, ast.Assign):
-                normalized: ast.AST = ast.Assign(
-                    targets=node.targets,
-                    value=placeholder,
-                    type_comment=node.type_comment,
-                )
-            else:
-                normalized = ast.AnnAssign(
-                    target=node.target,
-                    annotation=node.annotation,
-                    value=placeholder,
-                    simple=node.simple,
-                )
-            signature.append(ast.dump(normalized, include_attributes=False))
-        return mapping, tuple(signature)
-
-    model_sections = [
-        section
-        for old_path, new_path, section in sections(str(unified_diff or ""))
-        if old_path == _SOURCE_ADD_MODEL_RUNNER_PATH
-        and new_path == _SOURCE_ADD_MODEL_RUNNER_PATH
-    ]
-    if len(model_sections) > 1:
-        return ["source_add_model_activation_diff_ambiguous"]
-    try:
-        existing, existing_signature = parse(existing_model_runner_source)
-    except (SyntaxError, ValueError):
-        return ["source_add_model_activation_existing_source_invalid"]
-    desired = dict(existing)
-    for category, tool_id in expected.items():
-        if category in desired and desired[category] != tool_id:
-            return ["source_add_model_activation_existing_category_conflict"]
-        desired[category] = tool_id
-    if not model_sections:
-        return [] if desired == existing else ["source_add_model_activation_missing"]
-    try:
-        with tempfile.TemporaryDirectory(
-            prefix="leadpoet-source-add-activation-check-"
-        ) as raw:
-            root = Path(raw)
-            model_runner_path = root / _SOURCE_ADD_MODEL_RUNNER_PATH
-            model_runner_path.parent.mkdir(parents=True)
-            model_runner_path.write_text(
-                existing_model_runner_source,
-                encoding="utf-8",
-            )
-            patch_path = root / "model-runner.diff"
-            patch_path.write_text(model_sections[0], encoding="utf-8")
-            _run_git_apply(
-                patch_path,
-                cwd=root,
-                timeout_seconds=5,
-                check=False,
-            )
-            observed_source = model_runner_path.read_text(encoding="utf-8")
-        observed, observed_signature = parse(observed_source)
-    except (CodeEditBuildError, OSError, SyntaxError, ValueError):
-        return ["source_add_model_activation_diff_invalid"]
-    if observed_signature != existing_signature:
-        return ["source_add_model_activation_unrelated_change"]
-    if observed != desired:
-        return ["source_add_model_activation_differs"]
-    return []
-
 
 def _credential_ready(provider: Mapping[str, Any]) -> bool:
     if str(provider.get("auth_kind") or "none").lower() == "none":
@@ -2579,7 +859,6 @@ def _credential_ready(provider: Mapping[str, Any]) -> bool:
             return True
     return False
 
-
 def _resolved_credential_ready(
     provider: Mapping[str, Any],
     resolver: Callable[[Mapping[str, Any]], bool | None] | None,
@@ -2589,7 +868,6 @@ def _resolved_credential_ready(
         if resolved is not None:
             return bool(resolved)
     return _credential_ready(provider)
-
 
 def _provider_doc_from_source_row(
     row: Mapping[str, Any],
@@ -2683,7 +961,6 @@ def _provider_doc_from_source_row(
     )
     return provider
 
-
 def _load_private_snapshot_rows_sync() -> list[Mapping[str, Any]]:
     from gateway.db.client import get_write_client
 
@@ -2697,7 +974,6 @@ def _load_private_snapshot_rows_sync() -> list[Mapping[str, Any]]:
     )
     rows = getattr(response, "data", None) or []
     return [dict(row) for row in rows]
-
 
 def _parse_private_snapshot(
     row: Mapping[str, Any],
@@ -2733,7 +1009,6 @@ def _parse_private_snapshot(
         raise ValueError("private capability snapshot hash mismatch")
     return providers, registry_hash
 
-
 def _legacy_provider_doc(
     value: Mapping[str, Any],
     *,
@@ -2751,7 +1026,6 @@ def _legacy_provider_doc(
         credential_ready_resolver,
     )
     return provider
-
 
 def load_effective_provider_capabilities_sync(
     static_provider_docs: Sequence[Mapping[str, Any]],
@@ -2865,14 +1139,12 @@ def load_effective_provider_capabilities_sync(
         warning_codes=tuple(sorted(warning_codes)),
     )
 
-
 def _route_matches(route: Mapping[str, Any], method: str, path: str) -> bool:
     if str(route.get("method") or "").upper() != method.upper():
         return False
     exact = str(route.get("path") or "")
     prefix = str(route.get("path_prefix") or "")
     return bool(exact and path == exact) or bool(prefix and path.startswith(prefix))
-
 
 def provider_request_allowed(provider: Mapping[str, Any], method: str, rest: str) -> tuple[bool, str, str]:
     normalized = normalize_candidate_route(rest)
@@ -2895,78 +1167,6 @@ def provider_request_allowed(provider: Mapping[str, Any], method: str, rest: str
     if policy.get("allow_unlisted_paths") is True and method.upper() in unlisted_methods:
         return True, "allowed_unlisted_route", path
     return False, "route_not_allowed", path
-
-
-def validate_candidate_provider_diff(
-    unified_diff: str,
-    capabilities: EffectiveProviderCapabilities,
-) -> list[str]:
-    """Static guard for provider-related additions before candidate build."""
-
-    added_lines = []
-    for line in str(unified_diff or "").splitlines():
-        if line.startswith("+++"):
-            continue
-        if line.startswith("+"):
-            added_lines.append(line)
-    added = "\n".join(added_lines)
-    errors: list[str] = []
-    if any(_NETWORK_IMPORT_RE.search(line) for line in added_lines):
-        errors.append("candidate_adds_new_network_client_import")
-    if _ENV_READ_RE.search(added) or _CREDENTIAL_NAME_RE.search(added):
-        errors.append("candidate_adds_new_credential_or_env_reference")
-    provider_by_host: dict[str, dict[str, Any]] = {}
-    for provider in capabilities.providers:
-        parsed = urllib.parse.urlsplit(str(provider.get("base_url") or ""))
-        if parsed.hostname:
-            provider_by_host[parsed.hostname.lower()] = provider
-    for match in _URL_RE.findall(added):
-        parsed = urllib.parse.urlsplit(match.rstrip(".,);]"))
-        host = (parsed.hostname or "").lower()
-        provider = provider_by_host.get(host)
-        if provider is None:
-            errors.append("candidate_adds_unknown_provider_host:" + sha256_json({"host": host})[-16:])
-            continue
-        allowed_for_any_method = any(
-            provider_request_allowed(provider, method, parsed.path or "/")[0]
-            for method in _VALID_METHODS
-        )
-        if not allowed_for_any_method:
-            errors.append("candidate_adds_disallowed_provider_path")
-    for provider in capabilities.providers:
-        policy = provider.get("capability_policy") if isinstance(provider.get("capability_policy"), Mapping) else {}
-        for route in policy.get("blocked_routes") or []:
-            if not isinstance(route, Mapping):
-                continue
-            blocked_path = str(route.get("path") or route.get("path_prefix") or "")
-            if blocked_path and blocked_path in added:
-                errors.append("candidate_adds_blocked_provider_route")
-    return sorted(set(errors))
-
-
-def summary_mentions_private_capability(
-    summary: str,
-    capabilities: EffectiveProviderCapabilities,
-) -> bool:
-    text = str(summary or "").lower()
-    markers: set[str] = set()
-    for provider in capabilities.providers:
-        parsed = urllib.parse.urlsplit(str(provider.get("base_url") or ""))
-        if parsed.hostname:
-            markers.add(parsed.hostname.lower())
-        planner = provider.get("planner_summary") if isinstance(provider.get("planner_summary"), Mapping) else {}
-        alias = str(planner.get("provider_alias") or "").strip().lower()
-        if len(alias) >= 4:
-            markers.add(alias)
-        policy = provider.get("capability_policy") if isinstance(provider.get("capability_policy"), Mapping) else {}
-        model_policy = policy.get("model_policy") if isinstance(policy.get("model_policy"), Mapping) else {}
-        markers.update(
-            model.lower()
-            for model in _string_tuple(model_policy.get("bootstrap_model_ids"), limit=100)
-            if len(model) >= 6
-        )
-    return any(marker and marker in text for marker in markers)
-
 
 class LiveTextModelCatalog:
     """Thread-safe live text-model cache with last-known-good fallback."""

@@ -15,7 +15,11 @@ def clean_scorer_environment():
     """The entrypoint binds the policy and trusted mode into the process environment; restore it afterwards."""
 
     saved = dict(os.environ)
-    for name in [shim.TRUSTED_SCORER_ENV, scoring.CACHE_DIR_ENV, *scoring.POLICY_ENV_BINDINGS, *scoring.CREDENTIAL_ENV_NAMES]:
+    for name in [
+        shim.TRUSTED_SCORER_ENV,
+        *scoring.POLICY_ENV_BINDINGS,
+        *scoring.CREDENTIAL_ENV_NAMES,
+    ]:
         os.environ.pop(name, None)
     try:
         yield

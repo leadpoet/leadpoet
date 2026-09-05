@@ -2,8 +2,9 @@ import time
 import asyncio
 import threading
 import argparse
+import subprocess
+import sys
 import traceback
-import getpass
 
 # Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
 # Complete no-op unless the LEADPOET_SENTRY_* environment gate is satisfied.
@@ -61,10 +62,8 @@ import requests
 import random
 import grpc
 from pathlib import Path
-import hashlib
 from urllib.parse import urlparse
 
-from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD as RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD
 from research_lab.source_add_miner import (
     SOURCE_ADD_AUTH_TYPES,
     SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS,
@@ -74,11 +73,6 @@ from research_lab.source_add_miner import (
     source_add_submission_ready,
 )
 from research_lab.source_add import source_add_contains_credential_material
-from leadpoet_canonical.credential_recipient_v2 import (
-    CredentialRecipientV2Error,
-    verify_and_encrypt_openrouter_credential_v2,
-    verify_openrouter_credential_release_v2,
-)
 
 
 class _SilenceInvalidRequest(logging.Filter):
@@ -1342,765 +1336,7 @@ class Miner(BaseMinerNeuron):
             bt.logging.error(traceback.format_exc())
 
 
-# =============================================================================
-# QUALIFICATION MODEL SUBMISSION
-# =============================================================================
-
-QUALIFICATION_GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://gateway.subnet71.com")
-QUALIFICATION_SUBMISSION_COST_USD = float(os.environ.get("QUALIFICATION_SUBMISSION_COST_USD", "10.0"))  # $10 submission cost
-
-# =============================================================================
-# LeadPoet Payment Wallet - COLDKEY addresses
-# =============================================================================
-# These are the coldkeys that receive qualification submission payments.
-# The gateway verifies on-chain that payments go to the correct address.
-#
-# MAINNET (netuid 71):
-#   Coldkey: 5ExoWGyajvzucCqS5GxZSpuzzXEzG1oNFcDqdW3sXeTujoD7
-#
-# TESTNET (netuid 401):
-#   Validator Hotkey: 5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz
-#   Validator Coldkey: 5Gh5kw7rV1x7FDDd5E3Uc7YYMoeQtm4gn93c7VYeL5oUyoAD
-#
-LEADPOET_COLDKEY_MAINNET = "5ExoWGyajvzucCqS5GxZSpuzzXEzG1oNFcDqdW3sXeTujoD7"
-LEADPOET_COLDKEY_TESTNET = "5Gh5kw7rV1x7FDDd5E3Uc7YYMoeQtm4gn93c7VYeL5oUyoAD"
-
-def get_leadpoet_coldkey(netuid: int) -> str:
-    """Get the correct LeadPoet coldkey based on netuid."""
-    if netuid == 71:
-        return LEADPOET_COLDKEY_MAINNET
-    elif netuid == 401:
-        return LEADPOET_COLDKEY_TESTNET
-    else:
-        # Unknown netuid - use testnet for safety
-        print(f"⚠️  Unknown netuid {netuid}, using testnet coldkey")
-        return LEADPOET_COLDKEY_TESTNET
-
-
-def get_tao_price_sync() -> float:
-    """
-    Get current TAO price from CoinGecko (sync version for CLI).
-    
-    Raises:
-        Exception: If CoinGecko API fails or is rate-limited
-    """
-    import requests
-    import time
-    
-    # Try multiple times with delays between attempts
-    # Retry schedule: 0s, wait 30s, wait 45s (total ~75s)
-    retry_delays = [0, 30, 45]
-    last_error = None
-    
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": "bittensor", "vs_currencies": "usd"},
-                timeout=15 + (attempt * 5)  # 15s, 20s, 25s
-            )
-            response.raise_for_status()
-            data = response.json()
-            price = data.get("bittensor", {}).get("usd")
-            if price:
-                return float(price)
-        except Exception as e:
-            last_error = e
-            if attempt < 2:
-                delay = retry_delays[attempt + 1]
-                print(f"   ⚠️  CoinGecko error: {e}")
-                print(f"   ⏳ Waiting {delay}s before retry {attempt + 2}/3...")
-                time.sleep(delay)
-            else:
-                print(f"❌ Could not fetch TAO price after 3 attempts: {e}")
-    
-    # No fallback - raise exception
-    raise Exception(f"CoinGecko API failed: {last_error}")
-
-
-def calculate_tao_required(usd_amount: float) -> float:
-    """
-    Calculate how much TAO is needed for a given USD amount.
-    
-    Returns:
-        float: Amount of TAO required
-        
-    Raises:
-        Exception: If TAO price cannot be fetched from CoinGecko
-    """
-    try:
-        tao_price = get_tao_price_sync()
-        tao_required = usd_amount / tao_price
-        return round(tao_required, 6)  # Round to 6 decimals (nano precision)
-    except Exception as e:
-        # Re-raise with helpful message
-        raise Exception(
-            f"\n❌ Cannot calculate TAO amount: {e}\n\n"
-            "CoinGecko is rate-limiting API requests. Please:\n"
-            "   1. Wait 60 seconds and try again\n"
-            "   2. OR check https://www.coingecko.com/en/coins/bittensor for current price\n"
-            "   3. OR try again in a few minutes\n"
-        )
-
-
-def transfer_tao(wallet, dest_coldkey: str, amount_tao: float, subtensor) -> tuple:
-    """
-    Transfer TAO to destination coldkey using direct substrate calls.
-    
-    Uses substrate-interface directly to get the actual block hash
-    and extrinsic index of the transfer (not just chain head).
-    
-    Returns:
-        tuple: (success: bool, block_hash: str or None, extrinsic_index: int or None, error: str or None)
-    """
-    print(f"\n💸 Initiating TAO transfer...")
-    print(f"   To: {dest_coldkey}")
-    print(f"   Amount: {amount_tao:.6f} TAO")
-    print("")
-    
-    # Retry logic for websocket errors (testnet can be flaky)
-    max_retries = 3
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                print(f"   Retry {attempt + 1}/{max_retries}...")
-                import time
-                time.sleep(2)  # Wait before retry
-            
-            # Use direct substrate extrinsic for better control
-            # This gives us the actual block hash containing our transfer
-            
-            # Create the transfer extrinsic
-            call = subtensor.substrate.compose_call(
-                call_module="Balances",
-                call_function="transfer_keep_alive",
-                call_params={
-                    "dest": dest_coldkey,
-                    "value": int(amount_tao * 1e9)  # Convert to rao
-                }
-            )
-            
-            # Create and sign the extrinsic
-            extrinsic = subtensor.substrate.create_signed_extrinsic(
-                call=call,
-                keypair=wallet.coldkey
-            )
-            
-            # Submit and wait for inclusion
-            print(f"   Submitting transfer...")
-            receipt = subtensor.substrate.submit_extrinsic(
-                extrinsic,
-                wait_for_inclusion=True,
-                wait_for_finalization=False
-            )
-            
-            if receipt.is_success:
-                block_hash = receipt.block_hash
-                extrinsic_index = receipt.extrinsic_idx
-                print(f"✅ Transfer successful!")
-                print(f"   Block hash: {block_hash}")
-                print(f"   Extrinsic index: {extrinsic_index}")
-                return True, block_hash, extrinsic_index, None
-            else:
-                error_msg = f"Transfer failed: {receipt.error_message}"
-                print(f"❌ {error_msg}")
-                return False, None, None, error_msg
-                
-        except Exception as e:
-            last_error = str(e)
-            # Check if it's a retryable websocket error
-            if "close frame" in last_error.lower() or "websocket" in last_error.lower() or "connection" in last_error.lower():
-                print(f"   ⚠️  Connection error: {last_error}")
-                continue  # Retry
-            else:
-                # Non-retryable error
-                print(f"❌ Transfer failed: {last_error}")
-                return False, None, None, last_error
-    
-    # All retries exhausted
-    print(f"❌ Transfer failed after {max_retries} attempts: {last_error}")
-    return False, None, None, last_error
-
-
-# =============================================================================
-# Qualification Model Submission (Direct S3 Upload - Frontrunning Protected)
-# =============================================================================
-
-def create_model_tarball(model_path: str) -> tuple:
-    """
-    Create a tarball from the model directory and compute its hash.
-    
-    Args:
-        model_path: Path to the model directory
-    
-    Returns:
-        Tuple of (tarball_path, code_hash)
-    """
-    import tarfile
-    import hashlib
-    import tempfile
-    import uuid
-    
-    # Expand user path (~) and make absolute
-    model_path = os.path.abspath(os.path.expanduser(model_path))
-    
-    if not os.path.isdir(model_path):
-        raise ValueError(f"Model path does not exist or is not a directory: {model_path}")
-    
-    # Create tarball in temp directory
-    tarball_name = f"model_{uuid.uuid4().hex[:8]}.tar.gz"
-    tarball_path = os.path.join(tempfile.gettempdir(), tarball_name)
-    
-    print(f"   Creating tarball from: {model_path}")
-    
-    # Create gzipped tarball
-    with tarfile.open(tarball_path, "w:gz") as tar:
-        tar.add(model_path, arcname="model")
-    
-    # Compute SHA256 hash
-    sha256 = hashlib.sha256()
-    with open(tarball_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            sha256.update(chunk)
-    
-    code_hash = sha256.hexdigest()
-    file_size = os.path.getsize(tarball_path)
-    
-    print(f"   ✅ Tarball created: {tarball_path}")
-    print(f"   ✅ Size: {file_size / (1024*1024):.2f} MB")
-    print(f"   ✅ Code hash: {code_hash[:16]}...")
-    
-    return tarball_path, code_hash
-
-
-def get_presigned_upload_url(wallet) -> dict:
-    """
-    Get a presigned URL from the gateway for direct S3 upload.
-    
-    Also checks rate limits - gateway will reject if limit reached.
-    This happens BEFORE payment so miner doesn't waste TAO.
-    
-    Args:
-        wallet: Bittensor wallet for signing
-    
-    Returns:
-        dict with upload_url, s3_key, expires_in_seconds, rate_limit_info
-        or dict with "error" and "rate_limit_exceeded" keys on failure
-    """
-    import requests
-    import time
-    
-    hotkey = wallet.hotkey.ss58_address
-    timestamp = int(time.time())
-    
-    # Create and sign the presign request
-    presign_data = {
-        "miner_hotkey": hotkey,
-        "timestamp": timestamp,
-    }
-    message = json.dumps(presign_data, sort_keys=True)
-    signature = wallet.hotkey.sign(message.encode()).hex()
-    presign_data["signature"] = signature
-    
-    print(f"\n📡 Getting presigned upload URL from gateway...")
-    print(f"   (This also checks your submission rate limit)")
-    
-    try:
-        response = requests.post(
-            f"{QUALIFICATION_GATEWAY_URL}/qualification/model/presign",
-            json=presign_data,
-            timeout=120
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            # Display rate limit info from response
-            daily_used = result.get('daily_submissions_used', 0)
-            daily_max = result.get('daily_submissions_max', 2)
-            credits = result.get('submission_credits', 0)
-            print(f"   📊 Submissions today: {daily_used}/{daily_max}")
-            if credits > 0:
-                print(f"   💳 Retry credits available: {credits}")
-            print(f"   ✅ Got presigned URL (expires in {result.get('expires_in_seconds')}s)")
-            return result
-            
-        elif response.status_code == 429:
-            # Rate limit exceeded - display friendly message
-            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {"detail": response.text}
-            error_msg = error_data.get('detail', 'Rate limit exceeded')
-            print(f"\n❌ RATE LIMIT EXCEEDED")
-            print(f"   {error_msg}")
-            print(f"\n   ⚠️  You cannot submit until the limit resets at midnight UTC.")
-            print(f"   💡 TIP: Wait until tomorrow or use retry credits if available.")
-            return {"error": error_msg, "rate_limit_exceeded": True}
-            
-        else:
-            error = response.json() if response.headers.get('content-type', '').startswith('application/json') else response.text
-            print(f"   ❌ Failed to get presigned URL: {response.status_code}")
-            print(f"      Error: {error}")
-            return {"error": error}
-            
-    except Exception as e:
-        print(f"   ❌ Error getting presigned URL: {e}")
-        return {"error": str(e)}
-
-
-def upload_to_s3_presigned(tarball_path: str, upload_url: str) -> bool:
-    """
-    Upload the tarball to S3 using the presigned URL.
-    Includes retry logic for transient network/SSL errors.
-    
-    Args:
-        tarball_path: Path to the local tarball file
-        upload_url: Presigned S3 URL for PUT
-    
-    Returns:
-        True on success, False on failure
-    """
-    import requests
-    import time
-    
-    file_size = os.path.getsize(tarball_path)
-    print(f"\n📤 Uploading model to S3 ({file_size / (1024*1024):.2f} MB)...")
-    
-    # Retry logic: attempt 1, wait 10s + attempt 2, wait 20s + attempt 3
-    retry_delays = [0, 10, 20]  # First attempt immediately, then 10s, then 20s
-    
-    for attempt, delay in enumerate(retry_delays, 1):
-        if delay > 0:
-            print(f"   ⏳ Waiting {delay}s before retry {attempt}/3...")
-            time.sleep(delay)
-        
-        try:
-            print(f"   🔄 Upload attempt {attempt}/3...")
-            with open(tarball_path, 'rb') as f:
-                response = requests.put(
-                    upload_url,
-                    data=f,
-                    headers={
-                        'Content-Type': 'application/gzip',
-                        'Content-Length': str(file_size)
-                    },
-                    timeout=300  # 5 minutes for large files
-                )
-            
-            if response.status_code in [200, 201, 204]:
-                print(f"   ✅ Upload successful!")
-                return True
-            else:
-                print(f"   ⚠️  Attempt {attempt}/3 failed: HTTP {response.status_code}")
-                print(f"      Response: {response.text[:200]}")
-                if attempt == len(retry_delays):
-                    print(f"   ❌ All upload attempts failed.")
-                    return False
-                    
-        except Exception as e:
-            print(f"   ⚠️  Attempt {attempt}/3 error: {e}")
-            if attempt == len(retry_delays):
-                print(f"   ❌ All upload attempts failed.")
-                return False
-    
-    return False
-
-
-def submit_qualification_model(wallet, s3_key: str, code_hash: str,
-                                block_hash: str, extrinsic_index: int,
-                                model_name: str = None) -> dict:
-    """
-    Submit a qualification model to the gateway (after S3 upload).
-    
-    NEW FLOW (Direct S3 Upload - Frontrunning Protected):
-    This is called AFTER the model has been uploaded to S3.
-    The gateway will verify the S3 object exists and hash matches.
-    
-    Args:
-        wallet: Bittensor wallet
-        s3_key: S3 object key from presign response
-        code_hash: SHA256 hash of the tarball (computed locally)
-        block_hash: Block hash containing the payment
-        extrinsic_index: Extrinsic index within the block
-        model_name: Optional human-readable name for the model
-    
-    Returns:
-        dict with model_id on success, or error on failure
-    """
-    import requests
-    
-    # Prepare submission data
-    import time
-    hotkey = wallet.hotkey.ss58_address
-    timestamp = int(time.time())
-    
-    submission_data = {
-        "miner_hotkey": hotkey,
-        "s3_key": s3_key,
-        "code_hash": code_hash,
-        "payment_block_hash": block_hash,
-        "payment_extrinsic_index": extrinsic_index,
-        "timestamp": timestamp,  # Required for signature verification
-    }
-    
-    if model_name:
-        submission_data["model_name"] = model_name
-    
-    # Sign the submission (exclude signature field)
-    message = json.dumps(submission_data, sort_keys=True)
-    signature = wallet.hotkey.sign(message.encode()).hex()
-    submission_data["signature"] = signature
-    
-    print(f"\n📤 Submitting model to gateway...")
-    print(f"   S3 Key: {s3_key}")
-    print(f"   Code Hash: {code_hash[:16]}...")
-    if model_name:
-        print(f"   Model Name: {model_name}")
-    
-    try:
-        response = requests.post(
-            f"{QUALIFICATION_GATEWAY_URL}/qualification/model/submit",
-            json=submission_data,
-            timeout=600  # 10 minutes - payment verification + block propagation + event loop contention
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            print(f"   ✅ Model submitted successfully!")
-            print(f"   Model ID: {result.get('model_id')}")
-            print(f"   Status: {result.get('status')}")
-            
-            # Display rate limit info
-            daily_remaining = result.get('daily_submissions_remaining')
-            credits_remaining = result.get('submission_credits_remaining')
-            if daily_remaining is not None or credits_remaining is not None:
-                print(f"\n   📊 Rate Limit Status:")
-                if daily_remaining is not None:
-                    print(f"      Daily submissions remaining: {daily_remaining}/2")
-                if credits_remaining is not None:
-                    print(f"      Retry credits available: {credits_remaining}")
-            
-            return result
-        else:
-            error = response.json() if response.headers.get('content-type', '').startswith('application/json') else response.text
-            print(f"   ❌ Submission failed: {response.status_code}")
-            print(f"      Error: {error}")
-            return {"error": error, "status_code": response.status_code}
-            
-    except Exception as e:
-        print(f"   ❌ Submission error: {e}")
-        return {"error": str(e)}
-
-
-def run_qualification_submission_flow(wallet, config, netuid: int):
-    """
-    Run the interactive qualification model submission flow.
-    
-    NEW FLOW (Direct S3 Upload - Frontrunning Protected):
-    1. Ask for model directory path (local folder with qualify.py)
-    2. Create tarball and compute hash locally
-    3. Get presigned S3 URL from gateway
-    4. Upload tarball to S3
-    5. Calculate required TAO
-    6. Connect to chain (AFTER user input to avoid WebSocket timeout)
-    7. Confirm and execute transfer
-    8. Submit to gateway with s3_key + code_hash
-    
-    This prevents frontrunning because:
-    - Code is uploaded to private S3 before any public disclosure
-    - Hash is computed locally and verified by gateway
-    
-    Args:
-        wallet: Bittensor wallet
-        config: Bittensor config (used to create subtensor when needed)
-        netuid: Network UID (71 for mainnet, 401 for testnet)
-    """
-    # Determine correct coldkey based on netuid
-    dest_coldkey = get_leadpoet_coldkey(netuid)
-    is_testnet = netuid == 401
-    
-    print("\n" + "="*80)
-    print(" 🏆 QUALIFICATION MODEL SUBMISSION")
-    if is_testnet:
-        print(" 🧪 TESTNET MODE (netuid 401)")
-    print("="*80)
-    print("")
-    print("Submit your lead qualification model to compete for 10% of subnet emissions!")
-    print(f"Submission cost: ${QUALIFICATION_SUBMISSION_COST_USD:.2f} USD (paid in TAO)")
-    print("")
-    
-    # Step 1: Get model directory path
-    print("📦 Step 1: Enter the path to your model directory")
-    print("   This should be a folder containing your qualify.py and any dependencies.")
-    print("   Example: ~/my-lead-qualifier/  or  /Users/you/projects/qualifier")
-    print("")
-    print("   Required file structure:")
-    print("   └── your-model/")
-    print("       ├── qualify.py      # REQUIRED: Must define `qualify(icp)` (takes ICP dict, returns one CompanyOutput dict)")
-    print("       ├── requirements.txt  # Optional: Dependencies")
-    print("       └── ...             # Any other files your model needs")
-    print("")
-    print("   The model competition is single-path company-mode: surface a")
-    print("   company from the open web that matches the ICP and has at least one")
-    print("   verifiable intent signal.  Return a CompanyOutput dict (company +")
-    print("   intent signals, NO contact / role / email / seniority fields —")
-    print("   those are fulfillment-side concerns and are scored separately).")
-    print("   Schema lives in gateway/qualification/models.py.  Extra/unknown")
-    print("   fields cause instant score-0 validation failure (gaming prevention).")
-    print("")
-    
-    model_path = input("   Model directory path: ").strip()
-    
-    if not model_path:
-        print("❌ No path provided.")
-        return False
-    
-    # Expand ~ and make absolute
-    model_path = os.path.abspath(os.path.expanduser(model_path))
-    
-    if not os.path.isdir(model_path):
-        print(f"❌ Directory does not exist: {model_path}")
-        return False
-    
-    # Check for qualify.py
-    qualify_file = os.path.join(model_path, "qualify.py")
-    if not os.path.isfile(qualify_file):
-        print(f"❌ Missing required file: qualify.py")
-        print(f"   Expected at: {qualify_file}")
-        return False
-    
-    print(f"   ✅ Found model directory: {model_path}")
-    print(f"   ✅ Found qualify.py")
-    
-    # Step 2: Create tarball and compute hash
-    print("\n📦 Step 2: Creating tarball and computing hash...")
-    
-    try:
-        tarball_path, code_hash = create_model_tarball(model_path)
-    except Exception as e:
-        print(f"❌ Failed to create tarball: {e}")
-        return False
-    
-    # Required: Get model name
-    print("\n📝 Step 3: Model name (REQUIRED)")
-    while True:
-        model_name = input("   Enter a name for your model: ").strip()
-        if model_name:
-            break
-        print("   ⚠️  Model name is required. Please enter a name.")
-    
-    # Step 4: Get presigned URL from gateway
-    print("\n📡 Step 4: Getting upload URL from gateway...")
-    
-    presign_result = get_presigned_upload_url(wallet)
-    
-    if "error" in presign_result:
-        if presign_result.get("rate_limit_exceeded"):
-            # Rate limit message already displayed by get_presigned_upload_url
-            pass
-        else:
-            print(f"❌ Failed to get upload URL: {presign_result['error']}")
-        # Clean up tarball
-        try:
-            os.remove(tarball_path)
-        except:
-            pass
-        return False
-    
-    upload_url = presign_result["upload_url"]
-    s3_key = presign_result["s3_key"]
-    
-    # Step 5: Upload to S3
-    print("\n📤 Step 5: Uploading model to S3...")
-    
-    upload_success = upload_to_s3_presigned(tarball_path, upload_url)
-    
-    # Clean up local tarball
-    try:
-        os.remove(tarball_path)
-        print(f"   ✅ Cleaned up local tarball")
-    except:
-        pass
-    
-    if not upload_success:
-        print("❌ Failed to upload model to S3.")
-        return False
-    
-    # Step 5b: Check if miner already has credit (from previous failed submission)
-    print("\n🔍 Checking submission credit status...")
-    has_existing_credit = False
-    try:
-        credit_response = requests.get(
-            f"{QUALIFICATION_GATEWAY_URL}/qualification/model/rate-limit/{wallet.hotkey.ss58_address}",
-            timeout=10
-        )
-        if credit_response.status_code == 200:
-            credit_status = credit_response.json()
-            existing_credits = credit_status.get("submission_credits", 0)
-            daily_used = credit_status.get("daily_submissions_used", 0)
-            daily_max = credit_status.get("daily_submissions_max", 2)
-            
-            print(f"   📊 Daily submissions: {daily_used}/{daily_max}")
-            print(f"   💳 Unused credits: {existing_credits}")
-            
-            if daily_used >= daily_max:
-                print(f"\n❌ Daily submission limit reached ({daily_max}/day).")
-                print(f"   Please wait until midnight UTC to submit again.")
-                if existing_credits > 0:
-                    print(f"   You have {existing_credits} credit(s) that will be available tomorrow.")
-                return False
-            
-            if existing_credits > 0:
-                has_existing_credit = True
-                print(f"   ✅ You have {existing_credits} credit(s) from a previous payment!")
-                print(f"   ⏭️  Skipping payment - will use existing credit.")
-    except Exception as e:
-        print(f"   ⚠️  Could not check credit status: {e}")
-        print(f"   Proceeding with payment flow...")
-    
-    # Initialize payment variables
-    block_hash = None
-    extrinsic_index = None
-    
-    # Step 6-9: Payment (skip if has existing credit)
-    if not has_existing_credit:
-        # Step 6: Calculate TAO required
-        print("\n💰 Step 6: Calculating payment...")
-        try:
-            tao_price = get_tao_price_sync()
-            tao_required = calculate_tao_required(QUALIFICATION_SUBMISSION_COST_USD)
-        except Exception as e:
-            print(f"\n{e}")
-            print("\n⚠️  Submission cancelled due to CoinGecko rate limiting.")
-            print("   Your model is uploaded to S3 but not yet submitted.")
-            print("   Please try again in 1-2 minutes.")
-            return False
-        
-        print(f"   Current TAO price: ${tao_price:.2f}")
-        print(f"   Submission cost: ${QUALIFICATION_SUBMISSION_COST_USD:.2f}")
-        print(f"   TAO required: {tao_required:.6f} TAO")
-        
-        # Add 1% buffer for price fluctuation
-        tao_with_buffer = round(tao_required * 1.01, 6)
-        print(f"   TAO to send (with 1% buffer): {tao_with_buffer:.6f} TAO")
-        
-        # Step 7: Confirm transfer
-        print(f"\n📝 Step 7: Confirm payment")
-        print(f"   From wallet: {wallet.name}")
-        print(f"   To: {dest_coldkey}")
-        if is_testnet:
-            print(f"   Network: TESTNET (subnet 401)")
-        else:
-            print(f"   Network: MAINNET (subnet 71)")
-        print(f"   Amount: {tao_with_buffer:.6f} TAO (~${QUALIFICATION_SUBMISSION_COST_USD:.2f})")
-        print("")
-        print(f"   Model hash: {code_hash[:16]}...")
-        print(f"   S3 location: {s3_key}")
-        if model_name:
-            print(f"   Model name: {model_name}")
-        
-        confirm = input("\n   Proceed with transfer? (Y/N): ").strip().upper()
-        
-        if confirm != "Y":
-            print("\n❌ Transfer cancelled.")
-            print("   Note: Your model is still uploaded to S3 but submission is not finalized.")
-            return False
-        
-        # Step 8: Connect to chain NOW (after all user input to avoid WebSocket timeout)
-        # Retry logic: attempt 1, wait 10s + attempt 2, wait 20s + attempt 3
-        print("\n🔗 Connecting to chain...")
-        subtensor = None
-        retry_delays = [0, 10, 20]  # First attempt immediately, then 10s, then 20s
-        
-        for attempt, delay in enumerate(retry_delays, 1):
-            if delay > 0:
-                print(f"   ⏳ Waiting {delay}s before retry {attempt}/3...")
-                import time
-                time.sleep(delay)
-            
-            try:
-                print(f"   🔄 Connection attempt {attempt}/3...")
-                subtensor = bt.Subtensor(config=config)
-                print(f"   ✅ Connected to: {subtensor.chain_endpoint}")
-                break  # Success - exit retry loop
-            except Exception as e:
-                print(f"   ⚠️  Attempt {attempt}/3 failed: {e}")
-                if attempt == len(retry_delays):
-                    print("   ❌ All connection attempts failed.")
-                    print("   Your model is uploaded but payment could not be processed.")
-                    print("   You can retry the submission later.")
-                    return False
-        
-        if subtensor is None:
-            print("   ❌ Failed to connect to chain after all retries.")
-            print("   Your model is uploaded but payment could not be processed.")
-            return False
-        
-        # Step 9: Execute transfer
-        success, block_hash, extrinsic_index, error = transfer_tao(
-            wallet=wallet,
-            dest_coldkey=dest_coldkey,
-            amount_tao=tao_with_buffer,
-            subtensor=subtensor
-        )
-        
-        if not success:
-            print(f"\n❌ Payment failed: {error}")
-            print("   Your model was NOT submitted (payment required).")
-            return False
-        
-        print("\n✅ Payment confirmed! Finalizing submission with gateway...")
-    else:
-        # Using existing credit - no payment needed
-        print("\n✅ Using existing credit! Finalizing submission with gateway...")
-    
-    # Step 10: Submit to gateway
-    
-    result = submit_qualification_model(
-        wallet=wallet,
-        s3_key=s3_key,
-        code_hash=code_hash,
-        block_hash=block_hash,
-        extrinsic_index=extrinsic_index,
-        model_name=model_name
-    )
-    
-    if "error" in result:
-        print(f"\n❌ Model submission failed: {result['error']}")
-        print("   A submission credit has been preserved for retry.")
-        return False
-    
-    print("\n" + "="*80)
-    print(" 🎉 SUBMISSION COMPLETE!")
-    print("="*80)
-    print(f"   Model ID: {result.get('model_id')}")
-    print(f"   Status: {result.get('status')}")
-    print(f"   Code Hash: {code_hash[:24]}...")
-    if model_name:
-        print(f"   Model Name: {model_name}")
-    
-    # Show rate limit status
-    daily_remaining = result.get('daily_submissions_remaining')
-    credits_remaining = result.get('submission_credits_remaining')
-    if daily_remaining is not None or credits_remaining is not None:
-        print("")
-        print("   📊 Daily Rate Limit:")
-        if daily_remaining is not None:
-            print(f"      Submissions remaining today: {daily_remaining}/2")
-        if credits_remaining is not None:
-            print(f"      Retry credits available: {credits_remaining}")
-    
-    print("")
-    print("   Your model will be evaluated by validators against 20 ICPs (up to 5 companies per ICP)")
-    print("   (one per industry, company-only).")
-    print("   Check your model status at:")
-    print(f"   {QUALIFICATION_GATEWAY_URL}/qualification/model/{result.get('model_id')}/status")
-    print("")
-    print("   If your model scores higher than the current champion by >5%,")
-    print("   you'll become the new champion and receive 10% of subnet emissions!")
-    print("="*80)
-    
-    return True
-
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://gateway.subnet71.com")
 
 DATA_DIR = "data"
 SOURCING_LOG = os.path.join(DATA_DIR, "sourcing_logs.json")
@@ -2379,32 +1615,6 @@ def _research_lab_source_add_signed_payload(wallet, payload: dict) -> dict:
     return {**sign_payload, "signature": signature}
 
 
-_RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS = (
-    "openrouter_api_key",
-    "openrouter_management_key",
-)
-
-
-def _research_lab_openrouter_key_signed_payload(wallet, payload: dict) -> dict:
-    """Sign OpenRouter key registration and its encrypted credential pair.
-
-    Deprecated plaintext fields remain excluded for schema compatibility. The
-    V2 ciphertext and one-use recipient IDs are included in the signed payload.
-    """
-
-    excluded = {"signature", *_RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS}
-    sign_payload = {
-        key: value for key, value in payload.items() if key not in excluded
-    }
-    message = json.dumps(sign_payload, sort_keys=True)
-    signature = wallet.hotkey.sign(message.encode()).hex()
-    signed = {**sign_payload, "signature": signature}
-    for field in _RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS:
-        if payload.get(field) is not None:
-            signed[field] = payload[field]
-    return signed
-
-
 def _research_lab_insecure_gateway_allowed(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -2416,7 +1626,7 @@ def _research_lab_insecure_gateway_allowed(url: str) -> bool:
 
 
 def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> dict:
-    if path.startswith("/research-lab/") and not _research_lab_insecure_gateway_allowed(QUALIFICATION_GATEWAY_URL):
+    if path.startswith("/research-lab/") and not _research_lab_insecure_gateway_allowed(GATEWAY_URL):
         return {
             "error": (
                 "Refusing to send Research Lab signed payload over insecure gateway URL. "
@@ -2425,7 +1635,7 @@ def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> d
             ),
             "status_code": 0,
         }
-    response = requests.post(f"{QUALIFICATION_GATEWAY_URL.rstrip('/')}{path}", json=payload, timeout=timeout)
+    response = requests.post(f"{GATEWAY_URL.rstrip('/')}{path}", json=payload, timeout=timeout)
     if response.status_code >= 400:
         try:
             detail = response.json()
@@ -2463,189 +1673,6 @@ def _get_research_lab_status(gateway_url: str) -> Optional[dict]:
     except Exception as exc:
         print(f"❌ Could not reach Research Lab gateway status: {exc}")
         return None
-
-
-def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tuple[str, str]]:
-    if status.get("openrouter_key_registration_enabled"):
-        raw_key = getpass.getpass("   OpenRouter API key (hidden; encrypted locally): ").strip()
-        if not raw_key:
-            print("❌ OpenRouter API key is required for paid auto-research loops.")
-            return None
-        if not raw_key.lower().startswith("sk-or-v1-"):
-            print("❌ OpenRouter API key must start with sk-or-v1-.")
-            return None
-        raw_management_key = getpass.getpass("   OpenRouter management key (hidden; encrypted locally): ").strip()
-        if not raw_management_key:
-            print("❌ OpenRouter management key is required for paid auto-research loops.")
-            return None
-        if not raw_management_key.lower().startswith("sk-or-v1-"):
-            print("❌ OpenRouter management key must start with sk-or-v1-.")
-            return None
-        import time
-        key_fingerprint = hashlib.sha256(
-            f"{raw_key}:{raw_management_key}".encode("utf-8")
-        ).hexdigest()[:24]
-        recipient_payload = _research_lab_signed_payload(
-            wallet,
-            {
-                "miner_hotkey": wallet.hotkey.ss58_address,
-                "timestamp": int(time.time()),
-                "idempotency_key": (
-                    "research-openrouter-recipient:"
-                    f"{wallet.hotkey.ss58_address}:{key_fingerprint}"
-                ),
-            },
-        )
-        recipients = _post_research_lab_json(
-            "/research-lab/openrouter-keys/credential-recipient",
-            recipient_payload,
-            timeout=120,
-        )
-        if "error" in recipients:
-            print(
-                "❌ OpenRouter credential recipient failed: "
-                f"HTTP {recipients.get('status_code')}"
-            )
-            print(f"   {recipients['error']}")
-            return None
-        try:
-            verified_coordinator_boot = verify_openrouter_credential_release_v2(
-                recipients["release_evidence"]
-            )
-            encrypted_runtime = verify_and_encrypt_openrouter_credential_v2(
-                recipients["runtime"],
-                raw_key,
-                miner_hotkey=wallet.hotkey.ss58_address,
-                credential_kind="runtime",
-                verified_coordinator_boot_identity=verified_coordinator_boot,
-            )
-            encrypted_management = verify_and_encrypt_openrouter_credential_v2(
-                recipients["management"],
-                raw_management_key,
-                miner_hotkey=wallet.hotkey.ss58_address,
-                credential_kind="management",
-                verified_coordinator_boot_identity=verified_coordinator_boot,
-            )
-        except (CredentialRecipientV2Error, KeyError, TypeError) as exc:
-            print(f"❌ OpenRouter credential recipient verification failed: {exc}")
-            return None
-        payload = _research_lab_openrouter_key_signed_payload(
-            wallet,
-            {
-                "miner_hotkey": wallet.hotkey.ss58_address,
-                "timestamp": int(time.time()),
-                "idempotency_key": (
-                    "research-openrouter-key:"
-                    f"{wallet.hotkey.ss58_address}:"
-                    f"{key_fingerprint}"
-                ),
-                "openrouter_api_key_v2": encrypted_runtime,
-                "openrouter_management_key_v2": encrypted_management,
-                "key_label": "research-lab-miner-key",
-            },
-        )
-        result = _post_research_lab_json("/research-lab/openrouter-keys", payload, timeout=120)
-        if "error" in result:
-            print(f"❌ OpenRouter key verification failed: HTTP {result.get('status_code')}")
-            print(f"   {result['error']}")
-            return None
-        print("✅ OpenRouter keys encrypted locally and verified by gateway")
-        return str(result["key_ref"]), "encrypted_ref"
-
-    print("❌ This gateway does not have encrypted OpenRouter key registration enabled.")
-    print("   Ask the operator to set RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID.")
-    return None
-
-
-def _brief_sanitized_ref_from_input(value: str) -> str:
-    value = value.strip()
-    if value.startswith("brief_sanitized:"):
-        if _looks_like_raw_research_lab_secret(value):
-            raise ValueError("brief_sanitized_ref cannot contain raw secret material")
-        return value
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"brief_sanitized:sha256:{digest}"
-
-
-def _brief_public_summary_from_input(value: str) -> Optional[str]:
-    value = value.strip()
-    if value.startswith("brief_sanitized:"):
-        return None
-    return value[:2000]
-
-
-def _research_lab_default_model_tier(default_tier: str, approved_tiers: dict) -> str:
-    if default_tier:
-        return default_tier
-    if approved_tiers:
-        return sorted(approved_tiers)[0]
-    return "default"
-
-
-def _research_lab_runtime_label(min_seconds: int, max_seconds: int) -> str:
-    if min_seconds <= 0 and max_seconds <= 0:
-        return ""
-
-    def _minutes_label(seconds: int) -> str:
-        minutes = max(1, round(seconds / 60))
-        return f"{minutes} min"
-
-    if min_seconds > 0 and max_seconds > 0 and min_seconds != max_seconds:
-        return f"{_minutes_label(min_seconds)}-{_minutes_label(max_seconds)}"
-    return _minutes_label(max(min_seconds, max_seconds))
-
-
-def _research_lab_prompt_model_tier(default_tier: str, approved_tiers: dict) -> str:
-    tiers = sorted(str(tier) for tier in approved_tiers) if approved_tiers else [default_tier or "default"]
-    if len(tiers) <= 1:
-        return tiers[0]
-    print("   Available model tiers:")
-    for index, tier in enumerate(tiers, start=1):
-        print(f"     {index}. {tier}")
-    default_choice = default_tier if default_tier in tiers else tiers[0]
-    value = input(f"   Model tier [{default_choice}]: ").strip()
-    if not value:
-        return default_choice
-    if value.isdigit():
-        selected_index = int(value)
-        if 1 <= selected_index <= len(tiers):
-            return tiers[selected_index - 1]
-    if value in tiers:
-        return value
-    print(f"❌ Unknown model tier. Using default: {default_choice}")
-    return default_choice
-
-
-def _research_lab_prompt_budget(label: str, *, default: float, minimum: float, maximum: float) -> float:
-    while True:
-        value = input(f"{label} [{default:.2f}]: ").strip()
-        if not value:
-            return float(default)
-        try:
-            parsed = float(value)
-        except ValueError:
-            print("❌ Enter a number.")
-            continue
-        if parsed < minimum or parsed > maximum:
-            print(f"❌ Budget must be between ${minimum:.2f} and ${maximum:.2f}.")
-            continue
-        return parsed
-
-
-def _research_lab_prompt_int(label: str, *, default: int, minimum: int, maximum: int) -> int:
-    while True:
-        value = input(f"{label} [{default}]: ").strip()
-        if not value:
-            return int(default)
-        try:
-            parsed = int(value)
-        except ValueError:
-            print("❌ Enter an integer.")
-            continue
-        if parsed < minimum or parsed > maximum:
-            print(f"❌ Value must be between {minimum} and {maximum}.")
-            continue
-        return parsed
 
 
 def _research_lab_prompt_required_text(label: str, *, max_length: int = 1000) -> str:
@@ -2736,472 +1763,6 @@ def _research_lab_prompt_source_add_third_party_refs() -> list[str]:
     return refs[:8]
 
 
-RESEARCH_LAB_RESEARCH_AREA_CHOICES: tuple[tuple[str, str, str], ...] = (
-    ("1", "generalist", "Broad improvements across all lead types"),
-)
-
-
-def _research_lab_prompt_research_area(default: str = "generalist") -> str:
-    labels_by_value = {
-        value: label for _number, value, label in RESEARCH_LAB_RESEARCH_AREA_CHOICES
-    }
-    values_by_number = {
-        number: value for number, value, _label in RESEARCH_LAB_RESEARCH_AREA_CHOICES
-    }
-    values_by_name = {
-        value.replace("_", "-"): value for _number, value, _label in RESEARCH_LAB_RESEARCH_AREA_CHOICES
-    }
-    values_by_name.update(
-        {value: value for _number, value, _label in RESEARCH_LAB_RESEARCH_AREA_CHOICES}
-    )
-
-    print("   Choose where this run should focus:")
-    for number, value, label in RESEARCH_LAB_RESEARCH_AREA_CHOICES:
-        default_marker = " (default)" if value == default else ""
-        print(f"     {number}. {label}{default_marker}")
-    while True:
-        choice = input(
-            f"   Research area [{labels_by_value.get(default, default)}]: "
-        ).strip().lower()
-        if not choice:
-            return default
-        if choice in values_by_number:
-            return values_by_number[choice]
-        normalized_choice = choice.replace(" ", "_")
-        if normalized_choice in values_by_name:
-            return values_by_name[normalized_choice]
-        print("   Choose a number from the list, or press Enter for the default.")
-
-
-def _research_lab_research_area_label(value: str) -> str:
-    for _number, area_value, label in RESEARCH_LAB_RESEARCH_AREA_CHOICES:
-        if area_value == value:
-            return label
-    return value.replace("_", " ")
-
-
-def _research_lab_tier_budget_cap(
-    tier: str,
-    approved_tiers: dict,
-    fallback_max_budget: float,
-) -> float:
-    tier_doc = approved_tiers.get(tier) if isinstance(approved_tiers, dict) else {}
-    try:
-        tier_cap = float(tier_doc.get("max_compute_budget_usd")) if isinstance(tier_doc, dict) else fallback_max_budget
-    except (TypeError, ValueError):
-        tier_cap = fallback_max_budget
-    return max(0.0, min(float(fallback_max_budget), tier_cap))
-
-
-def _research_lab_loop_start_fee_usd(status: dict) -> float:
-    default_fee = float(RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD)
-    try:
-        gateway_fee = float(status.get("loop_start_fee_usd"))
-    except (TypeError, ValueError):
-        gateway_fee = 0.0
-    # Honor higher gateway policy, but do not under-communicate stale/missing status.
-    return max(default_fee, gateway_fee)
-
-
-def _execute_research_lab_payment(
-    *,
-    wallet,
-    config,
-    netuid: int,
-    usd_amount: float,
-    payment_label: str,
-    confirm_transfer: bool = True,
-) -> Optional[Tuple[str, int]]:
-    """Submit a TAO payment and return the on-chain proof for gateway verification."""
-    dest_coldkey = get_leadpoet_coldkey(netuid)
-    print("")
-    print(f"{payment_label}: ${usd_amount:.2f} USD-equivalent in TAO")
-    print(f"Payment destination coldkey for netuid {netuid}: {dest_coldkey}")
-
-    try:
-        tao_price = get_tao_price_sync()
-        tao_required = calculate_tao_required(usd_amount)
-    except Exception as exc:
-        print(f"\n{exc}")
-        print("\nPayment cancelled because TAO pricing could not be fetched.")
-        return None
-
-    tao_with_buffer = round(tao_required * 1.01, 6)
-    print(f"   Current TAO price: ${tao_price:.2f}")
-    print(f"   TAO required: {tao_required:.6f}")
-    print(f"   TAO to send with 1% buffer: {tao_with_buffer:.6f}")
-
-    if confirm_transfer:
-        confirm = input("   Proceed with TAO transfer? [Y/n]: ").strip().lower()
-        if confirm in ("n", "no"):
-            print("Payment cancelled.")
-            return None
-
-    print("\nConnecting to chain...")
-    subtensor = None
-    retry_delays = [0, 10, 20]
-    for attempt, delay in enumerate(retry_delays, start=1):
-        if delay > 0:
-            import time
-
-            print(f"   Waiting {delay}s before retry {attempt}/3...")
-            time.sleep(delay)
-        try:
-            print(f"   Connection attempt {attempt}/3...")
-            subtensor = bt.Subtensor(config=config)
-            print(f"   Connected to: {subtensor.chain_endpoint}")
-            break
-        except Exception as exc:
-            print(f"   Attempt {attempt}/3 failed: {exc}")
-
-    if subtensor is None:
-        print("Could not connect to chain. Payment was not sent.")
-        return None
-
-    success, block_hash, extrinsic_index, error = transfer_tao(
-        wallet=wallet,
-        dest_coldkey=dest_coldkey,
-        amount_tao=tao_with_buffer,
-        subtensor=subtensor,
-    )
-    if not success or not block_hash or extrinsic_index is None:
-        print(f"\nPayment failed: {error or 'missing payment proof'}")
-        return None
-
-    print("\nPayment submitted. Gateway will now verify it on-chain.")
-    return str(block_hash), int(extrinsic_index)
-
-
-def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
-    """Run the miner-facing Research Lab auto-research entrypoint."""
-    gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
-    flow_id = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
-    print("\n" + "="*80)
-    print(" LEADPOET AUTO-RESEARCH LOOPS")
-    print("="*80)
-    print("")
-    print(f"Miner hotkey: {wallet.hotkey.ss58_address}")
-    print(f"Gateway: {gateway_url}")
-    print("")
-    print("Auto-research loops are the current miner research workflow.")
-    print("Miners fund hosted model-improvement loops. Leadpoet runs the private")
-    print("model, sealed benchmark, and server-side data providers.")
-    print("")
-
-    try:
-        response = requests.get(f"{gateway_url}/research-lab/status", timeout=10)
-        if response.status_code != 200:
-            print(f"❌ Research Lab status unavailable: HTTP {response.status_code}")
-            print(f"   {response.text[:300]}")
-            return
-        status = response.json()
-    except Exception as exc:
-        print(f"❌ Could not reach Research Lab gateway status: {exc}")
-        return
-
-    worker_status = status.get("hosted_worker") if isinstance(status.get("hosted_worker"), dict) else {}
-    approved_tiers = worker_status.get("approved_model_tiers") if isinstance(worker_status.get("approved_model_tiers"), dict) else {}
-    default_tier = str(worker_status.get("default_model_tier") or "default")
-    default_budget = float(worker_status.get("default_compute_budget_usd") or 5.0)
-    min_budget = float(worker_status.get("min_compute_budget_usd") or 1.0)
-    max_budget = float(worker_status.get("max_compute_budget_usd") or 100.0)
-    loop_fee = _research_lab_loop_start_fee_usd(status)
-    min_runtime_seconds = int(worker_status.get("auto_research_min_seconds") or 0)
-    max_runtime_seconds = int(worker_status.get("auto_research_max_seconds") or 0)
-    runtime_label = _research_lab_runtime_label(min_runtime_seconds, max_runtime_seconds)
-    reimbursement_status = status.get("reimbursement") if isinstance(status.get("reimbursement"), dict) else {}
-    topups_enabled = bool(status.get("loop_topups_enabled"))
-
-    print("Research Lab status:")
-    ready = bool(status.get("api_enabled") and status.get("paid_loops_enabled") and status.get("hosted_runs_enabled"))
-    print(f"  hosted auto-research: {'ready' if ready else 'not ready'}")
-    print(f"  loop-start fee: ${loop_fee:.2f} USD-equivalent in TAO")
-    print("  payment conversion: live TAO/USD + 1% transfer buffer")
-    print(f"  default compute budget: ${default_budget:.2f}")
-    if runtime_label:
-        print(f"  expected research runtime: {runtime_label}")
-    if reimbursement_status:
-        estimate = float(reimbursement_status.get("default_rebate_rate_estimate") or 0.0)
-        epochs = int(reimbursement_status.get("reimbursement_epochs") or 0)
-        included = "yes" if reimbursement_status.get("loop_start_fee_included") else "no"
-        print(f"  estimated default reimbursement: {estimate * 100:.1f}% over {epochs} epochs")
-        print(f"  loop-start fee reimbursed: {included}")
-
-    if not status.get("api_enabled"):
-        print("")
-        print("Auto-research APIs are not enabled on this gateway yet.")
-        return
-
-    if topups_enabled:
-        print("")
-        run_choice = input("❓ Start new loop or top up an existing promising loop? [new/topup] ").strip().lower() or "new"
-        if run_choice in ("topup", "top-up", "t"):
-            _run_research_lab_topup_flow(
-                wallet=wallet,
-                config=config,
-                netuid=netuid,
-                status=status,
-                default_tier=default_tier,
-                default_budget=default_budget,
-                min_budget=min_budget,
-                max_budget=max_budget,
-            )
-            return
-        if run_choice not in ("new", "n", "start"):
-            print("❌ Choose either 'new' or 'topup'.")
-            return
-
-    print("")
-    print("Research focus (optional).")
-    print("Use this to suggest a broad model-improvement area; evaluation remains benchmark-wide.")
-    print("Leave blank to let the system choose the highest-priority general improvement path.")
-    print("Examples: evidence freshness scoring; reducing overbroad matches; source-routing quality.")
-    brief_input = input("   Research focus [benchmark-wide model improvement]: ").strip()
-    if not brief_input:
-        brief_input = "default: benchmark-wide Leadpoet sourcing-model improvement"
-    try:
-        brief_sanitized_ref = _brief_sanitized_ref_from_input(brief_input)
-        brief_public_summary = _brief_public_summary_from_input(brief_input)
-    except ValueError as exc:
-        print(f"❌ {exc}")
-        return
-
-    island = "generalist"
-    requested_loop_count = 1
-    research_model_tier = _research_lab_default_model_tier(default_tier, approved_tiers)
-    tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
-    requested_compute_budget_usd = min(default_budget, tier_max_budget)
-    max_compute_budget_usd = requested_compute_budget_usd
-    print(
-        f"   Using default Research Lab settings: budget=${requested_compute_budget_usd:.2f}"
-        + (f", expected_runtime={runtime_label}" if runtime_label else "")
-    )
-
-    key_result = _register_research_lab_openrouter_key(wallet, status)
-    if key_result is None:
-        return
-    key_ref, key_handling = key_result
-
-    import time
-    ticket_payload = _research_lab_signed_payload(
-        wallet,
-        {
-            "miner_hotkey": wallet.hotkey.ss58_address,
-            "timestamp": int(time.time()),
-            "idempotency_key": f"research-ticket:{wallet.hotkey.ss58_address}:{flow_id}",
-            "island": island,
-            "brief_sanitized_ref": brief_sanitized_ref,
-            "brief_public_summary": brief_public_summary,
-            "requested_loop_count": requested_loop_count,
-            "loop_start_fee_required_usd": loop_fee,
-            "research_model_tier": research_model_tier,
-            "requested_compute_budget_usd": requested_compute_budget_usd,
-            "max_compute_budget_usd": max_compute_budget_usd,
-            "miner_openrouter_key_ref": key_ref,
-            "miner_openrouter_key_handling": key_handling,
-        },
-    )
-    ticket_result = _post_research_lab_json("/research-lab/tickets", ticket_payload)
-    if "error" in ticket_result:
-        print(f"❌ Ticket creation failed: HTTP {ticket_result.get('status_code')}")
-        print(f"   {ticket_result['error']}")
-        return
-
-    ticket_id = ticket_result["ticket_id"]
-    print("✅ Research Lab ticket opened")
-    print(f"   Ticket ID: {ticket_id}")
-    print(f"   Event seq: {ticket_result.get('event_seq')}")
-
-    if not status.get("paid_loops_enabled") or not status.get("hosted_runs_enabled"):
-        print("")
-        print("Paid hosted loop starts are not enabled on this gateway yet.")
-        print("The ticket is open, but this miner process will not submit a paid loop-start request.")
-        return
-
-    start_now = input(
-        f"❓ Pay the TAO loop-start fee of ${loop_fee:.2f} USD-equivalent and queue this run now? [Y/n]: "
-    ).strip().lower()
-    if start_now in ("n", "no"):
-        return
-
-    payment_result = _execute_research_lab_payment(
-        wallet=wallet,
-        config=config,
-        netuid=netuid,
-        usd_amount=loop_fee,
-        payment_label="Loop-start fee",
-        confirm_transfer=False,
-    )
-    if payment_result is None:
-        return
-    payment_block_hash, payment_extrinsic_index = payment_result
-
-    loop_payload = _research_lab_signed_payload(
-        wallet,
-        {
-            "miner_hotkey": wallet.hotkey.ss58_address,
-            "timestamp": int(time.time()),
-            "idempotency_key": f"research-loop-start:{ticket_id}:{payment_block_hash}:{payment_extrinsic_index}",
-            "ticket_id": ticket_id,
-            "payment_block_hash": payment_block_hash,
-            "payment_extrinsic_index": payment_extrinsic_index,
-            "miner_openrouter_key_ref": key_ref,
-            "miner_openrouter_key_handling": key_handling,
-            "miner_openrouter_preflight_status": "passed",
-            "requested_loop_count": requested_loop_count,
-            "research_model_tier": research_model_tier,
-            "requested_compute_budget_usd": requested_compute_budget_usd,
-            "max_compute_budget_usd": max_compute_budget_usd,
-        },
-    )
-    loop_result = _post_research_lab_json("/research-lab/loop-start", loop_payload, timeout=600)
-    if "error" in loop_result:
-        print(f"❌ Loop-start failed: HTTP {loop_result.get('status_code')}")
-        print(f"   {loop_result['error']}")
-        return
-
-    if loop_result.get("queued") is False:
-        print("⚠️  Research Lab loop-start was not queued")
-        print(f"   Status: {loop_result.get('status')}")
-        if loop_result.get("credit_preserved"):
-            print("   Retry credit preserved: yes")
-            print(f"   Credit ID: {loop_result.get('credit_id')}")
-        print(f"   Payment ref: {loop_result.get('payment_ref')}")
-        return
-
-    print("✅ Research Lab loop-start accepted")
-    print(f"   Run ID: {loop_result.get('run_id')}")
-    print(f"   Status: {loop_result.get('status')}")
-    print(f"   Payment ref: {loop_result.get('payment_ref')}")
-
-
-def _run_research_lab_topup_flow(
-    *,
-    wallet,
-    config,
-    netuid: int,
-    status: dict,
-    default_tier: str,
-    default_budget: float,
-    min_budget: float,
-    max_budget: float,
-) -> None:
-    import time
-
-    if not status.get("loop_topups_enabled"):
-        print("Top-ups are temporarily disabled for launch.")
-        return
-    ticket_id = input("   Existing ticket ID: ").strip()
-    continue_from_run_id = input("   Continue from run ID: ").strip()
-    research_model_tier = _research_lab_default_model_tier(default_tier, {})
-    worker_status = status.get("hosted_worker") if isinstance(status.get("hosted_worker"), dict) else {}
-    approved_tiers = worker_status.get("approved_model_tiers") if isinstance(worker_status.get("approved_model_tiers"), dict) else {}
-    tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
-    additional_compute_budget_usd = _research_lab_prompt_budget(
-        "   Additional compute budget USD",
-        default=min(default_budget, tier_max_budget),
-        minimum=min_budget,
-        maximum=tier_max_budget,
-    )
-    advanced = input("❓ Adjust advanced top-up settings? [y/N]: ").strip().lower()
-    if advanced in ("y", "yes"):
-        research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
-        tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
-        additional_compute_budget_usd = min(additional_compute_budget_usd, tier_max_budget)
-    key_result = _register_research_lab_openrouter_key(wallet, status)
-    if key_result is None:
-        return
-    key_ref, key_handling = key_result
-
-    if not ticket_id:
-        print("❌ Ticket ID is required.")
-        return
-    if not continue_from_run_id:
-        print("❌ Continue from run ID is required for top-ups.")
-        return
-    payment_result = _execute_research_lab_payment(
-        wallet=wallet,
-        config=config,
-        netuid=netuid,
-        usd_amount=additional_compute_budget_usd,
-        payment_label="Top-up payment",
-    )
-    if payment_result is None:
-        return
-    payment_block_hash, payment_extrinsic_index = payment_result
-
-    topup_payload = _research_lab_signed_payload(
-        wallet,
-        {
-            "miner_hotkey": wallet.hotkey.ss58_address,
-            "timestamp": int(time.time()),
-            "idempotency_key": f"research-loop-topup:{ticket_id}:{payment_block_hash}:{payment_extrinsic_index}",
-            "ticket_id": ticket_id,
-            "continue_from_run_id": continue_from_run_id,
-            "payment_block_hash": payment_block_hash,
-            "payment_extrinsic_index": payment_extrinsic_index,
-            "additional_compute_budget_usd": additional_compute_budget_usd,
-            "research_model_tier": research_model_tier,
-            "topup_reason": "promising_needs_topup",
-            "miner_openrouter_key_ref": key_ref,
-            "miner_openrouter_key_handling": key_handling,
-            "miner_openrouter_preflight_status": "passed",
-        },
-    )
-    topup_result = _post_research_lab_json("/research-lab/loop-topups", topup_payload, timeout=600)
-    if "error" in topup_result:
-        print(f"❌ Top-up failed: HTTP {topup_result.get('status_code')}")
-        print(f"   {topup_result['error']}")
-        return
-    if topup_result.get("queued") is False:
-        print("⚠️  Research Lab top-up was not queued")
-        print(f"   Status: {topup_result.get('status')}")
-        if topup_result.get("credit_preserved"):
-            print("   Retry credit preserved: yes")
-            print(f"   Credit ID: {topup_result.get('credit_id')}")
-        print(f"   Payment ref: {topup_result.get('payment_ref')}")
-        return
-    print("✅ Research Lab top-up accepted")
-    print(f"   New run ID: {topup_result.get('run_id')}")
-    print(f"   Status: {topup_result.get('status')}")
-    print(f"   Payment ref: {topup_result.get('payment_ref')}")
-
-
-def run_research_lab_resume_credit_blocked_flow(wallet, config, netuid: int) -> None:
-    """Resume this miner's credit-blocked (paused) auto-research loops after a top-up.
-
-    Does not re-charge a loop-start payment; the gateway re-checks the OpenRouter key
-    and re-queues funded runs (the hosted worker is the final credit gate)."""
-    import time
-
-    print("\n" + "=" * 80)
-    print(" RESEARCH LAB — RESUME CREDIT-BLOCKED LOOPS")
-    print("=" * 80)
-    print("\n  Top up your OpenRouter key first, then this resumes your paused")
-    print("  (blocked_for_credit) auto-research loops. No loop-start payment is re-charged.\n")
-
-    payload = _research_lab_signed_payload(
-        wallet,
-        {
-            "miner_hotkey": wallet.hotkey.ss58_address,
-            "timestamp": int(time.time()),
-            "idempotency_key": f"research-resume-credit:{wallet.hotkey.ss58_address}:{int(time.time())}",
-        },
-    )
-    result = _post_research_lab_json("/research-lab/resume-credit-blocked", payload, timeout=120)
-    if "error" in result:
-        print(f"❌ Resume failed: HTTP {result.get('status_code')}")
-        print(f"   {result['error']}")
-        return
-    print(
-        f"✅ Requeued {result.get('requeued', 0)} loop(s); "
-        f"{result.get('still_blocked', 0)} still credit-blocked (top up the key and retry)."
-    )
-    for item in (result.get("results") or [])[:20]:
-        extra = item.get("detail") or item.get("credit_check") or ""
-        print(f"   - {str(item.get('run_id', '?'))[:13]}: {item.get('status')}" + (f" ({extra})" if extra else ""))
-
-
 def run_research_lab_source_add_flow(
     wallet,
     config,
@@ -3217,7 +1778,7 @@ def run_research_lab_source_add_flow(
     False means nothing was confirmed as saved. None means the miner cancelled.
     """
 
-    gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
+    gateway_url = GATEWAY_URL.rstrip("/")
     print("\n" + "=" * 80)
     print(" RESEARCH LAB — SUBMIT API SOURCE")
     print("=" * 80)
@@ -3343,7 +1904,9 @@ def run_research_lab_source_add_flow(
         print(f"   Precheck: {result.get('precheck_status')}")
     for reason in (result.get("precheck_reasons") or [])[:8]:
         print(f"     - {reason}")
-    print("   Run the miner again and select option 5 to check this submission.")
+    print(
+        "   Run the miner again, select Submit SOURCE_ADD, then check your submissions."
+    )
     return True
 
 
@@ -3469,9 +2032,43 @@ def _run_research_lab_source_add_mode(config) -> int:
     return 1
 
 
+def _choose_primary_miner_mode(input_fn=input, output_fn=print) -> str:
+    """Return one of the two primary submission modes or SOURCE_ADD status."""
+
+    output_fn("")
+    output_fn("=" * 80)
+    output_fn(" LEADPOET MINER — SELECT ACTION")
+    output_fn("=" * 80)
+    output_fn("")
+    output_fn("  1. Submit SOURCE_ADD — Submit or check an API/source candidate")
+    output_fn("  2. Submit Model — Submit model source and run credentials (default)")
+    output_fn("")
+    selection = input_fn("Select action (1/2) [default: 2]: ").strip()
+    if selection != "1":
+        return "agent_competition"
+
+    output_fn("")
+    output_fn(" SOURCE_ADD")
+    output_fn("  1. Submit a new API/source candidate (default)")
+    output_fn("  2. Check my submissions, decisions, and rewards")
+    output_fn("")
+    source_add_selection = input_fn(
+        "Select SOURCE_ADD action (1/2) [default: 1]: "
+    ).strip()
+    if source_add_selection == "2":
+        return "research_lab_source_add_status"
+    return "research_lab_source_add"
+
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
+    parser.add_argument(
+        "--mode",
+        choices=("menu", "fulfillment"),
+        default="menu",
+        help="use fulfillment only for the legacy background worker",
+    )
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -3592,59 +2189,44 @@ def main():
         else:
             bt.logging.info(f"✅ Contributor terms attestation valid (hash: {TERMS_VERSION_HASH[:16]}...)")
     
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # MINER MODE SELECTION
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    print("\n" + "="*80)
-    print(" LEADPOET MINER — SELECT MODE")
-    print("="*80)
-    print("")
-    print("  1. Auto Research  — Check hosted auto-research loop availability (default)")
-    print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
-    print("  3. Resume Credit-Blocked — Resume paused auto-research loops after an OpenRouter top-up")
-    print("  4. Submit API Source — Submit a structured API/source candidate when SOURCE_ADD is live")
-    print("  5. Check API Source Submissions — View your private SOURCE_ADD decisions and rewards")
-    print("")
-    print("  You can run multiple active modes simultaneously in separate terminals.")
-    print("")
-
-    mode_input = input("❓ Select mode (1/2/3/4/5) [default: 1]: ").strip()
-    if mode_input not in ("1", "2", "3", "4", "5"):
-        mode_input = "1"
-
-    miner_mode = {
-        "1": "research_lab",
-        "2": "fulfillment",
-        "3": "research_lab_resume_credit",
-        "4": "research_lab_source_add",
-        "5": "research_lab_source_add_status",
-    }[mode_input]
+    # Fulfillment remains callable for existing operators, but it is not a
+    # primary submission action in the miner menu.
+    miner_mode = (
+        "fulfillment"
+        if args.mode == "fulfillment"
+        else _choose_primary_miner_mode()
+    )
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
-    if miner_mode == "research_lab":
+    if miner_mode == "agent_competition":
         try:
             temp_wallet = bt.Wallet(config=config)
             print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            run_research_lab_auto_research_flow(temp_wallet, config, config.netuid)
+            helper = Path(__file__).resolve().parents[1] / "scripts" / "lab_arena_miner.py"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(helper),
+                    "interactive",
+                    "--api-base-url",
+                    os.environ.get("LAB_ARENA_API_BASE_URL", GATEWAY_URL),
+                    "--wallet-name",
+                    str(config.wallet.name),
+                    "--hotkey-name",
+                    str(config.wallet.hotkey),
+                    "--wallet-path",
+                    str(config.wallet.path),
+                ],
+                check=False,
+            )
+            submitted = result.returncode == 0
         except Exception as e:
-            bt.logging.error(f"❌ Error during Research Lab mode: {e}")
+            bt.logging.error(f"❌ Error during Agent Competition mode: {e}")
             import traceback
             traceback.print_exc()
+            submitted = False
         print("\n👋 Done. Run the miner again to select another mode.")
-        raise SystemExit(0)
-
-    if miner_mode == "research_lab_resume_credit":
-        try:
-            temp_wallet = bt.Wallet(config=config)
-            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            run_research_lab_resume_credit_blocked_flow(temp_wallet, config, config.netuid)
-        except Exception as e:
-            bt.logging.error(f"❌ Error during resume-credit-blocked mode: {e}")
-            import traceback
-            traceback.print_exc()
-        print("\n👋 Done. Run the miner again to select another mode.")
-        raise SystemExit(0)
+        raise SystemExit(0 if submitted else 1)
 
     if miner_mode == "research_lab_source_add":
         raise SystemExit(_run_research_lab_source_add_mode(config))

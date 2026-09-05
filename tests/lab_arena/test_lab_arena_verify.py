@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from leadpoet_verifier.research_evaluation import compute_evaluation_aggregates
-from research_lab.eval import evaluator
+from qualification.scoring import competition as evaluator
 
 from lab_arena import contracts, scoring, verify
 from lab_arena.contracts import ArenaContractError
@@ -156,10 +156,9 @@ def test_first_n_slice_and_employee_bucket_skip_are_recomputed():
     assert verify.slice_first_n(companies, 3) == companies[:3]
     assert verify.bucket_skip(icp, companies) == ([0, 2, 4], [1, 3])
     assert verify.bucket_skip(icp, companies, max_scored_companies=2) == ([0, 2], [1])
-    assert verify.icp_company_goal({"max_companies": 500}) == 50
+    assert verify.icp_company_goal({"max_companies": 500}) == 5
     assert verify.icp_company_goal({"max_companies": 0}) == 1
-    with pytest.raises(ArenaContractError):
-        verify.icp_company_goal({})
+    assert verify.icp_company_goal({}) == 5
     with pytest.raises(ArenaContractError):
         verify.bucket_skip(icp, ["not-a-company"])
 
@@ -167,9 +166,8 @@ def test_first_n_slice_and_employee_bucket_skip_are_recomputed():
 def test_stage_score_requires_the_exact_stage_or_final_icp_count():
     assert verify.stage_score([0.1] * 10, 10) == 0.1
     assert verify.stage_score([0.1] * 20, 20) == 0.1
-    assert verify.stage_score([0.1] * 30, 30) == 0.1
-    assert verify.stage_score(list(range(30)), 30) == verify.stage_score(list(reversed(range(30))), 30)
-    for scores, denominator in (([1.0] * 9, 10), ([1.0] * 19, 20), ([1.0] * 29, 30), ([1.0] * 15, 15)):
+    assert verify.stage_score(list(range(20)), 20) == verify.stage_score(list(reversed(range(20))), 20)
+    for scores, denominator in (([1.0] * 9, 10), ([1.0] * 19, 20), ([1.0] * 15, 15), ([1.0] * 29, 30)):
         with pytest.raises(ArenaContractError):
             verify.stage_score(scores, denominator)
 
@@ -205,13 +203,14 @@ def test_ranking_finalist_cut_and_king_decisions_do_not_use_image_identity():
 
     king = _entry("king", 50.0, True)
     tie = verify.king_decision([_entry("a", 50.0)], king)
-    assert tie["outcome"] == "defended" and tie["winner_submission_id"] is None
+    assert tie["outcome"] == "no_king" and tie["winner_submission_id"] is None
     crowned = verify.king_decision([_entry("b", 60.0), _entry("a", 60.0)], king)
     assert crowned["outcome"] == "crowned" and crowned["winner_submission_id"] == "a"
     zero_wins = verify.king_decision([_entry("a", 0.0)], _entry("king", None, True))
-    assert zero_wins["outcome"] == "crowned" and zero_wins["winner_submission_id"] == "a"
+    assert zero_wins["outcome"] == "no_king" and zero_wins["winner_submission_id"] is None
     zero_tie = verify.king_decision([_entry("a", 0.0)], _entry("king", 0.0, True))
-    assert zero_tie["outcome"] == "defended" and zero_tie["winner_submission_id"] is None
+    assert zero_tie["outcome"] == "no_king" and zero_tie["winner_submission_id"] is None
+    assert verify.king_decision([_entry("a", 100.0)], None)["outcome"] == "no_king"
 
     final = verify.final_ranking([
         _entry("a", 40.0),
@@ -220,6 +219,8 @@ def test_ranking_finalist_cut_and_king_decisions_do_not_use_image_identity():
         _entry("c", 55.0),
     ])
     assert [row["submission_id"] for row in final] == ["c", "king", "a", "b"]
+    assert [row["is_baseline"] for row in final] == [False, True, False, False]
+    assert all("is_king" not in row for row in final)
 
 
 def _walk_keys(value: Any) -> set:

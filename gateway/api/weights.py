@@ -3755,7 +3755,7 @@ async def get_compact_published_weights_v2(
 
 @router.get("/v2/release-evidence/{commit_sha}")
 async def get_auditor_release_evidence_v2(commit_sha: str) -> Dict[str, Any]:
-    """Return short-lived links to one immutable six-build release channel."""
+    """Return the current local identity or an older locked release channel."""
 
     import boto3
     from botocore.config import Config
@@ -3768,6 +3768,43 @@ async def get_auditor_release_evidence_v2(commit_sha: str) -> Dict[str, Any]:
     commit = str(commit_sha or "").lower()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise HTTPException(status_code=422, detail="release commit is invalid")
+    gateway_release = _gateway_v2_release_manifest()
+    if gateway_release.get("commit_sha") == commit:
+        try:
+            from gateway.tee.release_channel_v2 import (
+                _load_json,
+                build_release_channel_v2,
+            )
+
+            validator_path = Path(
+                os.environ.get(
+                    "GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST",
+                    "/home/ec2-user/tee/validator-v2-release-manifest.json",
+                )
+            ).expanduser()
+            validator_release = _load_json(
+                validator_path,
+                "local validator release identity",
+            )
+            channel = build_release_channel_v2(
+                gateway_release_manifest=gateway_release,
+                validator_release_manifest=validator_release,
+            )
+            return {
+                "schema_version": "leadpoet.auditor_local_release_evidence.v1",
+                "commit_sha": commit,
+                "release_channel": channel,
+            }
+        except Exception as exc:
+            logger.warning(
+                "AUDITOR_V2_LOCAL_RELEASE_EVIDENCE_UNAVAILABLE commit=%s type=%s",
+                commit,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail="local V2 release identity is unavailable",
+            ) from exc
     try:
         key = release_channel_key(commit, prefix=DEFAULT_PREFIX)
         client = boto3.client(

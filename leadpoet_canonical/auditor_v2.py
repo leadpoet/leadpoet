@@ -129,7 +129,21 @@ def identity_cache_from_release_channel(channel: Mapping[str, Any]) -> Dict[str,
 def fetch_locked_release_identity_cache(
     evidence: Mapping[str, Any], *, http_open: Any = None
 ) -> Dict[str, Any]:
-    """Fetch one exact Object-Locked release and derive its identity cache."""
+    """Load current local identity or an older Object-Locked release."""
+
+    local_fields = {"schema_version", "commit_sha", "release_channel"}
+    if isinstance(evidence, Mapping) and set(evidence) == local_fields:
+        if evidence.get("schema_version") != (
+            "leadpoet.auditor_local_release_evidence.v1"
+        ):
+            raise AuditorV2Error("auditor local release evidence schema is invalid")
+        commit = str(evidence.get("commit_sha") or "").lower()
+        if not _COMMIT_RE.fullmatch(commit) or len(commit) != 40:
+            raise AuditorV2Error("auditor local release identity is invalid")
+        cache = identity_cache_from_release_channel(evidence["release_channel"])
+        if any(entry["commit_sha"] != commit for entry in cache["entries"]):
+            raise AuditorV2Error("auditor local release commit differs")
+        return cache
 
     fields = {
         "schema_version",
@@ -247,10 +261,8 @@ def _identity_for_boot(
         dependency_hash
     ):
         raise AuditorV2Error("independent build closure identity is invalid")
-    if int(entry.get("verified_build_count") or 0) < 3:
-        raise AuditorV2Error(
-            "independent PCR0 identity needs three matching builds"
-        )
+    if int(entry.get("verified_build_count") or 0) < 1:
+        raise AuditorV2Error("PCR0 identity needs one completed local build")
     if pcr0 != str(boot.get("pcr0") or "").lower():
         raise AuditorV2Error("boot PCR0 differs from independent build")
     if manifest_hash != str(boot.get("build_manifest_hash") or "").lower():

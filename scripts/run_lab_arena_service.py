@@ -10,21 +10,30 @@ and epoch cutover load only when a published live round needs activation.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
+import shlex
 import sys
 import threading
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lab_arena.driver import drive_once  # noqa: E402
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Leadpoet Lab Arena service")
+    parser.add_argument(
+        "--environment-file",
+        type=Path,
+        help="load only LAB_ARENA_* values from the protected gateway env cache",
+    )
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8791)
+    parser.add_argument("--port", type=int, default=8792)
     parser.add_argument("--tick-seconds", type=int, default=60)
     parser.add_argument("--check-only", action="store_true", help="run startup checks and exit")
     mode = parser.add_mutually_exclusive_group()
@@ -33,58 +42,73 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def drive_once(service) -> str:
-    """One driver tick: advance every active round, then open the next daily round.
+def load_scoped_environment(path: Path) -> None:
+    """Load only Arena-owned values without restoring gateway provider aliases."""
 
-    Rounds overlap: the day's round runs its benchmark while the next round is
-    open for submissions, so a tick advances each round that is not published
-    or cancelled, oldest first. Every failure, including one while listing the
-    rounds, is contained and reported by exception type only (never a secret
-    or a payload): the next tick retries, and the driver thread never dies
-    while the process serves.
-    """
+    from gateway.tee.prepare_gateway_envelopes_v2 import (
+        GatewayEnvelopePreparationV2Error,
+    )
 
-    outcome = _advance_active(service)
-    parts = [] if outcome == "idle" else [outcome]
     try:
-        rewards = service.activate_pending_rewards()
-    except Exception as exc:
-        parts.append("failed activate_rewards: %s" % type(exc).__name__)
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway source environment is unavailable"
+        ) from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if parsed is not None:
+        if not isinstance(parsed, dict):
+            raise GatewayEnvelopePreparationV2Error(
+                "gateway source environment JSON must be an object"
+            )
+        scoped = {
+            str(name): str(value)
+            for name, value in parsed.items()
+            if str(name).startswith("LAB_ARENA_")
+        }
     else:
-        activated = int(rewards.get("activated") or 0)
-        if activated:
-            parts.append("activated rewards %d" % activated)
-    return "; ".join(parts) if parts else "idle"
-
-
-def _advance_active(service) -> str:
-    try:
-        active = list(service.active_rounds())
-    except Exception as exc:
-        return "failed active_rounds: %s" % type(exc).__name__
-    outcomes = []
-    for row in active:
-        try:
-            service.advance_round(row["round_id"])
-        except Exception as exc:
-            outcomes.append("failed advance_round %s: %s" % (row["round_id"], type(exc).__name__))
-        else:
-            outcomes.append("advanced %s" % row["round_id"])
-    if not any(row.get("status") == "open" for row in active):
-        # No round is open for submissions: create the next daily round if the
-        # service is configured to, otherwise wait for the operator.
-        try:
-            ensured = service.ensure_daily_round()
-        except Exception as exc:
-            outcomes.append("failed ensure_daily_round: %s" % type(exc).__name__)
-        else:
-            if ensured.get("status") == "created":
-                outcomes.append("created %s" % ensured.get("round_id"))
-    return "; ".join(outcomes) if outcomes else "idle"
+        scoped = {}
+        for raw_line in raw.replace("\x00", "\n").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            name, separator, raw_value = line.partition("=")
+            name = name.strip()
+            if not separator or not name.startswith("LAB_ARENA_"):
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment key is malformed"
+                )
+            try:
+                parts = shlex.split("VALUE=" + raw_value, comments=True, posix=True)
+            except ValueError as exc:
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment value is malformed"
+                ) from exc
+            if len(parts) != 1 or not parts[0].startswith("VALUE="):
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment value is malformed"
+                )
+            value = parts[0].split("=", 1)[1]
+            if name in scoped and scoped[name] != value:
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment key is duplicated"
+                )
+            scoped[name] = value
+    for name, value in scoped.items():
+        os.environ.setdefault(name, value)
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.environment_file is not None:
+        load_scoped_environment(args.environment_file)
     mode = os.environ.get("LAB_ARENA_MODE", "off").strip().lower()
     if mode == "off":
         print("LAB_ARENA_MODE=off: nothing starts and nothing is served")
@@ -96,14 +120,20 @@ def main(argv=None) -> int:
     print("lab arena service identity", {k: v for k, v in checks.items() if k != "database_identity"}, "role", checks["database_identity"].get("current_user"))
     if args.check_only:
         return 0
+    if not args.no_driver:
+        initial = drive_once(service)
+        if "failed" in initial:
+            print("initial driver tick", initial, file=sys.stderr)
+        elif initial != "idle":
+            print("initial driver tick", initial)
+
     stop = threading.Event()
 
     def driver() -> None:
-        while not stop.is_set():
+        while not stop.wait(max(5, int(args.tick_seconds))):
             outcome = drive_once(service)
             if "failed" in outcome:
                 print("driver tick", outcome, file=sys.stderr)
-            stop.wait(max(5, int(args.tick_seconds)))
 
     # The driver is one process's job: several API replicas run with
     # --no-driver and exactly one scheduler process runs with --driver-only.
@@ -113,12 +143,20 @@ def main(argv=None) -> int:
         except KeyboardInterrupt:
             stop.set()
         return 0
+    driver_thread = None
     if not args.no_driver:
-        threading.Thread(target=driver, name="lab-arena-driver", daemon=True).start()
+        driver_thread = threading.Thread(
+            target=driver, name="lab-arena-driver", daemon=True
+        )
+        driver_thread.start()
     import uvicorn
 
-    uvicorn.run(app, host=args.host, port=int(args.port), log_level="info")
-    stop.set()
+    try:
+        uvicorn.run(app, host=args.host, port=int(args.port), log_level="info")
+    finally:
+        stop.set()
+        if driver_thread is not None:
+            driver_thread.join(timeout=5)
     return 0
 
 

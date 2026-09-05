@@ -205,6 +205,11 @@ _FORCED_KEYS = {
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "GATEWAY_TEE_TOPOLOGY_MODE",
     "LANGFUSE_ENABLED",
+    "LAB_ARENA_MODE",
+    "LAB_ARENA_SUPABASE_URL",
+    "LAB_ARENA_SUPABASE_ANON_KEY",
+    "LAB_ARENA_SERVICE_JWT",
+    "LAB_ARENA_BUCKET",
     "LEADPOET_PARITY_CANDIDATE_SHA",
     "LEADPOET_PRODUCTION_PARITY_MODE",
     "LEADPOET_PRODUCTION_PARITY_RUN_ID",
@@ -429,6 +434,14 @@ def build_gateway_environment(
         "GATEWAY_STATEFUL_CUTOVER_CEREMONY": "0",
         "GATEWAY_TEE_TOPOLOGY_MODE": "full",
         "LANGFUSE_ENABLED": "false",
+        # The restarted gateway must not inherit a production Arena process.
+        # The full-parity runner starts one isolated shadow service explicitly
+        # after the exact-candidate gateway is ready.
+        "LAB_ARENA_MODE": "off",
+        "LAB_ARENA_SUPABASE_URL": supabase_origin.rstrip("/"),
+        "LAB_ARENA_SUPABASE_ANON_KEY": _jwt(jwt_secret, "anon"),
+        "LAB_ARENA_SERVICE_JWT": _jwt(jwt_secret, "lab_arena_service"),
+        "LAB_ARENA_BUCKET": artifact_bucket,
         "LEADPOET_PARITY_CANDIDATE_SHA": candidate_sha,
         **boundary_environment,
         "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET": artifact_bucket,

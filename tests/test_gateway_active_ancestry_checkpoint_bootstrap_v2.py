@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -19,6 +20,92 @@ HASH_C = "sha256:" + "c" * 64
 LINEAGE = "sha256:" + "d" * 64
 COMMIT = "1" * 40
 PCR0 = "2" * 96
+
+
+def test_load_release_manifest_accepts_exact_historical_running_gateway(
+    tmp_path,
+):
+    from tests.test_release_channel_v2 import _historical_gateway_manifest
+
+    manifest = _historical_gateway_manifest(COMMIT)
+    path = tmp_path / "running-release.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert bootstrap._load_release_manifest(path) == manifest
+
+
+def test_load_release_manifest_rejects_incomplete_historical_running_gateway(
+    tmp_path,
+):
+    from tests.test_release_channel_v2 import _historical_gateway_manifest
+
+    manifest = _historical_gateway_manifest(COMMIT)
+    manifest["roles"].pop("gateway_autoresearch")
+    path = tmp_path / "running-release.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="release manifest roles are incomplete"):
+        bootstrap._load_release_manifest(path)
+
+
+@pytest.mark.asyncio
+async def test_whole_bootstrap_accepts_running_historical_gateway(
+    monkeypatch,
+):
+    from tests.test_release_channel_v2 import _historical_gateway_manifest
+
+    manifest = _historical_gateway_manifest(COMMIT)
+    coordinator = manifest["roles"]["gateway_coordinator"]
+
+    class HistoricalClient(_Client):
+        async def v2_get_boot_identity(self):
+            return {
+                "boot_identity_hash": HASH_A,
+                "commit_sha": coordinator["commit_sha"],
+                "pcr0": coordinator["pcr0"],
+                "build_manifest_hash": coordinator["execution_manifest_hash"],
+                "dependency_lock_hash": coordinator["dependency_lock_hash"],
+                "build_identity_hash": coordinator["build_identity_hash"],
+                "physical_role": "gateway_coordinator",
+            }
+
+    async def awaiting_first_allocation(**_kwargs):
+        return {"status": "awaiting_first_allocation"}
+
+    async def resolve_epoch(_value):
+        return 24000
+
+    async def load_empty(**_kwargs):
+        return []
+
+    verified_releases = []
+
+    def verifier_builder(releases):
+        verified_releases.append(deepcopy(releases))
+        return lambda identity: dict(identity)
+
+    monkeypatch.setattr(bootstrap, "_lineage_id", lambda: LINEAGE)
+    boot_verifier = bootstrap._LazyApprovedReleaseBootVerifier(
+        current_release=manifest,
+        verifier_builder=verifier_builder,
+    )
+    result = await bootstrap.bootstrap_active_ancestry_checkpoints_v2(
+        netuid=71,
+        release_manifest=manifest,
+        client=HistoricalClient(),
+        boot_verifier=boot_verifier,
+        resolve_epoch=resolve_epoch,
+        load_allocation_graphs=load_empty,
+        load_sourcing_graphs=load_empty,
+        load_proofs=lambda *_args, **_kwargs: {},
+        load_checkpointed_graphs=lambda *_args, **_kwargs: {},
+        persist_checkpoint=lambda *_args, **_kwargs: None,
+        ensure_allocation_frontier=awaiting_first_allocation,
+    )
+
+    assert result["status"] == "complete"
+    assert result["active_root_count"] == 0
+    assert verified_releases == [{COMMIT: manifest}]
 
 
 def _proof(root: str, suffix: str) -> dict:
@@ -194,11 +281,11 @@ class _Harness:
 @pytest.fixture
 def orchestration(monkeypatch):
     monkeypatch.setattr(
-        bootstrap, "validate_release_manifest", lambda value: dict(value)
+        bootstrap, "validate_prior_release_manifest", lambda value: dict(value)
     )
     monkeypatch.setattr(
         bootstrap,
-        "role_expectation",
+        "prior_role_expectation",
         lambda _release, _role: {
             "commit_sha": COMMIT,
             "pcr0": PCR0,
@@ -731,7 +818,7 @@ async def test_missing_exact_proof_readback_fails_closed(orchestration):
 
 def test_lazy_verifier_loads_historic_and_current_validator_release(monkeypatch):
     monkeypatch.setattr(
-        bootstrap, "validate_release_manifest", lambda value: dict(value)
+        bootstrap, "validate_prior_release_manifest", lambda value: dict(value)
     )
     loaded = []
 

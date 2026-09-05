@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -25,8 +26,6 @@ from gateway.tee.source_add_runtime_v2 import (
 from gateway.tee.coordinator_executor_v2 import (
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
     OP_CLASSIFY_LEGACY_ALLOCATION_V2,
-    OP_PROMOTION_GATE_DECISION,
-    OP_PROMOTION_IMPROVEMENT,
     OP_RESEARCH_LAB_ALLOCATION,
 )
 from gateway.tee.coordinator_chain_realized_settlement_v1 import (
@@ -34,11 +33,6 @@ from gateway.tee.coordinator_chain_realized_settlement_v1 import (
     CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
     OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
     OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
-)
-from gateway.tee.scoring_executor import (
-    OP_BUILD_BASELINE_SCORE_SUMMARY,
-    OP_BUILD_SCORE_BUNDLE,
-    OP_QUALIFICATION_COMPANY_SCORES,
 )
 from gateway.tee.scoring_executor_v2 import (
     OP_PROVIDER_PREFLIGHT_V2,
@@ -68,9 +62,6 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_receipt_graph,
     validate_receipt_graphs,
-)
-from research_lab.sourcing_model_contract_check import (
-    QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS,
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MEASURED_OPERATION_LOGGER = logging.getLogger(
@@ -173,6 +164,8 @@ _PURPOSE_V2 = {
     "research_lab.rebenchmark.v1": "research_lab.rebenchmark.v2",
     "research_lab.confirmation_score.v1": "research_lab.confirmation_score.v2",
 }
+
+_CHAIN_SETTLEMENT_RETRY_COOLDOWN_SECONDS = 300.0
 
 
 class ResearchLabV2AuthorityError(RuntimeError):
@@ -1404,269 +1397,6 @@ def _current_allocation_frontier_outcome_v2(
     }
 
 
-async def execute_company_scores_v2(
-    *,
-    epoch_id: int,
-    sequence: int = 0,
-    purpose: str,
-    companies: Sequence[Mapping[str, Any]],
-    icp: Mapping[str, Any],
-    is_reference_model: bool,
-    scoring_adapter_version: str,
-    provider_credential_profile: str = "default",
-    attestation_out: dict[str, Any] | None = None,
-    execute: Any = execute_scoring_v2,
-) -> list[dict[str, Any]]:
-    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
-        raise ResearchLabV2AuthorityError(
-            "V2 company score sequence must be a non-negative integer"
-        )
-    if (
-        not isinstance(scoring_adapter_version, str)
-        or scoring_adapter_version
-        not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
-    ):
-        raise ResearchLabV2AuthorityError(
-            "V2 company scoring adapter version is unsupported"
-        )
-    outcome = await execute(
-        operation=OP_QUALIFICATION_COMPANY_SCORES,
-        purpose="research_lab.company_score.v2",
-        epoch_id=int(epoch_id),
-        sequence=sequence,
-        payload={
-            "companies": [dict(item) for item in companies],
-            "icp": dict(icp),
-            "is_reference_model": bool(is_reference_model),
-            "scoring_adapter_version": scoring_adapter_version,
-            "provider_execution_mode": "live_enclave",
-            "scoring_context_purpose": _v2_purpose(purpose),
-        },
-        worker_index=_worker_index(),
-        provider_credential_profile=provider_credential_profile,
-    )
-    result = outcome.get("result")
-    if not isinstance(result, Mapping):
-        raise ResearchLabV2AuthorityError("V2 company score result is missing")
-    breakdowns = result.get("breakdowns")
-    scores = result.get("scores")
-    if not isinstance(breakdowns, list) or not isinstance(scores, list):
-        raise ResearchLabV2AuthorityError("V2 company score result is invalid")
-    normalized = []
-    for item in breakdowns:
-        if not isinstance(item, Mapping):
-            raise ResearchLabV2AuthorityError("V2 company score breakdown is invalid")
-        normalized.append(dict(item))
-    _assert_equal(
-        scores,
-        [float(item.get("final_score", 0.0) or 0.0) for item in normalized],
-        "company score projection",
-    )
-    if attestation_out is not None:
-        attestation_out.clear()
-        attestation_out.update(outcome)
-    return normalized
-
-
-async def compare_score_bundle_v2(
-    *,
-    epoch_id: int,
-    purpose: str,
-    build_payload: Mapping[str, Any],
-    expected_score_bundle: Mapping[str, Any],
-    parent_receipt_hashes: Sequence[str],
-    execute: Any = execute_scoring_v2,
-    load_graph: Any = None,
-    persist_links: Any = None,
-) -> dict[str, Any]:
-    bundle_hash = str(expected_score_bundle.get("score_bundle_hash") or "").lower()
-    if not _HASH_RE.fullmatch(bundle_hash):
-        raise ResearchLabV2AuthorityError("score bundle hash is invalid")
-    graphs = await _graphs_for_roots(parent_receipt_hashes, load_graph=load_graph)
-    outcome = await execute(
-        operation=OP_BUILD_SCORE_BUNDLE,
-        purpose=_v2_purpose(purpose),
-        epoch_id=int(epoch_id),
-        sequence=0,
-        payload=dict(build_payload),
-        worker_index=_worker_index(),
-        parent_graphs=graphs,
-        input_artifact_hashes=(bundle_hash,),
-    )
-    actual = (outcome.get("result") or {}).get("score_bundle")
-    _assert_equal(actual, dict(expected_score_bundle), "score bundle")
-    link = await _persist_business_links(
-        outcome,
-        (
-            {
-                "artifact_kind": "score_bundle",
-                "artifact_ref": "score_bundle:" + bundle_hash.split(":", 1)[1],
-                "artifact_hash": bundle_hash,
-            },
-        ),
-        persist_links=persist_links,
-    )
-    return {**dict(outcome), "status": "matched", "artifact_link_status": link}
-
-
-async def compare_baseline_summary_v2(
-    *,
-    epoch_id: int,
-    build_payload: Mapping[str, Any],
-    expected_result: Mapping[str, Any],
-    parent_receipt_hashes: Sequence[str],
-    execute: Any = execute_scoring_v2,
-    load_graph: Any = None,
-    persist_links: Any = None,
-) -> dict[str, Any]:
-    from leadpoet_canonical.attested_v2 import sha256_json
-    from research_lab.eval.baseline_summary import (
-        baseline_score_summary_artifact_ref,
-    )
-
-    summary = expected_result.get("score_summary_doc")
-    if not isinstance(summary, Mapping):
-        raise ResearchLabV2AuthorityError("baseline score summary is missing")
-    summary_hash = sha256_json(dict(summary))
-    graphs = await _graphs_for_roots(parent_receipt_hashes, load_graph=load_graph)
-    outcome = await execute(
-        operation=OP_BUILD_BASELINE_SCORE_SUMMARY,
-        purpose="research_lab.rebenchmark.v2",
-        epoch_id=int(epoch_id),
-        sequence=0,
-        payload=dict(build_payload),
-        worker_index=_worker_index(),
-        parent_graphs=graphs,
-        input_artifact_hashes=(summary_hash,),
-    )
-    _assert_equal(outcome.get("result"), dict(expected_result), "baseline summary")
-    artifact_ref = baseline_score_summary_artifact_ref(
-        benchmark_date=str(build_payload.get("benchmark_date") or ""),
-        benchmark_attempt=int(build_payload.get("benchmark_attempt") or 0),
-        rolling_window_hash=str(build_payload.get("rolling_window_hash") or ""),
-    )
-    link = await _persist_business_links(
-        outcome,
-        (
-            {
-                "artifact_kind": "benchmark_score_summary",
-                "artifact_ref": artifact_ref,
-                "artifact_hash": summary_hash,
-            },
-        ),
-        persist_links=persist_links,
-    )
-    return {
-        **dict(outcome),
-        "status": "matched",
-        "score_summary_hash": summary_hash,
-        "artifact_ref": artifact_ref,
-        "artifact_link_status": link,
-    }
-
-
-async def compare_promotion_metric_v2(
-    *,
-    epoch_id: int,
-    score_bundle: Mapping[str, Any],
-    expected_improvement_points: float,
-    expected_event_doc: Mapping[str, Any],
-    parent_receipt_hashes: Sequence[str] = (),
-    execute: Any = execute_coordinator_v2,
-    load_graph: Any = None,
-    persist_links: Any = None,
-) -> dict[str, Any]:
-    bundle_hash = str(score_bundle.get("score_bundle_hash") or "").lower()
-    if not _HASH_RE.fullmatch(bundle_hash):
-        raise ResearchLabV2AuthorityError("promotion score bundle hash is invalid")
-    bundle_id = "score_bundle:" + bundle_hash.split(":", 1)[1]
-    roots = list(parent_receipt_hashes)
-    if not roots:
-        from gateway.research_lab.attested_v2_store import (
-            load_business_artifact_graph_v2,
-        )
-
-        graph = await load_business_artifact_graph_v2(
-            artifact_kind="score_bundle",
-            artifact_ref=bundle_id,
-            artifact_hash=bundle_hash,
-        )
-        graphs = [graph]
-    else:
-        graphs = await _graphs_for_roots(roots, load_graph=load_graph)
-    outcome = await execute(
-        operation=OP_PROMOTION_IMPROVEMENT,
-        purpose="research_lab.ranking.v2",
-        epoch_id=int(epoch_id),
-        sequence=0,
-        payload={"score_bundle": dict(score_bundle)},
-        parent_graphs=graphs,
-        input_artifact_hashes=(bundle_hash,),
-    )
-    expected = {
-        "improvement_points": float(expected_improvement_points),
-        "event_doc": dict(expected_event_doc),
-    }
-    _assert_equal(outcome.get("result"), expected, "promotion metric")
-    link = await _persist_business_links(
-        outcome,
-        (
-            {
-                "artifact_kind": "promotion_metric",
-                "artifact_ref": bundle_id,
-                "artifact_hash": bundle_hash,
-            },
-        ),
-        persist_links=persist_links,
-    )
-    return {**dict(outcome), "status": "matched", "artifact_link_status": link}
-
-
-async def compare_promotion_decision_v2(
-    *,
-    epoch_id: int,
-    score_bundle: Mapping[str, Any],
-    decision_payload: Mapping[str, Any],
-    expected_decision: Mapping[str, Any],
-    metric_outcome: Mapping[str, Any],
-    execute: Any = execute_coordinator_v2,
-    persist_links: Any = None,
-) -> dict[str, Any]:
-    metric_graph = metric_outcome.get("receipt_graph")
-    if not isinstance(metric_graph, Mapping):
-        raise ResearchLabV2AuthorityError("promotion metric V2 graph is missing")
-    validate_receipt_graph(metric_graph, required_purposes=("research_lab.ranking.v2",))
-    bundle_hash = str(score_bundle.get("score_bundle_hash") or "").lower()
-    if not _HASH_RE.fullmatch(bundle_hash):
-        raise ResearchLabV2AuthorityError("promotion score bundle hash is invalid")
-    outcome = await execute(
-        operation=OP_PROMOTION_GATE_DECISION,
-        purpose="research_lab.promotion_decision.v2",
-        epoch_id=int(epoch_id),
-        sequence=0,
-        payload={"score_bundle": dict(score_bundle), **dict(decision_payload)},
-        parent_graphs=(metric_graph,),
-        input_artifact_hashes=(bundle_hash,),
-    )
-    _assert_equal(
-        (outcome.get("result") or {}).get("decision"),
-        dict(expected_decision),
-        "promotion decision",
-    )
-    link = await _persist_business_links(
-        outcome,
-        (
-            {
-                "artifact_kind": "promotion_decision",
-                "artifact_ref": "score_bundle:" + bundle_hash.split(":", 1)[1],
-                "artifact_hash": bundle_hash,
-            },
-        ),
-        persist_links=persist_links,
-    )
-    return {**dict(outcome), "status": "matched", "artifact_link_status": link}
-
-
 async def build_allocation_v2(
     *,
     epoch_id: int,
@@ -1931,7 +1661,7 @@ async def _resolve_chain_settlement_attempt_v1(
 ) -> int:
     rows = await load_attempt_history(
         "research_lab_attested_execution_receipts_v2",
-        columns="purpose,sequence",
+        columns="purpose,sequence,receipt_status,issued_at",
         filters=(
             ("role", "gateway_coordinator"),
             ("epoch_id", int(epoch_id)),
@@ -1949,7 +1679,8 @@ async def _resolve_chain_settlement_attempt_v1(
     )
     if not rows:
         return int(requested_attempt)
-    durable_sequence = rows[0].get("sequence")
+    latest = rows[0]
+    durable_sequence = latest.get("sequence")
     if (
         isinstance(durable_sequence, bool)
         or not isinstance(durable_sequence, int)
@@ -1958,6 +1689,30 @@ async def _resolve_chain_settlement_attempt_v1(
         raise ResearchLabV2AuthorityError(
             "chain-realized settlement attempt history is invalid"
         )
+    receipt_status = latest.get("receipt_status")
+    if receipt_status not in {"failed", "succeeded"}:
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement attempt history is invalid"
+        )
+    if receipt_status == "failed":
+        raw_issued_at = latest.get("issued_at")
+        try:
+            issued_at = datetime.fromisoformat(
+                str(raw_issued_at).replace("Z", "+00:00")
+            )
+            if issued_at.tzinfo is None:
+                issued_at = issued_at.replace(tzinfo=timezone.utc)
+            age_seconds = (
+                datetime.now(timezone.utc) - issued_at.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError):
+            raise ResearchLabV2AuthorityError(
+                "chain-realized settlement attempt history is invalid"
+            ) from None
+        if age_seconds < _CHAIN_SETTLEMENT_RETRY_COOLDOWN_SECONDS:
+            raise ResearchLabV2AuthorityError(
+                "chain-realized settlement retry is cooling down"
+            )
     return max(int(requested_attempt), (durable_sequence // 2) + 1)
 
 

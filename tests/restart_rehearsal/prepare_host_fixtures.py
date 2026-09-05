@@ -13,12 +13,6 @@ import shutil
 import subprocess
 import tarfile
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-from gateway.tee.acceptance_corpus_v2 import (
-    REQUIRED_PROMOTION_BRANCHES,
-    build_acceptance_corpus_v2,
-)
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 
 
@@ -26,33 +20,6 @@ def _hash(label: str) -> str:
     return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
 
 
-def _fixture(
-    root: Path,
-    *,
-    kind: str,
-    index: int,
-    metadata: dict | None = None,
-) -> dict:
-    relative = Path(kind) / f"{index:04d}.json"
-    path = root / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"index": index, "kind": kind, "sanitized": True},
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode() + b"\n"
-    path.write_bytes(payload)
-    path.chmod(0o600)
-    return {
-        "kind": kind,
-        "fixture_id": f"{kind}:{index:04d}",
-        "captured_at": f"2026-06-{1 + index % 30:02d}T00:00:00Z",
-        "artifact_path": relative.as_posix(),
-        "artifact_hash": sha256_bytes(payload),
-        "expected_output_hash": _hash(f"output:{kind}:{index}"),
-        "receipt_root": _hash(f"receipt:{kind}:{index}"),
-        "metadata": dict(metadata or {}),
-    }
 
 
 def _extract_candidate(*, source_repo: Path, commit: str, destination: Path) -> None:
@@ -174,10 +141,6 @@ def _materialize_validator_app(
         ("gateway/tasks/__init__.py", "gateway/tasks/__init__.py"),
         ("gateway/tasks/icp_generator.py", "gateway/tasks/icp_generator.py"),
         ("qualification/__init__.py", "qualification/__init__.py"),
-        ("scripts/run_research_lab_hosted_worker.py", "scripts/run_research_lab_hosted_worker.py"),
-        ("scripts/run_research_lab_hosted_worker_fleet.py", "scripts/run_research_lab_hosted_worker_fleet.py"),
-        ("scripts/run_research_lab_scoring_worker.py", "scripts/run_research_lab_scoring_worker.py"),
-        ("scripts/run_research_lab_scoring_worker_fleet.py", "scripts/run_research_lab_scoring_worker_fleet.py"),
         ("neurons/validator.py", "neurons/validator.py"),
         ("validator_models/automated_checks.py", "validator_models/automated_checks.py"),
     )
@@ -285,12 +248,19 @@ def _release_build_input(*, commit: str, destination: Path) -> dict:
     dockerfile_hash = sha256_bytes(
         (gateway_root / "tee/Dockerfile.enclave").read_bytes()
     )
+    topology = json.loads(
+        (gateway_root / "tee/topology.json").read_text(encoding="utf-8")
+    )
+    topology_roles = topology.get("roles")
+    if not isinstance(topology_roles, dict) or not topology_roles:
+        raise RuntimeError("release fixture topology roles are invalid")
+    identity_names = {
+        path.stem for path in generated_identities.glob("*.json")
+    }
+    if identity_names != set(topology_roles):
+        raise RuntimeError("release fixture role identities are incomplete")
     roles = {}
-    for role in (
-        "gateway_autoresearch",
-        "gateway_coordinator",
-        "gateway_scoring",
-    ):
+    for role in sorted(topology_roles):
         identity = json.loads(
             (
                 gateway_root
@@ -298,16 +268,26 @@ def _release_build_input(*, commit: str, destination: Path) -> dict:
                 / f"{role}.json"
             ).read_text(encoding="utf-8")
         )
+        historical_role = role == "gateway_autoresearch"
         roles[role] = {
             "build_identity_hash": identity["identity_hash"],
             "commit_sha": commit,
             "dependency_lock_hash": identity["dependency_lock_hash"],
             "dockerfile_hash": dockerfile_hash,
-            "eif_hash": eif_hash(commit, role),
+            "eif_hash": (
+                _hash(f"historical-eif:{commit}:{role}")
+                if historical_role
+                else eif_hash(commit, role)
+            ),
             "execution_manifest_hash": identity["execution_manifest_hash"],
-            "normalized_image_hash": normalized_image_id(commit, role),
+            "normalized_image_hash": (
+                _hash(f"historical-image:{commit}:{role}")
+                if historical_role
+                else normalized_image_id(commit, role)
+            ),
             "pcr0": pcr0(commit),
             "source_manifest_hash": source_hash,
+            "service_role": identity["service_role"],
             "topology_hash": identity["topology_hash"],
         }
     value = {
@@ -347,64 +327,7 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--candidate-sha", required=True)
     args = parser.parse_args()
-    destination = args.output_dir
-    corpus = destination / "acceptance-corpus-v2"
-    corpus.mkdir(parents=True, exist_ok=True)
-
-    fixtures = [
-        _fixture(corpus, kind="autoresearch_run", index=0),
-        _fixture(corpus, kind="provider_tape", index=0),
-        _fixture(corpus, kind="reward_allocation", index=0),
-    ]
-    fixtures.extend(
-        _fixture(corpus, kind="score_bundle", index=index)
-        for index in range(100)
-    )
-    fixtures.extend(
-        _fixture(
-            corpus,
-            kind="daily_benchmark",
-            index=index,
-            metadata={"benchmark_date": f"2026-06-{index + 1:02d}"},
-        )
-        for index in range(14)
-    )
-    fixtures.extend(
-        _fixture(
-            corpus,
-            kind="promotion_branch",
-            index=index,
-            metadata={"status": status},
-        )
-        for index, status in enumerate(sorted(REQUIRED_PROMOTION_BRANCHES))
-    )
-    fixtures.extend(
-        _fixture(
-            corpus,
-            kind="weight_epoch",
-            index=index,
-            metadata={"epoch_id": 23_000 + index},
-        )
-        for index in range(50)
-    )
-
-    key = Ed25519PrivateKey.from_private_bytes(
-        hashlib.sha256(b"leadpoet-local-acceptance-signer").digest()
-    )
-    public_key = key.public_key().public_bytes_raw()
-    manifest = build_acceptance_corpus_v2(
-        fixtures=fixtures,
-        captured_from="2026-06-01T00:00:00Z",
-        captured_through="2026-07-01T00:00:00Z",
-        signing_pubkey_hex=public_key.hex(),
-        sign_digest=key.sign,
-    )
-    manifest_path = destination / "acceptance-corpus-v2.json"
-    manifest_path.write_text(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-    manifest_path.chmod(0o600)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     release_input = _release_build_input_without_scratch(
         commit=args.candidate_sha,
         destination=Path(
@@ -414,10 +337,7 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "fixture_count": len(fixtures),
-                "manifest_hash": manifest["manifest_hash"],
                 "release_build_commit": release_input["commit_sha"],
-                "signer_hash": sha256_bytes(public_key),
                 "status": "ready",
             },
             sort_keys=True,

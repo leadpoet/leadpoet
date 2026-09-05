@@ -44,11 +44,7 @@ from gateway.tee.release_lineage_v2 import (
     build_release_lineage_boot_verifier_v2,
     load_approved_release_lineage_v2,
 )
-from gateway.tee.scoring_executor_v2 import (
-    MODEL_COMPATIBILITY_PURPOSE_V2,
-    OP_RUN_MODEL_SANDBOX_V2,
-    SCORING_OPERATIONS_V2,
-)
+from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
 from gateway.utils.tee_artifact_store_v2 import (
     ATTESTED_V2_ARTIFACT_KEY_PREFIX,
 )
@@ -61,7 +57,6 @@ from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
     canonical_json,
     EMPTY_ARTIFACT_ROOT,
-    EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
     merkle_root,
     sha256_bytes,
@@ -500,123 +495,6 @@ def _validate_checkpointed_graph_proof_v2(
         require_boot_attestation_verification=True,
     )
     return normalized
-
-
-async def _load_model_compatibility_replay_v2(
-    *,
-    expected_receipt: Mapping[str, Any],
-    expected_lineage_id: str,
-    boot_attestation_verifier: Any,
-    trusted_parent_authorities: Mapping[str, str],
-    load_ancestry_proofs: Any,
-    persist_ancestry_checkpoint: Any,
-    load_compatible_receipt: Any = None,
-    load_checkpointed_graph: Any = None,
-) -> Optional[dict[str, Any]]:
-    """Revalidate and return one exact durable metadata authority."""
-
-    if expected_receipt.get("purpose") != MODEL_COMPATIBILITY_PURPOSE_V2:
-        return None
-    if load_compatible_receipt is None or load_checkpointed_graph is None:
-        from gateway.research_lab.attested_v2_store import (
-            load_checkpointed_receipt_graph_v2,
-            load_compatible_model_compatibility_receipt_v2,
-        )
-
-        if load_compatible_receipt is None:
-            load_compatible_receipt = (
-                load_compatible_model_compatibility_receipt_v2
-            )
-        if load_checkpointed_graph is None:
-            load_checkpointed_graph = load_checkpointed_receipt_graph_v2
-
-    stored_receipt = load_compatible_receipt(expected_receipt)
-    if inspect.isawaitable(stored_receipt):
-        stored_receipt = await stored_receipt
-    if stored_receipt is None:
-        return None
-    if not isinstance(stored_receipt, Mapping):
-        raise AttestedScoringV2Error(
-            "V2 model compatibility durable receipt is invalid"
-        )
-    root_hash = str(stored_receipt.get("receipt_hash") or "")
-    durable_graph = load_checkpointed_graph(root_hash)
-    if inspect.isawaitable(durable_graph):
-        durable_graph = await durable_graph
-    if not isinstance(durable_graph, Mapping):
-        raise AttestedScoringV2Error(
-            "V2 model compatibility checkpointed graph is unavailable"
-        )
-    durable_receipts = durable_graph.get("receipts")
-    durable_boots = durable_graph.get("boot_identities")
-    if (
-        durable_graph.get("root_receipt_hash") != root_hash
-        or durable_receipts != [dict(stored_receipt)]
-        or not isinstance(durable_boots, list)
-        or len(durable_boots) != 1
-        or durable_graph.get("transport_attempts") != []
-        or durable_graph.get("host_operations") != []
-    ):
-        raise AttestedScoringV2Error(
-            "V2 model compatibility checkpointed receipt differs"
-        )
-    await _validate_receipt_graph_async(
-        durable_graph,
-        required_purposes=(MODEL_COMPATIBILITY_PURPOSE_V2,),
-        allowed_failed_receipt_hashes=(),
-        boot_attestation_verifier=boot_attestation_verifier,
-        require_boot_attestation_verification=True,
-    )
-    loaded_proofs = load_ancestry_proofs(
-        (root_hash,),
-        expected_lineage_id=expected_lineage_id,
-        boot_attestation_verifier=boot_attestation_verifier,
-        allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
-    )
-    if inspect.isawaitable(loaded_proofs):
-        loaded_proofs = await loaded_proofs
-    if not isinstance(loaded_proofs, Mapping):
-        raise AttestedScoringV2Error(
-            "V2 model compatibility ancestry lookup is invalid"
-        )
-    durable_proof = loaded_proofs.get(root_hash)
-    if not isinstance(durable_proof, Mapping):
-        raise AttestedScoringV2Error(
-            "V2 model compatibility ancestry checkpoint is unavailable"
-        )
-    normalized_proof = _validate_checkpointed_graph_proof_v2(
-        proof=durable_proof,
-        graph=durable_graph,
-        expected_root_receipt_hash=root_hash,
-        expected_lineage_id=expected_lineage_id,
-        boot_attestation_verifier=boot_attestation_verifier,
-        trusted_parent_authorities=trusted_parent_authorities,
-        allowed_failed_receipt_hashes=(),
-    )
-    checkpoint_persistence = await _persist_ancestry_checkpoint_after_graph_v2(
-        normalized_proof,
-        checkpointed_graph=durable_graph,
-        expected_root_receipt_hash=root_hash,
-        expected_lineage_id=expected_lineage_id,
-        boot_attestation_verifier=boot_attestation_verifier,
-        persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-    )
-    return {
-        "receipt": dict(stored_receipt),
-        "receipt_graph": dict(durable_graph),
-        "ancestry_compact_proof": dict(normalized_proof),
-        "persistence": {
-            "graph_hash": sha256_json(dict(durable_graph)),
-            "root_receipt_hash": root_hash,
-            "boot_count": len(durable_graph["boot_identities"]),
-            "receipt_count": len(durable_graph["receipts"]),
-            "transport_attempt_count": len(
-                durable_graph["transport_attempts"]
-            ),
-            "host_operation_count": len(durable_graph["host_operations"]),
-        },
-        "ancestry_checkpoint_persistence": dict(checkpoint_persistence),
-    }
 
 
 async def _persist_ancestry_checkpoint_after_graph_v2(
@@ -2065,78 +1943,6 @@ async def execute_scoring_v2(
         boot_attestation_verifier=verifier,
         require_boot_attestation_verification=True,
     )
-    model_compatibility_execution = (
-        purpose == MODEL_COMPATIBILITY_PURPOSE_V2
-    )
-    if model_compatibility_execution:
-        if (
-            operation != OP_RUN_MODEL_SANDBOX_V2
-            or physical_role != "gateway_scoring"
-            or expected_service_role != "gateway_scoring"
-            or parent_roots
-            or graph.get("root_receipt_hash") != receipt.get("receipt_hash")
-            or graph.get("receipts") != [dict(receipt)]
-            or not isinstance(graph.get("boot_identities"), list)
-            or len(graph["boot_identities"]) != 1
-            or transport_attempts
-            or host_operations
-            or not set(artifact_hashes).issubset(job_artifact_hashes)
-            or transitions
-            or sealed_model_artifacts
-            or expected_artifact_hashes
-            or receipt.get("transport_root") != EMPTY_TRANSPORT_ROOT
-            or receipt.get("host_operation_root")
-            != EMPTY_HOST_OPERATION_ROOT
-        ):
-            raise AttestedScoringV2Error(
-                "V2 model compatibility replay scope is not isolated"
-            )
-
-    async def load_model_compatibility_outcome() -> Optional[dict[str, Any]]:
-        if not model_compatibility_execution:
-            return None
-        replay = await _load_model_compatibility_replay_v2(
-            expected_receipt=receipt,
-            expected_lineage_id=ancestry_lineage_id,
-            boot_attestation_verifier=verifier,
-            trusted_parent_authorities=trusted_parent_authorities,
-            load_ancestry_proofs=load_ancestry_proofs,
-            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-        )
-        if replay is None:
-            return None
-        replay_receipt = replay["receipt"]
-        replay_graph = replay["receipt_graph"]
-        replay_proof = replay["ancestry_compact_proof"]
-        return {
-            "status": "succeeded",
-            "result": result,
-            "receipt": dict(replay_receipt),
-            "execution_receipt": dict(replay_receipt),
-            "execution_receipt_graph": dict(replay_graph),
-            "receipt_graph": dict(replay_graph),
-            "transitions": [],
-            "transport_attempts": [],
-            "artifact_persistence": [],
-            "artifact_hashes": list(job_artifact_hashes),
-            "persistence": dict(replay["persistence"]),
-            "sidecar_persistence": {},
-            "release_hash": release["release_hash"],
-            "physical_role": physical_role,
-            "replay_status": "durable_model_compatibility_exact",
-            "execution_ancestry_compact_proof": dict(replay_proof),
-            "ancestry_compact_proof": dict(replay_proof),
-            "execution_ancestry_checkpoint_persistence": dict(
-                replay["ancestry_checkpoint_persistence"]
-            ),
-            "ancestry_checkpoint_persistence": dict(
-                replay["ancestry_checkpoint_persistence"]
-            ),
-        }
-
-    compatibility_outcome = await load_model_compatibility_outcome()
-    if compatibility_outcome is not None:
-        return compatibility_outcome
     artifact_persistence = []
     reuse_persisted_artifacts = False
     # Snapshot/cache replay bytes are already bound to an immutable input
@@ -2486,26 +2292,18 @@ async def execute_scoring_v2(
                 lineage_checkpoint_persistence
             ),
         }
-    from gateway.research_lab.attested_v2_store import AttestedV2StoreError
-
-    try:
-        persistence, ancestry_checkpoint_persistence = (
-            await _persist_graph_then_ancestry_checkpoint_v2(
-                graph,
-                ancestry_compact_proof,
-                expected_root_receipt_hash=str(receipt["receipt_hash"]),
-                expected_lineage_id=ancestry_lineage_id,
-                boot_attestation_verifier=verifier,
-                persist_graph=persist_graph,
-                persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-                allowed_failed_receipt_hashes=local_allowed_failed,
-            )
+    persistence, ancestry_checkpoint_persistence = (
+        await _persist_graph_then_ancestry_checkpoint_v2(
+            graph,
+            ancestry_compact_proof,
+            expected_root_receipt_hash=str(receipt["receipt_hash"]),
+            expected_lineage_id=ancestry_lineage_id,
+            boot_attestation_verifier=verifier,
+            persist_graph=persist_graph,
+            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+            allowed_failed_receipt_hashes=local_allowed_failed,
         )
-    except AttestedV2StoreError:
-        compatibility_outcome = await load_model_compatibility_outcome()
-        if compatibility_outcome is not None:
-            return compatibility_outcome
-        raise
+    )
     sidecar_persistence = {}
     if transitions:
         if persist_sidecars is None:

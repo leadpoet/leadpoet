@@ -31,7 +31,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert shutdown < cleanup < prune < enclave
     emergency = script.index("emergency_disk_preflight()")
     emergency_end = script.index(
-        "stop_research_lab_private_model_containers()", emergency
+        "acquire_gateway_restart_lock()", emergency
     )
     emergency_source = script[emergency:emergency_end]
     assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in emergency_source
@@ -57,7 +57,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script
     assert script.count(
-        "7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &"
+        "7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &"
     ) == 2
 
 

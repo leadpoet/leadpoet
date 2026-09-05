@@ -30,7 +30,7 @@ from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
     frontier_bootstrap_artifact_hashes_v2,
     validate_allocation_settlement_frontier_bootstrap_v2,
 )
-from leadpoet_canonical.attested_v2 import ROLE_PURPOSES, sha256_json
+from leadpoet_canonical.attested_v2 import sha256_json
 
 try:
     from fixture_contract import (
@@ -52,13 +52,9 @@ RUNTIME_TABLES = frozenset(
         "leads_private",
         "merkle_checkpoints",
         "published_weight_bundles",
-        "qualification_baselines",
         "qualification_private_icp_sets",
         "research_lab_champion_reward_current",
-        "research_lab_candidate_evaluation_current",
-        "research_lab_candidate_promotion_events",
         "research_lab_gateway_control_current",
-        "research_lab_public_benchmark_report_current",
         "research_lab_source_add_reward_current",
         "research_lab_stateful_subnet_epoch_cutover_state_v1",
         "research_lab_stateful_subnet_epoch_cutovers_v1",
@@ -135,19 +131,6 @@ EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE = {
 CONTROL_QUERY_FIELDS = frozenset(
     {"columns", "limit", "offset", "on_conflict", "order", "select"}
 )
-
-
-def _candidate_hybrid_constraint_definition() -> str:
-    clauses = []
-    for role, purposes in ROLE_PURPOSES.items():
-        encoded_purposes = ", ".join(
-            "'%s'::text" % purpose for purpose in sorted(purposes)
-        )
-        clauses.append(
-            "((role = '%s'::text) AND (purpose = ANY (ARRAY[%s])))"
-            % (role, encoded_purposes)
-        )
-    return "CHECK (%s)" % " OR ".join(clauses)
 
 
 def _candidate_source_add_leg1_authority(
@@ -626,7 +609,6 @@ def _migration_schema_contract(
         "132-research-lab-champion-lifetime-credit.sql",
         "133-research-lab-provider-outcome-contention-status.sql",
         "134-research-lab-provider-outcome-head-contention.sql",
-        "135-research-lab-active-model-result-replay.sql",
         "136-research-lab-ancestry-checkpoint-sidecars.sql",
         "137-research-lab-allocation-settlement-frontier.sql",
         "138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql",
@@ -637,38 +619,28 @@ def _migration_schema_contract(
         "143-research-lab-compact-ancestry-checkpoints.sql",
         "144-research-lab-provider-persistence-batches.sql",
         "145-research-lab-source-add-admission-control.sql",
-        "146-research-lab-private-benchmark-schema-v11.sql",
         "147-research-lab-source-catalog-auth-metadata.sql",
         "148-research-lab-atomic-credit-resume.sql",
         "149-research-lab-compact-weight-settlement-authority.sql",
-        "152-research-lab-candidate-hybrid-purposes.sql",
-        "153-research-lab-private-model-lineage-generation.sql",
-        "154-research-lab-model-compatibility-purpose.sql",
         "155-research-lab-ancestry-disclosure-root-fast-path.sql",
         "156-production-parity-readonly-role.sql",
-        "157-research-lab-routing-experiment-authority.sql",
-        "158-research-lab-routing-experiment-purposes.sql",
-            "159-research-lab-routing-execution-queue.sql",
-            "160-research-lab-routing-adapter-failures.sql",
-            "161-research-lab-exact-model-transitions.sql",
-            "162-research-lab-candidate-routing-experiments.sql",
-            "163-research-lab-model-transition-artifact-custody.sql",
-            "164-research-lab-official-baseline-action-authority.sql",
-            "165-research-lab-candidate-derived-artifact-event.sql",
-            "166-research-lab-zero-call-verifier-timeout.sql",
-            "167-research-lab-provider-request-attempt-scope.sql",
-            "169-research-lab-source-add-post-accept-leg1.sql",
-            "170-research-lab-source-add-provider-origin-uniqueness.sql",
-            "171-research-lab-source-add-duplicate-privacy.sql",
-            "172-research-lab-source-add-claim-control.sql",
-            "173-research-lab-source-add-leg1-release-policy.sql",
-            "174-research-lab-source-add-restart-state-restore.sql",
-            "175-research-lab-source-add-provenance-leg1.sql",
-            "176-research-lab-source-add-provenance-origin-repair.sql",
-            "177-research-lab-source-add-provenance-authority-acl.sql",
-            "178-research-lab-source-add-miner-status.sql",
-            "179-lab-arena-v1.sql",
-        ]
+        "169-research-lab-source-add-post-accept-leg1.sql",
+        "170-research-lab-source-add-provider-origin-uniqueness.sql",
+        "171-research-lab-source-add-duplicate-privacy.sql",
+        "172-research-lab-source-add-claim-control.sql",
+        "173-research-lab-source-add-leg1-release-policy.sql",
+        "174-research-lab-source-add-restart-state-restore.sql",
+        "175-research-lab-source-add-provenance-leg1.sql",
+        "176-research-lab-source-add-provenance-origin-repair.sql",
+        "177-research-lab-source-add-provenance-authority-acl.sql",
+        "178-research-lab-source-add-miner-status.sql",
+        "179-lab-arena-v1.sql",
+        "180-lab-arena-daily-competition.sql",
+        "181-lab-arena-source-submissions.sql",
+        "182-lab-arena-source-execution.sql",
+        "183-lab-arena-miner-reward-basis.sql",
+        "184-lab-arena-scoring-failure-isolation.sql",
+    ]
     applied_migrations = document.get("applied_migrations")
     if (
         not isinstance(applied_migrations, list)
@@ -745,11 +717,13 @@ def _migration_schema_contract(
         "research_lab_allocation_settlement_frontiers_v2",
         "research_lab_allocation_settlement_frontier_activation_v2",
         "research_lab_compact_weight_authorities_v2",
-        "research_lab_candidate_model_unit_terminals",
-        "research_lab_candidate_waterfall_receipts",
-        "research_lab_candidate_waterfall_metrics",
         "research_lab_source_add_provenance_leg1_authority_v1",
         "research_lab_source_add_miner_status_v1",
+        "lab_arena_rounds",
+        "lab_arena_submissions",
+        "lab_arena_runs",
+        "lab_arena_ledger",
+        "lab_arena_reward_basis_v1",
     }
     if not required_relations <= set(relations):
         raise RuntimeError(
@@ -777,7 +751,6 @@ def _migration_schema_contract(
         "research_lab_allocation_frontier_bootstrap_contract_v2",
         "resume_research_lab_credit_blocked_run_v1",
         "research_lab_compact_weight_settlement_contract_v1",
-        "research_lab_candidate_hybrid_purpose_contract_v1",
         "research_lab_source_add_provider_origin_contract_v1",
         "research_lab_source_add_duplicate_privacy_contract_v1",
         "research_lab_source_add_post_accept_leg1_contract_v1",
@@ -797,12 +770,12 @@ def _migration_schema_contract(
         "research_lab_source_add_reserve_leg1_slot_v4",
         "research_lab_source_add_reserve_leg1_slot_v3",
         "research_lab_source_add_finalize_leg1_v3",
-        "research_lab_routing_exact_model_transition_contract_v1",
-        "research_lab_routing_exact_model_transition_contract_v2",
-        "research_lab_routing_load_model_transition_v2",
-        "research_lab_candidate_append_model_unit_terminal_v1",
-        "research_lab_candidate_append_waterfall_receipt_v1",
-        "research_lab_candidate_append_waterfall_metric_v1",
+        "lab_arena_current_daily_icp_set",
+        "lab_arena_register_submission",
+        "lab_arena_update_submission",
+        "lab_arena_claim_assignment",
+        "lab_arena_activate_reward",
+        "lab_arena_schema_version_v1",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
@@ -1253,6 +1226,7 @@ class LocalPostgRESTState:
         durable_schema_sha: str = "",
     ):
         self.state_root = state_root
+        self.source_root = source_root
         self.fixture = fixture
         self.tables = tables
         self.rpcs = rpcs
@@ -3977,22 +3951,21 @@ class Handler(BaseHTTPRequestHandler):
                     "finalized_stage_supported": True,
                 }
             elif name == (
-                "research_lab_candidate_hybrid_purpose_contract_v1"
+                "research_lab_source_add_admission_control_contract_v1"
             ):
                 if body not in ({}, None):
                     raise ValueError(
-                        "candidate hybrid purpose contract body is invalid"
+                        "SOURCE_ADD admission-control contract body is invalid"
                     )
                 response = {
                     "schema_version": (
-                        "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
+                        "leadpoet.source_add_admission_control_contract.v1"
                     ),
-                    "constraint_name": (
-                        "research_lab_attested_execution_receipts_v2_role_purpose_check"
-                    ),
-                    "constraint_valid": True,
-                    "constraint_definition": (
-                        _candidate_hybrid_constraint_definition()
+                    "control_row_present": True,
+                    "trigger_enabled": True,
+                    "pause_rpc": "research_lab_source_add_set_paused",
+                    "admission_trigger": (
+                        "trg_source_add_work_admission_control"
                     ),
                 }
             elif name == (

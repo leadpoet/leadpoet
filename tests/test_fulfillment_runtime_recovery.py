@@ -12,10 +12,6 @@ import requests
 
 from Leadpoet.utils import cloud_db
 from gateway.fulfillment.models import FulfillmentScoreResult
-from gateway.research_lab.worker_autostart import (
-    ResearchLabWorkerStartupError,
-    build_research_lab_worker_environment,
-)
 from neurons.validator import (
     Validator,
     _FULFILLMENT_HEARTBEAT_STALE_SECONDS,
@@ -588,43 +584,7 @@ def test_gateway_score_submit_raises_after_exactly_three_failures(
     assert sleeps == [2, 2]
 
 
-def test_research_lab_child_environment_requires_matching_epoch_authority(
-    tmp_path: Path,
-) -> None:
-    manifest = (ROOT / "config" / "stateful-epoch-cutover-sn71.json").read_text(
-        encoding="utf-8"
-    )
-    env = {
-        "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON": manifest,
-        "BITTENSOR_NETUID": "71",
-        "SENTINEL": "preserved",
-    }
-
-    child = build_research_lab_worker_environment(env)
-
-    assert child == env
-    with pytest.raises(ResearchLabWorkerStartupError, match="missing or invalid"):
-        build_research_lab_worker_environment({"BITTENSOR_NETUID": "71"})
-    with pytest.raises(ResearchLabWorkerStartupError, match="different netuid"):
-        build_research_lab_worker_environment(
-            {
-                "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON": manifest,
-                "BITTENSOR_NETUID": "72",
-            }
-        )
-
-    path = tmp_path / "cutover.json"
-    path.write_text(manifest, encoding="utf-8")
-    path_child = build_research_lab_worker_environment(
-        {
-            "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH": str(path),
-            "NETUID": "71",
-        }
-    )
-    assert path_child["LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"] == str(path)
-
-
-def test_every_validator_and_research_worker_launch_has_epoch_guard() -> None:
+def test_every_validator_and_fulfillment_worker_launch_has_epoch_guard() -> None:
     deploy = (
         ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
     ).read_text(encoding="utf-8")
@@ -633,10 +593,10 @@ def test_every_validator_and_research_worker_launch_has_epoch_guard() -> None:
         '"${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'
     )
 
-    assert deploy.count(env_arg) == 3
+    assert deploy.count(env_arg) == 2
     assert deploy.count(
         '-e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION"'
-    ) == 3
+    ) == 2
     fulfillment_section = deploy[
         deploy.index("# Auto-detect FULFILLMENT proxies"):
         deploy.index("# Wait for containers to start")
@@ -652,23 +612,6 @@ def test_every_validator_and_research_worker_launch_has_epoch_guard() -> None:
     assert "from neurons.validator" not in deploy
     for container in (
         "leadpoet-validator-worker-$i",
-        "leadpoet-qual-worker-$i",
         "leadpoet-ff-worker-$i",
     ):
         assert f'queue_worker_epoch_authority "{container}"' in deploy
-
-    for script_name in (
-        "run_research_lab_hosted_worker.py",
-        "run_research_lab_hosted_worker_fleet.py",
-        "run_research_lab_scoring_worker.py",
-        "run_research_lab_scoring_worker_fleet.py",
-    ):
-        source = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-        assert "build_research_lab_worker_environment()" in source
-        if script_name.endswith("_fleet.py"):
-            assert "env = worker_environment.copy()" in source
-
-    worker_process = (
-        ROOT / "gateway" / "research_lab" / "worker_process.py"
-    ).read_text(encoding="utf-8")
-    assert "build_research_lab_worker_environment()" in worker_process

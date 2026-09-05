@@ -22,12 +22,6 @@ from gateway.utils.tee_kms_provision_v2 import (
     provider_reference_hashes_from_envelopes,
     provision_provider_envelope_v2,
     provision_job_provider_envelope_v2,
-    provision_job_credential_envelope_v2,
-)
-from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
-from gateway.tee.openrouter_credential_v2 import (
-    build_openrouter_sealed_job_envelope_v2,
-    seal_openrouter_persistent_credential_v2,
 )
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 
@@ -133,16 +127,6 @@ class _Client:
             "job_id": job_id,
             "released_slot_count": 0,
         }
-
-    async def v2_provision_job_sealed_openrouter_secret(self, *, envelope):
-        self.sealed_openrouter = dict(envelope)
-        return {
-            "status": "ready",
-            "job_id": envelope["job_id"],
-            "credential_slot": envelope["credential_slot"],
-            "credential_ref_hash": envelope["credential_value_hash"],
-        }
-
 
 class _EncryptKMS:
     def __init__(self):
@@ -338,7 +322,6 @@ async def test_failed_job_kms_round_trip_releases_pending_recipient():
 
     assert client.released_job_ids == ["autoresearch-v2:job-1"]
 
-
 @pytest.mark.asyncio
 async def test_failed_job_cleanup_preserves_original_error(monkeypatch):
     envelope = {
@@ -462,32 +445,3 @@ async def test_cancelled_job_provision_releases_pending_recipient():
         )
 
     assert client.released_job_ids == ["autoresearch-v2:job-1"]
-
-
-@pytest.mark.asyncio
-async def test_enclave_sealed_openrouter_job_never_calls_parent_kms():
-    vault = EncryptedArtifactVaultV2(
-        master_key=b"v" * 32,
-        boot_identity_hash="sha256:" + "d" * 64,
-    )
-    stored = seal_openrouter_persistent_credential_v2(
-        credential="sk-or-v1-" + "r" * 32,
-        credential_kind="runtime",
-        key_ref="encrypted_ref:openrouter:" + "e" * 32,
-        miner_hotkey="miner-hotkey",
-        job_id="registration-job",
-        purpose="research_lab.openrouter_credential.v2",
-        vault=vault,
-    )
-    envelope = build_openrouter_sealed_job_envelope_v2(
-        stored,
-        job_id="autoresearch-v2:job-1",
-    )
-    client = _Client()
-    result = await provision_job_credential_envelope_v2(
-        envelope,
-        client=client,
-        kms_client=pytest.fail,
-    )
-    assert result["status"] == "ready"
-    assert client.sealed_openrouter["job_id"] == "autoresearch-v2:job-1"

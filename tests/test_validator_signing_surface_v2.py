@@ -34,10 +34,11 @@ def test_primary_validator_uses_only_the_measured_application_signing_helpers():
         "gateway_submit_fulfillment_scores",
     }
     assert expected <= called
+    assert "build_enclave_backed_wallet_v2" in called
 
     source = (ROOT / "neurons" / "validator.py").read_text(encoding="utf-8")
-    assert source.count("self.wallet.hotkey.sign(") == 1
-    assert 'message = str(timestamp).encode()' in source
+    assert "self.wallet.hotkey.sign(" not in source
+    assert 'message = str(timestamp).encode()' not in source
 
 
 def test_primary_validator_does_not_reach_deprecated_generic_signers():

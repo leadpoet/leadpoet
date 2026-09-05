@@ -46,9 +46,7 @@ _COORDINATOR_CID = _CID_BY_ROLE["gateway_coordinator"]
 _APPROVED_PAIRS = frozenset(
     {
         (_COORDINATOR_CID, _CID_BY_ROLE["gateway_scoring"]),
-        (_COORDINATOR_CID, _CID_BY_ROLE["gateway_autoresearch"]),
         (_CID_BY_ROLE["gateway_scoring"], _COORDINATOR_CID),
-        (_CID_BY_ROLE["gateway_autoresearch"], _COORDINATOR_CID),
     }
 )
 _RELAY_TRANSPORT_HEALTH_LOCK = threading.Lock()

@@ -42,7 +42,6 @@ class _Client:
         configured_workers = {
             "gateway_coordinator": 0,
             "gateway_scoring": 25,
-            "gateway_autoresearch": 10,
         }[self.role]
         return {
             "authority": "v2_only",
@@ -60,16 +59,12 @@ class _Client:
     async def scoring_v2_health(self):
         return self._health(10)
 
-    async def autoresearch_v2_health(self):
-        return self._health(10)
-
-
 @pytest.mark.asyncio
 async def test_runtime_ready_requires_every_manager_and_provider_slot():
     clients = {role: _Client(role) for role in ROLE_SPECS}
     result = await verify_v2_runtime_ready(clients)
     assert result["status"] == "ready"
-    assert len(result["roles"]) == 3
+    assert len(result["roles"]) == len(ROLE_SPECS) == 2
 
 
 @pytest.mark.asyncio

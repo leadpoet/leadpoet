@@ -257,18 +257,18 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
         "arn:aws:s3:::leadpoet-attested-v2-artifacts-493765492819/"
         "encrypted-artifacts/credential.json"
     )
-    private_model_version = (
-        "arn:aws:s3:::leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/current.json"
+    unrelated_object = (
+        "arn:aws:s3:::unrelated-artifacts-493765492819/"
+        "current.json"
     )
     assert _policy_allows(
         runner, "s3:GetObjectVersion", attested_version, {}
     )
     assert not _policy_allows(
-        runner, "s3:GetObjectVersion", private_model_version, {}
+        runner, "s3:GetObjectVersion", unrelated_object, {}
     )
     assert _policy_allows(runner, "s3:GetObject", attested_version, {})
-    assert _policy_allows(runner, "s3:GetObject", private_model_version, {})
+    assert not _policy_allows(runner, "s3:GetObject", unrelated_object, {})
     run_object = (
         f"arn:aws:s3:::leadpoet-parity-{ACCOUNT}-fixture/"
         "production-parity/runs/pp-1-1/full-evidence.json"
@@ -278,7 +278,7 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
     )
     assert _policy_allows(runner, "s3:GetObjectRetention", run_object, {})
     assert not _policy_allows(
-        runner, "s3:GetObjectRetention", private_model_version, {}
+        runner, "s3:GetObjectRetention", unrelated_object, {}
     )
     run_checkpoint = (
         f"arn:aws:s3:::leadpoet-parity-{ACCOUNT}-fixture/"
@@ -286,9 +286,6 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
         f"{COMMIT}/checkpoint.json"
     )
     assert _policy_allows(runner, "s3:PutObject", run_checkpoint, {})
-    assert not _policy_allows(
-        runner, "s3:PutObject", private_model_version, {}
-    )
 
 
 def test_controller_managed_policy_partition_and_adversarial_boundaries():

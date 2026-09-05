@@ -1,4 +1,4 @@
-"""Host-side bootstrap for the fixed three-enclave V2 gateway topology.
+"""Host-side bootstrap for the fixed two-enclave V2 gateway topology.
 
 The parent supplies public configuration and relays boot documents, certificates,
 and ciphertext.  Every enclave verifies peers against the independently built
@@ -34,6 +34,32 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 class TEEV2BootstrapError(RuntimeError):
     """The complete enclave release cannot be configured or mutually attested."""
+
+
+def configured_scoring_worker_count(config_dir: Path) -> int:
+    """Return the contiguous locally sealed scoring-proxy capacity."""
+
+    pattern = re.compile(r"^scoring_proxy_([0-9]{2})\.json$")
+    indexes = []
+    for path in Path(config_dir).glob("scoring_proxy_*.json"):
+        if path.is_symlink() or not path.is_file():
+            raise TEEV2BootstrapError(
+                "scoring proxy profile path is not a regular file"
+            )
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            raise TEEV2BootstrapError(
+                "scoring proxy profile filename is invalid"
+            )
+        indexes.append(int(match.group(1)))
+    indexes.sort()
+    if not indexes or indexes != list(range(len(indexes))):
+        raise TEEV2BootstrapError(
+            "scoring proxy profiles must be present and contiguous"
+        )
+    if len(indexes) > 500:
+        raise TEEV2BootstrapError("scoring proxy profile count exceeds the limit")
+    return len(indexes)
 
 
 def load_release_manifest(path: Path) -> Dict[str, Any]:
@@ -131,10 +157,7 @@ def runtime_configuration_documents(
     normalized_worker_counts = {
         str(role): int(count) for role, count in configured_worker_counts.items()
     }
-    if set(normalized_worker_counts) != {
-        "gateway_scoring",
-        "gateway_autoresearch",
-    } or any(
+    if set(normalized_worker_counts) != {"gateway_scoring"} or any(
         count <= 0 or count > 500 for count in normalized_worker_counts.values()
     ):
         raise TEEV2BootstrapError("configured worker counts are invalid")
@@ -163,9 +186,6 @@ def runtime_configuration_documents(
         configured_worker_count = 0
         if role == "gateway_scoring":
             execution_worker_count = 10
-            configured_worker_count = normalized_worker_counts[role]
-        elif role == "gateway_autoresearch":
-            execution_worker_count = normalized_worker_counts[role]
             configured_worker_count = normalized_worker_counts[role]
         configuration = {
             "bootstrap_schema_version": BOOTSTRAP_SCHEMA_VERSION,
@@ -237,7 +257,7 @@ async def bootstrap_gateway_enclaves_v2(
     clients: Optional[Mapping[str, Any]] = None,
     boot_verifier: Callable[..., Mapping[str, Any]] = verify_boot_identity_nitro,
 ) -> Dict[str, Any]:
-    """Configure, independently verify, pair, and health-check all three roles."""
+    """Configure, independently verify, pair, and health-check both roles."""
 
     release = validate_release_manifest(release_manifest)
     if set(runtime_documents) != set(ROLE_SPECS):
@@ -301,10 +321,7 @@ async def bootstrap_gateway_enclaves_v2(
             raise TEEV2BootstrapError("%s TLS service did not start" % role)
 
     channels = []
-    for runner_role in (
-        "gateway_scoring",
-        "gateway_autoresearch",
-    ):
+    for runner_role in ("gateway_scoring",):
         runner_to_coordinator = await role_clients[runner_role].v2_call_peer_health(
             "gateway_coordinator"
         )
@@ -344,9 +361,6 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
     from gateway.tee.research_lab_runtime_config_v2 import (
         build_research_lab_execution_config,
     )
-    from gateway.research_lab.provider_profiles_v2 import (
-        verify_required_worker_proxy_profiles_v2,
-    )
 
     release = load_release_manifest(args.release_manifest)
     try:
@@ -381,9 +395,7 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
         raise TEEV2BootstrapError(
             "protected workflow manifest hash is invalid"
         )
-    profile_set = verify_required_worker_proxy_profiles_v2(
-        config_dir=args.config_dir
-    )
+    scoring_worker_count = configured_scoring_worker_count(args.config_dir)
     research_lab_execution_config = build_research_lab_execution_config()
     documents = runtime_configuration_documents(
         release_manifest=release,
@@ -401,7 +413,7 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
             artifact_envelopes[0]["credential_ref_hash"]
         ),
         research_lab_execution_config=research_lab_execution_config,
-        configured_worker_counts=profile_set["worker_counts"],
+        configured_worker_counts={"gateway_scoring": scoring_worker_count},
     )
     return await bootstrap_gateway_enclaves_v2(
         release_manifest=release,

@@ -6,8 +6,6 @@ Everything fails open — a repair problem can never break scoring.
 """
 
 import asyncio
-import hashlib
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -15,57 +13,6 @@ import pytest
 import qualification.scoring.deepline_evidence_repair as repair_module
 import qualification.scoring.lead_scorer as lead_scorer
 from gateway.qualification.models import CompanyOutput, ICPPrompt
-from gateway.qualification.company_fit_proof_receipt import (
-    COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
-    COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
-)
-
-
-def _company_fit_proof():
-    body = {
-        "schema_version": "company-fit-proof-receipt:v1",
-        "contract_sha256": COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
-        "outcome_binding": COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
-        "decision": "match",
-        "company_binding": {
-            "company_name": "TestCo",
-            "company_website": "https://testco.com",
-            "company_linkedin": "https://linkedin.com/company/testco",
-        },
-        "icp_binding": {
-            "employee_count": "51-200",
-            "employee_count_required": True,
-            "company_stage": "",
-            "stage_required": False,
-        },
-        "dimensions": {
-            dimension: "match"
-            for dimension in (
-                "identity", "employee_size", "industry", "geography", "stage"
-            )
-        },
-        "employee_size_proof": {
-            "decision": "match",
-            "observed_employee_count": "51-200",
-            "evidence_source": "scrapingdog_linkedin_company_profile",
-            "evidence_url": "https://linkedin.com/company/testco",
-        },
-        "stage_proof": {
-            "decision": "not_required",
-            "observed_company_stage": "",
-            "evidence_url": "",
-            "evidence_quote": "",
-        },
-    }
-    canonical = json.dumps(
-        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    return {
-        **body,
-        "receipt_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-    }
-
-
 def _company() -> CompanyOutput:
     return CompanyOutput.model_validate({
         "company_name": "TestCo",
@@ -78,7 +25,6 @@ def _company() -> CompanyOutput:
         "country": "United States",
         "state": "",
         "description": "TestCo builds software.",
-        "company_fit_proof_receipt": _company_fit_proof(),
         "intent_signals": [{
             "source": "news",
             "description": "raised a round",
@@ -158,10 +104,10 @@ def test_hook_rescues_all_fabricated(monkeypatch):
 
     monkeypatch.setattr(repair_module, "repair_sources", fake_repair)
     monkeypatch.setattr(
-        lead_scorer, "score_company_autoresearch_intent_signal", fake_rescore
+        lead_scorer, "score_company_competition_intent_signal", fake_rescore
     )
     out = asyncio.run(
-        lead_scorer._attempt_autoresearch_evidence_repair(_company(), _icp())
+        lead_scorer._attempt_competition_evidence_repair(_company(), _icp())
     )
     assert out is not None
     assert out[4] is False and out[1] == 55.0
@@ -176,7 +122,7 @@ def test_hook_fails_open_when_repair_empty_or_unverified(monkeypatch):
 
     monkeypatch.setattr(repair_module, "repair_sources", repair_empty)
     assert asyncio.run(
-        lead_scorer._attempt_autoresearch_evidence_repair(_company(), _icp())
+        lead_scorer._attempt_competition_evidence_repair(_company(), _icp())
     ) is None
 
     async def repair_junk(**kwargs):
@@ -184,7 +130,7 @@ def test_hook_fails_open_when_repair_empty_or_unverified(monkeypatch):
 
     monkeypatch.setattr(repair_module, "repair_sources", repair_junk)
     assert asyncio.run(
-        lead_scorer._attempt_autoresearch_evidence_repair(_company(), _icp())
+        lead_scorer._attempt_competition_evidence_repair(_company(), _icp())
     ) is None
 
     async def repair_ok(**kwargs):
@@ -195,18 +141,18 @@ def test_hook_fails_open_when_repair_empty_or_unverified(monkeypatch):
 
     monkeypatch.setattr(repair_module, "repair_sources", repair_ok)
     monkeypatch.setattr(
-        lead_scorer, "score_company_autoresearch_intent_signal",
+        lead_scorer, "score_company_competition_intent_signal",
         rescore_still_fabricated,
     )
     assert asyncio.run(
-        lead_scorer._attempt_autoresearch_evidence_repair(_company(), _icp())
+        lead_scorer._attempt_competition_evidence_repair(_company(), _icp())
     ) is None
 
 
 def test_hook_disabled_is_no_op(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_DEEPLINE_EVIDENCE_REPAIR_ENABLED", "false")
     assert asyncio.run(
-        lead_scorer._attempt_autoresearch_evidence_repair(_company(), _icp())
+        lead_scorer._attempt_competition_evidence_repair(_company(), _icp())
     ) is None
 
 
@@ -283,10 +229,10 @@ def test_verifier_outage_is_unavailable_not_fabricated(monkeypatch):
     monkeypatch.setattr(lead_scorer, "verify_company_exists", company_exists)
     monkeypatch.setattr(lead_scorer, "_llm_reverify_company", reverify)
     monkeypatch.setattr(
-        lead_scorer, "score_company_autoresearch_intent_signal", scorer
+        lead_scorer, "score_company_competition_intent_signal", scorer
     )
     result = asyncio.run(
-        lead_scorer.score_company_autoresearch_intent_v2(
+        lead_scorer.score_company_competition_intent(
             company=_company(),
             icp=_icp(),
             run_cost_usd=0.0,

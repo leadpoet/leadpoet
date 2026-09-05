@@ -85,25 +85,13 @@ from gateway.db.client import create_http1_sync_client
 # submit hash+values in one request to /validate. No separate reveal phase needed.
 from gateway.api import epoch, validate, manifest, submit, attest, weights, attestation
 from gateway.api import role_translate
+from gateway.api.arena_proxy import router as arena_proxy_router
+from gateway.api.arena_proxy import testnet_router as arena_testnet_proxy_router
 from gateway.api import metrics as metrics_api
-
-# Import qualification router (Lead Qualification Agent Competition - Phase 10)
-from gateway.qualification.api.router import qualification_router
 
 # Research Lab is an authoritative V2 service. Import failures must abort
 # startup instead of silently launching a gateway without its protected path.
 from gateway.research_lab.api import router as research_lab_router
-from gateway.research_lab.routing_experiment_api import (
-    router as routing_experiment_router,
-)
-from gateway.research_lab.routing_registration import routing_registration_health
-from gateway.research_lab.routing_product_bootstrap import (
-    install_reviewed_routing_product_at_startup,
-)
-from gateway.research_lab.routing_consumer_supervisor import (
-    RoutingExecutionConsumerSupervisor,
-    RoutingConsumerSupervisorError,
-)
 
 # Import fulfillment router (Lead Fulfillment System)
 try:
@@ -186,33 +174,6 @@ def _start_source_add_dispatcher_task(
     return task
 
 
-def _observe_research_lab_worker_startup_task(application, task) -> None:
-    """Consume and expose a fleet-start failure without coupling other tasks."""
-
-    application.state.research_lab_worker_startup_failure = None
-
-    def _record_outcome(completed_task):
-        if completed_task.cancelled():
-            application.state.research_lab_worker_startup_failure = {
-                "status": "cancelled",
-            }
-            return
-        failure = completed_task.exception()
-        if failure is None:
-            return
-        application.state.research_lab_worker_startup_failure = {
-            "status": "failed",
-            "exception_type": type(failure).__name__,
-        }
-        print(
-            "Research Lab worker startup failed type=%s; SOURCE_ADD remains independent"
-            % type(failure).__name__,
-            flush=True,
-        )
-
-    task.add_done_callback(_record_outcome)
-
-
 # ============================================================
 # Lifespan Context Manager (for background tasks)
 # ============================================================
@@ -229,21 +190,6 @@ async def lifespan(app: FastAPI):
     - Bulletproof: No WebSocket subscriptions = No WebSocket failures
     """
     
-    # Install the Research Lab routing API service before any request can
-    # reach the route.  Only a release-owned dependency bundle can build the
-    # composition.  Missing or changed inputs leave the API fail closed.
-    reviewed_composition = install_reviewed_routing_product_at_startup(
-        app,
-        environment=os.environ,
-    )
-    if reviewed_composition is None:
-        print(
-            "Research Lab routing experiment API is fail-closed until the reviewed "
-            "release bootstrap is installed"
-        )
-    else:
-        print("Research Lab reviewed routing product composition installed")
-
     # ════════════════════════════════════════════════════════════════
     # COORDINATOR-ENCLAVE EVENT SIGNER INITIALIZATION
     # ════════════════════════════════════════════════════════════════
@@ -412,9 +358,6 @@ async def lifespan(app: FastAPI):
     rate_limiter_task = None
     icp_task = None
     fulfillment_task_handle = None
-    research_lab_worker_supervisor = None
-    research_lab_worker_startup_task = None
-    routing_consumer_supervisor = None
     source_add_dispatcher_task = None
     hotkey_bucket_cleanup_task = None
 
@@ -559,105 +502,8 @@ async def lifespan(app: FastAPI):
                 fulfillment_task_handle = asyncio.create_task(fulfillment_lifecycle_task())
                 print("✅ Fulfillment lifecycle task started")
         
-        # SOURCE_ADD has its own queue and failure boundary. Start it before
-        # scoring/autoresearch supervisors so either fleet may fail or remain
-        # deferred without delaying miner submissions or SOURCE_ADD work.
+        # SOURCE_ADD has its own queue and failure boundary.
         source_add_dispatcher_task = _start_source_add_dispatcher_task(app)
-
-        # Start gateway-owned Research Lab worker fleets. Keep every import and
-        # constructor inside the observed task so a broken scoring/autoresearch
-        # fleet remains fail-closed without taking down independent SOURCE_ADD.
-        app.state.research_lab_worker_supervisor = None
-        app.state.research_lab_worker_health = None
-
-        async def _start_research_lab_worker_services() -> dict[str, object]:
-            nonlocal research_lab_worker_supervisor, routing_consumer_supervisor
-            from gateway.research_lab.worker_autostart import (
-                ResearchLabWorkerSupervisor,
-                start_worker_supervisor_without_blocking_event_loop,
-            )
-
-            research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
-            app.state.research_lab_worker_supervisor = (
-                research_lab_worker_supervisor
-            )
-            research_lab_worker_health = (
-                await start_worker_supervisor_without_blocking_event_loop(
-                    research_lab_worker_supervisor
-                )
-            )
-            app.state.research_lab_worker_health = research_lab_worker_health
-            print(
-                "✅ Research Lab authoritative workers ready: "
-                f"hosted={research_lab_worker_health['hosted_running']} "
-                f"scoring={research_lab_worker_health['scoring_running']} "
-                "deferred_roles="
-                f"{research_lab_worker_health['deferred_worker_fleet_roles']}"
-            )
-
-            # The routing execution consumer is a separate supervised process,
-            # not part of the hosted/scoring fleet.  It starts only after the
-            # static product composition is present.  A child that cannot run
-            # the same release bootstrap remains unavailable and cannot claim
-            # a queue lease.
-            if (
-                reviewed_composition is not None
-                and os.getenv(
-                    "RESEARCH_LAB_ROUTING_EXECUTION_CONSUMER_ENABLED",
-                    "false",
-                ).strip().lower()
-                in {"1", "true", "yes", "on"}
-            ):
-                routing_consumer_supervisor = RoutingExecutionConsumerSupervisor(
-                    environment=os.environ
-                )
-                app.state.reviewed_routing_consumer_supervisor = (
-                    routing_consumer_supervisor
-                )
-                try:
-                    await routing_consumer_supervisor.start_without_blocking_event_loop()
-                    app.state.reviewed_routing_consumer_supervised = True
-                    app.state.reviewed_routing_consumer_registered = (
-                        routing_consumer_supervisor.health()["registered"] is True
-                    )
-                    app.state.reviewed_routing_consumer_ready = (
-                        routing_consumer_supervisor.health()["ready"] is True
-                    )
-                except RoutingConsumerSupervisorError as exc:
-                    app.state.reviewed_routing_consumer_supervised = True
-                    app.state.reviewed_routing_consumer_registered = False
-                    app.state.reviewed_routing_consumer_ready = False
-                    print(
-                        "⚠️  Research Lab routing consumer remains fail-closed: "
-                        + type(exc).__name__
-                    )
-            else:
-                app.state.reviewed_routing_consumer_supervised = False
-                app.state.reviewed_routing_consumer_registered = False
-                app.state.reviewed_routing_consumer_ready = False
-
-            # Current-release PCR0 and attestation are verified by the restart
-            # preflight before this process starts.  Begin optional historical
-            # cache warming only after both authoritative worker fleets have
-            # finished launching, so its Docker subprocesses cannot race the
-            # fork-based worker readiness handshake during a cold restart.
-            from gateway.utils.pcr0_builder import start_pcr0_builder
-
-            start_pcr0_builder()
-            print("✅ PCR0 builder started (trustless validator verification)")
-
-            return research_lab_worker_health
-
-        research_lab_worker_startup_task = asyncio.create_task(
-            _start_research_lab_worker_services()
-        )
-        app.state.research_lab_worker_startup_task = (
-            research_lab_worker_startup_task
-        )
-        _observe_research_lab_worker_startup_task(
-            app,
-            research_lab_worker_startup_task,
-        )
         app.state.event_signing_identity = dict(event_signing_identity)
         
         print("")
@@ -666,7 +512,7 @@ async def lifespan(app: FastAPI):
         print("   • Polling-based epoch monitor (same as validator)")
         print("   • Bulletproof: No WebSocket = No WebSocket failures")
         print("   • Proven stable: Validator uses polling for months")
-        print("   • PCR0 builder: Computes expected PCR0 from GitHub (trustless)")
+        print("   • Agent competition: operated by the independent Arena service")
         print("="*80 + "\n")
         
         # Yield control back to FastAPI (app runs here)
@@ -692,7 +538,6 @@ async def lifespan(app: FastAPI):
             hotkey_bucket_cleanup_task,
             icp_task,
             fulfillment_task_handle,
-            research_lab_worker_startup_task,
             source_add_dispatcher_task,
         ]
         
@@ -715,18 +560,6 @@ async def lifespan(app: FastAPI):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 print(f"   ⚠️  Task {i} error during shutdown: {result}")
 
-        if research_lab_worker_supervisor is not None:
-            try:
-                research_lab_worker_supervisor.stop()
-            except Exception as e:
-                print(f"   ⚠️  Error stopping Research Lab worker fleets: {e}")
-
-        if routing_consumer_supervisor is not None:
-            try:
-                await routing_consumer_supervisor.stop_without_blocking_event_loop()
-            except Exception as e:
-                print(f"   ⚠️  Error stopping Research Lab routing consumer: {e}")
-        
         print("   ✅ All background tasks stopped")
         print("")
         
@@ -755,36 +588,11 @@ app = FastAPI(
     redirect_slashes=False,  # Prevent 307 redirects from consuming semaphore slots
 )
 
-_WORKER_STARTUP_DIAGNOSTIC_PATHS = frozenset(
-    {
-        "/",
-        "/build-info",
-        "/health",
-        "/health/v2-authority",
-        "/health/routing-experiments",
-        "/research-lab/status",
-        "/research-lab/source-adapters/status",
-    }
-)
 _SOURCE_ADD_INDEPENDENT_PATHS = frozenset(
     {
         "/research-lab/source-adapters",
     }
 )
-
-
-def _gateway_worker_startup_ready(application: FastAPI) -> bool:
-    startup_task = getattr(
-        application.state,
-        "research_lab_worker_startup_task",
-        None,
-    )
-    return bool(
-        startup_task is not None
-        and startup_task.done()
-        and not startup_task.cancelled()
-        and startup_task.exception() is None
-    )
 
 
 def _gateway_source_add_dispatcher_ready(application: FastAPI) -> bool:
@@ -800,13 +608,12 @@ def _gateway_source_add_dispatcher_ready(application: FastAPI) -> bool:
 
 
 @app.middleware("http")
-async def require_worker_authority_after_liveness(
+async def require_source_add_dispatcher(
     request: Request,
     call_next,
 ):
-    """Expose diagnostics while keeping authoritative routes fail closed."""
+    """Keep SOURCE_ADD writes closed when its queue consumer is not ready."""
 
-    worker_authority_ready = _gateway_worker_startup_ready(request.app)
     path_parts = request.url.path.split("/")
     source_add_admin_request = bool(
         request.method == "POST"
@@ -832,27 +639,10 @@ async def require_worker_authority_after_liveness(
         source_add_request
         and _gateway_source_add_dispatcher_ready(request.app)
     )
-    allocation_epoch = path_parts[4] if len(path_parts) == 5 else ""
-    required_allocation_read = bool(
-        request.method == "GET"
-        and path_parts[:4] == ["", "research-lab", "allocations", "attested"]
-        and allocation_epoch
-        and allocation_epoch.isascii()
-        and allocation_epoch.isdigit()
-    )
     if source_add_request and not source_add_independently_ready:
         return JSONResponse(
             status_code=503,
             content={"detail": "SOURCE_ADD dispatcher authority is not ready"},
-        )
-    if not worker_authority_ready and (
-        request.url.path not in _WORKER_STARTUP_DIAGNOSTIC_PATHS
-        and not source_add_independently_ready
-        and not required_allocation_read
-    ):
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "gateway worker authority is not ready"},
         )
     return await call_next(request)
 
@@ -938,11 +728,9 @@ app.include_router(weights.router)  # Weights submission for auditor validators
 app.include_router(role_translate.router)  # POST /fulfillment/translate-role (DeepL-backed cache)
 app.include_router(metrics_api.router)
 
-# Lead Qualification Agent Competition API (Phase 10)
-app.include_router(qualification_router)
-
 app.include_router(research_lab_router)
-app.include_router(routing_experiment_router)
+app.include_router(arena_proxy_router)
+app.include_router(arena_testnet_proxy_router)
 
 if _FULFILLMENT_ROUTER_AVAILABLE:
     app.include_router(fulfillment_router)
@@ -990,36 +778,10 @@ async def health():
     return {"status": "healthy"}
 
 
-@app.get("/health/routing-experiments")
-async def routing_experiment_readiness():
-    """Feature-specific readiness without changing shared gateway liveness."""
-
-    routing = routing_registration_health(app)
-    if routing["status"] == "unavailable":
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "schema_version": "leadpoet.routing_registration_health.v1",
-                "status": "unavailable",
-                "routing": routing,
-            },
-        )
-    return {
-        "schema_version": "leadpoet.routing_registration_health.v1",
-        "status": routing["status"],
-        "routing": routing,
-    }
-
-
 @app.get("/health/v2-authority")
 async def v2_authority_health():
-    """Fail-closed readiness for the live V2 enclave and worker authority."""
+    """Fail-closed readiness for the retained live V2 enclave authority."""
     try:
-        if not _gateway_worker_startup_ready(app):
-            raise RuntimeError("gateway worker authority startup is incomplete")
-        supervisor = app.state.research_lab_worker_supervisor
-        worker_health = supervisor.health()
-
         from gateway.api.attestation import _event_signing_identity
         from gateway.tee.verify_v2_runtime_ready import verify_v2_runtime_ready
 
@@ -1048,13 +810,11 @@ async def v2_authority_health():
         "schema_version": "leadpoet.gateway_v2_authority_health.v2",
         "status": "ready",
         "commit_sha": GITHUB_COMMIT,
-        "routing": routing_registration_health(app),
         "event_signer": {
             "purpose": event_identity["purpose"],
             "enclave_pubkey": event_identity["enclave_pubkey"],
             "code_hash": event_identity["code_hash"],
         },
-        "workers": worker_health,
         "enclaves": enclave_health,
     }
 

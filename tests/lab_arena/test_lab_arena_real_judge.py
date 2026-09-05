@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Mapping, Tuple
 
 import pytest
 
-from lab_arena import benchmark, contracts, output, scoring, shim
+from lab_arena import contracts, output, scoring, shim
 from lab_arena import broker as br
 from lab_arena import operations as ops
 from lab_arena import runtime
@@ -35,7 +35,7 @@ from lab_arena import runtime
 pytest.importorskip("qualification.scoring.lead_scorer")
 pytest.importorskip("aiohttp")
 
-from tests.lab_arena.lab_arena_benchmark_tape import raw_icp  # noqa: E402
+from tests.lab_arena.icp_fixtures import raw_icp  # noqa: E402
 
 EVALUATION_DATE = "2026-09-02"
 COMPANY = "Acme Robotics"
@@ -54,12 +54,9 @@ PAGE_HTML = "<html><head><title>Acme Robotics raises Series B</title></head><bod
 
 
 def arena_icp() -> Dict[str, Any]:
-    """One round-shaped ICP, through the benchmark's own validation pipeline."""
+    """One ordinary ICP from the same stored daily-set shape as production."""
 
-    raw = raw_icp("Software", 1)
-    check = benchmark.check_raw_icp(raw, requested=[(0, "Software")], filled=())
-    validated = benchmark.build_validated_icp(raw, check, icp_id="arena:%s:0" % EVALUATION_DATE)
-    return benchmark.apply_arena_contract(benchmark.canonicalize_arena_icp(validated))
+    return raw_icp("Software", 1)
 
 
 def companies_for(icp: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -73,12 +70,16 @@ def companies_for(icp: Mapping[str, Any]) -> List[Dict[str, Any]]:
             "company_linkedin": "https://www.linkedin.com/company/%s" % name.lower().replace(" ", "-"),
             "industry": icp["industry"],
             "employee_count": bucket,
+            "company_stage": str(icp.get("company_stage") or ""),
             "country": icp.get("country") or "United States",
+            "state": "",
+            "fit_summary": "The company matches the ICP.",
+            "fit_evidence_urls": [site + "/about"],
             "intent_signals": [{
-                "source": "news",
                 "description": "Announced a Series B funding round in July 2026",
                 "url": NEWS_URL if index == 0 else site + "/news",
                 "date": "2026-07-15",
+                "why_now": "The funding makes outreach timely.",
                 "snippet": SENTENCE,
                 "matched_icp_signal": 0,
             }],

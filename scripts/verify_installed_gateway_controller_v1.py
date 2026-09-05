@@ -19,6 +19,12 @@ from typing import Any, Iterator, Mapping, Sequence
 SUPPORTED_CONTROLLER_COMMITS = frozenset(
     {"0dd3a385a23a3af0fa17210bfe02a39cc4023952"}
 )
+# Exact Git identity left in the production host-wrapper slot by the first
+# controller cutover.  Keep this recovery allowance separate from the minimum
+# compatible controller floors: it admits only these reviewed wrapper bytes.
+RECOVERY_HOST_CONTROLLER_COMMITS = frozenset(
+    {"ef0dfeaad19810d3ab2db137d397a2890830a574"}
+)
 CONTROLLER_FILES: Mapping[str, tuple[int, str]] = {
     "gw_restart.sh": (0o700, "100755"),
     "scripts/gateway_git_deploy.py": (0o600, "100644"),
@@ -515,7 +521,11 @@ def verify_installed_controller_bundle(
         )
         observed[relative_path] = payload
     host_wrapper = _read_exact_file(Path(host_restart_path), expected_mode=0o700)
-    host_candidates = set(SUPPORTED_CONTROLLER_COMMITS) | {controller_commit}
+    host_candidates = (
+        set(SUPPORTED_CONTROLLER_COMMITS)
+        | set(RECOVERY_HOST_CONTROLLER_COMMITS)
+        | {controller_commit}
+    )
     host_controller_commits = {
         candidate
         for candidate in host_candidates
@@ -633,6 +643,99 @@ def _exec_verified_helper(
         os.close(descriptor)
 
 
+def _recover_exact_controller_checkout_drift(
+    *,
+    repo_root: Path,
+    bundle: Mapping[str, Any],
+    helper_arguments: Sequence[str],
+) -> bool:
+    """Remove only the exact controller copy left by an older pinned restart."""
+
+    if list(helper_arguments[:1]) != ["prepare"]:
+        return False
+    repository = Path(repo_root).expanduser().resolve()
+    head_commit = _git(repository, "rev-parse", "HEAD^{commit}").lower()
+    if not _COMMIT_RE.fullmatch(head_commit):
+        raise InstalledGatewayControllerError(
+            "gateway Git checkout HEAD is invalid"
+        )
+    status = _git(
+        repository,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    if not status:
+        return False
+    # _git strips outer whitespace, so an unstaged porcelain row is rendered
+    # as one status letter followed by one space and the path.
+    if status != "M gw_restart.sh":
+        return False
+    payloads = bundle.get("payloads")
+    controller_payload = (
+        payloads.get("gw_restart.sh") if isinstance(payloads, Mapping) else None
+    )
+    if not isinstance(controller_payload, bytes):
+        raise InstalledGatewayControllerError(
+            "installed controller recovery payload is unavailable"
+        )
+    checkout_path = repository / "gw_restart.sh"
+    checkout_parent = frozenset({repository})
+    if (
+        _read_exact_file(
+            checkout_path,
+            expected_mode=0o700,
+            allowed_group_writable_paths=checkout_parent,
+        )
+        != controller_payload
+    ):
+        raise InstalledGatewayControllerError(
+            "gateway Git checkout has unrecognized controller drift"
+        )
+    _require_unmodified_git_authority(repository)
+    if (
+        _git(repository, "rev-parse", "HEAD^{commit}").lower() != head_commit
+        or _git(
+            repository,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+        != "M gw_restart.sh"
+        or _read_exact_file(
+            checkout_path,
+            expected_mode=0o700,
+            allowed_group_writable_paths=checkout_parent,
+        )
+        != controller_payload
+    ):
+        raise InstalledGatewayControllerError(
+            "gateway Git checkout controller drift changed before recovery"
+        )
+    _git(
+        repository,
+        "restore",
+        f"--source={head_commit}",
+        "--worktree",
+        "--",
+        "gw_restart.sh",
+    )
+    if (
+        _git(repository, "rev-parse", "HEAD^{commit}").lower() != head_commit
+        or _git(
+            repository,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+    ):
+        raise InstalledGatewayControllerError(
+            "gateway Git checkout controller recovery was incomplete"
+        )
+    _require_unmodified_git_authority(repository)
+    return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
@@ -681,6 +784,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             host_restart_path=args.host_restart_path,
             expected_commit=args.expected_commit,
             expected_controller_commit=args.expected_controller_commit,
+        )
+        _recover_exact_controller_checkout_drift(
+            repo_root=args.repo_root,
+            bundle=result,
+            helper_arguments=helper_arguments,
         )
         _exec_verified_helper(
             bundle=result,

@@ -153,12 +153,17 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "/health/v2-authority" in source
     assert "attestation = get('/attest')" in source
     assert "/weights/v2/release-evidence/" in source
+    assert "fetch_locked_release_identity_cache" in source
+    assert "identity_cache_from_release_channel" in source
+    assert "active gateway release differs from auditor release evidence" in source
     assert "verify_v2_runtime_ready(clients)" in source
     assert "processes[0].joinpath('environ')" in source
     assert "build_research_lab_execution_config(" in source
     assert "environment=runtime_environment" in source
     assert "provider_reference_hashes_from_envelopes(envelopes)" in source
-    assert "verify_required_worker_proxy_profiles_v2(config_dir=config_dir)" in source
+    assert "configured_scoring_worker_count(config_dir)" in source
+    assert "verify_required_worker_proxy_profiles_v2" in source
+    assert "expected_historical_topology_hash" in source
     assert "runtime_configuration_documents(" in source
     assert "build_runtime_configuration(" in source
     assert "client.health_check()" in source

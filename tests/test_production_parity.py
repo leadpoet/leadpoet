@@ -21,8 +21,6 @@ from urllib.error import HTTPError
 import pytest
 import yaml
 
-from gateway.research_lab import daily_baseline_readiness
-from gateway.research_lab import scoring_worker
 from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
 
 from leadpoet_canonical.production_parity import (
@@ -41,7 +39,6 @@ from scripts.materialize_production_parity_secrets import (
     production_parity_trace_prefixes,
 )
 from scripts import production_parity_snapshot as parity_snapshot
-from scripts import check_production_parity_rebenchmark as parity_readiness
 from scripts import run_local_restart_rehearsal as restart_rehearsal
 from scripts import run_production_parity_fast as fast_parity
 from scripts import run_production_parity_full_host as full_host
@@ -57,7 +54,9 @@ from scripts.production_parity_snapshot import (
 )
 from scripts.run_production_parity_full_host import (
     FullParityError,
+    _arena_provider_keys,
     _builtwith_key_from_secret,
+    _clone_arena_service_role_key,
     _clone_service_role_key,
     _current_epoch_from_readiness,
     _dsn_from_secret,
@@ -618,6 +617,41 @@ def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(
     assert archive.stat().st_mode & 0o777 == 0o600
 
 
+def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
+    observed = {}
+    value = {
+        "latest_completed_benchmark_date": None,
+        "current_day_rebenchmark_run_count": 0,
+        "current_day_benchmark_bundle_count": 0,
+        "source_role": {
+            "role_name": "readonly",
+            "transaction_read_only": True,
+            "superuser": False,
+            "bypass_rls": False,
+            "replication": False,
+            "table_write_capable": False,
+        },
+    }
+
+    def fake_run_postgres(command, **kwargs):
+        observed["sql"] = command[-1]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(value).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+
+    stats = parity_snapshot._database_stats({})
+
+    assert "lab_arena_rounds" not in observed["sql"]
+    assert stats["latest_completed_benchmark_date"] is None
+    assert stats["current_day_rebenchmark_run_count"] == 0
+    assert stats["current_day_benchmark_bundle_count"] == 0
+
+
 def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     monkeypatch,
     tmp_path: Path,
@@ -1030,10 +1064,6 @@ def test_schema_only_source_add_cutover_rejects_malformed_identity(field, value)
 
 def test_schema_only_source_add_acl_is_exact_migration_bound():
     migrations = parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
-    arena_migration = parity_snapshot._LAB_ARENA_MIGRATION
-    assert parity_snapshot.file_sha256(
-        ROOT / str(arena_migration["path"])
-    ) == arena_migration["sha256"]
     sql = parity_snapshot._schema_only_source_add_acl_sql(migrations).decode(
         "utf-8"
     )
@@ -1115,12 +1145,6 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     ):
         parity_snapshot._schema_only_source_add_acl_sql(rewritten)
 
-    arena_extended = [
-        *migrations,
-        arena_migration,
-    ]
-    parity_snapshot._schema_only_source_add_acl_sql(arena_extended)
-
     extended = [
         *migrations,
         {
@@ -1129,11 +1153,48 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
             "sequence": 179,
         },
     ]
-    with pytest.raises(
-        ProductionParityError,
-        match="not bound to the latest candidate migration",
-    ):
-        parity_snapshot._schema_only_source_add_acl_sql(extended)
+    parity_snapshot._schema_only_source_add_acl_sql(extended)
+
+
+def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypatch):
+    observed = {}
+
+    def fake_run_postgres(command, **kwargs):
+        observed["sql"] = command[-1]
+        value = {
+            "server_version_num": "150010",
+            "relation_count": 1,
+            "total_relation_bytes": 1,
+            "largest_relation_bytes": 1,
+            "capture_utc_timestamp": "2026-09-04T00:00:00+00:00",
+            "capture_utc_date": "2026-09-04",
+            "latest_completed_benchmark_date": None,
+            "current_day_rebenchmark_run_count": 0,
+            "current_day_benchmark_bundle_count": 0,
+            "weight_history_scope": None,
+            "source_role": {
+                "role_name": "readonly",
+                "transaction_read_only": True,
+                "superuser": False,
+                "bypass_rls": False,
+                "replication": False,
+                "table_write_capable": False,
+            },
+        }
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(value).encode(), stderr=b""
+        )
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+    result = parity_snapshot._database_stats(
+        {"PGHOST": "db.production.example"},
+        postgres_image="postgres@sha256:" + "a" * 64,
+    )
+
+    assert "FROM public.lab_arena_rounds" not in observed["sql"]
+    assert result["latest_completed_benchmark_date"] is None
+    assert result["current_day_rebenchmark_run_count"] == 0
+    assert result["current_day_benchmark_bundle_count"] == 0
 
 
 def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
@@ -1774,180 +1835,6 @@ def test_full_clone_https_readiness_probes_exact_rest_prefix(monkeypatch):
     full_host._wait_https_origin(ORIGIN, timeout_seconds=1)
     assert observed == {"url": ORIGIN + "/rest/v1/", "timeout": 10}
 
-
-def _acceptance_corpus_fixture(tmp_path: Path) -> tuple[Path, Path]:
-    source_config = tmp_path / "production-v2"
-    source_root = source_config / "acceptance-corpus-v2"
-    fixture_dir = source_root / "daily"
-    fixture_dir.mkdir(parents=True, mode=0o700)
-    source_config.chmod(0o700)
-    source_root.chmod(0o700)
-    fixture_dir.chmod(0o700)
-    fixture = fixture_dir / "one.json"
-    fixture.write_bytes(b'{"fixture":1}\n')
-    fixture.chmod(0o600)
-    manifest = source_config / "acceptance-corpus-v2.json"
-    manifest.write_text(
-        json.dumps({"fixtures": [{"artifact_path": "daily/one.json"}]})
-        + "\n",
-        encoding="utf-8",
-    )
-    manifest.chmod(0o600)
-    destination_config = tmp_path / "run-v2"
-    destination_config.mkdir(mode=0o700)
-    destination_config.chmod(0o700)
-    return source_config, destination_config
-
-
-def test_full_acceptance_corpus_is_candidate_bound_and_copied_exactly(
-    monkeypatch,
-    tmp_path: Path,
-):
-    source_config, destination_config = _acceptance_corpus_fixture(tmp_path)
-    observed: list[tuple[Path, Path, str]] = []
-    signer_hash = "sha256:" + "c" * 64
-    release_hash = "sha256:" + "d" * 64
-
-    monkeypatch.setattr(
-        full_host,
-        "validate_release_manifest",
-        lambda _value: {
-            "commit_sha": SHA,
-            "acceptance_signer_pubkey_hash": signer_hash,
-            "release_hash": release_hash,
-        },
-    )
-
-    def fake_load(manifest_path, *, corpus_root, expected_signing_pubkey_hash):
-        observed.append(
-            (Path(manifest_path), Path(corpus_root), expected_signing_pubkey_hash)
-        )
-        assert expected_signing_pubkey_hash == signer_hash
-        value = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-        assert (Path(corpus_root) / "daily" / "one.json").read_bytes() == (
-            b'{"fixture":1}\n'
-        )
-        return {
-            "fixtures": value["fixtures"],
-            "manifest_hash": "sha256:" + "e" * 64,
-        }
-
-    monkeypatch.setattr(
-        full_host,
-        "load_and_validate_acceptance_corpus_v2",
-        fake_load,
-    )
-    evidence = full_host._materialize_acceptance_corpus(
-        source_config_dir=source_config,
-        destination_config_dir=destination_config,
-        candidate_sha=SHA,
-        candidate_release_manifest={"untrusted": "input"},
-    )
-
-    destination_manifest = destination_config / "acceptance-corpus-v2.json"
-    destination_fixture = (
-        destination_config / "acceptance-corpus-v2" / "daily" / "one.json"
-    )
-    assert destination_manifest.read_bytes() == (
-        source_config / "acceptance-corpus-v2.json"
-    ).read_bytes()
-    assert destination_fixture.read_bytes() == b'{"fixture":1}\n'
-    assert destination_manifest.stat().st_mode & 0o777 == 0o600
-    assert destination_fixture.stat().st_mode & 0o777 == 0o600
-    assert destination_fixture.parent.stat().st_mode & 0o777 == 0o700
-    assert len(observed) == 2
-    assert observed[0][0] == source_config / "acceptance-corpus-v2.json"
-    assert observed[1][0] == destination_manifest
-    assert evidence == {
-        "candidate_sha": SHA,
-        "release_hash": release_hash,
-        "manifest_hash": "sha256:" + "e" * 64,
-        "fixture_count": 1,
-        "copied_exact": True,
-    }
-
-
-def test_full_acceptance_corpus_rejects_unlisted_directories(
-    monkeypatch,
-    tmp_path: Path,
-):
-    source_config, destination_config = _acceptance_corpus_fixture(tmp_path)
-    extra = source_config / "acceptance-corpus-v2" / "unlisted"
-    extra.mkdir(mode=0o700)
-    extra.chmod(0o700)
-    signer_hash = "sha256:" + "c" * 64
-    monkeypatch.setattr(
-        full_host,
-        "validate_release_manifest",
-        lambda _value: {
-            "commit_sha": SHA,
-            "acceptance_signer_pubkey_hash": signer_hash,
-            "release_hash": "sha256:" + "d" * 64,
-        },
-    )
-    monkeypatch.setattr(
-        full_host,
-        "load_and_validate_acceptance_corpus_v2",
-        lambda manifest_path, **_kwargs: {
-            "fixtures": json.loads(
-                Path(manifest_path).read_text(encoding="utf-8")
-            )["fixtures"],
-            "manifest_hash": "sha256:" + "e" * 64,
-        },
-    )
-    with pytest.raises(FullParityError, match="file set differs"):
-        full_host._materialize_acceptance_corpus(
-            source_config_dir=source_config,
-            destination_config_dir=destination_config,
-            candidate_sha=SHA,
-            candidate_release_manifest={},
-        )
-
-
-@pytest.mark.parametrize("failure", ["missing", "signer-mismatch"])
-def test_full_acceptance_corpus_fails_before_restart(
-    monkeypatch,
-    tmp_path: Path,
-    failure: str,
-):
-    source_config, destination_config = _acceptance_corpus_fixture(tmp_path)
-    if failure == "missing":
-        (source_config / "acceptance-corpus-v2.json").unlink()
-    monkeypatch.setattr(
-        full_host,
-        "validate_release_manifest",
-        lambda _value: {
-            "commit_sha": SHA,
-            "acceptance_signer_pubkey_hash": "sha256:" + "c" * 64,
-            "release_hash": "sha256:" + "d" * 64,
-        },
-    )
-
-    def reject_mismatch(*_args, **_kwargs):
-        raise ValueError("signer mismatch")
-
-    monkeypatch.setattr(
-        full_host,
-        "load_and_validate_acceptance_corpus_v2",
-        reject_mismatch,
-    )
-    with pytest.raises(FullParityError, match="acceptance corpus"):
-        full_host._materialize_acceptance_corpus(
-            source_config_dir=source_config,
-            destination_config_dir=destination_config,
-            candidate_sha=SHA,
-            candidate_release_manifest={},
-        )
-    assert not (destination_config / "acceptance-corpus-v2.json").exists()
-    assert not (destination_config / "acceptance-corpus-v2").exists()
-
-    source = inspect.getsource(full_host.run_full)
-    assert source.index("fetch_and_unpack_transfer(") < source.index(
-        "_materialize_acceptance_corpus("
-    )
-    assert source.index("_materialize_acceptance_corpus(") < source.index(
-        '["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha]'
-    )
 
 
 def test_full_snapshot_disk_headroom_fits_512_gib_and_fails_closed(
@@ -3952,7 +3839,7 @@ def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
     assert fast_parity.FAST_JOB_MINIMUM_TIMEOUT_SECONDS == expected_minimum
     assert outer_seconds == fast_parity.FAST_JOB_OUTER_TIMEOUT_SECONDS
     assert outer_seconds - expected_minimum >= 10 * 60
-    assert fast_parity._fast_job_minimum_timeout_seconds(5) >= outer_seconds
+    assert fast_parity._fast_job_minimum_timeout_seconds(7) >= outer_seconds
     assert role_duration_seconds == fast_parity.FAST_AWS_ROLE_DURATION_SECONDS
     assert role_duration_seconds - outer_seconds >= 19 * 60
 
@@ -4087,60 +3974,16 @@ def test_fast_live_boundary_enforces_per_request_and_aggregate_deadlines(
 
 
 @pytest.mark.asyncio
-async def test_parity_date_controls_baseline_rollover_and_readiness(monkeypatch):
-    target_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
-    parity_environment = {
-        "LEADPOET_PRODUCTION_PARITY_MODE": "enabled",
-        "LEADPOET_PRODUCTION_PARITY_RUN_ID": "parity-date-check",
-        "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN": (
-            "https://d111111abcdef8.cloudfront.net"
-        ),
-        "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE": target_date,
-    }
-    for name, value in parity_environment.items():
-        monkeypatch.setenv(name, value)
-
-    async def maintenance_state():
-        return {"paused": False, "reason": ""}
-
-    async def unavailable_active_model(*_args, **_kwargs):
-        raise RuntimeError("bounded readiness probe")
-
-    monkeypatch.setattr(
-        scoring_worker,
-        "get_scoring_maintenance_state",
-        maintenance_state,
-    )
-    monkeypatch.setattr(
-        daily_baseline_readiness,
-        "load_active_private_model",
-        unavailable_active_model,
-    )
-    await scoring_worker._enforce_baseline_wave_maintenance_boundary(
-        completed_icps=12,
-        total_icps=40,
-        benchmark_date=target_date,
-    )
-    readiness = await daily_baseline_readiness.autoresearch_daily_baseline_readiness(
-        SimpleNamespace(private_baseline_rebenchmark_enabled=True)
-    )
-    assert readiness == {
-        "available": False,
-        "reason": "daily_baseline_gate_unavailable",
-        "benchmark_date": target_date,
-    }
-
-
 def test_critical_stage_ledger_fails_closed_and_hashes_evidence():
     ledger = StageLedger(
         lane="full",
         candidate_sha=SHA,
         contract_hash=HASH,
         snapshot_hash=HASH,
-        critical_stage_ids=("rebenchmark", "weights"),
+        critical_stage_ids=("scoring", "weights"),
     )
     ledger.record(
-        "rebenchmark",
+        "scoring",
         status="passed",
         duration_seconds=1.5,
         evidence={"all_icps": 40},
@@ -4230,6 +4073,13 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
                 "s3://production/signatures"
             ),
             "RESEARCH_LAB_SCORING_CACHE_DIR": "/production/scoring-cache",
+            "LAB_ARENA_MODE": "live",
+            "LAB_ARENA_SUPABASE_URL": (
+                "https://qplwoislplkcegvdmbim.supabase.co"
+            ),
+            "LAB_ARENA_SUPABASE_ANON_KEY": "production-anon-poison",
+            "LAB_ARENA_SERVICE_JWT": "production.arena.poison",
+            "LAB_ARENA_BUCKET": "production-arena-poison",
         },
         run_id="pp-1-1",
         candidate_sha=SHA,
@@ -4309,6 +4159,11 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["GATEWAY_STATEFUL_CUTOVER_CEREMONY"] == "0"
     assert environment["GATEWAY_TEE_TOPOLOGY_MODE"] == "full"
     assert environment["LANGFUSE_ENABLED"] == "false"
+    assert environment["LAB_ARENA_MODE"] == "off"
+    assert environment["LAB_ARENA_SUPABASE_URL"] == ORIGIN
+    assert environment["LAB_ARENA_SUPABASE_ANON_KEY"].count(".") == 2
+    assert environment["LAB_ARENA_SERVICE_JWT"].count(".") == 2
+    assert environment["LAB_ARENA_BUCKET"] == artifact_bucket
     assert environment["AWS_S3_BUCKET"] == artifact_bucket
     assert environment["RESEARCH_LAB_CORPUS_EXPORT_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX"] == ""
@@ -4522,8 +4377,6 @@ def test_full_gateway_restart_reasserts_run_owned_path_authority():
         "GATEWAY_V2_RELEASE_MANIFEST",
         "GATEWAY_V2_RELEASE_LINEAGE",
         "GATEWAY_V2_ARTIFACT_POLICY",
-        "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
-        "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
         "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
         "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
         "GATEWAY_V2_RELEASE_PREFIX",
@@ -4579,126 +4432,212 @@ def test_controller_dependency_closure_includes_runtime_identity_and_database_cl
         "bittensor",
         "boto3",
         "cryptography",
+        "fastapi",
         "httpx",
         "supabase",
+        "uvicorn[standard]",
     }
     assert "arweave-python-client>=1.0.19" in selected
     assert 'bittensor==10.5.0; python_version >= "3.10"' in selected
 
 
-def test_full_baseline_checkpoint_is_run_scoped_and_production_default_is_unchanged(
-    monkeypatch,
-):
-    run_id = "pp-123-1"
-    bucket = "leadpoet-parity-493765492819-" + hashlib.sha256(
-        f"493765492819:{run_id}:{SHA}".encode("ascii")
-    ).hexdigest()[:16]
-    environment = build_gateway_environment(
-        {},
-        run_id=run_id,
+def test_arena_rebenchmark_is_live_complete_and_precedes_weights():
+    source = inspect.getsource(full_host.run_full)
+    gateway = source.index('failure_stage = "gateway-health"')
+    arena = source.index("_run_arena_rebenchmark_path(")
+    weights = source.index('failure_stage = "weight-readiness"')
+    assert gateway < arena < weights
+    assert '"arena_rebenchmark": arena_rebenchmark' in source
+
+
+def test_arena_rebenchmark_accepts_existing_gateway_provider_key_names():
+    assert _arena_provider_keys(
+        {
+            "OPENROUTER_KEY": "openrouter-test",
+            "QUALIFICATION_SCRAPINGDOG_API_KEY": "scrapingdog-test",
+            "RESEARCH_LAB_V2_DEEPLINE_API_KEY": "deepline-test",
+        }
+    ) == {
+        "openrouter": "openrouter-test",
+        "scrapingdog": "scrapingdog-test",
+        "deepline": "deepline-test",
+    }
+
+
+def test_arena_rebenchmark_counts_only_public_https_and_successful_openrouter():
+    assert full_host._arena_https_evidence_urls(
+        {
+            "fit_evidence_urls": [
+                "https://evidence.example.com/news",
+                "http://evidence.example.com/plaintext",
+                "https://localhost/private",
+                "https://user@evidence.example.com/credential",
+            ],
+            "intent_signals": [{"url": "https://127.0.0.1/private"}],
+        }
+    ) == {"https://evidence.example.com/news"}
+    assert full_host._successful_openrouter_settlement_count(
+        [
+            {
+                "entry_kind": "settlement",
+                "provider": "openrouter",
+                "terminal_response": {"status": 200},
+            },
+            {
+                "entry_kind": "settlement",
+                "provider": "openrouter",
+                "terminal_response": {"status": 429},
+            },
+            {
+                "entry_kind": "settlement",
+                "provider": "deepline",
+                "terminal_response": {"status": 200},
+            },
+            {
+                "entry_kind": "dispatch",
+                "provider": "openrouter",
+                "terminal_response": {"status": 200},
+            },
+        ]
+    ) == 1
+
+
+def test_clone_postgrest_can_assume_the_candidate_arena_service_role():
+    source = inspect.getsource(fast_parity._DockerDatabase.start_postgrest)
+    assert "rolname = 'lab_arena_service'" in source
+    assert "GRANT lab_arena_service TO authenticator" in source
+
+
+def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence():
+    bucket = "leadpoet-parity-493765492819-" + "f" * 16
+    evidence = {
+        "schema_version": (
+            "leadpoet.production_parity_arena_rebenchmark_evidence.v1"
+        ),
+        "candidate_sha": SHA,
+        "run_id": "pp-1-1",
+        "artifact_bucket": bucket,
+        "status": "passed",
+        "mode": "shadow",
+        "round_id": "arena-2026-09-04-abcdef123456",
+        "evaluation_date": "2026-09-04",
+        "daily_icp_set_id": 20260904,
+        "baseline_source_url": (
+            "https://github.com/leadpoet/pydantic-harness/"
+            "archive/refs/heads/main.tar.gz"
+        ),
+        "baseline_final_score": 72.5,
+        "icp_results": [
+            {
+                "icp_position": position,
+                "execute_accepted": True,
+                "score_accepted": True,
+                "company_count": 1,
+                "valid_company_with_https_evidence_count": 1,
+                "https_evidence_url_count": 1,
+                "successful_openrouter_execute_call_count": 1,
+                "successful_openrouter_score_settlement_count": 1,
+            }
+            for position in range(20)
+        ],
+        "counts": {
+            "configured_icp_count": 20,
+            "stage_1_icp_count": 10,
+            "stage_2_icp_count": 10,
+            "accepted_execute_runs": 20,
+            "accepted_score_runs": 20,
+            "scored_icp_count": 20,
+            "unique_icp_positions": 20,
+            "company_count": 20,
+            "evidence_url_count": 20,
+        },
+        "providers": {
+            "transport": "live-httpx",
+            "names": ["deepline", "openrouter", "scrapingdog"],
+            "settled_provider_call_count": 87,
+            "execute_settled_provider_call_count": 42,
+            "score_settled_provider_call_count": 45,
+            "successful_openrouter_execute_call_count": 20,
+            "successful_openrouter_score_settlement_count": 20,
+        },
+        "runtime": {
+            "runner": "lab_arena.runner.Runner",
+            "sandbox": "gvisor-runsc",
+            "api": "lab_arena.api.loopback-http",
+            "object_store": "s3",
+            "judge_image_materialization": "exact-candidate-local-docker",
+        },
+        "restart_recovery": {
+            "service_restarted": True,
+            "runner_restarted": True,
+            "resumed_round_status": "stage1",
+            "persisted_execute_runs": 10,
+        },
+        "publication_visible": True,
+        "public_benchmark_visible": True,
+        "public_results_visible": True,
+        "production_database_mutated": False,
+        "production_chain_mutated": False,
+    }
+    assert full_host._validate_arena_rebenchmark_evidence(
+        evidence,
         candidate_sha=SHA,
-        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
-        supabase_origin=ORIGIN,
+        run_id="pp-1-1",
         artifact_bucket=bucket,
-        benchmark_date="2026-08-19",
-        jwt_secret="j" * 48,
-    )
-    assert "RESEARCH_LAB_SCORING_PER_ICP_CHECKPOINT" not in environment
-    monkeypatch.delenv(
-        "RESEARCH_LAB_SCORING_PER_ICP_CHECKPOINT", raising=False
-    )
-    for key, value in environment.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setenv("ATTESTED_RUNTIME_COMMIT_SHA", SHA)
-    assert scoring_worker._per_icp_checkpoint_enabled() is True
-    location = scoring_worker._baseline_progress_s3_location(
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json",
-        benchmark_date="2026-08-19",
-        window_hash=HASH,
-        private_model_artifact_hash="sha256:" + "c" * 64,
-    )
-    assert location is not None
-    assert location[0] == bucket
-    assert location[1].startswith(
-        f"production-parity/runs/{run_id}/baseline-checkpoints/{SHA}/"
-    )
-    assert "leadpoet-private-model-artifacts" not in "/".join(location)
-    assert location[1].endswith("b" * 16 + "-" + "c" * 16 + ".json")
+    )["status"] == "passed"
 
-    for key in (*environment, "ATTESTED_RUNTIME_COMMIT_SHA"):
-        monkeypatch.delenv(key, raising=False)
-    production_location = scoring_worker._baseline_progress_s3_location(
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json",
-        benchmark_date="2026-08-19",
-        window_hash=HASH,
-        private_model_artifact_hash="sha256:" + "c" * 64,
-    )
-    assert production_location == (
-        "leadpoet-private-model-artifacts-493765492819",
-        "research-lab/sourcing-model/branches/leadpoet-lab/baselines/"
-        "2026-08-19/scoring-progress/" + "b" * 16 + "-" + "c" * 16 + ".json",
-    )
+    broken_values = []
+    for section, key, value in (
+        ("counts", "stage_1_icp_count", 9),
+        ("counts", "accepted_execute_runs", 19),
+        ("counts", "accepted_score_runs", 19),
+        ("counts", "company_count", 0),
+        ("counts", "evidence_url_count", 0),
+        ("providers", "execute_settled_provider_call_count", 0),
+        ("providers", "score_settled_provider_call_count", 0),
+        ("providers", "successful_openrouter_execute_call_count", 19),
+        ("providers", "successful_openrouter_score_settlement_count", 19),
+        ("restart_recovery", "service_restarted", False),
+    ):
+        broken = json.loads(json.dumps(evidence))
+        broken[section][key] = value
+        broken_values.append(broken)
+    for broken in broken_values:
+        with pytest.raises(FullParityError, match="evidence is incomplete"):
+            full_host._validate_arena_rebenchmark_evidence(
+                broken,
+                candidate_sha=SHA,
+                run_id="pp-1-1",
+                artifact_bucket=bucket,
+            )
 
-
-def test_full_baseline_checkpoint_fails_closed_on_partial_boundary(
-    monkeypatch,
-):
-    monkeypatch.setenv("LEADPOET_PRODUCTION_PARITY_MODE", "enabled")
-    with pytest.raises(RuntimeError, match="checkpoint boundary is invalid"):
-        scoring_worker._baseline_progress_s3_location(
-            "s3://leadpoet-private-model-artifacts-493765492819/current.json",
-            benchmark_date="2026-08-19",
-            window_hash=HASH,
-            private_model_artifact_hash="sha256:" + "c" * 64,
-        )
-
-
-@pytest.mark.parametrize(
-    "poison", ["bucket", "run", "candidate", "runtime", "benchmark_date"]
-)
-def test_full_baseline_checkpoint_rejects_mismatched_run_identity(
-    monkeypatch,
-    poison: str,
-):
-    run_id = "pp-123-1"
-    bucket = "leadpoet-parity-493765492819-" + hashlib.sha256(
-        f"493765492819:{run_id}:{SHA}".encode("ascii")
-    ).hexdigest()[:16]
-    environment = build_gateway_environment(
-        {},
-        run_id=run_id,
-        candidate_sha=SHA,
-        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
-        supabase_origin=ORIGIN,
-        artifact_bucket=bucket,
-        benchmark_date="2026-08-19",
-        jwt_secret="j" * 48,
-    )
-    if poison == "bucket":
-        environment["RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET"] = (
-            "leadpoet-parity-493765492819-" + "f" * 16
-        )
-    elif poison == "run":
-        environment["LEADPOET_PRODUCTION_PARITY_RUN_ID"] = "pp-999-1"
-    elif poison == "candidate":
-        environment["LEADPOET_PARITY_CANDIDATE_SHA"] = "f" * 40
-    for key, value in environment.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setenv(
-        "ATTESTED_RUNTIME_COMMIT_SHA",
-        "f" * 40 if poison == "runtime" else SHA,
-    )
-    with pytest.raises(RuntimeError, match="checkpoint destination differs"):
-        scoring_worker._baseline_progress_s3_location(
-            "s3://leadpoet-private-model-artifacts-493765492819/current.json",
-            benchmark_date=(
-                "2026-08-20" if poison == "benchmark_date" else "2026-08-19"
-            ),
-            window_hash=HASH,
-            private_model_artifact_hash="sha256:" + "c" * 64,
-        )
+    per_icp_broken_values = []
+    missing_position = json.loads(json.dumps(evidence))
+    missing_position["icp_results"].pop()
+    per_icp_broken_values.append(missing_position)
+    duplicate_position = json.loads(json.dumps(evidence))
+    duplicate_position["icp_results"][-1]["icp_position"] = 18
+    per_icp_broken_values.append(duplicate_position)
+    for key, value in (
+        ("execute_accepted", False),
+        ("score_accepted", False),
+        ("company_count", 0),
+        ("valid_company_with_https_evidence_count", 0),
+        ("https_evidence_url_count", 0),
+        ("successful_openrouter_execute_call_count", 0),
+        ("successful_openrouter_score_settlement_count", 0),
+    ):
+        broken = json.loads(json.dumps(evidence))
+        broken["icp_results"][7][key] = value
+        per_icp_broken_values.append(broken)
+    for broken in per_icp_broken_values:
+        with pytest.raises(FullParityError, match="evidence is incomplete"):
+            full_host._validate_arena_rebenchmark_evidence(
+                broken,
+                candidate_sha=SHA,
+                run_id="pp-1-1",
+                artifact_bucket=bucket,
+            )
 
 
 def test_full_runner_accepts_json_secret_and_strict_env_file(tmp_path: Path):
@@ -4833,14 +4772,10 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
                     "production_database_mutated": False,
                     "production_chain_mutated": False,
                     "chain_registration_boundary": "strict-ephemeral-hotkey",
-                    "openrouter": {"admitted": True},
                     "source_add": {
                         "admitted": True,
                         "global_miner_submissions_enabled": False,
-                        "autoresearch_paused": True,
-                        "scoring_paused": True,
                         "source_add_paused": False,
-                        "non_source_miner_route_rejected": True,
                     },
                 }
             ),
@@ -4855,10 +4790,6 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
         supabase_origin=ORIGIN,
         gateway_env_file=tmp_path / "gateway.env",
         artifact_bucket="leadpoet-parity-493765492819-" + "f" * 16,
-        production_gateway_environment={
-            "OPENROUTER_API_KEY": "runtime-credential",
-            "OPENROUTER_MANAGEMENT_KEY": "management-credential",
-        },
         miner_intake_secret=json.dumps(
             {"builtwith_api_key": "builtwith-credential"}
         ),
@@ -4903,56 +4834,9 @@ async def test_miner_intake_restores_controls_changed_for_source_only_state():
     async def call_rpc(name, payload):
         observed.append((name, dict(payload)))
 
-    async def set_autoresearch(**payload):
-        observed.append(("autoresearch", dict(payload)))
-
-    async def set_scoring(**payload):
-        observed.append(("scoring", dict(payload)))
-
     await full_host._restore_miner_intake_controls(
-        {
-            "source_add_paused": True,
-            "autoresearch_paused": False,
-            "scoring_paused": False,
-        },
+        {"source_add_paused": True},
         call_rpc=call_rpc,
-        set_autoresearch_maintenance_paused=set_autoresearch,
-        set_scoring_maintenance_paused=set_scoring,
-    )
-
-    assert [name for name, _payload in observed] == [
-        "research_lab_source_add_set_paused",
-        "autoresearch",
-        "scoring",
-    ]
-    assert all(payload["p_paused"] is True for name, payload in observed[:1])
-    assert all(payload["paused"] is False for name, payload in observed[1:])
-    assert all(
-        payload.get("p_reason", payload.get("reason"))
-        == "production_parity_miner_intake_complete"
-        for _name, payload in observed
-    )
-
-
-@pytest.mark.asyncio
-async def test_miner_intake_does_not_rewrite_already_paused_other_lanes():
-    observed: list[tuple[str, object]] = []
-
-    async def call_rpc(name, payload):
-        observed.append((name, dict(payload)))
-
-    async def unexpected_setter(**_payload):
-        raise AssertionError("an already-paused independent lane was rewritten")
-
-    await full_host._restore_miner_intake_controls(
-        {
-            "source_add_paused": True,
-            "autoresearch_paused": True,
-            "scoring_paused": True,
-        },
-        call_rpc=call_rpc,
-        set_autoresearch_maintenance_paused=unexpected_setter,
-        set_scoring_maintenance_paused=unexpected_setter,
     )
 
     assert observed == [
@@ -4965,6 +4849,21 @@ async def test_miner_intake_does_not_rewrite_already_paused_other_lanes():
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_miner_intake_does_not_rewrite_already_active_source_add():
+    observed: list[tuple[str, object]] = []
+
+    async def call_rpc(name, payload):
+        observed.append((name, dict(payload)))
+
+    await full_host._restore_miner_intake_controls(
+        {"source_add_paused": False},
+        call_rpc=call_rpc,
+    )
+
+    assert observed == []
 
 
 def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
@@ -4987,6 +4886,14 @@ def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
         jwt_secret=jwt_secret,
     )
     assert token == environment["SUPABASE_SERVICE_ROLE_KEY"]
+    arena_token = _clone_arena_service_role_key(
+        environment,
+        candidate_sha=SHA,
+        run_id="parity-20260815",
+        supabase_origin=ORIGIN,
+        jwt_secret=jwt_secret,
+    )
+    assert arena_token == environment["LAB_ARENA_SERVICE_JWT"]
     with pytest.raises(FullParityError, match="credential is unavailable"):
         _clone_service_role_key(
             {**environment, "SUPABASE_SERVICE_ROLE_KEY": ""},
@@ -5010,6 +4917,19 @@ def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
             run_id="parity-20260815",
             supabase_origin=ORIGIN,
             jwt_secret="x" * 48,
+        )
+    with pytest.raises(FullParityError, match="credential identity differs"):
+        _clone_arena_service_role_key(
+            {
+                **environment,
+                "LAB_ARENA_SERVICE_JWT": environment[
+                    "SUPABASE_SERVICE_ROLE_KEY"
+                ],
+            },
+            candidate_sha=SHA,
+            run_id="parity-20260815",
+            supabase_origin=ORIGIN,
+            jwt_secret=jwt_secret,
         )
 
 
@@ -5054,132 +4974,6 @@ def test_weight_readiness_epoch_parser_uses_real_reported_epoch():
     assert _current_epoch_from_readiness(output) == 24561
     with pytest.raises(FullParityError, match="effective epoch"):
         _current_epoch_from_readiness("no json")
-
-
-def test_rebenchmark_readiness_uses_explicit_region_and_filters_secret_poison(
-    monkeypatch,
-):
-    observed = {}
-    environment = build_gateway_environment(
-        {},
-        run_id="pp-1-1",
-        candidate_sha=SHA,
-        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
-        supabase_origin=ORIGIN,
-        artifact_bucket="leadpoet-parity-493765492819-" + "d" * 16,
-        benchmark_date="2026-08-19",
-        jwt_secret="j" * 48,
-    )
-    environment.update(
-        {
-            "PATH": "/secret/path-poison",
-            "PYTHONPATH": "/secret/import-poison",
-            "HTTP_PROXY": "http://secret-proxy.invalid",
-            "HTTPS_PROXY": "http://secret-proxy.invalid",
-            "GIT_SSH_COMMAND": "ssh -i /secret/key",
-            "AWS_ACCESS_KEY_ID": "secret-access-key",
-            "AWS_SECRET_ACCESS_KEY": "secret-secret-key",
-            "RESEARCH_LAB_PROVIDER_HTTP_PROXY": "provider-proxy-ref",
-        }
-    )
-
-    class Secrets:
-        def get_secret_value(self, *, SecretId):
-            assert SecretId.endswith("/pp-1-1/gateway")
-            return {"SecretString": json.dumps(environment)}
-
-    def fake_client(service, *, region_name):
-        observed["service"] = service
-        observed["region"] = region_name
-        return Secrets()
-
-    monkeypatch.setattr(parity_readiness.boto3, "client", fake_client)
-    filtered = parity_readiness._secret_environment(
-        "leadpoet/staging/production-parity/runs/pp-1-1/gateway",
-        SHA,
-        region="us-east-1",
-        run_id="pp-1-1",
-        supabase_origin=ORIGIN,
-        artifact_bucket=(
-            "leadpoet-parity-493765492819-" + "d" * 16
-        ),
-    )
-    assert observed == {"service": "secretsmanager", "region": "us-east-1"}
-    assert filtered["SUPABASE_URL"] == ORIGIN
-    assert filtered["RESEARCH_LAB_PROVIDER_HTTP_PROXY"] == "provider-proxy-ref"
-    for key in (
-        "PATH",
-        "PYTHONPATH",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "GIT_SSH_COMMAND",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-    ):
-        assert key not in filtered
-    with pytest.raises(
-        parity_readiness.RebenchmarkReadinessError,
-        match="not bound to disposable state",
-    ):
-        parity_readiness._secret_environment(
-            "leadpoet/staging/production-parity/runs/pp-1-1/gateway",
-            SHA,
-            region="us-east-1",
-            run_id="pp-1-1",
-            supabase_origin=ORIGIN,
-            artifact_bucket=(
-                "leadpoet-parity-493765492819-" + "e" * 16
-            ),
-        )
-
-
-def test_full_rebenchmark_child_receives_exact_region_run_and_origin(monkeypatch):
-    observed = {}
-
-    def fake_run(command, **kwargs):
-        observed["command"] = list(command)
-        observed["env"] = dict(kwargs["env"])
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps(
-                {
-                    "schema_version": (
-                        "leadpoet.production_parity_rebenchmark_readiness.v1"
-                    ),
-                    "candidate_sha": SHA,
-                    "artifact_bucket": (
-                        "leadpoet-parity-493765492819-" + "d" * 16
-                    ),
-                    "available": True,
-                }
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(full_host, "_run", fake_run)
-    result = full_host._wait_rebenchmark(
-        candidate_sha=SHA,
-        secret_id=(
-            "leadpoet/staging/production-parity/runs/pp-1-1/gateway"
-        ),
-        region="us-east-1",
-        run_id="pp-1-1",
-        supabase_origin=ORIGIN,
-        artifact_bucket="leadpoet-parity-493765492819-" + "d" * 16,
-        timeout_seconds=30,
-    )
-    assert result["available"] is True
-    command = observed["command"]
-    assert command[command.index("--region") + 1] == "us-east-1"
-    assert command[command.index("--run-id") + 1] == "pp-1-1"
-    assert command[command.index("--supabase-origin") + 1] == ORIGIN
-    assert command[command.index("--artifact-bucket") + 1] == (
-        "leadpoet-parity-493765492819-" + "d" * 16
-    )
-    child_env = observed["env"]
-    assert child_env["AWS_REGION"] == "us-east-1"
-    assert child_env["AWS_DEFAULT_REGION"] == "us-east-1"
 
 
 def test_runner_iam_policy_is_nonforwarding_and_write_scoped():

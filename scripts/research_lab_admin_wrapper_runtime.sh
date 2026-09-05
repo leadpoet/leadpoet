@@ -60,9 +60,6 @@ fi
 
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
-export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"
-export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-export RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="alias/leadpoet-research-lab-artifact-signing"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
 

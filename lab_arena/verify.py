@@ -6,32 +6,29 @@ import math
 from fractions import Fraction
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from leadpoet_verifier.research_evaluation import compute_evaluation_aggregates
-
-
 def normalize_employee_count_bucket(*args, **kwargs):
-    from research_lab.employee_buckets import normalize_employee_count_bucket as normalize  # lazy: the research_lab package is heavy
+    from qualification.employee_buckets import normalize_employee_count_bucket as normalize
 
     return normalize(*args, **kwargs)
 
 
 def normalize_observed_employee_count_bucket(*args, **kwargs):
-    from research_lab.employee_buckets import normalize_observed_employee_count_bucket as normalize  # lazy: the research_lab package is heavy
+    from qualification.employee_buckets import normalize_observed_employee_count_bucket as normalize
 
     return normalize(*args, **kwargs)
 
 
 def _evaluator():
-    """The Research Lab evaluator, imported on first use.
+    """The shared competition scorer, imported on first use.
 
     Its import pulls the whole qualification scoring package (seconds per
     process), so the service must not pay for it until a score is actually
     derived.
     """
 
-    from research_lab.eval import evaluator
+    from qualification.scoring import competition
 
-    return evaluator
+    return competition
 
 
 def count_penalizable_false_positives(*args, **kwargs):
@@ -54,7 +51,7 @@ from lab_arena.contracts import (
 
 FINAL_DENOMINATOR = BENCHMARK_ICP_COUNT
 STAGE_DENOMINATORS = (STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT - STAGE_1_ICP_COUNT, FINAL_DENOMINATOR)
-MAX_COMPANIES_PER_ICP = 50
+MAX_COMPANIES_PER_ICP = 5
 ACCEPTED_CAUSE = "accepted"
 ZERO_ROW_CAUSES = tuple(cause for cause in TERMINAL_CAUSES if cause != ACCEPTED_CAUSE)
 
@@ -98,16 +95,14 @@ def _require_text(value: Any, name: str) -> str:
 def icp_company_goal(icp: Mapping[str, Any]) -> int:
     """The ICP's ``max_companies`` clamped to 1..50, mirroring the evaluator.
 
-    The evaluator falls back to a fixed five-lead budget when the key is
-    absent; every accepted Arena ICP carries ``max_companies`` (section 18.6),
-    so an ICP without it is a contract violation here rather than a silent
-    five.
+    The shared daily ICP source does not need to carry this execution setting,
+    so use the evaluator's fixed five-company default when it is absent.
     """
 
     _require_mapping(icp, "icp")
-    raw = icp.get("max_companies")
-    if raw is None or isinstance(raw, bool):
-        raise ArenaContractError("ICP must carry max_companies")
+    raw = icp.get("max_companies", 5)
+    if isinstance(raw, bool):
+        raise ArenaContractError("ICP max_companies must be an integer")
     try:
         goal = int(raw)
     except (TypeError, ValueError) as exc:
@@ -201,33 +196,16 @@ def per_icp_score(
     for index, item in enumerate(rows):
         if not isinstance(item, Mapping):
             raise ArenaContractError("breakdowns[%d] must be an object" % index)
-    gate, primary = count_penalizable_false_positives(
-        rows, icp_has_intent_signals=icp_has_intent_signals(icp)
-    )
-    company_scores = [float(item.get("final_score", 0.0) or 0.0) for item in rows]
-    row = {
-        "icp_ref": "current",
-        "icp_company_goal": goal,
-        "base_company_scores": [],
-        "candidate_company_scores": company_scores,
-        "candidate_fp_gate_count": gate,
-        "candidate_fp_unverified_primary_count": primary,
-    }
-    aggregates = compute_evaluation_aggregates(
-        [row],
-        leads_per_icp_normalizer=goal,
+    result = _evaluator().competition_score_from_breakdowns(
+        icp,
+        rows,
         fp_penalty_points=validated_policy["fp_penalty_points"],
-        fp_unverified_primary_penalty_points=validated_policy["fp_unverified_primary_penalty_points"],
-        fp_penalty_icp_floor=validated_policy["fp_penalty_icp_floor"],
+        fp_unverified_primary_penalty_points=validated_policy[
+            "fp_unverified_primary_penalty_points"
+        ],
+        score_floor=validated_policy["fp_penalty_icp_floor"],
     )
-    score = float(aggregates["per_icp_results"][0]["candidate_per_icp_score"])
-    return {
-        "per_icp_score": score,
-        "fp_gate_count": int(gate),
-        "fp_unverified_primary_count": int(primary),
-        "company_goal": goal,
-        "company_scores": company_scores,
-    }
+    return dict(result)
 
 
 def zero_row(submission_id: str, icp_position: int, cause: str) -> Dict[str, Any]:
@@ -353,7 +331,7 @@ def _final_entry(entry: Any) -> Dict[str, Any]:
 
 
 def final_ranking(entries: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Rank by score, then keep the king, then use the stable submission ID.
+    """Rank by score, then keep the baseline, then use the stable submission ID.
 
     ``final_score`` is ``None`` for a participant without a valid result; such
     rows sort last. Bundle bytes and digests never affect rank.
@@ -377,7 +355,7 @@ def final_ranking(entries: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
                 "rank": index + 1,
                 "submission_id": row["submission_id"],
                 "final_score": row["final_score"],
-                "is_king": row["is_king"],
+                "is_baseline": row["is_king"],
             }
         )
     return ranked
@@ -398,17 +376,15 @@ def king_decision(
     finalists_final_scores: Sequence[Mapping[str, Any]],
     king_entry: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Section 12.3 decision from finalist and king final results.
+    """Choose a miner only when it strictly beats the daily baseline.
 
     Entries are ``{"submission_id", "hotkey", "final_score"}``
     where ``final_score`` is ``None`` for a participant with no valid
-    30-ICP result. Contenders are challengers with any valid score.
-    The highest contender (ties by stable submission ID) is crowned
-    when it strictly exceeds the king's valid score, or whenever the king has
-    no valid result; an exact tie keeps the king (``defended``). With no
-    contender the king is ``defended`` when it has a valid result and
-    ``retained_ineligible`` otherwise; with no king at all the round records
-    ``no_king``.
+    full daily ICP result. Contenders are challengers with any valid score.
+    The highest contender (ties by stable submission ID) is crowned only when
+    both it and the organizer baseline have valid scores and the contender's
+    score is strictly higher. A tie, no contender, or no valid baseline score
+    records ``no_king``. The baseline is a threshold, never a champion.
     """
 
     contenders = []  # type: List[Dict[str, Any]]
@@ -426,20 +402,18 @@ def king_decision(
     best = contenders[0] if contenders else None
 
     if king_entry is None:
-        if best is None:
-            return _decision("no_king", None, None)
-        return _decision("crowned", best, best["submission_id"])
+        return _decision("no_king", None, None)
 
     king = _final_entry(king_entry)
     if king["submission_id"] in seen:
         raise ArenaContractError("the king cannot also be a finalist")
-    if king["final_score"] is not None:
-        if best is not None and best["final_score"] > king["final_score"]:
-            return _decision("crowned", best, best["submission_id"])
-        return _decision("defended", king, None)
-    if best is not None:
+    if (
+        king["final_score"] is not None
+        and best is not None
+        and best["final_score"] > king["final_score"]
+    ):
         return _decision("crowned", best, best["submission_id"])
-    return _decision("retained_ineligible", king, None)
+    return _decision("no_king", None, None)
 
 
 def result_is_valid(rows_by_position: Mapping[int, Mapping[str, Any]], positions: Sequence[int]) -> bool:
@@ -463,7 +437,7 @@ def result_is_valid(rows_by_position: Mapping[int, Mapping[str, Any]], positions
 # verification traces, quotes, page text, prompts, and stage verdict payloads
 # can never reach a public bundle through a new key. Every field read by
 # ``count_penalizable_false_positives`` and the ``scorer_breakdown_has_*``
-# helpers in ``research_lab/eval/evaluator.py`` is kept.
+# helpers in ``qualification/scoring/competition.py`` is kept.
 BREAKDOWN_FIELDS = (
     "icp_fit",
     "decision_maker",

@@ -53,10 +53,6 @@ PCR0_COPY_PATHS=(
     "gateway/tasks/__init__.py"
     "gateway/tasks/icp_generator.py"
     "qualification/__init__.py"
-    "scripts/run_research_lab_hosted_worker.py"
-    "scripts/run_research_lab_hosted_worker_fleet.py"
-    "scripts/run_research_lab_scoring_worker.py"
-    "scripts/run_research_lab_scoring_worker_fleet.py"
     "neurons/validator.py"
     "validator_models/automated_checks.py"
 )
@@ -421,6 +417,10 @@ DEPENDENCY_LOCK_HASH="$(
         -c 'from validator_tee.enclave.runtime_v2 import dependency_lock_hash; print(dependency_lock_hash())'
 )"
 NORMALIZED_IMAGE_HASH="$(docker image inspect -f '{{.Id}}' validator-tee-enclave:latest)"
+VALIDATOR_RELEASE_COMMIT_ARGS=()
+if [ -n "${VALIDATOR_V2_BUILD_COMMIT:-}" ]; then
+    VALIDATOR_RELEASE_COMMIT_ARGS=(--commit-sha "$VALIDATOR_V2_BUILD_COMMIT")
+fi
 PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     python3 -m validator_tee.host.release_v2 \
     --repo-root "$REPO_ROOT" \
@@ -429,6 +429,7 @@ PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     --app-manifest-hash "$APP_MANIFEST_HASH" \
     --dependency-lock-hash "$DEPENDENCY_LOCK_HASH" \
     --normalized-image-hash "$NORMALIZED_IMAGE_HASH" \
+    "${VALIDATOR_RELEASE_COMMIT_ARGS[@]}" \
     --output "$VALIDATOR_TEE_DIR/validator-v2-release.json"
 echo "   ✓ Validator V2 release metadata written"
 echo ""

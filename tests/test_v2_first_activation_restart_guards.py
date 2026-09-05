@@ -11,7 +11,7 @@ def test_gateway_first_activation_exits_before_process_shutdown():
     assert content.index("if report_gateway_v2_bootstrap_pending; then") < content.index(
         'pkill -9 -f "python3 main.py"'
     )
-    assert content.index("Acquiring the independently built V2 release channel") < content.index(
+    assert content.index("Building the exact local gateway and validator runtime identities") < content.index(
         'pkill -9 -f "python3 main.py"'
     )
 
@@ -34,6 +34,6 @@ def test_validator_first_activation_exits_before_process_shutdown():
     )
     assert missing_inputs < destructive_phase < shutdown < first_shutdown_signal
     assert (
-        content.index("Acquiring the independently built V2 release channel")
+        content.index("Building the exact local gateway and validator runtime identities")
         < destructive_phase
     )

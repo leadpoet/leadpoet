@@ -2772,7 +2772,7 @@
       "symbol": "verify_tls_proxy_connect_v2"
     },
     {
-      "ast_sha256": "sha256:97770470bc9f561338bbb5447de4b465a6d490f240110a4e7a188d9a223d8ad1",
+      "ast_sha256": "sha256:eb4ab1e6475917432146e2b9b03b03a57438c563af1ef99a5a832a6bb486621e",
       "path": "gateway/tee/release_archive_v2.py",
       "symbol": "_archived_role_pcr0s"
     },
@@ -2822,7 +2822,7 @@
       "symbol": "_measurement_pcr0"
     },
     {
-      "ast_sha256": "sha256:9a52b5a262479b0f13c6563f946b2d5661e9da690310e4a29fa101fb270a6367",
+      "ast_sha256": "sha256:2f481d1ed1caec6341f4786465fc65ff1f3b1a5aa9484f9514c4ab84f6bb8e22",
       "path": "gateway/tee/release_archive_v2.py",
       "symbol": "_normalize_role_pcr0s"
     },
@@ -2847,7 +2847,7 @@
       "symbol": "_real_directory"
     },
     {
-      "ast_sha256": "sha256:958c00dcbee349a54fc6fd9ea590fac0ed389b76f4061f69c26fdd0956d25772",
+      "ast_sha256": "sha256:7dc4ae33cdc496cc3fba1b6ec724591293ee43dbe130a9f961941d394e06a3db",
       "path": "gateway/tee/release_archive_v2.py",
       "symbol": "_release_role_pcr0s"
     },
@@ -2892,7 +2892,7 @@
       "symbol": "select_release_manifest"
     },
     {
-      "ast_sha256": "sha256:8225784c9d798d957759ef79953e5426a158acb24c2c273bbd5da4bb28f03251",
+      "ast_sha256": "sha256:ce5d665be49f6607c6a2c01cdd2e324107fd2a6cd3c41ce7f66a102c6ef9bb03",
       "path": "gateway/tee/release_archive_v2.py",
       "symbol": "verify_archive_directory"
     },
@@ -4682,7 +4682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:fbae91f56b14135b96e4fc164a60003d87645e0ec317811a50e373917698a681",
-  "protected_source_commit": "b2949c3c206e89add4db0b96cde696d40ee9fd9a",
+  "manifest_hash": "sha256:702efb0722219522e7accb129871ce090fc4b61f0bcf0bf566e877f9464b57d4",
+  "protected_source_commit": "c3019ebcdf6c611c3a88f1877b925912a03571c8",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

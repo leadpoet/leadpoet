@@ -2984,7 +2984,11 @@ def test_bootstrap_accepts_legacy_intake_projection_only_before_activation(
     del status["source_add"]["intake_enabled"]
     monkeypatch.setattr(maintenance, "_fetch_runtime_status", lambda: status)
 
-    maintenance._require_pre_activation_runtime_source_add_closed()
+    result = maintenance._require_pre_activation_runtime_source_add_closed(
+        live_process_commitment="sha256:" + "1" * 64,
+    )
+
+    assert result == "runtime_closed"
 
     bootstrap_names = (
         maintenance.bootstrap_gateway_miner_maintenance_restart.__code__.co_names
@@ -2992,6 +2996,183 @@ def test_bootstrap_accepts_legacy_intake_projection_only_before_activation(
     assert "_require_pre_activation_runtime_source_add_closed" in bootstrap_names
     assert "_require_runtime_source_add_closed" not in bootstrap_names
     assert "_controller_exec_environment" in bootstrap_names
+
+
+def test_bootstrap_pre_activation_accepts_only_proved_absent_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def unexpected_runtime_status():
+        pytest.fail("proved-absent gateway has no loopback status")
+
+    monkeypatch.setattr(
+        maintenance, "_fetch_runtime_status", unexpected_runtime_status
+    )
+
+    result = maintenance._require_pre_activation_runtime_source_add_closed(
+        live_process_commitment=maintenance.sha256_json({"status": "absent"}),
+    )
+
+    assert result == "gateway_absent"
+
+
+def test_bootstrap_pre_activation_present_gateway_still_fails_on_open_source_add(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    status = _closed_source_add_runtime_status()
+    status["source_add"]["intake_enabled"] = True
+    monkeypatch.setattr(maintenance, "_fetch_runtime_status", lambda: status)
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="SOURCE_ADD intake is not durably paused",
+    ):
+        maintenance._require_pre_activation_runtime_source_add_closed(
+            live_process_commitment="sha256:" + "1" * 64,
+        )
+
+
+def test_bootstrap_handoff_accepts_the_canonical_paired_coordination_window():
+    marker = Path(
+        "/tmp/leadpoet-gateway-miner-maintenance-handoff.%s-test" % os.getpid()
+    )
+    nonce = "0" * 64
+    try:
+        marker.write_text("%s %s\n" % (CANDIDATE_COMMIT, nonce), encoding="ascii")
+        marker.chmod(0o600)
+
+        maintenance._wait_for_handoff_marker(
+            path=marker,
+            expected_commit=CANDIDATE_COMMIT,
+            nonce=nonce,
+            timeout_seconds=(
+                maintenance.SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS
+            ),
+        )
+
+        assert not marker.exists()
+    finally:
+        marker.unlink(missing_ok=True)
+
+
+def test_bootstrap_handoff_accepts_marker_after_the_old_five_minute_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    marker = Path(
+        "/tmp/leadpoet-gateway-miner-maintenance-handoff.%s-late" % os.getpid()
+    )
+    nonce = "1" * 64
+    clock = {"seconds": 0.0}
+
+    def monotonic() -> float:
+        return clock["seconds"]
+
+    def sleep(seconds: float) -> None:
+        clock["seconds"] += seconds
+        if clock["seconds"] >= 301.0 and not marker.exists():
+            marker.write_text(
+                "%s %s\n" % (CANDIDATE_COMMIT, nonce), encoding="ascii"
+            )
+            marker.chmod(0o600)
+
+    monkeypatch.setattr(maintenance.time, "monotonic", monotonic)
+    monkeypatch.setattr(maintenance.time, "sleep", sleep)
+    try:
+        maintenance._wait_for_handoff_marker(
+            path=marker,
+            expected_commit=CANDIDATE_COMMIT,
+            nonce=nonce,
+            timeout_seconds=(
+                maintenance.SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS
+            ),
+        )
+
+        assert clock["seconds"] >= 301.0
+        assert not marker.exists()
+    finally:
+        marker.unlink(missing_ok=True)
+
+
+def test_bootstrap_handoff_still_fails_closed_at_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    marker = Path(
+        "/tmp/leadpoet-gateway-miner-maintenance-handoff.%s-missing"
+        % os.getpid()
+    )
+    clock = {"seconds": 0.0}
+    monkeypatch.setattr(
+        maintenance.time, "monotonic", lambda: clock["seconds"]
+    )
+    monkeypatch.setattr(
+        maintenance.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("seconds", clock["seconds"] + seconds),
+    )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="did not provide a bounded miner-maintenance handoff",
+    ):
+        maintenance._wait_for_handoff_marker(
+            path=marker,
+            expected_commit=CANDIDATE_COMMIT,
+            nonce="2" * 64,
+            timeout_seconds=2,
+        )
+
+
+def test_bootstrap_handoff_cancel_and_bad_nonce_fail_closed():
+    marker = Path(
+        "/tmp/leadpoet-gateway-miner-maintenance-handoff.%s-cancel" % os.getpid()
+    )
+    nonce = "3" * 64
+    try:
+        marker.write_text(
+            "failed:%s %s\n" % (CANDIDATE_COMMIT, nonce), encoding="ascii"
+        )
+        marker.chmod(0o600)
+        with pytest.raises(
+            maintenance.GatewayMinerMaintenanceRestartError,
+            match="paired operator cancelled",
+        ):
+            maintenance._wait_for_handoff_marker(
+                path=marker,
+                expected_commit=CANDIDATE_COMMIT,
+                nonce=nonce,
+                timeout_seconds=1,
+            )
+    finally:
+        marker.unlink(missing_ok=True)
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="handoff request is invalid",
+    ):
+        maintenance._wait_for_handoff_marker(
+            path=marker,
+            expected_commit=CANDIDATE_COMMIT,
+            nonce="bad-nonce",
+            timeout_seconds=1,
+        )
+
+
+def test_bootstrap_uses_the_canonical_paired_coordination_deadline():
+    source = Path(maintenance.__file__).read_text(encoding="utf-8")
+    bootstrap = source.split(
+        "def bootstrap_gateway_miner_maintenance_restart(", 1
+    )[1].split("\ndef ", 1)[0]
+
+    assert (
+        "timeout_seconds=SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS"
+        in bootstrap
+    )
+
+
+def test_candidate_bootstrap_protected_source_binding_matches_current_source():
+    # Bootstrap calls this same fixed-purpose verifier before it mutates or
+    # waits.  Use the real candidate manifest so a changed protected helper
+    # cannot pass tests with only placeholder commitments.
+    maintenance._verify_protected_source()
 
 
 def test_candidate_runtime_rejects_missing_source_add_intake_field(

@@ -1590,12 +1590,13 @@ def _require_runtime_source_add_restored(
         )
 
 
-def _require_pre_activation_runtime_source_add_closed() -> None:
-    """Verify the still-running N-1 gateway before candidate activation."""
+def _require_pre_activation_runtime_source_add_closed(
+    *, live_process_commitment: str
+) -> str:
+    """Verify the unchanged N-1 gateway, or its proved absence, before activation."""
 
-    _require_runtime_source_add_closed(
-        _fetch_runtime_status(),
-        allow_legacy_missing_intake=True,
+    return _require_pre_hydration_runtime_source_add_closed(
+        live_process_commitment=live_process_commitment,
     )
 
 
@@ -3849,7 +3850,9 @@ def _wait_for_handoff_marker(
             str(path),
         )
         or not re.fullmatch(r"[0-9a-f]{64}", str(nonce))
-        or not 1 <= int(timeout_seconds) <= 300
+        or not 1
+        <= int(timeout_seconds)
+        <= SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS
     ):
         raise GatewayMinerMaintenanceRestartError(
             "miner-maintenance handoff request is invalid"
@@ -4062,7 +4065,10 @@ def bootstrap_gateway_miner_maintenance_restart(
             path=handoff_file,
             expected_commit=expected_commit,
             nonce=handoff_nonce,
-            timeout_seconds=300,
+            # The paired operator builds both exact runtime releases after this
+            # bootstrap proves the durable pause.  Keep this wait on the same
+            # bounded deadline as that existing paired coordination window.
+            timeout_seconds=SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS,
         )
         _require_canonical_restart_lock_fd()
         final_tree = _validate_candidate_identity(
@@ -4076,6 +4082,9 @@ def bootstrap_gateway_miner_maintenance_restart(
         )
         _verify_protected_source()
         secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
+        final_live_process_commitment = _pre_hydration_live_process_commitment(
+            final_tree
+        )
         _verify_proof_against_state(
             proof=_proof_from_fd(PROOF_FD_NUMBER),
             deploy_commit=expected_commit,
@@ -4083,11 +4092,11 @@ def bootstrap_gateway_miner_maintenance_restart(
             client=secrets_client,
             tree_evidence=final_tree,
             restart_invocation_id=restart_invocation_id,
-            live_process_commitment=(
-                _pre_hydration_live_process_commitment(final_tree)
-            ),
+            live_process_commitment=final_live_process_commitment,
         )
-        _require_pre_activation_runtime_source_add_closed()
+        _require_pre_activation_runtime_source_add_closed(
+            live_process_commitment=final_live_process_commitment,
+        )
         _install_controller_bundle_memfds(final_tree["controller_bundle"])
         controller_fds_open = True
         for descriptor in (

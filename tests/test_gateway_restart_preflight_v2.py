@@ -707,6 +707,20 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     }
     assert len(requests) == result["table_probe_count"] + 8
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
+    requested_urls = [request.full_url for request, _timeout in requests]
+    assert any("/rest/v1/lab_arena_reward_basis_v1?" in url for url in requested_urls)
+    assert any("/rest/v1/research_lab_source_add_miner_status_v1?" in url for url in requested_urls)
+    assert all(
+        marker not in url
+        for url in requested_urls
+        for marker in (
+            "/rest/v1/lab_arena_rounds?",
+            "/rest/v1/lab_arena_submissions?",
+            "/rest/v1/lab_arena_runs?",
+            "/rest/v1/lab_arena_ledger?",
+            "/rpc/lab_arena_",
+        )
+    )
     table_requests = [
         request
         for request, _timeout in requests
@@ -808,11 +822,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/172-research-lab-source-add-claim-control.sql",
         "scripts/173-research-lab-source-add-leg1-release-policy.sql",
         "scripts/178-research-lab-source-add-miner-status.sql",
-        "scripts/180-lab-arena-daily-competition.sql",
-        "scripts/181-lab-arena-source-submissions.sql",
-        "scripts/182-lab-arena-source-execution.sql",
         "scripts/183-lab-arena-miner-reward-basis.sql",
-        "scripts/184-lab-arena-scoring-failure-isolation.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 
@@ -1174,7 +1184,7 @@ def test_source_add_leg1_release_environment_rejects_policy_drift(
         )
 
 
-def test_required_supabase_v2_schema_covers_retained_and_arena_contracts() -> None:
+def test_required_supabase_v2_schema_keeps_only_public_arena_reward_boundary() -> None:
     schema_contract = {
         (migration, relation)
         for migration, relation, _columns in (
@@ -1223,50 +1233,39 @@ def test_required_supabase_v2_schema_covers_retained_and_arena_contracts() -> No
         "research_lab_source_add_miner_status_contract_v1",
     ) in rpc_contract
 
-    assert (
-        "scripts/181-lab-arena-source-submissions.sql",
+    private_arena_relations = {
+        "lab_arena_rounds",
         "lab_arena_submissions",
-    ) in schema_contract
-    assert {
-        "submission_id",
-        "round_id",
-        "miner_hotkey",
-        "status",
-        "is_king",
-        "source_ref",
-        "source_size_bytes",
-        "submission_doc",
-    } == relation_columns["lab_arena_submissions"]
+        "lab_arena_runs",
+        "lab_arena_ledger",
+    }
+    assert private_arena_relations.isdisjoint(relation_columns)
+    private_arena_rpcs = {
+        "lab_arena_current_daily_icp_set",
+        "lab_arena_register_submission",
+        "lab_arena_update_submission",
+        "lab_arena_claim_assignment",
+        "lab_arena_activate_reward",
+        "lab_arena_schema_version_v1",
+    }
+    assert private_arena_rpcs.isdisjoint(
+        function for _migration, function in rpc_contract
+    )
     assert (
         "scripts/183-lab-arena-miner-reward-basis.sql",
         "lab_arena_reward_basis_v1",
     ) in schema_contract
     assert {
-        (
-            "scripts/180-lab-arena-daily-competition.sql",
-            "lab_arena_current_daily_icp_set",
-        ),
-        (
-            "scripts/181-lab-arena-source-submissions.sql",
-            "lab_arena_register_submission",
-        ),
-        (
-            "scripts/181-lab-arena-source-submissions.sql",
-            "lab_arena_update_submission",
-        ),
-        (
-            "scripts/182-lab-arena-source-execution.sql",
-            "lab_arena_claim_assignment",
-        ),
-        (
-            "scripts/183-lab-arena-miner-reward-basis.sql",
-            "lab_arena_activate_reward",
-        ),
-        (
-            "scripts/184-lab-arena-scoring-failure-isolation.sql",
-            "lab_arena_schema_version_v1",
-        ),
-    }.issubset(rpc_contract)
+        "round_id",
+        "effective_reward_epoch",
+        "reward_basis_hash",
+        "reward_basis_doc",
+        "signing_key_doc",
+        "king_outcome",
+        "king_hotkey",
+        "king_start_epoch",
+        "published_at",
+    } == relation_columns["lab_arena_reward_basis_v1"]
 
     retired_markers = (
         "autoresearch",
@@ -1400,7 +1399,7 @@ def test_required_supabase_v2_schema_names_missing_migration() -> None:
         )
 
 
-def test_required_supabase_v2_schema_names_missing_rpc_migration() -> None:
+def test_required_supabase_v2_schema_names_missing_non_arena_rpc_migration() -> None:
     def opener(request, *, timeout):
         del timeout
         if request.full_url.endswith("/rest/v1/"):
@@ -1415,10 +1414,8 @@ def test_required_supabase_v2_schema_names_missing_rpc_migration() -> None:
 
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"lab_arena_current_daily_icp_set.*"
-            r"180-lab-arena-daily-competition"
-        ),
+        match=(r"persist_research_lab_chain_realized_settlement_v1.*"
+               r"126-research-lab-chain-realized-settlement"),
     ):
         schema_preflight.verify_required_supabase_v2_schema(
             {

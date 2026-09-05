@@ -291,16 +291,22 @@ def test_local_release_builder_runs_modules_from_candidate_root() -> None:
         encoding="utf-8"
     )
 
+    frozen_archive = script.index('git -C "$REPOSITORY" archive "$REVISION"')
+    frozen_reexec = script.index(
+        '/bin/bash "$FROZEN_SOURCE_ROOT/gateway/tee/build_local_release_v2.sh"'
+    )
     candidate_root = script.index('cd "$CANDIDATE_ROOT"')
     gateway_builder = script.index(
         "python3 -m validator_tee.host.gateway_pcr0_builder"
     )
     release_builder = script.index("python3 -m gateway.tee.local_release_v2")
+    assert frozen_archive < frozen_reexec < candidate_root
     assert candidate_root < gateway_builder < release_builder
 
 
-def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
-    tmp_path: Path,
+@pytest.mark.parametrize("assembler_status", [0, 65])
+def test_local_release_builder_uses_and_cleans_frozen_candidate_tree(
+    tmp_path: Path, assembler_status: int,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     candidate = tmp_path / "candidate"
@@ -317,6 +323,8 @@ def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
         "leadpoet_release_docker_operation_lock_v2() { :; }\n",
         encoding="utf-8",
     )
+    assembler = candidate / "gateway/tee/local_release_v2.py"
+    assembler.write_text("# exact revision assembler\n", encoding="utf-8")
 
     subprocess.run(["git", "init", "-q", str(candidate)], check=True)
     subprocess.run(
@@ -359,6 +367,7 @@ def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
     fake_python.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
+        "printf '%s\\n' \"$PYTHONPATH\" >> \"$LOCAL_RELEASE_TEST_TRACE\"\n"
         "test \"${1:-}\" = -m\n"
         "module=${2:-}\n"
         "shift 2\n"
@@ -373,8 +382,13 @@ def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
         "  esac\n"
         "done\n"
         "case \"$module\" in\n"
-        "  validator_tee.host.gateway_pcr0_builder) printf '[]\\n' > \"$output_file\" ;;\n"
+        "  validator_tee.host.gateway_pcr0_builder)\n"
+        "    rm \"$LOCAL_RELEASE_MUTABLE_ROOT/gateway/tee/local_release_v2.py\"\n"
+        "    printf '[]\\n' > \"$output_file\"\n"
+        "    ;;\n"
         "  gateway.tee.local_release_v2)\n"
+        "    test -r \"$PYTHONPATH/gateway/tee/local_release_v2.py\"\n"
+        "    test \"$LOCAL_RELEASE_ASSEMBLER_STATUS\" = 0 || exit \"$LOCAL_RELEASE_ASSEMBLER_STATUS\"\n"
         "    test -s \"$validator_release\"\n"
         "    printf '{}\\n' > \"$gateway_output\"\n"
         "    printf '{}\\n' > \"$validator_output\"\n"
@@ -389,6 +403,10 @@ def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
     validator_output = tmp_path / "validator-release.json"
     environment = os.environ.copy()
     environment["GATEWAY_V2_BUILD_WORK_ROOT"] = str(tmp_path / "build-work")
+    trace = tmp_path / "python-paths.txt"
+    environment["LOCAL_RELEASE_TEST_TRACE"] = str(trace)
+    environment["LOCAL_RELEASE_MUTABLE_ROOT"] = str(candidate)
+    environment["LOCAL_RELEASE_ASSEMBLER_STATUS"] = str(assembler_status)
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
     result = subprocess.run(
         [
@@ -408,9 +426,16 @@ def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
         text=True,
         env=environment,
     )
-    assert result.returncode == 0, result.stderr
-    assert gateway_output.is_file()
-    assert validator_output.is_file()
+    assert result.returncode == assembler_status, result.stderr
+    assert gateway_output.is_file() is (assembler_status == 0)
+    assert validator_output.is_file() is (assembler_status == 0)
+    assert not assembler.exists()
+    python_paths = trace.read_text(encoding="utf-8").splitlines()
+    assert len(python_paths) == 2
+    assert python_paths[0] == python_paths[1]
+    assert python_paths[0] != str(candidate)
+    assert python_paths[0].startswith("/tmp/leadpoet-local-release-source.")
+    assert not Path(python_paths[0]).exists()
     for relative_path in (
         ".validator-base.dockerfile.sha256",
         ".validator-tee-artifacts",
@@ -419,6 +444,8 @@ def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
         "validator_tee/validator-v2-release.json",
     ):
         assert not (candidate / relative_path).exists()
+
+    assembler.write_text("# exact revision assembler\n", encoding="utf-8")
 
     evidence = gateway_git_deploy.verify_materialized_tree(
         repo_root=candidate,

@@ -891,6 +891,76 @@ def test_active_release_phase_cannot_load_helper_from_historical_checkout(
     assert "historical checkout helper was selected" not in result.stderr
 
 
+def test_active_release_phase_preserves_candidate_local_release_authority_across_sudo(
+    tmp_path: Path,
+):
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("run_validator_active_release_phase() {")
+    end = script.index("\n}\n", start) + 3
+    function = script[start:end]
+
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    controller = tmp_path / "controller"
+    helper = controller / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+    helper.parent.mkdir(parents=True)
+    (helper.parent.parent / "__init__.py").write_text("", encoding="utf-8")
+    (helper.parent / "__init__.py").write_text("", encoding="utf-8")
+    helper.write_text(
+        "import json, os\n"
+        "candidate = os.environ['LEADPOET_LOCAL_RELEASE_COMMIT_SHA']\n"
+        "for name in ('LEADPOET_LOCAL_GATEWAY_RELEASE', 'LEADPOET_LOCAL_VALIDATOR_RELEASE'):\n"
+        "    with open(os.environ[name], encoding='utf-8') as handle:\n"
+        "        assert json.load(handle)['commit_sha'] == candidate\n"
+        "print(candidate)\n",
+        encoding="utf-8",
+    )
+    gateway_release = tmp_path / "gateway-release.json"
+    validator_release = tmp_path / "validator-release.json"
+    for path in (gateway_release, validator_release):
+        path.write_text('{"commit_sha":"%s"}\n' % candidate, encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sudo = bin_dir / "sudo"
+    sudo.write_text('#!/bin/bash\nenv -i PATH="$PATH" "$@"\n', encoding="utf-8")
+    sudo.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            + function
+            + "\nrun_validator_active_release_phase --phase validator-initial\n",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_PREPARER": str(helper),
+            "VALIDATOR_HISTORICAL_TOPOLOGY_HASH": "sha256:" + "a" * 64,
+            "VALIDATOR_PYTHON_BIN": sys.executable,
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
+            "LEADPOET_LOCAL_RELEASE_COMMIT_SHA": candidate,
+            "LEADPOET_LOCAL_GATEWAY_RELEASE": str(gateway_release),
+            "LEADPOET_LOCAL_VALIDATOR_RELEASE": str(validator_release),
+        },
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == candidate
+
+
 def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     deploy = Path(

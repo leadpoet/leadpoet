@@ -8648,6 +8648,34 @@ def test_module_provenance_accepts_candidate_restart_authority_archive(
             )
 
 
+@pytest.mark.parametrize("tampered", (False, True))
+def test_frozen_local_release_archive_keeps_exact_source_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tampered: bool,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    candidate_sha = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setattr(contract_adapter, "_candidate_root", lambda: root)
+    relative = Path("gateway/tee/local_release_v2.py")
+    with _production_named_temp_directory("leadpoet-local-release-source.") as archive:
+        source = archive / relative
+        source.parent.mkdir(parents=True)
+        source.write_bytes((root / relative).read_bytes() + (b"\n# changed\n" if tampered else b""))
+        if tampered:
+            with pytest.raises(RuntimeError, match="source bytes differ"):
+                contract_adapter._source_identity(source)
+        else:
+            identity = contract_adapter._source_identity(source)
+            assert identity["source_kind"] == "candidate_archive"
+            assert identity["source_commit"] == candidate_sha
+            assert identity["source_git_path"] == relative.as_posix()
+
+
 def test_module_provenance_accepts_only_exact_candidate_local_release_copy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

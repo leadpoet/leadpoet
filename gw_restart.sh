@@ -26,6 +26,17 @@ GATEWAY_HISTORICAL_TOPOLOGY_HASH=""
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/gateway}"
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
+# Process supervision for gateway.main. The unit is rendered from the deployed
+# tree and installed on every release, so merging a change to the template is
+# the whole install; see docs/gateway_supervision.md.
+GATEWAY_SUPERVISOR_UNIT="${GATEWAY_SUPERVISOR_UNIT:-leadpoet-gateway.service}"
+GATEWAY_SUPERVISOR_UNIT_DIR="${GATEWAY_SUPERVISOR_UNIT_DIR:-/etc/systemd/system}"
+GATEWAY_SUPERVISOR_UNIT_TEMPLATE="${GATEWAY_SUPERVISOR_UNIT_TEMPLATE:-$LEADPOET_REPO_ROOT/config/systemd/leadpoet-gateway.service}"
+GATEWAY_SUPERVISED_LAUNCHER="${GATEWAY_SUPERVISED_LAUNCHER:-$LEADPOET_REPO_ROOT/scripts/gateway_supervised_launch.sh}"
+GATEWAY_SUPERVISOR_LAUNCH_ENV="${GATEWAY_SUPERVISOR_LAUNCH_ENV:-/home/ec2-user/.config/leadpoet/gateway-launch-env.sh}"
+GATEWAY_SUPERVISOR_ENABLED="${GATEWAY_SUPERVISOR_ENABLED:-1}"
+GATEWAY_SUPERVISOR_ACTIVE=0
+GATEWAY_LAUNCHED_SUPERVISED=0
 GATEWAY_RESTART_AUTHORITY_ROOT="${GATEWAY_RESTART_AUTHORITY_ROOT:-}"
 GATEWAY_RESTART_AUTHORITY_COMMIT="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
@@ -188,6 +199,21 @@ wait_for_gateway_v2_authority() {
       pgrep -f "^$GATEWAY_PYTHON_BIN -u -m gateway[.]main$" | head -1 || true
     )"
     if [ -z "$GATEWAY_PID" ]; then
+      # Supervised, systemd relaunches the process; a gap between attempts is
+      # a restart in flight, not a failed deploy. The poll interval and target
+      # route below are unchanged either way.
+      if [ "${GATEWAY_LAUNCHED_SUPERVISED:-0}" = "1" ]; then
+        case "$(gateway_supervisor_unit_state)" in
+          active|activating|reloading)
+            if [ "$attempt" -lt "$GATEWAY_V2_HEALTH_MAX_ATTEMPTS" ] \
+                && [ "$SECONDS" -lt "$deadline" ]; then
+              sleep "$GATEWAY_V2_HEALTH_RETRY_SECONDS"
+              continue
+            fi
+            break
+            ;;
+        esac
+      fi
       tail -160 "$GATEWAY_LOG_FILE"
       echo "ERROR: gateway exited while authoritative V2 readiness was pending" >&2
       return 1
@@ -640,9 +666,116 @@ cancel_gateway_owned_process_group() {
   rm -f -- "$ready_marker"
 }
 
+# --- gateway process supervision --------------------------------------------
+# gateway.main used to be launched with `setsid` and then orphaned: once this
+# script exited, nothing on the host owned the process, so an exit meant an
+# outage that lasted until a human noticed. These helpers hand that job to
+# systemd instead. Everything here is best-effort and pre-shutdown: if systemd
+# is missing or refuses the unit, the deploy prints a loud warning and falls
+# back to the historical unsupervised launch rather than failing.
+
+gateway_supervisor_supported() {
+  [ "$GATEWAY_SUPERVISOR_ENABLED" = "1" ] || return 1
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [ -d /run/systemd/system ] || return 1
+  [ -r "$GATEWAY_SUPERVISOR_UNIT_TEMPLATE" ] || return 1
+  [ -x "$GATEWAY_SUPERVISED_LAUNCHER" ] || return 1
+  return 0
+}
+
+render_gateway_supervisor_unit() {
+  local destination="$1"
+  sed \
+    -e "s#@LEADPOET_REPO_ROOT@#$LEADPOET_REPO_ROOT#g" \
+    -e "s#@GATEWAY_SUPERVISOR_LAUNCH_ENV@#$GATEWAY_SUPERVISOR_LAUNCH_ENV#g" \
+    -e "s#@GATEWAY_RUN_USER@#$(id -un)#g" \
+    "$GATEWAY_SUPERVISOR_UNIT_TEMPLATE" > "$destination"
+}
+
+# Install or refresh leadpoet-gateway.service from the deployed tree and enable
+# it for boot. Called before the destructive phase so a systemd problem stalls
+# at a gate with the gateway still running, never after the pkill.
+ensure_gateway_supervisor_unit() {
+  local installed rendered
+  GATEWAY_SUPERVISOR_ACTIVE=0
+  if ! gateway_supervisor_supported; then
+    echo "WARNING: systemd process supervision is unavailable on this host" >&2
+    echo "WARNING: gateway.main will be launched unsupervised; if it exits, it will stay down until someone runs this script again" >&2
+    return 0
+  fi
+  installed="$GATEWAY_SUPERVISOR_UNIT_DIR/$GATEWAY_SUPERVISOR_UNIT"
+  rendered="$(mktemp /tmp/leadpoet-gateway.service.XXXXXX)"
+  if ! render_gateway_supervisor_unit "$rendered"; then
+    rm -f -- "$rendered"
+    echo "WARNING: could not render $GATEWAY_SUPERVISOR_UNIT from $GATEWAY_SUPERVISOR_UNIT_TEMPLATE; launching gateway.main unsupervised" >&2
+    return 0
+  fi
+  if cmp -s "$rendered" "$installed" 2>/dev/null; then
+    echo "Gateway supervisor unit $GATEWAY_SUPERVISOR_UNIT already matches this release"
+  else
+    echo "Installing gateway supervisor unit $installed from the deployed tree"
+    if ! sudo install -m 0644 -o root -g root "$rendered" "$installed" \
+        || ! sudo systemctl daemon-reload; then
+      rm -f -- "$rendered"
+      echo "WARNING: could not install or reload $GATEWAY_SUPERVISOR_UNIT; launching gateway.main unsupervised" >&2
+      return 0
+    fi
+  fi
+  rm -f -- "$rendered"
+  if ! sudo systemctl enable "$GATEWAY_SUPERVISOR_UNIT" >/dev/null 2>&1; then
+    echo "WARNING: could not enable $GATEWAY_SUPERVISOR_UNIT; launching gateway.main unsupervised" >&2
+    return 0
+  fi
+  GATEWAY_SUPERVISOR_ACTIVE=1
+  echo "Gateway supervisor unit $GATEWAY_SUPERVISOR_UNIT is installed and enabled (Restart=always)"
+  return 0
+}
+
+# Freeze the environment this script was about to launch gateway.main with, so
+# systemd can relaunch the same process later without re-running a deploy. Same
+# directory, owner and 0600 mode as the existing gateway env file.
+write_gateway_supervisor_launch_env() {
+  local destination="$GATEWAY_SUPERVISOR_LAUNCH_ENV" temporary
+  mkdir -p "$(dirname "$destination")" || return 1
+  temporary="$(mktemp "$destination.XXXXXX")" || return 1
+  chmod 600 "$temporary"
+  if ! {
+      printf '# Generated by gw_restart.sh; the launch environment for %s.\n' \
+        "$GATEWAY_SUPERVISOR_UNIT"
+      printf '# Regenerated on every release. Do not edit by hand.\n'
+      export -p
+    } > "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$destination"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  chmod 600 "$destination"
+  return 0
+}
+
+# Stop the supervised gateway without systemd immediately restarting it. Used
+# at the destructive boundary and on a failed post-launch verification, where
+# `pkill` alone would just be undone by Restart=always.
+stop_supervised_gateway() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  sudo systemctl stop "$GATEWAY_SUPERVISOR_UNIT" 2>/dev/null || true
+  sudo systemctl reset-failed "$GATEWAY_SUPERVISOR_UNIT" 2>/dev/null || true
+  return 0
+}
+
+gateway_supervisor_unit_state() {
+  systemctl is-active "$GATEWAY_SUPERVISOR_UNIT" 2>/dev/null || true
+}
+
 stop_failed_miner_maintenance_runtime() {
   local process_pid=""
   echo "Stopping the newly launched gateway after miner-maintenance verification failure" >&2
+  if [ "${GATEWAY_LAUNCHED_SUPERVISED:-0}" = "1" ]; then
+    stop_supervised_gateway
+  fi
   for process_pid in \
       "${GATEWAY_LAUNCHER_PID:-}" \
       "${TEE_EGRESS_FORWARDER_PID:-}" \
@@ -3869,9 +4002,18 @@ if ! (
   exit 1
 fi
 
+echo "Preparing gateway process supervision before shutdown"
+GATEWAY_DEPLOY_STAGE="gateway_supervisor_install"
+export GATEWAY_DEPLOY_STAGE
+ensure_gateway_supervisor_unit
+
 echo "Stopping existing gateway and Research Lab worker processes"
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
 export GATEWAY_DESTRUCTIVE_PHASE_STARTED
+# Stop the unit before the pkill: with Restart=always in force, killing the
+# process without stopping its unit would have systemd relaunch the outgoing
+# release on top of the deploy.
+stop_supervised_gateway
 sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
 sudo systemctl reset-failed leadpoet-tee-egress-forwarder.service 2>/dev/null || true
 pkill -9 -f "python3 main.py" 2>/dev/null || true
@@ -4440,6 +4582,21 @@ record_gateway_restart_timing "validator_weight_input_ready"
 leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
+GATEWAY_LAUNCHED_SUPERVISED=0
+if [ "${GATEWAY_SUPERVISOR_ACTIVE:-0}" = "1" ]; then
+  if write_gateway_supervisor_launch_env \
+      && sudo systemctl start "$GATEWAY_SUPERVISOR_UNIT"; then
+    GATEWAY_LAUNCHED_SUPERVISED=1
+    echo "Gateway launched under $GATEWAY_SUPERVISOR_UNIT; systemd owns the process from here"
+  else
+    echo "WARNING: could not start $GATEWAY_SUPERVISOR_UNIT; falling back to an unsupervised launch" >&2
+    stop_supervised_gateway
+  fi
+fi
+if [ "${GATEWAY_LAUNCHED_SUPERVISED:-0}" != "1" ]; then
+# The historical launch: detached, unowned, and only as durable as the host.
+# Kept verbatim, and kept here at the launch site, as the fallback for a host
+# without usable systemd.
 env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_GIT_HELPER \
   -u GATEWAY_EXACT_COMMIT_HELPER \
@@ -4459,9 +4616,18 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
 
 GATEWAY_LAUNCHER_PID="$!"
+echo "gateway launcher pid: $GATEWAY_LAUNCHER_PID (unsupervised)"
+fi
+
 GATEWAY_PID=""
-echo "gateway launcher pid: $GATEWAY_LAUNCHER_PID"
-for attempt in $(seq 1 15); do
+# Under supervision a first start is immediate, but a crash inside the first
+# seconds puts the unit into RestartSec backoff. Wait long enough to see the
+# retry rather than declaring the deploy dead while systemd is still working.
+GATEWAY_LAUNCH_DISCOVERY_ATTEMPTS=15
+if [ "${GATEWAY_LAUNCHED_SUPERVISED:-0}" = "1" ]; then
+  GATEWAY_LAUNCH_DISCOVERY_ATTEMPTS=45
+fi
+for attempt in $(seq 1 "$GATEWAY_LAUNCH_DISCOVERY_ATTEMPTS"); do
   GATEWAY_PID="$(pgrep -f "^$GATEWAY_PYTHON_BIN -u -m gateway[.]main$" | head -1 || true)"
   if [ -n "$GATEWAY_PID" ]; then
     break
@@ -4482,6 +4648,20 @@ GATEWAY_HEALTH_READY=0
 for attempt in $(seq 1 120); do
   GATEWAY_PID="$(pgrep -f "^$GATEWAY_PYTHON_BIN -u -m gateway[.]main$" | head -1 || true)"
   if [ -z "$GATEWAY_PID" ]; then
+    # Supervised, a missing process is usually a restart in flight rather than
+    # a dead deploy: systemd is holding RestartSec before trying again. Keep
+    # polling while the unit is still working, and only fail once systemd has
+    # stopped trying — which, with StartLimitIntervalSec=0, it never does
+    # short of an explicit stop.
+    if [ "${GATEWAY_LAUNCHED_SUPERVISED:-0}" = "1" ]; then
+      case "$(gateway_supervisor_unit_state)" in
+        active|activating|reloading)
+          echo "Gateway process not up yet; $GATEWAY_SUPERVISOR_UNIT is restarting it"
+          sleep 5
+          continue
+          ;;
+      esac
+    fi
     tail -160 "$GATEWAY_LOG_FILE"
     echo "ERROR: gateway exited during startup" >&2
     exit 1

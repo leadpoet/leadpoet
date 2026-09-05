@@ -850,6 +850,90 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     assert (lease["image_digest"], lease["image_reference"]) == (pinned_digest, pinned_reference)
 
 
+def _runner_claim_service(*, network_name, hotkeys, validator_permit, active=None):
+    runner = "5" * 48
+    snapshot_values = {"hotkeys": hotkeys}
+    if validator_permit is not None:
+        snapshot_values["validator_permit"] = validator_permit
+    if active is not None:
+        snapshot_values["active"] = active
+    snapshot = SimpleNamespace(**snapshot_values)
+    chain = SimpleNamespace(
+        metagraph=lambda: snapshot,
+        hotkeys_owned_by_same_coldkey=lambda _hotkey: [],
+    )
+    service = object.__new__(ArenaService)
+    service._store = SimpleNamespace(
+        claim_assignment=lambda **_kwargs: {"status": "empty"}
+    )
+    service._config = SimpleNamespace(network_name=network_name, chain=chain)
+    service._request_round = lambda *_args, **_kwargs: (
+        {
+            "hotkey": runner,
+            "body": {"declared_parallelism": 1},
+            "request_id": "0" * 32,
+            "signature": "sig",
+        },
+        {
+            "round_id": "arena-2026-09-05-testnet",
+            "status": "stage1",
+            "configuration_doc": {
+                "runner_hotkeys": [runner],
+                "runner_slot_ceiling": 8,
+                "lease_ttl_seconds": 420,
+            },
+        },
+    )
+    service._lease_token = lambda _validated: "token"
+    return service
+
+
+@pytest.mark.parametrize(
+    ("hotkeys", "validator_permit", "expected_code"),
+    [
+        (["5" + "A" * 47], [True], "runner_hotkey_unregistered"),
+        (["5" * 48], [False], "runner_validator_permit_required"),
+        (["5" * 48], None, "runner_validator_permit_unavailable"),
+        (["5" * 48], [], "runner_validator_permit_unavailable"),
+        (["5" * 48], ["false"], "runner_validator_permit_unavailable"),
+    ],
+)
+def test_test_network_claim_requires_registered_validator_permit(
+    hotkeys, validator_permit, expected_code
+):
+    service = _runner_claim_service(
+        network_name="test",
+        hotkeys=hotkeys,
+        validator_permit=validator_permit,
+    )
+
+    with pytest.raises(ServiceError) as rejected:
+        service.handle_claim({})
+
+    assert rejected.value.code == expected_code
+
+
+def test_test_network_claim_accepts_permitted_inactive_validator():
+    service = _runner_claim_service(
+        network_name="test",
+        hotkeys=["5" * 48],
+        validator_permit=[True],
+        active=[False],
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+
+
+def test_finney_claim_does_not_add_the_testnet_validator_permit_gate():
+    service = _runner_claim_service(
+        network_name="finney",
+        hotkeys=["5" * 48],
+        validator_permit=[False],
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+
+
 def test_execute_lease_uses_private_source_and_the_common_trusted_python_image():
     runner = "5" * 48
     digest = "sha256:" + "a" * 64

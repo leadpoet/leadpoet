@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, submission_rate_limit, verify
+from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, submission_rate_limit, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -1526,6 +1526,23 @@ class ArenaService:
         configuration = round_row["configuration_doc"]
         if validated["hotkey"] not in configuration["runner_hotkeys"]:
             raise ServiceError("runner_not_allowlisted", 403)
+        if str(getattr(self._config, "network_name", "finney")).strip().lower() == "test":
+            try:
+                snapshot = self._config.chain.metagraph()
+                uid = chain_module.uid_for_hotkey(snapshot, validated["hotkey"])
+                permits = snapshot.validator_permit
+            except Exception as exc:
+                raise ServiceError("runner_validator_permit_unavailable", 503) from exc
+            if uid is None:
+                raise ServiceError("runner_hotkey_unregistered", 403)
+            try:
+                has_validator_permit = permits[uid]
+            except (IndexError, KeyError, TypeError) as exc:
+                raise ServiceError("runner_validator_permit_unavailable", 503) from exc
+            if not isinstance(has_validator_permit, bool):
+                raise ServiceError("runner_validator_permit_unavailable", 503)
+            if not has_validator_permit:
+                raise ServiceError("runner_validator_permit_required", 403)
         excluded = list(self._config.chain.hotkeys_owned_by_same_coldkey(validated["hotkey"]))
         token = self._lease_token(validated)
         response = self._store.claim_assignment(

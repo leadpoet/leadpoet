@@ -2327,7 +2327,7 @@ def _verify_weight_submission_evidence_core(
             public_key_verifier_policy=binding.public_key_verifier_policy
         )
     release_evidence = readonly_http.get_json(
-        "/weights/v2/release-evidence/" + candidate,
+        "/weights/v2/immutable-release-evidence/" + candidate,
         maximum_bytes=MAX_RELEASE_EVIDENCE_BYTES,
     )
     if str(release_evidence.get("commit_sha") or "").lower() != candidate:

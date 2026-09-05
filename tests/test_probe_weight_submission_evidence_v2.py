@@ -163,7 +163,7 @@ class _Http:
     def __init__(self, *, authority=None, candidate=CANDIDATE):
         self.documents = {
             "/build-info": {"is_commit_known": True, "git_commit": candidate},
-            "/weights/v2/release-evidence/"
+            "/weights/v2/immutable-release-evidence/"
             + CANDIDATE: {
                 "schema_version": "leadpoet.auditor_release_evidence.v2",
                 "commit_sha": CANDIDATE,
@@ -254,7 +254,7 @@ def test_probe_verifies_exact_release_authority_and_finalized_vectors():
     )
     assert [path for path, _limit in http.calls] == [
         "/build-info",
-        "/weights/v2/release-evidence/" + CANDIDATE,
+        "/weights/v2/immutable-release-evidence/" + CANDIDATE,
         "/weights/v2/published-compact/71/24080",
     ]
     assert len(release_calls) == 1
@@ -269,7 +269,8 @@ def test_probe_rejects_gateway_and_release_sha_mismatches():
         _run(http=_Http(candidate="b" * 40))
 
     http = _Http()
-    http.documents["/weights/v2/release-evidence/" + CANDIDATE]["commit_sha"] = "b" * 40
+    release_path = "/weights/v2/immutable-release-evidence/" + CANDIDATE
+    http.documents[release_path]["commit_sha"] = "b" * 40
     with pytest.raises(
         probe.WeightSubmissionEvidenceProbeError, match="release_sha_mismatch"
     ):

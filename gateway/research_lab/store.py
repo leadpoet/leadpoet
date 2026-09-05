@@ -23,7 +23,16 @@ logger = logging.getLogger(__name__)
 # retry is safe. The classifier is an allowlist: anything that is not a
 # recognized transient propagates immediately, exactly as before, so genuine
 # query-logic errors still fail closed.
-_TRANSIENT_READ_ATTEMPTS = 4
+# Sized against the 2026-09-04 edge regime, in which a fraction of reads was
+# dropped for eight hours. Four attempts was enough for an isolated drop but
+# not for a sustained one: a request making a single read still mostly
+# succeeded, while the attested allocation bundle — which makes hundreds of
+# reads to assemble its ancestry, and fails whole if any one of them fails —
+# failed 677 times in a row without a single success. Seven attempts with the
+# backoff capped at 1.5s bounds one exhausted read at roughly 7s of sleeping
+# on top of its attempts, which fits inside the 480s preparation budget from
+# #162 even when several reads in a build have to spend it.
+_TRANSIENT_READ_ATTEMPTS = 7
 _TRANSIENT_READ_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
 _TRANSIENT_ERROR_SIGNATURES = (
     "cloudflare",

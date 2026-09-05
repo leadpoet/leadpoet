@@ -226,7 +226,10 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
     for parent in resolved.parents:
         if (
             parent.parent == archive_parent
-            and re.fullmatch(r"gateway-v2-preflight\.[A-Za-z0-9]+", parent.name)
+            and re.fullmatch(
+                r"(?:gateway-v2-preflight|leadpoet-local-release-source)\.[A-Za-z0-9]+",
+                parent.name,
+            )
         ):
             return resolved.relative_to(parent), "candidate_archive"
         if (

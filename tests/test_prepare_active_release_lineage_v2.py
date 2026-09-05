@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -533,6 +534,33 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
     assert {call["current_epoch"] for call in sourcing_calls} == {24_745}
     assert {call["window"] for call in sourcing_calls} == {30}
     assert {call["current_epoch"] for call in source_add_calls} == {24_745}
+
+
+def test_gateway_final_uses_bound_validator_authority_after_n_minus_one_unsets_env(
+) -> None:
+    restart = (Path(__file__).resolve().parents[1] / "gw_restart.sh").read_text(
+        encoding="utf-8"
+    )
+    bootstrap_start = restart.index(
+        '  exec env \\\n    -u GATEWAY_RESTART_AUTHORITY_ROOT'
+    )
+    bootstrap = restart[
+        bootstrap_start : restart.index("\nfi\n", bootstrap_start)
+    ]
+    assert "-u GATEWAY_RESTART_AUTHORITY_COMMIT" in bootstrap
+
+    advanced_main = "9" * 40
+    validator_authority = "8" * 40
+    requirements = _requirements(authority=validator_authority)
+
+    assert prepare._gateway_final_authority_commit(
+        advanced_main,
+        requirements,
+    ) == validator_authority
+    assert prepare._gateway_final_authority_commit(
+        advanced_main,
+        None,
+    ) == advanced_main
 
 
 @pytest.mark.asyncio

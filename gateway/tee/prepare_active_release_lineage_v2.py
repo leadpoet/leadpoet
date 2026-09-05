@@ -1113,6 +1113,26 @@ def prepare_validator_final_active_lineage_v2(
     }
 
 
+def _gateway_final_authority_commit(
+    requested_authority_commit: str,
+    validator_requirements: Optional[Mapping[str, Any]],
+) -> str:
+    """Select the paired validator's already-validated release authority."""
+
+    requested = _commit(requested_authority_commit, "release authority commit")
+    if validator_requirements is None:
+        return requested
+    requirements = validate_active_release_requirements_v2(
+        validator_requirements
+    )
+    # The installed N-1 gateway controller removes restart-only authority
+    # variables at the miner-maintenance bootstrap boundary. Its shell fallback
+    # can therefore observe a newer origin/main. The invocation-bound validator
+    # sidecar is the paired authority; the full gateway-final verifier below
+    # still binds its candidate, invocation, lineage, and selected roots.
+    return str(requirements["authority_commit_sha"])
+
+
 def _result(*, mode: str, prepared: Mapping[str, Any]) -> Dict[str, Any]:
     requirements = prepared["requirements"]
     lineage = prepared["lineage"]
@@ -1240,23 +1260,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         policy = ResearchLabGatewayConfig.from_env().reimbursement_policy_doc(
             enabled=True
         )
+        validator_requirements = (
+            _load_json(
+                args.validator_requirements,
+                "validator active release requirements",
+            )
+            if args.validator_requirements is not None
+            else None
+        )
+        authority_commit = _gateway_final_authority_commit(
+            args.authority_commit,
+            validator_requirements,
+        )
         prepared = asyncio.run(
             prepare_gateway_final_active_lineage_v2(
                 candidate_commit_sha=args.candidate_commit,
-                authority_commit_sha=args.authority_commit,
+                authority_commit_sha=authority_commit,
                 restart_invocation_id=args.restart_invocation_id,
                 running_gateway_release_manifest=_load_json(
                     args.running_gateway_manifest,
                     "running gateway release manifest",
                 ),
-                validator_requirements=(
-                    _load_json(
-                        args.validator_requirements,
-                        "validator active release requirements",
-                    )
-                    if args.validator_requirements is not None
-                    else None
-                ),
+                validator_requirements=validator_requirements,
                 fallback_lineage=(
                     _load_json(
                         args.fallback_lineage,

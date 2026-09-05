@@ -99,11 +99,17 @@ Organizer keys remain for the explicitly identified daily baseline only.
 With the miner vault unset, baseline operation remains available, but new
 model admission fails closed.
 
-## Remaining live validation
+## Live validation and deployment boundary
 
-This change is not yet proof of a live miner submission. Validate admission,
-source loading, actual provider calls, persisted scoring, and failure isolation
-on the production gateway and validator before cutover.
+The isolated testnet-401 run completed real CLI admission, source loading in
+gVisor, provider calls, scoring, persistence, publication, and API restart
+recovery. See [the live validation report](miner-model-live-validation-20260905.md).
+This proves the workflow, not model quality: the test miner scored zero.
+
+Production was not changed. The test used the real gateway and validator hosts
+but separate processes, PostgreSQL, and an S3 prefix. It exercised the SQL RPCs
+through `PsycopgTransport`, not the production PostgREST transport. Complete the
+staged operator setup and production transport checks before enabling intake.
 
 The scorer's webpage, job, LinkedIn post, and X post requests use Deepline
 for miner-funded scoring only. Public webpages use Firecrawl; LinkedIn jobs

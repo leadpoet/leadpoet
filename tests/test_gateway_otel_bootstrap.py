@@ -393,3 +393,70 @@ def test_resource_is_fixed_and_ignores_ambient_resource_env(monkeypatch):
     resource_attrs = dict(spans[0].resource.attributes)
     assert resource_attrs == {"service.name": "leadpoet-gateway"}
     assert "leak.key" not in resource_attrs
+
+
+def test_validator_allows_vocabulary_stage_only_on_failures():
+    """The optional stage label is bounded: it is accepted only on a 5xx and
+    only when its value comes from the fixed stage vocabulary."""
+    from gateway.observability.otel_bootstrap import (
+        STAGE_ATTRIBUTE,
+        STAGE_ATTRIBUTE_VALUES,
+    )
+
+    exp = InMemorySpanExporter()
+    tracer = _validator_harness(exp)
+
+    stage = "compact_bundle_cutover_authority"
+    assert stage in STAGE_ATTRIBUTE_VALUES
+
+    failed = {
+        "http.request.method": "POST",
+        "http.route": "/ok",
+        "http.response.status_code": 503,
+        "duration_ms": 1.5,
+    }
+
+    # A vocabulary stage on a failed request → exported, label intact.
+    _emit_span(tracer, attrs={**failed, STAGE_ATTRIBUTE: stage})
+    spans = exp.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].attributes[STAGE_ATTRIBUTE] == stage
+    exp.clear()
+
+    # A stage value outside the vocabulary → dropped, never exported as-is.
+    _emit_span(tracer, attrs={**failed, STAGE_ATTRIBUTE: "not_a_stage"})
+    # Free text (the shape a leak would take) → dropped.
+    _emit_span(tracer, attrs={**failed, STAGE_ATTRIBUTE: "hotkey=5F3x epoch=91"})
+    # A stage on a successful request → dropped; it is a failure label only.
+    _emit_span(
+        tracer,
+        attrs={
+            **failed,
+            "http.response.status_code": 200,
+            STAGE_ATTRIBUTE: stage,
+        },
+    )
+    # The stage label does not license any other extra attribute.
+    _emit_span(
+        tracer,
+        attrs={**failed, STAGE_ATTRIBUTE: stage, "user.email": "leak@example.com"},
+    )
+    assert exp.get_finished_spans() == ()
+
+    # A failed request with no stage recorded stays conforming.
+    _emit_span(tracer, attrs=failed)
+    assert len(exp.get_finished_spans()) == 1
+
+
+def test_stage_context_is_per_request_and_never_raises():
+    """The stage carrier is reset per request and swallows its own errors."""
+    from gateway.observability import stage_context
+
+    stage_context.reset_stage()
+    assert stage_context.current_stage() is None
+    stage_context.enter_stage("compact_bundle_shape_verification")
+    assert stage_context.current_stage() == "compact_bundle_shape_verification"
+    stage_context.enter_stage("compact_bundle_cutover_authority")
+    assert stage_context.current_stage() == "compact_bundle_cutover_authority"
+    stage_context.reset_stage()
+    assert stage_context.current_stage() is None

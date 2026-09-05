@@ -33,7 +33,9 @@ The boundary is CODE-ENFORCED, not discipline-enforced:
    span envelope before export: the ``gateway.http`` instrumentation scope
    with no version/schema metadata, ``SERVER`` kind, a root span (no parent,
    empty trace state), EXACTLY the four approved attributes with the
-   approved types, a standard HTTP method, a span name equal to exactly
+   approved types — plus, on a >=500 response only, an OPTIONAL fifth
+   ``gateway.stage`` label whose value must come from a fixed in-repo
+   vocabulary so a generic error names the stage that refused it — a standard HTTP method, a span name equal to exactly
    ``<method> <route>``, no events, no links, no status description, the
    fixed resource, and a route label that is either a registered route
    template or the literal ``/_unmatched``. Anything else is DROPPED (never
@@ -56,6 +58,8 @@ from __future__ import annotations
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional
+
+from gateway.observability import stage_context
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -102,6 +106,51 @@ SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 
 SPAN_ATTRIBUTE_ALLOWLIST = frozenset(SPAN_ATTRIBUTE_TYPES)
 
+# One OPTIONAL attribute, attached only to a failed (>=500) request: the name of
+# the internal stage the request last entered. Its value must come from the fixed
+# vocabulary below, which is owned by this codebase and contains no identifiers,
+# hotkeys, epochs, paths, or caller-supplied text. A stage name outside the
+# vocabulary is a boundary violation and the span is dropped like any other.
+STAGE_ATTRIBUTE = "gateway.stage"
+
+STAGE_ATTRIBUTE_VALUES = frozenset(
+    {
+        "canonical_bundle_durable_lookup",
+        "canonical_bundle_durable_persistence",
+        "canonical_bundle_epoch_authority",
+        "canonical_bundle_identity_authorization",
+        "canonical_bundle_measured_publication",
+        "canonical_bundle_publication_persistence",
+        "canonical_bundle_shape_verification",
+        "canonical_bundle_transparency_event",
+        "compact_bundle_authority_persistence",
+        "compact_bundle_authority_readback",
+        "compact_bundle_authority_verification",
+        "compact_bundle_cryptographic_verification",
+        "compact_bundle_cutover_authority",
+        "compact_bundle_durable_persistence",
+        "compact_bundle_epoch_authority",
+        "compact_bundle_epoch_evidence",
+        "compact_bundle_measured_publication",
+        "compact_bundle_publication_intent_lookup",
+        "compact_bundle_publication_intent_persistence",
+        "compact_bundle_shape_verification",
+        "compact_bundle_transparency_event",
+        "compact_bundle_validator_ancestry_persistence",
+        "compact_finalization_ancestry_persistence",
+        "compact_finalization_authority_persistence",
+        "compact_finalization_authority_verification",
+        "compact_finalization_cutover_authority",
+        "compact_finalization_publication_readback",
+        "compact_finalization_publication_verification",
+        "compact_finalization_recovery_verification",
+        "compact_finalization_shape_verification",
+        "primary_finalization_persistence",
+        "primary_finalization_receipt_graph_verification",
+        "primary_finalization_shape_verification",
+    }
+)
+
 
 def _enabled() -> bool:
     return (
@@ -141,11 +190,21 @@ def _span_scope(span: Any) -> Any:
 
 
 def _attributes_conform(attributes: Dict[str, Any]) -> bool:
-    if set(attributes) != SPAN_ATTRIBUTE_ALLOWLIST:
+    present = set(attributes)
+    stage = attributes.get(STAGE_ATTRIBUTE)
+    if present - {STAGE_ATTRIBUTE} != SPAN_ATTRIBUTE_ALLOWLIST:
         return False
     for key, allowed_types in SPAN_ATTRIBUTE_TYPES.items():
         value = attributes[key]
         if isinstance(value, bool) or not isinstance(value, allowed_types):
+            return False
+    if STAGE_ATTRIBUTE in present:
+        # A stage label is only meaningful on a failure, and only from the
+        # fixed vocabulary. Anything else fails closed.
+        if stage not in STAGE_ATTRIBUTE_VALUES:
+            return False
+        status = attributes["http.response.status_code"]
+        if not isinstance(status, int) or status < 500:
             return False
     return True
 
@@ -186,6 +245,7 @@ class _GatewayOtelMiddleware:
             await self.app(scope, receive, send)
             return
 
+        stage_context.reset_stage()
         start_ns = time.time_ns()
         start_mono = time.monotonic()
         status_code = 500
@@ -425,6 +485,11 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
             span.set_attribute("http.response.status_code", int(status_code))
             span.set_attribute("duration_ms", (time.monotonic() - start_mono) * 1000.0)
             if int(status_code) >= 500:
+                # Name the internal stage this request last entered, so a generic
+                # 5xx says where it failed. Vocabulary-checked at the boundary.
+                stage = stage_context.current_stage()
+                if stage in STAGE_ATTRIBUTE_VALUES:
+                    span.set_attribute(STAGE_ATTRIBUTE, stage)
                 span.set_status(Status(StatusCode.ERROR))
             span.end()
 

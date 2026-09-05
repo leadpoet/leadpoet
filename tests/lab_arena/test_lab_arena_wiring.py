@@ -79,7 +79,9 @@ def test_banned_hotkeys_snapshot_must_be_a_json_list(tmp_path, monkeypatch):
     assert wiring.banned_hotkeys_from_environment() == []
 
 
-@pytest.mark.parametrize("raw, expected", [("", 0), ("0", 0), ("23", 23)])
+@pytest.mark.parametrize(
+    "raw, expected", [("", 0), ("0", 0), ("23", 23), ("disabled", None)]
+)
 def test_daily_cutoff_hour_is_read_from_the_environment(monkeypatch, raw, expected):
     from lab_arena import wiring
 
@@ -101,6 +103,67 @@ def test_daily_capacity_defaults_are_bounded(monkeypatch):
     monkeypatch.delenv("LAB_ARENA_MAX_CHALLENGERS", raising=False)
     assert wiring._max_challengers_from_environment() == 16
     assert wiring._max_challengers_from_environment() < wiring.contracts.MAX_CHALLENGERS
+
+
+def test_stage_minutes_override_is_complete_and_testnet_shadow_only(monkeypatch):
+    override = {
+        "benchmark": 1,
+        "stage_1": 30,
+        "stage_1_scoring": 10,
+        "stage_2": 30,
+        "final_scoring": 30,
+    }
+    monkeypatch.setenv("LAB_ARENA_STAGE_MINUTES", json.dumps(override))
+    assert wiring._stage_minutes_from_environment(
+        mode="shadow", network_name="test", netuid=401, rewards_enabled=False
+    ) == override
+    for context in (
+        {"mode": "live", "network_name": "test", "netuid": 401, "rewards_enabled": False},
+        {"mode": "shadow", "network_name": "finney", "netuid": 71, "rewards_enabled": False},
+        {"mode": "shadow", "network_name": "test", "netuid": 401, "rewards_enabled": True},
+    ):
+        with pytest.raises(ServiceError, match="only for reward-disabled shadow testnet 401"):
+            wiring._stage_minutes_from_environment(**context)
+
+
+def test_stage_minutes_without_an_override_keep_native_defaults(monkeypatch):
+    monkeypatch.delenv("LAB_ARENA_STAGE_MINUTES", raising=False)
+    assert wiring._stage_minutes_from_environment(
+        mode="live", network_name="finney", netuid=71, rewards_enabled=True
+    ) == wiring.DEFAULT_STAGE_MINUTES
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-json",
+        json.dumps({"benchmark": 1}),
+        json.dumps(
+            {
+                "benchmark": 31,
+                "stage_1": 30,
+                "stage_1_scoring": 10,
+                "stage_2": 30,
+                "final_scoring": 30,
+            }
+        ),
+        json.dumps(
+            {
+                "benchmark": True,
+                "stage_1": 30,
+                "stage_1_scoring": 10,
+                "stage_2": 30,
+                "final_scoring": 30,
+            }
+        ),
+    ],
+)
+def test_stage_minutes_override_rejects_partial_or_invalid_values(monkeypatch, raw):
+    monkeypatch.setenv("LAB_ARENA_STAGE_MINUTES", raw)
+    with pytest.raises(ServiceError):
+        wiring._stage_minutes_from_environment(
+            mode="shadow", network_name="test", netuid=401, rewards_enabled=False
+        )
 
 
 def test_service_requires_at_least_one_runner_hotkey(monkeypatch):

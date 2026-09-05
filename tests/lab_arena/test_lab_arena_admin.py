@@ -102,9 +102,9 @@ class IdleService(FakeService):
     def open_round(self):
         return None
 
-    def create_round(self, cutoff):
-        self.created.append(cutoff)
-        return {"round_id": "arena-%s" % cutoff.strftime("%Y-%m-%d"), "schedule": {"submission_cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")}}
+    def create_round(self, cutoff, *, round_id=None):
+        self.created.append((cutoff, round_id))
+        return {"round_id": round_id or "arena-%s" % cutoff.strftime("%Y-%m-%d"), "schedule": {"submission_cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")}}
 
 
 def test_create_makes_the_round_for_a_cutoff_and_refuses_open_rounds_and_existing_dates(capsys):
@@ -123,6 +123,42 @@ def test_create_makes_the_round_for_a_cutoff_and_refuses_open_rounds_and_existin
     # Rounds overlap: a running round never blocks the next one.
     running = FakeService(status="stage1")
     running.created = []
-    running.create_round = lambda cutoff: IdleService.create_round(running, cutoff)
+    running.create_round = lambda cutoff, *, round_id=None: IdleService.create_round(running, cutoff, round_id=round_id)
     assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-06T00:00:00Z"]), running) == 0
     assert json.loads(capsys.readouterr().out)["created"] == "arena-2026-09-06" and len(running.created) == 1
+
+
+def test_create_accepts_only_a_date_matched_suffixed_explicit_round_id(capsys):
+    service = IdleService()
+    args = [
+        "create",
+        "--cutoff",
+        "2026-09-05T08:00:00Z",
+        "--round-id",
+        "arena-2026-09-05-hosted1",
+    ]
+    code, out, err = run(args + ["--dry-run"], service, capsys)
+    assert code == 0 and not err
+    assert json.loads(out)["would_create"] == "arena-2026-09-05-hosted1"
+    code, out, err = run(args, service, capsys)
+    assert code == 0 and not err
+    assert json.loads(out)["created"] == "arena-2026-09-05-hosted1"
+    assert service.created[-1][1] == "arena-2026-09-05-hosted1"
+
+    for invalid in (
+        "arena-2026-09-05",
+        "arena-2026-09-06-hosted1",
+        "arena-2026-09-05-HOSTED",
+    ):
+        code, _, err = run(
+            [
+                "create",
+                "--cutoff",
+                "2026-09-05T08:00:00Z",
+                "--round-id",
+                invalid,
+            ],
+            IdleService(),
+            capsys,
+        )
+        assert code == 2 and "match the cutoff date" in err

@@ -571,6 +571,85 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
     ]
 
 
+@pytest.mark.parametrize("submission_id", ["sub-unknown", "sub-current-open-round"])
+def test_public_results_refuse_ids_outside_the_published_round(submission_id):
+    published = {
+        "round_id": "arena-2026-09-02",
+        "status": "published",
+        "publication_doc": {
+            "participants": [
+                {
+                    "submission_id": "sub-published",
+                    "miner_hotkey": "5" + "A" * 47,
+                    "is_baseline": False,
+                }
+            ],
+            "stage1_ranking": [],
+            "final_ranking": [],
+        },
+    }
+
+    class Store:
+        @staticmethod
+        def list_runs(*_args, **_kwargs):
+            pytest.fail("a nonparticipant must be rejected before run lookup")
+
+        @staticmethod
+        def get_submission(_submission_id):
+            # This simulates a known submission in the current open round. The
+            # global submission row must not make it part of this publication.
+            return {
+                "round_id": "arena-2026-09-03",
+                "submission_id": "sub-current-open-round",
+                "miner_hotkey": "5" + "B" * 47,
+                "is_king": False,
+            }
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._round = lambda _round_id: published
+
+    with pytest.raises(ServiceError) as caught:
+        service.public_results(published["round_id"], submission_id)
+    assert caught.value.status == 404 and caught.value.code == "submission_missing"
+
+
+def test_public_results_take_valid_identity_from_the_round_publication():
+    hotkey = "5" + "C" * 47
+    published = {
+        "round_id": "arena-2026-09-02",
+        "status": "published",
+        "publication_doc": {
+            "participants": [
+                {
+                    "submission_id": "sub-published",
+                    "miner_hotkey": hotkey,
+                    "is_baseline": True,
+                }
+            ],
+            "stage1_ranking": [],
+            "final_ranking": [],
+        },
+    }
+
+    class Store:
+        @staticmethod
+        def list_runs(_round_id, **filters):
+            assert filters == {"submission_id": "sub-published", "kind": "execute"}
+            return []
+
+        @staticmethod
+        def get_submission(_submission_id):
+            pytest.fail("public identity must not come from the global submission row")
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._round = lambda _round_id: published
+
+    result = service.public_results(published["round_id"], "sub-published")
+    assert result["submission"] == {"miner_hotkey": hotkey, "is_baseline": True}
+
+
 def test_source_download_requires_the_active_execute_lease():
     token = "a" * 64
     payload = b"private source bytes"

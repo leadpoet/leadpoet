@@ -1918,6 +1918,17 @@ class ArenaService:
         row = self._round(round_id)
         if row["status"] != "published":
             raise ServiceError("results_not_public", 403)
+        publication = row.get("publication_doc") or {}
+        participant = next(
+            (
+                item
+                for item in publication.get("participants") or []
+                if item.get("submission_id") == submission_id
+            ),
+            None,
+        )
+        if participant is None:
+            raise ServiceError("submission_missing", 404)
         runs = [run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")]
         outputs = {}
         for run in runs:
@@ -1935,14 +1946,12 @@ class ArenaService:
                 if int(run.get("stage") or 0) == 2 and run.get("per_icp_score") is not None
             ],
         }
-        publication = row.get("publication_doc") or {}
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
-        submission = self._store.get_submission(submission_id) or {}
         return {
             "round_id": round_id, "submission_id": submission_id, "submission": {
-                "miner_hotkey": submission.get("miner_hotkey"),
-                "is_baseline": bool(submission.get("is_king")),
+                "miner_hotkey": participant.get("miner_hotkey"),
+                "is_baseline": bool(participant.get("is_baseline")),
             },
             "outputs": outputs, "run_results": [run["result_doc"] for run in runs if run.get("result_doc")],
             "scores": scores,

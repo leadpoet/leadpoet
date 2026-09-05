@@ -202,6 +202,21 @@ def test_restart_uses_the_arena_runner_capacity_default():
     assert 'LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-8}"' in script
 
 
+def test_validator_restart_replaces_runner_after_gateway_alignment():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("start_lab_arena_runner() {")
+    end = script.index("\n}\n", start) + 3
+    runner = script[start:end]
+    privileged_launch_start = runner.index("setsid sudo env \\")
+    privileged_launch = runner[privileged_launch_start:]
+    entrypoint = '"$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py'
+
+    assert "PYTHONDONTWRITEBYTECODE=1" in privileged_launch
+    assert privileged_launch.index("PYTHONDONTWRITEBYTECODE=1") < privileged_launch.index(
+        entrypoint
+    )
+
+
 def test_unpinned_validator_local_build_follows_new_main_before_shutdown():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     start = script.index("follow_superseding_validator_release() {")

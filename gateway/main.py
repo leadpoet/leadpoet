@@ -360,6 +360,7 @@ async def lifespan(app: FastAPI):
     fulfillment_task_handle = None
     source_add_dispatcher_task = None
     hotkey_bucket_cleanup_task = None
+    pcr0_builder_task_handle = None
 
     # Now use async_subtensor in a try/finally to ensure cleanup
     try:
@@ -501,6 +502,15 @@ async def lifespan(app: FastAPI):
                 from gateway.fulfillment.lifecycle import fulfillment_lifecycle_task
                 fulfillment_task_handle = asyncio.create_task(fulfillment_lifecycle_task())
                 print("✅ Fulfillment lifecycle task started")
+
+        # The dynamic validator PCR0 cache belongs to the gateway verification
+        # boundary, not to the retired Research Lab worker fleets.  Keep its
+        # independent Git rebuild running in this API process so weight
+        # submissions can verify the exact validator commit and measurement.
+        from gateway.utils.pcr0_builder import start_pcr0_builder
+
+        pcr0_builder_task_handle = start_pcr0_builder()
+        print("✅ PCR0 builder started (trustless validator verification)")
         
         # SOURCE_ADD has its own queue and failure boundary.
         source_add_dispatcher_task = _start_source_add_dispatcher_task(app)
@@ -539,6 +549,7 @@ async def lifespan(app: FastAPI):
             icp_task,
             fulfillment_task_handle,
             source_add_dispatcher_task,
+            pcr0_builder_task_handle,
         ]
         
         # Filter out None tasks (when DISABLE_BACKGROUND_TASKS=true)

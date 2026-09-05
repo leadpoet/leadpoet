@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "fc738a50a87d11a6a7aa956838b475945d7a0a0d",
+  "baseline_commit": "33cd6ad428c809be97482a4c5ef4758253b1f8d1",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -72,7 +72,7 @@
       "symbol": "_start_source_add_dispatcher_task"
     },
     {
-      "ast_sha256": "sha256:5d55cef1befb85a4f8e9af6252ae8f68781ae18cdeea3cf24d65b20c3ffdb7cd",
+      "ast_sha256": "sha256:b2f41dcf05af252418ec0b079627ff6371902596948d3c1dad8b8155e2c82d44",
       "path": "gateway/main.py",
       "symbol": "lifespan"
     },
@@ -4682,7 +4682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8c5d9c021a8ae7d0dbd72a37257b5c090fbf491461612424f9ddd3b36910893a",
-  "protected_source_commit": "c339dc48c297b5c9a22a7a56414bd48a57bafd5f",
+  "manifest_hash": "sha256:32a84e48b0d32144c36eb8fcd78959c1250b6c7de767cc38e8cfd2387bec8a5b",
+  "protected_source_commit": "33cd6ad428c809be97482a4c5ef4758253b1f8d1",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

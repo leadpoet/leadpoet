@@ -2041,7 +2041,11 @@ async def pcr0_builder_task():
         logger.info("[PCR0] Running startup cache warming (last N commits)...")
         await build_pcr0_for_recent_commits(PCR0_CACHE_SIZE)
     else:
-        logger.info("[PCR0] Startup historical cache warming disabled by env")
+        logger.info(
+            "[PCR0] Startup historical cache warming disabled by env; "
+            "building the active runtime commit"
+        )
+        await build_pcr0_for_recent_commits(1)
     
     logger.info(f"[PCR0] Startup complete. Cache status: {get_cache_status()}")
     
@@ -2051,9 +2055,9 @@ async def pcr0_builder_task():
         await check_and_build_pcr0()
 
 
-def start_pcr0_builder():
+def start_pcr0_builder() -> asyncio.Task:
     """Start the background PCR0 builder task."""
-    asyncio.create_task(pcr0_builder_task())
+    task = asyncio.create_task(pcr0_builder_task())
     logger.info("[PCR0] Background builder task started")
     print("🔐 [PCR0] Background builder task started")
     print(f"   Repo: {GITHUB_REPO_URL}")
@@ -2063,6 +2067,7 @@ def start_pcr0_builder():
     print("   Startup warm delay: 15s")
     print(f"   Mode: PINNED DOCKERFILE (reproducible builds)")
     print(f"   TTL: None (pinned builds are deterministic)")
+    return task
 
 
 # =============================================================================

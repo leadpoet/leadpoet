@@ -12,6 +12,7 @@ full contract.
 | `http.route` | `/research-lab/allocations/attested/{epoch}` (route *template* — never the concrete path) |
 | `http.response.status_code` | `200` |
 | `duration_ms` | `12.4` |
+| `gateway.stage` | `compact_bundle_cutover_authority` — OPTIONAL, present only on a `>=500` response, and only for handlers that record internal stages (the weight bundle paths). Its value must be one of a fixed vocabulary defined in `gateway/observability/otel_bootstrap.py`; anything else drops the span. Carries no ids, hotkeys, epochs, or caller-supplied text. |
 
 No bodies, query strings, headers, DB statements, model I/O, prompts, or
 completions. Health/liveness routes are suppressed entirely.
@@ -46,7 +47,8 @@ telemetry can never delay or break gateway startup.
 2. **Fail-closed complete-envelope validator.** Before export every span
    must have the `gateway.http` instrumentation scope with no
    version/schema metadata, `SERVER` kind, a root context (no parent, empty
-   trace state), exactly the four attributes above with the approved types,
+   trace state), exactly the four required attributes above with the approved
+   types plus the optional failure-only `gateway.stage` label,
    a standard HTTP method, a span name equal to exactly `<method> <route>`,
    no events/links/status descriptions, the fixed resource, and a
    registered route template (or the literal `/_unmatched`). A span

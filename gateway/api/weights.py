@@ -100,6 +100,7 @@ from Leadpoet.utils.subnet_epoch import (
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
 )
+from gateway.observability import stage_context
 from leadpoet_observability import (
     capture_failure,
     failure_code_for_exception,
@@ -175,6 +176,9 @@ def _begin_weight_stage(
     """Emit a bounded stage boundary without exposing authority documents."""
 
     payload = {**dict(telemetry), **fields}
+    # Also carry the stage name on the request itself, so a generic 5xx answer
+    # arrives in telemetry naming the stage that refused it.
+    stage_context.enter_stage(stage)
     record_stage(
         component="gateway",
         operation="weight_bundle",

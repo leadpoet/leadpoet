@@ -21,6 +21,25 @@ def _schedule():
     }
 
 
+def test_run_context_keeps_the_durable_round_identity():
+    run = {
+        "round_id": "arena-2026-09-04",
+        "assignment_id": "assignment-1",
+        "attempt": 2,
+        "icp_position": 3,
+        "miner_hotkey": "5" * 48,
+        "submission_id": "submission-1",
+        "stage": 2,
+        "kind": "score",
+    }
+    service = object.__new__(ArenaService)
+    service._store = SimpleNamespace(get_run=lambda _run_id: run)
+    returned, context = service._run_context("run-1", "lease-token")
+    assert returned is run
+    assert context.round_id == "arena-2026-09-04"
+    assert context.lease_token_hash == hash_lease_token("lease-token")
+
+
 @pytest.mark.parametrize("moment", ["2026-09-01T23:59:59+00:00", "2026-09-02T01:00:00+00:00"])
 def test_submission_requires_the_full_half_open_time_window(moment):
     service = object.__new__(ArenaService)

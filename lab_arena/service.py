@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, verify
+from lab_arena import broker as broker_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, submission_rate_limit, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -281,6 +281,9 @@ class ArenaService:
         self._lock = threading.RLock()
         self._hot_round_lock = threading.Lock()
         self._hot_rounds: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._submission_request_limiter = (
+            submission_rate_limit.SubmissionRequestLimiter()
+        )
         self._scorer_policy = scoring.build_scorer_policy()
         self._brokers: Dict[str, broker_module.Broker] = {}
 
@@ -620,6 +623,17 @@ class ArenaService:
         if now < _parse_iso(schedule["submission_open"]) or now >= _parse_iso(schedule["submission_cutoff"]):
             raise ServiceError("submission_window_closed", 409)
 
+    def _enforce_submission_request_limit(self, hotkey: str) -> None:
+        # Some narrow unit tests construct the service without __init__. The
+        # fallback is test-only; production always creates the limiter above.
+        limiter = getattr(self, "_submission_request_limiter", None)
+        if limiter is None:
+            limiter = submission_rate_limit.SubmissionRequestLimiter()
+            self._submission_request_limiter = limiter
+        decision = limiter.check(hotkey)
+        if not decision.allowed:
+            raise ServiceError("submission_rate_limited", 429)
+
     def handle_submission_presign(self, envelope: Any) -> Dict[str, Any]:
         """Reserve one private source upload for a signed miner request."""
 
@@ -635,6 +649,7 @@ class ArenaService:
         ):
             raise ServiceError("baseline_hotkey_reserved", 403)
         body = contracts.validate_submission_presign_body(validated["body"])
+        self._enforce_submission_request_limit(validated["hotkey"])
         # The submission id is the only server-assigned source identity.
         submission_id = "sub-%s" % secrets.token_hex(16)
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
@@ -735,6 +750,7 @@ class ArenaService:
             raise ServiceError("submission_credentials_missing", 409)
         if row.get("status") != "uploading":
             raise ServiceError("submission_not_uploading", 409)
+        self._enforce_submission_request_limit(validated["hotkey"])
         try:
             self._validate_uploaded_source(
                 row, forbidden_values=tuple(body["credentials"].values())
@@ -775,6 +791,8 @@ class ArenaService:
             validated["hotkey"],
             encrypted_credentials,
         )
+        if result.get("status") == "window_closed":
+            raise ServiceError("submission_window_closed", 409)
         if result.get("status") not in ("ok", "existing"):
             raise ServiceError("submission_finalize_failed", 500)
         return {"status": "accepted", "submission_id": submission_id}
@@ -1514,7 +1532,7 @@ class ArenaService:
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
-        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"))
+        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"), round_id=str(run.get("round_id") or ""))
 
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
         """Return source bytes only to the runner that holds the active lease."""

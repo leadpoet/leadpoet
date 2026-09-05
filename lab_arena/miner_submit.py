@@ -127,6 +127,19 @@ def _api_base_url(value: str) -> str:
     return base
 
 
+_SAFE_ADMISSION_ERRORS = frozenset({
+    "hotkey_unregistered", "baseline_hotkey_reserved", "submission_window_closed",
+    "submission_rate_limited", "submission_conflict", "submission_not_uploading",
+    "source_upload_unavailable", "credential_validation_unavailable",
+    "credential_kms_unavailable", "submission_credentials_missing",
+    "submission_rejected:openrouter_api_key_invalid",
+    "submission_rejected:openrouter_api_key_no_credit",
+    "submission_rejected:openrouter_management_key_invalid",
+    "submission_rejected:deepline_api_key_invalid",
+    "submission_rejected:submission_credentials_invalid",
+})
+
+
 def _json_response(response: Any, operation: str) -> Mapping[str, Any]:
     try:
         document = response.json()
@@ -136,7 +149,10 @@ def _json_response(response: Any, operation: str) -> Mapping[str, Any]:
         raise MinerSubmissionError("arena_response_invalid", operation)
     if not 200 <= int(response.status_code) < 300:
         # The gateway can include submitted credentials in a framework error.
-        # Keep all server-controlled response text out of local errors and logs.
+        # Surface only fixed, known codes. Never echo arbitrary server text.
+        code = document.get("code")
+        if isinstance(code, str) and code in _SAFE_ADMISSION_ERRORS:
+            raise MinerSubmissionError(code, operation)
         raise MinerSubmissionError("arena_request_failed", operation)
     return document
 

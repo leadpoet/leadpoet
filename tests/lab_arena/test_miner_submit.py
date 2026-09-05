@@ -296,6 +296,23 @@ def test_server_error_text_is_not_propagated():
     assert secret not in str(caught.value)
 
 
+@pytest.mark.parametrize("code", ["hotkey_unregistered", "submission_rate_limited", "submission_rejected:openrouter_management_key_invalid"])
+def test_known_admission_errors_are_actionable_without_echoing_details(code):
+    response = _Response(400, {"code": code, "detail": "server-echoed-secret"})
+    with pytest.raises(MinerSubmissionError) as caught:
+        miner_submit._json_response(response, "submission_finalize")
+    assert caught.value.code == code
+    assert "server-echoed-secret" not in str(caught.value)
+
+
+def test_unknown_error_code_is_never_echoed():
+    response = _Response(400, {"code": "submission_rejected:server-echoed-secret"})
+    with pytest.raises(MinerSubmissionError) as caught:
+        miner_submit._json_response(response, "submission_finalize")
+    assert caught.value.code == "arena_request_failed"
+    assert "server-echoed-secret" not in str(caught.value)
+
+
 def test_cli_rejects_submitted_credentials_embedded_in_source_before_upload(tmp_path):
     source = _agent_source(tmp_path)
     (source / "agent.py").write_text(

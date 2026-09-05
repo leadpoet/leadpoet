@@ -25,7 +25,7 @@ from urllib.error import HTTPError, URLError
 
 import httpx
 
-from lab_arena import contracts, operations
+from lab_arena import contracts, operations, scoring_provider_compat
 from lab_arena.contracts import ArenaContractError
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
@@ -375,6 +375,7 @@ class RunContext:
     stage: int
     kind: str = "execute"  # "execute" runs a miner model; "score" runs the Arena judge on a miner's output
     attempt: int = 1
+    round_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -499,16 +500,32 @@ class Broker:
             funding_source = self._funding_source_for(context) if self._funding_source_for else "host"
             if funding_source not in ("host", "miner_key"):
                 raise BrokerError("broker_unavailable")
-            secret = self._credential_for(context, operation.provider) if self._credential_for else self._key_for(operation.provider)
+            route = scoring_provider_compat.route_for(
+                kind=getattr(context, "kind", "execute"),
+                funding_source=funding_source,
+                round_id=getattr(context, "round_id", ""),
+                operation_id=operation_id,
+                parameters=normalized,
+            )
+            effective_operation_id = route.effective_operation_id if route else operation_id
+            effective_parameters = route.effective_parameters if route else normalized
+            effective_operation = operations.OPERATIONS[effective_operation_id]
+            effective_normalized = operations.validate_operation_request(
+                effective_operation_id, effective_parameters
+            )
+            secret = self._credential_for(context, effective_operation.provider) if self._credential_for else self._key_for(effective_operation.provider)
             if not isinstance(secret, str) or not secret:
                 raise BrokerError("miner_credentials_unavailable" if funding_source == "miner_key" else "broker_unavailable")
-        except BrokerError as exc:
+        except (BrokerError, KeyError, operations.OperationError) as exc:
+            if not isinstance(exc, BrokerError):
+                exc = BrokerError("broker_unavailable")
             return _error_result(exc.code, {"operation_id": operation_id, "funding_source": funding_source})
         max_output_tokens = 0
         try:
-            if operation.provider == "openrouter":
+            if effective_operation.provider == "openrouter":
                 # Reserve the maximum cost allowed by the request and output cap.
-                normalized, max_output_tokens = self._openrouter_parameters(normalized, kind=getattr(context, "kind", "execute"))
+                effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
+                normalized = effective_normalized
                 amount = max_openrouter_cost_microusd(self._price_table, normalized["model"], normalized, max_output_tokens=max_output_tokens)
             else:
                 # Other providers are bounded by call quota, so the reservation
@@ -528,21 +545,23 @@ class Broker:
         summary: Dict[str, Any] = {
             "call_identity": call_identity,
             "operation_id": operation_id,
-            "provider": operation.provider,
+            "provider": effective_operation.provider,
             "funding_source": funding_source,
             "request_hash": request_hash,
             "reserved_microusd": amount,
             "action_sequence": action_sequence,
         }
+        if route is not None:
+            summary.update(route.summary())
         reserved = self._store.reserve_call(
             run_id=context.run_id,
             lease_token_hash=context.lease_token_hash,
             call_identity=call_identity,
             operation_id=operation_id,
-            provider=operation.provider,
+            provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens},
+            call_doc={"request_hash": request_hash, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
         status = reserved.get("status")
@@ -581,10 +600,10 @@ class Broker:
             summary["outcome"] = "uncertain"
             return _error_result("call_uncertain", summary)
         # Build the outbound request from the constant table and inject the credential.
-        outbound = operations.build_outbound_request(operation_id, normalized)
+        outbound = operations.build_outbound_request(effective_operation_id, effective_normalized)
         try:
             url, headers = inject_credential(outbound, secret)
-            timeout_seconds = min(max(1, int(timeout_ms)) / 1000.0, float(operation.timeout_seconds))
+            timeout_seconds = min(max(1, int(timeout_ms)) / 1000.0, float(effective_operation.timeout_seconds))
             try:
                 response = self._transport.send(method=outbound.target.method, url=url, headers=headers, body=outbound.body, timeout_seconds=timeout_seconds)
                 # A provider must not echo its authorization secret into a
@@ -608,11 +627,28 @@ class Broker:
             del secret
 
         try:
-            sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(operation_id, response.status, response.headers, response.body, parameters=normalized)
             if funding_source == "miner_key" and response.status in (401, 402, 403):
                 refused = _error_result("miner_credentials_unavailable", summary)
                 sanitized_status, sanitized_headers, sanitized_body = refused.status, refused.headers, refused.body
-            if operation.provider == "openrouter":
+            else:
+                adapted_status, adapted_headers, adapted_body = (
+                    scoring_provider_compat.adapt_response(
+                        route,
+                        status=response.status,
+                        headers=response.headers,
+                        body=response.body,
+                    )
+                    if route is not None and 200 <= response.status < 300
+                    else (response.status, response.headers, response.body)
+                )
+                sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
+                    operation_id,
+                    adapted_status,
+                    adapted_headers,
+                    adapted_body,
+                    parameters=normalized,
+                )
+            if effective_operation.provider == "openrouter":
                 actual: Optional[int] = None
                 if 200 <= response.status < 300:
                     try:
@@ -621,7 +657,7 @@ class Broker:
                         actual = None
                 # Missing, malformed, stale, or excessive usage retains the full reservation.
                 actual = amount if actual is None or actual > amount else actual
-            elif operation.provider == "deepline" and 200 <= response.status < 300:
+            elif effective_operation.provider == "deepline" and 200 <= response.status < 300:
                 # Deepline reports the charge in its envelope; record it, floor-rounded.
                 actual = deepline_cost_microusd(response.body)
             else:

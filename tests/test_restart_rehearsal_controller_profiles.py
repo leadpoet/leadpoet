@@ -3328,7 +3328,7 @@ def test_instruction_files_match_and_verification_runbook_defines_default() -> N
     assert "120-second outer deadline" in runbook
     assert "legacy\n`prepush` profile asynchronously after push" in runbook
     assert "### 4. Asynchronous Accelerated Production Rehearsal" in runbook
-    assert "Preserve one receipt ancestry" in runbook
+    assert "fail-closed negatives and cleanup" in runbook
     assert "`un-accelerated` or\n`unaccelerated`" in runbook
     assert '"production-equivalent"' in runbook
     assert "--profile unaccelerated" in runbook

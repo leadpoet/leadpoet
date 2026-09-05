@@ -12,6 +12,7 @@ from gateway.tee.release_channel_v2 import (
     fetch_release_lineage_v2,
 )
 from gateway.tee.release_manifest_v2 import (
+    ReleaseManifestV2Error,
     build_local_release_identity,
     validate_release_manifest,
 )
@@ -129,6 +130,30 @@ def test_local_release_channel_precedes_s3(
     assert fetch_release_channel_v2(
         bucket="unused", commit_sha=COMMIT, s3_client=NoS3()
     ) == channel
+
+
+def test_invalid_local_release_fails_without_approved_channel_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = _channel()
+    gateway_path = tmp_path / "gateway.json"
+    validator_path = tmp_path / "validator.json"
+    gateway_path.write_text("{}", encoding="utf-8")
+    validator_path.write_text(
+        json.dumps(channel["validator_release_manifest"]), encoding="utf-8"
+    )
+    monkeypatch.setenv("LEADPOET_LOCAL_RELEASE_COMMIT_SHA", COMMIT)
+    monkeypatch.setenv("LEADPOET_LOCAL_GATEWAY_RELEASE", str(gateway_path))
+    monkeypatch.setenv("LEADPOET_LOCAL_VALIDATOR_RELEASE", str(validator_path))
+
+    class NoS3:
+        def get_object(self, **_kwargs):
+            raise AssertionError("invalid local input must not use S3 fallback")
+
+    with pytest.raises(ReleaseManifestV2Error):
+        fetch_release_channel_v2(
+            bucket="unused", commit_sha=COMMIT, s3_client=NoS3()
+        )
 
 
 def test_installed_lineage_removes_s3_from_next_restart(

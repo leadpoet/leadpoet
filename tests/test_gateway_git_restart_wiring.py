@@ -1487,6 +1487,123 @@ def test_gateway_active_release_selection_requires_paired_validator_authority(
     )
 
 
+def test_gateway_final_release_selection_restores_prepared_local_identity(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function = _shell_function_source(
+        script, "prepare_gateway_active_release_lineage"
+    )
+    candidate_commit = "2" * 40
+    installed_commit = "1" * 40
+    candidate_gateway = tmp_path / "candidate-gateway.json"
+    candidate_validator = tmp_path / "candidate-validator.json"
+    installed_gateway = tmp_path / "installed-gateway.json"
+    installed_validator = tmp_path / "installed-validator.json"
+    running_gateway = tmp_path / "running-gateway.json"
+    installed_lineage = tmp_path / "installed-lineage.json"
+    validator_requirements = Path(
+        f"/tmp/leadpoet-{os.getpid()}-{time.time_ns()}.json"
+    )
+    env_clone = tmp_path / "gateway-env-clone.sh"
+    controller_log = tmp_path / "controller.log"
+    for path in (
+        candidate_gateway,
+        candidate_validator,
+        installed_gateway,
+        installed_validator,
+        installed_lineage,
+        running_gateway,
+        validator_requirements,
+    ):
+        path.write_text("{}\n", encoding="utf-8")
+    env_clone.write_text(
+        f"export LEADPOET_LOCAL_RELEASE_COMMIT_SHA={installed_commit}\n"
+        f"export LEADPOET_LOCAL_GATEWAY_RELEASE={installed_gateway}\n"
+        f"export LEADPOET_LOCAL_VALIDATOR_RELEASE={installed_validator}\n",
+        encoding="utf-8",
+    )
+    python_stub = tmp_path / "python"
+    python_stub.write_text(
+        "#!/bin/bash\nprintf 'sha256:%064d\\n' 0\n",
+        encoding="utf-8",
+    )
+    python_stub.chmod(0o755)
+    harness = tmp_path / "restore-local-release.sh"
+    harness.write_text(
+        "\n".join(
+            (
+                "#!/bin/bash",
+                "set -e",
+                function,
+                "run_gateway_active_release_controller_module() {",
+                "  printf '%s\\n%s\\n%s\\n' \"$LEADPOET_LOCAL_RELEASE_COMMIT_SHA\" \"$LEADPOET_LOCAL_GATEWAY_RELEASE\" \"$LEADPOET_LOCAL_VALIDATOR_RELEASE\" >> \"$CONTROLLER_LOG\"",
+                "  while [ \"$#\" -gt 0 ]; do",
+                "    case \"$1\" in",
+                "      --requirements-output) shift; printf '{}\\n' > \"$1\" ;;",
+                "      --lineage-output) shift; printf '{}\\n' > \"$1\" ;;",
+                "    esac",
+                "    shift",
+                "  done",
+                "}",
+                "prepare_gateway_active_release_lineage || exit 8",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prepared_requirements = tmp_path / "prepared-requirements.json"
+    prepared_lineage = tmp_path / "prepared-lineage.json"
+    try:
+        completed = subprocess.run(
+            ["bash", str(harness)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "CONTROLLER_LOG": str(controller_log),
+                "ENV_CLONE": str(env_clone),
+                "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "standalone",
+                "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID": "restart-1",
+                "GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT": str(running_gateway),
+                "GATEWAY_ANCESTRY_SAFE_EPOCH": "1",
+                "GATEWAY_COUNTERPART_RELEASE_LINEAGE": "",
+                "GATEWAY_HISTORICAL_TOPOLOGY_HASH": "",
+                "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED": "1",
+                "GATEWAY_PREFLIGHT_TREE": str(tmp_path),
+                "GATEWAY_PREPARED_V2_RELEASE_LINEAGE": str(prepared_lineage),
+                "GATEWAY_PREPARED_V2_RELEASE_MANIFEST": str(candidate_gateway),
+                "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS": str(prepared_requirements),
+                "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST": str(candidate_validator),
+                "GATEWAY_PYTHON_BIN": str(python_stub),
+                "GATEWAY_RESTART_AUTHORITY_COMMIT": candidate_commit,
+                "GATEWAY_RESTART_AUTHORITY_ROOT": "",
+                "GATEWAY_STATEFUL_CUTOVER_CEREMONY": "0",
+                "GATEWAY_V2_RELEASE_BUCKET": "bucket",
+                "GATEWAY_V2_RELEASE_LINEAGE": str(installed_lineage),
+                "GATEWAY_V2_RELEASE_MANIFEST": str(running_gateway),
+                "GATEWAY_V2_RELEASE_PREFIX": "prefix",
+                "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS": str(validator_requirements),
+                "LEADPOET_LOCAL_GATEWAY_RELEASE": str(candidate_gateway),
+                "LEADPOET_LOCAL_RELEASE_COMMIT_SHA": candidate_commit,
+                "LEADPOET_LOCAL_VALIDATOR_RELEASE": str(candidate_validator),
+                "LEADPOET_REPO_ROOT": str(tmp_path),
+                "PREPARED_GATEWAY_SHA": candidate_commit,
+            },
+        )
+    finally:
+        validator_requirements.unlink(missing_ok=True)
+
+    assert completed.returncode == 0, completed.stderr
+    assert controller_log.read_text(encoding="utf-8").splitlines() == [
+        candidate_commit,
+        str(candidate_gateway),
+        str(candidate_validator),
+    ]
+
+
 def test_gateway_standalone_active_release_uses_only_explicit_compact_fallback() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     selector = _shell_function_source(

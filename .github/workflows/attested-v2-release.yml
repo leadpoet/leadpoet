@@ -19,8 +19,44 @@ env:
   ACCEPTANCE_SIGNER_PUBKEY_HASH: sha256:cdc20e17d9ecee5da04b30604ac72bc015326640ab98501646551f075d60ef36
 
 jobs:
+  gateway-runner-admission:
+    name: Release gateway runner from superseded full parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Check out exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Require exact main source before runner admission
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+
+      - name: Await cleanup of superseded automatic full parity
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/admit_gateway_runner_v2.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --current-sha "$GITHUB_SHA" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --current-ref "$GITHUB_REF" \
+            --timeout-seconds 1800
+
   gateway-parent:
     name: Independent gateway-parent builds
+    needs: gateway-runner-admission
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
     timeout-minutes: 720
     env:

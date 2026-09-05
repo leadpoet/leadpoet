@@ -244,7 +244,11 @@ def build_service_from_environment(mode: str):
         service_jwt="" if service_key else service_jwt,
     )
     store = ArenaStore(transport)
-    objects = S3ObjectStore(_required("LAB_ARENA_BUCKET"), region_name=os.environ.get("AWS_REGION"))
+    objects = S3ObjectStore(
+        _required("LAB_ARENA_BUCKET"),
+        region_name=os.environ.get("AWS_REGION"),
+        prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""),
+    )
     chain_config = chain_module.ArenaChainConfig(endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT"), netuid=int(os.environ.get("LAB_ARENA_NETUID", "71")), network_name=os.environ.get("LAB_ARENA_NETWORK", "finney"), request_timeout_seconds=int(os.environ.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")))
     arena_chain = chain_module.ArenaChain(chain_config, chain_module.connect_substrate(chain_config))
     atexit.register(arena_chain.close)  # the websocket threads would otherwise hold the process open at exit

@@ -101,7 +101,15 @@ class LocalObjectStore:
 class S3ObjectStore:
     """Versioned, delete-denied Arena bucket (section 3.1); boto3 imported lazily."""
 
-    def __init__(self, bucket: str, *, client: Any = None, region_name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        bucket: str,
+        *,
+        client: Any = None,
+        region_name: Optional[str] = None,
+        prefix: str = "",
+    ) -> None:
+        self._key_prefix = self._validate_key_prefix(prefix)
         if client is None:
             import boto3  # noqa: WPS433
 
@@ -109,13 +117,38 @@ class S3ObjectStore:
         self._client = client
         self._bucket = bucket
 
+    @staticmethod
+    def _validate_key_prefix(value: str) -> str:
+        if not isinstance(value, str):
+            raise ArenaContractError("object key prefix is invalid")
+        if value == "":
+            return value
+        segments = value.split("/")
+        if (
+            value != value.strip()
+            or any(
+                segment in ("", ".", "..") or segment != segment.strip()
+                for segment in segments
+            )
+            or "\\" in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ArenaContractError("object key prefix is invalid")
+        return value
+
+    def _key(self, ref: str) -> str:
+        if not self._key_prefix:
+            return ref
+        return "%s/%s" % (self._key_prefix, ref)
+
     def put(self, ref: str, data: bytes) -> None:
         payload = bytes(data)
+        key = self._key(ref)
         for attempt in range(2):
             try:
                 self._client.put_object(
                     Bucket=self._bucket,
-                    Key=ref,
+                    Key=key,
                     Body=payload,
                     ContentType="application/json",
                     IfNoneMatch="*",
@@ -143,14 +176,15 @@ class S3ObjectStore:
         raise ArenaContractError("object ref %s could not be written safely" % ref)
 
     def get(self, ref: str) -> bytes:
-        response = self._client.get_object(Bucket=self._bucket, Key=ref)
+        response = self._client.get_object(Bucket=self._bucket, Key=self._key(ref))
         return response["Body"].read()
 
     def get_bounded(self, ref: str, max_bytes: int) -> bytes:
-        head = self._client.head_object(Bucket=self._bucket, Key=ref)
+        key = self._key(ref)
+        head = self._client.head_object(Bucket=self._bucket, Key=key)
         if int(head.get("ContentLength") or 0) > int(max_bytes):
             raise ArenaContractError("object exceeds source size limit")
-        response = self._client.get_object(Bucket=self._bucket, Key=ref)
+        response = self._client.get_object(Bucket=self._bucket, Key=key)
         body = response["Body"]
         try:
             data = body.read(int(max_bytes) + 1)
@@ -163,6 +197,7 @@ class S3ObjectStore:
         return data
 
     def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]:
+        key = self._key(ref)
         headers = {
             "content-type": str(content_type),
             "content-length": str(int(size_bytes)),
@@ -172,7 +207,7 @@ class S3ObjectStore:
             "put_object",
             Params={
                 "Bucket": self._bucket,
-                "Key": ref,
+                "Key": key,
                 "ContentType": str(content_type),
                 "ContentLength": int(size_bytes),
                 "IfNoneMatch": "*",

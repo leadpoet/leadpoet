@@ -24,6 +24,11 @@ from lab_arena.driver import drive_once  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Leadpoet Lab Arena service")
+    parser.add_argument(
+        "--environment-file",
+        type=Path,
+        help="load only LAB_ARENA_* values from the protected gateway env cache",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8792)
     parser.add_argument("--tick-seconds", type=int, default=60)
@@ -34,8 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_scoped_environment(path: Path) -> None:
+    """Load only Arena-owned values without restoring gateway provider aliases."""
+
+    from gateway.tee.prepare_gateway_envelopes_v2 import load_environment_file
+
+    for name, value in load_environment_file(path).items():
+        if name.startswith("LAB_ARENA_"):
+            os.environ.setdefault(name, value)
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.environment_file is not None:
+        load_scoped_environment(args.environment_file)
     mode = os.environ.get("LAB_ARENA_MODE", "off").strip().lower()
     if mode == "off":
         print("LAB_ARENA_MODE=off: nothing starts and nothing is served")

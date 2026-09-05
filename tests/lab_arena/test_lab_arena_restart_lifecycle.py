@@ -1,5 +1,6 @@
 """Restart wiring for the optional Arena service and validator runner."""
 
+import os
 from pathlib import Path
 
 
@@ -25,6 +26,43 @@ def test_gateway_restart_replaces_and_checks_the_arena_sidecar() -> None:
     assert sidecar_health < public_health
     assert 'case "$mode" in' in script
     assert "shadow|live" in script
+    assert '--environment-file "$GATEWAY_ENV_FILE"' in function
+
+
+def test_arena_service_loads_only_scoped_values(tmp_path, monkeypatch) -> None:
+    from scripts import run_lab_arena_service
+
+    environment = tmp_path / "gateway.env"
+    environment.write_text(
+        "LAB_ARENA_MODE=shadow\n"
+        "LAB_ARENA_OPENROUTER_API_KEY=scoped-secret\n"
+        "OPENROUTER_API_KEY=shared-secret\n"
+        "SUPABASE_SERVICE_ROLE_KEY=unrelated-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("LAB_ARENA_MODE", raising=False)
+    monkeypatch.delenv("LAB_ARENA_OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+    run_lab_arena_service.load_scoped_environment(environment)
+
+    assert os.environ["LAB_ARENA_MODE"] == "shadow"
+    assert os.environ["LAB_ARENA_OPENROUTER_API_KEY"] == "scoped-secret"
+    assert "OPENROUTER_API_KEY" not in os.environ
+    assert "SUPABASE_SERVICE_ROLE_KEY" not in os.environ
+
+
+def test_arena_service_keeps_explicit_scoped_override(tmp_path, monkeypatch) -> None:
+    from scripts import run_lab_arena_service
+
+    environment = tmp_path / "gateway.env"
+    environment.write_text("LAB_ARENA_MODE=live\n", encoding="utf-8")
+    monkeypatch.setenv("LAB_ARENA_MODE", "off")
+
+    run_lab_arena_service.load_scoped_environment(environment)
+
+    assert os.environ["LAB_ARENA_MODE"] == "off"
 
 
 def test_validator_restart_replaces_runner_after_gateway_alignment() -> None:

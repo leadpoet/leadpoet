@@ -202,7 +202,7 @@ def test_restart_uses_the_arena_runner_capacity_default():
     assert 'LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-8}"' in script
 
 
-def test_validator_restart_replaces_runner_after_gateway_alignment():
+def test_validator_restart_passes_bytecode_suppression_to_arena_runner():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     start = script.index("start_lab_arena_runner() {")
     end = script.index("\n}\n", start) + 3
@@ -215,6 +215,33 @@ def test_validator_restart_replaces_runner_after_gateway_alignment():
     assert privileged_launch.index("PYTHONDONTWRITEBYTECODE=1") < privileged_launch.index(
         entrypoint
     )
+
+
+def test_python_bytecode_suppression_prevents_import_cache(tmp_path: Path):
+    module = tmp_path / "isolated_runner_module.py"
+    module.write_text("VALUE = 7\n", encoding="utf-8")
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(tmp_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import isolated_runner_module; print(isolated_runner_module.VALUE)",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "7"
+    assert not list(tmp_path.glob("__pycache__/*.pyc"))
 
 
 def test_unpinned_validator_local_build_follows_new_main_before_shutdown():

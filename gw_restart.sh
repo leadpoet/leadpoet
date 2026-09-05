@@ -1835,9 +1835,18 @@ run_gateway_active_release_controller_module() {
 prepare_gateway_active_release_lineage() {
   local authority_commit counterpart_historical_topology_hash fallback_context
   local lineage_id running_gateway_manifest
+  local selected_local_release_commit selected_local_prior_release_lineage
   local -a validator_authority_args=()
   local -a topology_authority_args=()
   counterpart_historical_topology_hash=""
+  selected_local_release_commit="${LEADPOET_LOCAL_RELEASE_COMMIT_SHA:-}"
+  selected_local_prior_release_lineage="${LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE:-}"
+
+  if [ -n "$selected_local_release_commit" ] \
+      && [ "$selected_local_release_commit" != "$PREPARED_GATEWAY_SHA" ]; then
+    echo "ERROR: selected local release identity differs from the prepared candidate" >&2
+    return 1
+  fi
 
   if [ -n "${GATEWAY_HISTORICAL_TOPOLOGY_HASH:-}" ] \
       && [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
@@ -1929,6 +1938,22 @@ PY
       set -a
       . "$ENV_CLONE"
       set +a
+      # Persisted runtime state must not replace this invocation's local build.
+      if [ -n "$selected_local_release_commit" ]; then
+        export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$selected_local_release_commit"
+        export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
+        export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"
+        if [ -n "$selected_local_prior_release_lineage" ]; then
+          export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$selected_local_prior_release_lineage"
+        else
+          unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+        fi
+      else
+        unset LEADPOET_LOCAL_RELEASE_COMMIT_SHA
+        unset LEADPOET_LOCAL_GATEWAY_RELEASE
+        unset LEADPOET_LOCAL_VALIDATOR_RELEASE
+        unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+      fi
       run_gateway_active_release_controller_module \
         gateway.tee.prepare_active_release_lineage_v2 \
         --phase gateway-final \

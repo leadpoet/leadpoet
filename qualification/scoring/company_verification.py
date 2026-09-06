@@ -356,7 +356,7 @@ class _HomepageIdentityParser(HTMLParser):
         if self._nonvisible_depth == 0:
             self.copyright_legal_names.extend(
                 match.group("name").strip()[:200]
-                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(data)
+                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(data[:500])
             )
 
     @property

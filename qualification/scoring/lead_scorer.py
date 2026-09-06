@@ -411,13 +411,13 @@ def _normalized_industry_label(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
-def _is_cited_data_collaboration_refinement(
+def _cited_data_collaboration_refinement(
     candidate_industry: str,
     candidate_subindustry: str,
     requested_industry: str,
     semantic_flag: Optional[bool],
     semantic_evidence: Optional[Mapping[str, Any]],
-) -> bool:
+) -> Optional[str]:
     """Refine one broad IT label only from corroborated data-product proof.
 
     This is scorer-local because changing the shared repository taxonomy would
@@ -426,32 +426,33 @@ def _is_cited_data_collaboration_refinement(
     and independently returned citation must then corroborate it.
     """
 
+    subindustry = _normalized_industry_label(candidate_subindustry)
     if (
         _normalized_industry_label(requested_industry) != "data and analytics"
         or _normalized_industry_label(candidate_industry)
         != "information technology"
+        or not re.search(r"\bdata collaboration\b", subindustry)
     ):
-        return False
-    subindustry = _normalized_industry_label(candidate_subindustry)
+        return None
     specific_data_product = bool(
-        re.search(r"\bdata collaboration\b", subindustry)
-        and re.search(
+        re.search(
             r"\b(?:platform|product|software|system|technology)\b",
             subindustry,
         )
     )
     if not specific_data_product or semantic_flag is not True:
-        return False
+        return COMPANY_FIT_UNAVAILABLE
     evidence = semantic_evidence if isinstance(semantic_evidence, Mapping) else {}
     quote = _normalized_industry_label(evidence.get("quote"))
     quote_supports_data_product = bool(re.search(
         r"\b(?:data collaboration|data platform)\b",
         quote,
     ))
-    return bool(
+    supported = bool(
         _valid_web_evidence_url(evidence.get("url"))
         and quote_supports_data_product
     )
+    return COMPANY_FIT_MATCH if supported else COMPANY_FIT_UNAVAILABLE
 
 
 def _industry_evidence_decision(
@@ -505,28 +506,15 @@ def _industry_evidence_decision(
     else:
         canonical_match = None
     if flag_required:
-        data_collaboration_shape = (
-            _normalized_industry_label(requested_industry)
-            == "data and analytics"
-            and _normalized_industry_label(candidate_industry)
-            == "information technology"
-            and bool(
-                re.search(
-                    r"\bdata collaboration\b",
-                    _normalized_industry_label(candidate_subindustry),
-                )
-            )
+        refinement = _cited_data_collaboration_refinement(
+            candidate_industry,
+            candidate_subindustry,
+            requested_industry,
+            flag,
+            semantic_evidence,
         )
-        if data_collaboration_shape:
-            if _is_cited_data_collaboration_refinement(
-                candidate_industry,
-                candidate_subindustry,
-                requested_industry,
-                flag,
-                semantic_evidence,
-            ):
-                return COMPANY_FIT_MATCH
-            return COMPANY_FIT_UNAVAILABLE
+        if refinement is not None:
+            return refinement
         if canonical_match is None or flag is None:
             return COMPANY_FIT_UNAVAILABLE
         if flag is not canonical_match:

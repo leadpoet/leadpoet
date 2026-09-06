@@ -208,6 +208,172 @@ def test_reverify_prompt_carries_only_bounded_untrusted_url_hints(monkeypatch):
     assert "four.example.com" not in prompts[0]
 
 
+def test_reverify_prompt_anchors_only_verified_homepage_identity(monkeypatch):
+    prompts = []
+
+    async def request(*, key, prompt, telemetry_purpose):
+        assert key == "test-key"
+        assert telemetry_purpose == "lead_scorer_reverify"
+        prompts.append(prompt)
+        return _complete_verdict(website="https://example.com"), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+    homepage_identity = company_fit_match(
+        "verified from homepage",
+        details={
+            "identity": {
+                "decision": "match",
+                "evidence_source": "company_homepage",
+                "observed_name": "acme",
+                "observed_domain": "example.com",
+                "observed_linkedin_slug": "acme",
+                "submitted_name": "untrusted-submitted-name",
+            }
+        },
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company(
+                company_name="Acme (YC W26)",
+                company_website="https://example.com",
+            ),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=homepage_identity,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert len(prompts) == 1
+    match = re.search(
+        r"<verified_homepage_identity>(.*?)</verified_homepage_identity>",
+        prompts[0],
+    )
+    assert match is not None
+    assert json.loads(match.group(1)) == {
+        "linkedin_company_slug": "acme",
+        "normalized_name": "acme",
+        "registrable_dns_domain": "example.com",
+    }
+    assert "untrusted-submitted-name" not in prompts[0]
+    assert "do not substitute a same-name company" in prompts[0]
+    assert "not proof of any fit dimension" in prompts[0]
+
+
+def test_unverified_incomplete_or_oversized_homepage_identity_is_not_anchored(
+    monkeypatch,
+):
+    prompts = []
+
+    async def request(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return _complete_verdict(), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+    receipt = {
+        "decision": "match",
+        "evidence_source": "company_homepage",
+        "observed_name": "acme",
+        "observed_domain": "example.com",
+        "observed_linkedin_slug": "acme",
+    }
+    identities = [
+        company_fit_match(
+            "incomplete",
+            details={"identity": {**receipt, "observed_linkedin_slug": ""}},
+        ),
+        company_fit_match(
+            "not homepage-verified",
+            details={
+                "identity": {
+                    **receipt,
+                    "evidence_source": "company_web_reverification",
+                }
+            },
+        ),
+        company_fit_mismatch(
+            "homepage mismatch",
+            details={"identity": receipt},
+        ),
+    ] + [
+        company_fit_match(
+            f"oversized {field}",
+            details={"identity": {**receipt, field: "a" * (limit + 1)}},
+        )
+        for field, limit in (
+            ("observed_name", 200),
+            ("observed_domain", 253),
+            ("observed_linkedin_slug", 200),
+        )
+    ]
+
+    for identity in identities:
+        result = asyncio.run(
+            _llm_reverify_company(
+                _company(),
+                _icp(),
+                require_company_fit_dimensions=True,
+                verified_homepage_identity=identity,
+            )
+        )
+        assert result.decision == COMPANY_FIT_MATCH
+
+    assert len(prompts) == len(identities)
+    assert all(
+        "<verified_homepage_identity>" not in prompt for prompt in prompts
+    )
+
+
+def test_verified_anchor_does_not_override_returned_linkedin_mismatch(monkeypatch):
+    async def request(**_kwargs):
+        verdict = _complete_verdict()
+        verdict["observed_company_linkedin"] = (
+            "https://linkedin.com/company/same-name-other-company"
+        )
+        return verdict, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+    homepage_identity = company_fit_match(
+        "verified from homepage",
+        details={
+            "identity": {
+                "decision": "match",
+                "evidence_source": "company_homepage",
+                "observed_name": "acme",
+                "observed_domain": "acme.example.com",
+                "observed_linkedin_slug": "acme",
+            }
+        },
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=homepage_identity,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "identity_mismatch"
+    )
+
+
 def test_fit_url_alone_cannot_replace_independent_dimension_proof(monkeypatch):
     calls = []
     incomplete = _complete_verdict()

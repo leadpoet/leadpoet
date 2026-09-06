@@ -93,6 +93,15 @@ _PARKED_DOMAIN_PATTERNS = [
     r"\bdefault web site page\b",
 ]
 _PARKED_DOMAIN_RE = re.compile("|".join(_PARKED_DOMAIN_PATTERNS), re.IGNORECASE)
+_COPYRIGHT_LEGAL_NAME_RE = re.compile(
+    r"(?:©|\bcopyright\b)\s*"
+    r"(?:\d{4}(?:\s*[-\N{EN DASH}]\s*\d{4})?\s*)?"
+    r"(?P<name>[a-z][a-z0-9&.,'’ -]{1,180}?\b(?:limited|ltd\.?|"
+    r"incorporated|inc\.?|corporation|corp\.?|llc|plc|pty limited|"
+    r"pty ltd\.?))"
+    r"(?=\s+(?:abn|acn|all rights reserved)\b|[\s.]*$)",
+    re.IGNORECASE,
+)
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
@@ -289,27 +298,32 @@ class _HomepageIdentityParser(HTMLParser):
         self._in_title = False
         self._title_parts: list[str] = []
         self.metadata_names: list[str] = []
+        self.copyright_legal_names: list[str] = []
         self.linkedin_urls: list[str] = []
         self._json_ld_parts: list[str] | None = None
+        self._nonvisible_depth = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        tag_name = tag.casefold()
         attributes = {
             str(key or "").casefold(): str(value or "").strip()
             for key, value in attrs
         }
-        if tag.casefold() == "title":
+        if tag_name in {"script", "style", "template"}:
+            self._nonvisible_depth += 1
+        if tag_name == "title":
             self._in_title = True
             return
-        if tag.casefold() in {"a", "link"}:
+        if tag_name in {"a", "link"}:
             linkedin = _canonical_linkedin_company_url(attributes.get("href", ""))
             if linkedin:
                 self.linkedin_urls.append(linkedin)
-        if tag.casefold() == "script":
+        if tag_name == "script":
             script_type = attributes.get("type", "").split(";", 1)[0].casefold()
             if script_type == "application/ld+json":
                 self._json_ld_parts = []
             return
-        if tag.casefold() != "meta":
+        if tag_name != "meta":
             return
         key = (
             attributes.get("property")
@@ -323,19 +337,27 @@ class _HomepageIdentityParser(HTMLParser):
                 self.metadata_names.append(content[:200])
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.casefold() == "title":
+        tag_name = tag.casefold()
+        if tag_name == "title":
             self._in_title = False
-        elif tag.casefold() == "script" and self._json_ld_parts is not None:
+        elif tag_name == "script" and self._json_ld_parts is not None:
             self.linkedin_urls.extend(
                 _organization_same_as_urls("".join(self._json_ld_parts))
             )
             self._json_ld_parts = None
+        if tag_name in {"script", "style", "template"}:
+            self._nonvisible_depth = max(0, self._nonvisible_depth - 1)
 
     def handle_data(self, data: str) -> None:
         if self._in_title and data.strip():
             self._title_parts.append(data.strip())
         if self._json_ld_parts is not None:
             self._json_ld_parts.append(data)
+        if self._nonvisible_depth == 0:
+            self.copyright_legal_names.extend(
+                match.group("name").strip()[:200]
+                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(data)
+            )
 
     @property
     def title(self) -> str:
@@ -350,7 +372,7 @@ def _homepage_company_names(page_text: str) -> list[str]:
         parser.feed(str(page_text or "")[:_MAX_BYTES])
     except Exception:
         return []
-    candidates = list(parser.metadata_names)
+    candidates = [*parser.metadata_names, *parser.copyright_legal_names]
     if parser.title:
         candidates.append(parser.title)
         candidates.extend(

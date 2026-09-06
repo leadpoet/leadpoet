@@ -48,9 +48,6 @@ _LINKEDIN_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._%+-]{0,99}$")
 _PARENTHETICAL_INITIALISM_RE = re.compile(
     r"^\s*(?P<legal_name>.+?)\s*\(\s*(?P<initialism>[A-Z0-9]{2,10})\s*\)\s*$"
 )
-_INITIALISM_LEGAL_SUFFIXES: Final = _LEGAL_SUFFIXES - {
-    "company", "holdings", "group",
-}
 _INDEPENDENT_IDENTITY_SOURCES: Final = frozenset({
     "company_homepage",
     "company_web_reverification",
@@ -194,21 +191,10 @@ def _verified_parenthetical_name_alignment(
     if match is None:
         return False
 
-    legal_name = match.group("legal_name")
     initialism = match.group("initialism").casefold()
     if observed_linkedin_slug != initialism:
         return False
-    observed = _company_name(observed_name)
-    if not observed:
-        return False
-    if _company_name(legal_name) == observed:
-        return True
-
-    words = re.findall(r"[a-z0-9]+", legal_name.casefold())
-    while words and words[-1] in _INITIALISM_LEGAL_SUFFIXES:
-        words.pop()
-    legal_initialism = "".join(word[0] for word in words)
-    return initialism == legal_initialism and observed == initialism
+    return _company_name(match.group("legal_name")) == _company_name(observed_name)
 
 
 def evaluate_company_identity(

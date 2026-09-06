@@ -232,7 +232,9 @@ def test_iag_parenthetical_alias_uses_homepage_linkedin_binding(monkeypatch):
     response = _Response(
         200,
         b'<title>IAG Limited</title>'
-        b'<a href="https://www.linkedin.com/company/iag/">LinkedIn</a>',
+        b'<a href="https://www.linkedin.com/company/iag/">LinkedIn</a>'
+        b'<footer>&copy; 2026 INSURANCE AUSTRALIA GROUP LIMITED '
+        b'ABN 60 090 739 923</footer>',
         "https://www.iag.com.au/",
     )
     monkeypatch.setattr(
@@ -342,18 +344,78 @@ def test_iag_parenthetical_alias_rejects_wrong_submitted_linkedin():
     assert receipt["decision"] == COMPANY_FIT_MISMATCH
 
 
-def test_parenthetical_alias_does_not_bind_wrong_company_on_same_domain():
+def test_parenthetical_initialism_collision_does_not_bind_wrong_company():
     receipt = evaluate_company_identity(
-        submitted_name="Other Business Limited (IAG)",
+        submitted_name="Imaginary Assets Group Limited (IAG)",
         submitted_website="https://www.iag.com.au/",
         submitted_linkedin="",
-        observed_name="IAG Limited",
+        observed_name="Insurance Australia Group Limited",
         observed_website="https://www.iag.com.au/",
         observed_linkedin="https://www.linkedin.com/company/iag/",
         evidence_source="company_homepage",
     )
 
     assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_parenthetical_alias_with_only_acronym_title_stays_unavailable(monkeypatch):
+    import asyncio
+
+    response = _Response(
+        200,
+        b'<title>IAG Limited</title>'
+        b'<a href="https://www.linkedin.com/company/iag/">LinkedIn</a>',
+        "https://www.iag.com.au/",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification._registrable_domain",
+        lambda _url: "iag.com.au",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+
+    result = asyncio.run(
+        verify_company_exists(
+            "Insurance Australia Group Limited (IAG)",
+            "https://www.iag.com.au/",
+            company_linkedin="",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
+def test_script_copyright_text_does_not_prove_parenthetical_alias(monkeypatch):
+    import asyncio
+
+    response = _Response(
+        200,
+        b'<title>IAG Limited</title>'
+        b'<script>const footer = "&copy; 2026 INSURANCE AUSTRALIA GROUP '
+        b'LIMITED ABN 60 090 739 923";</script>'
+        b'<a href="https://www.linkedin.com/company/iag/">LinkedIn</a>',
+        "https://www.iag.com.au/",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification._registrable_domain",
+        lambda _url: "iag.com.au",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+
+    result = asyncio.run(
+        verify_company_exists(
+            "Insurance Australia Group Limited (IAG)",
+            "https://www.iag.com.au/",
+            company_linkedin="",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
 
 
 def test_parenthetical_alias_rejects_wrong_domain():

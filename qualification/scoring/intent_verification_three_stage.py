@@ -3310,17 +3310,12 @@ async def verify_three_stage(
             }
             deterministic_exact_hiring_evidence = (
                 # The exact, currently listed ATS record is the authority here.
-                # A semantic ``contradicted`` verdict may be normalized only
-                # when every quote it supplied as a contradiction is absent
-                # from that immutable posting; a grounded contradiction still
-                # fails closed through ``grounded_contradictions`` below.
-                item.get("signal_status")
-                in {
-                    "supported",
-                    "partially_supported",
-                    "wrong_entity",
-                    "contradicted",
-                }
+                # It can resolve employer identity and posting state, but it
+                # cannot resolve a partial or failed claim-to-ICP semantic fit.
+                # Normalize only a verdict that already says the claim is
+                # supported; every other semantic status keeps its normal
+                # fail-closed outcome.
+                item.get("signal_status") == "supported"
                 and item.get("verification_mode") == "source_grounded"
                 and item.get("confidence") in {"medium", "high"}
                 and item.get("same_entity_check") in {"pass", "unclear", "fail"}

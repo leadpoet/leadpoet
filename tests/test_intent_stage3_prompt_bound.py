@@ -211,3 +211,156 @@ def test_long_evidence_still_requires_stage3_terminal_verdict():
     assert len(prompts[1]) <= operations.OPENROUTER_MAX_CONTENT_CHARS
     assert result["decision"] == "reject"
     assert result["rejection_reason"] == "stage3_contradicted"
+
+
+def _exact_ats_stage_verdict(
+    status,
+    *,
+    confidence="high",
+    same_entity="pass",
+    claim=CLAIM,
+    supporting_quote="Enterprise Account Executive",
+):
+    return {
+        "answer": {
+            "overall_verdict": "qualified" if status == "supported" else "not_qualified",
+            "overall_confidence": confidence,
+            "signal_evaluations": [{
+                "signal_status": status,
+                "verification_mode": "source_grounded",
+                "same_entity_check": same_entity,
+                "confidence": confidence,
+                "evidence_urls_used": [SOURCE_URL],
+                "claim_matches_miner_date": "no_date_in_content",
+                "source_accessibility": "accessible",
+                "claim": claim,
+                "supporting_quotes": [supporting_quote],
+                "contradicting_quotes": [],
+                "risk_notes": [],
+                "unsupported_parts": [],
+            }],
+        },
+        "model": "perplexity/sonar-pro",
+        "usage": {},
+    }
+
+
+def _exact_ats_contents(
+    *,
+    title="Enterprise Account Executive",
+    text=(
+        "Enterprise Account Executive\n"
+        "Responsibilities: own the sales cycle. Qualifications: five years "
+        "of sales experience. Apply for this job. Employment type: full-time."
+    ),
+):
+    return {
+        "results": [{
+            "url": SOURCE_URL,
+            "title": title,
+            "text": text,
+            "meta": {"kind": "ashby_job"},
+        }],
+        "statuses": [],
+    }
+
+
+def _exact_ats_result(
+    stage3_verdict,
+    *,
+    claim=CLAIM,
+    target_signal=TARGET_ICP_SIGNAL,
+    contents=None,
+):
+    stage1 = {
+        "answer": {
+            "signal_evaluations": [{
+                "signal_status": "unable_to_verify",
+                "verification_mode": "source_grounded",
+                "same_entity_check": "unclear",
+                "confidence": "medium",
+            }]
+        },
+        "model": "perplexity/sonar",
+        "usage": {},
+    }
+    with mock.patch.object(
+        intent,
+        "_call_openrouter",
+        mock.AsyncMock(side_effect=[stage1, stage3_verdict]),
+    ), mock.patch.object(
+        intent,
+        "_fetch_sd_then_exa",
+        mock.AsyncMock(return_value=contents or _exact_ats_contents()),
+    ):
+        return asyncio.run(intent.verify_three_stage(
+            None,
+            company_name="Example",
+            company_linkedin="https://www.linkedin.com/company/example",
+            company_website="https://example.com",
+            source_url=SOURCE_URL,
+            miner_claim=claim,
+            target_signal_text=target_signal,
+            miner_signal_date=SIGNAL_DATE,
+            evidence_type="HIRING",
+            stage1_soft_reject=True,
+        ))
+
+
+def test_exact_ats_can_resolve_identity_for_semantically_supported_claim():
+    result = _exact_ats_result(
+        _exact_ats_stage_verdict(
+            "supported",
+            confidence="medium",
+            same_entity="unclear",
+        )
+    )
+
+    assert result["client_ready"] is True
+    assert result["decision"] == "approve"
+    assert result["stage3"]["status"] == "supported"
+    assert result["stage3"]["same_entity_check"] == "pass"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_decision", "expected_reason"),
+    [
+        ("partially_supported", "review", "stage3_review"),
+        ("wrong_entity", "reject", "stage3_wrong_entity"),
+    ],
+)
+def test_exact_ats_does_not_promote_non_supported_semantic_verdicts(
+    status, expected_decision, expected_reason
+):
+    result = _exact_ats_result(_exact_ats_stage_verdict(status))
+
+    assert result["client_ready"] is False
+    assert result["decision"] == expected_decision
+    assert result["rejection_reason"] == expected_reason
+    assert result["stage3"]["status"] == status
+
+
+def test_exact_ats_does_not_promote_true_but_semantically_wrong_role():
+    claim = "Example has an open backend engineer position."
+    target = "Company has an active enterprise sales job posting."
+    result = _exact_ats_result(
+        _exact_ats_stage_verdict(
+            "contradicted",
+            claim=claim,
+            supporting_quote="Backend Engineer",
+        ),
+        claim=claim,
+        target_signal=target,
+        contents=_exact_ats_contents(
+            title="Backend Engineer",
+            text=(
+                "Backend Engineer\nResponsibilities: build APIs. Qualifications: "
+                "five years of Python. Apply for this job. Employment type: full-time."
+            ),
+        ),
+    )
+
+    assert result["client_ready"] is False
+    assert result["decision"] == "reject"
+    assert result["rejection_reason"] == "stage3_contradicted"
+    assert result["stage3"]["status"] == "contradicted"

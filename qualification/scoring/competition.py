@@ -36,6 +36,10 @@ _PENALIZABLE_FAILURE_MARKERS = (
     "intent fabrication detected",
 )
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
+_NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
+    "model_contract_incompatible",
+    "complete_verifier_taxonomy_disagreement",
+})
 
 
 class CompetitionScorerInputError(ValueError):
@@ -301,7 +305,7 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 isinstance(receipt, Mapping)
                 and str(receipt.get("decision") or "") == "unavailable"
                 and str(receipt.get("failure_class") or "")
-                != "model_contract_incompatible"
+                not in _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES
             ):
                 return True
     details = breakdown.get("intent_signals_detail")

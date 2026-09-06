@@ -10,12 +10,16 @@ import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring.lead_scorer import (
+    COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS,
     _llm_reverify_company,
     _matches_exclusion_list,
     _reverify_decision,
     _run_company_binary_fit_checks,
     _run_competition_binary_fit_checks,
     _verify_company_fit,
+)
+from qualification.scoring.competition import (
+    scorer_breakdown_has_retryable_infrastructure_failure,
 )
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
@@ -480,6 +484,112 @@ def test_web_dimension_matches_require_citations_and_bound_identity():
         company=company,
     )
     assert cited.decision == COMPANY_FIT_MATCH
+
+
+def test_complete_verifier_taxonomy_disagreement_is_non_retryable_zero(monkeypatch):
+    import qualification.scoring.lead_scorer as scorer
+
+    company = _company().model_copy(
+        update={"industry": "Lending and Investments"}
+    )
+    icp = _icp(industry="Lending and Investments")
+    verdict = {
+        "observed_company_name": "Acme",
+        "observed_company_website": "https://acme.com/about",
+        "observed_company_linkedin": "",
+        "observed_employee_count": "51-200",
+        "employee_size_matches": True,
+        "observed_industry": "Asset Management",
+        "observed_subindustry": "Private credit / direct lending",
+        "industry_matches": True,
+        "observed_hq_country": "United States",
+        "geography_matches": True,
+        "dimension_evidence": {
+            dimension: {
+                "url": f"https://evidence.example/{dimension}",
+                "quote": f"Verified {dimension}",
+            }
+            for dimension in ("employee_size", "industry", "geography")
+        },
+    }
+    web_result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=icp,
+        company=company,
+    )
+    assert web_result.decision == COMPANY_FIT_UNAVAILABLE
+    assert web_result.details["failure_class"] == (
+        COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+    )
+
+    missing_evidence = copy.deepcopy(verdict)
+    missing_evidence["dimension_evidence"]["industry"]["quote"] = ""
+    missing_other_dimension = copy.deepcopy(verdict)
+    missing_other_dimension["observed_hq_country"] = ""
+    invalid_boolean = copy.deepcopy(verdict)
+    invalid_boolean["industry_matches"] = "true"
+    for incomplete_verdict in (
+        missing_evidence,
+        missing_other_dimension,
+        invalid_boolean,
+    ):
+        incomplete = _reverify_decision(
+            incomplete_verdict,
+            "",
+            "",
+            icp=icp,
+            company=company,
+        )
+        assert incomplete.decision == COMPANY_FIT_UNAVAILABLE
+        assert "failure_class" not in incomplete.details
+        assert scorer_breakdown_has_retryable_infrastructure_failure({
+            "final_score": 0,
+            "verifier_gate_receipts": [incomplete.receipt("company_fit")],
+        })
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match()
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def web(*_args, **_kwargs):
+        return web_result
+
+    monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_llm_reverify_company", web)
+    breakdown = asyncio.run(
+        scorer.score_company_competition_intent(
+            company, icp, 0.0, 1.0, set()
+        )
+    )
+    assert breakdown.final_score == 0
+    receipt = breakdown.verifier_gate_receipts[0]
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["failure_class"] == (
+        COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+    )
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown.model_dump(mode="json")
+    )
+
+
+def test_provider_or_malformed_fit_unavailability_remains_retryable():
+    for reason in (
+        "provider HTTP 503",
+        "provider response contained no JSON object",
+    ):
+        breakdown = {
+            "final_score": 0,
+            "failure_reason": f"Company fit unavailable: {reason}",
+            "verifier_gate_receipts": [
+                company_fit_unavailable(reason).receipt("company_fit")
+            ],
+        }
+        assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
 
 
 def test_web_geography_rejects_state_conflict_and_accepts_state_match():

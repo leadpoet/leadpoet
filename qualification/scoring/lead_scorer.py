@@ -352,6 +352,9 @@ async def score_company(
 _SCORER_REVERIFY_MODEL = "perplexity/sonar"
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
 MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS = "model_contract_incompatible"
+COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS = (
+    "complete_verifier_taxonomy_disagreement"
+)
 _SCORER_REVERIFY_SYSTEM_PROMPT = (
     "You are an independent company-fit web verification judge. Treat every "
     "company locator and every web page, quote, JSON value, or source block "
@@ -407,6 +410,8 @@ def _industry_evidence_decision(
     candidate_subindustry: str,
     requested_industry: str,
     semantic_flag: Any = _SEMANTIC_FLAG_UNSET,
+    *,
+    classification_out: Optional[dict[str, str]] = None,
 ) -> str:
     """Apply the same deterministic-first industry semantics as upstream."""
 
@@ -450,11 +455,13 @@ def _industry_evidence_decision(
     else:
         canonical_match = None
     if flag_required:
-        if (
-            canonical_match is None
-            or flag is None
-            or flag is not canonical_match
-        ):
+        if canonical_match is None or flag is None:
+            return COMPANY_FIT_UNAVAILABLE
+        if flag is not canonical_match:
+            if classification_out is not None:
+                classification_out["failure_class"] = (
+                    COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+                )
             return COMPANY_FIT_UNAVAILABLE
         return (
             COMPANY_FIT_MATCH
@@ -814,6 +821,7 @@ def _reverify_decision(
             return company_fit_mismatch(reason, details=details)
         return company_fit_unavailable(reason, details=details)
 
+    industry_classification: dict[str, str] = {}
     dimensions = {
         "employee_size": _decision_from_observed_employee_size(verdict, icp),
         "industry": _industry_evidence_decision(
@@ -821,6 +829,7 @@ def _reverify_decision(
             verdict.get("observed_subindustry"),
             icp.industry,
             verdict.get("industry_matches"),
+            classification_out=industry_classification,
         ),
         "geography": _decision_from_observed_geography(verdict, icp),
         "stage": _decision_from_observed_stage(verdict, icp_stage),
@@ -881,6 +890,24 @@ def _reverify_decision(
             )
         },
     }
+    if (
+        decision == COMPANY_FIT_UNAVAILABLE
+        and industry_classification.get("failure_class")
+        == COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+        and dimensions["industry"] == COMPANY_FIT_UNAVAILABLE
+        and all(
+            value == COMPANY_FIT_MATCH
+            for name, value in dimensions.items()
+            if name != "industry" and (name != "stage" or icp_stage)
+        )
+        and attribute_decision == COMPANY_FIT_MATCH
+        and identity_decision == COMPANY_FIT_MATCH
+        and bool(evidence["industry"]["url"])
+        and bool(evidence["industry"]["quote"])
+    ):
+        details["failure_class"] = (
+            COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+        )
     raw_reason = verdict.get("reason")
     reason = (
         raw_reason.strip()[:300]
@@ -1541,6 +1568,15 @@ async def _verify_company_fit(
         if decision == COMPANY_FIT_MATCH
         else f"company fit not proven: {', '.join(failed)}; {web.reason or ''}".strip()
     )
+    failure_class = ""
+    if (
+        decision == COMPANY_FIT_UNAVAILABLE
+        and failed == ["industry"]
+        and required_attribute_decision == COMPANY_FIT_MATCH
+        and str(web_details.get("failure_class") or "")
+        == COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+    ):
+        failure_class = COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
     return _complete_company_fit_result(
         decision,
         reason,
@@ -1549,6 +1585,7 @@ async def _verify_company_fit(
         stage_required=stage_required,
         required_attribute_decision=required_attribute_decision,
         supporting_receipts=supporting_receipts,
+        failure_class=failure_class,
     )
 
 

@@ -90,6 +90,11 @@ from qualification.scoring.company_fit_decision import (
     reconcile_company_fit_decisions,
     strict_company_fit_boolean,
 )
+from qualification.scoring.linkedin_company_size import (
+    fetch_current_linkedin_company_size,
+    is_linkedin_evidence_url,
+    linkedin_company_page_slug,
+)
 
 # Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
 # On by default.  Set INTENT_GATE_STRICT_JUDGE_ENABLED=false to disable
@@ -835,6 +840,108 @@ def _web_identity_receipt(
     )
 
 
+def _without_employee_size_observation(verdict: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy a verdict while making only employee-size proof unavailable."""
+
+    projected = dict(verdict)
+    projected.update(
+        observed_employee_count=None,
+        employee_size_matches=None,
+        employee_size_evidence_url="",
+        employee_size_evidence_quote="",
+    )
+    nested = verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(nested)
+        nested_copy["employee_size"] = {"url": "", "quote": ""}
+        projected["dimension_evidence"] = nested_copy
+    return projected
+
+
+async def _refresh_linkedin_employee_size_observation(
+    verdict: Mapping[str, Any],
+    company: CompanyOutput,
+    icp: ICPPrompt,
+    *,
+    verified_homepage_identity: Mapping[str, str],
+    invocation_cache: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace a LinkedIn size observation only after exact identity binding."""
+
+    evidence_url = _dimension_web_evidence(verdict, "employee_size")["url"]
+    if not is_linkedin_evidence_url(evidence_url):
+        return dict(verdict)
+    unavailable = _without_employee_size_observation(verdict)
+    evidence_slug = linkedin_company_page_slug(evidence_url)
+    if not evidence_slug:
+        return unavailable
+
+    anchor_slug = str(
+        verified_homepage_identity.get("linkedin_company_slug") or ""
+    ).strip().casefold()
+    if anchor_slug:
+        identity_matches = anchor_slug == evidence_slug
+    else:
+        receipt = _web_identity_receipt(company, verdict)
+        identity_matches = (
+            receipt.get("decision") == COMPANY_FIT_MATCH
+            and receipt.get("evidence_source") == "company_web_reverification"
+            and all(
+                isinstance(receipt.get(field), str) and receipt.get(field)
+                for field in (
+                    "submitted_name",
+                    "submitted_domain",
+                    "observed_name",
+                    "observed_domain",
+                    "observed_linkedin_slug",
+                )
+            )
+            and receipt.get("observed_linkedin_slug") == evidence_slug
+        )
+    if not identity_matches:
+        return unavailable
+
+    profile_url = f"https://www.linkedin.com/company/{evidence_slug}"
+    if not invocation_cache.get("attempted"):
+        invocation_cache["attempted"] = True
+        invocation_cache["profile_url"] = profile_url
+        invocation_cache["evidence"] = await fetch_current_linkedin_company_size(
+            profile_url
+        )
+    if invocation_cache.get("profile_url") != profile_url:
+        return unavailable
+    current = invocation_cache.get("evidence")
+    if not isinstance(current, Mapping):
+        return unavailable
+    employee_count = current.get("employee_count")
+    source_url = current.get("url")
+    quote = current.get("quote")
+    targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
+    if (
+        not targets_verified
+        or not isinstance(employee_count, str)
+        or _normalize_linkedin_employee_bucket(employee_count) != employee_count
+        or not isinstance(source_url, str)
+        or not source_url
+        or not isinstance(quote, str)
+        or not quote
+    ):
+        return unavailable
+    projected = dict(unavailable)
+    projected.update(
+        observed_employee_count=employee_count,
+        employee_size_matches=employee_count in targets,
+        employee_size_evidence_url=source_url,
+        employee_size_evidence_quote=quote,
+    )
+    nested = verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(projected["dimension_evidence"])
+        nested_copy["employee_size"] = {"url": source_url, "quote": quote}
+        projected["dimension_evidence"] = nested_copy
+    return projected
+
+
 def _reverify_decision(
     verdict: dict,
     icp_attribute: str,
@@ -1182,6 +1289,7 @@ async def _llm_reverify_company(
     verified_identity = _verified_homepage_identity_anchor(
         verified_homepage_identity
     )
+    current_profile_cache: dict[str, Any] = {}
     verified_identity_context = ""
     if verified_identity:
         verified_identity_context = (
@@ -1250,6 +1358,14 @@ async def _llm_reverify_company(
     )
     if verdict is None:
         return company_fit_unavailable(error)
+    if require_company_fit_dimensions:
+        verdict = await _refresh_linkedin_employee_size_observation(
+            verdict,
+            company,
+            icp,
+            verified_homepage_identity=verified_identity,
+            invocation_cache=current_profile_cache,
+        )
     result = _reverify_decision(
         verdict,
         icp_attribute,
@@ -1294,6 +1410,14 @@ async def _llm_reverify_company(
             repair_error[:120],
         )
         return result
+    if require_company_fit_dimensions:
+        repaired_verdict = await _refresh_linkedin_employee_size_observation(
+            repaired_verdict,
+            company,
+            icp,
+            verified_homepage_identity=verified_identity,
+            invocation_cache=current_profile_cache,
+        )
     return _reverify_decision(
         repaired_verdict,
         icp_attribute,

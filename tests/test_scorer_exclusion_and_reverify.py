@@ -52,6 +52,28 @@ def _icp(**over):
     return ICPPrompt(**base)
 
 
+def _complete_industry_disagreement_verdict():
+    return {
+        "observed_company_name": "Acme",
+        "observed_company_website": "https://acme.com/about",
+        "observed_company_linkedin": "",
+        "observed_employee_count": "51-200",
+        "employee_size_matches": True,
+        "observed_industry": "Asset Management",
+        "observed_subindustry": "Private credit / direct lending",
+        "industry_matches": True,
+        "observed_hq_country": "United States",
+        "geography_matches": True,
+        "dimension_evidence": {
+            dimension: {
+                "url": f"https://evidence.example/{dimension}",
+                "quote": f"Verified {dimension}",
+            }
+            for dimension in ("employee_size", "industry", "geography")
+        },
+    }
+
+
 def test_exclusion_matcher_by_domain_linkedin_name(monkeypatch):
     monkeypatch.setattr(
         "qualification.scoring.lead_scorer._registrable_domain",
@@ -493,25 +515,7 @@ def test_complete_verifier_taxonomy_disagreement_is_non_retryable_zero(monkeypat
         update={"industry": "Lending and Investments"}
     )
     icp = _icp(industry="Lending and Investments")
-    verdict = {
-        "observed_company_name": "Acme",
-        "observed_company_website": "https://acme.com/about",
-        "observed_company_linkedin": "",
-        "observed_employee_count": "51-200",
-        "employee_size_matches": True,
-        "observed_industry": "Asset Management",
-        "observed_subindustry": "Private credit / direct lending",
-        "industry_matches": True,
-        "observed_hq_country": "United States",
-        "geography_matches": True,
-        "dimension_evidence": {
-            dimension: {
-                "url": f"https://evidence.example/{dimension}",
-                "quote": f"Verified {dimension}",
-            }
-            for dimension in ("employee_size", "industry", "geography")
-        },
-    }
+    verdict = _complete_industry_disagreement_verdict()
     web_result = _reverify_decision(
         verdict,
         "",
@@ -590,6 +594,72 @@ def test_provider_or_malformed_fit_unavailability_remains_retryable():
             ],
         }
         assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+def test_llm_complete_industry_disagreement_skips_schema_repair(monkeypatch):
+    import qualification.scoring.lead_scorer as scorer
+
+    calls = []
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return _complete_industry_disagreement_verdict(), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company().model_copy(
+                update={"industry": "Lending and Investments"}
+            ),
+            _icp(industry="Lending and Investments"),
+            require_company_fit_dimensions=True,
+        )
+    )
+    assert calls == ["lead_scorer_reverify"]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == (
+        COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+    )
+
+
+@pytest.mark.parametrize("incomplete_kind", ["evidence", "dimension", "boolean"])
+def test_llm_incomplete_verdict_still_uses_schema_repair(
+    monkeypatch,
+    incomplete_kind,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    verdict = _complete_industry_disagreement_verdict()
+    if incomplete_kind == "evidence":
+        verdict["dimension_evidence"]["industry"]["quote"] = ""
+    elif incomplete_kind == "dimension":
+        verdict["observed_hq_country"] = ""
+    else:
+        verdict["industry_matches"] = "true"
+    calls = []
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return verdict, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company().model_copy(
+                update={"industry": "Lending and Investments"}
+            ),
+            _icp(industry="Lending and Investments"),
+            require_company_fit_dimensions=True,
+        )
+    )
+    assert calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "failure_class" not in result.details
 
 
 def test_web_geography_rejects_state_conflict_and_accepts_state_match():

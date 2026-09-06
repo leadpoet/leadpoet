@@ -1159,6 +1159,12 @@ async def _llm_reverify_company(
         icp=icp if require_company_fit_dimensions else None,
         company=company,
     )
+    if (
+        result.decision == COMPANY_FIT_UNAVAILABLE
+        and result.details.get("failure_class")
+        == COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
+    ):
+        return result
     incomplete = _incomplete_company_reverify_dimensions(
         result,
         icp_attribute=icp_attribute,

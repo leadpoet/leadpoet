@@ -46,7 +46,7 @@ def test_article_extraction_preserves_link_target(monkeypatch):
     assert "https://acme.example/about" in extracted
 
 
-def test_final_judge_keeps_existing_source_content_bound():
+def test_final_judge_keeps_link_while_applying_transport_prompt_bound():
     link = "[Acme](https://acme.example/about)"
     source_text = link + ("x" * _common.MAX_SCRAPED_CHARS)
 
@@ -66,7 +66,9 @@ def test_final_judge_keeps_existing_source_content_bound():
         "\n\nToday's date:", 1
     )[0]
 
-    assert len(projected) == _common.MAX_SCRAPED_CHARS
+    assert len(prompt) <= _common.FINAL_JUDGE_PROMPT_MAX_CHARS
+    assert len(projected) < _common.MAX_SCRAPED_CHARS
+    assert _common._SOURCE_OMISSION_MARKER.strip() in projected
     assert "https://acme.example/about" in projected
 
 

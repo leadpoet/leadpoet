@@ -888,7 +888,9 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
 
     detail = (
         "Bearer bearer-secret https://provider.example/path?api_key=query-secret&mode=raw "
-        "api_key=plain-secret OPENAI_API_KEY=env-secret sk-proj-secret-value"
+        "api_key=plain-secret OPENAI_API_KEY=env-secret sk-proj-secret-value "
+        '{"api_key":"opaque-deepline-value","OPENAI_API_KEY":"opaque-env-value",'
+        '"password":"opaque-password","private_key":"opaque-private-key"}'
     )
     output = scoring.build_scoring_failure("r1", "judge_error", detail)
     api = FakeApi([scoring_lease(run_id="r9")])
@@ -903,14 +905,22 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
     assert "run_id=r9" in captured.err
     assert "event=scoring_failure" in captured.err
     assert "error_class=judge_error" in captured.err
-    assert "https://provider.example/path?[redacted]" in captured.err
+    assert "https://[redacted]/path?[redacted]" in captured.err
     assert "Bearer [redacted]" in captured.err
     assert "api_key=[redacted]" in captured.err
+    assert '"api_key":[redacted]' in captured.err
+    assert '"OPENAI_API_KEY":[redacted]' in captured.err
+    assert '"password":[redacted]' in captured.err
+    assert '"private_key":[redacted]' in captured.err
     assert "bearer-secret" not in captured.err
     assert "query-secret" not in captured.err
     assert "plain-secret" not in captured.err
     assert "env-secret" not in captured.err
     assert "secret-value" not in captured.err
+    assert "opaque-deepline-value" not in captured.err
+    assert "opaque-env-value" not in captured.err
+    assert "opaque-password" not in captured.err
+    assert "opaque-private-key" not in captured.err
     assert "\x00" not in rn._safe_judge_diagnostic_text("before\x00after")
     assert len(rn._safe_judge_diagnostic_text("x" * 301)) == 300
     assert api.completions[0]["body"].get("output") in (None, {})
@@ -921,6 +931,52 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
         "finished_at",
         "terminal_status",
     }
+
+
+@pytest.mark.parametrize(
+    ("detail", "safe_fragment", "secrets"),
+    [
+        (
+            'provider={"api_key":"opaque-deepline-value",'
+            '"OPENAI_API_KEY":"opaque-env-value"}',
+            '"api_key":[redacted]',
+            ("opaque-deepline-value", "opaque-env-value"),
+        ),
+        (
+            "password=opaque-password private_key=opaque-private-key",
+            "password=[redacted]",
+            ("opaque-password", "opaque-private-key"),
+        ),
+        (
+            "https://web-user:web-password@provider.example/path",
+            "https://[redacted]/path",
+            ("web-user", "web-password"),
+        ),
+        (
+            "postgresql://db-user:db-password@db.example/database",
+            "postgresql://[redacted]/database",
+            ("db-user", "db-password"),
+        ),
+        (
+            "https://partial-user:partial-password",
+            "https://[redacted]",
+            ("partial-user", "partial-password"),
+        ),
+    ],
+)
+def test_judge_diagnostic_logger_redacts_credential_forms(
+    capsys, detail, safe_fragment, secrets
+):
+    rn._log_judge_diagnostic(
+        "credential-test",
+        event="scoring_failure",
+        error_class="judge_error",
+        detail=detail,
+    )
+
+    diagnostic = capsys.readouterr().err
+    assert safe_fragment in diagnostic
+    assert all(secret not in diagnostic for secret in secrets)
 
 
 @pytest.mark.parametrize(

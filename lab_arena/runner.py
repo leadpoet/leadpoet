@@ -75,10 +75,16 @@ DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
 MAX_JUDGE_DIAGNOSTIC_CHARS = scoring.MAX_FAILURE_DETAIL_CHARS
-_DIAGNOSTIC_URL_QUERY_RE = re.compile(r"(?i)(https?://[^\s?#]+)\?[^\s#]*")
+_DIAGNOSTIC_URL_QUERY_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]+)\?[^\s#]*"
+)
+_DIAGNOSTIC_URL_AUTHORITY_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s?#]+"
+)
 _DIAGNOSTIC_CREDENTIAL_RE = re.compile(
-    r"(?i)\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|apikey|access[_-]?token|token|"
-    r"authorization|secret))\b\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    r"(?i)((?<![a-z0-9])[\"']?(?:[a-z0-9]+[_-])*(?:api[_-]?key|apikey|"
+    r"access[_-]?token|token|authorization|secret|password|private[_-]?key)"
+    r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
 )
 _DIAGNOSTIC_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _DIAGNOSTIC_KNOWN_TOKEN_RE = re.compile(
@@ -103,8 +109,9 @@ def _safe_judge_diagnostic_text(
 
     text = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", str(value or ""))
     text = _DIAGNOSTIC_URL_QUERY_RE.sub(r"\1?[redacted]", text)
+    text = _DIAGNOSTIC_URL_AUTHORITY_RE.sub(r"\1[redacted]", text)
     text = _DIAGNOSTIC_BEARER_RE.sub("Bearer [redacted]", text)
-    text = _DIAGNOSTIC_CREDENTIAL_RE.sub(r"\1=[redacted]", text)
+    text = _DIAGNOSTIC_CREDENTIAL_RE.sub(r"\1[redacted]", text)
     text = _DIAGNOSTIC_KNOWN_TOKEN_RE.sub("[redacted]", text)
     return " ".join(text.split())[:max_chars]
 

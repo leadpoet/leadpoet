@@ -45,6 +45,15 @@ _WORKDAY_API_PATH_RE = re.compile(
     r"^/wday/cxs/[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,100}/job/"
     r"[A-Za-z0-9_./-]{3,500}$"
 )
+_LEVER_POSTING_ID_PATTERN = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_LEVER_POSTING_ID_RE = re.compile(r"^" + _LEVER_POSTING_ID_PATTERN + r"$")
+_LEVER_API_PATH_RE = re.compile(
+    r"^/v0/postings/(?P<tenant>[A-Za-z0-9](?:[A-Za-z0-9_-]{0,98}[A-Za-z0-9])?)"
+    r"(?:/(?P<posting>" + _LEVER_POSTING_ID_PATTERN + r"))?/?$"
+)
 
 
 class CompatibilityResponseError(ValueError):
@@ -79,7 +88,7 @@ def _evaluation_date(round_id: str) -> Optional[date]:
 
 
 def _ats_api_kind(value: Any) -> str:
-    """Classify only the three exact public JSON transports used by scoring."""
+    """Classify only exact public JSON transports used by scoring."""
 
     try:
         parsed = urlsplit(str(value or ""))
@@ -114,6 +123,12 @@ def _ats_api_kind(value: Any) -> str:
         and _WORKDAY_API_PATH_RE.fullmatch(parsed.path)
     ):
         return "workday"
+    if (
+        host == "api.lever.co"
+        and not parsed.query
+        and _LEVER_API_PATH_RE.fullmatch(parsed.path)
+    ):
+        return "lever"
     return ""
 
 
@@ -207,7 +222,7 @@ def route_for(
     return None
 
 
-def _envelope_data(body: bytes) -> Mapping[str, Any]:
+def _envelope_data(body: bytes) -> Any:
     try:
         document = json.loads(bytes(body).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -216,7 +231,7 @@ def _envelope_data(body: bytes) -> Mapping[str, Any]:
         raise CompatibilityResponseError("incomplete_deepline_envelope")
     result = document.get("result")
     data = result.get("data") if isinstance(result, Mapping) else None
-    if not isinstance(data, Mapping):
+    if not isinstance(data, (Mapping, list)):
         raise CompatibilityResponseError("missing_deepline_result")
     return data
 
@@ -253,10 +268,10 @@ def _safe_https_url(value: Any) -> str:
     return text
 
 
-def _json_bytes(value: Mapping[str, Any]) -> bytes:
+def _json_bytes(value: Any) -> bytes:
     try:
         return json.dumps(
-            dict(value),
+            dict(value) if isinstance(value, Mapping) else value,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -451,10 +466,31 @@ def _twitter_post_response(
     return status, {"content-type": "application/json"}, _json_bytes(response)
 
 
+def _lever_posting_valid(
+    value: Any, *, tenant: str, posting: Optional[str]
+) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    posting_id = value.get("id")
+    title = value.get("text")
+    hosted_url = value.get("hostedUrl")
+    if (
+        not isinstance(posting_id, str)
+        or _LEVER_POSTING_ID_RE.fullmatch(posting_id) is None
+        or posting is not None and posting_id.casefold() != posting.casefold()
+        or not isinstance(title, str)
+        or not title.strip()
+        or not isinstance(hosted_url, str)
+    ):
+        return False
+    expected_hosted_url = "https://jobs.lever.co/%s/%s" % (tenant, posting_id)
+    return hosted_url == expected_hosted_url
+
+
 def _generic_ats_response(
-    route: MinerScoreRoute, data: Mapping[str, Any]
+    route: MinerScoreRoute, data: Any
 ) -> tuple[int, dict[str, str], bytes]:
-    reported_status = data.get("status")
+    reported_status = data.get("status") if isinstance(data, Mapping) else None
     if (
         isinstance(reported_status, int)
         and not isinstance(reported_status, bool)
@@ -462,6 +498,31 @@ def _generic_ats_response(
     ):
         return reported_status, {"content-type": "application/json"}, _json_bytes(data)
     ats_kind = route.adapter.partition(":")[2]
+    lever_match = None
+    if ats_kind == "lever":
+        try:
+            parsed = urlsplit(str(route.requested_parameters.get("url") or ""))
+            lever_match = _LEVER_API_PATH_RE.fullmatch(parsed.path)
+        except ValueError:
+            lever_match = None
+        if lever_match is None:
+            raise CompatibilityResponseError("invalid_generic_ats_response")
+        tenant = lever_match.group("tenant")
+        posting = lever_match.group("posting")
+        valid_lever = (
+            _lever_posting_valid(data, tenant=tenant, posting=posting)
+            if posting is not None
+            else isinstance(data, list)
+            and all(
+                _lever_posting_valid(item, tenant=tenant, posting=None)
+                for item in data
+            )
+        )
+        if not valid_lever:
+            raise CompatibilityResponseError("invalid_generic_ats_response")
+        return 200, {"content-type": "application/json"}, _json_bytes(data)
+    if not isinstance(data, Mapping):
+        raise CompatibilityResponseError("invalid_generic_ats_response")
     valid = (
         ats_kind == "ashby"
         and isinstance(data.get("jobs"), list)
@@ -488,6 +549,10 @@ def adapt_response(
     if status < 200 or status >= 300:
         raise CompatibilityResponseError("deepline_http_error")
     data = _envelope_data(body)
+    if route.adapter.startswith("generic_ats_json:"):
+        return _generic_ats_response(route, data)
+    if not isinstance(data, Mapping):
+        raise CompatibilityResponseError("missing_deepline_result")
     if route.adapter == "firecrawl_raw_html":
         return _firecrawl_response(route, data)
     if route.adapter == "harvest_linkedin_job":
@@ -496,8 +561,6 @@ def adapt_response(
         return _harvest_post_response(route, data)
     if route.adapter == "twitter_x_post":
         return _twitter_post_response(route, data)
-    if route.adapter.startswith("generic_ats_json:"):
-        return _generic_ats_response(route, data)
     raise CompatibilityResponseError("unknown_compatibility_adapter")
 
 

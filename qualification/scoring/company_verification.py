@@ -598,9 +598,18 @@ async def verify_company_exists(
         None,
     )
     if conflict is not None:
+        # Page titles can be marketing copy, and outgoing company links can
+        # name a parent, partner, or an old LinkedIn slug. Their disagreement
+        # is not a proven entity conflict on the same final domain. Defer to
+        # the existing independent web verifier; do not mark this as a match
+        # or supply it as a verified identity anchor. Invalid domains, parked
+        # pages, and cross-domain redirects remain terminal checks above.
+        unresolved = dict(conflict)
+        unresolved.update(decision="unavailable", reason_code="identity_not_proven")
         return _identity_result(
-            conflict,
-            f"company identity conflict: {conflict['reason_code']}",
+            unresolved,
+            "homepage identity evidence unavailable: page metadata and links "
+            "do not prove the submitted identity",
             actual_final_url=observed_url,
         )
     unavailable = next(

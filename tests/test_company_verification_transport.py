@@ -595,7 +595,7 @@ def test_homepage_name_is_observed_not_echoed_from_submission(monkeypatch):
     assert result.details["identity"]["evidence_source"] == "company_homepage"
 
 
-def test_conflicting_observed_homepage_name_is_mismatch(monkeypatch):
+def test_conflicting_homepage_title_needs_independent_identity_check(monkeypatch):
     import asyncio
 
     result = asyncio.run(
@@ -606,8 +606,38 @@ def test_conflicting_observed_homepage_name_is_mismatch(monkeypatch):
             b'<a href="https://linkedin.com/company/example-company">LinkedIn</a>',
         )
     )
-    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.passed is False
     assert result.details["identity"]["observed_name"] == "differentbusiness"
+
+
+def test_marketing_title_and_old_linkedin_link_do_not_prove_a_conflict(monkeypatch):
+    import asyncio
+
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            b'<title>Save money. Stay powered. Example Company Map pin</title>'
+            b'<a href="https://linkedin.com/company/old-example-name">LinkedIn</a>',
+        )
+    )
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.passed is False
+    assert result.details["identity"]["observed_linkedin_slug"] == "old-example-name"
+
+
+def test_independent_web_identity_conflict_is_still_a_mismatch():
+    receipt = evaluate_company_identity(
+        submitted_name="Example Company",
+        submitted_website="https://example.co.uk",
+        submitted_linkedin="https://linkedin.com/company/example-company",
+        observed_name="Different Business",
+        observed_website="https://example.co.uk",
+        observed_linkedin="https://linkedin.com/company/different-business",
+        evidence_source="company_web_reverification",
+    )
+    assert receipt["decision"] == COMPANY_FIT_MISMATCH
 
 
 def test_cross_registrable_domain_redirect_is_identity_conflict(monkeypatch):

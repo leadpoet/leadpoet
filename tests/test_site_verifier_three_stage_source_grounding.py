@@ -304,33 +304,43 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stage_one_approval_cannot_bypass_a_failed_evidence_fetch(self):
         url = "https://news.example/acme-funding"
-        call = AsyncMock(return_value=supported(url))
-        fetch = AsyncMock(return_value={
-            "results": [],
-            "statuses": [{"source": "scrapingdog", "stage": "timeout"},
-                         {"source": "exa_fallback", "stage": "empty"}],
-        })
-        with (
-            patch("qualification.scoring.intent_verification_three_stage._call_openrouter", call),
-            patch("qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa", fetch),
-        ):
-            result = await verify_three_stage(
-                object(),
-                company_name="Acme",
-                company_linkedin="https://www.linkedin.com/company/acme",
-                company_website="https://acme.com",
-                source_url=url,
-                miner_claim="Acme raised a Series B",
-                target_signal_text="The company recently raised funding",
-                miner_signal_date="2026-07-01",
-                stage1_soft_reject=True,
-            )
-        self.assertEqual(call.await_count, 1)
-        fetch.assert_awaited_once_with([url])
-        self.assertFalse(result["client_ready"])
-        self.assertEqual(result["decision"], "unavailable")
-        self.assertEqual(result["rejection_reason"], "evidence_fetch_failed")
-        self.assertEqual(result["verdict"]["signal_evaluations"][0]["signal_status"], "unable_to_verify")
+        status_cases = (
+            [{"source": "scrapingdog", "stage": "timeout"},
+             {"source": "exa_fallback", "stage": "empty"}],
+            [{
+                "source": "none",
+                "sd_stage": "all_tiers_exhausted:html_empty_body",
+                "exa_stage": "exa_empty",
+            }],
+        )
+        for statuses in status_cases:
+            with self.subTest(statuses=statuses):
+                call = AsyncMock(return_value=supported(url))
+                fetch = AsyncMock(return_value={"results": [], "statuses": statuses})
+                with (
+                    patch("qualification.scoring.intent_verification_three_stage._call_openrouter", call),
+                    patch("qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa", fetch),
+                ):
+                    result = await verify_three_stage(
+                        object(),
+                        company_name="Acme",
+                        company_linkedin="https://www.linkedin.com/company/acme",
+                        company_website="https://acme.com",
+                        source_url=url,
+                        miner_claim="Acme raised a Series B",
+                        target_signal_text="The company recently raised funding",
+                        miner_signal_date="2026-07-01",
+                        stage1_soft_reject=True,
+                    )
+                self.assertEqual(call.await_count, 1)
+                fetch.assert_awaited_once_with([url])
+                self.assertFalse(result["client_ready"])
+                self.assertEqual(result["decision"], "unavailable")
+                self.assertEqual(result["rejection_reason"], "evidence_fetch_failed")
+                self.assertEqual(
+                    result["verdict"]["signal_evaluations"][0]["signal_status"],
+                    "unable_to_verify",
+                )
 
     async def test_stage_three_makes_the_terminal_decision_from_fetched_content(self):
         url = "https://news.example/acme-funding"

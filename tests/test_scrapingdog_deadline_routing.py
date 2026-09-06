@@ -62,6 +62,47 @@ class _AiohttpSession:
 
 
 class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    def test_empty_visible_html_body_is_not_accepted(self):
+        long_head = "<meta name='description' content='" + ("metadata " * 100) + "'>"
+        empty_body = f"<!doctype html><html><head>{long_head}</head><body> </body></html>"
+        scripts_only = (
+            "<html><head>" + long_head + "</head><body>"
+            "<template><script>window.payload = '" + ("data " * 200)
+            + "';</script></template>"
+            "<style>.hidden { display: none; }</style>"
+            "<!-- metadata is not visible body text -->"
+            "</body></html>"
+        )
+
+        self.assertEqual(intent._evaluate_sd_response(200, empty_body), "html_empty_body")
+        self.assertEqual(intent._evaluate_sd_response(200, scripts_only), "html_empty_body")
+
+    def test_literal_body_markup_in_head_does_not_hide_real_body(self):
+        article = (
+            "<!doctype html><html><head>"
+            "<!-- literal <body></body> metadata -->"
+            "<script>window.template = '<body></body>';</script>"
+            "</head><body><article>"
+            + ("The company announced generally available software. " * 100)
+            + "</article></body></html>"
+        )
+
+        self.assertEqual(intent._evaluate_sd_response(200, article), "ok")
+
+    def test_real_html_plain_text_and_json_keep_existing_acceptance(self):
+        article = (
+            "<!doctype html><html><head><title>News</title></head><body>"
+            "<article><time>September 6, 2026</time>"
+            + ("The company announced generally available software. " * 100)
+            + "</article></body></html>"
+        )
+        plain_text = "The company announced generally available software. " * 100
+        json_text = '{"article":"' + ("verified evidence " * 200) + '"}'
+
+        self.assertEqual(intent._evaluate_sd_response(200, article), "ok")
+        self.assertEqual(intent._evaluate_sd_response(200, plain_text), "ok")
+        self.assertEqual(intent._evaluate_sd_response(200, json_text), "ok")
+
     async def test_client_deadline_stops_scrapingdog_ladder(self):
         client = _HttpxClient([httpx.ReadTimeout("client deadline")])
         with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
@@ -119,6 +160,44 @@ class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(result["stage"], "sd:dynamic_render")
+
+    async def test_empty_body_uses_full_native_cascade_then_exa_for_exact_url(self):
+        url = "https://news.example/company-announcement"
+        shell = (
+            "<!doctype html><html><head>"
+            + ("<meta name='description' content='metadata'>" * 30)
+            + "</head><body><script>window.state = {};</script></body></html>"
+        )
+        extracted = "The company announced generally available software. " * 30
+        client = _HttpxClient([
+            httpx.Response(200, text=shell, headers={})
+            for _ in intent._SD_TIERS
+        ])
+        wayback = mock.AsyncMock(return_value={
+            "ok": False,
+            "stage": "wayback_no_snapshot",
+            "content": "",
+            "error": "no archived snapshot",
+        })
+        exa = mock.AsyncMock(return_value={
+            "ok": True,
+            "stage": "exa_scraped",
+            "content": extracted,
+            "error": None,
+        })
+        with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
+                mock.patch.object(intent, "_try_wayback", new=wayback), \
+                mock.patch.object(intent, "_scrape_exa", new=exa), \
+                mock.patch.dict("os.environ", {"SCRAPINGDOG_API_KEY": "test"}):
+            result = await intent._fetch_sd_then_exa([url])
+
+        self.assertEqual(len(client.calls), len(intent._SD_TIERS))
+        self.assertTrue(all(call[1]["params"]["url"] == url for call in client.calls))
+        wayback.assert_awaited_once_with(url)
+        exa.assert_awaited_once_with(url)
+        self.assertEqual(result["results"][0]["url"], url)
+        self.assertEqual(result["results"][0]["text"], extracted)
+        self.assertEqual(result["statuses"][0]["source"], "exa_fallback")
 
     async def test_mislabeled_pdf_binary_skips_text_and_archive_paths(self):
         client = _HttpxClient([

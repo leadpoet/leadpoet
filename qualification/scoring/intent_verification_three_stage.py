@@ -147,6 +147,7 @@ _SD_TIER_TIMEOUT = {
 }
 _SD_CONTENT_ESCALATION_VERDICTS = frozenset({
     "body_too_short",
+    "html_empty_body",
     "anti_bot_marker",
     "js_shell",
     "non_textual",
@@ -875,6 +876,33 @@ def _looks_like_js_shell(body: str) -> bool:
     return False
 
 
+_HTML_DOCUMENT_RE = re.compile(
+    r"^\s*(?:<!doctype\s+html[^>]*>\s*)?<html\b",
+    re.IGNORECASE,
+)
+
+
+def _has_empty_html_body(body: str) -> bool:
+    """Return true only for an explicit HTML document with no visible body."""
+    if not _HTML_DOCUMENT_RE.search(body):
+        return False
+    try:
+        from bs4 import BeautifulSoup, Comment
+
+        document = BeautifulSoup(body, "html.parser")
+    except Exception:
+        return False
+    if document.body is None:
+        return False
+    for node in reversed(document.body.find_all(
+        ["script", "style", "template", "noscript"]
+    )):
+        node.decompose()
+    for node in document.body.find_all(string=lambda value: isinstance(value, Comment)):
+        node.extract()
+    return not document.body.get_text(" ", strip=True)
+
+
 def _evaluate_sd_response(status_code: int, body: str) -> str:
     """Classify a ScrapingDog response. Returns 'ok' or a short failure label.
 
@@ -890,6 +918,8 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
         return f"http_{status_code}"
     if not body or len(body) < 500:
         return "body_too_short"
+    if _has_empty_html_body(body):
+        return "html_empty_body"
     if _has_anti_bot_marker(body):
         return "anti_bot_marker"
     if _looks_like_js_shell(body):

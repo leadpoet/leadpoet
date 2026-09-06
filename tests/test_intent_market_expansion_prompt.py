@@ -46,6 +46,8 @@ def test_market_expansion_guidance_is_in_both_verifier_stages() -> None:
         assert GUIDANCE in prompt
         assert "new geography, customer market" in prompt
         assert "added capacity" in prompt
+        assert "quote the source text establishing that fact" in prompt
+        assert "PART A fails: return contradicted" in prompt
 
 
 def test_facility_opening_prompt_does_not_receive_market_expansion_guidance() -> None:

@@ -179,7 +179,11 @@ MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     entry or expansion into a new geography, customer market, or clearly
     distinct commercial segment. Another facility or asset, or added capacity
     in an existing market, is insufficient unless the exact source explicitly
-    connects it to entry into that new market."""
+    connects it to entry into that new market. Identify the market that is new
+    to this company and quote the source text establishing that fact. A new
+    site address is not by itself a new market. If only an additional facility
+    in an existing market is proved, PART A fails: return contradicted even
+    when the facility-opening claim itself is true."""
 
 
 # ──────────────────────────────────────────────────────────────────────

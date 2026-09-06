@@ -728,6 +728,8 @@ def _decision_with_web_evidence(
 def _web_identity_receipt(
     company: CompanyOutput,
     verdict: Mapping[str, Any],
+    *,
+    verified_homepage_identity: Optional[Mapping[str, str]] = None,
 ) -> dict[str, str]:
     """Bind the independently observed web identity to the submitted company."""
 
@@ -747,10 +749,47 @@ def _web_identity_receipt(
             "decision": COMPANY_FIT_UNAVAILABLE,
             "reason_code": "identity_observation_type_invalid",
         }
-    return evaluate_company_identity(
+    receipt = evaluate_company_identity(
         submitted_name=company.company_name,
         submitted_website=company.company_website,
         submitted_linkedin=company.company_linkedin,
+        observed_name=observed_values["name"],
+        observed_website=observed_values["website"],
+        observed_linkedin=observed_values["linkedin"],
+        evidence_source="company_web_reverification",
+    )
+    if (
+        receipt["decision"] != COMPANY_FIT_UNAVAILABLE
+        or str(company.company_linkedin or "").strip()
+        or not isinstance(verified_homepage_identity, Mapping)
+    ):
+        return receipt
+
+    anchor_domain = str(
+        verified_homepage_identity.get("registrable_dns_domain") or ""
+    ).strip()
+    anchor_name = str(
+        verified_homepage_identity.get("normalized_name") or ""
+    ).strip()
+    anchor_linkedin_slug = str(
+        verified_homepage_identity.get("linkedin_company_slug") or ""
+    ).strip()
+    if (
+        not anchor_name
+        or not anchor_domain
+        or not anchor_linkedin_slug
+        or len(anchor_name) > 200
+        or len(anchor_domain) > 253
+        or len(anchor_linkedin_slug) > 200
+        or receipt.get("submitted_domain") != anchor_domain
+    ):
+        return receipt
+    return evaluate_company_identity(
+        submitted_name=company.company_name,
+        submitted_website=company.company_website,
+        submitted_linkedin=(
+            f"https://www.linkedin.com/company/{anchor_linkedin_slug}"
+        ),
         observed_name=observed_values["name"],
         observed_website=observed_values["website"],
         observed_linkedin=observed_values["linkedin"],
@@ -765,6 +804,7 @@ def _reverify_decision(
     *,
     icp: Optional[ICPPrompt] = None,
     company: Optional[CompanyOutput] = None,
+    verified_homepage_identity: Optional[Mapping[str, str]] = None,
 ) -> CompanyFitDecisionResult:
     """Classify web proof as a match, conflict, or unavailable outcome.
 
@@ -779,7 +819,11 @@ def _reverify_decision(
     identity_receipt: dict[str, str] = {}
     identity_decision = COMPANY_FIT_MATCH
     if company is not None:
-        identity_receipt = _web_identity_receipt(company, verdict)
+        identity_receipt = _web_identity_receipt(
+            company,
+            verdict,
+            verified_homepage_identity=verified_homepage_identity,
+        )
         identity_decision = str(identity_receipt.get("decision") or "")
         if identity_decision not in {
             COMPANY_FIT_MATCH,
@@ -1158,6 +1202,7 @@ async def _llm_reverify_company(
         icp_stage,
         icp=icp if require_company_fit_dimensions else None,
         company=company,
+        verified_homepage_identity=verified_identity,
     )
     if (
         result.decision == COMPANY_FIT_UNAVAILABLE
@@ -1205,6 +1250,7 @@ async def _llm_reverify_company(
         icp_stage,
         icp=icp if require_company_fit_dimensions else None,
         company=company,
+        verified_homepage_identity=verified_identity,
     )
 
 

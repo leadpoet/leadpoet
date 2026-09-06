@@ -1,13 +1,15 @@
-from qualification.scoring.company_verification import (
-    _upgrade_plain_http_company_url,
-    verify_company_exists,
-)
+from gateway.qualification.models import CompanyOutput
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
     evaluate_company_identity,
 )
+from qualification.scoring.company_verification import (
+    _upgrade_plain_http_company_url,
+    verify_company_exists,
+)
+from qualification.scoring.lead_scorer import _web_identity_receipt
 
 
 class _Content:
@@ -222,6 +224,192 @@ def test_missing_submitted_linkedin_uses_exact_name_and_domain(monkeypatch):
         )
     )
     assert result.decision == COMPANY_FIT_MATCH
+
+
+def test_iag_parenthetical_alias_uses_homepage_linkedin_binding(monkeypatch):
+    import asyncio
+
+    response = _Response(
+        200,
+        b'<title>IAG Limited</title>'
+        b'<a href="https://www.linkedin.com/company/iag/">LinkedIn</a>',
+        "https://www.iag.com.au/",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification._registrable_domain",
+        lambda _url: "iag.com.au",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+
+    result = asyncio.run(
+        verify_company_exists(
+            "Insurance Australia Group Limited (IAG)",
+            "https://www.iag.com.au/",
+            company_linkedin="",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity"]["observed_linkedin_slug"] == "iag"
+
+
+def test_iag_web_reverification_without_homepage_anchor_stays_unavailable():
+    receipt = evaluate_company_identity(
+        submitted_name="Insurance Australia Group Limited (IAG)",
+        submitted_website="https://www.iag.com.au/",
+        submitted_linkedin="",
+        observed_name="Insurance Australia Group Limited",
+        observed_website="https://www.iag.com.au/about-us",
+        observed_linkedin="https://www.linkedin.com/company/iag/",
+        evidence_source="company_web_reverification",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_iag_web_reverification_uses_verified_homepage_anchor():
+    company = CompanyOutput(
+        company_name="Insurance Australia Group Limited (IAG)",
+        company_website="https://www.iag.com.au/",
+        company_linkedin="",
+        industry="Financial Services",
+        employee_count="10001+",
+        company_stage="Public",
+        country="Australia",
+        intent_signals=[
+            {
+                "description": "IAG announced a leadership transition.",
+                "source": "news",
+                "url": "https://www.iag.com.au/newsroom",
+                "date": "2026-02-23",
+                "snippet": "IAG announced a leadership team update.",
+            }
+        ],
+    )
+    verdict = {
+        "observed_company_name": "Insurance Australia Group Limited",
+        "observed_company_website": "https://www.iag.com.au/about-us",
+        "observed_company_linkedin": "https://www.linkedin.com/company/iag/",
+    }
+    anchor = {
+        "normalized_name": "iag",
+        "registrable_dns_domain": "iag.com.au",
+        "linkedin_company_slug": "iag",
+    }
+
+    receipt = _web_identity_receipt(
+        company,
+        verdict,
+        verified_homepage_identity=anchor,
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["submitted_linkedin_slug"] == "iag"
+
+    wrong_entity = _web_identity_receipt(
+        company,
+        {**verdict, "observed_company_name": "Unrelated Insurance Limited"},
+        verified_homepage_identity=anchor,
+    )
+    assert wrong_entity["decision"] == COMPANY_FIT_MISMATCH
+
+    incomplete_anchor = _web_identity_receipt(
+        company,
+        verdict,
+        verified_homepage_identity={
+            "normalized_name": "",
+            "registrable_dns_domain": "iag.com.au",
+            "linkedin_company_slug": "iag",
+        },
+    )
+    assert incomplete_anchor["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_iag_parenthetical_alias_rejects_wrong_submitted_linkedin():
+    receipt = evaluate_company_identity(
+        submitted_name="Insurance Australia Group Limited (IAG)",
+        submitted_website="https://www.iag.com.au/",
+        submitted_linkedin="https://www.linkedin.com/company/not-iag/",
+        observed_name="IAG Limited",
+        observed_website="https://www.iag.com.au/",
+        observed_linkedin="https://www.linkedin.com/company/iag/",
+        evidence_source="company_homepage",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MISMATCH
+
+
+def test_parenthetical_alias_does_not_bind_wrong_company_on_same_domain():
+    receipt = evaluate_company_identity(
+        submitted_name="Other Business Limited (IAG)",
+        submitted_website="https://www.iag.com.au/",
+        submitted_linkedin="",
+        observed_name="IAG Limited",
+        observed_website="https://www.iag.com.au/",
+        observed_linkedin="https://www.linkedin.com/company/iag/",
+        evidence_source="company_homepage",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_parenthetical_alias_rejects_wrong_domain():
+    receipt = evaluate_company_identity(
+        submitted_name="Insurance Australia Group Limited (IAG)",
+        submitted_website="https://www.iag.com.au/",
+        submitted_linkedin="",
+        observed_name="IAG Limited",
+        observed_website="https://different.example/",
+        observed_linkedin="https://www.linkedin.com/company/iag/",
+        evidence_source="company_homepage",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MISMATCH
+
+
+def test_parenthetical_alias_without_independent_linkedin_stays_unavailable():
+    receipt = evaluate_company_identity(
+        submitted_name="Insurance Australia Group Limited (IAG)",
+        submitted_website="https://www.iag.com.au/",
+        submitted_linkedin="",
+        observed_name="IAG Limited",
+        observed_website="https://www.iag.com.au/",
+        observed_linkedin="",
+        evidence_source="company_homepage",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_parenthetical_alias_without_independent_source_stays_unavailable():
+    receipt = evaluate_company_identity(
+        submitted_name="Insurance Australia Group Limited (IAG)",
+        submitted_website="https://www.iag.com.au/",
+        submitted_linkedin="",
+        observed_name="IAG Limited",
+        observed_website="https://www.iag.com.au/",
+        observed_linkedin="https://www.linkedin.com/company/iag/",
+        evidence_source="",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_parenthetical_alias_with_different_homepage_linkedin_stays_unavailable():
+    receipt = evaluate_company_identity(
+        submitted_name="Insurance Australia Group Limited (IAG)",
+        submitted_website="https://www.iag.com.au/",
+        submitted_linkedin="",
+        observed_name="IAG Limited",
+        observed_website="https://www.iag.com.au/",
+        observed_linkedin="https://www.linkedin.com/company/unrelated/",
+        evidence_source="company_homepage",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
 
 
 def test_matching_domain_without_linkedin_does_not_bind_a_name_alias():

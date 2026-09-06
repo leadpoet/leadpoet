@@ -1285,6 +1285,15 @@ class ArenaService:
             # The per-run scores are part of the published result; a write the
             # database refused must stop the stage, never pass silently.
             raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
+        if stage == 2:
+            final_entries = self._score_entries_from_runs(
+                round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
+            )
+            baseline_entry = next(
+                (entry for entry in final_entries if entry["is_king"]), None
+            )
+            if baseline_entry is None or baseline_entry["final_score"] is None:
+                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
         if stage == 1:
             ranking = verify.stage1_ranking(
                 self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
@@ -1360,6 +1369,8 @@ class ArenaService:
             round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
         )
         king_entry = next((e for e in final_entries if e["is_king"]), None)
+        if king_entry is None or king_entry["final_score"] is None:
+            return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
         decision = verify.king_decision([e for e in final_entries if not e["is_king"]], king_entry)
         published_at = _iso(self.now())
         publication = {

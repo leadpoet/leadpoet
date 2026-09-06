@@ -21,7 +21,8 @@ def test_dry_run_validates_the_sandbox_plan(capsys):
     assert module["main"](["--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "LAB_ARENA_RUNSC_PROBE_DRY_RUN_OK" in out
-    assert out.count("PLAN ") == 3 and "--network=none" in out and "--rootless=false" in out
+    assert out.count("PLAN ") == 4 and "--network=none" in out and "--rootless=false" in out
+    assert '"entry": ["python3", "-I", "-u", "-B", "/agent/entrypoint.py"]' in out
 
 
 def test_live_probe_refuses_without_root_or_on_the_wrong_host():

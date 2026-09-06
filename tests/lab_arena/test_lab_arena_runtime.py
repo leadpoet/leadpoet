@@ -264,12 +264,23 @@ def test_oci_spec_invariants(tmp_path):
     mounts = {mount["destination"]: mount for mount in document["mounts"]}
     assert set(mounts) == {
         "/proc", "/dev", "/tmp", "/input", "/output", "/run/lab_arena",
-        "/agent/source", "/agent/deps", "/agent/entrypoint.py",
+        "/agent", "/agent/source", "/agent/deps", "/agent/entrypoint.py",
     }
     assert mounts["/input"]["source"] == str(spec.input_dir) and "ro" in mounts["/input"]["options"]
     assert mounts["/output"]["source"] == str(spec.output_dir) and "rw" in mounts["/output"]["options"]
     assert "noexec" in mounts["/output"]["options"]
     assert mounts["/run/lab_arena"]["source"] == str(spec.socket_dir)
+    assert mounts["/agent"] == {
+        "destination": "/agent",
+        "type": "tmpfs",
+        "source": "tmpfs",
+        "options": ["nosuid", "nodev", "mode=0755", "size=65536"],
+    }
+    destinations = [mount["destination"] for mount in document["mounts"]]
+    assert all(
+        destinations.index("/agent") < destinations.index(child)
+        for child in ("/agent/source", "/agent/deps", "/agent/entrypoint.py")
+    )
     assert mounts["/agent/source"]["source"] == str(spec.source_dir)
     assert "ro" in mounts["/agent/source"]["options"]
     assert mounts["/agent/deps"]["source"] == str(spec.dependency_dir)
@@ -436,6 +447,11 @@ def test_scorer_python_keeps_trusted_model_startup(tmp_path):
     environment = dict(item.split("=", 1) for item in process["env"])
     assert process["args"] == ["python3", "/model/scorer_entrypoint.py"]
     assert environment["PYTHONPATH"] == "/model"
+    assert not any(
+        mount["destination"] == "/agent"
+        or mount["destination"].startswith("/agent/")
+        for mount in document["mounts"]
+    )
 
 
 # ---------------------------------------------------------------------------

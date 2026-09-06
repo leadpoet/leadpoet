@@ -339,6 +339,15 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
         mounts.extend(
             [
                 {
+                    # Do not inherit an image's root-only /agent permissions.
+                    # This root-owned parent allows traversal, not agent writes;
+                    # its source, dependency, and entrypoint mounts stay read-only.
+                    "destination": SANDBOX_AGENT_DIR,
+                    "type": "tmpfs",
+                    "source": "tmpfs",
+                    "options": ["nosuid", "nodev", "mode=0755", "size=65536"],
+                },
+                {
                     "destination": SANDBOX_AGENT_SOURCE_DIR,
                     "type": "bind",
                     "source": str(spec.source_dir),

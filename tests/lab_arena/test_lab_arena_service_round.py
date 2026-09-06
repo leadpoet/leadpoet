@@ -594,6 +594,124 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
     assert_canary_absent(harness, connect)
 
 
+def test_all_failed_baseline_keeps_zero_rows_and_cancels_before_publication(
+    connect, tmp_path
+):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    _start_round(harness, day=2, epoch=24820)
+    participants = harness.service.store.get_round(harness.round_id)["participants"]
+    baseline = next(
+        participant for participant in participants if participant["is_king"]
+    )
+    harness.broken.add(baseline["submission_id"])
+
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    result = {}
+    for _ in range(30):
+        status = harness.status()
+        if status == "cancelled":
+            break
+        if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring"):
+            harness.run_stage_with_runners(1)
+        if status == "stage1_scored":
+            harness.clock.advance_to(harness.schedule()["stage_2_start"])
+        result = harness.service.advance_round(harness.round_id)
+    assert harness.status() == "cancelled", result
+
+    runs = harness.service.store.list_runs(
+        harness.round_id,
+        submission_id=baseline["submission_id"],
+        kind="execute",
+    )
+    scored = [run for run in runs if run["per_icp_score"] is not None]
+    assert len(scored) == contracts.BENCHMARK_ICP_COUNT
+    assert all(float(run["per_icp_score"]) == 0.0 for run in scored)
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["publication_doc"] is None
+    assert harness.service.latest_published_round() is None
+
+
+def test_partially_successful_baseline_publishes_a_numeric_mean(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    _start_round(harness, day=3, epoch=24840)
+    participants = harness.service.store.get_round(harness.round_id)["participants"]
+    baseline = next(
+        participant for participant in participants if participant["is_king"]
+    )
+    original_run_icp = harness.sandbox.run_icp
+
+    def run_icp(spec, **kwargs):
+        if spec.source_dir is None:
+            return original_run_icp(spec, **kwargs)
+        document = json.loads(
+            (spec.input_dir / runtime.INPUT_FILE_NAME).read_text(encoding="utf-8")
+        )
+        submission_id = spec.source_dir.parent.name.removeprefix("submission-")
+        position = int(str(document["icp"]["icp_id"]).rsplit("_", 1)[-1]) - 1
+        if submission_id == baseline["submission_id"] and position != 0:
+            return runtime.fake_result(
+                exit_code=1, output_bytes=None, stderr=b"model failure"
+            )
+        return original_run_icp(spec, **kwargs)
+
+    harness.sandbox.run_icp = run_icp
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    harness.advance_until("published", runners=1)
+
+    public = harness.service.public_results(
+        harness.round_id, baseline["submission_id"]
+    )
+    assert isinstance(public["submission_scores"]["final"], float)
+    scores = public["scores"]["stage_1"] + public["scores"]["stage_2"]
+    assert len(scores) == contracts.BENCHMARK_ICP_COUNT
+    assert sum(float(item["per_icp_score"]) == 0.0 for item in scores) == 19
+    expected = verify.stage_score(
+        [float(item["per_icp_score"]) for item in scores], len(scores)
+    )
+    assert public["submission_scores"]["final"] == expected
+
+
+def test_publish_cancels_an_existing_scored_state_with_no_valid_baseline(
+    connect, tmp_path, monkeypatch
+):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    _start_round(harness, day=4, epoch=24860)
+    participants = harness.service.store.get_round(harness.round_id)["participants"]
+    baseline = next(
+        participant for participant in participants if participant["is_king"]
+    )
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    harness.advance_until("scored", runners=1)
+
+    original_entries = harness.service._score_entries_from_runs
+
+    def entries_with_invalid_baseline(round_row, positions, score_key):
+        entries = original_entries(round_row, positions, score_key)
+        if score_key == "final_score":
+            entries = [
+                {
+                    **entry,
+                    "final_score": (
+                        None
+                        if entry["submission_id"] == baseline["submission_id"]
+                        else entry["final_score"]
+                    ),
+                }
+                for entry in entries
+            ]
+        return entries
+
+    monkeypatch.setattr(
+        harness.service, "_score_entries_from_runs", entries_with_invalid_baseline
+    )
+    assert harness.service.publish(harness.round_id)["status"] == "cancelled"
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["publication_doc"] is None
+
+
 def test_restart_finishes_a_partial_participant_freeze_without_changing_baseline(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=["Restart-A", "Restart-B"], runners=["alpha"])
     configuration = harness.service.create_round(

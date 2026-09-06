@@ -411,46 +411,63 @@ def _normalized_industry_label(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
-def _cited_data_collaboration_refinement(
-    candidate_industry: str,
+def _activity_text_matches_requested_industry(
+    requested_industry: str,
+    activity_text: str,
+    industry_fit: Any,
+) -> bool:
+    """Match one source-derived activity without changing shared taxonomy."""
+
+    passed, _detail = industry_fit(requested_industry, activity_text, "")
+    if passed:
+        return True
+
+    # Keep the existing narrow Data and Analytics synonym inside this generic
+    # evidence path. The shared taxonomy intentionally remains unchanged.
+    activity = _normalized_industry_label(activity_text)
+    return bool(
+        _normalized_industry_label(requested_industry) == "data and analytics"
+        and re.search(r"\bdata collaboration\b", activity)
+        and re.search(
+            r"\b(?:platform|product|software|system|technology)\b",
+            activity,
+        )
+    )
+
+
+def _cited_subindustry_activity_refinement(
     candidate_subindustry: str,
     requested_industry: str,
     semantic_flag: Optional[bool],
     semantic_evidence: Optional[Mapping[str, Any]],
-) -> Optional[str]:
-    """Refine one broad IT label only from corroborated data-product proof.
+    industry_fit: Any,
+) -> str:
+    """Refine a taxonomy rejection only from twice-corroborated activity.
 
     This is scorer-local because changing the shared repository taxonomy would
-    also change standalone pre-check and SOURCE_ADD-adjacent behavior. The
-    observed labels establish the narrow candidate shape; the semantic verdict
-    and independently returned citation must then corroborate it.
+    also change standalone pre-check and SOURCE_ADD-adjacent behavior. The web
+    judge, observed subindustry, and cited quote must all independently support
+    the requested activity.
     """
 
-    subindustry = _normalized_industry_label(candidate_subindustry)
-    if (
-        _normalized_industry_label(requested_industry) != "data and analytics"
-        or _normalized_industry_label(candidate_industry)
-        != "information technology"
-        or not re.search(r"\bdata collaboration\b", subindustry)
-    ):
-        return None
-    specific_data_product = bool(
-        re.search(
-            r"\b(?:platform|product|software|system|technology)\b",
-            subindustry,
-        )
-    )
-    if not specific_data_product or semantic_flag is not True:
+    if semantic_flag is not True:
         return COMPANY_FIT_UNAVAILABLE
     evidence = semantic_evidence if isinstance(semantic_evidence, Mapping) else {}
-    quote = _normalized_industry_label(evidence.get("quote"))
-    quote_supports_data_product = bool(re.search(
-        r"\b(?:data collaboration|data platform)\b",
-        quote,
-    ))
-    supported = bool(
-        _valid_web_evidence_url(evidence.get("url"))
-        and quote_supports_data_product
+    quote = evidence.get("quote")
+    supported = (
+        bool(_valid_web_evidence_url(evidence.get("url")))
+        and isinstance(quote, str)
+        and bool(quote.strip())
+        and _activity_text_matches_requested_industry(
+            requested_industry,
+            candidate_subindustry,
+            industry_fit,
+        )
+        and _activity_text_matches_requested_industry(
+            requested_industry,
+            quote,
+            industry_fit,
+        )
     )
     return COMPANY_FIT_MATCH if supported else COMPANY_FIT_UNAVAILABLE
 
@@ -506,15 +523,19 @@ def _industry_evidence_decision(
     else:
         canonical_match = None
     if flag_required:
-        refinement = _cited_data_collaboration_refinement(
-            candidate_industry,
-            candidate_subindustry,
-            requested_industry,
-            flag,
-            semantic_evidence,
-        )
-        if refinement is not None:
-            return refinement
+        if taxonomy.get("decision") == "rejected" and flag is True:
+            try:
+                refinement = _cited_subindustry_activity_refinement(
+                    candidate_subindustry,
+                    requested_industry,
+                    flag,
+                    semantic_evidence,
+                    industry_fit,
+                )
+            except Exception:
+                return COMPANY_FIT_UNAVAILABLE
+            if refinement == COMPANY_FIT_MATCH:
+                return refinement
         if canonical_match is None or flag is None:
             return COMPANY_FIT_UNAVAILABLE
         if flag is not canonical_match:

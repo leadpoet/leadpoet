@@ -11,6 +11,7 @@ import pytest
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring.lead_scorer import (
     COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS,
+    _industry_evidence_decision,
     _llm_reverify_company,
     _matches_exclusion_list,
     _reverify_decision,
@@ -529,7 +530,7 @@ def test_web_dimension_matches_require_citations_and_bound_identity():
     assert cited.decision == COMPANY_FIT_MATCH
 
 
-def test_cited_data_collaboration_refines_broad_it_parent_to_data_analytics():
+def test_generic_activity_refinement_preserves_data_collaboration_case():
     result = _reverify_decision(
         _complete_cinchy_industry_verdict(),
         "",
@@ -542,6 +543,250 @@ def test_cited_data_collaboration_refines_broad_it_parent_to_data_analytics():
     assert result.details["dimension_decisions"]["industry"] == (
         COMPANY_FIT_MATCH
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "requested_industry",
+        "observed_industry",
+        "observed_subindustry",
+        "evidence_quote",
+    ),
+    [
+        (
+            "Payments",
+            "Fintech",
+            "Global payments and treasury management",
+            "The company provides digital payments, acceptance, settlement, "
+            "and localized payouts.",
+        ),
+        (
+            "Commerce and Shopping",
+            "Fashion",
+            "Fashion Retail",
+            "Cider is a fashion retail company.",
+        ),
+        (
+            "Lending and Investments",
+            "Financial Services",
+            "Private Credit / Asset Management / Direct Lending",
+            "Monroe specializes in private credit markets and direct lending.",
+        ),
+        (
+            "Sales and Marketing",
+            "Software",
+            "AI-powered customer journey orchestration / marketing personalization",
+            "Auxia provides AI-powered marketing personalization and customer "
+            "journey orchestration.",
+        ),
+    ],
+)
+def test_cited_subindustry_activity_refines_broad_taxonomy_rejection(
+    requested_industry,
+    observed_industry,
+    observed_subindustry,
+    evidence_quote,
+):
+    assert _industry_evidence_decision(
+        observed_industry,
+        observed_subindustry,
+        requested_industry,
+        True,
+        semantic_evidence={
+            "url": "https://independent.example/activity",
+            "quote": evidence_quote,
+        },
+    ) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    (
+        "semantic_flag",
+        "evidence_url",
+        "evidence_quote",
+        "subindustry",
+        "expected",
+    ),
+    [
+        (
+            False,
+            "https://sunrate.com/",
+            "SUNRATE provides digital payments.",
+            "Global payments",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            None,
+            "https://sunrate.com/",
+            "SUNRATE provides digital payments.",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            "true",
+            "https://sunrate.com/",
+            "SUNRATE provides digital payments.",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            True,
+            "",
+            "SUNRATE provides digital payments.",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            True,
+            "javascript:alert(1)",
+            "SUNRATE provides digital payments.",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            True,
+            "https://sunrate.com/",
+            "",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            True,
+            "https://sunrate.com/",
+            "Global headquarters; 501-1000 employees.",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            True,
+            "https://sunrate.com/",
+            "SUNRATE provides digital payments.",
+            "Private credit",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+    ],
+)
+def test_activity_refinement_rejects_missing_or_inconsistent_proof(
+    semantic_flag,
+    evidence_url,
+    evidence_quote,
+    subindustry,
+    expected,
+):
+    assert _industry_evidence_decision(
+        "Fintech",
+        subindustry,
+        "Payments",
+        semantic_flag,
+        semantic_evidence={"url": evidence_url, "quote": evidence_quote},
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("requested_industry", "observed_industry", "observed_subindustry", "quote"),
+    [
+        (
+            "Payments",
+            "Financial Services",
+            "Private Credit / Direct Lending",
+            "The company specializes in private credit and direct lending.",
+        ),
+        (
+            "Sales and Marketing",
+            "Software",
+            "Generic collaboration software",
+            "The company provides a collaboration software platform.",
+        ),
+        (
+            "Manufacturing",
+            "Renewable Energy",
+            "Modular energy systems for data centers",
+            "The company designs modular renewable energy systems.",
+        ),
+        (
+            "Lending and Investments",
+            "Financial Services",
+            "Asset Management",
+            "The company provides asset management services.",
+        ),
+    ],
+)
+def test_activity_refinement_does_not_cross_distinct_industries(
+    requested_industry,
+    observed_industry,
+    observed_subindustry,
+    quote,
+):
+    assert _industry_evidence_decision(
+        observed_industry,
+        observed_subindustry,
+        requested_industry,
+        True,
+        semantic_evidence={
+            "url": "https://independent.example/activity",
+            "quote": quote,
+        },
+    ) == COMPANY_FIT_UNAVAILABLE
+
+
+def test_activity_refinement_does_not_accept_auxia_website_only_quote():
+    assert _industry_evidence_decision(
+        "Software",
+        "AI-powered customer journey orchestration / marketing personalization",
+        "Sales and Marketing",
+        True,
+        semantic_evidence={
+            "url": "https://auxia.io/",
+            "quote": "Website: https://auxia.io",
+        },
+    ) == COMPANY_FIT_UNAVAILABLE
+
+
+def test_activity_refinement_does_not_override_identity_mismatch():
+    verdict = _complete_industry_disagreement_verdict()
+    verdict.update({
+        "observed_company_name": "Other Company",
+        "observed_company_website": "https://other.example.com",
+        "observed_company_linkedin": "https://linkedin.com/company/other",
+        "observed_industry": "Fintech",
+        "observed_subindustry": "Global payments and treasury management",
+    })
+    verdict["dimension_evidence"]["industry"] = {
+        "url": "https://independent.example/activity",
+        "quote": "The company provides digital payments and settlement.",
+    }
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(industry="Payments"),
+        company=_company(),
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["identity_decision"] == COMPANY_FIT_MISMATCH
+
+
+def test_activity_refinement_exception_is_unavailable(monkeypatch):
+    import leadpoet_verifier.industry_fit as industry_module
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("taxonomy unavailable")
+
+    monkeypatch.setattr(industry_module, "industry_fit", unavailable)
+
+    assert _industry_evidence_decision(
+        "Fintech",
+        "Global payments",
+        "Payments",
+        True,
+        semantic_evidence={
+            "url": "https://sunrate.com/",
+            "quote": "SUNRATE provides digital payments.",
+        },
+    ) == COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize(
@@ -560,7 +805,7 @@ def test_cited_data_collaboration_refines_broad_it_parent_to_data_analytics():
         ("unchanged", "Lending and Investments"),
     ],
 )
-def test_data_collaboration_refinement_fails_closed(
+def test_generic_activity_refinement_handles_data_collaboration_boundaries(
     mutation,
     requested_industry,
 ):
@@ -593,10 +838,15 @@ def test_data_collaboration_refinement_fails_closed(
         company=_company(name="Cinchy", website="https://cinchy.com"),
     )
 
-    assert result.decision == COMPANY_FIT_UNAVAILABLE
-    assert result.details["dimension_decisions"]["industry"] == (
-        COMPANY_FIT_UNAVAILABLE
+    expected = (
+        COMPANY_FIT_MISMATCH
+        if mutation == "semantic_false"
+        else COMPANY_FIT_MATCH
+        if mutation == "broad_analytics_quote"
+        else COMPANY_FIT_UNAVAILABLE
     )
+    assert result.decision == expected
+    assert result.details["dimension_decisions"]["industry"] == expected
 
 
 def test_energy_manufacturing_disagreement_is_not_refined():

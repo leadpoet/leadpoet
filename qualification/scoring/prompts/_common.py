@@ -211,7 +211,7 @@ so structural callers can distinguish entity-mismatch from claim-mismatch."""
 FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
 - Re-apply the PART A check from above BEFORE judging content support: if
   miner_claim does not semantically map to target_icp_signal, return
-  wrong_entity regardless of what the extracted content shows. Do not let a
+  contradicted regardless of what the extracted content shows. Do not let a
   factually-true but orthogonal claim pass just because the URL supports it.
 - Use only the exact source extraction above as supporting evidence.
 - Page titles, navigation menus, headers, and breadcrumbs are NOT evidence.

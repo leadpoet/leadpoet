@@ -1839,15 +1839,19 @@ def _source_publication_date(value: Any) -> str:
 def _published_date_from_html(html: str, source_url: str) -> str:
     """Read first-party publication metadata before body extraction drops it."""
 
-    head = re.split(r"</head\s*>", html, maxsplit=1, flags=re.IGNORECASE)[0]
+    head_match = re.search(
+        r"<head(?:\s[^>]*)?>(.*?)</head\s*>",
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    head = head_match.group(1) if head_match else ""
     patterns = (
         r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\']',
     )
     candidates: set[str] = set()
     for pattern in patterns:
-        match = re.search(pattern, head, re.IGNORECASE)
-        if match:
+        for match in re.finditer(pattern, head, re.IGNORECASE):
             normalized = _source_publication_date(match.group(1))
             if normalized:
                 candidates.add(normalized)
@@ -1867,7 +1871,8 @@ def _published_date_from_html(html: str, source_url: str) -> str:
                 continue
             node_type = node.get("@type")
             types = node_type if isinstance(node_type, list) else [node_type]
-            if not set(types) & {"Article", "NewsArticle", "BlogPosting"}:
+            valid_types = {value for value in types if isinstance(value, str)}
+            if not valid_types & {"Article", "NewsArticle", "BlogPosting"}:
                 continue
             main_page = node.get("mainEntityOfPage")
             page_id = main_page.get("@id") if isinstance(main_page, Mapping) else main_page

@@ -94,3 +94,32 @@ def test_jsonld_date_requires_article_type_and_exact_main_page() -> None:
     assert intent._published_date_from_html(update_only, URL) == ""
     assert intent._published_date_from_html(exact, URL) == "2026-08-04"
     assert intent._published_date_from_html(conflicting, URL) == ""
+
+
+def test_duplicate_head_metadata_conflict_is_rejected() -> None:
+    html = '''<html><head>
+      <meta property="article:published_time" content="2026-08-03">
+      <meta property="article:published_time" content="2026-08-04">
+    </head><body></body></html>'''
+
+    assert intent._published_date_from_html(html, URL) == ""
+
+
+def test_body_meta_without_a_head_is_not_page_metadata() -> None:
+    html = '''<html><body>
+      <meta property="article:published_time" content="2026-08-04">
+    </body></html>'''
+
+    assert intent._published_date_from_html(html, URL) == ""
+
+
+def test_malformed_jsonld_type_is_ignored() -> None:
+    html = f'''<html><head></head><body>
+      <script type="application/ld+json">{{
+        "@type":[{{"unexpected":"mapping"}}, "WebPage"],
+        "datePublished":"2026-08-04",
+        "mainEntityOfPage":{{"@id":"{URL}"}}
+      }}</script>
+    </body></html>'''
+
+    assert intent._published_date_from_html(html, URL) == ""

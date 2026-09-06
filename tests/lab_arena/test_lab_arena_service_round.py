@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 import pytest
 from bittensor_wallet import Keypair
 
-from lab_arena import broker as br, contracts, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
+from lab_arena import broker as br, contracts, driver as arena_driver, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
 
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
@@ -591,6 +591,76 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
     assert len(public["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
     assert len(public["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
     assert public["submission_scores"]["final"] is not None
+    assert_canary_absent(harness, connect)
+
+
+def test_driver_discovers_an_older_live_round_through_unrelated_history_and_publishes(
+    connect, tmp_path
+):
+    """The production history shape cannot hide a full baseline-only round."""
+
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    service = harness.service
+    for active in service.active_rounds():
+        service.cancel(active["round_id"], svc.CANCEL_REASONS["operator"])
+
+    harness.chain.epoch = 24950
+    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    configuration = service.create_round(
+        cutoff, round_id="arena-2026-12-29-discovery"
+    )
+    harness.round_id = configuration["round_id"]
+    schedule = dict(configuration["schedule"])
+
+    history_ids = []
+    for index in range(25):
+        round_id = "arena-2026-12-30-h%02d" % index
+        history_configuration = dict(configuration)
+        history_configuration["round_id"] = round_id
+        history_configuration["mode"] = "live" if index < 21 else "shadow"
+        history_configuration["rewards_enabled"] = False
+        assert service.store.create_round(round_id, history_configuration)["status"] == "created"
+        assert service.store.cancel_round(
+            round_id, svc.CANCEL_REASONS["operator"]
+        )["status"] == "cancelled"
+        history_ids.append(round_id)
+
+    hidden = service.store.get_round(harness.round_id)
+    assert hidden["status"] == "open"
+    assert hidden["configuration_doc"]["schedule"] == schedule
+    assert service.current_round()["round_id"] == harness.round_id
+    assert service.open_round()["round_id"] == harness.round_id
+    assert [row["round_id"] for row in service.active_rounds()] == [harness.round_id]
+
+    harness.clock.advance_to(schedule["submission_cutoff"])
+    outcome = arena_driver.drive_once(service)
+    assert outcome == "advanced %s" % harness.round_id
+    committed = service.store.get_round(harness.round_id)
+    assert committed["status"] == "committed"
+    assert committed["configuration_doc"]["schedule"] == schedule
+    participants = committed["participants"]
+    assert len(participants) == 1 and participants[0]["is_king"] is True
+    harness.flavors[participants[0]["submission_id"]] = "PublicBaseline"
+
+    _run_stage_one_to_scoring(harness, participants=1, runners=1)
+    harness.advance_until("published", runners=1)
+
+    published = service.store.get_round(harness.round_id)
+    execute_runs = service.store.list_runs(harness.round_id, kind="execute")
+    score_runs = service.store.list_runs(harness.round_id, kind="score")
+    assert published["status"] == "published"
+    assert published["configuration_doc"]["schedule"] == schedule
+    assert len(execute_runs) == contracts.BENCHMARK_ICP_COUNT
+    assert len(score_runs) == contracts.BENCHMARK_ICP_COUNT
+    assert all(run["status"] == "accepted" for run in execute_runs + score_runs)
+    public = service.public_results(harness.round_id, participants[0]["submission_id"])
+    assert len(public["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
+    assert len(public["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
+    assert {
+        item["icp_position"]
+        for item in public["scores"]["stage_1"] + public["scores"]["stage_2"]
+    } == set(range(contracts.BENCHMARK_ICP_COUNT))
+    assert all(service.store.get_round(round_id)["status"] == "cancelled" for round_id in history_ids)
     assert_canary_absent(harness, connect)
 
 

@@ -20,6 +20,9 @@ from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
+ACTIVE_ROUND_STATUSES = tuple(
+    status for status in contracts.ROUND_STATUSES if status not in TERMINAL_STATUSES
+)
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
 DEFAULT_STAGE_MINUTES = {
@@ -554,7 +557,12 @@ class ArenaService:
         """The newest round that is not published or cancelled (operator status)."""
 
         # Scan ids and statuses only; a full row can be large at hundreds of participants.
-        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc"):
+        for row in self._store.list_rounds(
+            statuses=ACTIVE_ROUND_STATUSES,
+            mode=self._config.mode,
+            limit=20,
+            columns="round_id,status,created_at,configuration_doc",
+        ):
             if row["status"] not in TERMINAL_STATUSES and (row.get("configuration_doc") or {}).get("mode") == self._config.mode:
                 return self._round(row["round_id"])
         return None
@@ -566,12 +574,26 @@ class ArenaService:
         so the driver advances each of them on every tick.
         """
 
-        rows = [
-            row
-            for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc")
-            if row["status"] not in TERMINAL_STATUSES
-            and (row.get("configuration_doc") or {}).get("mode") == self._config.mode
-        ]
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        page_size = 20
+        while True:
+            page = self._store.list_rounds(
+                statuses=ACTIVE_ROUND_STATUSES,
+                mode=self._config.mode,
+                limit=page_size,
+                offset=offset,
+                columns="round_id,status,created_at,configuration_doc",
+            )
+            rows.extend(
+                row
+                for row in page
+                if row["status"] not in TERMINAL_STATUSES
+                and (row.get("configuration_doc") or {}).get("mode") == self._config.mode
+            )
+            if len(page) < page_size:
+                break
+            offset += page_size
         return [
             {
                 "round_id": row["round_id"],
@@ -584,7 +606,12 @@ class ArenaService:
     def open_round(self) -> Optional[Dict[str, Any]]:
         """The round open for submissions, if any (at most one at a time)."""
 
-        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc"):
+        for row in self._store.list_rounds(
+            status="open",
+            mode=self._config.mode,
+            limit=20,
+            columns="round_id,status,created_at,configuration_doc",
+        ):
             if row["status"] == "open" and (row.get("configuration_doc") or {}).get("mode") == self._config.mode:
                 return self._round(row["round_id"])
         return None
@@ -629,7 +656,9 @@ class ArenaService:
         return validated, round_row
 
     def latest_published_round(self) -> Optional[Dict[str, Any]]:
-        rows = self._store.list_rounds(status="published", limit=200)
+        rows = self._store.list_rounds(
+            status="published", mode=self._config.mode, limit=200
+        )
         return next(
             (row for row in rows if (row.get("configuration_doc") or {}).get("mode") == self._config.mode),
             None,
@@ -1404,7 +1433,13 @@ class ArenaService:
 
         if self._config.mode != "live":
             return {"status": "disabled", "activated": 0}
-        rows = list(reversed(self._store.list_rounds(status="published", limit=200)))
+        rows = list(
+            reversed(
+                self._store.list_rounds(
+                    status="published", mode="live", limit=200
+                )
+            )
+        )
         pending = [
             row for row in rows
             if (row.get("configuration_doc") or {}).get("mode") == "live"
@@ -1471,7 +1506,7 @@ class ArenaService:
             return {"status": "disabled"}
         publication = row.get("publication_doc") or {}
         decision = publication.get("king_decision") or {}
-        prior = self._store.published_reward_bases(limit=200)
+        prior = self._store.published_reward_bases(mode="live", limit=200)
         maximum_epoch = max((int(item["effective_reward_epoch"]) for item in prior if item.get("effective_reward_epoch") is not None), default=-1)
         effective_epoch = max(int(self._config.chain.current_settlement_epoch()) + 1, maximum_epoch + 1)
         usable = self._usable_reward_bases(prior)
@@ -1877,7 +1912,7 @@ class ArenaService:
                 if eligibility:
                     week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
         elif self._config.mode == "live":
-            rows = self._store.published_reward_bases(limit=200)
+            rows = self._store.published_reward_bases(mode="live", limit=200)
             bases = self._usable_reward_bases(rows)
             if bases:
                 governing = max(
@@ -1899,7 +1934,7 @@ class ArenaService:
     def public_reward_basis(self, epoch: int) -> Optional[Dict[str, Any]]:
         if self._config.mode != "live":
             return None
-        rows = self._store.published_reward_bases(limit=200)
+        rows = self._store.published_reward_bases(mode="live", limit=200)
         return rewards.governing_reward_basis(
             self._usable_reward_bases(rows), int(epoch)
         )

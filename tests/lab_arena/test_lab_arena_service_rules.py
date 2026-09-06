@@ -379,6 +379,147 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
         service._round("shadow-round")
 
 
+def test_round_discovery_filters_before_limits_and_pages_every_active_round():
+    def row(round_id, status, mode, created_at, **extra):
+        return {
+            "round_id": round_id,
+            "status": status,
+            "created_at": created_at,
+            "configuration_doc": {
+                "mode": mode,
+                "schedule": {"submission_cutoff": created_at},
+                **extra.pop("configuration", {}),
+            },
+            **extra,
+        }
+
+    live_active = [
+        row(
+            "live-active-%02d" % index,
+            "open" if index == 44 else "committed",
+            "live",
+            "2026-09-%02dT00:00:00Z" % (index + 1),
+        )
+        for index in range(45)
+    ]
+    live_published = [
+        row(
+            "live-published-new",
+            "published",
+            "live",
+            "2026-12-31T00:00:00Z",
+            configuration={"rewards_enabled": True},
+            reward_activated_at=None,
+        ),
+        row(
+            "live-published-old",
+            "published",
+            "live",
+            "2026-12-30T00:00:00Z",
+            configuration={"rewards_enabled": True},
+            reward_activated_at=None,
+        ),
+    ]
+    rows = (
+        [
+            row(
+                "shadow-published-%03d" % index,
+                "published",
+                "shadow",
+                "2027-01-%03dT00:00:00Z" % index,
+            )
+            for index in range(201)
+        ]
+        + [
+            row(
+                "live-terminal-%02d" % index,
+                "cancelled",
+                "live",
+                "2026-12-%02dT00:00:00Z" % (index + 1),
+            )
+            for index in range(25)
+        ]
+        + live_published
+        + list(reversed(live_active))
+    )
+
+    class Store:
+        calls = []
+
+        @classmethod
+        def list_rounds(
+            cls,
+            *,
+            status=None,
+            statuses=None,
+            mode=None,
+            limit=100,
+            offset=None,
+            **_kwargs,
+        ):
+            cls.calls.append(
+                {
+                    "status": status,
+                    "statuses": statuses,
+                    "mode": mode,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+            selected = list(rows)
+            if status is not None:
+                selected = [item for item in selected if item["status"] == status]
+            if statuses is not None:
+                selected = [item for item in selected if item["status"] in statuses]
+            if mode is not None:
+                selected = [
+                    item
+                    for item in selected
+                    if item["configuration_doc"]["mode"] == mode
+                ]
+            start = int(offset or 0)
+            return selected[start : start + int(limit)]
+
+        @staticmethod
+        def get_round(round_id):
+            return next((item for item in rows if item["round_id"] == round_id), None)
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._config = SimpleNamespace(mode="live")
+    service._round = Store.get_round
+
+    assert service.current_round()["round_id"] == "live-active-44"
+    assert service.open_round()["round_id"] == "live-active-44"
+    assert service.latest_published_round()["round_id"] == "live-published-new"
+    Store.calls.clear()
+
+    active = service.active_rounds()
+    assert [item["round_id"] for item in active] == [
+        "live-active-%02d" % index for index in range(45)
+    ]
+    assert [call["offset"] for call in Store.calls] == [0, 20, 40]
+    assert all(call["mode"] == "live" for call in Store.calls)
+    assert all(
+        "published" not in call["statuses"] and "cancelled" not in call["statuses"]
+        for call in Store.calls
+    )
+
+    activated = []
+    service.activate_reward = (
+        lambda round_id: activated.append(round_id) or {"status": "activated"}
+    )
+    assert service.activate_pending_rewards() == {"status": "ok", "activated": 2}
+    assert activated == ["live-published-old", "live-published-new"]
+    assert Store.calls[-1] == {
+        "status": "published",
+        "statuses": None,
+        "mode": "live",
+        "limit": 200,
+        "offset": None,
+    }
+
+
 def test_public_round_does_not_expose_source_transport_fields():
     service = object.__new__(ArenaService)
     service._round = lambda _round_id: {

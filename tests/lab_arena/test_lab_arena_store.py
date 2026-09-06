@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, PostgrestTransport, SCORE_BATCH_SIZE, TABLES, create_http1_client
+from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, PostgrestTransport, PsycopgTransport, SCORE_BATCH_SIZE, TABLES, create_http1_client
 
 
 class RecordingTransport:
@@ -162,3 +162,141 @@ def test_postgrest_does_not_follow_a_cross_origin_redirect():
         transport.rpc("lab_arena_whoami", {})
     assert contacted == ["https://project.example/rest/v1/rpc/lab_arena_whoami"]
     transport.close()
+
+
+def test_postgrest_filters_round_mode_and_status_before_limit_with_pagination():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), follow_redirects=False, trust_env=False
+    )
+    transport = PostgrestTransport(
+        "https://project.example",
+        anon_key="anon",
+        service_jwt="a.b.c",
+        http_client=client,
+    )
+    rows = transport.select(
+        "lab_arena_rounds",
+        filters={"configuration_doc->>mode": "live"},
+        status_in=("open", "committed"),
+        order="created_at",
+        descending=True,
+        limit=20,
+        offset=40,
+    )
+    assert rows == []
+    params = list(requests[0].url.params.multi_items())
+    assert ("configuration_doc->>mode", "eq.live") in params
+    assert ("status", "in.(open,committed)") in params
+    assert ("order", "created_at.desc") in params
+    assert ("limit", "20") in params and ("offset", "40") in params
+    transport.close()
+
+
+@pytest.mark.parametrize(
+    "filters,statuses",
+    [
+        ({"configuration_doc->>mode": "live,or(status.eq.open)"}, ("open",)),
+        ({"configuration_doc->>mode": "live"}, ("open,published",)),
+    ],
+)
+def test_postgrest_round_filters_reject_reserved_query_syntax(filters, statuses):
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=[])),
+        follow_redirects=False,
+        trust_env=False,
+    )
+    transport = PostgrestTransport(
+        "https://project.example",
+        anon_key="anon",
+        service_jwt="a.b.c",
+        http_client=client,
+    )
+    with pytest.raises(ArenaStoreError, match="reserved characters"):
+        transport.select(
+            "lab_arena_rounds", filters=filters, status_in=statuses, limit=20
+        )
+    transport.close()
+
+
+def test_psycopg_parameterizes_round_mode_and_status_before_limit():
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, values):
+            calls.append((sql, values))
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        closed = 0
+        autocommit = False
+
+        @staticmethod
+        def cursor():
+            return Cursor()
+
+        @staticmethod
+        def close():
+            return None
+
+    transport = PsycopgTransport(lambda: Connection(), role=None)
+    assert transport.select(
+        "lab_arena_rounds",
+        filters={"configuration_doc->>mode": "live"},
+        status_in=("open", "committed"),
+        order="created_at",
+        descending=True,
+        limit=20,
+        offset=40,
+    ) == []
+    sql, values = calls[0]
+    assert "configuration_doc ->> 'mode' = %s" in sql
+    assert "status = ANY(%s)" in sql
+    assert sql.index(" WHERE ") < sql.index(" ORDER BY ") < sql.index(" LIMIT 20")
+    assert sql.endswith(" OFFSET 40) t")
+    assert values == ["live", ["open", "committed"]]
+    assert "live" not in sql and "committed" not in sql
+    transport.close()
+
+
+def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
+    calls = []
+
+    class Transport:
+        @staticmethod
+        def select(table, **kwargs):
+            calls.append((table, kwargs))
+            return []
+
+        @staticmethod
+        def close():
+            return None
+
+    store = ArenaStore(Transport())
+    store.list_rounds(
+        statuses=("open", "committed"), mode="live", limit=20, offset=20
+    )
+    store.published_reward_bases(mode="live", limit=200)
+    active = calls[0][1]
+    rewards = calls[1][1]
+    assert active["filters"] == {"configuration_doc->>mode": "live"}
+    assert active["status_in"] == ("open", "committed")
+    assert active["limit"] == 20 and active["offset"] == 20
+    assert rewards["filters"] == {
+        "status": "published",
+        "configuration_doc->>mode": "live",
+    }
+    assert rewards["limit"] == 200

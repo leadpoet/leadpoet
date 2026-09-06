@@ -71,6 +71,7 @@ TABLES = (
     "lab_arena_runs",
     "lab_arena_ledger",
 )
+ROUND_MODE_FILTER = "configuration_doc->>mode"
 
 
 DEADLOCK_SQLSTATE = "40P01"
@@ -117,6 +118,8 @@ class StoreTransport:
         order: Optional[str] = None,
         descending: bool = False,
         limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        status_in: Optional[Sequence[str]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
@@ -223,16 +226,41 @@ class PostgrestTransport(StoreTransport):
                 raise ArenaStoreError("rpc %s returned non-JSON" % function) from exc
         raise ArenaStoreError("rpc %s failed after deadlock retries" % function)
 
-    def select(self, table, *, filters=None, order=None, descending=False, limit=None, columns="*"):
+    def select(
+        self,
+        table,
+        *,
+        filters=None,
+        order=None,
+        descending=False,
+        limit=None,
+        offset=None,
+        status_in=None,
+        columns="*",
+    ):
         if table not in TABLES:
             raise ArenaStoreError("unknown Arena table")
         query: List[tuple] = [("select", columns)]
         for key, value in (filters or {}).items():
+            if key != ROUND_MODE_FILTER and not key.replace("_", "").isalnum():
+                raise ArenaStoreError("invalid filter column")
             query.append((key, "eq." + _check_filter_value(value)))
+        if status_in is not None:
+            if table != "lab_arena_rounds" or "status" in (filters or {}):
+                raise ArenaStoreError("status inclusion filter is invalid")
+            statuses = tuple(_check_filter_value(value) for value in status_in)
+            if not statuses:
+                raise ArenaStoreError("status inclusion filter is empty")
+            query.append(("status", "in.(%s)" % ",".join(statuses)))
         if order:
             query.append(("order", "%s.%s" % (order, "desc" if descending else "asc")))
         if limit is not None:
             query.append(("limit", str(int(limit))))
+        if offset is not None:
+            offset = int(offset)
+            if offset < 0:
+                raise ArenaStoreError("offset must be nonnegative")
+            query.append(("offset", str(offset)))
         try:
             response = self._client.get(
                 "%s/rest/v1/%s" % (self._base_url, table),
@@ -356,16 +384,39 @@ class PsycopgTransport(StoreTransport):
                 self._release(connection)
         raise ArenaStoreError("rpc %s failed after deadlock retries" % function)
 
-    def select(self, table, *, filters=None, order=None, descending=False, limit=None, columns="*"):
+    def select(
+        self,
+        table,
+        *,
+        filters=None,
+        order=None,
+        descending=False,
+        limit=None,
+        offset=None,
+        status_in=None,
+        columns="*",
+    ):
         if table not in TABLES:
             raise ArenaStoreError("unknown Arena table")
         clauses = []
         values: List[Any] = []
         for key, value in (filters or {}).items():
-            if not key.replace("_", "").isalnum():
+            if key == ROUND_MODE_FILTER:
+                expression = "configuration_doc ->> 'mode'"
+            elif key.replace("_", "").isalnum():
+                expression = key
+            else:
                 raise ArenaStoreError("invalid filter column")
-            clauses.append("%s = %%s" % key)
+            clauses.append("%s = %%s" % expression)
             values.append(value)
+        if status_in is not None:
+            if table != "lab_arena_rounds" or "status" in (filters or {}):
+                raise ArenaStoreError("status inclusion filter is invalid")
+            statuses = tuple(_check_filter_value(value) for value in status_in)
+            if not statuses:
+                raise ArenaStoreError("status inclusion filter is empty")
+            clauses.append("status = ANY(%s)")
+            values.append(list(statuses))
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -375,6 +426,11 @@ class PsycopgTransport(StoreTransport):
             sql += " ORDER BY %s %s" % (order, "DESC" if descending else "ASC")
         if limit is not None:
             sql += " LIMIT %d" % int(limit)
+        if offset is not None:
+            offset = int(offset)
+            if offset < 0:
+                raise ArenaStoreError("offset must be nonnegative")
+            sql += " OFFSET %d" % offset
         sql += ") t"
         connection = self._acquire()
         try:
@@ -479,14 +535,41 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
         return rows[0] if rows else None
 
-    def list_rounds(self, *, status: Optional[str] = None, limit: int = 100, columns: str = "*") -> List[Dict[str, Any]]:
-        filters = {"status": status} if status else None
-        return self._transport.select("lab_arena_rounds", filters=filters, order="created_at", descending=True, limit=limit, columns=columns)
+    def list_rounds(
+        self,
+        *,
+        status: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None,
+        mode: Optional[str] = None,
+        limit: int = 100,
+        offset: Optional[int] = None,
+        columns: str = "*",
+    ) -> List[Dict[str, Any]]:
+        if status is not None and statuses is not None:
+            raise ArenaStoreError("round status filters are mutually exclusive")
+        filters: Dict[str, Any] = {}
+        if status is not None:
+            filters["status"] = status
+        if mode is not None:
+            filters[ROUND_MODE_FILTER] = mode
+        return self._transport.select(
+            "lab_arena_rounds",
+            filters=filters or None,
+            status_in=statuses,
+            order="created_at",
+            descending=True,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+        )
 
-    def published_reward_bases(self, *, limit: int = 200) -> List[Dict[str, Any]]:
+    def published_reward_bases(self, *, mode: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        filters: Dict[str, Any] = {"status": "published"}
+        if mode is not None:
+            filters[ROUND_MODE_FILTER] = mode
         rows = self._transport.select(
             "lab_arena_rounds",
-            filters={"status": "published"},
+            filters=filters,
             order="effective_reward_epoch",
             descending=True,
             limit=limit,

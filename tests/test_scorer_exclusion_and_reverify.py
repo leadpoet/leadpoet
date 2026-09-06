@@ -797,6 +797,13 @@ def test_activity_refinement_does_not_accept_auxia_website_only_quote():
             "The company is a nonprofit payment provider.",
             "nonprofit payment provider",
         ),
+        (
+            "Company provides retail analytics powered by a payment provider.",
+            "retail analytics",
+        ),
+        ("Company provides analytics via payment transaction data.", "analytics"),
+        ("Company provides software through a payments partner.", "software"),
+        ("Company provides payments through its platform.", "payments"),
     ],
 )
 def test_provider_activity_object_excludes_incidental_or_internal_activity(
@@ -833,6 +840,24 @@ def test_provider_activity_object_excludes_incidental_or_internal_activity(
             "Commerce and Shopping",
             "Fashion\nFashion Retail",
         ),
+        (
+            "E-Commerce",
+            "Retail analytics payment integrations",
+            "Payments",
+            "Company provides retail analytics powered by a payment provider.",
+        ),
+        (
+            "E-Commerce",
+            "Retail analytics payment integrations",
+            "Payments",
+            "Company provides analytics via payment transaction data.",
+        ),
+        (
+            "E-Commerce",
+            "Retail analytics payment integrations",
+            "Payments",
+            "Company provides software through a payments partner.",
+        ),
     ],
 )
 def test_activity_refinement_rejects_incidental_or_label_only_quotes(
@@ -862,6 +887,19 @@ def test_activity_refinement_accepts_nonprofit_payment_provider():
         semantic_evidence={
             "url": "https://evidence.example/fact",
             "quote": "The company is a nonprofit payment provider.",
+        },
+    ) == COMPANY_FIT_MATCH
+
+
+def test_activity_refinement_accepts_direct_object_before_through_boundary():
+    assert _industry_evidence_decision(
+        "Fintech",
+        "Global payments",
+        "Payments",
+        True,
+        semantic_evidence={
+            "url": "https://evidence.example/fact",
+            "quote": "Company provides payments through its platform.",
         },
     ) == COMPANY_FIT_MATCH
 

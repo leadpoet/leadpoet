@@ -431,7 +431,8 @@ _NEGATED_ACTIVITY_OBJECT = re.compile(
     re.IGNORECASE,
 )
 _ACTIVITY_OBJECT_BOUNDARY = re.compile(
-    r"[,;:.!?]|\s+\b(?:and|but|while|where|which|that|for|with|using|to)\b",
+    r"[,;:.!?]|\s+\b(?:powered\s+by|via|through|and|but|while|where|which|"
+    r"that|for|with|using|to)\b",
     re.IGNORECASE,
 )
 

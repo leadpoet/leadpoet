@@ -1319,8 +1319,18 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     "https://api.scrapingdog.com/scrape",
                     params=params, timeout=tier_timeout,
                 )
-                body = r.text or ""
-                verdict = _evaluate_sd_response(r.status_code, body)
+                # ScrapingDog can return the original PDF bytes while labeling
+                # them as text. PDF syntax is mostly printable, so the normal
+                # text heuristic can accept the decoded binary and pass control
+                # characters into the Stage-3 request. Do not spend stronger
+                # render tiers on the same binary document; the existing Exa
+                # fallback below can extract bounded text from the original URL.
+                if r.status_code == 200 and r.content.startswith(b"%PDF-"):
+                    body = ""
+                    verdict = "pdf_binary"
+                else:
+                    body = r.text or ""
+                    verdict = _evaluate_sd_response(r.status_code, body)
                 history.append((tier_name, verdict))
                 last_status = r.status_code
                 last_verdict = verdict
@@ -1386,7 +1396,9 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
 
     # All ScrapingDog tiers exhausted. Try Wayback as the final source of
     # content — stale snapshot is better than nothing for evidence verification.
-    if last_verdict != "http_404" or last_status != 404:
+    if last_verdict != "pdf_binary" and (
+        last_verdict != "http_404" or last_status != 404
+    ):
         wb = await _try_wayback(url)
         history.append(("wayback", wb["stage"]))
         if wb["ok"]:
@@ -3298,17 +3310,12 @@ async def verify_three_stage(
             }
             deterministic_exact_hiring_evidence = (
                 # The exact, currently listed ATS record is the authority here.
-                # A semantic ``contradicted`` verdict may be normalized only
-                # when every quote it supplied as a contradiction is absent
-                # from that immutable posting; a grounded contradiction still
-                # fails closed through ``grounded_contradictions`` below.
-                item.get("signal_status")
-                in {
-                    "supported",
-                    "partially_supported",
-                    "wrong_entity",
-                    "contradicted",
-                }
+                # It can resolve employer identity and posting state, but it
+                # cannot resolve a partial or failed claim-to-ICP semantic fit.
+                # Normalize only a verdict that already says the claim is
+                # supported; every other semantic status keeps its normal
+                # fail-closed outcome.
+                item.get("signal_status") == "supported"
                 and item.get("verification_mode") == "source_grounded"
                 and item.get("confidence") in {"medium", "high"}
                 and item.get("same_entity_check") in {"pass", "unclear", "fail"}

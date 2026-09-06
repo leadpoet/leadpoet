@@ -5,6 +5,7 @@ import json
 import pytest
 
 from lab_arena import scoring_provider_compat as compat
+from lab_arena import operations
 
 
 def envelope(data, *, status="completed"):
@@ -137,6 +138,113 @@ def test_exact_ats_json_uses_generic_http_without_html_conversion(url, kind, dat
     )
     assert status == 200 and headers["content-type"] == "application/json"
     assert json.loads(body) == data
+
+
+@pytest.mark.parametrize(
+    ("url", "data"),
+    [
+        (
+            "https://api.lever.co/v0/postings/acme/12345678-1234-1234-1234-123456789abc",
+            {
+                "id": "12345678-1234-1234-1234-123456789abc",
+                "text": "Integration Engineer",
+                "hostedUrl": (
+                    "https://jobs.lever.co/acme/"
+                    "12345678-1234-1234-1234-123456789abc"
+                ),
+            },
+        ),
+        (
+            "https://api.lever.co/v0/postings/acme",
+            [
+                {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "text": "Integration Engineer",
+                    "hostedUrl": (
+                        "https://jobs.lever.co/acme/"
+                        "12345678-1234-1234-1234-123456789abc"
+                    ),
+                }
+            ],
+        ),
+    ],
+)
+def test_exact_lever_json_uses_generic_http_and_preserves_valid_json(url, data):
+    selected = route("scrapingdog.scrape", {"url": url, "dynamic": False})
+    assert selected.adapter == "generic_ats_json:lever"
+    assert selected.effective_parameters == {
+        "tool": compat.GENERIC_HTTP_TOOL,
+        "payload": {
+            "url": url,
+            "method": "GET",
+            "follow_redirects": False,
+            "timeout_ms": 60_000,
+        },
+    }
+    status, headers, body = compat.adapt_response(
+        selected, status=200, headers={}, body=envelope(data)
+    )
+    status, headers, body = operations.sanitize_response(
+        "scrapingdog.scrape",
+        status,
+        headers,
+        body,
+        parameters={"url": url, "dynamic": False},
+    )
+    assert status == 200
+    assert headers["content-type"] == "application/json"
+    assert json.loads(body) == data
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.lever.co.evil.example/v0/postings/acme",
+        "https://api.lever.co/v0/postings/acme?mode=json",
+        "https://api.lever.co/v0/postings/acme/not-a-uuid",
+        "https://api.lever.co/v0/postings/acme/12345678-1234-1234-1234-123456789abc/extra",
+    ],
+)
+def test_non_exact_lever_urls_do_not_use_generic_http(url):
+    selected = route("scrapingdog.scrape", {"url": url, "dynamic": False})
+    assert selected.adapter == "firecrawl_raw_html"
+
+
+@pytest.mark.parametrize(
+    "url,data",
+    [
+        (
+            "https://api.lever.co/v0/postings/acme/12345678-1234-1234-1234-123456789abc",
+            {
+                "id": "aaaaaaaa-1234-1234-1234-123456789abc",
+                "text": "Integration Engineer",
+                "hostedUrl": (
+                    "https://jobs.lever.co/acme/"
+                    "aaaaaaaa-1234-1234-1234-123456789abc"
+                ),
+            },
+        ),
+        (
+            "https://api.lever.co/v0/postings/acme",
+            [
+                {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "text": "Integration Engineer",
+                    "hostedUrl": (
+                        "https://jobs.lever.co/other/"
+                        "12345678-1234-1234-1234-123456789abc"
+                    ),
+                }
+            ],
+        ),
+    ],
+)
+def test_lever_json_rejects_response_identity_mismatch(url, data):
+    selected = route("scrapingdog.scrape", {"url": url, "dynamic": False})
+    with pytest.raises(compat.CompatibilityResponseError, match="invalid_generic"):
+        compat.adapt_response(
+            selected, status=200, headers={}, body=envelope(data)
+        )
 
 
 def test_generic_http_preserves_explicit_target_error_and_rejects_unknown_success():

@@ -883,6 +883,157 @@ def test_judge_failures_map_to_judge_causes_with_no_output(tmp_path, output, tim
     assert api.completions[0]["body"].get("output") in (None, {})
 
 
+def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
+    from lab_arena import scoring
+
+    detail = (
+        "Bearer bearer-secret https://provider.example/path?api_key=query-secret&mode=raw "
+        "api_key=plain-secret OPENAI_API_KEY=env-secret sk-proj-secret-value "
+        '{"api_key":"opaque-deepline-value","OPENAI_API_KEY":"opaque-env-value",'
+        '"password":"opaque-password","private_key":"opaque-private-key"}'
+    )
+    output = scoring.build_scoring_failure("r1", "judge_error", detail)
+    api = FakeApi([scoring_lease(run_id="r9")])
+    sandbox = BridgingRuntime(output=output, calls=0)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+
+    assert runner_.run_once() == 1
+
+    captured = capsys.readouterr()
+    assert "Lab Arena judge diagnostic:" in captured.err
+    assert "run_id=r9" in captured.err
+    assert "event=scoring_failure" in captured.err
+    assert "error_class=judge_error" in captured.err
+    assert "https://[redacted]/path?[redacted]" in captured.err
+    assert "Bearer [redacted]" in captured.err
+    assert "api_key=[redacted]" in captured.err
+    assert '"api_key":[redacted]' in captured.err
+    assert '"OPENAI_API_KEY":[redacted]' in captured.err
+    assert '"password":[redacted]' in captured.err
+    assert '"private_key":[redacted]' in captured.err
+    assert "bearer-secret" not in captured.err
+    assert "query-secret" not in captured.err
+    assert "plain-secret" not in captured.err
+    assert "env-secret" not in captured.err
+    assert "secret-value" not in captured.err
+    assert "opaque-deepline-value" not in captured.err
+    assert "opaque-env-value" not in captured.err
+    assert "opaque-password" not in captured.err
+    assert "opaque-private-key" not in captured.err
+    assert "\x00" not in rn._safe_judge_diagnostic_text("before\x00after")
+    assert len(rn._safe_judge_diagnostic_text("x" * 301)) == 300
+    assert api.completions[0]["body"].get("output") in (None, {})
+    assert set(api.completions[0]["body"]["result"]) == {
+        "schema_version",
+        "resource_summary",
+        "started_at",
+        "finished_at",
+        "terminal_status",
+    }
+
+
+@pytest.mark.parametrize(
+    ("detail", "safe_fragment", "secrets"),
+    [
+        (
+            'provider={"api_key":"opaque-deepline-value",'
+            '"OPENAI_API_KEY":"opaque-env-value"}',
+            '"api_key":[redacted]',
+            ("opaque-deepline-value", "opaque-env-value"),
+        ),
+        (
+            "password=opaque-password private_key=opaque-private-key",
+            "password=[redacted]",
+            ("opaque-password", "opaque-private-key"),
+        ),
+        (
+            "https://web-user:web-password@provider.example/path",
+            "https://[redacted]/path",
+            ("web-user", "web-password"),
+        ),
+        (
+            "postgresql://db-user:db-password@db.example/database",
+            "postgresql://[redacted]/database",
+            ("db-user", "db-password"),
+        ),
+        (
+            "https://partial-user:partial-password",
+            "https://[redacted]",
+            ("partial-user", "partial-password"),
+        ),
+    ],
+)
+def test_judge_diagnostic_logger_redacts_credential_forms(
+    capsys, detail, safe_fragment, secrets
+):
+    rn._log_judge_diagnostic(
+        "credential-test",
+        event="scoring_failure",
+        error_class="judge_error",
+        detail=detail,
+    )
+
+    diagnostic = capsys.readouterr().err
+    assert safe_fragment in diagnostic
+    assert all(secret not in diagnostic for secret in secrets)
+
+
+@pytest.mark.parametrize(
+    ("result", "event", "error_class"),
+    [
+        (
+            runtime.fake_result(
+                output_bytes=None,
+                output_error="unbounded output api_key=never-log-this",
+            ),
+            "output_error",
+            "SandboxOutputError",
+        ),
+        (
+            runtime.fake_result(output_bytes=b"not-json"),
+            "output_parse_error",
+            "ScoringError",
+        ),
+    ],
+)
+def test_judge_prevalidation_failure_logs_safe_class_without_output(
+    tmp_path, capsys, result, event, error_class
+):
+    api = FakeApi([scoring_lease(run_id="prevalidation")])
+    sandbox = runtime.FakeRuntime([result])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+
+    assert runner_.run_once() == 1
+
+    captured = capsys.readouterr()
+    assert f"event={event}" in captured.err
+    assert f"error_class={error_class}" in captured.err
+    assert "never-log-this" not in captured.err
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
+def test_accepted_judge_output_does_not_log_payload(tmp_path, capsys):
+    from lab_arena import scoring
+
+    output = scoring.build_scoring_output(
+        "r1",
+        [{"final_score": 71.0, "failure_reason": "Bearer accepted-secret"}],
+    )
+    api = FakeApi([scoring_lease(run_id="accepted")])
+    sandbox = BridgingRuntime(output=output, calls=0)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+
+    assert runner_.run_once() == 1
+
+    captured = capsys.readouterr()
+    assert "Lab Arena judge diagnostic:" not in captured.err
+    assert "accepted-secret" not in captured.err
+    assert api.completions[0]["body"]["output"] == output
+
+
 class RefusingApi(FakeApi):
     """The broker refuses a scoring call under its external quota."""
 

@@ -36,6 +36,9 @@ _PENALIZABLE_FAILURE_MARKERS = (
     "intent fabrication detected",
 )
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
+_NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
+    "model_contract_incompatible",
+})
 
 
 class CompetitionScorerInputError(ValueError):
@@ -196,6 +199,7 @@ def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
         "country": row["country"],
         "state": row["state"],
         "description": row["fit_summary"][:500],
+        "fit_evidence_urls": row["fit_evidence_urls"],
         "intent_signals": signals,
         "required_attribute": row.get("required_attribute"),
     }
@@ -300,7 +304,7 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 isinstance(receipt, Mapping)
                 and str(receipt.get("decision") or "") == "unavailable"
                 and str(receipt.get("failure_class") or "")
-                != "model_contract_incompatible"
+                not in _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES
             ):
                 return True
     details = breakdown.get("intent_signals_detail")

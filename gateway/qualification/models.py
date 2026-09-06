@@ -252,6 +252,26 @@ def validate_candidate_prompt_text(text: str, field_name: str) -> str:
     return text
 
 
+def _encoded_ascii_space_confined_to_url_path_or_query(value: str) -> bool:
+    """Allow direct ``%20`` only in the raw URL path or query."""
+
+    try:
+        parsed = urlparse(value)
+    except (TypeError, ValueError):
+        return False
+    if "%" in parsed.scheme or "%" in parsed.netloc:
+        return False
+    return not any(
+        re.search(r"%20", component, re.IGNORECASE)
+        for component in (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.params,
+            parsed.fragment,
+        )
+    )
+
+
 def canonical_candidate_prompt_url(
     value: str,
     field_name: str,
@@ -278,8 +298,25 @@ def canonical_candidate_prompt_url(
     decoded = raw
     for _decode_round in range(4):
         next_decoded = unquote(decoded)
-        if any(character.isspace() for character in next_decoded) or _contains_prompt_control(
-            next_decoded
+        disallowed_whitespace = any(
+            character.isspace() and character != " "
+            for character in next_decoded
+        )
+        newly_decoded_ascii_space = (
+            next_decoded.count(" ") > decoded.count(" ")
+        )
+        if (
+            disallowed_whitespace
+            or _contains_prompt_control(next_decoded)
+            or (
+                newly_decoded_ascii_space
+                and (
+                    _decode_round != 0
+                    or not _encoded_ascii_space_confined_to_url_path_or_query(
+                        raw
+                    )
+                )
+            )
         ):
             raise ValueError(f"{field_name} contains encoded controls")
         _scan_for_prompt_injection(next_decoded, field_name)
@@ -691,6 +728,10 @@ class CompanyOutput(BaseModel):
     # cannot be used as a prompt-injection lever (same pattern as
     # IntentSignal.description).
     description: str = Field("", max_length=500, description="Short company description / one-liner (optional)")
+    fit_evidence_urls: List[str] = Field(
+        default_factory=list,
+        description="Untrusted public URLs that may help independent company-fit discovery",
+    )
 
     # Intent signals — at least one, same schema as LeadOutput.  This is
     # the load-bearing field for company-mode scoring; the whole point

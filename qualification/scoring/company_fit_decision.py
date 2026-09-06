@@ -45,6 +45,13 @@ _LEGAL_SUFFIXES: Final = frozenset({
     "kk", "srl", "spa",
 })
 _LINKEDIN_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._%+-]{0,99}$")
+_PARENTHETICAL_INITIALISM_RE = re.compile(
+    r"^\s*(?P<legal_name>.+?)\s*\(\s*(?P<initialism>[A-Z0-9]{2,10})\s*\)\s*$"
+)
+_INDEPENDENT_IDENTITY_SOURCES: Final = frozenset({
+    "company_homepage",
+    "company_web_reverification",
+})
 
 
 def company_fit_decision_contract_identity() -> dict[str, object]:
@@ -160,6 +167,36 @@ def _company_name(value: Any) -> str:
     return "".join(words)
 
 
+def _verified_parenthetical_name_alignment(
+    submitted_name: Any,
+    observed_name: Any,
+    *,
+    observed_linkedin_slug: str,
+    evidence_source: str,
+) -> bool:
+    """Recognize an explicit legal-name/common-initialism pair.
+
+    This narrow bridge applies only to independently observed identity evidence
+    on the exact submitted domain. It does not infer unstated or fuzzy aliases.
+    """
+
+    if (
+        not observed_linkedin_slug
+        or evidence_source not in _INDEPENDENT_IDENTITY_SOURCES
+    ):
+        return False
+    match = _PARENTHETICAL_INITIALISM_RE.fullmatch(
+        str(submitted_name or "").strip()
+    )
+    if match is None:
+        return False
+
+    initialism = match.group("initialism").casefold()
+    if observed_linkedin_slug != initialism:
+        return False
+    return _company_name(match.group("legal_name")) == _company_name(observed_name)
+
+
 def evaluate_company_identity(
     *,
     submitted_name: Any,
@@ -219,28 +256,50 @@ def evaluate_company_identity(
         if observed["linkedin_slug"].isdigit() != submitted["linkedin_slug"].isdigit():
             receipt.update(reason_code="identity_linkedin_alias_unresolved")
             return receipt
+        # A first-party homepage can retain an old vanity URL after LinkedIn
+        # renames the company page. Exact name and domain evidence make this an
+        # unresolved alias, not proof of a different entity. The later web
+        # verifier must still bind the submitted current slug independently.
+        if (
+            source == "company_homepage"
+            and observed["name"] == submitted["name"]
+            and observed["linkedin_slug"]
+            and not observed["linkedin_slug"].isdigit()
+        ):
+            receipt.update(reason_code="identity_linkedin_alias_unresolved")
+            return receipt
         receipt.update(decision="mismatch", reason_code="identity_mismatch")
         return receipt
     if observed["name"] != submitted["name"]:
+        parenthetical_names_align = _verified_parenthetical_name_alignment(
+            submitted_name,
+            observed_name,
+            observed_linkedin_slug=observed["linkedin_slug"],
+            evidence_source=source,
+        )
         # A matching registrable domain with a different common/legal name is
         # not proof of a conflict by itself. Keep the result unavailable when
         # there is no second stable identifier to bind the alias.
         if submitted["linkedin_slug"]:
-            shorter_name = min(
-                (submitted["name"], observed["name"]),
-                key=len,
-            )
-            longer_name = max(
-                (submitted["name"], observed["name"]),
-                key=len,
-            )
-            if len(shorter_name) < 4 or not longer_name.startswith(shorter_name):
-                receipt.update(
-                    decision="mismatch",
-                    reason_code="identity_mismatch",
+            if not parenthetical_names_align:
+                shorter_name = min(
+                    (submitted["name"], observed["name"]),
+                    key=len,
                 )
-                return receipt
-        else:
+                longer_name = max(
+                    (submitted["name"], observed["name"]),
+                    key=len,
+                )
+                if (
+                    len(shorter_name) < 4
+                    or not longer_name.startswith(shorter_name)
+                ):
+                    receipt.update(
+                        decision="mismatch",
+                        reason_code="identity_mismatch",
+                    )
+                    return receipt
+        elif source != "company_homepage" or not parenthetical_names_align:
             return receipt
     receipt.update(decision="match", reason_code="verifier_accepted")
     return receipt

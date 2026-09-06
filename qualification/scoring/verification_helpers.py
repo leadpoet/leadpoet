@@ -143,6 +143,7 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
         body = _trafilatura.extract(
             content,
             include_comments=False,
+            include_links=True,
             include_tables=True,
             favor_recall=True,
             no_fallback=False,

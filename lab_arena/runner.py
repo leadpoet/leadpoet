@@ -74,6 +74,22 @@ DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
+MAX_JUDGE_DIAGNOSTIC_CHARS = scoring.MAX_FAILURE_DETAIL_CHARS
+_DIAGNOSTIC_URL_QUERY_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]+)\?[^\s#]*"
+)
+_DIAGNOSTIC_URL_AUTHORITY_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s?#]+"
+)
+_DIAGNOSTIC_CREDENTIAL_RE = re.compile(
+    r"(?i)((?<![a-z0-9])[\"']?(?:[a-z0-9]+[_-])*(?:api[_-]?key|apikey|"
+    r"access[_-]?token|token|authorization|secret|password|private[_-]?key)"
+    r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
+)
+_DIAGNOSTIC_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_DIAGNOSTIC_KNOWN_TOKEN_RE = re.compile(
+    r"(?i)\b(?:sk-|sb_secret)[A-Za-z0-9._-]*"
+)
 
 
 class RunnerError(RuntimeError):
@@ -82,6 +98,40 @@ class RunnerError(RuntimeError):
 
 class AgentDependencyError(RunnerError):
     """The submitted dependency declaration cannot run in the Arena."""
+
+
+def _safe_judge_diagnostic_text(
+    value: Any,
+    *,
+    max_chars: int = MAX_JUDGE_DIAGNOSTIC_CHARS,
+) -> str:
+    """Return bounded operator diagnostics with common credentials removed."""
+
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", str(value or ""))
+    text = _DIAGNOSTIC_URL_QUERY_RE.sub(r"\1?[redacted]", text)
+    text = _DIAGNOSTIC_URL_AUTHORITY_RE.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_BEARER_RE.sub("Bearer [redacted]", text)
+    text = _DIAGNOSTIC_CREDENTIAL_RE.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_KNOWN_TOKEN_RE.sub("[redacted]", text)
+    return " ".join(text.split())[:max_chars]
+
+
+def _log_judge_diagnostic(
+    run_id: str,
+    *,
+    event: str,
+    error_class: str,
+    detail: Any = "",
+) -> None:
+    safe_run_id = _safe_judge_diagnostic_text(run_id, max_chars=128) or "-"
+    safe_detail = _safe_judge_diagnostic_text(detail) or "-"
+    print(
+        "Lab Arena judge diagnostic: "
+        f"run_id={safe_run_id} event={event} error_class={error_class} "
+        f"detail={safe_detail}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 class SignatureFn(Protocol):
@@ -1290,14 +1340,33 @@ class AssignmentExecutor:
             else:
                 if result.output_error or result.output_bytes is None:
                     terminal = "judge_error" if scoring_run else ("invalid_output" if result.output_error else "model_error")
+                    if scoring_run:
+                        _log_judge_diagnostic(
+                            str(lease["run_id"]),
+                            event="output_error" if result.output_error else "output_missing",
+                            error_class="SandboxOutputError" if result.output_error else "MissingOutput",
+                            detail=result.output_error or "",
+                        )
                 elif scoring_run:
                     try:
                         output_document = scoring.scoring_output_from_bytes(result.output_bytes)
                     except scoring.ScoringError as exc:
                         terminal = "judge_error"
+                        _log_judge_diagnostic(
+                            str(lease["run_id"]),
+                            event="output_parse_error",
+                            error_class=type(exc).__name__,
+                            detail=str(exc),
+                        )
                     else:
                         if "failure" in output_document:
                             terminal = str(output_document["failure"])
+                            _log_judge_diagnostic(
+                                str(lease["run_id"]),
+                                event="scoring_failure",
+                                error_class=terminal,
+                                detail=output_document.get("detail", ""),
+                            )
                             output_document = None
                         else:
                             terminal = "accepted"

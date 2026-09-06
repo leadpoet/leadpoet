@@ -411,6 +411,52 @@ def _normalized_industry_label(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
+_PROVIDER_ACTIVITY_PREDICATE = re.compile(
+    r"\b(?:provides?|offers?|sells?|builds?|develops?|operates?|"
+    r"manufactures?|processes?|delivers?|specializes?\s+in|is\s+an?)\s+",
+    re.IGNORECASE,
+)
+_NON_COMPANY_ACTIVITY_SUBJECT = re.compile(
+    r"\b(?:customers?|clients?|employees?|users?|buyers?|consumers?|shoppers?|"
+    r"staff|teams?|departments?|workforce|competitors?)\b",
+    re.IGNORECASE,
+)
+_NEGATED_ACTIVITY_PREDICATE = re.compile(
+    r"\b(?:not|never|no\s+longer|do\s+not|does\s+not|did\s+not|"
+    r"cannot|can['’]?t|doesn['’]?t|don['’]?t|didn['’]?t)\b",
+    re.IGNORECASE,
+)
+_ACTIVITY_OBJECT_BOUNDARY = re.compile(
+    r"[,;:.!?]|\s+\b(?:and|but|while|where|which|that|for|with|using|to)\b",
+    re.IGNORECASE,
+)
+
+
+def _quoted_provider_activity_object(quote: Any) -> str:
+    """Extract one bounded object that the cited company says it supplies."""
+
+    if not isinstance(quote, str):
+        return ""
+    for clause in re.split(r"[\n.!?;]+", quote[:2000]):
+        predicate = _PROVIDER_ACTIVITY_PREDICATE.search(clause)
+        if predicate is None:
+            continue
+        subject = clause[:predicate.start()].strip(" \t,:-()[]")
+        if (
+            not subject
+            or _NON_COMPANY_ACTIVITY_SUBJECT.search(subject)
+            or _NEGATED_ACTIVITY_PREDICATE.search(subject)
+        ):
+            continue
+        activity = _ACTIVITY_OBJECT_BOUNDARY.split(
+            clause[predicate.end():],
+            maxsplit=1,
+        )[0].strip(" \t,:-()[]")
+        if activity:
+            return activity
+    return ""
+
+
 def _activity_text_matches_requested_industry(
     requested_industry: str,
     activity_text: str,
@@ -454,10 +500,12 @@ def _cited_subindustry_activity_refinement(
         return COMPANY_FIT_UNAVAILABLE
     evidence = semantic_evidence if isinstance(semantic_evidence, Mapping) else {}
     quote = evidence.get("quote")
+    quoted_activity = _quoted_provider_activity_object(quote)
     supported = (
         bool(_valid_web_evidence_url(evidence.get("url")))
         and isinstance(quote, str)
         and bool(quote.strip())
+        and bool(quoted_activity)
         and _activity_text_matches_requested_industry(
             requested_industry,
             candidate_subindustry,
@@ -465,7 +513,7 @@ def _cited_subindustry_activity_refinement(
         )
         and _activity_text_matches_requested_industry(
             requested_industry,
-            quote,
+            quoted_activity,
             industry_fit,
         )
     )
@@ -1198,7 +1246,11 @@ async def _llm_reverify_company(
                 "operating activity in observed_subindustry instead of replacing it "
                 "with vague product wording. Never fabricate specificity. If the "
                 "source supports only a broad industry label, retain that broad "
-                "observed_industry and return an empty observed_subindustry."
+                "observed_industry and return an empty observed_subindustry. The "
+                "industry evidence quote must directly state what the company "
+                "provides, offers, sells, builds, develops, operates, manufactures, "
+                "processes, delivers, specializes in, or is. Directory labels, "
+                "customer use, and internal department work are not enough."
             ),
             (
                 "geography_matches: independently find the company's headquarters "
@@ -1222,7 +1274,10 @@ async def _llm_reverify_company(
             f'ownership and public companies. Private Equity means a private-equity '
             f'or private-markets sponsor is the current majority or controlling owner. '
             f'Public means the company itself has publicly listed shares. Answer false '
-            f'ONLY if you are confident it is a different stage.')
+            f'ONLY if you are confident it is a different stage. Use the latest '
+            f'completed funding round or current ownership; an older Seed, Series A, '
+            f'or Series B quote does not establish the current stage when later-round '
+            f'evidence exists. If the latest stage is unresolved, return null.')
     locator_data: dict[str, Any] = {
         "registrable_dns_domain": prompt_identity["company"],
     }

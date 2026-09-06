@@ -316,3 +316,97 @@ def test_sidecar_destination_is_fixed_by_network(monkeypatch):
     for testnet in [False, True]:
         asyncio.run(arena_proxy._request_sidecar("GET", "v1/current", query="", body=b"", headers={}, testnet=testnet))
     assert observed == ["http://127.0.0.1:8792/arena/v1/current", "http://127.0.0.1:8793/arena/v1/current"]
+
+
+def _exported_route_labels(client: TestClient) -> list:
+    """The route labels the gateway would export as span names for each request.
+
+    Uses the exporter's own accessor, so this asserts the telemetry label a
+    request actually produces rather than a restatement of it.
+    """
+
+    from gateway.observability.otel_bootstrap import _safe_route_label
+
+    seen: list = []
+    app = client.app
+
+    @app.middleware("http")
+    async def _capture(request, call_next):
+        response = await call_next(request)
+        seen.append(_safe_route_label(request))
+        return response
+
+    return seen
+
+
+def test_contract_endpoints_are_labelled_by_operation(monkeypatch):
+    forwarded = []
+
+    async def forward(method, path, *, query, body, headers, testnet=False):
+        forwarded.append((method, path))
+        return httpx.Response(200, content=b"{}")
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = _app()
+    seen = _exported_route_labels(client)
+
+    client.post("/arena/v1/submissions/sub-abc/finalize", content=b"{}")
+    client.post("/arena/v1/runs/claim", content=b"{}")
+    client.get("/arena/v1/rounds/arena-2026-09-05/results/sub-abc")
+
+    assert seen == [
+        "/arena/v1/submissions/{submission_id}/finalize",
+        "/arena/v1/runs/claim",
+        "/arena/v1/rounds/{round_id}/results/{submission_id}",
+    ]
+    # The concrete ids stay out of the template and the sidecar still receives
+    # exactly the path it receives today.
+    assert forwarded == [
+        ("POST", "v1/submissions/sub-abc/finalize"),
+        ("POST", "v1/runs/claim"),
+        ("GET", "v1/rounds/arena-2026-09-05/results/sub-abc"),
+    ]
+
+
+def test_unlisted_paths_still_reach_the_sidecar_through_the_catch_all(monkeypatch):
+    forwarded = []
+
+    async def forward(method, path, *, query, body, headers, testnet=False):
+        forwarded.append((method, path))
+        return httpx.Response(200, content=b"{}")
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = _app()
+    seen = _exported_route_labels(client)
+
+    assert client.get("/arena/v2/something-new").status_code == 200
+    assert seen == ["/arena/{arena_path:path}"]
+    assert forwarded == [("GET", "v2/something-new")]
+
+
+def test_named_testnet_routes_keep_every_testnet_guard(monkeypatch):
+    async def fail(*_args, **_kwargs):
+        raise AssertionError("a guarded testnet request reached the sidecar")
+
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", fail)
+    monkeypatch.delenv("LAB_ARENA_TESTNET_ENABLED", raising=False)
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    client = _app()
+    # The operator switch still gates the named routes.
+    assert client.get("/testnet/arena/v1/current").status_code == 404
+
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    blocked = client.get("/testnet/arena/v1/rounds/arena-2026-09-05-t/benchmark")
+    assert blocked.status_code == 403
+    assert blocked.json() == {"detail": "testnet benchmark is private"}
+
+
+def test_every_contract_route_is_registered_before_the_catch_all() -> None:
+    app = FastAPI()
+    app.include_router(arena_proxy.router)
+    paths = [getattr(route, "path", "") for route in app.routes]
+    catch_all = paths.index("/arena/{arena_path:path}")
+    for contract_path in arena_proxy._CONTRACT_ROUTES:
+        assert paths.index("/arena" + contract_path) < catch_all

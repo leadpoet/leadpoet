@@ -130,6 +130,72 @@ async def _request_sidecar(
         )
 
 
+# The Arena contract's own endpoints, registered individually so a request is
+# labelled by the operation it performed instead of collapsing into the
+# catch-all. Nothing about proxying changes: every one of these delegates to the
+# same `_proxy_request` with the same derived path, the same guards, and the same
+# body limits. They exist because the gateway exports the MATCHED ROUTE TEMPLATE
+# as the span name, so an unlabelled catch-all makes a runner claiming work and a
+# miner submitting an agent indistinguishable in telemetry — which is exactly the
+# ambiguity that left the 2026-09-05 12:56-13:00 UTC submission refusals
+# unattributable. The templates are low-cardinality and carry no client-controlled
+# segment, so the telemetry boundary validator's route rules are unaffected.
+#
+# A path NOT listed here still matches the catch-all below and behaves exactly as
+# it does today, so the sidecar can grow endpoints without this list blocking
+# them; it only loses the named label until the entry is added.
+# Registered with BOTH methods, exactly as the catch-all is, so method handling
+# is unchanged: the sidecar still decides what it accepts, and a GET against a
+# POST-only endpoint is still its 405, not the gateway's.
+_CONTRACT_ROUTES: tuple[str, ...] = (
+    "/v1/current",
+    "/v1/signing-key",
+    "/v1/reward-basis",
+    "/v1/rounds/{round_id}",
+    "/v1/rounds/{round_id}/benchmark",
+    "/v1/rounds/{round_id}/results/{submission_id}",
+    "/v1/submissions/presign",
+    "/v1/submissions/{submission_id}",
+    "/v1/submissions/{submission_id}/finalize",
+    "/v1/runs/claim",
+    "/v1/runs/{run_id}/provider",
+    "/v1/runs/{run_id}/source",
+    "/v1/runs/{run_id}/complete",
+)
+_CONTRACT_ROUTE_METHODS = ["GET", "POST"]
+
+
+def _arena_path_of(request: Request, prefix: str) -> str:
+    """The sidecar path this request names, taken from the routed path itself.
+
+    ASGI has already decoded the path once, which is the same string the
+    catch-all receives as its path parameter, so every downstream guard sees
+    exactly what it sees today.
+    """
+    path = str(request.scope.get("path") or request.url.path)
+    return path[len(prefix) + 1 :] if path.startswith(prefix + "/") else ""
+
+
+async def _named_arena_request(request: Request) -> Response:
+    if not _arena_enabled():
+        raise HTTPException(status_code=404, detail="agent competition is disabled")
+    return await _proxy_request(_arena_path_of(request, router.prefix), request)
+
+
+async def _named_testnet_request(request: Request) -> Response:
+    arena_path = _arena_path_of(request, testnet_router.prefix)
+    return await _testnet_request(arena_path, request)
+
+
+for _contract_path in _CONTRACT_ROUTES:
+    router.add_api_route(
+        _contract_path, _named_arena_request, methods=_CONTRACT_ROUTE_METHODS
+    )
+    testnet_router.add_api_route(
+        _contract_path, _named_testnet_request, methods=_CONTRACT_ROUTE_METHODS
+    )
+
+
 @router.api_route("/{arena_path:path}", methods=("GET", "POST"))
 async def proxy_arena_request(arena_path: str, request: Request) -> Response:
     if not _arena_enabled():
@@ -139,6 +205,10 @@ async def proxy_arena_request(arena_path: str, request: Request) -> Response:
 
 @testnet_router.api_route("/{arena_path:path}", methods=("GET", "POST"))
 async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
+    return await _testnet_request(arena_path, request)
+
+
+async def _testnet_request(arena_path: str, request: Request) -> Response:
     # An explicit operator switch and a fixed loopback destination keep testnet
     # requests out of the mainnet service. Never fall back if testnet is down.
     if os.environ.get("LAB_ARENA_TESTNET_ENABLED", "false").strip().lower() != "true":

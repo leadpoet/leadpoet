@@ -404,9 +404,17 @@ def test_named_testnet_routes_keep_every_testnet_guard(monkeypatch):
 
 
 def test_every_contract_route_is_registered_before_the_catch_all() -> None:
-    app = FastAPI()
-    app.include_router(arena_proxy.router)
-    paths = [getattr(route, "path", "") for route in app.routes]
-    catch_all = paths.index("/arena/{arena_path:path}")
-    for contract_path in arena_proxy._CONTRACT_ROUTES:
-        assert paths.index("/arena" + contract_path) < catch_all
+    # Starlette matches in registration order, so the named routes only ever get
+    # a chance if they sit ahead of the catch-all. Matched by suffix so the test
+    # does not depend on where the router prefix is applied.
+    for name, api_router in (("mainnet", arena_proxy.router), ("testnet", arena_proxy.testnet_router)):
+        paths = [getattr(route, "path", "") for route in api_router.routes]
+        catch_all = next(
+            i for i, path in enumerate(paths) if path.endswith("/{arena_path:path}")
+        )
+        for contract_path in arena_proxy._CONTRACT_ROUTES:
+            registered = [i for i, path in enumerate(paths) if path.endswith(contract_path)]
+            assert registered, f"{contract_path} is not registered on the {name} router"
+            assert max(registered) < catch_all, (
+                f"{contract_path} is registered after the {name} catch-all"
+            )

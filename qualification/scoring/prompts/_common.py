@@ -174,6 +174,14 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
     reserved STRICTLY for entity-identity mismatch in PART 0."""
 
 
+MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
+    A MARKET_EXPANSION target is supported only when the exact source proves
+    entry or expansion into a new geography, customer market, or clearly
+    distinct commercial segment. Another facility or asset, or added capacity
+    in an existing market, is insufficient unless the exact source explicitly
+    connects it to entry into that new market."""
+
+
 # ──────────────────────────────────────────────────────────────────────
 # PART B — URL SUPPORTS THE CLAIM
 # ──────────────────────────────────────────────────────────────────────
@@ -297,7 +305,10 @@ def build_verification_prompt(
     the original prompt's whitespace exactly.
     """
     signal = visible_signal(row)
-    parts: List[str] = [PART_0_BLOCK, PART_A_BLOCK, PART_B_BLOCK]
+    parts: List[str] = [PART_0_BLOCK, PART_A_BLOCK]
+    if row.get("_evidence_type") == "MARKET_EXPANSION":
+        parts.append(MARKET_EXPANSION_BLOCK)
+    parts.append(PART_B_BLOCK)
     parts.extend(extra_parts)
     body = "\n\n".join(parts)
     return f"""Evaluate this B2B sales lead.

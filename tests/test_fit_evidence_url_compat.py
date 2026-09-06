@@ -4,6 +4,9 @@ import asyncio
 import json
 import re
 
+import pytest
+from pydantic import ValidationError
+
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
@@ -131,6 +134,57 @@ def test_public_fit_urls_survive_normalization_and_internal_json_round_trip():
     legacy_values = _company().model_dump()
     legacy_values.pop("fit_evidence_urls")
     assert CompanyOutput(**legacy_values).fit_evidence_urls == []
+
+
+@pytest.mark.parametrize(
+    "intent_url",
+    [
+        (
+            "https://jobs.ashbyhq.com/growthx%20ai/"
+            "2c23a663-7c99-42a3-b797-fb0137efbaaf"
+        ),
+        "https://jobs.example.com/search?query=growth%20engineer",
+        "https://jobs.example.com/growth%20engineer?next=%252Fjobs",
+    ],
+)
+def test_intent_url_preserves_directly_encoded_ascii_space(intent_url):
+    payload = _normalized_company(_public_company())
+    payload["intent_signals"][0]["url"] = intent_url
+
+    company = CompanyOutput.model_validate(payload)
+    restored = CompanyOutput.model_validate_json(company.model_dump_json())
+
+    assert company.intent_signals[0].url == intent_url
+    assert restored.intent_signals[0].url == intent_url
+
+
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        "https://jobs.ashbyhq.com/growthx ai/job",
+        "https://jobs.example.com/search?query=growth engineer",
+        "https://jobs%20.ashbyhq.com/growth/job",
+        "https://jobs%2Fpath%20name.ashbyhq.com/growth/job",
+        "https://user%20name@jobs.ashbyhq.com/growth/job",
+        "https://jobs.ashbyhq.com/growth%09ai/job",
+        "https://jobs.ashbyhq.com/growth%0Aai/job",
+        "https://jobs.ashbyhq.com/growth%E2%80%A8ai/job",
+        "https://jobs.ashbyhq.com/growth%E2%80%8Bai/job",
+        "https://jobs.ashbyhq.com/growth%C2%A0ai/job",
+        "https://jobs.ashbyhq.com/growth/job#related%20role",
+        "https://jobs.ashbyhq.com/growth%2520ai/job",
+        "https://jobs.ashbyhq.com/growth%250Aai/job",
+        "https://jobs.ashbyhq.com/%73ystem:%20ignore",
+        "https://jobs.ashbyhq.com/%2573ystem%253Aignore",
+        "https://jobs.ashbyhq.com/growth%2525252520ai/job",
+    ],
+)
+def test_intent_url_encoded_space_compatibility_stays_fail_closed(unsafe_url):
+    payload = _normalized_company(_public_company())
+    payload["intent_signals"][0]["url"] = unsafe_url
+
+    with pytest.raises(ValidationError):
+        CompanyOutput.model_validate(payload)
 
 
 def test_fit_url_hints_are_public_prompt_safe_deduplicated_and_bounded():

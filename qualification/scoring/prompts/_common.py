@@ -183,7 +183,17 @@ MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     to this company and quote the source text establishing that fact. A new
     site address is not by itself a new market. If only an additional facility
     in an existing market is proved, PART A fails: return contradicted even
-    when the facility-opening claim itself is true."""
+    when the facility-opening claim itself is true. Raising money or entering
+    a capital market is also not entry into a new commercial geography or
+    customer segment. A bond issue, debt offering, equity listing, or other
+    financing event therefore does not satisfy a general MARKET_EXPANSION
+    target unless the exact source separately proves entry into a new customer
+    market. If the target ICP text itself explicitly asks for entry into a
+    financing or capital market, judge that narrower request as written. This does
+    not limit a FINANCING or FUNDING target: corporate debt and other explicit
+    financing events remain valid evidence for those targets. A financial-
+    services company can still satisfy MARKET_EXPANSION when the exact source
+    proves that it began serving a genuinely new customer market."""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -236,6 +246,12 @@ FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
   contradicted regardless of what the extracted content shows. Do not let a
   factually-true but orthogonal claim pass just because the URL supports it.
 - Use only the exact source extraction above as supporting evidence.
+- Require semantic fidelity, not verbatim wording. A concise claim can use a
+  faithful umbrella description of a named release or capability when the
+  body proves its concrete function. For example, a release that provides an
+  API for automated reporting can support "reporting API launch." Do not
+  require that standalone wording to appear in the body, and do not accept a
+  broader claim that adds functions the body does not prove.
 - Page titles, navigation menus, headers, and breadcrumbs are NOT evidence.
   Only specific factual claims in the page BODY count.
 - If the body contains explicit negation about the claim ("0 open positions",
@@ -275,7 +291,12 @@ FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
 
 MINER_DATE_CHECK_BLOCK = """Miner-date consistency check (set claim_matches_miner_date) — STEP BY STEP:
 1. Treat miner_signal_date as a HYPOTHESIS to verify, not a fact.
-2. Look for a POST TIMESTAMP in extracted_text.  Allowed forms ONLY:
+2. First use SOURCE PAGE PUBLICATION METADATA when supplied. It was read from
+   exact-source page/provider metadata, independent of miner_signal_date. It
+   dates the page publication, not necessarily an event described by the page.
+   If the claim is about an event and the body explicitly gives a different
+   event date, use that event date for claim consistency instead. Otherwise
+   look for a POST TIMESTAMP in extracted_text. Allowed forms ONLY:
    a) absolute date ("2025-03-15", "March 15, 2025", "Posted on Jan 4, 2026")
    b) anchored relative phrase ("Posted N months ago", "Published N weeks
       ago", "Shared yesterday", "Updated last week")
@@ -373,13 +394,18 @@ Today's date: {today_str}
             "url": res.get("url") or res.get("id") or "",
             "title": res.get("title") or "",
             "text": (res.get("text") or "")[:MAX_SCRAPED_CHARS],
+            "source_publication_date": res.get("source_publication_date") or "",
         }
         for res in results
     ]
 
     def render(source: Dict[str, Any], text: str) -> str:
+        date_line = (
+            f"SOURCE PAGE PUBLICATION METADATA: {source['source_publication_date']}\n"
+            if source["source_publication_date"] else ""
+        )
         return (
-            f"URL: {source['url']}\nTITLE: {source['title']}\n"
+            f"URL: {source['url']}\nTITLE: {source['title']}\n{date_line}"
             f"CONTENT:\n{text}"
         )
 

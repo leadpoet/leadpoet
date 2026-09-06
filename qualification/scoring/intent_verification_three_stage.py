@@ -1375,6 +1375,7 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     _safe_sd_request_id(r),
                 )
                 if verdict == "ok":
+                    source_publication_date = _published_date_from_html(body, url)
                     # Extract article body from raw HTML before truncation.
                     # Removes nav/sidebar/footer/related-posts that otherwise
                     # eat the first chars of the prompt input.
@@ -1385,6 +1386,7 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                         pass  # fall through with original content
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
+                            "source_publication_date": source_publication_date,
                             "error": None, "stage_history": history}
                 if not _should_escalate_sd_response(verdict, tier_name):
                     break
@@ -1468,12 +1470,16 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                     data = r.json()
                     results = data.get("results") or []
                     if results:
-                        text = (results[0].get("text") or "")[:MAX_SCRAPED_CHARS]
+                        result = results[0]
+                        text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
                         if len(text) >= 300:
                             return {
                                 "ok": True,
                                 "stage": "exa_scraped",
                                 "content": text,
+                                "source_publication_date": _source_publication_date(
+                                    result.get("publishedDate")
+                                ),
                                 "error": None,
                             }
                         last_error = "<300 chars"
@@ -1815,6 +1821,64 @@ def _safe_prompt_status_label(value: Any) -> str:
     return re.sub(r"[^a-z0-9_.:-]", "_", value.casefold())[:80]
 
 
+def _source_publication_date(value: Any) -> str:
+    """Normalize a source timestamp that came from page/provider metadata."""
+
+    if not isinstance(value, str):
+        return ""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[T ]|$)", value.strip())
+    if not match:
+        return ""
+    try:
+        date.fromisoformat(match.group(1))
+    except ValueError:
+        return ""
+    return match.group(1)
+
+
+def _published_date_from_html(html: str, source_url: str) -> str:
+    """Read first-party publication metadata before body extraction drops it."""
+
+    head = re.split(r"</head\s*>", html, maxsplit=1, flags=re.IGNORECASE)[0]
+    patterns = (
+        r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\']',
+    )
+    candidates: set[str] = set()
+    for pattern in patterns:
+        match = re.search(pattern, head, re.IGNORECASE)
+        if match:
+            normalized = _source_publication_date(match.group(1))
+            if normalized:
+                candidates.add(normalized)
+    for match in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            payload = json.loads(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        nodes = payload.get("@graph") if isinstance(payload, Mapping) else None
+        nodes = nodes if isinstance(nodes, list) else [payload]
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                continue
+            node_type = node.get("@type")
+            types = node_type if isinstance(node_type, list) else [node_type]
+            if not set(types) & {"Article", "NewsArticle", "BlogPosting"}:
+                continue
+            main_page = node.get("mainEntityOfPage")
+            page_id = main_page.get("@id") if isinstance(main_page, Mapping) else main_page
+            if _normalize_url(str(page_id or "")) != _normalize_url(source_url):
+                continue
+            normalized = _source_publication_date(node.get("datePublished"))
+            if normalized:
+                candidates.add(normalized)
+    return next(iter(candidates)) if len(candidates) == 1 else ""
+
+
 def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
     """Bound source fields while retaining the exact validated evidence URL."""
 
@@ -1830,6 +1894,9 @@ def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
                 "title": item.get("title") if isinstance(item.get("title"), str) else "",
                 "text": item.get("text") if isinstance(item.get("text"), str) else "",
                 "meta": dict(item.get("meta")) if isinstance(item.get("meta"), Mapping) else {},
+                "source_publication_date": _source_publication_date(
+                    item.get("source_publication_date")
+                ),
             }
         )
     statuses: List[Dict[str, Any]] = []
@@ -2141,6 +2208,7 @@ async def _fetch_sd_then_exa(
             results.append({
                 "url": url, "title": "",
                 "text": sd["content"][:max_chars],
+                "source_publication_date": sd.get("source_publication_date") or "",
                 "meta": (
                     {"kind": "lever_job"}
                     if _lever_posting_identity(url) is not None
@@ -2157,6 +2225,7 @@ async def _fetch_sd_then_exa(
             results.append({
                 "url": url, "title": "",
                 "text": exa["content"][:max_chars],
+                "source_publication_date": exa.get("source_publication_date") or "",
                 "meta": (
                     {"kind": "lever_job"}
                     if _lever_posting_identity(url) is not None

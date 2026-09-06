@@ -69,3 +69,14 @@ def test_facility_opening_prompt_does_not_receive_market_expansion_guidance() ->
     for prompt in (stage_one, stage_three):
         assert FACILITY_TARGET in prompt
         assert GUIDANCE not in prompt
+
+
+def test_market_expansion_excludes_capital_raise_but_preserves_explicit_targets() -> None:
+    prompt = intent._build_verification_prompt(_row("MARKET_EXPANSION"))
+
+    assert "bond issue, debt offering, equity listing" in prompt
+    assert "does not satisfy a general MARKET_EXPANSION" in prompt
+    assert "target ICP text itself explicitly asks" in prompt
+    assert "corporate debt and other explicit" in prompt
+    assert "financing events remain valid evidence" in prompt
+    assert "genuinely new customer market" in prompt

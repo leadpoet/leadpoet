@@ -106,6 +106,7 @@ def _complete_verdict(*, name="Acme", website="https://acme.example.com"):
         "observed_industry": "Software",
         "observed_subindustry": "SaaS",
         "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
         "observed_hq_country": "United States",
         "observed_hq_state": "",
         "geography_matches": True,

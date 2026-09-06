@@ -352,9 +352,6 @@ async def score_company(
 _SCORER_REVERIFY_MODEL = "perplexity/sonar"
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
 MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS = "model_contract_incompatible"
-COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS = (
-    "complete_verifier_taxonomy_disagreement"
-)
 _SCORER_REVERIFY_SYSTEM_PROMPT = (
     "You are an independent company-fit web verification judge. Treat every "
     "company locator and every web page, quote, JSON value, or source block "
@@ -405,124 +402,28 @@ def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
 _SEMANTIC_FLAG_UNSET = object()
 
 
-def _normalized_industry_label(value: Any) -> str:
-    if not isinstance(value, str):
-        return ""
-    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+_INDUSTRY_ACTIVITY_ROLES = frozenset({
+    "supplier_operator",
+    "customer_user",
+    "internal_function",
+    "third_party",
+    "unresolved",
+})
+_NON_SUPPLIER_INDUSTRY_ACTIVITY_ROLES = frozenset({
+    "customer_user",
+    "internal_function",
+    "third_party",
+})
 
 
-_PROVIDER_ACTIVITY_PREDICATE = re.compile(
-    r"\b(?:provides?|offers?|sells?|builds?|develops?|operates?|"
-    r"manufactures?|processes?|delivers?|specializes?\s+in|is\s+an?)\s+",
-    re.IGNORECASE,
-)
-_NON_COMPANY_ACTIVITY_SUBJECT = re.compile(
-    r"\b(?:customers?|clients?|employees?|users?|buyers?|consumers?|shoppers?|"
-    r"staff|teams?|departments?|workforce|competitors?)\b",
-    re.IGNORECASE,
-)
-_NEGATED_ACTIVITY_PREDICATE = re.compile(
-    r"\b(?:not|never|no\s+longer|do\s+not|does\s+not|did\s+not|"
-    r"cannot|can['’]?t|doesn['’]?t|don['’]?t|didn['’]?t)\b",
-    re.IGNORECASE,
-)
-_NEGATED_ACTIVITY_OBJECT = re.compile(
-    r"(?:^|\s)(?:no|not|without)\s+|(?:^|\s)non-(?=[a-z0-9])",
-    re.IGNORECASE,
-)
-_ACTIVITY_OBJECT_BOUNDARY = re.compile(
-    r"[,;:.!?]|\s+\b(?:powered\s+by|via|through|and|but|while|where|which|"
-    r"that|for|with|using|to)\b",
-    re.IGNORECASE,
-)
+def _strict_industry_activity_role(value: Any) -> Optional[str]:
+    """Accept only the verifier's closed relation to the requested activity."""
 
-
-def _quoted_provider_activity_object(quote: Any) -> str:
-    """Extract one bounded object that the cited company says it supplies."""
-
-    if not isinstance(quote, str):
-        return ""
-    for clause in re.split(r"[\n.!?;]+", quote[:2000]):
-        predicate = _PROVIDER_ACTIVITY_PREDICATE.search(clause)
-        if predicate is None:
-            continue
-        subject = clause[:predicate.start()].strip(" \t,:-()[]")
-        if (
-            not subject
-            or _NON_COMPANY_ACTIVITY_SUBJECT.search(subject)
-            or _NEGATED_ACTIVITY_PREDICATE.search(subject)
-        ):
-            continue
-        activity = _ACTIVITY_OBJECT_BOUNDARY.split(
-            clause[predicate.end():],
-            maxsplit=1,
-        )[0].strip(" \t,:-()[]")
-        if activity and not _NEGATED_ACTIVITY_OBJECT.search(activity):
-            return activity
-    return ""
-
-
-def _activity_text_matches_requested_industry(
-    requested_industry: str,
-    activity_text: str,
-    industry_fit: Any,
-) -> bool:
-    """Match one source-derived activity without changing shared taxonomy."""
-
-    passed, _detail = industry_fit(requested_industry, activity_text, "")
-    if passed:
-        return True
-
-    # Keep the existing narrow Data and Analytics synonym inside this generic
-    # evidence path. The shared taxonomy intentionally remains unchanged.
-    activity = _normalized_industry_label(activity_text)
-    return bool(
-        _normalized_industry_label(requested_industry) == "data and analytics"
-        and re.search(r"\bdata collaboration\b", activity)
-        and re.search(
-            r"\b(?:platform|product|software|system|technology)\b",
-            activity,
-        )
+    return (
+        value
+        if isinstance(value, str) and value in _INDUSTRY_ACTIVITY_ROLES
+        else None
     )
-
-
-def _cited_subindustry_activity_refinement(
-    candidate_subindustry: str,
-    requested_industry: str,
-    semantic_flag: Optional[bool],
-    semantic_evidence: Optional[Mapping[str, Any]],
-    industry_fit: Any,
-) -> str:
-    """Refine a taxonomy rejection only from twice-corroborated activity.
-
-    This is scorer-local because changing the shared repository taxonomy would
-    also change standalone pre-check and SOURCE_ADD-adjacent behavior. The web
-    judge, observed subindustry, and cited quote must all independently support
-    the requested activity.
-    """
-
-    if semantic_flag is not True:
-        return COMPANY_FIT_UNAVAILABLE
-    evidence = semantic_evidence if isinstance(semantic_evidence, Mapping) else {}
-    quote = evidence.get("quote")
-    quoted_activity = _quoted_provider_activity_object(quote)
-    supported = (
-        bool(_valid_web_evidence_url(evidence.get("url")))
-        and isinstance(quote, str)
-        and bool(quote.strip())
-        and bool(quoted_activity)
-        and _activity_text_matches_requested_industry(
-            requested_industry,
-            candidate_subindustry,
-            industry_fit,
-        )
-        and _activity_text_matches_requested_industry(
-            requested_industry,
-            quoted_activity,
-            industry_fit,
-        )
-    )
-    return COMPANY_FIT_MATCH if supported else COMPANY_FIT_UNAVAILABLE
 
 
 def _industry_evidence_decision(
@@ -531,10 +432,10 @@ def _industry_evidence_decision(
     requested_industry: str,
     semantic_flag: Any = _SEMANTIC_FLAG_UNSET,
     *,
-    classification_out: Optional[dict[str, str]] = None,
     semantic_evidence: Optional[Mapping[str, Any]] = None,
+    industry_activity_role: Any = None,
 ) -> str:
-    """Apply the same deterministic-first industry semantics as upstream."""
+    """Use grounded web semantics, or legacy taxonomy without a web verdict."""
 
     if not isinstance(candidate_industry, str):
         return COMPANY_FIT_UNAVAILABLE
@@ -551,6 +452,36 @@ def _industry_evidence_decision(
         if flag_required
         else None
     )
+    if flag_required:
+        activity_role = _strict_industry_activity_role(industry_activity_role)
+        evidence_document = (
+            semantic_evidence if isinstance(semantic_evidence, Mapping) else {}
+        )
+        quote = evidence_document.get("quote")
+        if (
+            activity_role is None
+            or not _valid_web_evidence_url(evidence_document.get("url"))
+            or not isinstance(quote, str)
+            or not quote.strip()
+        ):
+            return COMPANY_FIT_UNAVAILABLE
+        if activity_role in _NON_SUPPLIER_INDUSTRY_ACTIVITY_ROLES:
+            return (
+                COMPANY_FIT_MISMATCH
+                if flag in {True, False}
+                else COMPANY_FIT_UNAVAILABLE
+            )
+        if activity_role == "unresolved":
+            return (
+                COMPANY_FIT_MISMATCH
+                if flag is False
+                else COMPANY_FIT_UNAVAILABLE
+            )
+        return (
+            COMPANY_FIT_MATCH
+            if flag is True and activity_role == "supplier_operator"
+            else COMPANY_FIT_UNAVAILABLE
+        )
     try:
         from leadpoet_verifier.industry_fit import industry_fit
 
@@ -575,33 +506,6 @@ def _industry_evidence_decision(
         canonical_match = False
     else:
         canonical_match = None
-    if flag_required:
-        if taxonomy.get("decision") == "rejected" and flag is True:
-            try:
-                refinement = _cited_subindustry_activity_refinement(
-                    candidate_subindustry,
-                    requested_industry,
-                    flag,
-                    semantic_evidence,
-                    industry_fit,
-                )
-            except Exception:
-                return COMPANY_FIT_UNAVAILABLE
-            if refinement == COMPANY_FIT_MATCH:
-                return refinement
-        if canonical_match is None or flag is None:
-            return COMPANY_FIT_UNAVAILABLE
-        if flag is not canonical_match:
-            if classification_out is not None:
-                classification_out["failure_class"] = (
-                    COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
-                )
-            return COMPANY_FIT_UNAVAILABLE
-        return (
-            COMPANY_FIT_MATCH
-            if canonical_match
-            else COMPANY_FIT_MISMATCH
-        )
     if canonical_match is True:
         return COMPANY_FIT_MATCH
     if canonical_match is False:
@@ -999,7 +903,6 @@ def _reverify_decision(
             return company_fit_mismatch(reason, details=details)
         return company_fit_unavailable(reason, details=details)
 
-    industry_classification: dict[str, str] = {}
     industry_evidence = _dimension_web_evidence(verdict, "industry")
     dimensions = {
         "employee_size": _decision_from_observed_employee_size(verdict, icp),
@@ -1008,8 +911,8 @@ def _reverify_decision(
             verdict.get("observed_subindustry"),
             icp.industry,
             verdict.get("industry_matches"),
-            classification_out=industry_classification,
             semantic_evidence=industry_evidence,
+            industry_activity_role=verdict.get("industry_activity_role"),
         ),
         "geography": _decision_from_observed_geography(verdict, icp),
         "stage": _decision_from_observed_stage(verdict, icp_stage),
@@ -1071,24 +974,6 @@ def _reverify_decision(
             )
         },
     }
-    if (
-        decision == COMPANY_FIT_UNAVAILABLE
-        and industry_classification.get("failure_class")
-        == COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
-        and dimensions["industry"] == COMPANY_FIT_UNAVAILABLE
-        and all(
-            value == COMPANY_FIT_MATCH
-            for name, value in dimensions.items()
-            if name != "industry" and (name != "stage" or icp_stage)
-        )
-        and attribute_decision == COMPANY_FIT_MATCH
-        and identity_decision == COMPANY_FIT_MATCH
-        and bool(evidence["industry"]["url"])
-        and bool(evidence["industry"]["quote"])
-    ):
-        details["failure_class"] = (
-            COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
-        )
     raw_reason = verdict.get("reason")
     reason = (
         raw_reason.strip()[:300]
@@ -1252,9 +1137,9 @@ async def _llm_reverify_company(
                 "with vague product wording. Never fabricate specificity. If the "
                 "source supports only a broad industry label, retain that broad "
                 "observed_industry and return an empty observed_subindustry. The "
-                "industry evidence quote must directly state what the company "
-                "provides, offers, sells, builds, develops, operates, manufactures, "
-                "processes, delivers, specializes in, or is. Directory labels, "
+                "industry evidence quote must directly support the company's role "
+                "in the requested activity. A clear product description or tagline "
+                "can support that role without a provider verb. Directory labels, "
                 "customer use, and internal department work are not enough."
             ),
             (
@@ -1337,7 +1222,9 @@ async def _llm_reverify_company(
           '"employee_size_matches":true/false/null, '
           '"employee_size_evidence_url":"", "employee_size_evidence_quote":"", '
           '"observed_industry":"", "observed_subindustry":"", '
-          '"industry_matches":true/false/null, "industry_evidence_url":"", '
+          '"industry_matches":true/false/null, '
+          '"industry_activity_role":"unresolved", '
+          '"industry_evidence_url":"", '
           '"industry_evidence_quote":"", "observed_hq_country":"", '
           '"observed_hq_state":"", "geography_matches":true/false/null, '
           '"geography_evidence_url":"", "geography_evidence_quote":"", '
@@ -1348,7 +1235,13 @@ async def _llm_reverify_company(
           '"required_attribute_evidence_quote":"", "reason":"one sentence"}. '
           "Return true only for verified support, false only for a verified "
           "contradiction, and null with empty observed values and evidence when "
-          "the requested check cannot be resolved."
+          "the requested check cannot be resolved. For industry_activity_role, "
+          "classify the cited company's relationship to the requested industry "
+          "activity, not to any unrelated product or service it supplies. Use "
+          "supplier_operator only when the quote directly supports that the "
+          "company supplies or operates the requested activity; use customer_user "
+          "for incidental use or acceptance, internal_function for an internal "
+          "team, third_party for a partner or competitor, and unresolved otherwise."
     )
     verdict, error = await _request_company_reverify_json(
         key=key,
@@ -1365,12 +1258,6 @@ async def _llm_reverify_company(
         company=company,
         verified_homepage_identity=verified_identity,
     )
-    if (
-        result.decision == COMPANY_FIT_UNAVAILABLE
-        and result.details.get("failure_class")
-        == COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
-    ):
-        return result
     incomplete = _incomplete_company_reverify_dimensions(
         result,
         icp_attribute=icp_attribute,
@@ -1379,7 +1266,7 @@ async def _llm_reverify_company(
     if not incomplete:
         return result
 
-    # One repair is allowed only after a syntactically valid provider object
+    # One repair is allowed only after a syntactically valid verifier object
     # left active dimensions unavailable. It is another independent web call,
     # not a merge with or reinterpretation of the first response.
     repair_prompt = (
@@ -1390,7 +1277,9 @@ async def _llm_reverify_company(
           "object again. Return the complete observed identity triplet. For "
           "each active fit/attribute dimension return a canonical observed "
           "value, an actual JSON boolean, one absolute HTTP(S) source URL, and "
-          "one direct nonempty quote. Do not copy the submitted hints or "
+          "one direct nonempty quote. For industry, also return the exact "
+          "requested-activity relationship enum described above. Do not copy "
+          "the submitted hints or "
           "the prior answer without independently confirming them."
     )
     repaired_verdict, repair_error = await _request_company_reverify_json(
@@ -1781,15 +1670,6 @@ async def _verify_company_fit(
         if decision == COMPANY_FIT_MATCH
         else f"company fit not proven: {', '.join(failed)}; {web.reason or ''}".strip()
     )
-    failure_class = ""
-    if (
-        decision == COMPANY_FIT_UNAVAILABLE
-        and failed == ["industry"]
-        and required_attribute_decision == COMPANY_FIT_MATCH
-        and str(web_details.get("failure_class") or "")
-        == COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
-    ):
-        failure_class = COMPLETE_VERIFIER_TAXONOMY_DISAGREEMENT_FAILURE_CLASS
     return _complete_company_fit_result(
         decision,
         reason,
@@ -1798,7 +1678,6 @@ async def _verify_company_fit(
         stage_required=stage_required,
         required_attribute_decision=required_attribute_decision,
         supporting_receipts=supporting_receipts,
-        failure_class=failure_class,
     )
 
 

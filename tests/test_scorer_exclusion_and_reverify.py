@@ -686,6 +686,20 @@ def test_cited_subindustry_activity_refines_broad_taxonomy_rejection(
             "Global payments",
             COMPANY_FIT_UNAVAILABLE,
         ),
+        (
+            True,
+            "https://sunrate.com/",
+            "The company provides no payment services.",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            True,
+            "https://sunrate.com/",
+            "The company is a non-payment provider.",
+            "Global payments",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
     ],
 )
 def test_activity_refinement_rejects_missing_or_inconsistent_proof(
@@ -777,6 +791,12 @@ def test_activity_refinement_does_not_accept_auxia_website_only_quote():
         ("The company does not provide payments.", ""),
         ("The company no longer offers payment services.", ""),
         ("A competitor provides payment services.", ""),
+        ("The company provides no payment services.", ""),
+        ("The company is a non-payment provider.", ""),
+        (
+            "The company is a nonprofit payment provider.",
+            "nonprofit payment provider",
+        ),
     ],
 )
 def test_provider_activity_object_excludes_incidental_or_internal_activity(
@@ -831,6 +851,19 @@ def test_activity_refinement_rejects_incidental_or_label_only_quotes(
             "quote": quote,
         },
     ) == COMPANY_FIT_UNAVAILABLE
+
+
+def test_activity_refinement_accepts_nonprofit_payment_provider():
+    assert _industry_evidence_decision(
+        "Fintech",
+        "Global payments",
+        "Payments",
+        True,
+        semantic_evidence={
+            "url": "https://evidence.example/fact",
+            "quote": "The company is a nonprofit payment provider.",
+        },
+    ) == COMPANY_FIT_MATCH
 
 
 def test_activity_refinement_does_not_override_identity_mismatch():

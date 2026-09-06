@@ -426,6 +426,10 @@ _NEGATED_ACTIVITY_PREDICATE = re.compile(
     r"cannot|can['’]?t|doesn['’]?t|don['’]?t|didn['’]?t)\b",
     re.IGNORECASE,
 )
+_NEGATED_ACTIVITY_OBJECT = re.compile(
+    r"(?:^|\s)(?:no|not|without)\s+|(?:^|\s)non-(?=[a-z0-9])",
+    re.IGNORECASE,
+)
 _ACTIVITY_OBJECT_BOUNDARY = re.compile(
     r"[,;:.!?]|\s+\b(?:and|but|while|where|which|that|for|with|using|to)\b",
     re.IGNORECASE,
@@ -452,7 +456,7 @@ def _quoted_provider_activity_object(quote: Any) -> str:
             clause[predicate.end():],
             maxsplit=1,
         )[0].strip(" \t,:-()[]")
-        if activity:
+        if activity and not _NEGATED_ACTIVITY_OBJECT.search(activity):
             return activity
     return ""
 

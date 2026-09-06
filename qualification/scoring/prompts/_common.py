@@ -196,6 +196,19 @@ MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     proves that it began serving a genuinely new customer market."""
 
 
+FUNDING_BLOCK = """  FUNDING / FINANCING — TARGET-COMPANY CAPITAL PROOF:
+    Interpret a broad target such as "announced funding," "raised funding," or
+    "announced a funding round" as capital raised by the target company. It
+    includes the company's own corporate debt or notes as well as equity
+    financing. Do not require equity-round terminology when the target is this
+    broad. If the target ICP text explicitly narrows the requested instrument,
+    round type, or stage (for example equity, Series A, or venture round), apply
+    that narrower requirement as written. Customer loans made by the company,
+    a fund manager's limited-partner fund close, and assets under management
+    are not funding raised by the target company unless the target ICP text
+    explicitly requests that event."""
+
+
 # ──────────────────────────────────────────────────────────────────────
 # PART B — URL SUPPORTS THE CLAIM
 # ──────────────────────────────────────────────────────────────────────
@@ -333,6 +346,8 @@ def build_verification_prompt(
     parts: List[str] = [PART_0_BLOCK, PART_A_BLOCK]
     if row.get("_evidence_type") == "MARKET_EXPANSION":
         parts.append(MARKET_EXPANSION_BLOCK)
+    if row.get("_evidence_type") in {"FUNDING", "FINANCING"}:
+        parts.append(FUNDING_BLOCK)
     parts.append(PART_B_BLOCK)
     parts.extend(extra_parts)
     body = "\n\n".join(parts)

@@ -120,6 +120,95 @@ class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(result["stage"], "sd:dynamic_render")
 
+    async def test_mislabeled_pdf_binary_skips_text_and_archive_paths(self):
+        client = _HttpxClient([
+            httpx.Response(
+                200,
+                content=b"%PDF-1.7\n" + (b"\x00\x01binary-stream" * 100),
+                headers={"content-type": "text/csv"},
+            ),
+        ])
+        wayback = mock.AsyncMock(
+            side_effect=AssertionError("binary PDFs must use text extraction")
+        )
+        with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
+                mock.patch.object(intent, "_try_wayback", new=wayback), \
+                mock.patch.dict("os.environ", {"SCRAPINGDOG_API_KEY": "test"}):
+            result = await intent._scrape_sd_hardened(
+                "https://investors.example/report.pdf"
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(result["stage_history"], [("baseline", "pdf_binary")])
+        self.assertEqual(result["stage"], "all_tiers_exhausted:pdf_binary")
+        self.assertEqual(result["content"], "")
+        wayback.assert_not_awaited()
+
+    async def test_plain_text_with_csv_content_type_is_unchanged(self):
+        text = "Tyro announced a verified company event. " * 100
+        client = _HttpxClient([
+            httpx.Response(
+                200,
+                text=text,
+                headers={"content-type": "text/csv"},
+            ),
+        ])
+        with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
+                mock.patch.dict("os.environ", {"SCRAPINGDOG_API_KEY": "test"}):
+            result = await intent._scrape_sd_hardened(
+                "https://investors.example/announcement"
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stage"], "sd:baseline")
+        self.assertEqual(result["content"], text)
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_pdf_uses_existing_exa_text_extraction_before_stage_three(self):
+        extracted = (
+            "Tyro Payments announced the verified event on November 5, 2025."
+        )
+        with mock.patch.object(
+            intent,
+            "_scrape_sd_hardened",
+            new=mock.AsyncMock(return_value={
+                "ok": False,
+                "stage": "all_tiers_exhausted:pdf_binary",
+                "content": "",
+                "error": "pdf_binary",
+            }),
+        ), mock.patch.object(
+            intent,
+            "_scrape_exa",
+            new=mock.AsyncMock(return_value={
+                "ok": True,
+                "stage": "exa_scraped",
+                "content": extracted,
+                "error": None,
+            }),
+        ):
+            result = await intent._fetch_sd_then_exa([
+                "https://investors.example/report.pdf"
+            ])
+
+        self.assertEqual(result["results"][0]["text"], extracted)
+        self.assertEqual(result["statuses"][0]["source"], "exa_fallback")
+        prompt = intent._build_final_judge_prompt(
+            {
+                "id": "signal-1",
+                "company": "tyro.com",
+                "website": "tyro.com",
+                "claim": "Tyro announced a verified company event.",
+                "claimed_source_urls": [
+                    "https://investors.example/report.pdf"
+                ],
+            },
+            result,
+        )
+        self.assertNotRegex(prompt, r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+        self.assertIn(extracted, prompt)
+
     def test_terminal_tier_has_provider_delivery_margin(self):
         self.assertGreater(
             intent._SD_TIER_TIMEOUT["full_combined"],

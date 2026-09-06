@@ -598,7 +598,8 @@ def test_all_failed_baseline_keeps_zero_rows_and_cancels_before_publication(
     connect, tmp_path
 ):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
-    _start_round(harness, day=2, epoch=24820)
+    prior_published = harness.service.latest_published_round()
+    _start_round(harness, day=7, epoch=24840)
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     baseline = next(
         participant for participant in participants if participant["is_king"]
@@ -629,12 +630,12 @@ def test_all_failed_baseline_keeps_zero_rows_and_cancels_before_publication(
     assert all(float(run["per_icp_score"]) == 0.0 for run in scored)
     row = harness.service.store.get_round(harness.round_id)
     assert row["publication_doc"] is None
-    assert harness.service.latest_published_round() is None
+    assert harness.service.latest_published_round() == prior_published
 
 
 def test_partially_successful_baseline_publishes_a_numeric_mean(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
-    _start_round(harness, day=3, epoch=24840)
+    _start_round(harness, day=8, epoch=24860)
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     baseline = next(
         participant for participant in participants if participant["is_king"]
@@ -677,7 +678,7 @@ def test_publish_cancels_an_existing_scored_state_with_no_valid_baseline(
     connect, tmp_path, monkeypatch
 ):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
-    _start_round(harness, day=4, epoch=24860)
+    _start_round(harness, day=9, epoch=24880)
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     baseline = next(
         participant for participant in participants if participant["is_king"]

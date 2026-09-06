@@ -196,6 +196,7 @@ def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
         "country": row["country"],
         "state": row["state"],
         "description": row["fit_summary"][:500],
+        "fit_evidence_urls": row["fit_evidence_urls"],
         "intent_signals": signals,
         "required_attribute": row.get("required_attribute"),
     }

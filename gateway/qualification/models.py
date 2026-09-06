@@ -691,6 +691,10 @@ class CompanyOutput(BaseModel):
     # cannot be used as a prompt-injection lever (same pattern as
     # IntentSignal.description).
     description: str = Field("", max_length=500, description="Short company description / one-liner (optional)")
+    fit_evidence_urls: List[str] = Field(
+        default_factory=list,
+        description="Untrusted public URLs that may help independent company-fit discovery",
+    )
 
     # Intent signals — at least one, same schema as LeadOutput.  This is
     # the load-bearing field for company-mode scoring; the whole point

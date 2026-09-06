@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT_SECS = 5
 _MAX_BYTES = 200_000  # cap body read to 200KB — plenty for title + first paragraph
+_MAX_FOOTER_IDENTITY_TEXT = 4096
 _TRANSIENT_FETCH_ATTEMPTS = 2
 _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 
@@ -302,6 +303,9 @@ class _HomepageIdentityParser(HTMLParser):
         self.linkedin_urls: list[str] = []
         self._json_ld_parts: list[str] | None = None
         self._nonvisible_depth = 0
+        self._footer_depth = 0
+        self._footer_text_parts: list[str] = []
+        self._footer_text_length = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag_name = tag.casefold()
@@ -311,6 +315,8 @@ class _HomepageIdentityParser(HTMLParser):
         }
         if tag_name in {"script", "style", "template"}:
             self._nonvisible_depth += 1
+        if tag_name == "footer":
+            self._footer_depth += 1
         if tag_name == "title":
             self._in_title = True
             return
@@ -347,17 +353,33 @@ class _HomepageIdentityParser(HTMLParser):
             self._json_ld_parts = None
         if tag_name in {"script", "style", "template"}:
             self._nonvisible_depth = max(0, self._nonvisible_depth - 1)
+        if tag_name == "footer" and self._footer_depth:
+            self._footer_depth -= 1
+            if self._footer_depth == 0:
+                footer_text = " ".join(self._footer_text_parts)
+                self.copyright_legal_names.extend(
+                    match.group("name").strip()[:200]
+                    for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(footer_text)
+                )
+                self._footer_text_parts = []
+                self._footer_text_length = 0
 
     def handle_data(self, data: str) -> None:
         if self._in_title and data.strip():
             self._title_parts.append(data.strip())
         if self._json_ld_parts is not None:
             self._json_ld_parts.append(data)
-        if self._nonvisible_depth == 0:
-            self.copyright_legal_names.extend(
-                match.group("name").strip()[:200]
-                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(data)
-            )
+        visible = data.strip()
+        if (
+            visible
+            and self._nonvisible_depth == 0
+            and self._footer_depth
+            and self._footer_text_length < _MAX_FOOTER_IDENTITY_TEXT
+        ):
+            remaining = _MAX_FOOTER_IDENTITY_TEXT - self._footer_text_length
+            part = visible[:remaining]
+            self._footer_text_parts.append(part)
+            self._footer_text_length += len(part)
 
     @property
     def title(self) -> str:

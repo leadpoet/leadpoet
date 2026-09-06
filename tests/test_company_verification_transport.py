@@ -233,8 +233,8 @@ def test_iag_parenthetical_alias_uses_homepage_linkedin_binding(monkeypatch):
         200,
         b'<title>IAG Limited</title>'
         b'<a href="https://www.linkedin.com/company/iag/">LinkedIn</a>'
-        b'<footer>&copy; 2026 INSURANCE AUSTRALIA GROUP LIMITED '
-        b'ABN 60 090 739 923</footer>',
+        b'<footer>&copy; 2026 <span>INSURANCE AUSTRALIA</span> '
+        b'<strong>GROUP LIMITED</strong> ABN 60 090 739 923</footer>',
         "https://www.iag.com.au/",
     )
     monkeypatch.setattr(

@@ -259,6 +259,8 @@ def _encoded_ascii_space_confined_to_url_path_or_query(value: str) -> bool:
         parsed = urlparse(value)
     except (TypeError, ValueError):
         return False
+    if "%" in parsed.scheme or "%" in parsed.netloc:
+        return False
     return not any(
         re.search(r"%20", component, re.IGNORECASE)
         for component in (

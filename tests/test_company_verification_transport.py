@@ -181,7 +181,9 @@ def test_https_mode_rejects_final_http_redirect(monkeypatch):
     assert "final URL is not HTTPS" in (result.reason or "")
 
 
-def test_homepage_nonnumeric_conflicting_linkedin_binding_is_mismatch(monkeypatch):
+def test_homepage_named_linkedin_alias_with_exact_name_and_domain_is_unavailable(
+    monkeypatch,
+):
     import asyncio
 
     result = asyncio.run(
@@ -191,8 +193,25 @@ def test_homepage_nonnumeric_conflicting_linkedin_binding_is_mismatch(monkeypatc
             b'<title>Example Company</title><a href="https://www.linkedin.com/company/different-company">LinkedIn</a>',
         )
     )
-    assert result.decision == COMPANY_FIT_MISMATCH
-    assert "identity conflict" in (result.reason or "")
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["identity"]["reason_code"] == (
+        "identity_linkedin_alias_unresolved"
+    )
+
+
+def test_web_reverification_named_linkedin_mismatch_remains_mismatch():
+    receipt = evaluate_company_identity(
+        submitted_name="Base Power",
+        submitted_website="https://basepowercompany.com",
+        submitted_linkedin="https://linkedin.com/company/basepowercompany",
+        observed_name="Base Power",
+        observed_website="https://basepowercompany.com/about",
+        observed_linkedin="https://linkedin.com/company/base-power-company",
+        evidence_source="company_web_reverification",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MISMATCH
+    assert receipt["reason_code"] == "identity_mismatch"
 
 
 def test_homepage_numeric_linkedin_id_vs_vanity_slug_is_unavailable(monkeypatch):

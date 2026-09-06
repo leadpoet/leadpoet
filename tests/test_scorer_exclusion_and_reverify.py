@@ -1008,6 +1008,111 @@ def test_homepage_unavailable_can_be_rescued_by_complete_web_receipt(monkeypatch
     assert identity["web_identity_decision"] == COMPANY_FIT_MATCH
 
 
+@pytest.mark.parametrize(
+    ("observed_name", "observed_website", "observed_linkedin", "expected"),
+    [
+        (
+            "Base Power",
+            "https://basepowercompany.com/careers",
+            "https://linkedin.com/company/basepowercompany",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Base Power",
+            "https://basepowercompany.com/careers",
+            "https://linkedin.com/company/base-power-company",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            "Other Power",
+            "https://basepowercompany.com/careers",
+            "https://linkedin.com/company/basepowercompany",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            "Base Power",
+            "https://other-power.example/careers",
+            "https://linkedin.com/company/basepowercompany",
+            COMPANY_FIT_MISMATCH,
+        ),
+    ],
+)
+def test_stale_homepage_linkedin_alias_requires_complete_web_rebinding(
+    monkeypatch,
+    observed_name,
+    observed_website,
+    observed_linkedin,
+    expected,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    company = _company(
+        name="Base Power",
+        website="https://basepowercompany.com",
+        linkedin="https://linkedin.com/company/basepowercompany",
+    )
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match()
+
+    async def homepage(*_args, **_kwargs):
+        receipt = evaluate_company_identity(
+            submitted_name=company.company_name,
+            submitted_website=company.company_website,
+            submitted_linkedin=company.company_linkedin,
+            observed_name="Base Power",
+            observed_website="https://basepowercompany.com",
+            observed_linkedin="https://linkedin.com/company/base-power-company",
+            evidence_source="company_homepage",
+        )
+        assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+        assert receipt["reason_code"] == "identity_linkedin_alias_unresolved"
+        return company_fit_unavailable(
+            "homepage LinkedIn alias is unresolved",
+            details={"identity": receipt},
+        )
+
+    async def request(**_kwargs):
+        verdict = {
+            "observed_company_name": observed_name,
+            "observed_company_website": observed_website,
+            "observed_company_linkedin": observed_linkedin,
+            "observed_employee_count": "51-200",
+            "employee_size_matches": True,
+            "observed_industry": "Software",
+            "observed_subindustry": "Energy management software",
+            "industry_matches": True,
+            "observed_hq_country": "United States",
+            "observed_hq_state": "Texas",
+            "geography_matches": True,
+            "reason": "Independent public sources support these values.",
+        }
+        for dimension in ("employee_size", "industry", "geography"):
+            verdict[f"{dimension}_evidence_url"] = (
+                f"https://independent.example/{dimension}"
+            )
+            verdict[f"{dimension}_evidence_quote"] = f"Verified {dimension}."
+        return verdict, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", request)
+
+    result = asyncio.run(
+        _verify_company_fit(
+            company,
+            _icp(),
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+
+    assert result.decision == expected
+
+
 def test_homepage_unavailable_remains_unavailable_without_complete_web_receipt(monkeypatch):
     import qualification.scoring.lead_scorer as scorer
 

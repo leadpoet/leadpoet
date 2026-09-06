@@ -256,6 +256,18 @@ def evaluate_company_identity(
         if observed["linkedin_slug"].isdigit() != submitted["linkedin_slug"].isdigit():
             receipt.update(reason_code="identity_linkedin_alias_unresolved")
             return receipt
+        # A first-party homepage can retain an old vanity URL after LinkedIn
+        # renames the company page. Exact name and domain evidence make this an
+        # unresolved alias, not proof of a different entity. The later web
+        # verifier must still bind the submitted current slug independently.
+        if (
+            source == "company_homepage"
+            and observed["name"] == submitted["name"]
+            and observed["linkedin_slug"]
+            and not observed["linkedin_slug"].isdigit()
+        ):
+            receipt.update(reason_code="identity_linkedin_alias_unresolved")
+            return receipt
         receipt.update(decision="mismatch", reason_code="identity_mismatch")
         return receipt
     if observed["name"] != submitted["name"]:

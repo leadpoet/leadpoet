@@ -2,9 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_source_add_end_to_end_postgres import _database_with_migrations, _json
+from tests.test_source_add_end_to_end_postgres import (
+    _database_with_migrations,
+    _json,
+    _scalar,
+)
 from tests.test_source_add_provenance_leg1_postgres import (
     PRE_MIGRATIONS,
+    _claim_reward,
+    _finalize_reward,
     _provision_after_leg1,
     _seed_boot_identity,
     _seed_case,
@@ -59,6 +65,20 @@ def migration_database():
     )
 
 
+@pytest.fixture(scope="module")
+def migration_database_after_status():
+    yield from _database_with_migrations(
+        PRE_MIGRATIONS
+        + (
+            "175-research-lab-source-add-provenance-leg1.sql",
+            "176-research-lab-source-add-provenance-origin-repair.sql",
+            "177-research-lab-source-add-provenance-authority-acl.sql",
+            "178-research-lab-source-add-miner-status.sql",
+            "186-research-lab-source-add-provisioned-status.sql",
+        )
+    )
+
+
 def test_source_add_status_migration_runs_on_postgres_and_is_idempotent(
     migration_database,
 ):
@@ -101,9 +121,7 @@ def test_source_add_status_migration_runs_on_postgres_and_is_idempotent(
                     FROM public.research_lab_source_add_work_items
                     WHERE work_id = %s
                     """,
-                    (
-                            smoke_work_id,
-                    ),
+                    (smoke_work_id,),
                 )
                 catalog_row, eligible_row = cursor.fetchone()
                 eligible_row = dict(eligible_row)
@@ -141,11 +159,6 @@ def test_source_add_status_migration_runs_on_postgres_and_is_idempotent(
                     (case["record"]["adapter_id"],),
                 )
                 historical_row = cursor.fetchone()
-                cursor.execute(
-                    "SELECT provision_ref, provision_status, seq FROM public.research_lab_source_add_provisioning_events WHERE adapter_id=%s ORDER BY seq",
-                    (case["record"]["adapter_id"],),
-                )
-                cursor.fetchall()
                 assert historical_row[1] == "provisioned_autoresearch_eligible"
                 assert historical_row[2]["provider_registry_entry"]["active"] is True
                 assert historical_row[3] == {}
@@ -162,19 +175,6 @@ def test_source_add_status_migration_runs_on_postgres_and_is_idempotent(
                 assert current_row[1] == "provisioned"
                 assert current_row[2] == historical_row[2]
                 assert current_row[3] == historical_row[3]
-                cursor.execute(
-                    """
-                    SELECT to_jsonb(work),
-                           (SELECT COUNT(*) FROM public.research_lab_source_add_provisioning_events),
-                           (SELECT COUNT(*) FROM public.research_lab_source_add_submissions)
-                    FROM public.research_lab_source_add_work_items work
-                    WHERE work.work_id = %s
-                    """,
-                    (
-                            smoke_work_id,
-                    ),
-                )
-                cursor.fetchone()
                 cursor.execute(
                     """
                     UPDATE public.research_lab_source_add_work_items
@@ -209,8 +209,8 @@ def test_source_add_status_migration_runs_on_postgres_and_is_idempotent(
                            (SELECT COUNT(*) FROM public.research_lab_source_add_submissions)
                     FROM public.research_lab_source_add_work_items work
                     WHERE work.work_id = %s
-                        """,
-                        (smoke_work_id,),
+                    """,
+                    (smoke_work_id,),
                 )
                 assert cursor.fetchone() == missing_status
                 cursor.execute(
@@ -228,5 +228,47 @@ def test_source_add_status_migration_runs_on_postgres_and_is_idempotent(
                     "SELECT pg_get_functiondef('public.source_add_test_status_predicate(text)'::regprocedure)"
                 )
                 assert "provisioned_autoresearch_eligible" in cursor.fetchone()[0]
+    finally:
+        connection.close()
+
+
+def test_source_add_status_migration_preserves_successful_leg1_provision(
+    migration_database_after_status,
+):
+    psycopg2, dsn = migration_database_after_status
+    connection = psycopg2.connect(**dsn)
+    try:
+        with connection:
+            with connection.cursor() as cursor:
+                _set_paused(cursor, False, "post-186 Leg 1 success")
+                _seed_boot_identity(cursor)
+                case = _seed_case(cursor, 0x1860000000000100)
+
+                assert (
+                    _provision_after_leg1(
+                        cursor, case, allow_unrewarded=True
+                    )
+                    is None
+                )
+                reward_work = _claim_reward(cursor)
+                finalized = _finalize_reward(
+                    cursor, work=reward_work, case=case, caller_cap=1
+                )
+                assert finalized["status"] == "created"
+                assert _scalar(
+                    cursor,
+                    "SELECT provision_status FROM public.research_lab_source_add_provisioning_current WHERE adapter_id=%s",
+                    (case["record"]["adapter_id"],),
+                ) == "provisioned"
+                assert _scalar(
+                    cursor,
+                    "SELECT work_status FROM public.research_lab_source_add_work_items WHERE work_id=%s",
+                    (reward_work["work_id"],),
+                ) == "completed"
+                assert _scalar(
+                    cursor,
+                    "SELECT count(*) FROM public.research_lab_source_add_reward_obligations WHERE adapter_id=%s AND leg=1",
+                    (case["record"]["adapter_id"],),
+                ) == 1
     finally:
         connection.close()

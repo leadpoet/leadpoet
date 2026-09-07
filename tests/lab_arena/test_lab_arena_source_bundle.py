@@ -58,6 +58,25 @@ def test_archive_validation_accepts_one_github_wrapper_directory():
     assert facts["source_root"] == "pydantic-harness-main"
 
 
+def test_archive_commit_reads_only_one_ordinary_pax_comment():
+    commit = "a" * 40
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(
+            fileobj=compressed,
+            mode="w",
+            format=tarfile.PAX_FORMAT,
+            pax_headers={"comment": commit},
+        ) as archive:
+            data = b"def run_icp(icp):\n    return []\n"
+            info = tarfile.TarInfo("pydantic-harness-lab/harness.py")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+    assert source_bundle.source_archive_commit(raw.getvalue()) == commit
+    assert source_bundle.source_archive_commit(b"not an archive") == ""
+
+
 def test_archive_validation_rejects_links_traversal_and_missing_harness():
     for name, kind in (("../harness.py", "file"), ("harness.py", "link"), ("logic.py", "file")):
         raw = io.BytesIO()

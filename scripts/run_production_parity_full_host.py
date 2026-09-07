@@ -90,7 +90,7 @@ ARENA_REBENCHMARK_EVIDENCE_SCHEMA_VERSION = (
 )
 ARENA_BASELINE_SOURCE_URL = (
     "https://github.com/leadpoet/pydantic-harness/"
-    "archive/refs/heads/main.tar.gz"
+    "archive/refs/heads/lab.tar.gz"
 )
 MINER_INTAKE_ENVIRONMENT_OVERRIDES = {
     "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",

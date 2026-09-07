@@ -944,7 +944,7 @@ jobs:
               or arena.get("mode") != "shadow"
               or arena.get("candidate_sha") != sys.argv[2]
               or arena.get("baseline_source_url")
-                  != "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+                  != "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/lab.tar.gz"
               or not isinstance(stage_1_icps, int)
               or isinstance(stage_1_icps, bool)
               or stage_1_icps < 1

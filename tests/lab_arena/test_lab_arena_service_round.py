@@ -419,7 +419,7 @@ class Harness:
             broker_factory=broker_factory,
             defaults=svc.RoundDefaults(
                 runner_hotkeys=tuple(self.runner_keys), baseline_hotkey=self.baseline_hotkey,
-                baseline_source_url="https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
+                baseline_source_url=svc.DEFAULT_BASELINE_SOURCE_URL,
                 max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc,
                 scorer_image_digest=SCORER_IMAGE_DIGEST, scorer_image_reference=SCORER_IMAGE_REFERENCE,
             ),

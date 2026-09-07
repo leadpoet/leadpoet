@@ -956,7 +956,7 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "leadpoet.production_parity_arena_rebenchmark_evidence.v1" in source
     assert (
         "https://github.com/leadpoet/pydantic-harness/"
-        "archive/refs/heads/main.tar.gz"
+        "archive/refs/heads/lab.tar.gz"
     ) in source
     assert 'arena_counts.get("accepted_execute_runs")' in source
     assert 'arena_counts.get("accepted_score_runs")' in source

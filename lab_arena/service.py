@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import secrets
 import threading
 import time
@@ -17,6 +18,8 @@ from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 
+logger = logging.getLogger(__name__)
+
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
@@ -24,7 +27,7 @@ ACTIVE_ROUND_STATUSES = tuple(
     status for status in contracts.ROUND_STATUSES if status not in TERMINAL_STATUSES
 )
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
-DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/lab.tar.gz"
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 240,
@@ -918,23 +921,34 @@ class ArenaService:
         ).strip()
         if not hotkey:
             raise ServiceError("baseline_hotkey_missing", 500)
-        if not source_url.startswith("https://"):
-            raise ServiceError("baseline_source_url_invalid", 500)
-        fetcher = self._config.baseline_source_fetcher
-        if fetcher is None:
-            raise ServiceError("baseline_source_fetcher_missing", 500)
         submission_id = "baseline-%s" % round_id.removeprefix("arena-")
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
         row = self._store.get_submission(submission_id)
         if row is None:
+            fetcher = self._config.baseline_source_fetcher
+            if fetcher is None:
+                raise ServiceError("baseline_source_fetcher_missing", 500)
+            selected_source_url = source_url
+            source_observation = "configured_shadow_source"
             try:
                 payload = self._objects.get_bounded(
                     source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
                 )
+                source_observation = "stored_object:%s" % source_ref
             except Exception:
                 try:
+                    if str(configuration.get("mode") or self._config.mode) == "live":
+                        selected_source_url = DEFAULT_BASELINE_SOURCE_URL
+                    source_observation = (
+                        selected_source_url
+                        if selected_source_url == DEFAULT_BASELINE_SOURCE_URL
+                        else "configured_shadow_source"
+                    )
                     payload = bytes(
-                        fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+                        fetcher(
+                            selected_source_url,
+                            source_bundle.MAX_SOURCE_ARCHIVE_BYTES,
+                        )
                     )
                     facts = source_bundle.validate_source_archive(payload)
                     self._objects.put(source_ref, payload)
@@ -951,6 +965,12 @@ class ArenaService:
                     raise ServiceError(
                         "baseline_source_invalid:%s" % exc.code, 500
                     ) from exc
+            logger.info(
+                "arena_baseline_source_frozen round_id=%s source=%s source_commit=%s",
+                round_id,
+                source_observation,
+                source_bundle.source_archive_commit(payload) or "unavailable",
+            )
             result = self._store.register_submission(
                 round_id,
                 submission_id,

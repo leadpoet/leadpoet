@@ -6,6 +6,7 @@ import ast
 import gzip
 import io
 import os
+import re
 import stat
 import tarfile
 import zlib
@@ -22,6 +23,7 @@ IGNORED_DIRECTORY_NAMES = frozenset({".git", ".pytest_cache", ".venv", "__pycach
 ALLOWED_ENV_TEMPLATE_NAMES = frozenset(
     {".env.example", ".env.sample", ".env.template"}
 )
+GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class SourceBundleError(ValueError):
@@ -275,6 +277,31 @@ def validate_source_archive(
         "source_size_bytes": len(payload),
         "source_root": harness_name.rsplit("/", 1)[0] if "/" in harness_name else "",
     }
+
+
+def source_archive_commit(data: bytes) -> str:
+    """Return GitHub's ordinary archive commit comment when it is present.
+
+    This is diagnostic source metadata. Archive validation and frozen object
+    bytes remain the source authority when the comment is absent.
+    """
+
+    payload = bytes(data)
+    if not 1 <= len(payload) <= MAX_SOURCE_ARCHIVE_BYTES:
+        return ""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            comments = [archive.pax_headers.get("comment")]
+            comments.extend(
+                member.pax_headers.get("comment") for member in archive
+            )
+    except (OSError, EOFError, tarfile.TarError, zlib.error):
+        return ""
+    commits = {
+        value for value in comments
+        if isinstance(value, str) and GIT_COMMIT_RE.fullmatch(value)
+    }
+    return next(iter(commits)) if len(commits) == 1 else ""
 
 
 def extract_source_archive(data: bytes, target_dir: str | Path) -> Dict[str, Any]:

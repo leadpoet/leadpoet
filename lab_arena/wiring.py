@@ -22,6 +22,7 @@ from lab_arena import broker as broker_module, chain as chain_module, contracts,
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
+    DEFAULT_BASELINE_SOURCE_URL,
     DEFAULT_STAGE_MINUTES,
     ArenaService,
     RoundDefaults,
@@ -42,6 +43,17 @@ def _required(name: str) -> str:
     if not value:
         raise ServiceError("environment %s is required" % name, 500)
     return value
+
+
+def _baseline_source_url_from_environment(mode: str) -> str:
+    """Pin live daily rounds while allowing explicit shadow candidates."""
+
+    configured = os.environ.get("LAB_ARENA_BASELINE_SOURCE_URL", "").strip()
+    if configured and not configured.startswith("https://"):
+        raise ServiceError("LAB_ARENA_BASELINE_SOURCE_URL must use https", 500)
+    if mode == "live" and configured and configured != DEFAULT_BASELINE_SOURCE_URL:
+        raise ServiceError("LAB_ARENA_BASELINE_SOURCE_URL is not the promoted lab source", 500)
+    return configured or DEFAULT_BASELINE_SOURCE_URL
 
 
 def fetch_public_source_archive(url: str, max_bytes: int) -> bytes:
@@ -334,10 +346,7 @@ def build_service_from_environment(mode: str):
     defaults = RoundDefaults(
         runner_hotkeys=runners,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),
-        baseline_source_url=os.environ.get(
-            "LAB_ARENA_BASELINE_SOURCE_URL",
-            "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
-        ).strip(),
+        baseline_source_url=_baseline_source_url_from_environment(mode),
         max_challengers=_max_challengers_from_environment(),
         stage_minutes=_stage_minutes_from_environment(
             mode=mode,

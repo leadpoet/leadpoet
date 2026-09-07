@@ -70,8 +70,10 @@ Set these values on the Arena service host:
 - `LAB_ARENA_RUNNER_HOTKEYS`: the runner hotkeys allowed to claim work
 - `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns each daily
   public baseline entry
-- `LAB_ARENA_BASELINE_SOURCE_URL`: the public HTTPS PydanticAI source archive;
-  it defaults to the `leadpoet/pydantic-harness` main-branch archive
+- `LAB_ARENA_BASELINE_SOURCE_URL`: optional in live mode. The only live daily
+  baseline source is the promoted `leadpoet/pydantic-harness` `lab` branch.
+  Remove an old `main` override before service startup. Shadow mode can set a
+  different public HTTPS candidate archive.
 
 Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_NETWORK`, `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`,
@@ -152,9 +154,16 @@ documentation only; it is not part of admission or scoring.
 At the first round cutoff, the service automatically admits the configured
 public baseline archive through the same source-admission checks. A temporary
 download or object-store failure is retried. An invalid baseline prevents the
-round from starting. Each daily round gets a new baseline download and uses
-only that baseline as the score miners must beat. Prior winners stay in reward
-history; they do not replace the next daily baseline.
+round from starting. Each daily round resolves the current promoted `lab`
+branch once when baseline execution starts, stores those bytes at the round's
+private source reference, and uses only that frozen bundle for execution and
+recovery. A later `lab` promotion affects the next round snapshot only. The
+operator log reports the archive's ordinary Git commit comment when GitHub
+provides it. A live round created before this policy can still show its old
+creation-time URL, but an unfrozen download uses `lab`; an already stored or
+registered bundle is not replaced. Prior winners stay in reward history; they
+do not replace the next daily baseline. Public `main` remains the development
+branch and is not the live daily baseline.
 
 ## Rewards and independent disable controls
 

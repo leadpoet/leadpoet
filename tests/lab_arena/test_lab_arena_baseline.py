@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena import source_bundle
-from lab_arena.service import ArenaService, ServiceError
+from lab_arena.service import ArenaService, DEFAULT_BASELINE_SOURCE_URL, ServiceError
 
 
 def _submission(submission_id: str, hotkey: str, *, status: str = "accepted") -> dict:
@@ -100,7 +100,7 @@ def _round(round_id: str = "arena-2026-09-05") -> dict:
             "mode": "live",
             "max_challengers": 1,
             "baseline_hotkey": "baseline",
-            "baseline_source_url": "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
+            "baseline_source_url": DEFAULT_BASELINE_SOURCE_URL,
         },
     }
 
@@ -112,7 +112,7 @@ def _service(store: _Store, objects: _Objects, payload: bytes) -> ArenaService:
     service._config = SimpleNamespace(
         mode="live",
         defaults=SimpleNamespace(
-            baseline_source_url="https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+            baseline_source_url=DEFAULT_BASELINE_SOURCE_URL
         ),
         baseline_source_fetcher=lambda _url, _limit: payload,
     )
@@ -182,3 +182,121 @@ def test_invalid_public_baseline_source_prevents_the_round_from_starting():
 
     with pytest.raises(ServiceError, match="baseline_source_invalid"):
         service.freeze_participants(current["round_id"])
+
+
+def test_open_live_round_with_legacy_main_config_downloads_only_promoted_lab(tmp_path):
+    current = _round()
+    current["configuration_doc"]["baseline_source_url"] = (
+        "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+    )
+    calls = []
+    payload = _archive(tmp_path)
+    service = _service(_Store(current, []), _Objects(), payload)
+    service._config.baseline_source_fetcher = lambda url, _limit: (
+        calls.append(url) or payload
+    )
+
+    service.freeze_participants(current["round_id"])
+
+    assert calls == [DEFAULT_BASELINE_SOURCE_URL]
+
+
+def test_partially_registered_round_recovers_existing_source_object_without_fetch(tmp_path):
+    current = _round()
+    current["configuration_doc"]["baseline_source_url"] = (
+        "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+    )
+    objects = _Objects()
+    source_ref = "arena/arena-2026-09-05/sources/baseline-2026-09-05.tar.gz"
+    payload = _archive(tmp_path)
+    objects.put(source_ref, payload)
+    service = _service(_Store(current, []), objects, b"unused")
+    service._config.baseline_source_fetcher = lambda *_args: pytest.fail("refetched")
+
+    participants = service.freeze_participants(current["round_id"])
+
+    assert [row["submission_id"] for row in participants] == ["baseline-2026-09-05"]
+
+
+def test_existing_frozen_baseline_recovers_without_refetching_old_main():
+    current = _round()
+    current["configuration_doc"]["baseline_source_url"] = (
+        "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+    )
+    baseline = _submission("baseline-2026-09-05", "baseline", status="frozen")
+    baseline["is_king"] = True
+    service = _service(_Store(current, [baseline]), _Objects(), b"unused")
+    service._config.baseline_source_fetcher = lambda *_args: pytest.fail("refetched")
+
+    participants = service.freeze_participants(current["round_id"])
+
+    assert [row["submission_id"] for row in participants] == [baseline["submission_id"]]
+
+
+def test_lab_promotion_changes_only_the_next_round_snapshot(tmp_path):
+    first_payload = _archive(tmp_path)
+    second_source = tmp_path / "promoted"
+    second_source.mkdir()
+    (second_source / "harness.py").write_text(
+        "def run_icp(icp):\n    return ['promoted']\n", encoding="utf-8"
+    )
+    second_target = tmp_path / "promoted.tar.gz"
+    source_bundle.write_source_archive(second_source, second_target)
+    promoted_payload = second_target.read_bytes()
+    selected = {DEFAULT_BASELINE_SOURCE_URL: first_payload}
+
+    def freeze(round_id):
+        current = _round(round_id)
+        objects = _Objects()
+        service = _service(_Store(current, []), objects, b"unused")
+        service._config.baseline_source_fetcher = lambda url, _limit: selected[url]
+        service.freeze_participants(round_id)
+        return next(iter(objects.values.values()))
+
+    first_frozen = freeze("arena-2026-09-05")
+    selected[DEFAULT_BASELINE_SOURCE_URL] = promoted_payload
+    second_frozen = freeze("arena-2026-09-06")
+
+    assert first_frozen == first_payload
+    assert second_frozen == promoted_payload
+    assert first_frozen != second_frozen
+
+
+def test_main_change_does_not_change_a_new_live_round_snapshot(tmp_path):
+    lab_payload = _archive(tmp_path)
+    sources = {
+        DEFAULT_BASELINE_SOURCE_URL: lab_payload,
+        "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz": b"main-v1",
+    }
+
+    def freeze(round_id):
+        current = _round(round_id)
+        objects = _Objects()
+        service = _service(_Store(current, []), objects, b"unused")
+        service._config.baseline_source_fetcher = lambda url, _limit: sources[url]
+        service.freeze_participants(round_id)
+        return next(iter(objects.values.values()))
+
+    first_frozen = freeze("arena-2026-09-07")
+    sources[
+        "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+    ] = b"main-v2"
+    second_frozen = freeze("arena-2026-09-08")
+
+    assert first_frozen == lab_payload
+    assert second_frozen == lab_payload
+
+
+def test_shadow_source_query_is_not_logged(tmp_path, caplog):
+    current = _round()
+    current["configuration_doc"]["mode"] = "shadow"
+    private_url = "https://example.test/candidate.tar.gz?signature=private"
+    current["configuration_doc"]["baseline_source_url"] = private_url
+    service = _service(_Store(current, []), _Objects(), _archive(tmp_path))
+    service._config.mode = "shadow"
+
+    with caplog.at_level("INFO", logger="lab_arena.service"):
+        service.freeze_participants(current["round_id"])
+
+    assert private_url not in caplog.text
+    assert "source=configured_shadow_source" in caplog.text

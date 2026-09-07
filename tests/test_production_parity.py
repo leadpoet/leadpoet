@@ -4524,7 +4524,7 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence():
         "daily_icp_set_id": 20260904,
         "baseline_source_url": (
             "https://github.com/leadpoet/pydantic-harness/"
-            "archive/refs/heads/main.tar.gz"
+            "archive/refs/heads/lab.tar.gz"
         ),
         "baseline_final_score": 72.5,
         "icp_results": [

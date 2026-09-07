@@ -158,7 +158,7 @@ async def test_source_add_provision_omits_unsupplied_test_config_defaults(
         "--registry-provider-id",
         "source_add_test",
         "--status",
-        "provisioned_autoresearch_eligible",
+        "provisioned",
         "--probe-endpoint-json",
         '{"endpoint_id":"source_add_test.records","provider_id":'
         '"source_add_test","method":"GET","path":"/records",'
@@ -172,7 +172,7 @@ async def test_source_add_provision_omits_unsupplied_test_config_defaults(
 
     expected_payload = {
         "registry_provider_id": "source_add_test",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "cost_model": {},
         "routing_contract": {},
         "probe_endpoints": [

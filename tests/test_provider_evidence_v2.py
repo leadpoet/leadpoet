@@ -285,7 +285,7 @@ def test_provider_evidence_routes_dynamic_source_only_with_measured_route():
     row = {
         "adapter_id": "adapter:public-source",
         "miner_hotkey": "miner-one",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "registry_provider_id": "public_source",
         "credential_envelope": {},
         "provision_doc": {

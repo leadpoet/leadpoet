@@ -182,7 +182,7 @@ def test_source_add_execution_plan_is_bound_to_tested_provisioned_route():
     source_row = {
         "adapter_id": "adapter:builtwith-trends",
         "miner_hotkey": "hk-builtwith-trends",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "credential_envelope": {},
         "provision_doc": {
             "provider_registry_entry": {
@@ -418,7 +418,7 @@ def test_private_snapshot_merges_ready_source_add_and_continuity_fallback():
     source_row = {
         "adapter_id": "adapter:synthetic",
         "miner_hotkey": "hk-synthetic",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "credential_envelope": {},
         "provision_doc": {
             "provider_registry_entry": {
@@ -506,7 +506,7 @@ def test_source_add_projection_preserves_v8_routing_metadata_losslessly():
     source_row = {
         "adapter_id": "adapter:v8-shaped",
         "miner_hotkey": "hk-v8-shaped",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "credential_envelope": {},
         "provision_doc": {
             "provider_registry_entry": {
@@ -534,7 +534,7 @@ def test_source_add_cannot_replace_reserved_provider_id():
     source_row = {
         "adapter_id": "adapter:collision",
         "miner_hotkey": "hk-collision",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "credential_envelope": {},
         "provision_doc": {
             "provider_registry_entry": {
@@ -575,7 +575,7 @@ def test_unresolved_authenticated_source_add_is_omitted(monkeypatch):
     source_row = {
         "adapter_id": "adapter:unready",
         "miner_hotkey": "hk-unready",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "credential_envelope": {},
         "provision_doc": {
             "provider_registry_entry": {

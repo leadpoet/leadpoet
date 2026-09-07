@@ -25,7 +25,6 @@ from gateway.research_lab.source_add_catalog import (
     sanitize_source_add_doc,
     source_add_row_credential_ready,
 )
-from gateway.research_lab.source_add_llm_judge import _parse_verdict
 from gateway.research_lab.source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED
 from research_lab.source_add_execution import SourceAddRejectionReason, intake_source_add_submission
 from research_lab.source_add_identity import (
@@ -1685,26 +1684,6 @@ def test_source_add_encrypted_credential_envelope_must_be_well_formed():
     row["credential_envelope"]["ciphertext_b64"] = base64.b64encode(b"encrypted-payload").decode()
     assert source_add_row_credential_ready(row) is True
 
-
-def test_llm_judge_verdict_parser_accepts_helped_json():
-    verdict = _parse_verdict(
-        '{"verdict":"helped","confidence":0.9,"source_used":true,'
-        '"adapter_id":"adapter:test-source","registry_provider_id":"test_source",'
-        '"evidence_summary":"Used source","reason_codes":["matched_api"]}',
-        model_id="openai/gpt-5.6-sol",
-        provider_usage={"model": "openai/gpt-5.6-sol"},
-    )
-    assert verdict.passed is True
-    assert verdict.trigger_evidence()["llm_judge_passed"] is True
-
-
-def test_llm_judge_verdict_parser_rejects_string_source_used():
-    with pytest.raises(ValueError, match="non-boolean source_used"):
-        _parse_verdict(
-            '{"verdict":"helped","confidence":0.9,"source_used":"false"}',
-            model_id="openai/gpt-5.6-sol",
-            provider_usage={},
-        )
 
 
 @pytest.mark.asyncio

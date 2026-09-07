@@ -111,26 +111,6 @@ def test_leg1_reward_rejects_noncanonical_provenance_authority(mutation):
         execute_reward_decision_v2(payload)
 
 
-def test_leg2_reward_rejects_nonapproving_signed_judge():
-    payload = {
-        "decision_kind": "source_add_leg2",
-        "decision_payload": {
-            "adapter_id": "adapter:test",
-            "miner_ref": "miner",
-            "start_epoch": 101,
-            "existing_rewards": [],
-            "alpha_percent": 5.0,
-            "reward_epochs": 20,
-            "trigger_evidence": {"llm_judge_passed": True},
-            "judge_result": {
-                "verdict": {"verdict": "not_helped", "source_used": False}
-            },
-        },
-    }
-    with pytest.raises(RewardExecutorV2Error, match="did not approve"):
-        execute_reward_decision_v2(payload)
-
-
 def test_reward_row_projection_hashes_change_for_payout_field_mutation():
     champion = {
         "champion_reward_id": "champion:1",

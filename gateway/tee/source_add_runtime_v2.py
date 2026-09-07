@@ -418,7 +418,7 @@ def build_source_add_runtime_route_v2(
     if not isinstance(row, Mapping):
         raise SourceAddRuntimeV2Error("SOURCE_ADD source row is invalid")
     if str(row.get("provision_status") or "") != (
-        "provisioned_autoresearch_eligible"
+        "provisioned"
     ):
         raise SourceAddRuntimeV2Error("SOURCE_ADD source row is not eligible")
     provision = row.get("provision_doc")

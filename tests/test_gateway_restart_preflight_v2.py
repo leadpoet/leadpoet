@@ -701,7 +701,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["source_add_leg1_release_policy"] == {
         "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
         "leg1_alpha_percent": 0.2,
-        "leg2_alpha_percent": 0.0,
         "reward_epochs": 20,
         "daily_cap": 50,
     }
@@ -1163,7 +1162,6 @@ def test_source_add_automatic_provenance_leg1_contract_rejects_policy_drift(
     ("name", "value"),
     (
         ("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", "0.5"),
-        ("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", "5"),
         ("RESEARCH_LAB_REWARD_EPOCHS", "21"),
         ("RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY", "100"),
         ("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", "nan"),

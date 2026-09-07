@@ -139,7 +139,6 @@ class ResearchLabGatewayConfig:
     source_add_sandbox_image: str = "python:3.11-slim"
     source_add_trial_timeout_seconds: int = 300
     source_add_leg1_alpha_percent: float = 0.2
-    source_add_leg2_alpha_percent: float = 0.0
     source_add_acceptance_floor_yield: float = 0.10
     source_add_max_concurrent_per_hotkey: int = 3
     source_add_max_per_day_per_hotkey: int = 5
@@ -298,9 +297,6 @@ class ResearchLabGatewayConfig:
             source_add_leg1_alpha_percent=max(
                 0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", 0.2)
             ),
-            source_add_leg2_alpha_percent=max(
-                0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", 0.0)
-            ),
             source_add_acceptance_floor_yield=max(
                 0.0, _float("RESEARCH_LAB_SOURCE_ADD_ACCEPTANCE_FLOOR_YIELD", 0.10)
             ),
@@ -377,7 +373,6 @@ class ResearchLabGatewayConfig:
                 "functional_probes_enabled": self.source_add_functional_probes_enabled,
                 "functional_rewards_enabled": self.source_add_functional_rewards_enabled,
                 "leg1_alpha_percent": self.source_add_leg1_alpha_percent,
-                "leg2_alpha_percent": self.source_add_leg2_alpha_percent,
                 "reward_epochs": self.lab_reward_epochs,
                 "max_concurrent_per_hotkey": self.source_add_max_concurrent_per_hotkey,
                 "max_per_day_per_hotkey": self.source_add_max_per_day_per_hotkey,

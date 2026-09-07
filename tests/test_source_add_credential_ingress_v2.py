@@ -77,7 +77,7 @@ def _source_row(envelope):
         "adapter_id": "adapter:test-source",
         "miner_hotkey": "miner-hotkey",
         "registry_provider_id": "test_source",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "credential_envelope": envelope,
         "provision_doc": {
             "provider_registry_entry": {

@@ -1038,7 +1038,6 @@ async def execute_scoring_v2(
         "benchmark_model",
         "benchmark_scorer",
         "provider_preflight",
-        "source_add_judge",
     }:
         raise AttestedScoringV2Error("provider credential profile is invalid")
     if provider_profile_loader is None:

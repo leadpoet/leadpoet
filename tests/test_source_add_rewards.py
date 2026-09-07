@@ -1,4 +1,4 @@
-"""SOURCE_ADD reward legs: LLM-only Leg 2 and allocation-rail integration."""
+"""SOURCE_ADD Leg 1 rewards and allocation-rail integration."""
 
 from __future__ import annotations
 
@@ -15,10 +15,8 @@ from leadpoet_verifier.economics import (
 from research_lab.canonical import sha256_json
 from research_lab.source_add_rewards import (
     REWARD_KIND_SOURCE_ACCEPTANCE,
-    REWARD_KIND_SOURCE_IMPLEMENTATION,
     SourceAddRewardState,
     create_leg1_reward,
-    create_leg2_reward,
     stop_reward_forward,
     validate_source_add_reward_record,
 )
@@ -102,81 +100,6 @@ class TestLeg1:
         assert record.state == SourceAddRewardState.QUEUED.value
         assert validate_source_add_reward_record(record) == []
 
-
-def _llm_evidence(**overrides):
-    evidence = {
-        "llm_judge_passed": True,
-        "llm_verdict": "helped",
-        "source_used": True,
-        "adapter_id": "adapter:a",
-        "registry_provider_id": "intentfeed",
-        "judge_doc_hash": "sha256:" + "a" * 64,
-    }
-    evidence.update(overrides)
-    return evidence
-
-
-class TestLeg2Creation:
-    def _evidence(self):
-        return _llm_evidence()
-
-    def test_created_for_adapter_owner_with_spec_defaults(self):
-        record = create_leg2_reward(
-            adapter_id="adapter:a",
-            adapter_owner_miner_ref="miner:owner",
-            start_epoch=500,
-            trigger_evidence=self._evidence(),
-        )
-        assert record.alpha_percent == 5.0
-        assert record.reward_epochs == 20
-        assert record.miner_ref == "miner:owner"  # owner paid even for house wiring
-        assert record.reward_kind == REWARD_KIND_SOURCE_IMPLEMENTATION
-        assert validate_source_add_reward_record(record) == []
-
-    def test_one_time_per_adapter(self):
-        first = create_leg2_reward(
-            adapter_id="adapter:a",
-            adapter_owner_miner_ref="miner:owner",
-            start_epoch=500,
-            trigger_evidence=self._evidence(),
-        )
-        repeat = create_leg2_reward(
-            adapter_id="adapter:a",
-            adapter_owner_miner_ref="miner:owner",
-            start_epoch=501,
-            trigger_evidence=self._evidence(),
-            existing_rewards=[first.to_dict()],
-        )
-        assert repeat is None
-
-    @pytest.mark.parametrize(
-        "evidence",
-        [
-            {},
-            {"llm_judge_passed": False},
-            {"llm_judge_passed": 1},
-            {"shadow_window_passed": True, "ablation_passed": True},
-        ],
-    )
-    def test_creation_without_exact_llm_pass_evidence_raises(self, evidence):
-        with pytest.raises(ValueError, match="llm_judge_passed=true"):
-            create_leg2_reward(
-                adapter_id="adapter:a",
-                adapter_owner_miner_ref="miner:owner",
-                start_epoch=500,
-                trigger_evidence=evidence,
-            )
-
-    def test_revert_stops_stream_forward_only(self):
-        record = create_leg2_reward(
-            adapter_id="adapter:a",
-            adapter_owner_miner_ref="miner:owner",
-            start_epoch=500,
-            trigger_evidence=self._evidence(),
-        )
-        stopped = stop_reward_forward(record, reason="implementing patch auto-reverted")
-        assert stopped.state == SourceAddRewardState.STOPPED_FORWARD.value
-        assert stopped.stopped_reason.startswith("implementing patch")
 
 
 class TestAllocationRails:
@@ -269,136 +192,6 @@ class TestAllocationRails:
         )
 
         assert allocation["source_add_alpha_percent"] == pytest.approx(0.2)
-
-    def test_source_rewards_are_first_class_and_fixed_size(self):
-        leg1 = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:owner", start_epoch=100)
-        leg2 = create_leg2_reward(
-            adapter_id="adapter:a",
-            adapter_owner_miner_ref="miner:owner",
-            start_epoch=100,
-            trigger_evidence=_llm_evidence(),
-        )
-        allocation = allocate_research_lab_epoch(
-            105,
-            self.POLICY,
-            [],
-            [],
-            active_source_add_obligations=[
-                self._source_obligation(leg1),
-                self._source_obligation(leg2),
-            ],
-        )
-        entries = allocation["source_add_allocations"]
-        assert len(entries) == 2
-        by_kind = {entry.get("reward_kind"): entry for entry in entries}
-        assert by_kind[REWARD_KIND_SOURCE_ACCEPTANCE]["paid_alpha_percent"] == pytest.approx(0.2)
-        assert by_kind[REWARD_KIND_SOURCE_IMPLEMENTATION]["paid_alpha_percent"] == pytest.approx(5.0)
-        assert all(
-            entry["source_add_reward_id"] == entry["source_id"]
-            for entry in entries
-        )
-        assert allocation["source_add_alpha_percent"] == pytest.approx(5.2)
-        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(24.8)
-        assert allocation["champion_allocations"] == []
-        assert allocation["unallocated_percent"] == pytest.approx(24.8)
-
-    def test_source_add_exhausts_cap_before_existing_allocator(self):
-        leg2 = create_leg2_reward(
-            adapter_id="adapter:a",
-            adapter_owner_miner_ref="miner:owner",
-            start_epoch=100,
-            trigger_evidence=_llm_evidence(),
-        )
-        champion = {
-            "uid": 9,
-            "miner_hotkey": "miner:champion",
-            "source_id": "champion:no-remaining-cap",
-            "status": "active",
-            "start_epoch": 100,
-            "epoch_count": 20,
-            "improvement_points": 5.0,
-            "desired_alpha_percent": 8.0,
-        }
-        policy = {**self.POLICY, "research_lab_emission_percent": 3.0}
-
-        allocation = allocate_research_lab_epoch(
-            105,
-            policy,
-            [],
-            [champion],
-            active_source_add_obligations=[self._source_obligation(leg2)],
-        )
-        expected_existing = allocate_research_lab_epoch(
-            105,
-            {**policy, "research_lab_emission_percent": 0.0},
-            [],
-            [champion],
-        )
-
-        assert allocation["source_add_alpha_percent"] == pytest.approx(3.0)
-        assert allocation["source_add_deferred_alpha_percent"] == pytest.approx(2.0)
-        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(0.0)
-        assert allocation["champion_allocations"] == expected_existing["champion_allocations"]
-        assert allocation["queued_champion_allocations"] == expected_existing["queued_champion_allocations"]
-
-    def test_source_rewards_are_deducted_before_unchanged_champion_logic(self):
-        leg1 = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:owner", start_epoch=100)
-        leg2 = create_leg2_reward(
-            adapter_id="adapter:a",
-            adapter_owner_miner_ref="miner:owner",
-            start_epoch=100,
-            trigger_evidence=_llm_evidence(),
-        )
-        champion = {
-            "uid": 9,
-            "miner_hotkey": "miner:wirer",
-            "source_id": "champion:1",
-            "champion_reward_id": "champion:1",
-            "island": "generalist",
-            "status": "active",
-            "start_epoch": 100,
-            "epoch_count": 20,
-            "improvement_points": 31.0,  # maxes out at the 15% champion cap
-            "desired_alpha_percent": 15.0,
-            "total_due_alpha_percent": 300.0,
-            "paid_alpha_percent_to_date": 0.0,
-            "remaining_alpha_percent": 300.0,
-        }
-        allocation = allocate_research_lab_epoch(
-            105,
-            self.POLICY,
-            [],
-            [champion],
-            active_source_add_obligations=[
-                self._source_obligation(leg1),
-                self._source_obligation(leg2),
-            ],
-        )
-        expected_existing = allocate_research_lab_epoch(
-            105,
-            {**self.POLICY, "research_lab_emission_percent": 24.8},
-            [],
-            [champion],
-        )
-        assert allocation["source_add_alpha_percent"] == pytest.approx(5.2)
-        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(24.8)
-        for key in (
-            "reimbursement_allocations",
-            "champion_allocations",
-            "queued_champion_allocations",
-            "reimbursement_alpha_percent",
-            "champion_alpha_percent",
-            "queued_champion_alpha_percent",
-            "unallocated_percent",
-        ):
-            assert allocation[key] == expected_existing[key]
-        assert allocation["champion_alpha_percent"] == pytest.approx(24.8)
-        assert allocation["unallocated_percent"] == pytest.approx(0.0)
-        by_source = {e["source_id"]: e for e in allocation["champion_allocations"]}
-        assert by_source["champion:1"]["paid_alpha_percent"] == pytest.approx(24.8)
-        assert allocation["queued_champion_allocations"] == []
-        classic = [e for e in allocation["champion_allocations"] if e["source_id"] == "champion:1"]
-        assert classic and "reward_kind" not in classic[0]
 
     @pytest.mark.parametrize(
         ("configured_cap", "expected_remaining"),

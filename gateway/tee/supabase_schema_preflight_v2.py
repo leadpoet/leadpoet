@@ -745,7 +745,6 @@ def _source_add_leg1_release_environment_policy_v1(
 ) -> Dict[str, Any]:
     expected = {
         "RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT": Decimal("0.2"),
-        "RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT": Decimal("0.0"),
         "RESEARCH_LAB_REWARD_EPOCHS": Decimal("20"),
         "RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY": Decimal("50"),
     }
@@ -767,9 +766,6 @@ def _source_add_leg1_release_environment_policy_v1(
         "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
         "leg1_alpha_percent": float(
             observed["RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT"]
-        ),
-        "leg2_alpha_percent": float(
-            observed["RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT"]
         ),
         "reward_epochs": int(observed["RESEARCH_LAB_REWARD_EPOCHS"]),
         "daily_cap": int(

@@ -71,7 +71,6 @@ def test_source_add_status_is_current_and_old_loop_intake_stays_closed(clean_env
     assert config.source_add_functional_probes_enabled is True
     assert config.source_add_functional_rewards_enabled is True
     assert config.source_add_leg1_alpha_percent == pytest.approx(0.2)
-    assert config.source_add_leg2_alpha_percent == pytest.approx(0.0)
     assert status["source_add"]["enabled"] is True
     assert status["source_add"]["max_per_day_per_hotkey"] == 5
 

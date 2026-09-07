@@ -360,7 +360,6 @@ PROTECTED_SYMBOLS = {
         "SourceAddRewardRecord",
         "validate_source_add_reward_record",
         "create_leg1_reward",
-        "create_leg2_reward",
         "stop_reward_forward",
     ),
     "gateway/research_lab/source_add_provenance.py": (
@@ -378,11 +377,6 @@ PROTECTED_SYMBOLS = {
         "_process_leg1_reward",
         "_retry_allowed",
         "_retry_at",
-    ),
-    "gateway/research_lab/source_add_llm_judge.py": (
-        "SourceAddJudgeVerdict",
-        "judge_source_add_implementation",
-        "_parse_verdict",
     ),
     "gateway/research_lab/allocations.py": (
         "_build_allocation_v2_singleflight",

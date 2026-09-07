@@ -905,7 +905,7 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         "provider_registry_recent",
     }:
         if policy.policy_id == "source_add_provisioning_eligible":
-            return (("provision_status", "eq.provisioned_autoresearch_eligible"),)
+            return (("provision_status", "eq.provisioned"),)
         return ()
     if policy.policy_id == "allocation_history":
         start_epoch = _non_negative_int(parameters["start_epoch"], "start_epoch")

@@ -184,7 +184,6 @@ def test_release_verifier_requires_all_worker_and_provider_profiles(tmp_path):
         ("openrouter", "benchmark_openrouter.json"),
         ("scrapingdog", "benchmark_scrapingdog.json"),
         ("openrouter", "stale_parent_openrouter.json"),
-        ("openrouter", "source_add_judge_openrouter.json"),
     ):
         (tmp_path / filename).write_text(
             json.dumps(_envelope(provider_id, filename + "-secret")),

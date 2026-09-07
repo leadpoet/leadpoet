@@ -10,7 +10,6 @@ from research_lab.source_add_rewards import (
     PUBLIC_LABELS,
     REWARD_KIND_SOURCE_ACCEPTANCE,
     create_leg1_reward,
-    create_leg2_reward,
 )
 
 
@@ -19,7 +18,6 @@ REWARD_DECISION_KINDS = frozenset(
     {
         "champion_migration",
         "source_add_leg1",
-        "source_add_leg2",
         "source_add_migration",
     }
 )
@@ -277,6 +275,8 @@ def _champion_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
+    if kind != "source_add_leg1":
+        raise RewardExecutorV2Error("SOURCE_ADD reward producer is retired")
     common = {
         "adapter_id",
         "miner_ref",
@@ -285,11 +285,7 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
         "alpha_percent",
         "reward_epochs",
     }
-    expected = common | (
-        {"trigger_evidence", "judge_result"}
-        if kind == "source_add_leg2"
-        else {"provenance_result", "trigger_evidence"}
-    )
+    expected = common | {"provenance_result", "trigger_evidence"}
     if set(value) != expected:
         raise RewardExecutorV2Error("SOURCE_ADD reward fields are invalid")
     existing = value.get("existing_rewards")
@@ -359,26 +355,6 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
             )
         reward = create_leg1_reward(
             miner_ref=str(value.get("miner_ref") or ""),
-            trigger_evidence=dict(trigger),
-            **kwargs,
-        )
-    else:
-        trigger = value.get("trigger_evidence")
-        judge_result = value.get("judge_result")
-        if not isinstance(trigger, Mapping) or not isinstance(judge_result, Mapping):
-            raise RewardExecutorV2Error("SOURCE_ADD trigger evidence is invalid")
-        verdict = judge_result.get("verdict")
-        if (
-            not isinstance(verdict, Mapping)
-            or verdict.get("verdict") != "helped"
-            or verdict.get("source_used") is not True
-            or trigger.get("llm_judge_passed") is not True
-        ):
-            raise RewardExecutorV2Error(
-                "SOURCE_ADD Leg 2 signed judge did not approve the reward"
-            )
-        reward = create_leg2_reward(
-            adapter_owner_miner_ref=str(value.get("miner_ref") or ""),
             trigger_evidence=dict(trigger),
             **kwargs,
         )

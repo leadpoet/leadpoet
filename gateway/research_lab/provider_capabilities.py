@@ -875,7 +875,7 @@ def _provider_doc_from_source_row(
     credential_ready_resolver: Callable[[Mapping[str, Any]], bool | None]
     | None = None,
 ) -> dict[str, Any] | None:
-    if str(row.get("provision_status") or "") != "provisioned_autoresearch_eligible":
+    if str(row.get("provision_status") or "") != "provisioned":
         return None
     provision = row.get("provision_doc") if isinstance(row.get("provision_doc"), Mapping) else {}
     raw = provision.get("provider_registry_entry") if isinstance(provision.get("provider_registry_entry"), Mapping) else {}

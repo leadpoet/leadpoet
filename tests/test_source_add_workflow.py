@@ -315,7 +315,7 @@ def _smoke_work() -> dict:
             "catalog_row": {"adapter_id": "adapter:test-source"},
             "provision_row": {
                 "adapter_id": "adapter:test-source",
-                "provision_status": "provisioned_autoresearch_eligible",
+                "provision_status": "provisioned",
                 "provision_doc": {
                     "provider_registry_entry": {
                         "base_url": "https://api.test-source.example/v1"

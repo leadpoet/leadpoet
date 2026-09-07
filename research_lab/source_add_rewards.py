@@ -1,4 +1,4 @@
-"""SOURCE_ADD two-leg emission rewards (sourceexperiments.md §3, owner-final).
+"""SOURCE_ADD emission rewards (sourceexperiments.md §3, owner-final).
 
 Supersedes the P1.5 USD trial-yield bounty bands. Both legs are fixed-term
 emission streams within a separate, first-priority SOURCE_ADD allocation:
@@ -7,10 +7,8 @@ emission streams within a separate, first-priority SOURCE_ADD allocation:
   ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created automatically when the measured
   V2 manifest/provenance precheck passes. Flat, one per adapter, ever. Catalog
   testing and operator provisioning remain separate later steps.
-- **Leg 2 — implementation rider**: +5% × 20 epochs to the ADAPTER OWNER,
-  created alongside the implementing merge's champion grant only when the
-  LLM final judge decides the already-winning change was helped by a known
-  SOURCE_ADD API. Paid to the owner even when the house arm wires it.
+Leg 2 records remain parseable for historical settlement and audit reads, but
+this module no longer creates new Leg 2 records.
 
 Reward records enter the first-priority ``source_add_allocations`` section.
 Their paid percentage is deducted from the configured Research Lab cap before
@@ -27,7 +25,6 @@ from .canonical import sha256_json
 
 # §3.4 config defaults (env-tunable; these are the launch values).
 DEFAULT_LEG1_ALPHA_PERCENT = 0.2
-DEFAULT_LEG2_ALPHA_PERCENT = 5.0
 DEFAULT_REWARD_EPOCHS = 20
 
 REWARD_KIND_SOURCE_ACCEPTANCE = "source_acceptance"
@@ -192,47 +189,6 @@ def _has_leg(existing_rewards: Sequence[Mapping[str, Any]], adapter_id: str, leg
         if str(row.get("adapter_id") or "") == adapter_id and int(row.get("leg") or 0) == leg:
             return True
     return False
-
-
-def create_leg2_reward(
-    *,
-    adapter_id: str,
-    adapter_owner_miner_ref: str,
-    start_epoch: int,
-    trigger_evidence: Mapping[str, Any],
-    existing_rewards: Sequence[Mapping[str, Any]] = (),
-    alpha_percent: float = DEFAULT_LEG2_ALPHA_PERCENT,
-    reward_epochs: int = DEFAULT_REWARD_EPOCHS,
-    state: str = SourceAddRewardState.ACTIVE.value,
-) -> SourceAddRewardRecord | None:
-    """Create the implementation rider for the ADAPTER OWNER.
-
-    ``adapter_owner_miner_ref`` is always the adapter's owner regardless of who
-    funded the wiring loop — including the house arm (the house holds no
-    stream; the owner's leg 2 still fires). One-time per adapter; idempotent
-    first-only. A merge routing to multiple new adapters fires one call per
-    adapter.
-    """
-
-    if _has_leg(existing_rewards, adapter_id, 2):
-        return None
-    record = SourceAddRewardRecord(
-        reward_ref=_reward_ref(adapter_id, 2),
-        adapter_id=adapter_id,
-        miner_ref=adapter_owner_miner_ref,
-        leg=2,
-        alpha_percent=float(alpha_percent),
-        reward_epochs=int(reward_epochs),
-        start_epoch=int(start_epoch),
-        state=state,
-        reward_kind=REWARD_KIND_SOURCE_IMPLEMENTATION,
-        trigger_evidence=dict(trigger_evidence),
-        public_label=PUBLIC_LABELS[REWARD_KIND_SOURCE_IMPLEMENTATION],
-    )
-    errors = validate_source_add_reward_record(record)
-    if errors:
-        raise ValueError("; ".join(errors))
-    return record
 
 
 def stop_reward_forward(record: SourceAddRewardRecord, *, reason: str) -> SourceAddRewardRecord:

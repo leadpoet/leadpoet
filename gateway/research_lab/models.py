@@ -577,7 +577,7 @@ class ResearchLabSourceAdapterProbeConfigureResponse(BaseModel):
 class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     registry_provider_id: str = Field(min_length=2, max_length=80)
     provider_alias: Optional[str] = Field(default=None, min_length=1, max_length=80)
-    provision_status: str = Field(default="provisioned_autoresearch_eligible", max_length=80)
+    provision_status: str = Field(default="provisioned", max_length=80)
     base_url: Optional[str] = Field(default=None, max_length=500)
     auth_kind: str = Field(default="none", max_length=20)
     auth_name: Optional[str] = Field(default=None, max_length=120)

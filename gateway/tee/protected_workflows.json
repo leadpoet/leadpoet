@@ -117,7 +117,7 @@
       "symbol": "_historical_compute_fallback_from_snapshot"
     },
     {
-      "ast_sha256": "sha256:022e27ef02a23ada50e154871020ce9dda1a393a6fc00bd9d5ff7f8f8d62d291",
+      "ast_sha256": "sha256:0e7429a894dacaaa212bfaca6f0f0f3663a40907215628fe4a9b48117ee9f833",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "build_research_lab_allocation_bundle"
     },
@@ -202,7 +202,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:3b23fd5314c5c61a45b91e5fe1fe57e0fd9e410f5bdba0d3c15fb6c63dcbfcd9",
+      "ast_sha256": "sha256:07e9cfd9c81b2e3f5e1bf9c27c54d896b230ada0aed0adf5a8598b9cb13a3a16",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -587,7 +587,7 @@
       "symbol": "_normalize_source_add_v8_registration"
     },
     {
-      "ast_sha256": "sha256:7a0eeb19b3d332a5675a62b959c78ae399aec08829519eb3a1110436f49c7073",
+      "ast_sha256": "sha256:7a19a92b0c2444031afa5817aac24b418bdf25f2105d075baefa5baa3578d7a4",
       "path": "gateway/research_lab/provider_capabilities.py",
       "symbol": "_provider_doc_from_source_row"
     },
@@ -657,24 +657,9 @@
       "symbol": "_cached_attested_preflight"
     },
     {
-      "ast_sha256": "sha256:5dc79583daa68f23b24222756cd8cfad9881a6f6d6a3d34b6c318097f6bd3261",
+      "ast_sha256": "sha256:5475590941e0be4309eef92185b3570d23fe6d83755145421279e969066179f0",
       "path": "gateway/research_lab/provider_preflight.py",
       "symbol": "preflight_gate"
-    },
-    {
-      "ast_sha256": "sha256:f47d7993b66d81502d858fe78db4df1b1ff1075df7dfd2a4e047043eb64c9056",
-      "path": "gateway/research_lab/source_add_llm_judge.py",
-      "symbol": "SourceAddJudgeVerdict"
-    },
-    {
-      "ast_sha256": "sha256:6ec0247c279d6a17e436284f76d9835981b9ddcb05b35b4a47e0d87110904ade",
-      "path": "gateway/research_lab/source_add_llm_judge.py",
-      "symbol": "_parse_verdict"
-    },
-    {
-      "ast_sha256": "sha256:8770e8234d2a40ef5341ac246938c983ff2268c00d9a46e29a58ffc494fe2193",
-      "path": "gateway/research_lab/source_add_llm_judge.py",
-      "symbol": "judge_source_add_implementation"
     },
     {
       "ast_sha256": "sha256:013c27a348ca01e9efb36f566359aabd48329dc93004df5a96fc1a3b121563cd",
@@ -722,7 +707,7 @@
       "symbol": "_process_provenance"
     },
     {
-      "ast_sha256": "sha256:5cf6004cad122c5120c4640be2b7170487dce69d1218f4820c5e8157252eab2e",
+      "ast_sha256": "sha256:aaa07c82d3cf4f60f8eb79f50032fc96f9e4c8c19a265cfd352f78525829d5fa",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_provisioning_smoke"
     },
@@ -1102,7 +1087,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:100ec391631298d90afa1ec53813b017f1f1ffffa792bd71cfcf25bcd43ac0f6",
+      "ast_sha256": "sha256:48841b2a24526f67c285344db478723787abd4207efe64b2dc2dd496e0d48209",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -1112,7 +1097,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:93f8ad8ba1c41f0afb006ad1539a3dbf78ae7ddb9ce6874d5f355051c569b01e",
+      "ast_sha256": "sha256:f4ceee2ef49cc4fe3cdfa5905f80db5972c0c55c6479b18dcac2706e33e7ed08",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -1837,7 +1822,7 @@
       "symbol": "_VERSION_ID_RE"
     },
     {
-      "ast_sha256": "sha256:5b7bd3ae7ce7cc948ea34641d0a2ed14dd695e4d15add4553432d61da76d81f1",
+      "ast_sha256": "sha256:3728692a474a5888f9ff9c4cc7278e5537f0849704c321352455f4f50238d0dd",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "__module__"
     },
@@ -2097,11 +2082,6 @@
       "symbol": "_require_restart_authority_absent_from_environment_payload"
     },
     {
-      "ast_sha256": "sha256:6bb7155b3143825741c3b66264dc80f7bf64dc4c6ef1ffd69c6889c112ac78e9",
-      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
-      "symbol": "_require_runtime_miner_disabled"
-    },
-    {
       "ast_sha256": "sha256:d56dc3c26407c9943cf2a4564963259eeeef9c0c658805e631035966df5d61f1",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_require_runtime_source_add_closed"
@@ -2287,7 +2267,7 @@
       "symbol": "prepare_gateway_miner_maintenance_restart"
     },
     {
-      "ast_sha256": "sha256:79f84949200fc19dcb07655b6baa968bf25a72a3bb4d541d1ef883a123f05196",
+      "ast_sha256": "sha256:94269ae561afdb9c28477267ddd1322610654ab6fd7dacdf46b5e64a9cf39b7c",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "verify_gateway_miner_maintenance_runtime_state"
     },
@@ -2722,7 +2702,7 @@
       "symbol": "_headers_without_credentials"
     },
     {
-      "ast_sha256": "sha256:e2a564dc1e01438f842b1407daa3f93aa7a575247d0fa012cbe21d473fbf8cf2",
+      "ast_sha256": "sha256:8735e5423bf81466a14388d1a4775e95c1feaaa126234f55797ee59586631f05",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -2732,7 +2712,7 @@
       "symbol": "_FAIL_CLOSED_REQUEST_SCHEMA_VERSION"
     },
     {
-      "ast_sha256": "sha256:7124e792ab042e68c18d5299231378f3964a8033a841b8ce0792d7f36b6ccfac",
+      "ast_sha256": "sha256:85f80443630a2d36135494af9d228ceafc11b8ce4fa8fcaefd919ae7c6a14585",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "_SEMANTICS_HEALTH_STAGES"
     },
@@ -2967,7 +2947,7 @@
       "symbol": "__module__"
     },
     {
-      "ast_sha256": "sha256:f4b4ae1a080f4b5ef1c15636d0c8bfff5c9723052f1dc9950a376b5ad954336a",
+      "ast_sha256": "sha256:d96d224638fa4cb9128e93e5e85f11959cf99610e2078e1af40fdb076de0eee1",
       "path": "gateway/tee/research_lab_runtime_config_v2.py",
       "symbol": "SCHEMA_VERSION"
     },
@@ -3077,7 +3057,7 @@
       "symbol": "champion_reward_row_projection_v2"
     },
     {
-      "ast_sha256": "sha256:1fb713169c94595ddcb9ed41116d5551d041ee0b36935cff1a3af1a32e349c1c",
+      "ast_sha256": "sha256:b50183ba6f39149b26d61cabd127852f95b41432f8a38481fabe6ae2a72ef75a",
       "path": "gateway/tee/reward_executor_v2.py",
       "symbol": "execute_reward_decision_v2"
     },
@@ -3117,12 +3097,12 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:fe24554718cef59e5813192c9ec28f81c8c83d7d72ed5f5776fa12932bc76ae4",
+      "ast_sha256": "sha256:4b0ddd2a4d2c627fc76dcb9daa6d16a89c4fa2e4ff4d7824731b4d01e132efea",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "SCORING_OPERATIONS_V2"
     },
     {
-      "ast_sha256": "sha256:aca3d4b715983bf93436aef04189684526827450f7f2a711ef89df80b240b6e2",
+      "ast_sha256": "sha256:803c3a230101322fc3a1e8811580647868946eba10ca83e01a81c7e449a6a7b4",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -3172,7 +3152,7 @@
       "symbol": "SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:2dc97839079a48948efbab97425b84782580cb029cddbf1b3001570e9c076025",
+      "ast_sha256": "sha256:93d9f7ec0646fecd0b0fe3fc9ec0eae6a56a7162feae1534a7977cc79f0b16e2",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
     },
@@ -3182,7 +3162,7 @@
       "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:74b3c37a6243060219b118f8371261909a833fe10b2f594b2f6219b432e6ab6a",
+      "ast_sha256": "sha256:2ae73a2308baba90230ec623f55230c11d8fc11eafe42a1091b688ac52dc4599",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256"
     },
@@ -3207,7 +3187,7 @@
       "symbol": "SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:b90d2cb937a0a6c63f3c4f1e9b9a87efd78f10f88a3f46b21949cea6dfab3ebe",
+      "ast_sha256": "sha256:5ae20673425f9066293de4f1a891b2b347e310e0071ce56b88cd58b3f6ffe1aa",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_source_add_leg1_release_environment_policy_v1"
     },
@@ -3242,7 +3222,7 @@
       "symbol": "verify_required_supabase_v2_schema"
     },
     {
-      "ast_sha256": "sha256:8fb3be964549d1b94573e339034e97e92b2b5d9436cc0a7ef6b4bc9242488ceb",
+      "ast_sha256": "sha256:7c73e27615973bc110635ec601d2316fbc4462d8cbd038f17b3174e2c6fc1bf7",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "QUERY_POLICIES"
     },
@@ -3252,7 +3232,7 @@
       "symbol": "SupabaseSourceReaderV2"
     },
     {
-      "ast_sha256": "sha256:25e60b57ed69f6d5123fd7e3496d566a7f9b9f2b0dfc9e1a84bf468841d30571",
+      "ast_sha256": "sha256:2baf076f32d6a2f819d782585b05c37bca6ba223eba809d2270514e22f3d1b6b",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "_filters"
     },
@@ -3357,7 +3337,7 @@
       "symbol": "execute_v2_provider_request"
     },
     {
-      "ast_sha256": "sha256:eae297f903fedf4515683d4e52071fac440e52bd5c6f9bb1d189b5d928b88da5",
+      "ast_sha256": "sha256:c31b581cf9ae3afb4ba3a7a7a52274eede4409f8761b19ff441020fc1b0a6573",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_coordinator_job_manager"
     },
@@ -3377,7 +3357,7 @@
       "symbol": "get_v2_scoring_job_manager"
     },
     {
-      "ast_sha256": "sha256:f665f7c2cfa53fa4883f462a207d0b7bcf312eaa3cadf849d2a56b475ad20bd5",
+      "ast_sha256": "sha256:cfbbc41046af364a96078b940cce2b3c47a6e6f88a70b6b99aa952d474acdd32",
       "path": "gateway/tee/tee_service.py",
       "symbol": "handle_inter_enclave_rpc"
     },
@@ -4342,31 +4322,6 @@
       "symbol": "allocate_research_lab_epoch"
     },
     {
-      "ast_sha256": "sha256:394083c08a9c24dcdcd4226ebd62383fb84be2811a8d5a1918dffb9ece7426e3",
-      "path": "leadpoet_verifier/economics.py",
-      "symbol": "build_champion_reward_obligation"
-    },
-    {
-      "ast_sha256": "sha256:f68136e18b19ea9e5a576e763d82488beb8c6ec865347945c134ccd6ed66c847",
-      "path": "leadpoet_verifier/economics.py",
-      "symbol": "build_reimbursement_schedule"
-    },
-    {
-      "ast_sha256": "sha256:b87e14f131be8ed6278859bd05e847da03623c824824f6a11314e9b39c9adff7",
-      "path": "leadpoet_verifier/economics.py",
-      "symbol": "cap_reimbursement_schedules_by_epoch"
-    },
-    {
-      "ast_sha256": "sha256:d9ba0e7d20bb4d3d090e5f2cf98c06c86603ccab97f8e5b8ea753f7333ca6324",
-      "path": "leadpoet_verifier/economics.py",
-      "symbol": "compose_final_weight_vector"
-    },
-    {
-      "ast_sha256": "sha256:4ba2d3559166c6398ab68dd8361126229b170a0e449396b7923ba18c25c2623e",
-      "path": "leadpoet_verifier/economics.py",
-      "symbol": "compute_reimbursement_award"
-    },
-    {
       "ast_sha256": "sha256:918e2734b4ec70265ad82dc569afc22f83764a0416c7dded1797ecf173ab2a2b",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_decision_from_observed_employee_size"
@@ -4542,11 +4497,6 @@
       "symbol": "create_leg1_reward"
     },
     {
-      "ast_sha256": "sha256:9e5539a1330c60c2483b36da7d8358f9fc57cdae74cc9875419811e88c928c01",
-      "path": "research_lab/source_add_rewards.py",
-      "symbol": "create_leg2_reward"
-    },
-    {
       "ast_sha256": "sha256:bc1763c9b89060251f4e679864e7269bf34ea017931b0b79eeacb5544bc944dd",
       "path": "research_lab/source_add_rewards.py",
       "symbol": "stop_reward_forward"
@@ -4682,7 +4632,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:d648e2fd3b78a7384277187556a656e5339f6655625719760524782ecf606cb9",
-  "protected_source_commit": "c6fdcb45a88331915a9dafcc132e227f4e70ceeb",
+  "manifest_hash": "sha256:4d1708a80275e88efa6006ee8c5a83c8ef489bd7a64a241a7f67aa01677e454a",
+  "protected_source_commit": "28a79db14a2ef3fa43e2fca07b5bac7955500722",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

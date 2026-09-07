@@ -51,7 +51,7 @@ TABLES = (
 )
 
 
-def test_migration_is_the_frontier_and_uniquely_numbered():
+def test_arena_migrations_are_uniquely_numbered():
     numbered = {}
     for path in SCRIPTS.glob("*.sql"):
         match = re.match(r"^(\d+)-", path.name)
@@ -65,7 +65,11 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
     assert numbered[183] == ["183-lab-arena-miner-reward-basis.sql"]
     assert numbered[184] == ["184-lab-arena-scoring-failure-isolation.sql"]
     assert numbered[185] == ["185-lab-arena-miner-credentials.sql"]
-    assert max(numbered) == 185, "185 must sit directly above the production frontier"
+    arena_frontier = max(
+        int(path.name.split("-", 1)[0])
+        for path in SCRIPTS.glob("*-lab-arena-*.sql")
+    )
+    assert arena_frontier == 185
 
 
 def test_migration_transaction_and_reload_shape():

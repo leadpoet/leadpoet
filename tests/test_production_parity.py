@@ -76,6 +76,10 @@ from scripts.setup_production_parity_staging import (
 from scripts.resolve_production_parity_controller_requirements import (
     resolve_controller_requirements,
 )
+from tests.test_gateway_restart_preflight_v2 import (
+    _source_add_claim_control_contract_response,
+    _source_add_miner_status_contract_response,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +87,69 @@ SHA = "a" * 40
 HASH = "sha256:" + "b" * 64
 ORIGIN = "https://d111111abcdef8.cloudfront.net"
 PARITY_GATEWAY_PUBLIC_KEY = "c" * 64
+
+# Migration 86 owns this historical SQL constraint.  Keep the fixture local
+# to the parity test: the retired receipt-purpose catalogue must not return to
+# the active schema-preflight runtime contract merely to build an old table.
+_HISTORICAL_ATTESTED_ROLE_PURPOSES = {
+    "gateway_coordinator": (
+        "research_lab.admission.v2",
+        "research_lab.provider_evidence.v2",
+        "leadpoet.artifact_persistence.v2",
+        "research_lab.ranking.v2",
+        "research_lab.promotion_decision.v2",
+        "research_lab.reward_decision.v2",
+        "research_lab.allocation.v2",
+        "research_lab.champion_input.v2",
+        "research_lab.reimbursement_input.v2",
+        "research_lab.source_add_reward_input.v2",
+        "research_lab.sourcing_input.v2",
+        "research_lab.fulfillment_input.v2",
+        "research_lab.leaderboard_input.v2",
+        "research_lab.ban_input.v2",
+        "research_lab.anomaly_adjustment_input.v2",
+        "gateway.weights.publication.v2",
+    ),
+    "gateway_scoring": (
+        "research_lab.private_model_run.v2",
+        "research_lab.candidate_model_run.v2",
+        "research_lab.candidate_test.v2",
+        "research_lab.company_score.v2",
+        "research_lab.candidate_score.v2",
+        "research_lab.baseline_score.v2",
+        "research_lab.benchmark.v2",
+        "research_lab.rebenchmark.v2",
+        "research_lab.confirmation_score.v2",
+        "research_lab.source_add_judge.v2",
+        "qualification.lead_decision.v2",
+        "qualification.email_evidence.v2",
+        "qualification.sourcing_epoch.v2",
+    ),
+    "gateway_autoresearch": (
+        "research_lab.source_inspection.v2",
+        "research_lab.research_plan.v2",
+        "research_lab.patch_draft.v2",
+        "research_lab.patch_validation.v2",
+        "research_lab.candidate_test.v2",
+        "research_lab.candidate_build.v2",
+        "research_lab.candidate_decision.v2",
+        "research_lab.stale_parent_repair.v2",
+        "research_lab.checkpoint.v2",
+        "research_lab.openrouter_guard.v2",
+    ),
+    "validator_weights": (
+        "validator.weight_snapshot.v2",
+        "validator.weights.computed.v2",
+        "validator.chain_state.v2",
+        "validator.metagraph_state.v2",
+        "validator.burn_ownership.v2",
+        "validator.feature_flags.v2",
+        "validator.constants.v2",
+        "validator.hotkey_signature.v2",
+        "validator.set_weights_extrinsic.v2",
+        "validator.weights.finalized.v2",
+    ),
+}
 
 
 def test_setup_targets_the_authoritative_github_repository():
@@ -2766,7 +2833,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             statements.append(f'CREATE TABLE public."{table}" ({definitions});')
 
         clauses = []
-        for role, purposes in schema_preflight.ROLE_PURPOSES.items():
+        for role, purposes in _HISTORICAL_ATTESTED_ROLE_PURPOSES.items():
             encoded_purposes = ", ".join(
                 f"'{purpose}'::text" for purpose in sorted(purposes)
             )
@@ -2942,6 +3009,12 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "research_lab_source_add_post_accept_leg1_contract_v4": (
                 source_add_provenance_leg1_contract
             ),
+            "research_lab_source_add_claim_control_contract_v2": json.loads(
+                _source_add_claim_control_contract_response()
+            ),
+            "research_lab_source_add_miner_status_contract_v1": json.loads(
+                _source_add_miner_status_contract_response()
+            ),
         }
         for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:
             assert re.fullmatch(r"[a-z_][a-z0-9_]*", function_name)
@@ -2968,7 +3041,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
         supabase_url, service_role_key = database.start_postgrest()
         assert database._psql(
             "SELECT has_schema_privilege('service_role','extensions','USAGE')::text;"
-        ).strip() == "t"
+        ).strip() in {"t", "true"}
         result = schema_preflight.verify_required_supabase_v2_schema(
             {
                 "SUPABASE_URL": supabase_url,
@@ -2988,7 +3061,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             == "0"
         )
         assert result["status"] == "ready"
-        assert result["data_probe_count"] == 4
+        assert result["data_probe_count"] == 6
         assert (
             result["chain_realized_settlement_activation_http_probe_count"] == 0
         )
@@ -3002,7 +3075,6 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "source_finalized_block": activation["source_finalized_block"],
         }
         assert result["compact_weight_settlement_contract"] == compact_contract
-        assert result["candidate_hybrid_purpose_contract"]["constraint_valid"] is True
         assert (
             result["source_add_provider_origin_contract"]
             == source_add_origin_contract

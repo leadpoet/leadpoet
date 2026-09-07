@@ -85,20 +85,8 @@ ORDER BY p.adapter_id, p.seq DESC, p.created_at DESC;
 
 -- Support only the deployed Leg 1 function identities below. Do not scan or
 -- rewrite arbitrary public functions: their bodies may be unrelated
--- compatibility or settlement authorities.
-CREATE OR REPLACE FUNCTION
-    public.research_lab_source_add_provision_status_is_eligible_v1(
-        p_status TEXT
-    )
-RETURNS BOOLEAN
-LANGUAGE sql
-IMMUTABLE
-STRICT
-SET search_path = pg_catalog, public
-AS $$
-    SELECT p_status IN ('provisioned', 'provisioned_autoresearch_eligible');
-$$;
-
+-- compatibility or settlement authorities. Inline the two accepted literals
+-- so this migration adds no new runtime RPC or authority hash surface.
 DO $source_add_status_functions$
 DECLARE
     function_row RECORD;
@@ -132,54 +120,54 @@ BEGIN
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             'provision[.]provision_status[[:space:]]*=[[:space:]]*''provisioned_autoresearch_eligible''',
-            'public.research_lab_source_add_provision_status_is_eligible_v1(provision.provision_status)',
+            'provision.provision_status IN (''provisioned'', ''provisioned_autoresearch_eligible'')',
             'g'
         );
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             'eligible[.]provision_status[[:space:]]*=[[:space:]]*''provisioned_autoresearch_eligible''',
-            'public.research_lab_source_add_provision_status_is_eligible_v1(eligible.provision_status)',
+            'eligible.provision_status IN (''provisioned'', ''provisioned_autoresearch_eligible'')',
             'g'
         );
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             '([[:space:]])provision_status[[:space:]]*=[[:space:]]*''provisioned_autoresearch_eligible''',
-            '\1public.research_lab_source_add_provision_status_is_eligible_v1(provision_status)',
+            '\1provision_status IN (''provisioned'', ''provisioned_autoresearch_eligible'')',
             'g'
         );
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             'v_provision[.]provision_status[[:space:]]*<>[[:space:]]*''provisioned_autoresearch_eligible''',
-            'NOT public.research_lab_source_add_provision_status_is_eligible_v1(v_provision.provision_status)',
+            'v_provision.provision_status NOT IN (''provisioned'', ''provisioned_autoresearch_eligible'')',
             'g'
         );
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             'NEW[.]provision_status[[:space:]]*<>[[:space:]]*''provisioned_autoresearch_eligible''',
-            'NOT public.research_lab_source_add_provision_status_is_eligible_v1(NEW.provision_status)',
+            'NEW.provision_status NOT IN (''provisioned'', ''provisioned_autoresearch_eligible'')',
             'g'
         );
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             'p_provision_row[[:space:]]*-[[:space:]]*>>[[:space:]]*''provision_status''[[:space:]]*<>[[:space:]]*''provisioned_autoresearch_eligible''',
-            'NOT public.research_lab_source_add_provision_status_is_eligible_v1(p_provision_row->>''provision_status'')',
+            'p_provision_row->>''provision_status'' NOT IN (''provisioned'', ''provisioned_autoresearch_eligible'')',
             'g'
         );
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             'p_provision_row[[:space:]]*-[[:space:]]*>>[[:space:]]*''provision_status''[[:space:]]*=[[:space:]]*''provisioned_autoresearch_eligible''',
-            'public.research_lab_source_add_provision_status_is_eligible_v1(p_provision_row->>''provision_status'')',
+            'p_provision_row->>''provision_status'' IN (''provisioned'', ''provisioned_autoresearch_eligible'')',
             'g'
         );
         function_definition := pg_catalog.regexp_replace(
             function_definition,
-            'v_work[.]job_doc[[:space:]]*#[[:space:]]*>[[:space:]]*''[{]provision_row,provision_status[}]''[[:space:]]+IS[[:space:]]+DISTINCT[[:space:]]+FROM[[:space:]]+pg_catalog[.]to_jsonb[[:space:]]*[(][[:space:]]*''provisioned_autoresearch_eligible''::TEXT[[:space:]]*[)]',
-            'public.research_lab_source_add_provision_status_is_eligible_v1(v_work.job_doc#>>''{provision_row,provision_status}'') IS NOT TRUE',
+            '(?i)v_work[.]job_doc[[:space:]]*#[[:space:]]*>[[:space:]]*''[{]provision_row,provision_status[}]''[[:space:]]+IS[[:space:]]+DISTINCT[[:space:]]+FROM[[:space:]]+pg_catalog[.]to_jsonb[[:space:]]*[(][[:space:]]*''provisioned_autoresearch_eligible''::TEXT[[:space:]]*[)]',
+            '(v_work.job_doc#>>''{provision_row,provision_status}'' IS NULL OR v_work.job_doc#>>''{provision_row,provision_status}'' NOT IN (''provisioned'', ''provisioned_autoresearch_eligible''))',
             'g'
         );
-        IF function_definition ILIKE '%provisioned_autoresearch_eligible%'
-           OR function_definition NOT ILIKE
-              '%research_lab_source_add_provision_status_is_eligible_v1%'
+        IF function_definition NOT ILIKE '%provisioned_autoresearch_eligible%'
+           OR function_definition ~ $$[<>=][[:space:]]*'provisioned_autoresearch_eligible'$$
+           OR function_definition ~* $$IS DISTINCT FROM[[:space:]]+(pg_catalog[.])?to_jsonb[[:space:]]*[(][[:space:]]*'provisioned_autoresearch_eligible'$$
         THEN
             RAISE EXCEPTION
                 'SOURCE_ADD status contract drift in %',

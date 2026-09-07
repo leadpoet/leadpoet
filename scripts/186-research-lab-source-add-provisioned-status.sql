@@ -30,11 +30,12 @@ BEGIN
          WHERE c.conrelid =
                'public.research_lab_source_add_provisioning_events'::REGCLASS
            AND c.contype = 'c'
-           AND (
-               c.conname = 'research_lab_source_provision_status_check'
-               OR pg_catalog.pg_get_constraintdef(c.oid)
-                  ILIKE '%provisioned_autoresearch_eligible%'
-           )
+           AND c.conname = ANY (ARRAY[
+               -- PostgreSQL truncates the inline constraint name from
+               -- migration 78 to this stable 63-byte identifier.
+               'research_lab_source_add_provisioning_eve_provision_status_check',
+               'research_lab_source_provision_status_check'
+           ])
     LOOP
         EXECUTE pg_catalog.format(
             'ALTER TABLE public.research_lab_source_add_provisioning_events DROP CONSTRAINT %I',
@@ -104,21 +105,24 @@ DECLARE
     function_definition TEXT;
     matched_function_count INTEGER := 0;
     supported_functions CONSTANT TEXT[] := ARRAY[
-        'research_lab_source_add_final_approval_catalog_v2(text)',
-        'enforce_research_lab_source_add_acceptance_v2()',
-        'enforce_research_lab_source_add_eligible_v2()',
-        'enforce_research_lab_source_add_leg1_obligation_v2()',
-        'research_lab_source_add_enqueue_provision_smoke(text,text,text,text,jsonb,jsonb)',
-        'enforce_research_lab_source_add_eligible_v3()',
-        'research_lab_source_add_enqueue_provision_smoke_v2(text,text,text,text,jsonb,jsonb)',
-        'research_lab_source_add_finalize_provision_v3(text,jsonb,jsonb,jsonb)',
-        'research_lab_source_add_reject_current_builtin_v3(text,uuid,text,jsonb,text,jsonb,jsonb,jsonb,jsonb)'
+        'public.research_lab_source_add_final_approval_catalog_v2(text)',
+        'public.enforce_research_lab_source_add_acceptance_v2()',
+        'public.enforce_research_lab_source_add_eligible_v2()',
+        'public.enforce_research_lab_source_add_leg1_obligation_v2()',
+        'public.research_lab_source_add_enqueue_provision_smoke(text,text,text,text,jsonb,jsonb)',
+        'public.enforce_research_lab_source_add_eligible_v3()',
+        'public.research_lab_source_add_enqueue_provision_smoke_v2(text,text,text,text,jsonb,jsonb)',
+        'public.research_lab_source_add_finalize_provision_v3(text,jsonb,jsonb,jsonb)',
+        'public.research_lab_source_add_reject_current_builtin_v3(text,uuid,text,jsonb,text,jsonb,jsonb,jsonb,jsonb)'
     ];
 BEGIN
     FOR function_row IN
         SELECT p.oid
           FROM pg_catalog.pg_proc p
-         WHERE p.oid::REGPROCEDURE::TEXT = ANY (supported_functions)
+         WHERE p.oid = ANY (
+             SELECT pg_catalog.to_regprocedure(function_signature)
+             FROM pg_catalog.unnest(supported_functions) AS signatures(function_signature)
+         )
     LOOP
         matched_function_count := matched_function_count + 1;
         function_definition := pg_catalog.pg_get_functiondef(function_row.oid);
@@ -170,7 +174,7 @@ BEGIN
         function_definition := pg_catalog.regexp_replace(
             function_definition,
             'v_work[.]job_doc[[:space:]]*#[[:space:]]*>[[:space:]]*''[{]provision_row,provision_status[}]''[[:space:]]+IS[[:space:]]+DISTINCT[[:space:]]+FROM[[:space:]]+pg_catalog[.]to_jsonb[[:space:]]*[(][[:space:]]*''provisioned_autoresearch_eligible''::TEXT[[:space:]]*[)]',
-            'NOT public.research_lab_source_add_provision_status_is_eligible_v1(v_work.job_doc#>>''{provision_row,provision_status}'')',
+            'public.research_lab_source_add_provision_status_is_eligible_v1(v_work.job_doc#>>''{provision_row,provision_status}'') IS NOT TRUE',
             'g'
         );
         IF function_definition ILIKE '%provisioned_autoresearch_eligible%'

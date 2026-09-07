@@ -1095,7 +1095,11 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
         "scripts/178-research-lab-source-add-miner-status.sql"
     )
+    provisioned_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
+        "scripts/186-research-lab-source-add-provisioned-status.sql"
+    )
     assert miner_status_migration["sha256"] in sql
+    assert provisioned_status_migration["sha256"] in sql
     assert (
         "public.research_lab_source_add_admit_v3"
         "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
@@ -1224,6 +1228,9 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
     miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
         "scripts/178-research-lab-source-add-miner-status.sql"
     )
+    provisioned_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
+        "scripts/186-research-lab-source-add-provisioned-status.sql"
+    )
     readback = {
         "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(
@@ -1234,6 +1241,7 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
         "migration_176_sha256": provenance_origin_repair_migration["sha256"],
         "migration_177_sha256": provenance_authority_acl_migration["sha256"],
         "migration_178_sha256": miner_status_migration["sha256"],
+        "migration_186_sha256": provisioned_status_migration["sha256"],
         "function_signature_count": len(expectations),
         "service_role_function_count": sum(
             privileges["service_role_callable"]

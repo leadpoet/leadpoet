@@ -71,6 +71,9 @@ _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 _SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "scripts/178-research-lab-source-add-miner-status.sql"
 )
+_SOURCE_ADD_PROVISIONED_STATUS_MIGRATION = (
+    "scripts/186-research-lab-source-add-provisioned-status.sql"
+)
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -186,6 +189,12 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
         "sha256": "sha256:3cbeaa65110d8efc9281a7c1c952c343dfed933a9c23be8e2083513d701f2b40",
         "transaction_mode": "candidate-file",
     },
+    {
+        "path": _SOURCE_ADD_PROVISIONED_STATUS_MIGRATION,
+        "sequence": 186,
+        "sha256": "sha256:0f7ca08fb8b34b9e5260d88f98254a1915b7502fa213f7292c4c84e2dcac7520",
+        "transaction_mode": "candidate-file",
+    },
 )
 _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION = (
     "leadpoet.production_parity.schema_only_source_add_acl.v6"
@@ -194,7 +203,7 @@ _SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
 )
 _SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
-    "sha256:fe7df9f9336217f3e738f420fae0d9720959042080df431c1bcb2d4baa8ee954"
+    "sha256:e54d0a27956d384d77a4adb212723f8eb3ab2fb0ea7cdffc143a8205eecf28a8"
 )
 _SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256 = (
     "sha256:208de2069d2b44826fe466de01a2d1a91f4c762869227b39bdba969c8586be16"
@@ -871,6 +880,9 @@ def _schema_only_source_add_acl_sql(
     miner_status_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_MINER_STATUS_MIGRATION
     )
+    provisioned_status_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVISIONED_STATUS_MIGRATION
+    )
     return f"""
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -1112,6 +1124,7 @@ SELECT pg_catalog.json_build_object(
     'migration_176_sha256', '{provenance_origin_repair_migration['sha256']}',
     'migration_177_sha256', '{provenance_authority_acl_migration['sha256']}',
     'migration_178_sha256', '{miner_status_migration['sha256']}',
+    'migration_186_sha256', '{provisioned_status_migration['sha256']}',
     'function_signature_count', (SELECT COUNT(*) FROM actual_acl),
     'service_role_function_count', (
         SELECT COUNT(*) FROM actual_acl WHERE service_role_callable
@@ -1320,6 +1333,9 @@ def restore_schema_only_source_add_acl_contract(
     miner_status_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_MINER_STATUS_MIGRATION
     )
+    provisioned_status_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVISIONED_STATUS_MIGRATION
+    )
     expected = {
         "schema_version": _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS),
@@ -1328,6 +1344,7 @@ def restore_schema_only_source_add_acl_contract(
         "migration_176_sha256": provenance_origin_repair_migration["sha256"],
         "migration_177_sha256": provenance_authority_acl_migration["sha256"],
         "migration_178_sha256": miner_status_migration["sha256"],
+        "migration_186_sha256": provisioned_status_migration["sha256"],
         "function_signature_count": len(expected_inventory),
         "service_role_function_count": (
             len(_SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS)

@@ -141,8 +141,9 @@ python3 scripts/run_lab_arena_runner.py
 Choose **Submit Model** in `neurons/miner.py`. It reads the local source
 directory and the miner's OpenRouter API key, OpenRouter management key, and
 Deepline API key from environment variables or masked prompts. It archives,
-uploads, signs, and finalizes the source. Credentials are sent separately and
-encrypted for the model's runs. No Dockerfile or image tag is required. The
+uploads, signs, and finalizes the source. Runtime API keys are sent separately
+and encrypted for the model's runs. The management key is used only to check
+admission and is not stored. No Dockerfile or image tag is required. The
 same helper can run directly with those credentials in the environment:
 
 ```bash

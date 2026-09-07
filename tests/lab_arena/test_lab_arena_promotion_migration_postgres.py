@@ -27,6 +27,35 @@ def database():
     yield from database_with_lab_arena_migration()
 
 
+def test_promotion_migrations_temporarily_restore_owner_schema_create():
+    migrations = DEFAULT_MIGRATIONS[: DEFAULT_MIGRATIONS.index(LAB_ARENA_BASELINE_PROMOTION_MIGRATION)]
+    database = database_with_lab_arena_migration(migrations)
+    psycopg2, dsn = next(database)
+    control = psycopg2.connect(**dsn)
+    control.autocommit = True
+    try:
+        with control.cursor() as cursor:
+            cursor.execute("CREATE ROLE lab_arena_migration_admin LOGIN NOSUPERUSER")
+            cursor.execute("GRANT lab_arena_owner TO lab_arena_migration_admin")
+            cursor.execute("ALTER SCHEMA public OWNER TO lab_arena_migration_admin")
+        admin_dsn = dict(dsn, user="lab_arena_migration_admin")
+        admin = psycopg2.connect(**admin_dsn)
+        admin.autocommit = True
+        try:
+            with admin.cursor() as cursor:
+                cursor.execute((SCRIPTS / LAB_ARENA_BASELINE_PROMOTION_MIGRATION).read_text())
+                cursor.execute((SCRIPTS / "189-lab-arena-round-network-scope.sql").read_text())
+                cursor.execute(
+                    "SELECT has_schema_privilege('lab_arena_owner', 'public', 'CREATE')"
+                )
+                assert cursor.fetchone() == (False,)
+        finally:
+            admin.close()
+    finally:
+        control.close()
+        database.close()
+
+
 @pytest.fixture()
 def connections(database):
     psycopg2, dsn = database

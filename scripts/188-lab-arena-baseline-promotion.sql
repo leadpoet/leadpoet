@@ -3,6 +3,8 @@
 
 BEGIN;
 
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 ALTER TABLE public.lab_arena_rounds
   ADD COLUMN IF NOT EXISTS promotion_required BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE public.lab_arena_rounds
@@ -296,4 +298,5 @@ ALTER FUNCTION public.lab_arena_schema_version_v1() OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_schema_version_v1() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.lab_arena_schema_version_v1() TO lab_arena_service;
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

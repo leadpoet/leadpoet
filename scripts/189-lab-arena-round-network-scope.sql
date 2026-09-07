@@ -4,6 +4,8 @@
 
 BEGIN;
 
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 ALTER TABLE public.lab_arena_rounds
   ADD COLUMN IF NOT EXISTS arena_network_name TEXT
   GENERATED ALWAYS AS (
@@ -140,4 +142,5 @@ GRANT EXECUTE ON FUNCTION public.lab_arena_schema_version_v1() TO lab_arena_serv
 
 NOTIFY pgrst, 'reload schema';
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

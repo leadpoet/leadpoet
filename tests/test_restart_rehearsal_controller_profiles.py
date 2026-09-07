@@ -1770,6 +1770,60 @@ def test_bounded_failure_projection_survives_early_cleanup_without_raw_output(
     assert not evidence_root.exists()
 
 
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_error_type"),
+    [("handoff", "RuntimeError"), ("system-exit", "SystemExit")],
+)
+def test_bounded_failure_projection_retains_empty_stage_failure_type(
+    failure_kind: str,
+    expected_error_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    evidence_root = tmp_path / "evidence"
+    durable_root = tmp_path / "durable"
+    evidence_root.mkdir()
+
+    def fake_mkdtemp(*, prefix: str) -> str:
+        if prefix.startswith("leadpoet-restart-evidence-"):
+            return str(evidence_root)
+        durable_root.mkdir(exist_ok=True)
+        return str(durable_root)
+
+    monkeypatch.setattr(controller.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: None,
+    )
+    original = (
+        RuntimeError("handoff failed")
+        if failure_kind == "handoff"
+        else SystemExit("launcher exited")
+    )
+
+    with pytest.raises(type(original)):
+        with controller._temporary_evidence_directory(
+            "rehearsal-image",
+            docker_platform="linux/amd64",
+            handoff_attempted=lambda: True,
+            failure_projection=lambda error: controller._preserve_bounded_failure_projection(
+                candidate_sha="b" * 40,
+                stages=[],
+                original=error,
+            ),
+        ):
+            raise original
+
+    report = json.loads(
+        (durable_root / "failure-summary.json").read_text(encoding="utf-8")
+    )
+    assert report["error_type"] == expected_error_type
+    assert report["stages"] == []
+    assert report["timeout"] is False
+
+
 def test_prepush_main_alarm_cancels_and_reaps_blocked_probe(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

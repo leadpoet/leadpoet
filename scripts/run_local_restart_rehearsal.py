@@ -2138,7 +2138,9 @@ def _temporary_evidence_directory(
     try:
         yield evidence_root
     except BaseException as original:
-        if failure_projection is not None and isinstance(original, Exception):
+        if failure_projection is not None and isinstance(
+            original, (Exception, SystemExit)
+        ):
             try:
                 failure_projection(original)
             except BaseException:
@@ -2437,6 +2439,9 @@ def _preserve_bounded_failure_projection(
             item["status"] == "unexercised" for item in projected_stages
         ),
     }
+    original_error_type = type(original).__name__
+    if original_error_type in _SAFE_FAILURE_PROJECTION_ERROR_TYPES:
+        report["error_type"] = original_error_type
     durable_root.joinpath("failure-summary.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

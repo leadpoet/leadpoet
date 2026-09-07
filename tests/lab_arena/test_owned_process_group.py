@@ -131,22 +131,40 @@ def _shell_function(script_name: str, function_name: str) -> str:
     return script[start:end]
 
 
+def _shell_process_helper_selector(script_name: str, role: str) -> str:
+    script = (ROOT / script_name).read_text(encoding="utf-8")
+    authority_variable = (
+        "GATEWAY_RESTART_AUTHORITY_ROOT"
+        if role == "gateway"
+        else "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"
+    )
+    state_variable = (
+        "GATEWAY_CONTROLLER_PROCESS_STATE_FILE"
+        if role == "gateway"
+        else "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE"
+    )
+    start = script.index(f'if [ -n "${authority_variable}" ]; then')
+    end_marker = f'\n{state_variable}='
+    end = script.index("\n", script.index(end_marker, start) + 1) + 1
+    return script[start:end]
+
+
 @pytest.mark.parametrize("role", ["gateway", "validator"])
-def test_n_minus_one_stop_function_uses_verified_candidate_helper(
+def test_current_controller_stops_historical_live_group_without_candidate_helper(
     tmp_path: Path, role: str
 ) -> None:
-    old_checkout = tmp_path / "old-checkout"
-    candidate_checkout = tmp_path / "verified-candidate"
-    candidate_helper = candidate_checkout / "scripts" / HELPER.name
-    candidate_helper.parent.mkdir(parents=True)
-    shutil.copy2(HELPER, candidate_helper)
+    historical_checkout = tmp_path / "historical-candidate"
+    current_authority = tmp_path / "current-controller-authority"
+    authority_helper = current_authority / "scripts" / HELPER.name
+    authority_helper.parent.mkdir(parents=True)
+    shutil.copy2(HELPER, authority_helper)
     state_file = tmp_path / "arena.json"
 
     if role == "gateway":
         script_name = "gw_restart.sh"
         function_name = "stop_lab_arena_service"
         relative_path = "scripts/run_lab_arena_service.py"
-        environment_file = old_checkout / "gateway.env"
+        environment_file = historical_checkout / "gateway.env"
         production_args = [
             "--environment-file",
             str(environment_file),
@@ -165,10 +183,10 @@ def test_n_minus_one_stop_function_uses_verified_candidate_helper(
         ]
         variables = {
             "GATEWAY_PYTHON_BIN": sys.executable,
-            "LEADPOET_REPO_ROOT": str(old_checkout),
+            "LEADPOET_REPO_ROOT": str(historical_checkout),
+            "GATEWAY_RESTART_AUTHORITY_ROOT": str(current_authority),
             "GATEWAY_ENV_FILE": str(environment_file),
             "LAB_ARENA_SERVICE_STATE_FILE": str(state_file),
-            "LAB_ARENA_PROCESS_HELPER": str(old_checkout / "scripts" / HELPER.name),
         }
     else:
         script_name = "validator_restart.sh"
@@ -178,20 +196,23 @@ def test_n_minus_one_stop_function_uses_verified_candidate_helper(
         sidecar_args = ["--round-id", "e2e-1"]
         variables = {
             "VALIDATOR_PYTHON_BIN": sys.executable,
-            "VALIDATOR_ROOT": str(old_checkout),
+            "VALIDATOR_ROOT": str(historical_checkout),
+            "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(current_authority),
             "LAB_ARENA_RUNNER_STATE_FILE": str(state_file),
-            "LAB_ARENA_PROCESS_HELPER": str(old_checkout / "scripts" / HELPER.name),
         }
 
-    _make_entrypoint(old_checkout, relative_path)
-    production = _start(old_checkout, relative_path, production_args)
-    sidecar = _start(old_checkout, relative_path, sidecar_args)
-    _await_ready(production)
-    _await_ready(sidecar)
-    assert not (old_checkout / "scripts" / HELPER.name).exists()
-    shell = _shell_function(script_name, function_name)
+    shell = _shell_process_helper_selector(script_name, role)
+    shell += _shell_function(script_name, function_name)
     shell += '\nsudo() { command "$@"; }\n'
-    shell += f'\n{function_name} "$CANDIDATE_HELPER"\n'
+    shell += f"\n{function_name}\n"
+    _make_entrypoint(historical_checkout, relative_path)
+    production = _start(historical_checkout, relative_path, production_args)
+    unrelated_task_api = _start(
+        historical_checkout, relative_path, sidecar_args
+    )
+    _await_ready(production)
+    _await_ready(unrelated_task_api)
+    assert not (historical_checkout / "scripts" / HELPER.name).exists()
     try:
         result = subprocess.run(
             ["bash", "-c", shell],
@@ -202,17 +223,173 @@ def test_n_minus_one_stop_function_uses_verified_candidate_helper(
             env={
                 **os.environ,
                 **variables,
-                "CANDIDATE_HELPER": str(candidate_helper),
             },
         )
 
         assert result.returncode == 0, result.stderr
         production.wait(timeout=3)
-        assert sidecar.poll() is None
+        assert unrelated_task_api.poll() is None
         assert not state_file.exists()
     finally:
         _kill(production)
-        _kill(sidecar)
+        _kill(unrelated_task_api)
+
+
+@pytest.mark.parametrize("role", ["gateway", "validator"])
+@pytest.mark.parametrize("invalid_helper", ["missing", "symlink"])
+def test_controller_helper_is_rejected_before_shutdown(
+    tmp_path: Path, role: str, invalid_helper: str
+) -> None:
+    historical_checkout = tmp_path / "historical-candidate"
+    current_authority = tmp_path / "current-controller-authority"
+    authority_helper = current_authority / "scripts" / HELPER.name
+    authority_helper.parent.mkdir(parents=True)
+    historical_checkout.mkdir()
+    state_file = tmp_path / "arena.json"
+    if invalid_helper == "symlink":
+        authority_helper.symlink_to(HELPER)
+
+    if role == "gateway":
+        script_name = "gw_restart.sh"
+        function_name = "stop_lab_arena_service"
+        environment = {
+            "GATEWAY_PYTHON_BIN": sys.executable,
+            "LEADPOET_REPO_ROOT": str(historical_checkout),
+            "GATEWAY_RESTART_AUTHORITY_ROOT": str(current_authority),
+            "GATEWAY_ENV_FILE": str(historical_checkout / "gateway.env"),
+            "LAB_ARENA_SERVICE_STATE_FILE": str(state_file),
+        }
+    else:
+        script_name = "validator_restart.sh"
+        function_name = "stop_lab_arena_runner"
+        environment = {
+            "VALIDATOR_PYTHON_BIN": sys.executable,
+            "VALIDATOR_ROOT": str(historical_checkout),
+            "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(current_authority),
+            "LAB_ARENA_RUNNER_STATE_FILE": str(state_file),
+        }
+
+    shell = "set -e\n" + _shell_process_helper_selector(script_name, role)
+    shell += _shell_function(script_name, function_name)
+    shell += '\nsudo() { command "$@"; }\n'
+    shell += f'\n{function_name}\nprintf "shutdown-started\\n"\n'
+    result = subprocess.run(
+        ["bash", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=8,
+        env={**os.environ, **environment},
+    )
+
+    assert result.returncode != 0
+    assert "verified controller Lab Arena stop helper is unavailable" in result.stderr
+    assert "shutdown-started" not in result.stdout
+
+
+@pytest.mark.parametrize("role", ["gateway", "validator"])
+def test_post_activation_start_records_with_current_controller_helper(
+    tmp_path: Path, role: str
+) -> None:
+    historical_checkout = tmp_path / "historical-candidate"
+    current_authority = tmp_path / "current-controller-authority"
+    authority_helper = current_authority / "scripts" / HELPER.name
+    authority_helper.parent.mkdir(parents=True)
+    shutil.copy2(HELPER, authority_helper)
+    state_file = tmp_path / "arena.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
+    fake_sudo.chmod(0o755)
+
+    if role == "gateway":
+        script_name = "gw_restart.sh"
+        function_name = "start_lab_arena_service"
+        relative_path = "scripts/run_lab_arena_service.py"
+        environment_file = historical_checkout / "gateway.env"
+        production_args = [
+            "--environment-file",
+            str(environment_file),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8792",
+        ]
+        environment = {
+            "GATEWAY_PYTHON_BIN": sys.executable,
+            "LEADPOET_REPO_ROOT": str(historical_checkout),
+            "GATEWAY_RESTART_AUTHORITY_ROOT": str(current_authority),
+            "GATEWAY_ENV_FILE": str(environment_file),
+            "GATEWAY_LOG_ROOT": str(tmp_path / "logs"),
+            "LAB_ARENA_SERVICE_LOG_FILE": str(tmp_path / "arena.log"),
+            "LAB_ARENA_SERVICE_STATE_FILE": str(state_file),
+            "LAB_ARENA_MODE": "shadow",
+        }
+        shell_suffix = '\ntimeout() { return 0; }\n'
+    else:
+        script_name = "validator_restart.sh"
+        function_name = "start_lab_arena_runner"
+        relative_path = "scripts/run_lab_arena_runner.py"
+        production_args = []
+        runsc = tmp_path / "runsc"
+        runsc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        runsc.chmod(0o755)
+        environment = {
+            "VALIDATOR_PYTHON_BIN": sys.executable,
+            "VALIDATOR_ROOT": str(historical_checkout),
+            "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(current_authority),
+            "LAB_ARENA_RUNNER_STATE_FILE": str(state_file),
+            "LAB_ARENA_RUNNER_LOG_FILE": str(tmp_path / "arena.log"),
+            "LAB_ARENA_MODE": "shadow",
+            "LAB_ARENA_API_BASE_URL": "https://gateway.invalid",
+            "LAB_ARENA_RUNSC_PATH": str(runsc),
+        }
+        shell_suffix = "\nsleep() { :; }\n"
+
+    selector = _shell_process_helper_selector(script_name, role)
+    start_function = _shell_function(script_name, function_name)
+    _make_entrypoint(historical_checkout, relative_path)
+    shell = "set -e\n" + selector + start_function + shell_suffix
+    shell += f"\n{function_name}\n"
+    state: dict[str, object] = {}
+    try:
+        result = subprocess.run(
+            ["bash", "-c", shell],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env={
+                **os.environ,
+                **environment,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        assert state["cwd"] == str(historical_checkout.resolve())
+        if production_args:
+            assert state["argv"][-len(production_args) :] == production_args
+        else:
+            assert state["argv"][-1] == relative_path
+        assert not (historical_checkout / "scripts" / HELPER.name).exists()
+    finally:
+        if state_file.exists():
+            _helper(
+                "stop",
+                historical_checkout,
+                state_file,
+                relative_path,
+                production_args,
+            )
+        pgid = state.get("pgid")
+        if isinstance(pgid, int):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize(

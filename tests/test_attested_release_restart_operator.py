@@ -216,6 +216,17 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert r'bash \"$gateway_restart_entrypoint_root/gw_restart.sh\"' in source
     assert r'bash \"\$authority_root/validator_restart.sh\"' in source
     assert r"""bash \"\$authority_root/validator_restart.sh\" --commit '$commit'""" in source
+    assert (
+        r'test -r \"\$authority_root/scripts/manage_owned_process_group.py\"'
+        in source
+    )
+    assert (
+        r'test ! -L \"\$authority_root/scripts/manage_owned_process_group.py\"'
+        in source
+    )
+    assert source.count(
+        r'hash-object --no-filters \"\$authority_root/scripts/manage_owned_process_group.py\"'
+    ) == 2
     assert "git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit'" in source
     assert "gateway-restart-controller-bootstrap" in source
     assert "--validator-hotkey-config '$VALIDATOR_V2_HOTKEY_CONFIG_PATH'" in source

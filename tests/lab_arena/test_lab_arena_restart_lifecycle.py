@@ -15,7 +15,7 @@ def test_gateway_restart_replaces_and_checks_the_arena_sidecar() -> None:
 
     destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1")
     stop_helper = script.index(
-        'GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_PREFLIGHT_TREE/'
+        'GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"'
     )
     stop = script.index("stop_lab_arena_service", destructive)
     gateway_health = script.index(
@@ -26,10 +26,17 @@ def test_gateway_restart_replaces_and_checks_the_arena_sidecar() -> None:
 
     assert stop_helper < destructive < stop < gateway_health < start < handoff
     assert 'stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"' in script
+    assert (
+        'GATEWAY_CONTROLLER_PROCESS_HELPER="$GATEWAY_RESTART_AUTHORITY_ROOT/'
+        'scripts/manage_owned_process_group.py"'
+        in script
+    )
     assert "scripts/run_lab_arena_service.py" in script
     function_start = script.index("start_lab_arena_service() {")
     function_end = script.index("\n}\n", function_start)
     function = script[function_start:function_end]
+    assert '"$GATEWAY_CONTROLLER_PROCESS_HELPER" record' in function
+    assert '"$GATEWAY_CONTROLLER_PROCESS_STATE_FILE"' in function
     sidecar_health = function.index("http://127.0.0.1:8792/arena/v1/current")
     public_health = function.index("http://127.0.0.1:8000/arena/v1/current")
     assert sidecar_health < public_health
@@ -128,7 +135,7 @@ def test_validator_restart_replaces_runner_after_gateway_alignment() -> None:
     )
     preflight = script.index("python3 -m validator_tee.host.restart_preflight_v2")
     stop_helper = script.index(
-        'VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_ROOT/'
+        'VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_CONTROLLER_PROCESS_HELPER"'
     )
     stop = script.index("stop_lab_arena_runner", destructive)
     application = script.index(
@@ -149,6 +156,17 @@ def test_validator_restart_replaces_runner_after_gateway_alignment() -> None:
         < complete
     )
     assert 'stop_lab_arena_runner "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER"' in script
+    assert (
+        'VALIDATOR_CONTROLLER_PROCESS_HELPER="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/'
+        'scripts/manage_owned_process_group.py"'
+        in script
+    )
+    assert '"$VALIDATOR_CONTROLLER_PROCESS_HELPER" record' in script
+    assert '"$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE"' in script
+    assert script.count('"VALIDATOR_CONTROLLER_PROCESS_HELPER",') == 2
+    assert script.count('"VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",') == 2
+    assert script.count('"LAB_ARENA_PROCESS_HELPER",') == 2
+    assert script.count('"LAB_ARENA_RUNNER_STATE_FILE",') == 2
     assert "scripts/run_lab_arena_runner.py" in script
     assert (
         'LAB_ARENA_WALLET_PATH="${LAB_ARENA_WALLET_PATH:-$VALIDATOR_WALLET_ROOT}"'

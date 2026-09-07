@@ -8,7 +8,6 @@ GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
 LAB_ARENA_SERVICE_LOG_FILE="${LAB_ARENA_SERVICE_LOG_FILE:-$GATEWAY_LOG_ROOT/lab_arena_service.log}"
 LAB_ARENA_SERVICE_STATE_FILE="${LAB_ARENA_SERVICE_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-service-process.json}"
-LAB_ARENA_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$LEADPOET_REPO_ROOT/scripts/manage_owned_process_group.py}"
 GATEWAY_PRIVATE_KEY_PATH="${GATEWAY_PRIVATE_KEY_PATH:-$GATEWAY_LOG_ROOT/secrets/gateway_private_key.pem}"
 ARWEAVE_KEYFILE_PATH="${ARWEAVE_KEYFILE_PATH:-$GATEWAY_LOG_ROOT/secrets/arweave_keyfile.json}"
 GATEWAY_RESTART_GIT_SSH_COMMAND="${GATEWAY_RESTART_GIT_SSH_COMMAND:-}"
@@ -30,6 +29,13 @@ GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-us
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
 GATEWAY_RESTART_AUTHORITY_ROOT="${GATEWAY_RESTART_AUTHORITY_ROOT:-}"
 GATEWAY_RESTART_AUTHORITY_COMMIT="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
+if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
+  GATEWAY_CONTROLLER_PROCESS_HELPER="$GATEWAY_RESTART_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+else
+  GATEWAY_CONTROLLER_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$LEADPOET_REPO_ROOT/scripts/manage_owned_process_group.py}"
+fi
+LAB_ARENA_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
+GATEWAY_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_SERVICE_STATE_FILE"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
 GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="${GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="${GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT:-standalone}"
@@ -210,13 +216,13 @@ wait_for_gateway_v2_authority() {
 }
 
 stop_lab_arena_service() {
-  local process_helper="${1:-$LAB_ARENA_PROCESS_HELPER}"
+  local process_helper="${1:-$GATEWAY_CONTROLLER_PROCESS_HELPER}"
   if [ ! -r "$process_helper" ] || [ -L "$process_helper" ]; then
-    echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+    echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
     return 1
   fi
   "$GATEWAY_PYTHON_BIN" "$process_helper" stop \
-    --state-file "$LAB_ARENA_SERVICE_STATE_FILE" \
+    --state-file "$GATEWAY_CONTROLLER_PROCESS_STATE_FILE" \
     --cwd "$LEADPOET_REPO_ROOT" \
     --uid "$(id -u)" \
     -- \
@@ -243,8 +249,9 @@ start_lab_arena_service() {
     echo "ERROR: Lab Arena service entrypoint is unavailable" >&2
     return 1
   fi
-  if [ ! -r "$LAB_ARENA_PROCESS_HELPER" ]; then
-    echo "ERROR: Lab Arena process ownership helper is unavailable" >&2
+  if [ ! -r "$GATEWAY_CONTROLLER_PROCESS_HELPER" ] \
+      || [ -L "$GATEWAY_CONTROLLER_PROCESS_HELPER" ]; then
+    echo "ERROR: verified controller Lab Arena process helper is unavailable" >&2
     return 1
   fi
   mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
@@ -258,8 +265,8 @@ start_lab_arena_service() {
       > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
       9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
   pid="$!"
-  if ! "$GATEWAY_PYTHON_BIN" "$LAB_ARENA_PROCESS_HELPER" record \
-      --state-file "$LAB_ARENA_SERVICE_STATE_FILE" \
+  if ! "$GATEWAY_PYTHON_BIN" "$GATEWAY_CONTROLLER_PROCESS_HELPER" record \
+      --state-file "$GATEWAY_CONTROLLER_PROCESS_STATE_FILE" \
       --cwd "$LEADPOET_REPO_ROOT" \
       --uid "$(id -u)" \
       --launch-pgid "$pid" \
@@ -371,6 +378,10 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   GATEWAY_RESTART_CONTROLLER_ROOT
   GATEWAY_RESTART_AUTHORITY_ROOT
   GATEWAY_RESTART_AUTHORITY_COMMIT
+  GATEWAY_CONTROLLER_PROCESS_HELPER
+  GATEWAY_CONTROLLER_PROCESS_STATE_FILE
+  LAB_ARENA_PROCESS_HELPER
+  LAB_ARENA_SERVICE_STATE_FILE
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID
   GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED
   GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT
@@ -3901,10 +3912,10 @@ if ! (
   exit 1
 fi
 
-GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
 if [ ! -r "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER" ] \
     || [ -L "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER" ]; then
-  echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+  echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi

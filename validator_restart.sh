@@ -4,7 +4,6 @@ set -euo pipefail
 VALIDATOR_ROOT="${VALIDATOR_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/validator.env}"
 LAB_ARENA_RUNNER_STATE_FILE="${LAB_ARENA_RUNNER_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-runner-process.json}"
-LAB_ARENA_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$VALIDATOR_ROOT/scripts/manage_owned_process_group.py}"
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
 VALIDATOR_ENV_BACKUP_DIR="${VALIDATOR_ENV_BACKUP_DIR:-/home/ec2-user/.config/leadpoet/env-backups}"
 EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
@@ -49,6 +48,13 @@ VALIDATOR_RESTART_STARTED_EPOCH="${VALIDATOR_RESTART_STARTED_EPOCH:-$(date -u +%
 VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$}"
 VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT:-}"
 VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT:-}"
+if [ -n "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" ]; then
+  VALIDATOR_CONTROLLER_PROCESS_HELPER="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+else
+  VALIDATOR_CONTROLLER_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$VALIDATOR_ROOT/scripts/manage_owned_process_group.py}"
+fi
+LAB_ARENA_PROCESS_HELPER="$VALIDATOR_CONTROLLER_PROCESS_HELPER"
+VALIDATOR_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_RUNNER_STATE_FILE"
 VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-$VALIDATOR_RESTART_INVOCATION_ID}"
 VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="${VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}"
@@ -127,13 +133,13 @@ run_bounded_validator_restart_artifact_cleanup() {
 }
 
 stop_lab_arena_runner() {
-  local process_helper="${1:-$LAB_ARENA_PROCESS_HELPER}"
+  local process_helper="${1:-$VALIDATOR_CONTROLLER_PROCESS_HELPER}"
   if [ ! -r "$process_helper" ] || [ -L "$process_helper" ]; then
-    echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+    echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
     return 1
   fi
   sudo "$VALIDATOR_PYTHON_BIN" "$process_helper" stop \
-    --state-file "$LAB_ARENA_RUNNER_STATE_FILE" \
+    --state-file "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" \
     --cwd "$VALIDATOR_ROOT" \
     --uid "$(sudo id -u)" \
     -- \
@@ -163,8 +169,9 @@ start_lab_arena_runner() {
     echo "ERROR: Lab Arena runner entrypoint is unavailable" >&2
     return 1
   fi
-  if [ ! -r "$LAB_ARENA_PROCESS_HELPER" ]; then
-    echo "ERROR: Lab Arena process ownership helper is unavailable" >&2
+  if [ ! -r "$VALIDATOR_CONTROLLER_PROCESS_HELPER" ] \
+      || [ -L "$VALIDATOR_CONTROLLER_PROCESS_HELPER" ]; then
+    echo "ERROR: verified controller Lab Arena process helper is unavailable" >&2
     return 1
   fi
   runsc_path="${LAB_ARENA_RUNSC_PATH:-}"
@@ -197,8 +204,8 @@ start_lab_arena_runner() {
       > "$LAB_ARENA_RUNNER_LOG_FILE" 2>&1 < /dev/null &
   pid="$!"
   sleep 3
-  if ! sudo "$VALIDATOR_PYTHON_BIN" "$LAB_ARENA_PROCESS_HELPER" record \
-      --state-file "$LAB_ARENA_RUNNER_STATE_FILE" \
+  if ! sudo "$VALIDATOR_PYTHON_BIN" "$VALIDATOR_CONTROLLER_PROCESS_HELPER" record \
+      --state-file "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" \
       --cwd "$VALIDATOR_ROOT" \
       --uid "$(sudo id -u)" \
       --launch-pgid "$pid" \
@@ -1024,12 +1031,16 @@ cache = Path(sys.argv[2])
 export_file = Path(sys.argv[3])
 raw = src.read_text()
 cache_excluded_keys = {
+    "LAB_ARENA_PROCESS_HELPER",
+    "LAB_ARENA_RUNNER_STATE_FILE",
     "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
     "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_CONTROLLER_PROCESS_HELPER",
+    "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
     "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
@@ -1082,12 +1093,16 @@ skip_keys = {
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "LAB_ARENA_PROCESS_HELPER",
+    "LAB_ARENA_RUNNER_STATE_FILE",
     "VALIDATOR_COORDINATED_EXPECTED_COMMIT",
     "VALIDATOR_DEPLOY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_CONTROLLER_PROCESS_HELPER",
+    "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "VALIDATOR_EXACT_RELEASE_PINNED",
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
@@ -1713,10 +1728,10 @@ python3 -m validator_tee.host.restart_preflight_v2 \
   --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
   --host-hotkey-directory "$HOST_HOTKEY_DIR"
 
-VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_ROOT/scripts/manage_owned_process_group.py"
+VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_CONTROLLER_PROCESS_HELPER"
 if [ ! -r "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER" ] \
     || [ -L "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER" ]; then
-  echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+  echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
   echo "Validator remains running; production shutdown has not started." >&2
   exit 1
 fi

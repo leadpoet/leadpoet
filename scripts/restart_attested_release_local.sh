@@ -1663,6 +1663,9 @@ build_gateway_restart_command() {
       find \"\$authority_root\" -type f ! \( -perm -100 -o -perm -010 -o -perm -001 \) -exec chmod 400 {} +
       find \"\$authority_root\" -type d -exec chmod 500 {} +
       run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/authority-plan.json\" --materialized-root \"\$authority_root\" --phase prepared_archive --strict-extras >/dev/null
+      test -r \"\$authority_root/scripts/manage_owned_process_group.py\"
+      test ! -L \"\$authority_root/scripts/manage_owned_process_group.py\"
+      test \"\$(git -C '$GATEWAY_REPO_ROOT' hash-object --no-filters \"\$authority_root/scripts/manage_owned_process_group.py\")\" = \"\$(git -C '$GATEWAY_REPO_ROOT' rev-parse '$branch_commit:scripts/manage_owned_process_group.py')\"
 $miner_candidate_prepare
       exec env \\
         LEADPOET_REPO_ROOT='$GATEWAY_REPO_ROOT' \\
@@ -1804,10 +1807,13 @@ run_validator_restart() {
     GIT_NO_REPLACE_OBJECTS=1 git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit' | tar -xf - -C \"\$authority_root\"
     test -r \"\$authority_root/validator_restart.sh\"
     test -r \"\$authority_root/gateway/tee/prepare_active_release_lineage_v2.py\"
+    test -r \"\$authority_root/scripts/manage_owned_process_group.py\"
+    test ! -L \"\$authority_root/scripts/manage_owned_process_group.py\"
     test -x '$VALIDATOR_PYTHON_BIN'
     test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters \"\$authority_root/validator_restart.sh\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$branch_commit:validator_restart.sh')\"
     find \"\$authority_root\" -type f -exec chmod 400 {} +
     find \"\$authority_root\" -type d -exec chmod 500 {} +
+    test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters \"\$authority_root/scripts/manage_owned_process_group.py\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$branch_commit:scripts/manage_owned_process_group.py')\"
     exec env \\
       VALIDATOR_ROOT='$VALIDATOR_REPO_ROOT' \\
       VALIDATOR_PYTHON_BIN='$VALIDATOR_PYTHON_BIN' \\

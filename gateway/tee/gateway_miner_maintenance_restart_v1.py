@@ -4347,11 +4347,6 @@ def verify_gateway_miner_maintenance_shutdown_quiescence(
     }
 
 
-def _require_runtime_miner_disabled(runtime_status: Mapping[str, Any]) -> None:
-    if runtime_status.get("miner_submissions_enabled") is not False:
-        raise GatewayMinerMaintenanceRestartError(
-            "running gateway has miner submissions enabled"
-        )
 
 
 def verify_gateway_miner_maintenance_runtime_state(
@@ -4363,11 +4358,10 @@ def verify_gateway_miner_maintenance_runtime_state(
     secrets_client: Any = None,
     hydrated_environment_path: Path = CANONICAL_GATEWAY_ENV_PATH,
 ) -> dict[str, str]:
-    """Recheck the exact false state against the activated live runtime."""
+    """Verify the active SOURCE_ADD guard and restore its durable state."""
 
     _require_fixed_bootstrap_authority(runtime_environment)
     _require_disabled_parent_environment(runtime_environment)
-    _require_runtime_miner_disabled(runtime_status)
     _require_runtime_source_add_closed(runtime_status)
     secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
     result = verify_gateway_miner_maintenance_state(

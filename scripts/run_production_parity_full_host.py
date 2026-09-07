@@ -2548,10 +2548,6 @@ def _run_miner_intake_path(
         or evidence.get("chain_registration_boundary")
         != "strict-ephemeral-hotkey"
         or evidence.get("source_add", {}).get("admitted") is not True
-        or evidence.get("source_add", {}).get(
-            "global_miner_submissions_enabled"
-        )
-        is not False
         or evidence.get("source_add", {}).get("source_add_paused") is not False
     ):
         raise FullParityError("miner-intake evidence is incomplete")
@@ -2693,10 +2689,6 @@ async def _run_miner_intake_child_validated(
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     source_controls: dict[str, Any] = {}
     try:
-        if research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled:
-            raise FullParityError(
-                "miner-intake child did not start with non-SOURCE_ADD intake closed"
-            )
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://production-parity.invalid",
@@ -2813,10 +2805,7 @@ async def _run_miner_intake_child_validated(
                 or builtwith_credential in source_persistence
             ):
                 raise FullParityError("SOURCE_ADD admission persistence is incomplete")
-            if (
-                (await source_add_control_state()).get("paused") is not False
-                or research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled
-            ):
+            if (await source_add_control_state()).get("paused") is not False:
                 raise FullParityError("SOURCE_ADD admission changed its intake controls")
 
             retired_payload = _research_lab_signed_payload(
@@ -2887,7 +2876,6 @@ async def _run_miner_intake_child_validated(
                 "credential_transport": "operator-managed-production-contract",
                 "public_credentials_forbidden": True,
                 "plaintext_absent": True,
-                "global_miner_submissions_enabled": False,
                 "source_add_paused": False,
             },
         }

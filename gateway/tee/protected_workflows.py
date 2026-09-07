@@ -629,7 +629,6 @@ PROTECTED_SYMBOLS = {
         "bootstrap_gateway_miner_maintenance_restart",
         "_fetch_runtime_status",
         "verify_gateway_miner_maintenance_shutdown_quiescence",
-        "_require_runtime_miner_disabled",
         "verify_gateway_miner_maintenance_runtime_state",
         "_active_tree_hash",
         "main",

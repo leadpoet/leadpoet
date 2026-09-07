@@ -2673,31 +2673,9 @@ def test_identical_document_alternate_version_hydration_equivalence_passes(
     assert result["current_secret_version_id"] == proof_current
 
 
-@pytest.mark.parametrize("runtime_value", [True, None, "false", 0])
-def test_runtime_state_requires_live_boolean_exact_false(
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_value,
-):
-    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
-    with pytest.raises(
-        maintenance.GatewayMinerMaintenanceRestartError,
-        match="running gateway has miner submissions enabled",
-    ):
-        maintenance.verify_gateway_miner_maintenance_runtime_state(
-            deploy_commit=CANDIDATE_COMMIT,
-            candidate_tree_hash=TREE_HASH,
-            runtime_environment={
-                "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
-            },
-            runtime_status={
-                "miner_submissions_enabled": runtime_value,
-                **_closed_source_add_runtime_status(),
-            },
-            secrets_client=client,
-        )
 
 
-def test_runtime_state_rechecks_live_and_durable_false_state(
+def test_runtime_state_restores_source_add_without_retired_miner_flag(
     monkeypatch: pytest.MonkeyPatch,
 ):
     client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
@@ -2711,7 +2689,6 @@ def test_runtime_state_rechecks_live_and_durable_false_state(
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
         },
         runtime_status={
-            "miner_submissions_enabled": False,
             **_closed_source_add_runtime_status(),
         },
         secrets_client=client,
@@ -2775,7 +2752,6 @@ def test_runtime_releases_guard_only_after_candidate_state_verifies(
             "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
         },
         runtime_status={
-            "miner_submissions_enabled": False,
             **_closed_source_add_runtime_status(),
         },
         secrets_client=client,
@@ -2826,7 +2802,6 @@ def test_runtime_restores_a_previously_paused_source_add_state(
             "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
         },
         runtime_status={
-            "miner_submissions_enabled": False,
             **_closed_source_add_runtime_status(),
         },
         secrets_client=client,
@@ -2875,7 +2850,6 @@ def test_runtime_restoration_failure_forces_source_add_back_to_paused(
                 "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
             },
             runtime_status={
-                "miner_submissions_enabled": False,
                 **_closed_source_add_runtime_status(),
             },
             secrets_client=client,
@@ -2927,7 +2901,6 @@ def test_runtime_secret_read_failure_after_release_forces_source_add_paused(
                 "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
             },
             runtime_status={
-                "miner_submissions_enabled": False,
                 **_closed_source_add_runtime_status(),
             },
             secrets_client=client,
@@ -3179,7 +3152,6 @@ def test_candidate_runtime_rejects_missing_source_add_intake_field(
     monkeypatch: pytest.MonkeyPatch,
 ):
     status = {
-        "miner_submissions_enabled": False,
         **_closed_source_add_runtime_status(),
     }
     del status["source_add"]["intake_enabled"]

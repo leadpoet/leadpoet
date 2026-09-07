@@ -4845,7 +4845,6 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
                     "chain_registration_boundary": "strict-ephemeral-hotkey",
                     "source_add": {
                         "admitted": True,
-                        "global_miner_submissions_enabled": False,
                         "source_add_paused": False,
                     },
                 }

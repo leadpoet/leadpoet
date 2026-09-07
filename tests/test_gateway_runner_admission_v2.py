@@ -252,3 +252,18 @@ def test_attested_workflow_scopes_mutation_and_gates_only_gateway_parent():
     command = admission["steps"][-1]["run"]
     assert "scripts/admit_gateway_runner_v2.py" in command
     assert "--timeout-seconds 1800" in command
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress"])
+def test_full_workflow_keeps_manual_diagnostics_outside_automatic_cancellation(status):
+    with open(".github/workflows/physical-v2-staging.yml", encoding="utf-8") as source:
+        workflow = yaml.safe_load(source)
+    assert workflow["concurrency"] == {
+        "group": "production-parity-full-${{ github.event_name }}",
+        "cancel-in-progress": True,
+    }
+    assert select_superseded_runs(
+        [_run(9, status=status), _run(8, event="workflow_dispatch", status=status)],
+        current_sha=CURRENT,
+        current_run_id=10,
+    ) == (9,)

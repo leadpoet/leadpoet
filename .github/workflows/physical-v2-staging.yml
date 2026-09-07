@@ -12,7 +12,8 @@ on:
         type: string
 
 concurrency:
-  group: production-parity-full
+  # Release admission can preempt automatic runs; explicit diagnostics survive.
+  group: production-parity-full-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:

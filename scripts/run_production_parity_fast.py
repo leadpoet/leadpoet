@@ -883,10 +883,12 @@ class _DockerDatabase:
 DO $$ BEGIN CREATE ROLE anon NOLOGIN INHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE authenticated NOLOGIN INHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE service_role NOLOGIN INHERIT BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE lab_arena_owner NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE lab_arena_service NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER ROLE anon WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE authenticated WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE service_role WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
+ALTER ROLE lab_arena_owner WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE lab_arena_service WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE SCHEMA IF NOT EXISTS extensions;
@@ -943,6 +945,12 @@ SELECT json_build_object(
       AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
       AND NOT rolbypassrls
   ),
+  'arena_owner_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'lab_arena_owner'
+      AND NOT rolcanlogin AND NOT rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND NOT rolbypassrls
+  ),
   'auth_schema', to_regnamespace('auth') IS NOT NULL,
   'extensions_schema', to_regnamespace('extensions') IS NOT NULL,
   'pgcrypto_extension', EXISTS (
@@ -966,6 +974,7 @@ SELECT json_build_object(
             "anon_role",
             "authenticated_role",
             "service_role",
+            "arena_owner_role",
             "arena_service_role",
             "auth_schema",
             "extensions_schema",

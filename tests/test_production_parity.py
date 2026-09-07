@@ -1460,6 +1460,7 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
         "anon_role",
         "authenticated_role",
         "service_role",
+        "arena_owner_role",
         "arena_service_role",
         "auth_schema",
         "extensions_schema",
@@ -1482,7 +1483,12 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
     bootstrap = observed[0]
     for role in ("anon", "authenticated", "service_role"):
         assert f"CREATE ROLE {role} NOLOGIN INHERIT" in bootstrap
+    assert "CREATE ROLE lab_arena_owner NOLOGIN NOINHERIT" in bootstrap
     assert "CREATE ROLE lab_arena_service NOLOGIN NOINHERIT" in bootstrap
+    assert (
+        "ALTER ROLE lab_arena_owner WITH NOLOGIN NOINHERIT NOSUPERUSER "
+        "NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;"
+    ) in bootstrap
     assert "CREATE SCHEMA IF NOT EXISTS auth" in bootstrap
     assert "CREATE SCHEMA IF NOT EXISTS extensions" in bootstrap
     assert "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions" in bootstrap

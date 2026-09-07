@@ -933,32 +933,11 @@ def verify_migration_backed_database_contract(
         raise SystemExit(
             "migration-backed compact weight settlement contract is missing"
         )
-    if document.get("provider_outcome_contention_contract") != {
-        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
-        "lock_contention_status": "busy",
-        "stale_lineage_status": "conflict",
-        "candidate_checkpoint_hash": True,
-        "conflict_head_checkpoint_row": "encrypted_or_null",
-    }:
-        raise SystemExit(
-            "migration-backed provider outcome contract evidence is missing"
-        )
     if document.get("provider_persistence_batch") != {
-        "batch_size": 5,
-        "durable_count": 5,
-        "batch_replay_exact": True,
-        "batch_conflict_head_exact": True,
-        "cache_put_exact": True,
-        "cache_replay_exact": True,
-        "schema": {
-            "schema_version": (
-                "leadpoet.provider_persistence_batch_contract.v1"
-            ),
-            "cache_put": "atomic_exact_row",
-            "outcome_append": "atomic_contiguous_batch",
-            "outcome_batch_max": 32,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
+        "schema_version": (
+            "leadpoet.provider_persistence_batch_contract.v1"
+        ),
+        "cache_put": "atomic_exact_row",
     }:
         raise SystemExit(
             "migration-backed provider persistence batch evidence is missing"
@@ -973,19 +952,6 @@ def verify_migration_backed_database_contract(
     }:
         raise SystemExit(
             "migration-backed maintenance lease evidence is missing"
-        )
-    provider_append = document.get("provider_outcome_append")
-    if (
-        not isinstance(provider_append, dict)
-        or provider_append.get("accepted_count") != 1
-        or provider_append.get("rejected_count") != 1
-        or provider_append.get("row_count") != 3
-        or provider_append.get("contention_rollback_delta") != 0
-        or provider_append.get("durable_head_conflict_verified") is not True
-        or provider_append.get("empty_head_conflict_verified") is not True
-    ):
-        raise SystemExit(
-            "migration-backed provider outcome append evidence is missing"
         )
     relations = document.get("relations")
     if (

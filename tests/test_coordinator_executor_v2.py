@@ -11,13 +11,11 @@ from gateway.tee.coordinator_executor_v2 import (
     OP_ATTEST_WEIGHT_INPUT,
     OP_ATTEST_WEIGHT_PUBLICATION,
     OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
-    OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
     OP_RESEARCH_LAB_ALLOCATION,
     CoordinatorExecutorV2,
     coordinator_receipt_output_v2,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
-from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
 from gateway.tee.scoring_executor import ScoringExecutionResult
 from leadpoet_canonical.attested_v2 import (
     RECEIPT_GRAPH_SCHEMA_VERSION,
@@ -532,56 +530,9 @@ async def test_coordinator_attests_legacy_settlement_only_from_measured_source()
 
 
 @pytest.mark.asyncio
-async def test_coordinator_attests_measured_provider_outcome_snapshot():
-    snapshot = ProviderOutcomeLedgerV2(
-        clock=lambda: "2026-07-10T12:00:00Z"
-    ).snapshot()
-    checkpoint_hash = "sha256:" + "9" * 64
-    result = await CoordinatorExecutorV2(
-        provider_outcome_supplier=lambda: {
-            "snapshot": snapshot,
-            "transport_attempts": [],
-            "evidence_artifact_hashes": [checkpoint_hash],
-        }
-    )(
-        OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
-        {"schema_version": "leadpoet.provider_outcome_snapshot_request.v2"},
-        ExecutionContextV2(
-            job_id="provider-outcome:1",
-            purpose="research_lab.provider_outcome_snapshot.v2",
-            epoch_id=1,
-        ),
-    )
-    assert result.output == snapshot
-    assert set(result.artifact_hashes) == {
-        snapshot["provider_outcome_digest_hash"],
-        snapshot["source_state_hash"],
-        checkpoint_hash,
-    }
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rejects_tampered_provider_outcome_snapshot():
-    snapshot = ProviderOutcomeLedgerV2(
-        clock=lambda: "2026-07-10T12:00:00Z"
-    ).snapshot()
-    snapshot["source_state_hash"] = "sha256:" + "f" * 64
-    with pytest.raises(Exception, match="commitments differ"):
-        await CoordinatorExecutorV2(
-            provider_outcome_supplier=lambda: {
-                "snapshot": snapshot,
-                "transport_attempts": [],
-                "evidence_artifact_hashes": [],
-            }
-        )(
-            OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
-            {"schema_version": "leadpoet.provider_outcome_snapshot_request.v2"},
-            ExecutionContextV2(
-                job_id="provider-outcome:1",
-                purpose="research_lab.provider_outcome_snapshot.v2",
-                epoch_id=1,
-            ),
-        )
 
 
 @pytest.mark.asyncio

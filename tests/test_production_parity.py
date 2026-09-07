@@ -4066,9 +4066,6 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
                 "/production/provider-evidence.jsonl"
             ),
-            "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH": (
-                "/production/provider-outcomes.jsonl"
-            ),
             "RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX": (
                 "s3://production/signatures"
             ),
@@ -4170,7 +4167,6 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["RESEARCH_LAB_EVIDENCE_PROXY_URL"] == ""
     assert environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR"] == ""
     assert environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"] == ""
-    assert environment["RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"] == ""
     assert environment["RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX"] == ""
     assert environment["RESEARCH_LAB_SCORING_CACHE_DIR"] == (
         production_parity_scoring_cache_dir(run_id="pp-1-1")
@@ -4275,11 +4271,6 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
         {
             "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
                 "/production/provider-evidence.jsonl"
-            )
-        },
-        {
-            "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH": (
-                "/production/provider-outcomes.jsonl"
             )
         },
         {

@@ -207,7 +207,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"',
             'echo "Installing Python dependencies"',
             'echo "Relaunching gateway with cloned runtime env"',
-            'unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH',
+            'unset RESEARCH_LAB_EVIDENCE_PROXY_URL',
             'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
             'for attempt in $(seq 1 120)',
             'curl -fsS http://localhost:8000/health',
@@ -2680,10 +2680,7 @@ def test_gateway_restart_disables_the_retired_host_provider_proxy() -> None:
     assert 'pkill -9 -f "gateway.research_lab.provider_evidence_proxy"' in script
     assert '"$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_evidence_proxy' not in script
     assert "legacy_v1" not in script
-    assert (
-        "unset RESEARCH_LAB_EVIDENCE_PROXY_URL "
-        "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"
-    ) in script
+    assert "unset RESEARCH_LAB_EVIDENCE_PROXY_URL" in script
 
 
 def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:

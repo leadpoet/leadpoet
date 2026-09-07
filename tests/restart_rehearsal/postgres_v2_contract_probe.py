@@ -165,18 +165,6 @@ TRANSPORT_FIX_MIGRATION = "128-research-lab-chain-settlement-transport-purposes.
 TRANSPORT_TERMINAL_MIGRATION = (
     "129-research-lab-attested-local-transport.sql"
 )
-PROVIDER_OUTCOME_APPEND_MIGRATION = (
-    "130-research-lab-provider-outcome-append.sql"
-)
-PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION = (
-    "131-research-lab-provider-outcome-backpressure.sql"
-)
-PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION = (
-    "133-research-lab-provider-outcome-contention-status.sql"
-)
-PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION = (
-    "134-research-lab-provider-outcome-head-contention.sql"
-)
 ANCESTRY_CHECKPOINT_MIGRATION = (
     "136-research-lab-ancestry-checkpoint-sidecars.sql"
 )
@@ -291,11 +279,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     *MIGRATIONS_BEFORE_TRANSPORT_FIX[5:],
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
-    PROVIDER_OUTCOME_APPEND_MIGRATION,
-    PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
-    PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
-    PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
@@ -331,10 +315,6 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "pre_129_attested_local_transport_rejected",
     "post_129_attested_local_transport_persisted",
     "transport_terminal_contract_valid",
-    "pre_133_provider_outcome_contract_rejected",
-    "post_133_provider_outcome_contract_valid",
-    "pre_134_provider_outcome_head_contract_rejected",
-    "post_134_provider_outcome_head_contract_valid",
     "post_136_ancestry_checkpoint_contract_valid",
     "post_137_allocation_settlement_frontier_contract_valid",
     "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
@@ -363,11 +343,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
-    "provider_outcome_append_atomic",
-    "provider_outcome_batch_append_atomic",
     "provider_evidence_cache_put_atomic",
-    "provider_outcome_contention_zero_rollback",
-    "provider_outcome_conflict_head_exact",
     "pre_132_lifetime_credit_rejected",
     "post_132_lifetime_credit_persisted",
     "lifetime_credit_rpc_idempotent",
@@ -1477,30 +1453,8 @@ def _atomic_credit_resume_postgres_contract(
     return evidence
 
 
-def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
-    payload = json.dumps(dict(row), sort_keys=True, separators=(",", ":"))
-    if "$leadpoet$" in payload:
-        raise PostgresContractProbeError(
-            "provider outcome checkpoint JSON delimiter collision"
-        )
-    return (
-        "SELECT public.append_research_lab_provider_outcome_checkpoint_v2("
-        "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
-    )
 
 
-def _provider_outcome_batch_append_sql(
-    rows: Sequence[Mapping[str, Any]],
-) -> str:
-    payload = json.dumps(list(rows), sort_keys=True, separators=(",", ":"))
-    if "$leadpoet$" in payload:
-        raise PostgresContractProbeError(
-            "provider outcome checkpoint batch JSON delimiter collision"
-        )
-    return (
-        "SELECT public.append_research_lab_provider_outcome_checkpoints_v2("
-        "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
-    )
 
 
 def _provider_cache_put_sql(row: Mapping[str, Any]) -> str:
@@ -1515,496 +1469,8 @@ def _provider_cache_put_sql(row: Mapping[str, Any]) -> str:
     )
 
 
-def _provider_persistence_batch_contract(
-    database: DisposablePostgres,
-) -> dict[str, Any]:
-    def checkpoint_row(
-        sequence: int,
-        checkpoint_hash: str,
-        previous_hash: str,
-        suffix: str,
-    ) -> dict[str, Any]:
-        return {
-            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
-            "artifact_master_key_ref_hash": "sha256:" + "8" * 64,
-            "utc_day": "2026-07-11",
-            "sequence": sequence,
-            "checkpoint_hash": checkpoint_hash,
-            "previous_checkpoint_hash": previous_hash,
-            "state_document_hash": sha256_json(
-                {"provider_persistence_batch_state": suffix}
-            ),
-            "checkpoint_artifact_id": sha256_json(
-                {"provider_persistence_batch_artifact": sequence}
-            ),
-            "encrypted_checkpoint_doc": {
-                "schema_version": "leadpoet.encrypted_artifact.v2",
-                "fixture": "batch-%d" % sequence,
-            },
-        }
-
-    batch = []
-    previous = ""
-    for sequence, suffix in enumerate(("1", "2", "3", "4", "5"), start=1):
-        checkpoint_hash = sha256_json(
-            {"provider_persistence_batch_checkpoint": sequence}
-        )
-        batch.append(
-            checkpoint_row(sequence, checkpoint_hash, previous, suffix)
-        )
-        previous = checkpoint_hash
-    inserted = json.loads(
-        database.psql(
-            _provider_outcome_batch_append_sql(batch),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    expected_inserted = {
-        "status": "inserted",
-        "checkpoint_hash": batch[-1]["checkpoint_hash"],
-        "checkpoint_count": len(batch),
-    }
-    if inserted != expected_inserted:
-        raise PostgresContractProbeError(
-            "provider outcome batch insert result differs"
-        )
-    replayed = json.loads(
-        database.psql(
-            _provider_outcome_batch_append_sql(batch),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if replayed != {**expected_inserted, "status": "existing"}:
-        raise PostgresContractProbeError(
-            "provider outcome batch replay result differs"
-        )
-    durable_count = int(
-        database.psql(
-            """
-            SELECT pg_catalog.count(*)
-            FROM public.research_lab_provider_outcome_checkpoints_v2
-            WHERE artifact_master_key_ref_hash =
-                  'sha256:8888888888888888888888888888888888888888888888888888888888888888'
-              AND utc_day = DATE '2026-07-11';
-            """,
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if durable_count != len(batch):
-        raise PostgresContractProbeError(
-            "provider outcome batch durable row count differs"
-        )
-
-    stale = [
-        checkpoint_row(
-            7,
-            sha256_json({"provider_persistence_batch_checkpoint": 7}),
-            batch[-1]["checkpoint_hash"],
-            "6",
-        )
-    ]
-    conflict = json.loads(
-        database.psql(
-            _provider_outcome_batch_append_sql(stale),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if (
-        conflict.get("status") != "conflict"
-        or conflict.get("checkpoint_hash") != stale[-1]["checkpoint_hash"]
-        or conflict.get("checkpoint_count") != 1
-        or conflict.get("head_checkpoint_row") != batch[-1]
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome batch conflict head differs"
-        )
-
-    encrypted_cache_doc = {
-        "schema_version": "leadpoet.encrypted_artifact.v2",
-        "artifact_id": "sha256:" + "a" * 64,
-        "plaintext_hash": "sha256:" + "b" * 64,
-        "ciphertext_hash": "sha256:" + "c" * 64,
-        "nonce_b64": "bm9uY2U=",
-        "aad_b64": "YWFk",
-        "encryption_context_hash": "sha256:" + "d" * 64,
-        "ciphertext_b64": "Y2lwaGVydGV4dA==",
-        "object_lock_mode": "COMPLIANCE",
-        "retain_until": "2026-08-10T12:00:00Z",
-    }
-    cache_row = {
-        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
-        "artifact_master_key_ref_hash": "sha256:" + "e" * 64,
-        "utc_day": "2026-07-11",
-        "request_fingerprint": "f" * 64,
-        "cache_entry_hash": "sha256:" + "0" * 64,
-        "cache_artifact_id": encrypted_cache_doc["artifact_id"],
-        "source_record_hash": "sha256:" + "1" * 64,
-        "source_boot_identity_hash": "sha256:" + "2" * 64,
-        "response_body_hash": "sha256:" + "3" * 64,
-        "encrypted_cache_doc": encrypted_cache_doc,
-    }
-    cache_inserted = json.loads(
-        database.psql(
-            _provider_cache_put_sql(cache_row),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if cache_inserted != {
-        "status": "inserted",
-        "cache_entry_hash": cache_row["cache_entry_hash"],
-        "cache_row": cache_row,
-    }:
-        raise PostgresContractProbeError(
-            "provider cache atomic put result differs"
-        )
-    cache_replayed = json.loads(
-        database.psql(
-            _provider_cache_put_sql(cache_row),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if cache_replayed != {**cache_inserted, "status": "existing"}:
-        raise PostgresContractProbeError(
-            "provider cache atomic replay result differs"
-        )
-
-    schema = json.loads(
-        database.psql(
-            "SELECT public.research_lab_provider_persistence_batch_contract_v1()::text;",
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if schema != {
-        "schema_version": "leadpoet.provider_persistence_batch_contract.v1",
-        "cache_put": "atomic_exact_row",
-        "outcome_append": "atomic_contiguous_batch",
-        "outcome_batch_max": 32,
-        "conflict_head_checkpoint_row": "encrypted_or_null",
-    }:
-        raise PostgresContractProbeError(
-            "provider persistence batch schema differs"
-        )
-    return {
-        "batch_size": len(batch),
-        "durable_count": durable_count,
-        "batch_replay_exact": True,
-        "batch_conflict_head_exact": True,
-        "cache_put_exact": True,
-        "cache_replay_exact": True,
-        "schema": schema,
-    }
 
 
-def _provider_outcome_append_contract(
-    database: DisposablePostgres,
-) -> dict[str, Any]:
-    key_hash = "sha256:" + "a" * 64
-
-    def rollback_count() -> int:
-        database.psql("SELECT pg_catalog.pg_stat_clear_snapshot();")
-        return int(
-            database.psql(
-                """
-                SELECT xact_rollback
-                FROM pg_catalog.pg_stat_database
-                WHERE datname = pg_catalog.current_database();
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-
-    def row(
-        *,
-        sequence: int,
-        checkpoint_hash: str,
-        previous_checkpoint_hash: str,
-        suffix: str,
-    ) -> dict[str, Any]:
-        return {
-            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
-            "artifact_master_key_ref_hash": key_hash,
-            "utc_day": "2026-07-10",
-            "sequence": sequence,
-            "checkpoint_hash": checkpoint_hash,
-            "previous_checkpoint_hash": previous_checkpoint_hash,
-            "state_document_hash": "sha256:" + suffix * 64,
-            "checkpoint_artifact_id": "sha256:" + suffix.upper().lower() * 64,
-            "encrypted_checkpoint_doc": {
-                "schema_version": "leadpoet.encrypted_artifact.v2",
-                "fixture": suffix,
-            },
-        }
-
-    first_hash = "sha256:" + "b" * 64
-    first = row(
-        sequence=1,
-        checkpoint_hash=first_hash,
-        previous_checkpoint_hash="",
-        suffix="c",
-    )
-    inserted = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(first),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if inserted != {"status": "inserted", "checkpoint_hash": first_hash}:
-        raise PostgresContractProbeError(
-            "provider outcome first append result differs"
-        )
-    existing = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(first),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if existing != {"status": "existing", "checkpoint_hash": first_hash}:
-        raise PostgresContractProbeError(
-            "provider outcome idempotent append result differs"
-        )
-    rollback_count_before_contention = rollback_count()
-
-    siblings = (
-        row(
-            sequence=2,
-            checkpoint_hash="sha256:" + "d" * 64,
-            previous_checkpoint_hash=first_hash,
-            suffix="e",
-        ),
-        row(
-            sequence=2,
-            checkpoint_hash="sha256:" + "f" * 64,
-            previous_checkpoint_hash=first_hash,
-            suffix="1",
-        ),
-    )
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        results = tuple(
-            executor.map(
-                lambda value: database.psql(
-                    _provider_outcome_append_sql(value),
-                    check=False,
-                    tuples_only=True,
-                ),
-                siblings,
-            )
-        )
-    if any(result.returncode != 0 for result in results):
-        raise PostgresContractProbeError(
-            "provider outcome expected contention surfaced as a SQL error"
-        )
-    outcomes = [json.loads(result.stdout.strip()) for result in results]
-    accepted = [
-        outcome for outcome in outcomes if outcome.get("status") == "inserted"
-    ]
-    rejected = [
-        outcome
-        for outcome in outcomes
-        if outcome.get("status") in {"busy", "conflict"}
-    ]
-    if len(accepted) != 1 or len(rejected) != 1:
-        raise PostgresContractProbeError(
-            "provider outcome concurrent append did not select one head"
-        )
-    accepted_hash = accepted[0].get("checkpoint_hash")
-    accepted_row = next(
-        (
-            dict(candidate)
-            for candidate in siblings
-            if candidate["checkpoint_hash"] == accepted_hash
-        ),
-        None,
-    )
-    if accepted_row is None:
-        raise PostgresContractProbeError(
-            "provider outcome append accepted an unknown candidate"
-        )
-    rejected_outcome = rejected[0]
-    if set(rejected_outcome) not in (
-        {"status", "checkpoint_hash"},
-        {"status", "checkpoint_hash", "head_checkpoint_row"},
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome contention response fields differ"
-        )
-    rejected_hash = rejected_outcome.get("checkpoint_hash")
-    if (
-        rejected_hash not in {candidate["checkpoint_hash"] for candidate in siblings}
-        or rejected_hash == accepted_hash
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome contention response lost candidate identity"
-        )
-    if rejected_outcome["status"] == "busy":
-        if set(rejected_outcome) != {"status", "checkpoint_hash"}:
-            raise PostgresContractProbeError(
-                "provider outcome busy response fields differ"
-            )
-    elif (
-        set(rejected_outcome)
-        != {"status", "checkpoint_hash", "head_checkpoint_row"}
-        or rejected_outcome.get("head_checkpoint_row") != accepted_row
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome concurrent conflict omitted its durable head"
-        )
-    row_count = int(
-        database.psql(
-            """
-            SELECT pg_catalog.count(*)
-            FROM public.research_lab_provider_outcome_checkpoints_v2
-            WHERE artifact_master_key_ref_hash =
-                  'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-              AND utc_day = DATE '2026-07-10';
-            """,
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if row_count != 2:
-        raise PostgresContractProbeError(
-            "provider outcome lineage contains an unexpected row count"
-        )
-
-    stale_row = next(
-        dict(candidate)
-        for candidate in siblings
-        if candidate["checkpoint_hash"] != accepted_hash
-    )
-    stale = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(stale_row),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if stale != {
-        "status": "conflict",
-        "checkpoint_hash": stale_row["checkpoint_hash"],
-        "head_checkpoint_row": accepted_row,
-    }:
-        raise PostgresContractProbeError(
-            "provider outcome stale append did not return the exact durable head"
-        )
-
-    empty_conflict_row = row(
-        sequence=2,
-        checkpoint_hash="sha256:" + "4" * 64,
-        previous_checkpoint_hash="sha256:" + "5" * 64,
-        suffix="6",
-    )
-    empty_conflict_row["artifact_master_key_ref_hash"] = "sha256:" + "9" * 64
-    empty_conflict = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(empty_conflict_row),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if empty_conflict != {
-        "status": "conflict",
-        "checkpoint_hash": empty_conflict_row["checkpoint_hash"],
-        "head_checkpoint_row": None,
-    }:
-        raise PostgresContractProbeError(
-            "provider outcome empty-lineage conflict response differs"
-        )
-
-    third_hash = "sha256:" + "2" * 64
-    third = row(
-        sequence=3,
-        checkpoint_hash=third_hash,
-        previous_checkpoint_hash=accepted_hash,
-        suffix="3",
-    )
-    lock_sql = """
-        BEGIN;
-        SELECT pg_catalog.pg_advisory_xact_lock(
-            pg_catalog.hashtext('research_lab_provider_outcome_checkpoint_v2'),
-            pg_catalog.hashtext(
-                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-                || ':2026-07-10'
-            )
-        );
-        SELECT pg_catalog.pg_sleep(2);
-        COMMIT;
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        holder = executor.submit(database.psql, lock_sql)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            granted = int(
-                database.psql(
-                    """
-                    SELECT pg_catalog.count(*)
-                    FROM pg_catalog.pg_locks
-                    WHERE locktype = 'advisory' AND granted;
-                    """,
-                    tuples_only=True,
-                ).stdout.strip()
-            )
-            if granted:
-                break
-            time.sleep(0.02)
-        else:
-            raise PostgresContractProbeError(
-                "provider outcome contention fixture did not acquire its lock"
-            )
-        started = time.monotonic()
-        busy = database.psql(
-            _provider_outcome_append_sql(third),
-            check=False,
-            tuples_only=True,
-        )
-        busy_elapsed = time.monotonic() - started
-        busy_result = (
-            json.loads(busy.stdout.strip())
-            if busy.returncode == 0 and busy.stdout.strip()
-            else {}
-        )
-        if busy.returncode != 0 or busy_result != {
-            "status": "busy",
-            "checkpoint_hash": third_hash,
-        }:
-            raise PostgresContractProbeError(
-                "provider outcome contention did not return the busy contract"
-            )
-        if busy_elapsed >= 1.0:
-            raise PostgresContractProbeError(
-                "provider outcome contention occupied a database session"
-            )
-        holder.result(timeout=3.0)
-
-    third_inserted = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(third),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if third_inserted != {
-        "status": "inserted",
-        "checkpoint_hash": third_hash,
-    }:
-        raise PostgresContractProbeError(
-            "provider outcome append did not recover after contention"
-        )
-    rollback_count_after_contention = rollback_count()
-    if rollback_count_after_contention != rollback_count_before_contention:
-        raise PostgresContractProbeError(
-            "provider outcome expected contention rolled back a transaction"
-        )
-    return {
-        "first_checkpoint_hash": first_hash,
-        "candidate_sibling_hashes": sorted(
-            item["checkpoint_hash"] for item in siblings
-        ),
-        "accepted_count": len(accepted),
-        "rejected_count": len(rejected),
-        "row_count": row_count + 1,
-        "contention_rollback_delta": (
-            rollback_count_after_contention
-            - rollback_count_before_contention
-        ),
-        "durable_head_conflict_verified": True,
-        "empty_head_conflict_verified": True,
-    }
 
 
 def _settlement_fixture(
@@ -3836,45 +3302,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "post-129 transport terminal constraint is invalid"
                 )
 
-        database.apply_migration(scripts / PROVIDER_OUTCOME_APPEND_MIGRATION)
-        applied.append(PROVIDER_OUTCOME_APPEND_MIGRATION)
-        database.apply_migration(
-            scripts / PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION
-        )
-        applied.append(PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION)
-        pre_contention_contract = database.psql(
-            """
-            SELECT public.research_lab_provider_outcome_contention_contract_v2()
-                   ::text;
-            """,
-            check=False,
-        )
-        if (
-            pre_contention_contract.returncode == 0
-            or "research_lab_provider_outcome_contention_contract_v2"
-            not in pre_contention_contract.stderr
-            or "does not exist" not in pre_contention_contract.stderr
-        ):
-            raise PostgresContractProbeError(
-                "pre-133 provider outcome contention contract did not fail closed"
-            )
-        pre_head_contract = database.psql(
-            """
-            SELECT public.research_lab_provider_outcome_contention_contract_v3()
-                   ::text;
-            """,
-            check=False,
-        )
-        if (
-            pre_head_contract.returncode == 0
-            or "research_lab_provider_outcome_contention_contract_v3"
-            not in pre_head_contract.stderr
-            or "does not exist" not in pre_head_contract.stderr
-        ):
-            raise PostgresContractProbeError(
-                "pre-134 provider outcome head contract did not fail closed"
-            )
-
         prior_rows, prior_verified, _prior_fixture = _settlement_fixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id - 1,
@@ -4132,71 +3559,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post-131 lifetime credit contract is incomplete"
             )
 
-        database.apply_migration(
-            scripts / PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION
-        )
-        applied.append(PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION)
-        contention_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_provider_outcome_contention_contract_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if contention_contract != {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v2"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-        }:
-            raise PostgresContractProbeError(
-                "post-133 provider outcome contention contract differs"
-            )
-        pre_head_contract = database.psql(
-            """
-            SELECT public.research_lab_provider_outcome_contention_contract_v3()
-                   ::text;
-            """,
-            check=False,
-        )
-        if (
-            pre_head_contract.returncode == 0
-            or "research_lab_provider_outcome_contention_contract_v3"
-            not in pre_head_contract.stderr
-            or "does not exist" not in pre_head_contract.stderr
-        ):
-            raise PostgresContractProbeError(
-                "pre-134 provider outcome head contract did not fail closed"
-            )
-
-        database.apply_migration(
-            scripts / PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION
-        )
-        applied.append(PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION)
-        head_contention_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_provider_outcome_contention_contract_v3()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if head_contention_contract != {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v3"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-            "candidate_checkpoint_hash": True,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        }:
-            raise PostgresContractProbeError(
-                "post-134 provider outcome head contract differs"
-            )
         database.apply_migration(scripts / ANCESTRY_CHECKPOINT_MIGRATION)
         applied.append(ANCESTRY_CHECKPOINT_MIGRATION)
         checkpoint_catalog = _relation_contract(database)
@@ -5574,10 +4936,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-139 allocation frontier bootstrap schema is incomplete"
             )
-        provider_outcome_append = _provider_outcome_append_contract(database)
-        provider_persistence_batch = _provider_persistence_batch_contract(
-            database
-        )
         historical_compute_seed_rows = (
             _historical_compute_allocation_seed_rows(
                 database=database,
@@ -5671,9 +5029,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "allocation_settlement_frontier_bootstrap": (
                 allocation_frontier_bootstrap_contract
             ),
-            "provider_outcome_append": provider_outcome_append,
-            "provider_persistence_batch": provider_persistence_batch,
-            "provider_outcome_contention_contract": head_contention_contract,
             "required_schema_declarations": declaration_counts,
         }
     finally:

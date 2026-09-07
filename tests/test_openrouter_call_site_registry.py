@@ -122,12 +122,11 @@ def test_captured_sites_actually_reference_the_telemetry_layer():
         ), f"{rel_path} is classified 'captured' but references no capture layer"
 
 
-def test_v2_receipt_sites_record_transport_and_provider_outcomes():
+def test_v2_receipt_sites_record_transport_and_provider_evidence():
     for rel_path, classification in CALL_SITE_REGISTRY.items():
         if classification != "captured_v2_receipt":
             continue
         text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
-        assert "ProviderOutcomeLedgerV2" in text
         assert "transport_attempt" in text
         assert "evidence_artifact_hashes" in text
 

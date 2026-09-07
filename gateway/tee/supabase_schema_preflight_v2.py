@@ -57,11 +57,6 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ("artifact_master_key_ref_hash",),
     ),
     (
-        "scripts/125-research-lab-artifact-key-lineage.sql",
-        "research_lab_provider_outcome_checkpoints_v2",
-        ("artifact_master_key_ref_hash",),
-    ),
-    (
         "scripts/126-research-lab-chain-realized-settlement.sql",
         "research_lab_finalized_weight_vector_candidates_v1",
         (
@@ -496,24 +491,8 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_attested_transport_terminal_contract_v2",
     ),
     (
-        "scripts/133-research-lab-provider-outcome-contention-status.sql",
-        "append_research_lab_provider_outcome_checkpoint_v2",
-    ),
-    (
-        "scripts/133-research-lab-provider-outcome-contention-status.sql",
-        "research_lab_provider_outcome_contention_contract_v2",
-    ),
-    (
-        "scripts/134-research-lab-provider-outcome-head-contention.sql",
-        "research_lab_provider_outcome_contention_contract_v3",
-    ),
-    (
         "scripts/144-research-lab-provider-persistence-batches.sql",
         "put_research_lab_provider_evidence_cache_v2",
-    ),
-    (
-        "scripts/144-research-lab-provider-persistence-batches.sql",
-        "append_research_lab_provider_outcome_checkpoints_v2",
     ),
     (
         "scripts/144-research-lab-provider-persistence-batches.sql",

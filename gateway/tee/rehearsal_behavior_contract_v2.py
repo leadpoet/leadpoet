@@ -113,7 +113,6 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/tee/execution_job_manager_v2.py",
     "gateway/tee/provider_broker_v2.py",
     "gateway/tee/provider_client_v2.py",
-    "gateway/tee/provider_outcome_store_v2.py",
     "gateway/tee/rpc_authority.py",
     "gateway/tee/release_manifest_v2.py",
     "gateway/tee/scoring_executor.py",

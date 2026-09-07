@@ -49,9 +49,6 @@ from gateway.tee.coordinator_source_add_v2 import (
     OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
     OP_SOURCE_ADD_PROVENANCE_V2,
 )
-from gateway.tee.provider_outcome_v2 import (
-    validate_provider_outcome_snapshot_v2,
-)
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
     attest_subnet_epoch_cutover_v2,
@@ -69,7 +66,6 @@ OP_ATTEST_QUALIFICATION_ADMISSION = "attest_qualification_admission"
 OP_ATTEST_WEIGHT_INPUT = "attest_weight_input"
 OP_ATTEST_WEIGHT_PUBLICATION = "attest_weight_publication"
 OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2 = "source_add_catalog_snapshot_v2"
-OP_PROVIDER_OUTCOME_SNAPSHOT_V2 = "provider_outcome_snapshot_v2"
 OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
     "attest_legacy_finalized_allocation_v2"
 )
@@ -215,9 +211,6 @@ COORDINATOR_OPERATIONS_V2 = {
     OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2: frozenset(
         {"research_lab.source_add_catalog_snapshot.v2"}
     ),
-    OP_PROVIDER_OUTCOME_SNAPSHOT_V2: frozenset(
-        {"research_lab.provider_outcome_snapshot.v2"}
-    ),
     OP_ATTEST_ARTIFACT_PERSISTENCE: frozenset(
         {"leadpoet.artifact_persistence.v2"}
     ),
@@ -335,7 +328,6 @@ class CoordinatorExecutorV2:
         source_add_catalog_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
-        provider_outcome_supplier: Optional[Callable[[], Mapping[str, Any]]] = None,
     ) -> None:
         self._artifact_evidence_supplier = artifact_evidence_supplier
         self._weight_source_resolver = weight_source_resolver
@@ -362,7 +354,6 @@ class CoordinatorExecutorV2:
             chain_realized_settlement_resolver
         )
         self._source_add_catalog_resolver = source_add_catalog_resolver
-        self._provider_outcome_supplier = provider_outcome_supplier
 
     async def __call__(
         self,
@@ -566,36 +557,6 @@ class CoordinatorExecutorV2:
                     str(output["private_registry_rows_hash"]),
                     str(output["runtime_catalog_hash"]),
                 ),
-            )
-        if operation == OP_PROVIDER_OUTCOME_SNAPSHOT_V2:
-            if set(payload) != {"schema_version"} or payload.get(
-                "schema_version"
-            ) != "leadpoet.provider_outcome_snapshot_request.v2":
-                raise ValueError("provider outcome snapshot request is invalid")
-            if self._provider_outcome_supplier is None:
-                raise ValueError("measured provider outcome state is unavailable")
-            supplied = self._provider_outcome_supplier()
-            if not isinstance(supplied, Mapping) or set(supplied) != {
-                "snapshot",
-                "transport_attempts",
-                "evidence_artifact_hashes",
-            }:
-                raise ValueError("provider outcome snapshot evidence is invalid")
-            output = validate_provider_outcome_snapshot_v2(
-                supplied["snapshot"]
-            )
-            attempts = supplied["transport_attempts"]
-            artifacts = supplied["evidence_artifact_hashes"]
-            if not isinstance(attempts, list) or not isinstance(artifacts, list):
-                raise ValueError("provider outcome snapshot evidence is invalid")
-            return ExecutionResultV2(
-                output=output,
-                artifact_hashes=(
-                    str(output["provider_outcome_digest_hash"]),
-                    str(output["source_state_hash"]),
-                    *[str(item) for item in artifacts],
-                ),
-                transport_attempts=tuple(dict(item) for item in attempts),
             )
         if operation == OP_RESEARCH_LAB_REWARD_DECISION:
             decision_kind = str(payload.get("decision_kind") or "")

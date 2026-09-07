@@ -45,11 +45,6 @@ from gateway.tee.inter_enclave_tls import (
     _RetryableInterEnclaveTransportError,
 )
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
-from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
-from gateway.tee.coordinator_executor_v2 import (
-    OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
-    CoordinatorExecutorV2,
-)
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionContextV2,
     ExecutionJobV2Error,
@@ -150,242 +145,10 @@ class _CacheStore:
         }
 
 
-class _OutcomeStore:
-    def __init__(self) -> None:
-        self.document = None
-        self.checkpoint_hash = ""
-        self.persist_count = 0
-        self.fail_persist = False
-
-    def load_latest(
-        self,
-        *,
-        utc_day,
-        job_id,
-        purpose,
-        operation_suffix="restore",
-    ):
-        return {
-            "found": self.document is not None,
-            "state_document": dict(self.document or {}),
-            "checkpoint_hash": self.checkpoint_hash,
-            "transport_attempts": [],
-            "evidence_artifact_hashes": [],
-        }
-
-    def persist(
-        self,
-        document,
-        *,
-        previous_checkpoint_hash,
-        job_id,
-        purpose,
-        attempt_number=0,
-    ):
-        del attempt_number
-        if self.fail_persist:
-            raise RuntimeError("outcome persistence failed")
-        expected_sequence = (
-            int(self.document["sequence"]) + 1
-            if self.document is not None
-            else 1
-        )
-        if (
-            previous_checkpoint_hash != self.checkpoint_hash
-            or int(document["sequence"]) != expected_sequence
-        ):
-            return {
-                "status": "conflict",
-                "transport_attempts": [],
-                "evidence_artifact_hashes": [],
-            }
-        self.persist_count += 1
-        self.document = dict(document)
-        self.checkpoint_hash = sha256_json(
-            {
-                "sequence": document["sequence"],
-                "state": document["document_hash"],
-                "previous": previous_checkpoint_hash,
-            }
-        )
-        return {
-            "status": "persisted",
-            "checkpoint_hash": self.checkpoint_hash,
-            "state_document_hash": document["document_hash"],
-            "transport_attempts": [],
-            "evidence_artifact_hashes": [self.checkpoint_hash],
-        }
 
 
-def test_provider_outcome_snapshot_does_not_rebind_restore_transport() -> None:
-    restore_artifact_hash = _hash("e")
-
-    class RestoreEvidenceOutcomeStore(_OutcomeStore):
-        restore_attempt = None
-
-        def load_latest(
-            self,
-            *,
-            utc_day,
-            job_id,
-            purpose,
-            operation_suffix="restore",
-        ):
-            restored = super().load_latest(
-                utc_day=utc_day,
-                job_id=job_id,
-                purpose=purpose,
-                operation_suffix=operation_suffix,
-            )
-            if not restored["found"]:
-                return restored
-            restore_request = _request(
-                job_id=job_id,
-                purpose=purpose,
-                logical_operation_id="provider-outcome-checkpoint-restore",
-            )
-            self.restore_attempt = _Broker._result(
-                restore_request,
-                status=200,
-                body=b'{"restored":true}',
-                terminal_status="authenticated_response",
-            )["transport_attempt"]
-            restored["transport_attempts"] = [self.restore_attempt]
-            restored["evidence_artifact_hashes"] = [restore_artifact_hash]
-            return restored
-
-    outcome_store = RestoreEvidenceOutcomeStore()
-    first, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store
-    )
-    first.execute(_request(job_id="provider-outcome-live"))
-
-    restarted, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store
-    )
-    evidence = restarted.provider_outcome_snapshot_evidence()
-
-    assert evidence["transport_attempts"] == []
-    assert evidence["evidence_artifact_hashes"] == sorted(
-        [outcome_store.checkpoint_hash, restore_artifact_hash]
-    )
-
-    snapshot_context = ExecutionContextV2(
-        job_id="provider-outcome-snapshot-current",
-        purpose="research_lab.provider_outcome_snapshot.v2",
-        epoch_id=24_000,
-    )
-    result = asyncio.run(
-        CoordinatorExecutorV2(
-            provider_outcome_supplier=(
-                restarted.provider_outcome_snapshot_evidence
-            )
-        )(
-            OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
-            {
-                "schema_version": (
-                    "leadpoet.provider_outcome_snapshot_request.v2"
-                )
-            },
-            snapshot_context,
-        )
-    )
-    for attempt in result.transport_attempts:
-        snapshot_context.record_transport(attempt)
-    for artifact_hash in result.artifact_hashes:
-        snapshot_context.record_artifact(artifact_hash)
-
-    assert snapshot_context.freeze_transport_attempts() == ()
-    assert set(snapshot_context.freeze_artifact_hashes()).issuperset(
-        {outcome_store.checkpoint_hash, restore_artifact_hash}
-    )
-    with pytest.raises(
-        ExecutionJobV2Error,
-        match="transport attempt differs from execution scope",
-    ):
-        snapshot_context = ExecutionContextV2(
-            job_id="provider-outcome-snapshot-current",
-            purpose="research_lab.provider_outcome_snapshot.v2",
-            epoch_id=24_000,
-        )
-        snapshot_context.record_transport(outcome_store.restore_attempt)
 
 
-class _BatchOutcomeStore(_OutcomeStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.batch_calls = []
-        self.first_batch_entered = threading.Event()
-        self.release_first_batch = threading.Event()
-
-    def persist_batch(
-        self,
-        transitions,
-        *,
-        previous_checkpoint_hash,
-        job_id,
-        purpose,
-        attempt_number=0,
-    ):
-        del attempt_number
-        call_index = len(self.batch_calls)
-        self.batch_calls.append(
-            {
-                "size": len(transitions),
-                "job_id": job_id,
-                "purpose": purpose,
-            }
-        )
-        if call_index == 0:
-            self.first_batch_entered.set()
-            assert self.release_first_batch.wait(timeout=3.0)
-        assert all(item["job_id"] == job_id for item in transitions)
-        assert all(item["purpose"] == purpose for item in transitions)
-        expected_sequence = (
-            int(self.document["sequence"]) + 1
-            if self.document is not None
-            else 1
-        )
-        if (
-            previous_checkpoint_hash != self.checkpoint_hash
-            or int(transitions[0]["document"]["sequence"])
-            != expected_sequence
-        ):
-            return {
-                "status": "conflict",
-                "head_checkpoint_hash": self.checkpoint_hash,
-                "head_state_document": dict(self.document or {}),
-                "transport_attempts": [],
-                "evidence_artifact_hashes": [],
-            }
-        for offset, transition in enumerate(transitions):
-            assert int(transition["document"]["sequence"]) == (
-                expected_sequence + offset
-            )
-        self.persist_count += len(transitions)
-        self.document = dict(transitions[-1]["document"])
-        self.checkpoint_hash = sha256_json(
-            {
-                "sequence": self.document["sequence"],
-                "state": self.document["document_hash"],
-                "previous": previous_checkpoint_hash,
-            }
-        )
-        operation_hash = sha256_json(
-            {
-                "batch": len(self.batch_calls),
-                "job_id": job_id,
-                "size": len(transitions),
-            }
-        )
-        return {
-            "status": "persisted",
-            "checkpoint_hash": self.checkpoint_hash,
-            "state_document_hash": self.document["document_hash"],
-            "checkpoint_count": len(transitions),
-            "transport_attempts": [{"attempt_hash": operation_hash}],
-            "evidence_artifact_hashes": [self.checkpoint_hash],
-        }
 
 
 class _Broker:
@@ -552,7 +315,6 @@ def _authority(
     broker=None,
     cache=None,
     artifacts=None,
-    outcome_store=None,
     artifact_transaction=None,
     clock=None,
     sleeper=None,
@@ -580,7 +342,6 @@ def _authority(
         artifact_transaction=artifact_transaction,
         clock=clock or (lambda: "2026-07-10T00:00:00Z"),
         sleeper=sleeper or (lambda _seconds: None),
-        outcome_store=outcome_store,
     )
     return authority, broker, cache, artifacts
 
@@ -685,18 +446,11 @@ def test_live_record_then_cache_hit_preserves_existing_fingerprint_and_costs():
     assert live_cost["cost_source"] == "exa_cost_dollars"
     assert replay_cost["cost_usd"] == 0.0
     assert replay_cost["cost_source"] == "cache_hit_zero_cost"
-    digest = authority.provider_outcome_snapshot()["provider_outcome_digest"]
-    assert digest["providers"]["exa"]["call_count"] == 2
-    assert digest["providers"]["exa"]["live_call_count"] == 1
-    assert digest["providers"]["exa"]["cache_hit_count"] == 1
-    assert digest["providers"]["exa"]["measured_spend_microusd"] == 5000
+    assert live_cost["cost_usd"] == 0.005
 
 
 def test_infrastructure_routes_bypass_paid_provider_cache_and_outcomes():
-    outcome_store = _OutcomeStore()
-    authority, broker, cache, _artifacts = _authority(
-        outcome_store=outcome_store,
-    )
+    authority, broker, cache, _artifacts = _authority()
     request = {
         **_request(
             provider="supabase",
@@ -721,13 +475,10 @@ def test_infrastructure_routes_bypass_paid_provider_cache_and_outcomes():
     assert len(broker.calls) == 2
     assert cache.load_count == 0
     assert cache.persist_count == 0
-    assert outcome_store.persist_count == 0
-    assert "supabase" not in authority.provider_outcome_snapshot()[
-        "provider_outcome_digest"
-    ]["providers"]
+    assert authority.health()["cost_scope_count"] == 0
 
 
-def test_assigned_provider_keeps_nested_supabase_cache_and_outcome_direct():
+def test_assigned_provider_keeps_nested_supabase_cache_direct():
     proxy_url = "https://worker:test-secret@proxy.example.com:443"
     job_id = "nested-provider-job"
     purpose = "research_lab.company_score.v2"
@@ -844,24 +595,9 @@ def test_assigned_provider_keeps_nested_supabase_cache_and_outcome_direct():
                     **kwargs,
                 )
 
-        class NestedOutcome(_OutcomeStore):
-            def persist(self, document, *, job_id, purpose, **kwargs):
-                direct_supabase(
-                    stage="outcome-append",
-                    operation_job_id=job_id,
-                    operation_purpose=purpose,
-                )
-                return super().persist(
-                    document,
-                    job_id=job_id,
-                    purpose=purpose,
-                    **kwargs,
-                )
-
         authority, _, _, _ = _authority(
             broker=broker,
             cache=NestedCache(),
-            outcome_store=NestedOutcome(),
         )
         return authority, broker, transport
 
@@ -875,11 +611,10 @@ def test_assigned_provider_keeps_nested_supabase_cache_and_outcome_direct():
         True,
         False,
         True,
-        True,
     ]
     assert transport.calls[1]["upstream_proxy_url"] == proxy_url
     assert transport.calls[1]["connection_scope"].startswith("sha256:")
-    for call in (transport.calls[0], transport.calls[2], transport.calls[3]):
+    for call in (transport.calls[0], transport.calls[2]):
         assert "upstream_proxy_url" not in call
         assert "connection_scope" not in call
     health = authority.health()
@@ -890,36 +625,8 @@ def test_assigned_provider_keeps_nested_supabase_cache_and_outcome_direct():
     }
     assert health["stage_counters"]["provider_cache_lookup"]["succeeded"] == 1
     assert health["stage_counters"]["provider_cache_write"]["succeeded"] == 1
-    assert health["stage_counters"]["provider_outcome_append"]["succeeded"] == 1
     assert broker.release_job_credentials(job_id)["released_slot_count"] == 1
 
-    failed_authority, failed_broker, failed_transport = make_authority(
-        fail_supabase_call=3,
-    )
-    failed = failed_authority.execute(
-        _request(job_id=job_id, purpose=purpose)
-    )
-
-    assert failed["terminal_status"] == "transport_failure"
-    assert failed["failure_stage"] == "provider_semantics"
-    assert [".supabase.co/" in call["url"] for call in failed_transport.calls] == [
-        True,
-        False,
-        True,
-        True,
-    ]
-    assert failed_transport.calls[1]["upstream_proxy_url"] == proxy_url
-    assert "upstream_proxy_url" not in failed_transport.calls[-1]
-    failed_health = failed_authority.health()
-    assert failed_health["last_stage_failure"]["stage"] == (
-        "provider_outcome_append"
-    )
-    assert failed_health["stage_counters"]["provider_outcome_append"] == {
-        "started": 1,
-        "succeeded": 0,
-        "failed": 1,
-    }
-    assert failed_broker.release_job_credentials(job_id)["released_slot_count"] == 1
 
 
 def test_cross_worker_cache_hit_uses_current_job_transport_profile():
@@ -1033,61 +740,6 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
     assert observed_wait_timeouts == [REPLAY_WAIT_SECONDS]
 
 
-def test_concurrent_outcomes_batch_by_execution_scope_without_duplicate_evidence():
-    outcome_store = _BatchOutcomeStore()
-    authority, broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store,
-    )
-    job_ids = ["batch-job-a"] * 12 + ["batch-job-b"] * 8
-
-    with ThreadPoolExecutor(max_workers=len(job_ids)) as executor:
-        futures = [
-            executor.submit(
-                authority.execute,
-                _request(
-                    logical_operation_id="batch-operation-%d" % index,
-                    job_id=job_id,
-                    body=(
-                        '{"query":"batch-%d"}' % index
-                    ).encode("utf-8"),
-                ),
-            )
-            for index, job_id in enumerate(job_ids)
-        ]
-        assert outcome_store.first_batch_entered.wait(timeout=2.0)
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            with authority._outcome_batch_condition:
-                queued = len(authority._outcome_pending)
-            if queued == len(job_ids) - 1:
-                break
-            time.sleep(0.005)
-        assert queued == len(job_ids) - 1
-        outcome_store.release_first_batch.set()
-        results = [future.result(timeout=3.0) for future in futures]
-
-    assert len(broker.calls) == len(job_ids)
-    assert outcome_store.persist_count == len(job_ids)
-    assert sum(item["size"] for item in outcome_store.batch_calls) == len(job_ids)
-    assert len(outcome_store.batch_calls) == 3
-    assert all(item["size"] <= 32 for item in outcome_store.batch_calls)
-    assert all(
-        item["job_id"] in {"batch-job-a", "batch-job-b"}
-        and item["purpose"] == "research_lab.company_score.v2"
-        for item in outcome_store.batch_calls
-    )
-    persisted_attempts = [
-        attempt
-        for result in results
-        for attempt in result.get("additional_transport_attempts") or ()
-    ]
-    assert len(persisted_attempts) == len(outcome_store.batch_calls)
-    assert len(
-        {attempt["attempt_hash"] for attempt in persisted_attempts}
-    ) == len(persisted_attempts)
-    assert authority.provider_outcome_snapshot()["provider_outcome_digest"][
-        "sidecar_sequence"
-    ] == len(job_ids)
 
 
 def test_concurrent_preflights_measure_each_worker_profile_without_cache_replay(
@@ -1159,308 +811,16 @@ def test_persistent_cache_survives_authority_restart_without_live_call():
     assert len(broker.calls) == 1
 
 
-def test_provider_outcome_state_survives_restart_and_persistence_is_fail_closed():
-    outcome_store = _OutcomeStore()
-    first, broker, cache, artifacts = _authority(outcome_store=outcome_store)
-    first.execute(_request())
-    restarted, _broker, _cache, _artifacts = _authority(
-        broker=broker,
-        cache=cache,
-        artifacts=artifacts,
-        outcome_store=outcome_store,
-    )
-    restarted.execute(
-        _request(logical_operation_id="provider-operation-after-restart")
-    )
-
-    digest = restarted.provider_outcome_snapshot()["provider_outcome_digest"]
-    assert digest["providers"]["exa"]["call_count"] == 2
-    assert digest["providers"]["exa"]["live_call_count"] == 1
-    assert digest["providers"]["exa"]["cache_hit_count"] == 1
-    assert outcome_store.persist_count == 2
-
-    before_failure = restarted.provider_outcome_snapshot()
-    outcome_store.fail_persist = True
-    failed = restarted.execute(
-        _request(
-            logical_operation_id="provider-operation-persistence-failure",
-            body=b'{"query":"new"}',
-        )
-    )
-    assert failed["terminal_status"] == "transport_failure"
-    assert failed["failure_stage"] == "provider_semantics"
-    assert restarted.provider_outcome_snapshot() == before_failure
 
 
-def test_model_retry_after_semantics_failure_has_one_terminal_per_intent():
-    class FailOnceOutcomeStore(_OutcomeStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.failures_remaining = 1
-
-        def persist(self, *args, **kwargs):
-            if self.failures_remaining:
-                self.failures_remaining -= 1
-                raise RuntimeError("outcome persistence failed")
-            return super().persist(*args, **kwargs)
-
-    outcome_store = FailOnceOutcomeStore()
-    authority, broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store,
-    )
-    terminals = []
-    router = BrokeredProviderTransportV2(
-        authority.execute,
-        terminal_sink=lambda attempt: terminals.append(dict(attempt)),
-    )
-    try:
-        with router.scope(
-            job_id="job-provider-semantics",
-            purpose="research_lab.company_score.v2",
-            logical_operation_id="model-operation",
-            retry_policy_hashes={
-                provider: sha256_json({"retry": provider})
-                for provider in BUILTIN_PROVIDER_ROUTES
-            },
-        ):
-            request = urllib.request.Request(
-                "https://api.exa.ai/search",
-                data=b'{"query":"example"}',
-                method="POST",
-            )
-            with pytest.raises(urllib.error.URLError, match="unexpected_eof"):
-                urllib.request.urlopen(request, timeout=30)
-            response = urllib.request.urlopen(request, timeout=30)
-            assert response.status == 200
-    finally:
-        router.restore()
-
-    assert [item["attempt_number"] for item in terminals] == [0, 1]
-    assert [item["terminal_status"] for item in terminals] == [
-        "transport_failure",
-        "attested_local_response",
-    ]
-    assert len({item["logical_operation_id"] for item in terminals}) == 1
-    assert sum(call["provider_id"] == "exa" for call in broker.calls) == 1
-    assert outcome_store.persist_count == 1
 
 
-def test_inter_enclave_replay_preserves_one_provider_checkpoint_across_restart():
-    outcome_store = _OutcomeStore()
-    authority, broker, cache, artifacts = _authority(outcome_store=outcome_store)
-    request = _request(logical_operation_id="provider-operation-replayed-terminal")
-    client = object.__new__(AttestedTLSRPCClient)
-    delivery = {"attempts": 0, "result": None}
-
-    def _call_once(**_kwargs):
-        delivery["attempts"] += 1
-        if delivery["result"] is None:
-            delivery["result"] = authority.execute(request)
-        if delivery["attempts"] < MAX_RPC_DELIVERY_ATTEMPTS:
-            raise _RetryableInterEnclaveTransportError(
-                "simulated terminal response loss"
-            )
-        return delivery["result"]
-
-    client._call_once = _call_once
-    result = client.call(
-        target_physical_role="gateway_coordinator",
-        method="provider_execute",
-        params=request,
-        channel_id="9" * 32,
-    )
-
-    assert result["terminal_status"] == "authenticated_response"
-    assert delivery["attempts"] == MAX_RPC_DELIVERY_ATTEMPTS
-    assert len(broker.calls) == 1
-    assert cache.persist_count == 1
-    assert outcome_store.persist_count == 1
-
-    restarted, _broker, _cache, _artifacts = _authority(
-        broker=broker,
-        cache=cache,
-        artifacts=artifacts,
-        outcome_store=outcome_store,
-    )
-    replay = restarted.execute(
-        {**request, "logical_operation_id": "provider-operation-after-restart"}
-    )
-    assert replay["terminal_status"] == "attested_local_response"
-    assert len(broker.calls) == 1
-    assert outcome_store.persist_count == 2
 
 
-def test_provider_outcome_conflict_rebases_onto_durable_head() -> None:
-    outcome_store = _OutcomeStore()
-    first, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store
-    )
-    stale, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store
-    )
-
-    first.execute(_request(job_id="job-first"))
-    stale.execute(
-        _request(
-            job_id="job-stale",
-            logical_operation_id="provider-operation-stale",
-            body=b'{"query":"second"}',
-        )
-    )
-
-    digest = stale.provider_outcome_snapshot()["provider_outcome_digest"]
-    assert outcome_store.document["sequence"] == 2
-    assert outcome_store.persist_count == 2
-    assert digest["providers"]["exa"]["call_count"] == 2
-    assert digest["providers"]["exa"]["live_call_count"] == 2
 
 
-def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
-    class BusyOnceOutcomeStore(_OutcomeStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.busy = True
-            self.persist_attempts = 0
-            self.attempt_numbers = []
-
-        def persist(
-            self,
-            document,
-            *,
-            previous_checkpoint_hash,
-            job_id,
-            purpose,
-            attempt_number=0,
-        ):
-            self.persist_attempts += 1
-            self.attempt_numbers.append(attempt_number)
-            if self.busy:
-                self.busy = False
-                return {
-                    "status": "busy",
-                    "transport_attempts": [],
-                    "evidence_artifact_hashes": [],
-                }
-            return super().persist(
-                document,
-                previous_checkpoint_hash=previous_checkpoint_hash,
-                job_id=job_id,
-                purpose=purpose,
-                attempt_number=attempt_number,
-            )
-
-    sleeps = []
-    outcome_store = BusyOnceOutcomeStore()
-    authority, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store,
-        sleeper=sleeps.append,
-    )
-
-    authority.execute(_request(job_id="job-busy-empty-head"))
-
-    assert outcome_store.persist_attempts == 2
-    assert outcome_store.persist_count == 1
-    assert outcome_store.document["sequence"] == 1
-    assert outcome_store.attempt_numbers == [0, 1]
-    assert len(sleeps) == 1
-    assert 0.01 <= sleeps[0] <= 0.02
 
 
-def test_oversized_provider_response_is_signed_and_checkpointed_after_busy_retry(
-    monkeypatch,
-) -> None:
-    from gateway.tee import provider_broker_v2
-
-    frame_bytes = 64 * 1024
-    reserve_bytes = 8 * 1024
-    response_limit = _provider_rpc_response_body_limit(
-        frame_bytes=frame_bytes,
-        reserve_bytes=reserve_bytes,
-    )
-    assert (
-        4 * (((response_limit + 1) + 2) // 3) + reserve_bytes
-        > frame_bytes
-    )
-    monkeypatch.setattr(
-        provider_broker_v2,
-        "MAX_RESPONSE_BODY_BYTES",
-        response_limit,
-    )
-
-    class OversizedTransport:
-        def __call__(self, **_request):
-            return {
-                "http_status": 200,
-                "headers": {"content-type": "application/json"},
-                "body": b"x" * (response_limit + 1),
-                "tls_peer_chain_hash": _hash("4"),
-                "tls_protocol": "TLSv1.3",
-            }
-
-    class BusyOnceOutcomeStore(_OutcomeStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.busy = True
-            self.persist_attempts = 0
-
-        def persist(self, document, **kwargs):
-            self.persist_attempts += 1
-            if self.busy:
-                self.busy = False
-                return {
-                    "status": "busy",
-                    "transport_attempts": [],
-                    "evidence_artifact_hashes": [],
-                }
-            return super().persist(document, **kwargs)
-
-    credentials = {
-        "openrouter": "openrouter-secret",
-        "exa": "exa-secret",
-        "scrapingdog": "scrapingdog-secret",
-        "deepline": "deepline-secret",
-        "supabase_service_role": "supabase-service-role-secret",
-        "truelist": "truelist-secret",
-    }
-    broker_artifacts = _Artifacts()
-    broker = ProviderBrokerV2(
-        credential_ref_hashes={
-            name: credential_reference_hash(value)
-            for name, value in credentials.items()
-        },
-        retry_policy_hashes={
-            name: sha256_json({"retry": name}) for name in BUILTIN_PROVIDER_ROUTES
-        },
-        transport=OversizedTransport(),
-        artifact_sink=broker_artifacts.seal,
-        clock=lambda: "2026-07-10T00:00:00Z",
-    )
-    broker.provision_credentials(credentials)
-    outcome_store = BusyOnceOutcomeStore()
-    authority, _broker, _cache, _artifacts = _authority(
-        broker=broker,
-        outcome_store=outcome_store,
-    )
-
-    result = authority.execute(_request(job_id="job-oversized-response"))
-
-    assert result["terminal_status"] == "transport_failure"
-    assert result["failure_code"] == "response_too_large"
-    assert result["transport_attempt"]["failure_code"] == "response_too_large"
-    assert broker.health()["terminal_count"] == 1
-    assert len(broker_artifacts.values) == 2
-    diagnostic = json.loads(broker_artifacts.values[1][0])
-    assert diagnostic["schema_version"] == (
-        PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION
-    )
-    assert diagnostic["failure_stage"] == "provider_request"
-    assert outcome_store.persist_attempts == 2
-    assert outcome_store.persist_count == 1
-    assert len(
-        canonical_json(
-            {"result": result, "channel_id": "f" * 32}
-        ).encode("utf-8")
-    ) <= frame_bytes
 
 
 @pytest.mark.parametrize(
@@ -1600,640 +960,18 @@ def test_transport_failure_diagnostic_rejects_malformed_projection(mutation):
         validate_provider_transport_failure_diagnostic(mutation(document))
 
 
-def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() -> None:
-    class AlwaysBusyOutcomeStore(_OutcomeStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.persist_attempts = 0
-            self.load_attempts = 0
-
-        def persist(
-            self,
-            document,
-            *,
-            previous_checkpoint_hash,
-            job_id,
-            purpose,
-            attempt_number=0,
-        ):
-            del document, previous_checkpoint_hash, job_id, purpose, attempt_number
-            self.persist_attempts += 1
-            return {
-                "status": "busy",
-                "transport_attempts": [],
-                "evidence_artifact_hashes": [],
-            }
-
-        def load_latest(
-            self,
-            *,
-            utc_day,
-            job_id,
-            purpose,
-            operation_suffix="restore",
-        ):
-            del utc_day, job_id, purpose, operation_suffix
-            self.load_attempts += 1
-            return {
-                "found": False,
-                "transport_attempts": [],
-                "evidence_artifact_hashes": [],
-            }
-
-    sleeps = []
-    outcome_store = AlwaysBusyOutcomeStore()
-    authority, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store,
-        sleeper=sleeps.append,
-    )
-
-    failed = authority.execute(_request(job_id="job-persistent-contention"))
-
-    assert failed["terminal_status"] == "transport_failure"
-    assert failed["failure_error_type"] == "ProviderSemanticsV2Error"
-    assert outcome_store.persist_attempts == 64
-    assert outcome_store.load_attempts == 1  # startup restore only
-    assert len(sleeps) == 63
-    assert (
-        authority.provider_outcome_snapshot()["provider_outcome_digest"].get(
-            "providers", {}
-        )
-        == {}
-    )
 
 
-def test_provider_outcome_contention_converges_across_25_writers() -> None:
-    writer_count = 25
-
-    class RoundContentionOutcomeStore(_OutcomeStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self._condition = threading.Condition()
-            self._arrivals = {}
-            self._round_results = {}
-
-        def load_latest(
-            self,
-            *,
-            utc_day,
-            job_id,
-            purpose,
-            operation_suffix="restore",
-        ):
-            with self._condition:
-                return super().load_latest(
-                    utc_day=utc_day,
-                    job_id=job_id,
-                    purpose=purpose,
-                    operation_suffix=operation_suffix,
-                )
-
-        def persist(
-            self,
-            document,
-            *,
-            previous_checkpoint_hash,
-            job_id,
-            purpose,
-            attempt_number=0,
-        ):
-            del attempt_number
-            sequence = int(document["sequence"])
-            with self._condition:
-                expected_sequence = (
-                    int(self.document["sequence"]) + 1
-                    if self.document is not None
-                    else 1
-                )
-                if (
-                    sequence != expected_sequence
-                    or previous_checkpoint_hash != self.checkpoint_hash
-                ):
-                    return {
-                        "status": "conflict",
-                        "transport_attempts": [],
-                        "evidence_artifact_hashes": [],
-                    }
-                arrivals = self._arrivals.setdefault(sequence, {})
-                arrivals[job_id] = dict(document)
-                expected_arrivals = writer_count - (sequence - 1)
-                if len(arrivals) == expected_arrivals:
-                    winner = sorted(arrivals)[0]
-                    self.persist_count += 1
-                    self.document = dict(arrivals[winner])
-                    self.checkpoint_hash = sha256_json(
-                        {
-                            "sequence": sequence,
-                            "state": self.document["document_hash"],
-                            "previous": previous_checkpoint_hash,
-                        }
-                    )
-                    self._round_results[sequence] = (
-                        winner,
-                        self.checkpoint_hash,
-                    )
-                    self._condition.notify_all()
-                assert self._condition.wait_for(
-                    lambda: sequence in self._round_results,
-                    timeout=5.0,
-                )
-                winner, checkpoint_hash = self._round_results[sequence]
-                if job_id != winner:
-                    return {
-                        "status": "conflict",
-                        "transport_attempts": [],
-                        "evidence_artifact_hashes": [],
-                    }
-                return {
-                    "status": "persisted",
-                    "checkpoint_hash": checkpoint_hash,
-                    "state_document_hash": document["document_hash"],
-                    "transport_attempts": [],
-                    "evidence_artifact_hashes": [checkpoint_hash],
-                }
-
-    outcome_store = RoundContentionOutcomeStore()
-    authorities = [
-        _authority(outcome_store=outcome_store)[0]
-        for _index in range(writer_count)
-    ]
-    start = threading.Barrier(writer_count)
-
-    def execute(index):
-        start.wait(timeout=5.0)
-        return authorities[index].execute(
-            _request(
-                job_id="job-contention-%02d" % index,
-                logical_operation_id="provider-contention-%02d" % index,
-                body=('{"query":"contention-%02d"}' % index).encode(),
-            )
-        )
-
-    with ThreadPoolExecutor(max_workers=writer_count) as executor:
-        results = list(executor.map(execute, range(writer_count)))
-
-    assert len(results) == writer_count
-    assert outcome_store.persist_count == writer_count
-    assert outcome_store.document["sequence"] == writer_count
-    assert outcome_store.document["totals"]["call_count"] == writer_count
 
 
-def test_provider_outcome_structured_conflict_rebases_without_head_read() -> None:
-    class EmbeddedHeadOutcomeStore(_OutcomeStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.load_attempts = 0
-
-        def load_latest(
-            self,
-            *,
-            utc_day,
-            job_id,
-            purpose,
-            operation_suffix="restore",
-        ):
-            self.load_attempts += 1
-            return super().load_latest(
-                utc_day=utc_day,
-                job_id=job_id,
-                purpose=purpose,
-                operation_suffix=operation_suffix,
-            )
-
-        def persist(
-            self,
-            document,
-            *,
-            previous_checkpoint_hash,
-            job_id,
-            purpose,
-            attempt_number=0,
-        ):
-            result = super().persist(
-                document,
-                previous_checkpoint_hash=previous_checkpoint_hash,
-                job_id=job_id,
-                purpose=purpose,
-                attempt_number=attempt_number,
-            )
-            if result["status"] == "conflict":
-                return {
-                    **result,
-                    "head_checkpoint_hash": self.checkpoint_hash,
-                    "head_state_document": dict(self.document),
-                }
-            return result
-
-    outcome_store = EmbeddedHeadOutcomeStore()
-    first, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store
-    )
-    stale, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store
-    )
-    assert outcome_store.load_attempts == 2
-
-    first.execute(_request(job_id="job-embedded-first"))
-    stale.execute(
-        _request(
-            job_id="job-embedded-stale",
-            logical_operation_id="provider-operation-embedded-stale",
-            body=b'{"query":"embedded-second"}',
-        )
-    )
-
-    assert outcome_store.load_attempts == 2
-    assert outcome_store.document["sequence"] == 2
-    assert (
-        stale.provider_outcome_snapshot()["provider_outcome_digest"]["providers"][
-            "exa"
-        ]["call_count"]
-        == 2
-    )
 
 
-def test_real_outcome_store_recovers_ambiguous_commit_without_provider_recall() -> None:
-    class LocalProviderTransport:
-        def __init__(self) -> None:
-            self.calls = []
-            self.rows = {}
-            self.append_count = 0
-
-        def __call__(self, **request):
-            self.calls.append(dict(request))
-            parsed = urlsplit(request["url"])
-            if parsed.hostname == "api.exa.ai":
-                body = b'{"costDollars":0.005,"results":[]}'
-            elif parsed.hostname == "qplwoislplkcegvdmbim.supabase.co":
-                if request["method"] == "POST":
-                    self.append_count += 1
-                    rows = json.loads(request["body"].decode("utf-8"))[
-                        "checkpoint_rows"
-                    ]
-                    assert len(rows) == 1
-                    row = rows[0]
-                    row_key = (
-                        row["artifact_master_key_ref_hash"],
-                        row["utc_day"],
-                        int(row["sequence"]),
-                    )
-                    existing = self.rows.get(row_key)
-                    assert existing is None or existing == row
-                    self.rows[row_key] = row
-                    if self.append_count == 1:
-                        raise EOFError("connection closed after checkpoint commit")
-                    body = json.dumps(
-                        {
-                            "status": "existing" if existing is not None else "inserted",
-                            "checkpoint_hash": row["checkpoint_hash"],
-                            "checkpoint_count": 1,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                else:
-                    query = parse_qs(parsed.query)
-                    day = query["utc_day"][0].split("eq.", 1)[1]
-                    key_hash = query["artifact_master_key_ref_hash"][0].split(
-                        "eq.", 1
-                    )[1]
-                    rows = [
-                        row
-                        for (row_key_hash, row_day, _sequence), row in self.rows.items()
-                        if row_key_hash == key_hash and row_day == day
-                    ]
-                    if "sequence" in query:
-                        sequence = int(query["sequence"][0].split("eq.", 1)[1])
-                        rows = [
-                            row
-                            for row in rows
-                            if int(row["sequence"]) == sequence
-                        ]
-                    if query.get("order") == ["sequence.desc"]:
-                        rows.sort(
-                            key=lambda row: int(row["sequence"]),
-                            reverse=True,
-                        )
-                    rows = rows[: int(query.get("limit", ["2"])[0])]
-                    body = json.dumps(
-                        rows,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-            else:
-                raise AssertionError("unexpected local provider destination")
-            return {
-                "http_status": 200,
-                "headers": {"content-type": "application/json"},
-                "body": body,
-                "tls_peer_chain_hash": _hash("c"),
-                "tls_protocol": "TLSv1.3",
-            }
-
-    vault = EncryptedArtifactVaultV2(
-        master_key=bytes(range(32)),
-        boot_identity_hash=_hash("b"),
-        retention_days=30,
-        clock=lambda: datetime(2026, 7, 10, tzinfo=timezone.utc),
-    )
-    credentials = {
-        slot: "%s-secret" % slot for slot in expected_provider_credential_slots()
-    }
-    transport = LocalProviderTransport()
-    broker = ProviderBrokerV2(
-        credential_ref_hashes={
-            slot: credential_reference_hash(secret)
-            for slot, secret in credentials.items()
-        },
-        retry_policy_hashes={
-            provider_id: sha256_json({"retry": provider_id})
-            for provider_id in BUILTIN_PROVIDER_ROUTES
-        },
-        transport=transport,
-        artifact_sink=vault.seal,
-        clock=lambda: "2026-07-10T00:00:00Z",
-    )
-    broker.provision_credentials(credentials)
-    outcome_store = ProviderOutcomeStoreV2(
-        broker=broker,
-        vault=vault,
-        sleeper=lambda _delay: None,
-    )
-    authority, _broker, _cache, _artifacts = _authority(
-        broker=broker,
-        artifacts=SimpleNamespace(seal=vault.seal),
-        outcome_store=outcome_store,
-        artifact_transaction=vault.transient_artifact_transaction,
-    )
-
-    result = authority.execute(_request(job_id="job-real-ambiguous-commit"))
-
-    append_attempts = [
-        attempt
-        for attempt in result["additional_transport_attempts"]
-        if str(attempt["logical_operation_id"]).endswith(":append-batch")
-    ]
-    assert [attempt["attempt_number"] for attempt in append_attempts] == [0, 1]
-    assert [attempt["terminal_status"] for attempt in append_attempts] == [
-        "transport_failure",
-        "authenticated_response",
-    ]
-    assert result["terminal_status"] == "authenticated_response"
-    assert sum(
-        urlsplit(call["url"]).hostname == "api.exa.ai" for call in transport.calls
-    ) == 1
-    assert transport.append_count == 2
-    assert len(transport.rows) == 1
-    assert authority.provider_outcome_snapshot()["provider_outcome_digest"][
-        "sidecar_sequence"
-    ] == 1
 
 
-def test_provider_outcome_rollback_preserves_original_error_across_midnight() -> None:
-    timestamps = ["2026-07-10T23:59:59Z"]
-    outcome_store = _OutcomeStore()
-    authority, _broker, _cache, _artifacts = _authority(
-        outcome_store=outcome_store,
-        clock=lambda: timestamps[0],
-    )
-    authority.execute(_request())
-
-    timestamps[0] = "2026-07-11T00:00:01Z"
-    outcome_store.fail_persist = True
-    failed = authority.execute(
-        _request(
-            logical_operation_id="provider-operation-next-day",
-            body=b'{"query":"next-day"}',
-        )
-    )
-
-    assert failed["terminal_status"] == "transport_failure"
-    restored = authority._outcome_ledger.state_document()
-    assert restored["utc_day"] == "2026-07-10"
-    assert restored["sequence"] == 1
 
 
-def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():
-    vault = EncryptedArtifactVaultV2(
-        master_key=bytes(range(32)),
-        boot_identity_hash=_hash("b"),
-        retention_days=30,
-        clock=lambda: datetime(2026, 7, 10, tzinfo=timezone.utc),
-    )
-
-    class FailingOutcomeStore(_OutcomeStore):
-        def persist(
-            self,
-            document,
-            *,
-            previous_checkpoint_hash,
-            job_id,
-            purpose,
-            attempt_number=0,
-        ):
-            del document, previous_checkpoint_hash, attempt_number
-            vault.seal(
-                b"uncommitted provider outcome checkpoint",
-                job_id=job_id,
-                purpose=purpose,
-                artifact_kind="provider_outcome_checkpoint",
-            )
-            raise RuntimeError("outcome persistence failed")
-
-    authority, _broker, _cache, _artifacts = _authority(
-        artifacts=SimpleNamespace(seal=vault.seal),
-        outcome_store=FailingOutcomeStore(),
-        artifact_transaction=vault.transient_artifact_transaction,
-    )
-    failed = authority.execute(_request())
-
-    assert failed["terminal_status"] == "transport_failure"
-    retained = vault.job_artifacts(
-        job_id="job-provider-semantics",
-        purpose="research_lab.company_score.v2",
-    )
-    assert [item["artifact_id"] for item in retained] == [
-        failed["encrypted_request_artifact_id"]
-    ]
-    assert [item["artifact_kind"] for item in retained] == ["provider_request"]
 
 
-def test_semantics_rollback_reseals_cleanup_diagnostic_with_outer_cause():
-    vault = EncryptedArtifactVaultV2(
-        master_key=bytes(range(32)),
-        boot_identity_hash=_hash("b"),
-        retention_days=30,
-        clock=lambda: datetime(2026, 7, 10, tzinfo=timezone.utc),
-    )
-    sealed = []
-
-    def seal(plaintext, **kwargs):
-        descriptor = vault.seal(plaintext, **kwargs)
-        sealed.append((bytes(plaintext), dict(kwargs), dict(descriptor)))
-        return descriptor
-
-    primary_error = ValueError(
-        "secret-primary https://user:password@example.invalid/private"
-    )
-    cleanup_error = OSError(errno.ENOBUFS, "secret-cleanup-token")
-
-    def transport(**_request):
-        raise ProviderTransportCleanupError(
-            stage="client_transport_cleanup",
-            primary_error=primary_error,
-            cleanup_error=cleanup_error,
-        )
-
-    credentials = {
-        slot: "%s-secret" % slot for slot in expected_provider_credential_slots()
-    }
-    broker = ProviderBrokerV2(
-        credential_ref_hashes={
-            slot: credential_reference_hash(secret)
-            for slot, secret in credentials.items()
-        },
-        retry_policy_hashes={
-            provider_id: sha256_json({"retry": provider_id})
-            for provider_id in BUILTIN_PROVIDER_ROUTES
-        },
-        transport=transport,
-        artifact_sink=seal,
-        clock=lambda: "2026-07-10T00:00:00Z",
-    )
-    broker.provision_credentials(credentials)
-    prior_broker_results = []
-    broker_execute = broker.execute
-
-    def recording_broker_execute(request):
-        broker_result = broker_execute(request)
-        prior_broker_results.append(dict(broker_result))
-        return broker_result
-
-    broker.execute = recording_broker_execute
-    outcome_store = _OutcomeStore()
-    outcome_store.fail_persist = True
-    authority, _broker, _cache, _artifacts = _authority(
-        broker=broker,
-        artifacts=SimpleNamespace(seal=seal),
-        outcome_store=outcome_store,
-        artifact_transaction=vault.transient_artifact_transaction,
-    )
-
-    result = authority.execute(_request())
-
-    assert result["terminal_status"] == "transport_failure"
-    assert result["failure_stage"] == "provider_semantics"
-    assert result["failure_error_type"] == "RuntimeError"
-    validate_transport_attempt(result["transport_attempt"])
-    assert broker.health()["terminal_count"] == 0
-    retained = vault.job_artifacts(
-        job_id="job-provider-semantics",
-        purpose="research_lab.company_score.v2",
-    )
-    assert sorted(item["artifact_kind"] for item in retained) == [
-        "provider_request",
-        "provider_transport_failure_diagnostic",
-    ]
-    retained_by_kind = {item["artifact_kind"]: item for item in retained}
-    diagnostic_descriptor = retained_by_kind[
-        "provider_transport_failure_diagnostic"
-    ]
-    diagnostic_plaintext = vault.decrypt_storage_document(
-        vault.export_ciphertext(diagnostic_descriptor["artifact_id"])[
-            "storage_document"
-        ]
-    )
-    diagnostic = json.loads(diagnostic_plaintext)
-    assert diagnostic["outer_error_type"] == "RuntimeError"
-    assert diagnostic["primary_error_type"] == "ValueError"
-    assert diagnostic["cleanup_error_type"] == "OSError"
-    assert diagnostic["cleanup_errno"] == errno.ENOBUFS
-    assert diagnostic["cleanup_resource_kind"] == "client_transport"
-    validate_provider_transport_failure_diagnostic(diagnostic)
-    request_descriptor = retained_by_kind["provider_request"]
-    request_plaintext = vault.decrypt_storage_document(
-        vault.export_ciphertext(request_descriptor["artifact_id"])[
-            "storage_document"
-        ]
-    )
-    request_document = json.loads(request_plaintext)
-    assert set(request_document) == {
-        "schema_version",
-        "logical_operation_id",
-        "job_id",
-        "purpose",
-        "provider_id",
-        "attempt_number",
-        "method",
-        "destination_host",
-        "path_hash",
-        "nonsecret_headers_hash",
-        "body_hash",
-        "retry_policy_hash",
-        "timeout_ms",
-        "failure_stage",
-        "failure_error_type",
-        "provider_transport_failure_diagnostic_hash",
-    }
-    assert request_document[
-        "provider_transport_failure_diagnostic_hash"
-    ] == sha256_bytes(diagnostic_plaintext)
-    retained_hashes = {
-        value
-        for descriptor in retained
-        for field in (
-            "artifact_id",
-            "plaintext_hash",
-            "ciphertext_hash",
-            "encryption_context_hash",
-        )
-        for value in (descriptor[field],)
-    }
-    assert retained_hashes.issubset(result["evidence_artifact_hashes"])
-    diagnostic_seals = [
-        item
-        for item in sealed
-        if item[1]["artifact_kind"]
-        == "provider_transport_failure_diagnostic"
-    ]
-    assert len(diagnostic_seals) == 2
-    assert diagnostic_seals[0][2]["artifact_id"] not in {
-        item["artifact_id"] for item in retained
-    }
-    assert diagnostic_seals[0][2]["artifact_id"] not in result[
-        "evidence_artifact_hashes"
-    ]
-    combined = "%s%s%s" % (
-        canonical_json(result),
-        diagnostic_plaintext.decode("utf-8"),
-        request_plaintext.decode("utf-8"),
-    )
-    assert "secret-primary" not in combined
-    assert "secret-cleanup-token" not in combined
-    assert "password" not in combined
-    assert len(prior_broker_results) == 1
-    with pytest.raises(RuntimeError, match="second outer commit failed"):
-        with vault.transient_artifact_transaction():
-            broker.reseal_transport_failure_diagnostic(
-                prior_result=prior_broker_results[0],
-                outer_error=OSError("second persistence failure"),
-            )
-            raise RuntimeError("second outer commit failed")
-    with vault.transient_artifact_transaction():
-        recovered_descriptor = broker.reseal_transport_failure_diagnostic(
-            prior_result=prior_broker_results[0],
-            outer_error=TimeoutError("third persistence failure"),
-        )
-    assert recovered_descriptor is not None
-    recovered_plaintext = vault.decrypt_storage_document(
-        vault.export_ciphertext(recovered_descriptor["artifact_id"])[
-            "storage_document"
-        ]
-    )
-    recovered = json.loads(recovered_plaintext)
-    assert recovered["outer_error_type"] == "TimeoutError"
-    assert recovered["primary_error_type"] == "ValueError"
-    assert recovered["cleanup_error_type"] == "OSError"
 
 
 def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():
@@ -2251,20 +989,16 @@ def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():
                 "tls_protocol": "TLSv1.3",
             }
 
-    class FailOnceOutcomeStore(_OutcomeStore):
+    class FailOnceCache(_CacheStore):
         def __init__(self) -> None:
             super().__init__()
             self.failed_once = False
 
-        def persist(self, *args, **kwargs):
+        def persist_recorded(self, *args, **kwargs):
             if not self.failed_once:
                 self.failed_once = True
-                self.fail_persist = True
-                try:
-                    return super().persist(*args, **kwargs)
-                finally:
-                    self.fail_persist = False
-            return super().persist(*args, **kwargs)
+                raise RuntimeError("cache persistence failed")
+            return super().persist_recorded(*args, **kwargs)
 
     vault = EncryptedArtifactVaultV2(
         master_key=bytes(range(32)),
@@ -2290,16 +1024,16 @@ def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():
         clock=lambda: "2026-07-10T00:00:00Z",
     )
     broker.provision_credentials(credentials)
-    outcome_store = FailOnceOutcomeStore()
+    cache = FailOnceCache()
     authority, _broker, _cache, _artifacts = _authority(
         broker=broker,
+        cache=cache,
         artifacts=SimpleNamespace(seal=vault.seal),
-        outcome_store=outcome_store,
         artifact_transaction=vault.transient_artifact_transaction,
     )
     request = _request(
         job_id="job-preflight-artifact-retry",
-        purpose="research_lab.provider_preflight.v2",
+        purpose="research_lab.company_score.v2",
     )
 
     failed = authority.execute(request)
@@ -2547,10 +1281,3 @@ def test_transport_failure_is_committed_as_error_not_provider_response():
     broker.queued["exa"] = [(0, b"", "transport_failure")]
     result = authority.execute(_request())
     assert result["terminal_status"] == "transport_failure"
-    digest = authority.provider_outcome_snapshot()["provider_outcome_digest"]
-    exa = digest["providers"]["exa"]
-    assert exa["call_count"] == 1
-    assert exa["live_call_count"] == 1
-    assert exa["error_count"] == 1
-    assert exa["status_histogram"] == {"502": 1}
-    assert exa["measured_spend_microusd"] == 0

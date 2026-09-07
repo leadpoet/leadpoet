@@ -55,7 +55,6 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _direct_provider_store_tables,
     _measured_query_tables,
     _migration_seed_rows,
-    _migration_provider_outcome_contract,
     _migration_schema_contract,
     _schema_contract,
     _source_add_claim_control_contract,
@@ -81,10 +80,6 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
     MAINTENANCE_PAUSE_MIGRATION,
     PAUSED_CAPACITY_AGING_MIGRATION,
-    PROVIDER_OUTCOME_APPEND_MIGRATION,
-    PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
-    PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
-    PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
     QUEUE_CAPACITY_GUARD_MIGRATION,
     RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
@@ -150,21 +145,10 @@ def python39_import_event_loop():
 
 def _provider_persistence_batch_fixture() -> dict[str, Any]:
     return {
-        "batch_size": 5,
-        "durable_count": 5,
-        "batch_replay_exact": True,
-        "batch_conflict_head_exact": True,
-        "cache_put_exact": True,
-        "cache_replay_exact": True,
-        "schema": {
-            "schema_version": (
-                "leadpoet.provider_persistence_batch_contract.v1"
-            ),
-            "cache_put": "atomic_exact_row",
-            "outcome_append": "atomic_contiguous_batch",
-            "outcome_batch_max": 32,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
+        "schema_version": (
+            "leadpoet.provider_persistence_batch_contract.v1"
+        ),
+        "cache_put": "atomic_exact_row",
     }
 
 
@@ -1418,7 +1402,6 @@ def test_gateway_rehearsal_discovers_candidate_direct_provider_tables() -> None:
     source_root = Path(__file__).resolve().parents[2]
     assert _direct_provider_store_tables(source_root) >= {
         "research_lab_provider_evidence_cache_v2",
-        "research_lab_provider_outcome_checkpoints_v2",
     }
 
 
@@ -1597,7 +1580,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_chain_realized_epoch_settlements_v1",
             "research_lab_chain_realized_settlement_activation_v1",
             "research_lab_chain_realized_obligation_credits_v1",
-            "research_lab_provider_outcome_checkpoints_v2",
             "research_lab_attested_ancestry_checkpoints_v2",
             "research_lab_attested_ancestry_activations_v2",
             "research_lab_allocation_settlement_frontiers_v2",
@@ -1643,11 +1625,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_acquire_maintenance_lease",
             "research_lab_attested_transport_purpose_contract_v2",
             "research_lab_attested_transport_terminal_contract_v2",
-            "append_research_lab_provider_outcome_checkpoint_v2",
-            "research_lab_provider_outcome_contention_contract_v2",
-            "research_lab_provider_outcome_contention_contract_v3",
             "put_research_lab_provider_evidence_cache_v2",
-            "append_research_lab_provider_outcome_checkpoints_v2",
             "research_lab_provider_persistence_batch_contract_v1",
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
             "research_lab_champion_lifetime_credit_contract_v1",
@@ -1712,15 +1690,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "checks": {
             name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
         },
-        "provider_outcome_contention_contract": {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v3"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-            "candidate_checkpoint_hash": True,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,
@@ -1728,14 +1697,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "same_holder_renewed": True,
             "expired_holder_replaced": True,
             "invalid_ttl_rejected": True,
-        },
-        "provider_outcome_append": {
-            "accepted_count": 1,
-            "rejected_count": 1,
-            "row_count": 3,
-            "contention_rollback_delta": 0,
-            "durable_head_conflict_verified": True,
-            "empty_head_conflict_verified": True,
         },
         "provider_persistence_batch": _provider_persistence_batch_fixture(),
         "seed_rows": {
@@ -1783,9 +1744,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     ] == frozenset(EXPECTED_FINALIZED_VIEW_COLUMNS)
     assert "research_lab_attested_transport_purpose_contract_v2" in rpcs
     assert "research_lab_attested_transport_terminal_contract_v2" in rpcs
-    assert "append_research_lab_provider_outcome_checkpoint_v2" in rpcs
-    assert "research_lab_provider_outcome_contention_contract_v2" in rpcs
-    assert "research_lab_provider_outcome_contention_contract_v3" in rpcs
     assert (
         "persist_research_lab_chain_realized_lifetime_settlement_v2"
         in rpcs
@@ -1805,10 +1763,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         candidate_sha=COMMIT,
         relation_columns=relation_columns,
     ) == contract["seed_rows"]
-    assert _migration_provider_outcome_contract(
-        path,
-        candidate_sha=COMMIT,
-    ) == contract["provider_outcome_contention_contract"]
     with pytest.raises(RuntimeError, match="differs from candidate"):
         _migration_schema_contract(path, candidate_sha="2" * 40)
 
@@ -1929,7 +1883,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_catalog_replay_contract_v2",
             "research_lab_compact_checkpoint_graph_contract_v1",
             "put_research_lab_provider_evidence_cache_v2",
-            "append_research_lab_provider_outcome_checkpoints_v2",
             "research_lab_provider_persistence_batch_contract_v1",
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
@@ -1969,15 +1922,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         "checks": {
             name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
         },
-        "provider_outcome_contention_contract": {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v3"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-            "candidate_checkpoint_hash": True,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,
@@ -1985,14 +1929,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "same_holder_renewed": True,
             "expired_holder_replaced": True,
             "invalid_ttl_rejected": True,
-        },
-        "provider_outcome_append": {
-            "accepted_count": 1,
-            "rejected_count": 1,
-            "row_count": 3,
-            "contention_rollback_delta": 0,
-            "durable_head_conflict_verified": True,
-            "empty_head_conflict_verified": True,
         },
         "provider_persistence_batch": _provider_persistence_batch_fixture(),
         "allocation_settlement_frontier": {
@@ -5705,7 +5641,6 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/execution_job_manager_v2.py",
         "gateway/tee/provider_broker_v2.py",
         "gateway/tee/provider_client_v2.py",
-        "gateway/tee/provider_outcome_store_v2.py",
         "gateway/tee/rpc_authority.py",
         "gateway/main.py",
         "gateway/research_lab/source_add_trial_runner.py",
@@ -6684,106 +6619,6 @@ def test_gateway_rehearsal_serves_source_add_restart_contracts(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
-
-
-def test_gateway_rehearsal_provider_checkpoint_rpc_matches_migration_134(
-    tmp_path,
-) -> None:
-    source_root = Path(__file__).resolve().parents[2]
-    fixture = json.loads(
-        (
-            source_root
-            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
-        ).read_text(encoding="utf-8")
-    )
-    table = "research_lab_provider_outcome_checkpoints_v2"
-    columns = frozenset(
-        {
-            "schema_version",
-            "artifact_master_key_ref_hash",
-            "utc_day",
-            "sequence",
-            "checkpoint_hash",
-            "previous_checkpoint_hash",
-            "state_document_hash",
-            "checkpoint_artifact_id",
-            "encrypted_checkpoint_doc",
-            "created_at",
-        }
-    )
-    contract = {
-        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
-        "lock_contention_status": "busy",
-        "stale_lineage_status": "conflict",
-        "candidate_checkpoint_hash": True,
-        "conflict_head_checkpoint_row": "encrypted_or_null",
-    }
-    state = LocalPostgRESTState(
-        state_root=tmp_path,
-        fixture=fixture,
-        source_root=source_root,
-        tables={table},
-        rpcs={"append_research_lab_provider_outcome_checkpoint_v2"},
-        relation_columns={table: columns},
-        provider_outcome_contract=contract,
-    )
-
-    def checkpoint(
-        sequence: int,
-        checkpoint_hash: str,
-        previous_hash: str,
-        suffix: str,
-    ) -> dict[str, Any]:
-        return {
-            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
-            "artifact_master_key_ref_hash": "sha256:" + "a" * 64,
-            "utc_day": "2026-07-29",
-            "sequence": sequence,
-            "checkpoint_hash": checkpoint_hash,
-            "previous_checkpoint_hash": previous_hash,
-            "state_document_hash": "sha256:" + suffix * 64,
-            "checkpoint_artifact_id": "sha256:" + suffix * 64,
-            "encrypted_checkpoint_doc": {"fixture": suffix},
-        }
-
-    first_hash = "sha256:" + "1" * 64
-    first = checkpoint(1, first_hash, "", "2")
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": first}
-    ) == {"status": "inserted", "checkpoint_hash": first_hash}
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": first}
-    ) == {"status": "existing", "checkpoint_hash": first_hash}
-
-    stale_hash = "sha256:" + "3" * 64
-    stale = checkpoint(1, stale_hash, "", "4")
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": stale}
-    ) == {
-        "status": "conflict",
-        "checkpoint_hash": stale_hash,
-        "head_checkpoint_row": first,
-    }
-
-    second_hash = "sha256:" + "5" * 64
-    second = checkpoint(2, second_hash, first_hash, "6")
-    lock = state._provider_outcome_lock(
-        second["artifact_master_key_ref_hash"],
-        second["utc_day"],
-    )
-    lock.acquire()
-    try:
-        assert state.append_provider_outcome_checkpoint(
-            {"checkpoint_row": second}
-        ) == {"status": "busy", "checkpoint_hash": second_hash}
-    finally:
-        lock.release()
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": second}
-    ) == {"status": "inserted", "checkpoint_hash": second_hash}
-    assert [
-        int(row["sequence"]) for row in state.rows[table]
-    ] == [1, 2]
 
 
 def test_gateway_rehearsal_ancestry_checkpoint_rpc_matches_migration_135(

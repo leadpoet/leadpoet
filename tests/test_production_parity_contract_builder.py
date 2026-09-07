@@ -30,7 +30,6 @@ REBENCHMARK_TRANSPORT_EVIDENCE_PATHS = {
     "gateway/tee/execution_job_manager_v2.py",
     "gateway/tee/provider_broker_v2.py",
     "gateway/tee/provider_client_v2.py",
-    "gateway/tee/provider_outcome_store_v2.py",
     "gateway/tee/rpc_authority.py",
     "leadpoet_observability/sentry_operations.py",
 }

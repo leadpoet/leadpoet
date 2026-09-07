@@ -161,8 +161,6 @@ v2_provider_broker = None
 v2_provider_broker_lock = Lock()
 v2_provider_cache_store = None
 v2_provider_cache_store_lock = Lock()
-v2_provider_outcome_store = None
-v2_provider_outcome_store_lock = Lock()
 v2_provider_semantics_authority = None
 vsock_rpc_transport_health_lock = Lock()
 vsock_rpc_cleanup_attempt_count = 0
@@ -1623,26 +1621,6 @@ def get_v2_provider_cache_store():
         return v2_provider_cache_store
 
 
-def get_v2_provider_outcome_store():
-    global v2_provider_outcome_store
-    with v2_provider_outcome_store_lock:
-        if v2_provider_outcome_store is not None:
-            return v2_provider_outcome_store
-        from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
-        from gateway.tee.rpc_authority import active_enclave_role
-
-        if active_enclave_role() != "gateway_coordinator":
-            raise RuntimeError("provider outcome store is coordinator-only")
-        v2_provider_outcome_store = ProviderOutcomeStoreV2(
-            broker=get_v2_provider_broker(),
-            vault=get_v2_artifact_vault(),
-            origin=_v2_supabase_origin(
-                get_v2_runtime_identity().runtime_configuration()["configuration"]
-            ),
-        )
-        return v2_provider_outcome_store
-
-
 def get_v2_provider_semantics_authority():
     global v2_provider_semantics_authority
     with v2_provider_semantics_authority_lock:
@@ -1660,7 +1638,6 @@ def get_v2_provider_semantics_authority():
             artifact_transaction=get_v2_artifact_vault().transient_artifact_transaction,
             boot_identity_supplier=get_v2_runtime_identity().boot_identity,
             sign_digest=sign_data,
-            outcome_store=get_v2_provider_outcome_store(),
         )
         return v2_provider_semantics_authority
 
@@ -2074,9 +2051,6 @@ def get_v2_coordinator_job_manager():
                 ),
                 source_add_catalog_resolver=lambda payload, context: (
                     reward_source.catalog_snapshot(payload=payload, context=context)
-                ),
-                provider_outcome_supplier=(
-                    get_v2_provider_semantics_authority().provider_outcome_snapshot_evidence
                 ),
             ),
             worker_count=1,

@@ -329,76 +329,6 @@ QUERY_POLICIES = {
         order="created_at.desc",
         limit=20,
     ),
-    "reimbursement_ticket_by_id": SupabaseQueryV2(
-        policy_id="reimbursement_ticket_by_id",
-        table="research_loop_ticket_current",
-        select=(
-            "ticket_id,miner_hotkey,island,brief_sanitized_ref,"
-            "miner_openrouter_key_ref,ticket_doc,created_at,current_status_at"
-        ),
-        parameter_names=("ticket_id",),
-        max_pages=1,
-        limit=1,
-    ),
-    "reimbursement_receipt_by_id": SupabaseQueryV2(
-        policy_id="reimbursement_receipt_by_id",
-        table="research_loop_receipt_current",
-        select=(
-            "receipt_id,run_id,ticket_id,loop_start_payment_id,"
-            "loop_start_credit_id,current_receipt_status"
-        ),
-        parameter_names=("receipt_id",),
-        max_pages=1,
-        limit=1,
-    ),
-    "reimbursement_payment_by_id": SupabaseQueryV2(
-        policy_id="reimbursement_payment_by_id",
-        table="research_loop_start_payments",
-        select="payment_id,ticket_id,payment_status,verification_doc,verified_at",
-        parameter_names=("payment_id",),
-        max_pages=1,
-        limit=1,
-    ),
-    "reimbursement_queue_events_by_run": SupabaseQueryV2(
-        policy_id="reimbursement_queue_events_by_run",
-        table="research_loop_run_queue_events",
-        select="run_id,ticket_id,seq,event_type,event_doc,created_at",
-        parameter_names=("run_id",),
-        max_pages=1,
-        order="seq.desc,created_at.desc",
-        limit=200,
-    ),
-    "reimbursement_participation_tickets": SupabaseQueryV2(
-        policy_id="reimbursement_participation_tickets",
-        table="research_loop_ticket_current",
-        select=(
-            "ticket_id,miner_hotkey,island,brief_sanitized_ref,"
-            "created_at,current_status_at"
-        ),
-        parameter_names=("island",),
-        max_pages=50,
-        order="created_at.desc,ticket_id.asc",
-    ),
-    "reimbursement_queue_by_ticket": SupabaseQueryV2(
-        policy_id="reimbursement_queue_by_ticket",
-        table="research_loop_run_queue_current",
-        select="run_id,ticket_id,current_queue_status,current_status_at",
-        parameter_names=("ticket_id",),
-        max_pages=1,
-        order="current_status_at.desc,run_id.asc",
-        limit=100,
-    ),
-    "reimbursement_cap_awards_by_day": SupabaseQueryV2(
-        policy_id="reimbursement_cap_awards_by_day",
-        table="research_reimbursement_award_current",
-        select=(
-            "award_id,miner_hotkey,island,run_day,current_award_status,"
-            "award_status,target_reimbursement_microusd"
-        ),
-        parameter_names=("run_day",),
-        max_pages=50,
-        order="award_id.asc",
-    ),
     "allocation_history": SupabaseQueryV2(
         policy_id="allocation_history",
         table="research_lab_emission_allocation_current",
@@ -997,36 +927,6 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         if policy.policy_id == "source_add_provisioning_eligible":
             return (("provision_status", "eq.provisioned_autoresearch_eligible"),)
         return ()
-    if policy.policy_id in {
-        "reimbursement_ticket_by_id",
-        "reimbursement_queue_by_ticket",
-    }:
-        ticket_id = _uuid(parameters["ticket_id"], "ticket_id")
-        return (("ticket_id", "eq.%s" % ticket_id),)
-    if policy.policy_id == "reimbursement_receipt_by_id":
-        receipt_id = _uuid(parameters["receipt_id"], "receipt_id")
-        return (("receipt_id", "eq.%s" % receipt_id),)
-    if policy.policy_id == "reimbursement_payment_by_id":
-        payment_id = _uuid(parameters["payment_id"], "payment_id")
-        return (("payment_id", "eq.%s" % payment_id),)
-    if policy.policy_id == "reimbursement_queue_events_by_run":
-        run_id = _uuid(parameters["run_id"], "run_id")
-        return (("run_id", "eq.%s" % run_id),)
-    if policy.policy_id == "reimbursement_participation_tickets":
-        island = _identifier(parameters["island"], "island")
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", island):
-            raise SupabaseSourceV2Error("island is invalid")
-        return (("island", "eq.%s" % island),)
-    if policy.policy_id == "reimbursement_cap_awards_by_day":
-        run_day = _identifier(parameters["run_day"], "run_day")
-        try:
-            datetime.strptime(run_day, "%Y-%m-%d")
-        except ValueError as exc:
-            raise SupabaseSourceV2Error("run_day is invalid") from exc
-        return (
-            ("current_award_status", "eq.awarded"),
-            ("run_day", "eq.%s" % run_day),
-        )
     if policy.policy_id == "allocation_history":
         start_epoch = _non_negative_int(parameters["start_epoch"], "start_epoch")
         end_epoch = _non_negative_int(parameters["end_epoch"], "end_epoch")

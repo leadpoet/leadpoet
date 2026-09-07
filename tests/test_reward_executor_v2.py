@@ -360,3 +360,12 @@ def test_historical_source_add_migration_requires_exact_measured_provenance():
                 },
             }
         )
+
+
+@pytest.mark.parametrize("kind", ("champion", "reimbursement"))
+def test_retired_loop_rewards_cannot_issue_new_obligations(kind):
+    with pytest.raises(RewardExecutorV2Error, match="kind is unsupported"):
+        execute_reward_decision_v2({
+            "decision_kind": kind,
+            "decision_payload": {},
+        })

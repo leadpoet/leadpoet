@@ -525,37 +525,8 @@ async def authorize_reward_decision_v2(
 ) -> dict[str, Any]:
     """Require the existing reward kernel to produce one exact signed decision."""
 
-    allowed_failed = set()
     for graph in parent_graphs:
-        root_hash = str(graph.get("root_receipt_hash") or "")
-        root = next(
-            (
-                item
-                for item in graph.get("receipts") or ()
-                if isinstance(item, Mapping)
-                and item.get("receipt_hash") == root_hash
-            ),
-            None,
-        )
-        graph_allowed = set()
-        if isinstance(root, Mapping) and root.get("status") == "failed":
-            terminal_result = decision_payload.get("autoresearch_result")
-            if (
-                decision_kind != "reimbursement"
-                or not isinstance(terminal_result, Mapping)
-                or terminal_result.get("status") != "failed"
-                or root.get("purpose") != "research_lab.candidate_decision.v2"
-                or root.get("output_root") != sha256_json(dict(terminal_result))
-            ):
-                raise ResearchLabV2AuthorityError(
-                    "failed reward ancestry is not an exact reimbursement terminal"
-                )
-            graph_allowed.add(root_hash)
-            allowed_failed.add(root_hash)
-        validate_receipt_graph(
-            graph,
-            allowed_failed_receipt_hashes=graph_allowed,
-        )
+        validate_receipt_graph(graph)
     execute_kwargs = {
         "operation": OP_RESEARCH_LAB_REWARD_DECISION,
         "purpose": "research_lab.reward_decision.v2",
@@ -574,10 +545,6 @@ async def authorize_reward_decision_v2(
             ),
         ),
     }
-    if allowed_failed:
-        execute_kwargs["allowed_failed_parent_receipt_hashes"] = tuple(
-            sorted(allowed_failed)
-        )
     outcome = await execute(
         **execute_kwargs,
     )
@@ -594,10 +561,6 @@ async def authorize_reward_decision_v2(
     if output_root != sha256_json(expected_projection):
         raise ResearchLabV2AuthorityError("reward decision output root differs")
     resolved_artifact_ref = str(artifact_ref)
-    if not resolved_artifact_ref and decision_kind == "reimbursement":
-        award = actual_result.get("award")
-        if isinstance(award, Mapping):
-            resolved_artifact_ref = str(award.get("award_id") or "")
     if not resolved_artifact_ref:
         raise ResearchLabV2AuthorityError("reward artifact reference is missing")
     link = await _persist_business_links(

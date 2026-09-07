@@ -34,7 +34,6 @@ SCORING_PROXY_PREFIXES = (
 )
 
 MAX_WORKER_PROCESSES = 500
-DEFAULT_LOOP_START_FEE_USD = 2.0
 
 
 def _is_production_subnet() -> bool:
@@ -99,10 +98,6 @@ class ResearchLabGatewayConfig:
     fulfillment_mutation_enabled: bool = False
     internal_api_key: str = ""
 
-    # These values can still be needed while existing paid-loop reimbursement
-    # records are settled. No new loop can be submitted.
-    loop_start_fee_usd: float = DEFAULT_LOOP_START_FEE_USD
-    default_compute_budget_usd: float = 5.0
     evaluation_epoch: int = 0
 
     reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
@@ -198,12 +193,6 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED"
             ),
             internal_api_key=os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", ""),
-            loop_start_fee_usd=_float(
-                "RESEARCH_LAB_LOOP_START_FEE_USD", DEFAULT_LOOP_START_FEE_USD
-            ),
-            default_compute_budget_usd=_float(
-                "RESEARCH_LAB_DEFAULT_COMPUTE_BUDGET_USD", 5.0
-            ),
             evaluation_epoch=_int("RESEARCH_LAB_EVALUATION_EPOCH", 0),
             reimbursement_policy_id=os.getenv(
                 "RESEARCH_LAB_REIMBURSEMENT_POLICY_ID",

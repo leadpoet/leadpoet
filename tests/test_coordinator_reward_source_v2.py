@@ -292,7 +292,6 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
         reader=reader,
         chain_source=FakeChain(),
         config_supplier=_config,
-        clock=lambda: datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
     )
     payload = {
         "decision_kind": "source_add_leg1",
@@ -825,109 +824,15 @@ def test_leg2_rejects_trigger_that_differs_from_signed_judge():
         resolver.resolve(payload=payload, context=_context(with_judge_parent=True))
 
 
-def test_reimbursement_reconstructs_formula_inputs_from_measured_rows():
-    run_id = "11111111-1111-4111-8111-111111111111"
-    ticket_id = "22222222-2222-4222-8222-222222222222"
-    receipt_id = "33333333-3333-4333-8333-333333333333"
-    payment_id = "44444444-4444-4444-8444-444444444444"
-    reader = FakeReader(
-        {
-            "reimbursement_ticket_by_id": [
-                {
-                    "ticket_id": ticket_id,
-                    "miner_hotkey": "miner",
-                    "island": "generalist",
-                    "brief_sanitized_ref": "brief:1",
-                    "miner_openrouter_key_ref": "encrypted_ref:openrouter:abc",
-                    "ticket_doc": {"requested_compute_budget_usd": 25.0},
-                    "created_at": "2026-07-09T12:00:00Z",
-                    "current_status_at": "2026-07-09T12:00:00Z",
-                }
-            ],
-            "reimbursement_receipt_by_id": [
-                {
-                    "receipt_id": receipt_id,
-                    "run_id": run_id,
-                    "ticket_id": ticket_id,
-                    "loop_start_payment_id": payment_id,
-                    "loop_start_credit_id": None,
-                    "current_receipt_status": "completed",
-                }
-            ],
-            "reimbursement_payment_by_id": [
-                {
-                    "payment_id": payment_id,
-                    "ticket_id": ticket_id,
-                    "payment_status": "verified",
-                    "verification_doc": {"compute_budget_usd": 25.0},
-                }
-            ],
-            "reimbursement_queue_events_by_run": [],
-            "reimbursement_participation_tickets": [
-                {
-                    "ticket_id": ticket_id,
-                    "miner_hotkey": "miner",
-                    "island": "generalist",
-                    "brief_sanitized_ref": "brief:1",
-                    "created_at": "2026-07-09T12:00:00Z",
-                    "current_status_at": "2026-07-09T12:00:00Z",
-                }
-            ],
-            "reimbursement_queue_by_ticket": [
-                {
-                    "run_id": run_id,
-                    "ticket_id": ticket_id,
-                    "current_queue_status": "completed",
-                    "current_status_at": "2026-07-10T19:59:00Z",
-                }
-            ],
-            "reimbursement_cap_awards_by_day": [],
-        }
+@pytest.mark.parametrize("kind", ("champion", "reimbursement"))
+def test_retired_loop_rewards_cannot_read_or_create_business_state(kind):
+    reader = FakeReader({})
+    authority = CoordinatorRewardSourceV2(
+        reader=reader, chain_source=FakeChain(), config_supplier=_config,
     )
-    resolver = CoordinatorRewardSourceV2(
-        reader=reader,
-        chain_source=FakeChain(),
-        config_supplier=_config,
-    )
-    autoresearch_result = {
-        "actual_openrouter_cost_microusd": 1_250_000,
-        "status": "completed",
-    }
-    parent_hash = "sha256:" + "c" * 64
-    context = _context()
-    context.parent_receipt_hashes = (parent_hash,)
-    context.external_receipt_graphs = [
-        {
-            "root_receipt_hash": parent_hash,
-            "receipts": [
-                {
-                    "receipt_hash": parent_hash,
-                    "purpose": "research_lab.candidate_decision.v2",
-                    "issued_at": "2026-07-10T20:00:00Z",
-                }
-            ],
-        }
-    ]
-    payload = {
-        "decision_kind": "reimbursement",
-        "decision_payload": {
-            "source_request": {
-                "run_id": run_id,
-                "ticket_id": ticket_id,
-                "receipt_id": receipt_id,
-            },
-            "autoresearch_result": autoresearch_result,
-        },
-    }
-
-    resolved = resolver.resolve(payload=payload, context=context)
-
-    decision = resolved["decision_payload"]
-    assert decision["run_cost"]["actual_openrouter_cost_usd"] == 1.25
-    assert decision["run_cost"]["verified_loop_start_payment"] is True
-    assert decision["participation_snapshot"]["paid_loop_count"] == 1
-    assert decision["participation_snapshot"]["lookback_end"] == (
-        "2026-07-10T20:00:00+00:00"
-    )
-    assert decision["start_epoch"] == 101
-    assert decision["autoresearch_result"] == autoresearch_result
+    with pytest.raises(CoordinatorRewardSourceV2Error, match="kind is unsupported"):
+        authority.resolve(
+            payload={"decision_kind": kind, "decision_payload": {}},
+            context=_context(),
+        )
+    assert reader.calls == []

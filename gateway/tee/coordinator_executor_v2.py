@@ -284,27 +284,7 @@ def coordinator_failed_parent_graph_policy_v2(
             raise ValueError("artifact persistence failed source differs")
         return tuple(sorted(failed_hashes))
 
-    if failed_hashes != {root_hash}:
-        raise ValueError("failed reward ancestry must be the direct graph root")
-
-    if operation != OP_RESEARCH_LAB_REWARD_DECISION:
-        raise ValueError("failed receipt ancestry is unauthorized for operation")
-    if payload.get("decision_kind") != "reimbursement":
-        raise ValueError("failed receipt ancestry is reimbursement-only")
-    decision_payload = payload.get("decision_payload")
-    terminal_result = (
-        decision_payload.get("autoresearch_result")
-        if isinstance(decision_payload, Mapping)
-        else None
-    )
-    if (
-        root.get("purpose") != "research_lab.candidate_decision.v2"
-        or not isinstance(terminal_result, Mapping)
-        or terminal_result.get("status") != "failed"
-        or root.get("output_root") != sha256_json(dict(terminal_result))
-    ):
-        raise ValueError("failed reimbursement ancestry does not bind terminal result")
-    return (root_hash,)
+    raise ValueError("failed receipt ancestry is unauthorized for operation")
 
 
 class CoordinatorExecutorV2:
@@ -625,7 +605,6 @@ class CoordinatorExecutorV2:
                 "source_add_migration",
                 "source_add_leg1",
                 "source_add_leg2",
-                "reimbursement",
             }:
                 if self._reward_source_resolver is None:
                     raise ValueError("measured reward source is unavailable")
@@ -741,10 +720,8 @@ class CoordinatorExecutorV2:
                 )
             return
         expected_purpose = {
-            "champion": "research_lab.promotion_decision.v2",
             "source_add_leg1": "research_lab.source_add_provenance.v2",
             "source_add_leg2": "research_lab.source_add_judge.v2",
-            "reimbursement": "research_lab.candidate_decision.v2",
         }.get(kind)
         if expected_purpose is None:
             raise ValueError("reward ancestry kind is unsupported")
@@ -772,16 +749,10 @@ class CoordinatorExecutorV2:
         ):
             raise ValueError("reward decision parent purpose is invalid")
         bound_result = None
-        if kind == "champion":
-            promotion_decision = decision_payload.get("promotion_decision")
-            if isinstance(promotion_decision, Mapping):
-                bound_result = {"decision": dict(promotion_decision)}
-        elif kind == "source_add_leg1":
+        if kind == "source_add_leg1":
             bound_result = decision_payload.get("provenance_result")
         elif kind == "source_add_leg2":
             bound_result = decision_payload.get("judge_result")
-        elif kind == "reimbursement":
-            bound_result = decision_payload.get("autoresearch_result")
         if bound_result is not None and (
             not isinstance(bound_result, Mapping)
             or root.get("output_root") != sha256_json(dict(bound_result))

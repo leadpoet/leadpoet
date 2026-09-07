@@ -6,7 +6,6 @@ import os
 
 
 PROTOCOL_ENV = "RESEARCH_LAB_TEE_PROTOCOL"
-LEGACY_V1_PROTOCOL = "legacy_v1"
 V2_PROTOCOL = "v2"
 _ALIASES = {
     V2_PROTOCOL: V2_PROTOCOL,
@@ -32,11 +31,6 @@ def normalize_tee_protocol(value: str | None) -> str:
 
 def research_lab_tee_protocol() -> str:
     return normalize_tee_protocol(os.getenv(PROTOCOL_ENV))
-
-
-def legacy_v1_enabled() -> bool:
-    research_lab_tee_protocol()
-    return False
 
 
 def v2_enabled() -> bool:

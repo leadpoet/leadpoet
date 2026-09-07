@@ -182,7 +182,7 @@ def per_icp_score(
     breakdowns: Sequence[Mapping[str, Any]],
     policy: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """One ICP through ``compute_evaluation_aggregates`` with the scorer policy.
+    """Score one ICP through the shared competition evaluator and policy.
 
     ``sum(final scores clamped to 0..100) / N - penalty / N``, floored at the
     policy floor, where the penalty is the Lab's false-positive counters over

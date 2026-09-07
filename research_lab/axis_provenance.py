@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 CALL_EMITTER_MODEL = "model"
 CALL_EMITTER_CODE = "code"
@@ -57,28 +57,3 @@ def provenance_for_stage(stage: str) -> dict[str, Any]:
         resolved["purpose"] = key or "unknown_stage"
         return resolved
     return dict(entry)
-
-
-def axis_rollup(calls: Iterable[Mapping[str, Any]]) -> str:
-    """Trace-level axis rollup per v5 §8.3.
-
-    The conjunction over the calls that drive control flow: a trace is axis-A
-    only when every control-flow-driving call was model-emitted (and there is
-    at least one). Mixed and empty traces roll up axis-B — today's champion
-    traces are axis-B by construction.
-    """
-    saw_driving_call = False
-    for call in calls:
-        if not isinstance(call, Mapping):
-            continue
-        stage = str(call.get("stage") or call.get("call_stage") or "")
-        emitter = str(call.get("call_emitter") or "")
-        drives = call.get("drives_control_flow")
-        if drives is None:
-            drives = provenance_for_stage(stage).get("drives_control_flow", True)
-        if not drives:
-            continue
-        saw_driving_call = True
-        if emitter != CALL_EMITTER_MODEL:
-            return AXIS_B
-    return AXIS_A if saw_driving_call else AXIS_B

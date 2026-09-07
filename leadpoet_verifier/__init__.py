@@ -77,15 +77,6 @@ from .l0 import (
     compute_snippet_overlap,
     run_l0_checks,
 )
-from .research_evaluation import (
-    SCORE_BUNDLE_SCHEMA_VERSION,
-    SCORE_BUNDLE_TYPE,
-    build_research_evaluation_score_bundle,
-    compute_evaluation_aggregates,
-    evaluate_improvement_gate,
-    score_bundle_to_weight_input,
-    verify_research_evaluation_score_bundle,
-)
 from .static_checks import StaticCheckResult, run_static_gaming_checks
 
 __all__ = [
@@ -104,8 +95,6 @@ __all__ = [
     "NO_DATE_DECAY_MULTIPLIER",
     "PROBATION_LOOKS",
     "SOURCE_TYPE_MULTIPLIERS",
-    "SCORE_BUNDLE_SCHEMA_VERSION",
-    "SCORE_BUNDLE_TYPE",
     "STUDENT_T_ONE_SIDED_95_BY_N",
     "aggregate_set_score",
     "allocate_research_lab_epoch",
@@ -120,10 +109,8 @@ __all__ = [
     "company_final_score",
     "build_champion_reward_obligation",
     "build_improvement_grant_schedule",
-    "build_research_evaluation_score_bundle",
     "build_reimbursement_schedule",
     "compose_final_weight_vector",
-    "compute_evaluation_aggregates",
     "compute_snippet_overlap",
     "compute_participation_score",
     "compute_rebate_rate",
@@ -132,7 +119,6 @@ __all__ = [
     "continuity_floor",
     "derive_delta_min",
     "evaluate_crowning",
-    "evaluate_improvement_gate",
     "interpolate_grant_share_ppm",
     "is_pcr0_allowed",
     "load_pcr0_allowlist",
@@ -145,7 +131,6 @@ __all__ = [
     "probability_crosses_boundary",
     "run_l0_checks",
     "run_static_gaming_checks",
-    "score_bundle_to_weight_input",
     "sha256_json",
     "simulate_sequential_crown_probability",
     "u16_weights_from_scores",
@@ -153,7 +138,6 @@ __all__ = [
     "validate_attestation_response_shape",
     "verify_improvement_grant_schedule",
     "verify_loop_start_payment_state",
-    "verify_research_evaluation_score_bundle",
     "verify_reimbursement_schedule",
     "DEFAULT_DELTA_MIN_FLOOR",
     "DEFAULT_REENTRY_CAP_PER_7_DAYS",

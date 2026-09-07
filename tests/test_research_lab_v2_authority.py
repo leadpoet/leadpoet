@@ -412,7 +412,6 @@ async def test_historical_settlement_authority_is_scope_bound_and_durable(
         migrations.append(kwargs)
         return {"settlement_hash": HASH_B}
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: True)
     monkeypatch.setattr(
         legacy_settlement_v2,
         "validate_legacy_settlement_document_v2",
@@ -536,7 +535,6 @@ async def test_historical_champion_reward_migration_runs_before_v2_cutover(
     async def persist_links(**_kwargs):
         return {"business_artifact_link_count": 1}
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: True)
     monkeypatch.setattr(
         v2_authority,
         "reward_receipt_projection_v2",
@@ -585,7 +583,6 @@ async def test_historical_source_add_migration_creates_reward_artifact_link(
     async def persist_links(**_kwargs):
         return {"business_artifact_link_count": 1}
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: True)
     monkeypatch.setattr(
         v2_authority,
         "reward_receipt_projection_v2",

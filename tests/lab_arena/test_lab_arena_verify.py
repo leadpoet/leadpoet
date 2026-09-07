@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from leadpoet_verifier.research_evaluation import compute_evaluation_aggregates
 from qualification.scoring import competition as evaluator
 
 from lab_arena import contracts, scoring, verify
@@ -115,30 +114,11 @@ def test_per_icp_score_matches_the_shared_evaluation_math():
         _junk(),
         _breakdown(30.0, details=[_signal(1, 30.0)]),
     ]
-    gate, primary = evaluator.count_penalizable_false_positives(
-        breakdowns, icp_has_intent_signals=True
-    )
-    expected = compute_evaluation_aggregates(
-        [{
-            "icp_ref": "current",
-            "icp_company_goal": 5,
-            "base_company_scores": [],
-            "candidate_company_scores": [80.0, 60.0, 40.0, 0.0, 30.0],
-            "candidate_fp_gate_count": gate,
-            "candidate_fp_unverified_primary_count": primary,
-        }],
-        leads_per_icp_normalizer=5,
-        fp_penalty_points=10.0,
-        fp_unverified_primary_penalty_points=10.0,
-        fp_penalty_icp_floor=0.0,
-    )["per_icp_results"][0]["candidate_per_icp_score"]
-
     result = verify.per_icp_score(icp, breakdowns, POLICY)
-    assert expected == 38.0
-    assert result["per_icp_score"] == expected
+    assert result["per_icp_score"] == 38.0
     assert (result["fp_gate_count"], result["fp_unverified_primary_count"]) == (1, 1)
     redacted = [verify.redact_breakdown(item) for item in breakdowns]
-    assert verify.per_icp_score(icp, redacted, POLICY)["per_icp_score"] == expected
+    assert verify.per_icp_score(icp, redacted, POLICY)["per_icp_score"] == 38.0
     with pytest.raises(ArenaContractError):
         verify.per_icp_score(icp, ["not-an-object"], POLICY)
 

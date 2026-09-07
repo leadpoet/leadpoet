@@ -236,7 +236,6 @@ async def test_provenance_authority_uses_retry_sequence(monkeypatch):
     async def persist_links(**_kwargs):
         return {"status": "persisted"}
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
     provenance, _outcome = await v2_authority.evaluate_source_add_provenance_v2(
         submission_id=SUBMISSION_ID,
         source_name="Credible API",
@@ -307,7 +306,6 @@ async def test_provenance_retry_reuses_identical_existing_authority(monkeypatch)
         observed.update(kwargs)
         return existing_graph
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
     monkeypatch.setattr(
         v2_authority,
         "validate_receipt_graph",
@@ -397,7 +395,6 @@ async def test_provenance_retry_rejects_different_existing_authority(monkeypatch
             "edges": [],
         }
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
     monkeypatch.setattr(
         v2_authority,
         "validate_receipt_graph",

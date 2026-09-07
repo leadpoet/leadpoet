@@ -1,7 +1,6 @@
 """Provider preflight probes for Research Lab scoring and paid loops.
 
-Before the scoring worker starts a daily baseline (or claims a candidate)
-and before the hosted worker claims a paid loop ticket, a cheap cached probe
+Before the scoring worker starts a daily baseline, a cheap cached probe
 checks that ScrapingDog and Exa are reachable and credited. A provider that
 is out of credits (HTTP 402), quota-exhausted (429), auth-broken (401/403),
 or persistently unreachable would otherwise turn the whole run into zeros
@@ -9,8 +8,8 @@ and burn the miner's budget on work that cannot succeed.
 
 Verdicts are cached per process for a TTL so probes stay cheap. On a
 credit/quota/auth failure — or a streak of transport/5xx failures — the
-probe auto-pauses the relevant maintenance control (scoring or
-autoresearch) with a ``provider_preflight:`` reason marker. When a later
+probe auto-pauses the relevant maintenance control with a
+``provider_preflight:`` reason marker. When a later
 probe comes back healthy, a pause that carries that marker (and only such a
 pause) is auto-resumed, so operator-set pauses are never overridden.
 
@@ -35,7 +34,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from gateway.research_lab.provider_profiles_v2 import PROVIDER_PREFLIGHT_PROFILE
-from gateway.research_lab.tee_protocol import legacy_v1_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -321,13 +319,8 @@ class ProviderPreflight:
         }
 
 
-_shared_preflight = ProviderPreflight()
 _attested_preflight_cache_lock = threading.Lock()
 _attested_preflight_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
-
-
-def shared_preflight() -> ProviderPreflight:
-    return _shared_preflight
 
 
 async def _cached_attested_preflight(
@@ -529,7 +522,7 @@ async def preflight_gate(
     measurement_scope_key: str | None = None,
     force_measurement: bool = False,
 ) -> dict[str, Any]:
-    """Async preflight gate for one maintenance scope (scoring/autoresearch).
+    """Async preflight gate for one maintenance scope.
 
     Returns {"proceed": bool, "reason": str, "verdicts": [...]}. When the
     verdict is pause-worthy and auto-pause is on, pauses the scope with a
@@ -537,30 +530,21 @@ async def preflight_gate(
     a previous preflight (marker present), auto-resumes it. Operator pauses
     (no marker) are never resumed here.
     """
-    if authority_check is None and legacy_v1_enabled():
-        result = await asyncio.to_thread(
-            shared_preflight().check,
-            force=bool(force_measurement),
-            settings=provider_preflight_settings(),
-        )
-    else:
-        if authority_check is None:
-            from gateway.research_lab.v2_authority import (
-                execute_provider_preflight_v2,
-            )
+    if authority_check is None:
+        from gateway.research_lab.v2_authority import execute_provider_preflight_v2
 
-            authority_check = execute_provider_preflight_v2
-        result = await _cached_attested_preflight(
-            scope_key=(
-                str(measurement_scope_key)
-                if measurement_scope_key is not None
-                else "%s:%s" % (str(scope), str(actor_ref))
-            ),
-            worker_index=int(worker_index),
-            settings=provider_preflight_settings(),
-            authority_check=authority_check,
-            force_measurement=force_measurement,
-        )
+        authority_check = execute_provider_preflight_v2
+    result = await _cached_attested_preflight(
+        scope_key=(
+            str(measurement_scope_key)
+            if measurement_scope_key is not None
+            else "%s:%s" % (str(scope), str(actor_ref))
+        ),
+        worker_index=int(worker_index),
+        settings=provider_preflight_settings(),
+        authority_check=authority_check,
+        force_measurement=force_measurement,
+    )
     if not isinstance(result, Mapping):
         raise RuntimeError("attested provider preflight result is invalid")
     if result.get("disabled"):

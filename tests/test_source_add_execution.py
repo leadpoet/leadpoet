@@ -10,7 +10,6 @@ import pytest
 from research_lab.source_add_execution import (
     SourceAddFunnelStage,
     SourceAddRejectionReason,
-    SourceAddSuggestionDoc,
     apply_provenance_precheck_result,
     apply_trial_result,
     evaluate_source_add_acceptance,
@@ -20,7 +19,6 @@ from research_lab.source_add_execution import (
     run_sandboxed_trial,
     run_static_scan_stage,
     static_scan_adapter_bundle,
-    validate_source_add_suggestion,
 )
 
 
@@ -318,28 +316,6 @@ class TestAcceptance:
         rejected, entry = evaluate_source_add_acceptance(record, human_gate_passed=True)
         assert entry is None
         assert "acceptance_requires_completed_trial" in rejected.rejection_reasons
-
-
-class TestSuggestionDoc:
-    def test_build_and_validate(self):
-        doc = SourceAddSuggestionDoc.build(
-            run_id="run-1",
-            provider_hint="procurement registry",
-            endpoint_class="/tenders/search",
-            evidence_gap="no coverage of EU public tenders in intent evidence",
-            probe_receipt_hashes=["sha256:abc"],
-        )
-        assert validate_source_add_suggestion(doc) == []
-        assert doc.suggestion_id.startswith("source_add_suggestion:")
-
-    def test_suggestion_doc_rejects_urls_and_credentials(self):
-        doc = SourceAddSuggestionDoc.build(
-            run_id="run-1",
-            provider_hint="fetch https://secret.example directly",
-            endpoint_class="/x",
-            evidence_gap="gap",
-        )
-        assert any("must not carry URLs" in error for error in validate_source_add_suggestion(doc))
 
 
 class TestDomainNormalization:

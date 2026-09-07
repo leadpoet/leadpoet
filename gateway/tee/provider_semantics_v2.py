@@ -17,10 +17,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
 from gateway.research_lab.provider_evidence_proxy import (
-    BUDGET_SOFT_STOP_HEADER,
-    BUDGET_SOFT_STOP_RESPONSE_HEADER,
     REPLAY_ONLY_HEADER,
-    _budget_soft_stop_body,
     _openrouter_chat_completion_path,
     _openrouter_generation_id_from_headers,
     _openrouter_request_with_usage_metadata,
@@ -563,46 +560,30 @@ class ProviderSemanticsAuthorityV2:
                 )
             if ledger.should_block_paid_call():
                 reason = ledger.block_reason()
-                soft_stop = reason == "cost_cap_reached" and _truthy(
-                    _header(headers, BUDGET_SOFT_STOP_HEADER)
-                )
-                status = 200 if soft_stop else 402
-                evidence = "budget_soft_stop" if soft_stop else "blocked"
                 event_doc = ledger.block_event(
                     provider=provider,
                     endpoint=redacted_endpoint(provider, normalized["url"]),
                     request_fingerprint=fingerprint,
                     reason=reason,
-                    status_code=status,
-                    evidence=evidence,
                 ).to_doc()
-                body = (
-                    _budget_soft_stop_body(provider, normalized["url"])
-                    if soft_stop
-                    else canonical_json(
-                        {
-                            "error": (
-                                "research_lab_provider_cost_cap_exceeded"
-                                if reason == "cost_cap_reached"
-                                else "research_lab_provider_cost_tracking_failed"
-                            ),
-                            "provider": provider,
-                            "endpoint": redacted_endpoint(provider, normalized["url"]),
-                        }
-                    ).encode("utf-8")
-                )
+                body = canonical_json(
+                    {
+                        "error": (
+                            "research_lab_provider_cost_cap_exceeded"
+                            if reason == "cost_cap_reached"
+                            else "research_lab_provider_cost_tracking_failed"
+                        ),
+                        "provider": provider,
+                        "endpoint": redacted_endpoint(provider, normalized["url"]),
+                    }
+                ).encode("utf-8")
                 return self._local_response(
                     normalized,
                     parsed=parsed,
                     body=body,
-                    status=status,
-                    evidence=evidence,
+                    status=402,
+                    evidence="blocked",
                     cost_event=event_doc,
-                    extra_headers=(
-                        {BUDGET_SOFT_STOP_RESPONSE_HEADER: "1"}
-                        if soft_stop
-                        else {}
-                    ),
                     additional_attempts=lookup_attempts,
                     additional_artifacts=lookup_artifacts,
                 )

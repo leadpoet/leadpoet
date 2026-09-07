@@ -1,13 +1,11 @@
-"""SOURCE_ADD execution funnel (sourceexperiments.md W5).
+"""SOURCE_ADD intake and manual-trial helpers.
 
-P1.5 (``source_add.py``) defined the contracts without execution. This module
-retains the pure intake and legacy manual-trial helpers. Production intake uses
+Production intake uses
 atomic database admission, measured provenance, and the V2 functional probe;
 operator-managed credentials never enter through the public miner contract.
 Leg 1 triggers automatically when the measured manifest/provenance precheck
 passes. Functional testing and operator catalog provisioning remain separate
-later gates, while Leg 2 still requires accepted catalog attribution
-(``source_add_rewards.py``).
+later gates.
 
 Execution boundaries preserved from the plan:
 - adapter code runs only in the sandbox, with no credentials inside and all
@@ -15,9 +13,6 @@ Execution boundaries preserved from the plan:
   registry entry only, metered on the miner's key);
 - trials run against lab-scheduled trial ICP sets, never the private
   benchmark window;
-- loops never execute SOURCE_ADD — a loop emits a suggestion doc into the
-  submission queue instead.
-
 Side effects (KMS, sandbox container, evidence classification) are injected
 callables so the funnel logic is testable and the gateway wires the real
 implementations (key_vault KMS pattern, private_runtime container, existing
@@ -583,77 +578,3 @@ def evaluate_source_add_acceptance(
         source_identity_hash=record.source_identity_hash,
     )
     return accepted, entry
-
-
-@dataclass(frozen=True)
-class SourceAddSuggestionDoc:
-    """Loop-emitted source-add suggestion (loops never execute SOURCE_ADD).
-
-    When probes suggest a missing source, the loop drops one of these into the
-    submission queue: provider hint + endpoint class + the evidence gap it
-    would close + probe receipts (event hashes only — no bodies, no queries).
-    """
-
-    suggestion_id: str
-    created_by_run_id: str
-    provider_hint: str
-    endpoint_class: str
-    evidence_gap: str
-    probe_receipt_hashes: tuple[str, ...] = ()
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        run_id: str,
-        provider_hint: str,
-        endpoint_class: str,
-        evidence_gap: str,
-        probe_receipt_hashes: Sequence[str] = (),
-    ) -> "SourceAddSuggestionDoc":
-        payload = {
-            "run_id": str(run_id),
-            "provider_hint": str(provider_hint)[:120],
-            "endpoint_class": str(endpoint_class)[:120],
-            "evidence_gap": str(evidence_gap)[:700],
-        }
-        return cls(
-            suggestion_id="source_add_suggestion:" + sha256_json(payload).split(":", 1)[1][:16],
-            created_by_run_id=payload["run_id"],
-            provider_hint=payload["provider_hint"],
-            endpoint_class=payload["endpoint_class"],
-            evidence_gap=payload["evidence_gap"],
-            probe_receipt_hashes=tuple(str(item)[:80] for item in probe_receipt_hashes)[:8],
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["probe_receipt_hashes"] = list(self.probe_receipt_hashes)
-        return data
-
-
-def validate_source_add_suggestion(doc: SourceAddSuggestionDoc | Mapping[str, Any]) -> list[str]:
-    if isinstance(doc, Mapping):
-        try:
-            doc = SourceAddSuggestionDoc(
-                suggestion_id=str(doc["suggestion_id"]),
-                created_by_run_id=str(doc["created_by_run_id"]),
-                provider_hint=str(doc.get("provider_hint") or ""),
-                endpoint_class=str(doc.get("endpoint_class") or ""),
-                evidence_gap=str(doc.get("evidence_gap") or ""),
-                probe_receipt_hashes=tuple(str(item) for item in doc.get("probe_receipt_hashes", [])),
-            )
-        except KeyError as exc:
-            return [f"missing field: {exc}"]
-    errors: list[str] = []
-    if not doc.suggestion_id.startswith("source_add_suggestion:"):
-        errors.append("suggestion_id must be source_add_suggestion:-prefixed")
-    if not doc.created_by_run_id:
-        errors.append("created_by_run_id is required")
-    if not doc.evidence_gap:
-        errors.append("evidence_gap is required")
-    lowered = f"{doc.provider_hint} {doc.endpoint_class} {doc.evidence_gap}".lower()
-    for marker in ("http://", "https://", "api_key", "bearer ", "sk-or-"):
-        if marker in lowered:
-            errors.append(f"suggestion doc must not carry URLs or credentials ({marker.strip()})")
-    return errors

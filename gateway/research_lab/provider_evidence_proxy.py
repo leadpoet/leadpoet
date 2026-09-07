@@ -89,8 +89,6 @@ CALLER_TOKEN_HEADER = "X-Research-Lab-Caller-Token"
 # W4: a request carrying this header replays from tape/day-cache only — a miss
 # returns 409 instead of a live upstream call (probe live-flag off).
 REPLAY_ONLY_HEADER = "X-Research-Lab-Replay-Only"
-BUDGET_SOFT_STOP_HEADER = "X-Research-Lab-Budget-Soft-Stop"
-BUDGET_SOFT_STOP_RESPONSE_HEADER = "X-Research-Lab-Budget-Soft-Stopped"
 REQUEST_TIMEOUT_MS_HEADER = "X-Research-Lab-Request-Timeout-Ms"
 REQUEST_PENDING_EVIDENCE = "request_pending"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 180.0
@@ -258,59 +256,6 @@ def _openrouter_request_with_usage_metadata(request_body: bytes) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
-
-
-def _truthy_header(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _budget_soft_stop_body(provider: str, upstream_url: str) -> bytes:
-    """Provider-shaped empty payload for private-model budget exhaustion.
-
-    This is intentionally synthetic and is never written to the evidence day
-    cache. The goal is to let the private model stop paid work and return any
-    companies it already has instead of crashing on a hard HTTP 402.
-    """
-
-    try:
-        path = urllib.parse.urlsplit(str(upstream_url or "")).path
-    except Exception:
-        path = ""
-    base = {
-        "research_lab_budget_exhausted": True,
-        "research_lab_provider_cost_cap_blocked": True,
-    }
-    if provider == "or":
-        doc: dict[str, Any] = {
-            **base,
-            "id": "research-lab-budget-soft-stop",
-            "object": "chat.completion",
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "[]"},
-                }
-            ],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }
-    elif provider == "exa":
-        doc = {**base, "results": [], "data": [], "costDollars": 0}
-        if path.startswith("/agent/runs/"):
-            doc.update({"status": "completed", "object": "agent.run"})
-    elif provider == "sd":
-        doc = {**base, "results": [], "data": [], "organic_results": [], "answer": ""}
-    elif provider == "deepline":
-        doc = {
-            **base,
-            "status": "completed",
-            "result": None,
-            "data": [],
-            "billing": {"credits": 0, "cost_usd": 0},
-        }
-    else:
-        doc = {**base, "results": [], "data": []}
-    return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _openrouter_generation_id_from_headers(headers: Mapping[str, Any]) -> str:
@@ -1701,18 +1646,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 if block_reason == "cost_cap_reached"
                 else "research_lab_provider_cost_tracking_failed"
             )
-            soft_stop = block_reason == "cost_cap_reached" and _truthy_header(
-                self.headers.get(BUDGET_SOFT_STOP_HEADER)
-            )
-            status_code = 200 if soft_stop else 402
-            evidence_label = "budget_soft_stop" if soft_stop else "blocked"
             event = cost_ledger.block_event(
                 provider=entry.id,
                 endpoint=endpoint,
                 request_fingerprint=fingerprint,
                 reason=block_reason,
-                status_code=status_code,
-                evidence=evidence_label,
             )
             body = json.dumps(
                 {
@@ -1725,12 +1663,8 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             ).encode("utf-8")
             if is_leader:
                 self.store.release_lead(fingerprint)
-            self._ledger_row(entry, rest, fingerprint, evidence=evidence_label, status=status_code, live_cost=False)
-            headers = event.to_headers()
-            if soft_stop:
-                body = _budget_soft_stop_body(entry.id, upstream_url)
-                headers[BUDGET_SOFT_STOP_RESPONSE_HEADER] = "1"
-            self._respond(status_code, body, evidence=evidence_label, headers=headers)
+            self._ledger_row(entry, rest, fingerprint, evidence="blocked", status=402, live_cost=False)
+            self._respond(402, body, evidence="blocked", headers=event.to_headers())
             return
         # Live call: enforce the per-day quota before touching the upstream.
         if entry.per_day_quota > 0 and self.ledger.live_calls_today(entry.id) >= entry.per_day_quota:

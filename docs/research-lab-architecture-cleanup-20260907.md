@@ -20,6 +20,12 @@ same frozen ICPs and scorer. Arena publishes the competition result.
   migrations remain available for settlement and existing data.
 - The unused Git-tree provider-call cap. Current request and provider quotas
   remain in force.
+- Private-model budget soft stops that returned synthetic successful provider
+  responses. Cost exhaustion and cost-tracking failures use the existing
+  HTTP 402 refusal, accounting, and request cleanup paths.
+- Uncalled loop-generated SOURCE_ADD suggestions and the old local P1.5
+  sandbox-review, workflow-guard, IP-assignment, and bounty simulator. Active
+  SOURCE_ADD manifests, trial outputs, intake, and their validators remain.
 - The model sandbox rootfs marker and gVisor installation inside the gateway
   enclave. Arena executes on validator hosts and retains its verified gVisor
   runtime.

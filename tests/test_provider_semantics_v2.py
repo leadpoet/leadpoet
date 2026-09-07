@@ -19,8 +19,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.research_lab.provider_evidence_proxy import (
-    BUDGET_SOFT_STOP_HEADER,
-    BUDGET_SOFT_STOP_RESPONSE_HEADER,
     REPLAY_ONLY_HEADER,
 )
 from gateway.tee.provider_broker_v2 import (
@@ -1394,8 +1392,9 @@ def test_terminal_record_commits_only_after_artifact_transaction_exit():
     ]
 
 
-def test_replay_only_miss_and_budget_modes_do_not_call_provider():
-    authority, broker, _cache, _artifacts = _authority()
+@pytest.mark.parametrize("legacy_header", [False, True])
+def test_replay_miss_and_budget_cap_do_not_call_provider_or_cache(legacy_header):
+    authority, broker, cache, _artifacts = _authority()
     replay_miss = authority.execute(
         _request(
             headers={
@@ -1404,35 +1403,30 @@ def test_replay_only_miss_and_budget_modes_do_not_call_provider():
             }
         )
     )
-    soft = authority.execute(
+    blocked = authority.execute(
         _request(
-            logical_operation_id="soft-stop",
-            body=b'{"query":"soft"}',
+            logical_operation_id="former-soft-stop",
+            body=b'{"query":"blocked"}',
             headers={
-                "X-Research-Lab-Cost-Scope": "soft-stop",
+                "X-Research-Lab-Cost-Scope": "former-soft-stop",
                 "X-Research-Lab-Cost-Cap-Usd": "0",
-                BUDGET_SOFT_STOP_HEADER: "1",
-            },
-        )
-    )
-    hard = authority.execute(
-        _request(
-            logical_operation_id="hard-stop",
-            body=b'{"query":"hard"}',
-            headers={
-                "X-Research-Lab-Cost-Scope": "hard-stop",
-                "X-Research-Lab-Cost-Cap-Usd": "0",
+                **({"X-Research-Lab-Budget-Soft-Stop": "1"} if legacy_header else {}),
             },
         )
     )
     assert replay_miss["http_status"] == 409
     assert replay_miss["evidence"] == "replay_miss"
-    assert soft["http_status"] == 200
-    assert soft["evidence"] == "budget_soft_stop"
-    assert soft["headers"][BUDGET_SOFT_STOP_RESPONSE_HEADER] == "1"
-    assert hard["http_status"] == 402
-    assert hard["evidence"] == "blocked"
+    assert blocked["http_status"] == 402
+    assert blocked["evidence"] == "blocked"
+    assert json.loads(base64.b64decode(blocked["body_b64"])) == {
+        "endpoint": "/search",
+        "error": "research_lab_provider_cost_cap_exceeded",
+        "provider": "exa",
+    }
+    assert "X-Research-Lab-Budget-Soft-Stopped" not in blocked["headers"]
     assert broker.calls == []
+    assert cache.persist_count == 0
+    assert cache.payloads == {}
 
 
 def test_dynamic_source_add_keeps_daily_cache_and_enforces_measured_quota():

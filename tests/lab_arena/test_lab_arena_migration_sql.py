@@ -27,6 +27,9 @@ CREDENTIAL_SQL = (SCRIPTS / "185-lab-arena-miner-credentials.sql").read_text(
 PROMOTION_THRESHOLD_SQL = (SCRIPTS / "187-lab-arena-promotion-threshold.sql").read_text(
     encoding="utf-8"
 )
+NETWORK_SCOPE_SQL = (SCRIPTS / "189-lab-arena-round-network-scope.sql").read_text(
+    encoding="utf-8"
+)
 
 SERVICE_FUNCTIONS = (
     "lab_arena_whoami",
@@ -74,11 +77,21 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[186] == ["186-research-lab-source-add-provisioned-status.sql"]
     assert numbered[187] == ["187-lab-arena-promotion-threshold.sql"]
     assert numbered[188] == ["188-lab-arena-baseline-promotion.sql"]
+    assert numbered[189] == ["189-lab-arena-round-network-scope.sql"]
     arena_frontier = max(
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 188
+    assert arena_frontier == 189
+
+
+def test_network_scope_migration_keeps_legacy_finney_defaults_queryable():
+    assert "COALESCE(configuration_doc ->> 'network_name', 'finney')" in NETWORK_SCOPE_SQL
+    assert "COALESCE((configuration_doc ->> 'netuid')::BIGINT, 71)" in NETWORK_SCOPE_SQL
+    assert "arena_network_name, arena_netuid, status, created_at DESC" in NETWORK_SCOPE_SQL
+    assert "(configuration_doc ? 'network_name') = (configuration_doc ? 'netuid')" in NETWORK_SCOPE_SQL
+    assert "'version', 189" in NETWORK_SCOPE_SQL
+    assert "NOTIFY pgrst, 'reload schema';" in NETWORK_SCOPE_SQL
 
 
 def test_promotion_threshold_migration_uses_exact_numeric_one_point_gate():

@@ -42,9 +42,10 @@ MIGRATIONS = tuple(
         (185, "miner-credentials"),
         (187, "promotion-threshold"),
         (188, "baseline-promotion"),
+        (189, "round-network-scope"),
     )
 )
-EXPECTED_SCHEMA_VERSION = 188
+EXPECTED_SCHEMA_VERSION = 189
 TESTNET_NETUID = 401
 TESTNET_NETWORK = "test"
 DEFAULT_DATABASE = "miner_testnet"
@@ -605,6 +606,7 @@ def _serve(args: argparse.Namespace) -> int:
                 broker_factory=broker_factory,
                 defaults=defaults,
                 network_name=TESTNET_NETWORK,
+                netuid=TESTNET_NETUID,
                 pinned_round_id=round_id,
                 baseline_source_fetcher=fetch_public_source_archive,
                 reward_signer_factory=None,

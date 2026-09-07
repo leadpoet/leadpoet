@@ -289,6 +289,7 @@ class ServiceConfig:
     defaults: RoundDefaults = field(default_factory=RoundDefaults)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     network_name: str = "finney"
+    netuid: int = 71
     # Optional process-local ownership boundary for isolated one-round hosts.
     # It is deliberately not persisted in a round configuration or schema.
     pinned_round_id: Optional[str] = None
@@ -303,6 +304,12 @@ class ServiceConfig:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
             raise ServiceError("mode_off", 500)
+        try:
+            self.network_name = chain_module.normalize_network_name(self.network_name)
+        except Exception as exc:
+            raise ServiceError("network_name_invalid", 500) from exc
+        if isinstance(self.netuid, bool) or not isinstance(self.netuid, int) or self.netuid < 1:
+            raise ServiceError("netuid_invalid", 500)
         if self.pinned_round_id is not None and (
             not isinstance(self.pinned_round_id, str)
             or not self.pinned_round_id
@@ -389,6 +396,15 @@ class ArenaService:
     def _pinned_round_id(self) -> Optional[str]:
         return getattr(getattr(self, "_config", None), "pinned_round_id", None)
 
+    def _chain_scope(self) -> Tuple[str, int]:
+        """Return this process's chain pair, with the legacy production default."""
+
+        config = getattr(self, "_config", None)
+        return (
+            str(getattr(config, "network_name", "finney")),
+            int(getattr(config, "netuid", 71)),
+        )
+
     def _require_round_ownership(self, round_id: str) -> None:
         pinned_round_id = self._pinned_round_id()
         if pinned_round_id is not None and round_id != pinned_round_id:
@@ -404,10 +420,17 @@ class ArenaService:
         return self._require_round_mode(row)
 
     def _require_round_mode(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        """Refuse a round owned by another Arena mode."""
+        """Refuse a round owned by another Arena mode or chain scope."""
 
-        if (row.get("configuration_doc") or {}).get("mode") != self._config.mode:
+        configuration = row.get("configuration_doc") or {}
+        if configuration.get("mode") != self._config.mode:
             raise ServiceError("round_mode_mismatch", 409)
+        # Rows created before schema 189 had no explicit chain pair. They are
+        # permanently interpreted as the original Finney/netuid 71 scope.
+        network_name = configuration.get("network_name", "finney")
+        netuid = configuration.get("netuid", 71)
+        if (network_name, netuid) != self._chain_scope():
+            raise ServiceError("round_network_mismatch", 409)
         return row
 
     def startup_checks(self) -> Dict[str, Any]:
@@ -425,7 +448,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (188,)
+        supported_versions = (189,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
@@ -518,6 +541,8 @@ class ArenaService:
             "schema_version": contracts.ROUND_CONFIGURATION_SCHEMA_VERSION,
             "round_id": round_id,
             "mode": self._config.mode,
+            "network_name": self._config.network_name,
+            "netuid": self._config.netuid,
             "rewards_enabled": bool(defaults.rewards_enabled and self._config.mode == "live"),
             "schedule": self.build_schedule(cutoff),
             "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
@@ -593,9 +618,12 @@ class ArenaService:
             row = self._pinned_round()
             return row if row is not None and row["status"] not in TERMINAL_STATUSES else None
         # Scan ids and statuses only; a full row can be large at hundreds of participants.
+        network_name, netuid = self._chain_scope()
         for row in self._store.list_rounds(
             statuses=ACTIVE_ROUND_STATUSES,
             mode=self._config.mode,
+            network_name=network_name,
+            netuid=netuid,
             limit=20,
             columns="round_id,status,created_at,configuration_doc",
         ):
@@ -620,6 +648,7 @@ class ArenaService:
                 "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
             }]
 
+        network_name, netuid = self._chain_scope()
         rows: List[Dict[str, Any]] = []
         offset = 0
         page_size = 20
@@ -627,6 +656,8 @@ class ArenaService:
             page = self._store.list_rounds(
                 statuses=ACTIVE_ROUND_STATUSES,
                 mode=self._config.mode,
+                network_name=network_name,
+                netuid=netuid,
                 limit=page_size,
                 offset=offset,
                 columns="round_id,status,created_at,configuration_doc",
@@ -655,9 +686,12 @@ class ArenaService:
         if self._pinned_round_id() is not None:
             row = self._pinned_round()
             return row if row is not None and row["status"] == "open" else None
+        network_name, netuid = self._chain_scope()
         for row in self._store.list_rounds(
             status="open",
             mode=self._config.mode,
+            network_name=network_name,
+            netuid=netuid,
             limit=20,
             columns="round_id,status,created_at,configuration_doc",
         ):
@@ -710,8 +744,11 @@ class ArenaService:
         if self._pinned_round_id() is not None:
             row = self._pinned_round()
             return row if row is not None and row["status"] == "published" else None
+        network_name, netuid = self._chain_scope()
         rows = self._store.list_rounds(
-            status="published", mode=self._config.mode, limit=200
+            status="published", mode=self._config.mode,
+            network_name=network_name, netuid=netuid,
+            limit=200
         )
         return next(
             (row for row in rows if (row.get("configuration_doc") or {}).get("mode") == self._config.mode),
@@ -1520,8 +1557,11 @@ class ArenaService:
         if self._config.mode != "live":
             return {"status": "disabled", "promoted": 0}
         promoted = 0
+        network_name, netuid = self._chain_scope()
         for row in self._store.pending_promotions(
-            pinned_round_id=self._config.pinned_round_id
+            pinned_round_id=self._config.pinned_round_id,
+            network_name=network_name,
+            netuid=netuid,
         ):
             result = self.promote_baseline(str(row["round_id"]))
             if result.get("status") not in ("promoted", "existing"):
@@ -1595,10 +1635,14 @@ class ArenaService:
 
         if self._config.mode != "live":
             return {"status": "disabled", "activated": 0}
+        network_name, netuid = self._chain_scope()
         rows = list(
             reversed(
                 self._store.list_rounds(
-                    status="published", mode="live", limit=200
+                    status="published", mode="live",
+                    network_name=network_name,
+                    netuid=netuid,
+                    limit=200
                 )
             )
         )

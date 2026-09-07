@@ -93,7 +93,8 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/184-lab-arena-scoring-failure-isolation.sql`,
 `scripts/185-lab-arena-miner-credentials.sql`,
 `scripts/187-lab-arena-promotion-threshold.sql`, and
-`scripts/188-lab-arena-baseline-promotion.sql` with the database owner
+`scripts/188-lab-arena-baseline-promotion.sql`, and
+`scripts/189-lab-arena-round-network-scope.sql` with the database owner
 before service startup. Then check the service wiring:
 
 ```bash
@@ -112,6 +113,13 @@ The service creates a daily round at 00:00 UTC by default. Set
 ```bash
 python3 scripts/lab_arena_admin.py create --cutoff 2026-09-05T00:00:00Z
 ```
+
+Each round freezes `LAB_ARENA_NETWORK` and `LAB_ARENA_NETUID` in its
+configuration. API and driver instances only select rounds in their configured
+chain scope. Historical rows without these fields are treated as Finney/netuid
+71. This permits a pinned testnet service to use the shared database without
+redirecting or advancing a Finney round. Promotion ordering and published
+reward history remain shared across scopes.
 
 ## Runner configuration
 

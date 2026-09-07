@@ -248,16 +248,40 @@ def test_reward_activation_processes_only_enabled_live_rounds_oldest_first():
     ]
     calls = []
     service = object.__new__(ArenaService)
-    service._config = SimpleNamespace(mode="live")
-    service._store = SimpleNamespace(list_rounds=lambda **_kwargs: rows)
+    queries = []
+    service._config = SimpleNamespace(mode="live", network_name="test", netuid=401)
+    service._store = SimpleNamespace(
+        list_rounds=lambda **kwargs: queries.append(kwargs) or rows
+    )
     service.activate_reward = lambda round_id: calls.append(round_id) or {"status": "activated"}
     assert service.activate_pending_rewards() == {"status": "ok", "activated": 2}
     assert calls == ["old", "new"]
+    assert queries == [{
+        "status": "published", "mode": "live", "network_name": "test",
+        "netuid": 401, "limit": 200,
+    }]
 
-    service._config = SimpleNamespace(mode="shadow")
+    service._config = SimpleNamespace(mode="shadow", network_name="test", netuid=401)
     calls.clear()
     assert service.activate_pending_rewards() == {"status": "disabled", "activated": 0}
     assert calls == []
+
+
+def test_round_scope_treats_legacy_rows_as_finney_71_and_rejects_cross_chain():
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71)
+    legacy = {"configuration_doc": {"mode": "live"}}
+    assert service._require_round_mode(legacy) is legacy
+
+    service._config = SimpleNamespace(mode="live", network_name="test", netuid=401)
+    with pytest.raises(ServiceError, match="round_network_mismatch"):
+        service._require_round_mode(legacy)
+    testnet = {
+        "configuration_doc": {
+            "mode": "live", "network_name": "test", "netuid": 401,
+        }
+    }
+    assert service._require_round_mode(testnet) is testnet
 
 
 def test_reward_activation_carries_only_the_latest_miner_winner():

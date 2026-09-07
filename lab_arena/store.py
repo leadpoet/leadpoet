@@ -75,6 +75,8 @@ TABLES = (
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
 PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
+ROUND_NETWORK_COLUMN = "arena_network_name"
+ROUND_NETUID_COLUMN = "arena_netuid"
 
 
 DEADLOCK_SQLSTATE = "40P01"
@@ -558,8 +560,12 @@ class ArenaStore:
         )
 
     def pending_promotions(
-        self, *, pinned_round_id: Optional[str] = None, limit: int = 100
+        self, *, pinned_round_id: Optional[str] = None,
+        network_name: Optional[str] = None, netuid: Optional[int] = None,
+        limit: int = 100
     ) -> List[Dict[str, Any]]:
+        if (network_name is None) != (netuid is None):
+            raise ArenaStoreError("round network filters must be supplied together")
         filters: Dict[str, Any] = {
             "status": "published",
             ROUND_MODE_FILTER: "live",
@@ -569,6 +575,9 @@ class ArenaStore:
         }
         if pinned_round_id is not None:
             filters["round_id"] = pinned_round_id
+        if network_name is not None:
+            filters[ROUND_NETWORK_COLUMN] = str(network_name)
+            filters[ROUND_NETUID_COLUMN] = int(netuid)
         rows = self._transport.select(
             "lab_arena_rounds",
             filters=filters,
@@ -589,17 +598,24 @@ class ArenaStore:
         status: Optional[str] = None,
         statuses: Optional[Sequence[str]] = None,
         mode: Optional[str] = None,
+        network_name: Optional[str] = None,
+        netuid: Optional[int] = None,
         limit: int = 100,
         offset: Optional[int] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:
         if status is not None and statuses is not None:
             raise ArenaStoreError("round status filters are mutually exclusive")
+        if (network_name is None) != (netuid is None):
+            raise ArenaStoreError("round network filters must be supplied together")
         filters: Dict[str, Any] = {}
         if status is not None:
             filters["status"] = status
         if mode is not None:
             filters[ROUND_MODE_FILTER] = mode
+        if network_name is not None:
+            filters[ROUND_NETWORK_COLUMN] = str(network_name)
+            filters[ROUND_NETUID_COLUMN] = int(netuid)
         return self._transport.select(
             "lab_arena_rounds",
             filters=filters or None,

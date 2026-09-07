@@ -185,6 +185,8 @@ def test_postgrest_filters_round_mode_and_status_before_limit_with_pagination():
         filters={
             "configuration_doc->>mode": "live",
             "publication_doc->king_decision->>outcome": "crowned",
+            "arena_network_name": "test",
+            "arena_netuid": 401,
         },
         status_in=("open", "committed"),
         order="created_at",
@@ -196,6 +198,8 @@ def test_postgrest_filters_round_mode_and_status_before_limit_with_pagination():
     params = list(requests[0].url.params.multi_items())
     assert ("configuration_doc->>mode", "eq.live") in params
     assert ("publication_doc->king_decision->>outcome", "eq.crowned") in params
+    assert ("arena_network_name", "eq.test") in params
+    assert ("arena_netuid", "eq.401") in params
     assert ("status", "in.(open,committed)") in params
     assert ("order", "created_at.desc") in params
     assert ("limit", "20") in params and ("offset", "40") in params
@@ -262,6 +266,8 @@ def test_psycopg_parameterizes_round_mode_and_status_before_limit():
         filters={
             "configuration_doc->>mode": "live",
             "publication_doc->king_decision->>outcome": "crowned",
+            "arena_network_name": "test",
+            "arena_netuid": 401,
         },
         status_in=("open", "committed"),
         order="created_at",
@@ -272,10 +278,12 @@ def test_psycopg_parameterizes_round_mode_and_status_before_limit():
     sql, values = calls[0]
     assert "configuration_doc ->> 'mode' = %s" in sql
     assert "publication_doc #>> '{king_decision,outcome}' = %s" in sql
+    assert "arena_network_name = %s" in sql
+    assert "arena_netuid = %s" in sql
     assert "status = ANY(%s)" in sql
     assert sql.index(" WHERE ") < sql.index(" ORDER BY ") < sql.index(" LIMIT 20")
     assert sql.endswith(" OFFSET 40) t")
-    assert values == ["live", "crowned", ["open", "committed"]]
+    assert values == ["live", "crowned", "test", 401, ["open", "committed"]]
     assert "live" not in sql and "crowned" not in sql and "committed" not in sql
     transport.close()
 
@@ -295,12 +303,17 @@ def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
 
     store = ArenaStore(Transport())
     store.list_rounds(
-        statuses=("open", "committed"), mode="live", limit=20, offset=20
+        statuses=("open", "committed"), mode="live",
+        network_name="test", netuid=401, limit=20, offset=20
     )
     store.published_reward_bases(mode="live", limit=200)
     active = calls[0][1]
     rewards = calls[1][1]
-    assert active["filters"] == {"configuration_doc->>mode": "live"}
+    assert active["filters"] == {
+        "configuration_doc->>mode": "live",
+        "arena_network_name": "test",
+        "arena_netuid": 401,
+    }
     assert active["status_in"] == ("open", "committed")
     assert active["limit"] == 20 and active["offset"] == 20
     assert rewards["filters"] == {
@@ -308,6 +321,19 @@ def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
         "configuration_doc->>mode": "live",
     }
     assert rewards["limit"] == 200
+
+
+def test_round_store_requires_the_network_filter_pair():
+    class Transport:
+        @staticmethod
+        def select(*_args, **_kwargs):
+            raise AssertionError("invalid filters reached the transport")
+
+    store = ArenaStore(Transport())
+    with pytest.raises(ArenaStoreError, match="supplied together"):
+        store.list_rounds(mode="live", network_name="test")
+    with pytest.raises(ArenaStoreError, match="supplied together"):
+        store.list_rounds(mode="live", netuid=401)
 
 
 def test_pending_promotions_pushes_durable_filters_and_oldest_order():
@@ -322,7 +348,7 @@ def test_pending_promotions_pushes_durable_filters_and_oldest_order():
             ]
 
     rows = ArenaStore(Transport()).pending_promotions(
-        pinned_round_id="winner", limit=3
+        pinned_round_id="winner", network_name="test", netuid=401, limit=3
     )
     assert [row["round_id"] for row in rows] == ["winner"]
     assert calls == [
@@ -336,6 +362,8 @@ def test_pending_promotions_pushes_durable_filters_and_oldest_order():
                     "baseline_promoted_at": None,
                     "publication_doc->king_decision->>outcome": "crowned",
                     "round_id": "winner",
+                    "arena_network_name": "test",
+                    "arena_netuid": 401,
                 },
                 "order": "created_at",
                 "descending": False,

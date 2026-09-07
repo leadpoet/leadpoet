@@ -571,7 +571,7 @@ class Harness:
 def test_startup_checks_require_the_current_arena_schema(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     checks = harness.service.startup_checks()
-    assert checks["schema_version"] == 188
+    assert checks["schema_version"] == 189
     assert checks["database_identity"]["current_user"] == "lab_arena_service"
 
 

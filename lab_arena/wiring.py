@@ -433,6 +433,7 @@ def build_service_from_environment(mode: str):
         baseline_source_fetcher=fetch_public_source_archive,
         credential_manager=credential_manager,
         network_name=chain_config.network_name,
+        netuid=chain_config.netuid,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
         baseline_promoter_factory=baseline_promoter_from_environment,
     )

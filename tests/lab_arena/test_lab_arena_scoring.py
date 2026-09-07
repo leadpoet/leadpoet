@@ -309,5 +309,7 @@ def test_exact_final_tie_crowns_no_miner():
     assert verify.final_ranking([challenger, king])[0]["submission_id"] == "king"
     assert verify.king_decision([challenger], king)["outcome"] == "no_king"
     challenger["final_score"] = 75.000001
+    assert verify.king_decision([challenger], king)["outcome"] == "no_king"
+    challenger["final_score"] = 76.0
     decision = verify.king_decision([challenger], king)
     assert (decision["outcome"], decision["winner_submission_id"]) == ("crowned", "c1")

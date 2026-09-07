@@ -49,6 +49,13 @@ class _Store:
     def get_round(self, round_id):
         return self.rounds.get(round_id)
 
+    def pending_promotions(self):
+        return [row for row in self.rounds.values() if (
+            row.get("promotion_required") and not row.get("baseline_promoted_at")
+            and row.get("status") == "published"
+            and (row.get("publication_doc") or {}).get("king_decision", {}).get("outcome") == "crowned"
+        )]
+
     def list_rounds(self, *, status=None, limit=None, **_kwargs):
         rows = list(reversed(list(self.rounds.values())))
         return [row for row in rows if status is None or row.get("status") == status][
@@ -153,7 +160,7 @@ def test_baseline_download_uses_the_same_source_checks_and_freezes(tmp_path):
     ]
 
 
-def test_yesterdays_miner_winner_never_replaces_todays_baseline(tmp_path):
+def test_yesterdays_miner_identity_never_replaces_the_registered_baseline_identity(tmp_path):
     current = _round()
     baseline = _submission("baseline-2026-09-05", "baseline")
     baseline["is_king"] = True
@@ -216,6 +223,33 @@ def test_partially_registered_round_recovers_existing_source_object_without_fetc
     participants = service.freeze_participants(current["round_id"])
 
     assert [row["submission_id"] for row in participants] == ["baseline-2026-09-05"]
+
+
+@pytest.mark.parametrize("has_frozen_object", [False, True])
+def test_pending_promotion_blocks_a_new_snapshot_but_preserves_recovery(tmp_path, has_frozen_object):
+    current = _round()
+    previous = {
+        "round_id": "arena-2026-09-04",
+        "status": "published",
+        "promotion_required": True,
+        "configuration_doc": {"mode": "live"},
+        "publication_doc": {"king_decision": {"outcome": "crowned"}},
+    }
+    payload = _archive(tmp_path)
+    objects = _Objects()
+    if has_frozen_object:
+        objects.put("arena/arena-2026-09-05/sources/baseline-2026-09-05.tar.gz", payload)
+    service = _service(_Store(current, [], [previous]), objects, b"unused")
+    service._config.baseline_source_fetcher = lambda *_args: pytest.fail("unexpected download")
+    if has_frozen_object:
+        # The first stored object is the daily snapshot. A registration retry
+        # cannot change that snapshot after another round publishes a winner.
+        participants = service.freeze_participants(current["round_id"])
+        assert participants[0]["submission_id"] == "baseline-2026-09-05"
+        assert next(iter(objects.values.values())) == payload
+    else:
+        with pytest.raises(ServiceError, match="baseline_promotion_pending"):
+            service.freeze_participants(current["round_id"])
 
 
 def test_existing_frozen_baseline_recovers_without_refetching_old_main():

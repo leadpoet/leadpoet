@@ -182,7 +182,10 @@ def test_postgrest_filters_round_mode_and_status_before_limit_with_pagination():
     )
     rows = transport.select(
         "lab_arena_rounds",
-        filters={"configuration_doc->>mode": "live"},
+        filters={
+            "configuration_doc->>mode": "live",
+            "publication_doc->king_decision->>outcome": "crowned",
+        },
         status_in=("open", "committed"),
         order="created_at",
         descending=True,
@@ -192,6 +195,7 @@ def test_postgrest_filters_round_mode_and_status_before_limit_with_pagination():
     assert rows == []
     params = list(requests[0].url.params.multi_items())
     assert ("configuration_doc->>mode", "eq.live") in params
+    assert ("publication_doc->king_decision->>outcome", "eq.crowned") in params
     assert ("status", "in.(open,committed)") in params
     assert ("order", "created_at.desc") in params
     assert ("limit", "20") in params and ("offset", "40") in params
@@ -255,7 +259,10 @@ def test_psycopg_parameterizes_round_mode_and_status_before_limit():
     transport = PsycopgTransport(lambda: Connection(), role=None)
     assert transport.select(
         "lab_arena_rounds",
-        filters={"configuration_doc->>mode": "live"},
+        filters={
+            "configuration_doc->>mode": "live",
+            "publication_doc->king_decision->>outcome": "crowned",
+        },
         status_in=("open", "committed"),
         order="created_at",
         descending=True,
@@ -264,11 +271,12 @@ def test_psycopg_parameterizes_round_mode_and_status_before_limit():
     ) == []
     sql, values = calls[0]
     assert "configuration_doc ->> 'mode' = %s" in sql
+    assert "publication_doc #>> '{king_decision,outcome}' = %s" in sql
     assert "status = ANY(%s)" in sql
     assert sql.index(" WHERE ") < sql.index(" ORDER BY ") < sql.index(" LIMIT 20")
     assert sql.endswith(" OFFSET 40) t")
-    assert values == ["live", ["open", "committed"]]
-    assert "live" not in sql and "committed" not in sql
+    assert values == ["live", "crowned", ["open", "committed"]]
+    assert "live" not in sql and "crowned" not in sql and "committed" not in sql
     transport.close()
 
 
@@ -300,3 +308,39 @@ def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
         "configuration_doc->>mode": "live",
     }
     assert rewards["limit"] == 200
+
+
+def test_pending_promotions_pushes_durable_filters_and_oldest_order():
+    calls = []
+
+    class Transport:
+        @staticmethod
+        def select(table, **kwargs):
+            calls.append((table, kwargs))
+            return [
+                {"round_id": "winner", "publication_doc": {"king_decision": {"outcome": "crowned"}}},
+            ]
+
+    rows = ArenaStore(Transport()).pending_promotions(
+        pinned_round_id="winner", limit=3
+    )
+    assert [row["round_id"] for row in rows] == ["winner"]
+    assert calls == [
+        (
+            "lab_arena_rounds",
+            {
+                "filters": {
+                    "status": "published",
+                    "configuration_doc->>mode": "live",
+                    "promotion_required": True,
+                    "baseline_promoted_at": None,
+                    "publication_doc->king_decision->>outcome": "crowned",
+                    "round_id": "winner",
+                },
+                "order": "created_at",
+                "descending": False,
+                "limit": 3,
+                "columns": "round_id,publication_doc,promotion_doc,published_at,created_at",
+            },
+        )
+    ]

@@ -40,9 +40,11 @@ MIGRATIONS = tuple(
         (183, "miner-reward-basis"),
         (184, "scoring-failure-isolation"),
         (185, "miner-credentials"),
+        (187, "promotion-threshold"),
+        (188, "baseline-promotion"),
     )
 )
-EXPECTED_SCHEMA_VERSION = 185
+EXPECTED_SCHEMA_VERSION = 188
 TESTNET_NETUID = 401
 TESTNET_NETWORK = "test"
 DEFAULT_DATABASE = "miner_testnet"
@@ -611,7 +613,7 @@ def _serve(args: argparse.Namespace) -> int:
         )
         checks = service.startup_checks()
         if checks.get("schema_version") != EXPECTED_SCHEMA_VERSION:
-            raise ConfigurationError("Arena startup did not verify schema 185")
+            raise ConfigurationError("Arena startup did not verify the current schema")
         if args.resume_round:
             if args.managed_postgrest:
                 existing_round = store.get_round(round_id)
@@ -709,7 +711,7 @@ def build_parser() -> argparse.ArgumentParser:
         expected_db_port=DEFAULT_DATABASE_PORT,
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("setup-db", help="apply the isolated schema shim and migrations 179 through 185")
+    commands.add_parser("setup-db", help="apply the isolated schema shim and current Arena migrations")
 
     def add_aws(command):
         command.add_argument("--aws-region", default="us-east-1")

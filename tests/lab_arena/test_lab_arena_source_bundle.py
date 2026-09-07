@@ -58,6 +58,20 @@ def test_archive_validation_accepts_one_github_wrapper_directory():
     assert facts["source_root"] == "pydantic-harness-main"
 
 
+@pytest.mark.parametrize("name", [
+    ".git/config", ".GIT/config", ".gitattributes",
+    ".github/workflows/push.yml", "wrapper/.github/workflows/push.yml",
+])
+def test_public_source_rejects_git_automation(name):
+    with pytest.raises(source_bundle.SourceBundleError, match="source_git_automation_forbidden"):
+        source_bundle.validate_publishable_path(name)
+
+
+def test_public_source_allows_ordinary_model_and_documentation_paths():
+    for name in ("harness.py", "README.md", ".gitignore", ".github/ISSUE_TEMPLATE.md"):
+        source_bundle.validate_publishable_path(name)
+
+
 def test_archive_commit_reads_only_one_ordinary_pax_comment():
     commit = "a" * 40
     raw = io.BytesIO()

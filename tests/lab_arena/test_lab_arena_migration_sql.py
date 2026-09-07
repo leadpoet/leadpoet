@@ -18,7 +18,13 @@ SOURCE_SQL = (SCRIPTS / "181-lab-arena-source-submissions.sql").read_text(
 SOURCE_EXECUTION_SQL = (SCRIPTS / "182-lab-arena-source-execution.sql").read_text(
     encoding="utf-8"
 )
+MINER_REWARD_SQL = (SCRIPTS / "183-lab-arena-miner-reward-basis.sql").read_text(
+    encoding="utf-8"
+)
 CREDENTIAL_SQL = (SCRIPTS / "185-lab-arena-miner-credentials.sql").read_text(
+    encoding="utf-8"
+)
+PROMOTION_THRESHOLD_SQL = (SCRIPTS / "187-lab-arena-promotion-threshold.sql").read_text(
     encoding="utf-8"
 )
 
@@ -65,11 +71,24 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[183] == ["183-lab-arena-miner-reward-basis.sql"]
     assert numbered[184] == ["184-lab-arena-scoring-failure-isolation.sql"]
     assert numbered[185] == ["185-lab-arena-miner-credentials.sql"]
+    assert numbered[186] == ["186-research-lab-source-add-provisioned-status.sql"]
+    assert numbered[187] == ["187-lab-arena-promotion-threshold.sql"]
+    assert numbered[188] == ["188-lab-arena-baseline-promotion.sql"]
     arena_frontier = max(
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 185
+    assert arena_frontier == 188
+
+
+def test_promotion_threshold_migration_uses_exact_numeric_one_point_gate():
+    assert PROMOTION_THRESHOLD_SQL.lstrip().startswith(
+        "-- 187-lab-arena-promotion-threshold.sql"
+    )
+    assert "v_winner_score < v_baseline_score + 1" in PROMOTION_THRESHOLD_SQL
+    assert "::NUMERIC >= v_baseline_score + 1" in PROMOTION_THRESHOLD_SQL
+    assert "OLD.status = 'published'" in MINER_REWARD_SQL
+    assert "UPDATE public.lab_arena_rounds" not in PROMOTION_THRESHOLD_SQL
 
 
 def test_migration_transaction_and_reload_shape():

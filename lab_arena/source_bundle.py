@@ -79,6 +79,21 @@ def _environment_file_forbidden(name: str) -> bool:
     )
 
 
+def validate_publishable_path(name: str) -> None:
+    """Source may become public code, but must not install Git automation.
+
+    Workflows could run with repository credentials on promotion. Git metadata
+    and export attributes could alter the exact source that tomorrow downloads.
+    """
+
+    parts = tuple(part.lower() for part in PurePosixPath(name).parts)
+    if (
+        ".git" in parts or ".gitattributes" in parts
+        or any(parts[index:index + 2] == (".github", "workflows") for index in range(len(parts)))
+    ):
+        raise SourceBundleError("source_git_automation_forbidden")
+
+
 def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
     files: List[Tuple[Path, str, os.stat_result]] = []
     total = 0
@@ -95,6 +110,7 @@ def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
         if not stat.S_ISREG(details.st_mode):
             raise SourceBundleError("source_entry_type_invalid")
         name = relative.as_posix()
+        validate_publishable_path(name)
         try:
             encoded_name = name.encode("utf-8")
         except UnicodeError as exc:
@@ -216,6 +232,7 @@ def _safe_members(
         if len(encoded_name) > MAX_SOURCE_PATH_BYTES or member.name in names:
             raise SourceBundleError("source_path_invalid")
         names.add(member.name)
+        validate_publishable_path(member.name)
         if member.isdir():
             continue
         if not member.isfile():

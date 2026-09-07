@@ -90,7 +90,10 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/181-lab-arena-source-submissions.sql` and
 `scripts/182-lab-arena-source-execution.sql`,
 `scripts/183-lab-arena-miner-reward-basis.sql`, and
-`scripts/184-lab-arena-scoring-failure-isolation.sql` with the database owner
+`scripts/184-lab-arena-scoring-failure-isolation.sql`,
+`scripts/185-lab-arena-miner-credentials.sql`,
+`scripts/187-lab-arena-promotion-threshold.sql`, and
+`scripts/188-lab-arena-baseline-promotion.sql` with the database owner
 before service startup. Then check the service wiring:
 
 ```bash
@@ -164,9 +167,35 @@ recovery. A later `lab` promotion affects the next round snapshot only. The
 operator log reports the archive's ordinary Git commit comment when GitHub
 provides it. A live round created before this policy can still show its old
 creation-time URL, but an unfrozen download uses `lab`; an already stored or
-registered bundle is not replaced. Prior winners stay in reward history; they
-do not replace the next daily baseline. Public `main` remains the development
-branch and is not the live daily baseline.
+registered bundle is not replaced. A finalist must score at least **1.0 point**
+above the daily baseline mean on the existing 0–100 scale. A tie or a smaller
+gain does not crown a new miner. The highest qualifying finalist wins.
+
+The gateway publishes that winner's accepted source to both `main` and `lab`
+with one atomic Git push. The new commit preserves both branches' history and
+contains exactly the submitted source files. The gateway never executes source
+while publishing it. Source bundles cannot contain Git metadata, export
+attributes, or GitHub workflows that could run with repository credentials.
+
+One ordinary promotion plan is saved on the round before the push. A failed
+push leaves promotion pending. A lost push response or restart checks the same
+plan and remote heads, then completes it without another promotion commit.
+Concurrent branch changes fail closed; they are not overwritten or force-pushed.
+There is no sequential fallback when the remote does not support atomic pushes.
+The next baseline download and the winner's reward activation wait for promotion
+to complete. Existing frozen round bundles do not change during recovery.
+
+Configure one repository-scoped host credential: `LAB_ARENA_GIT_SSH_KEY_PATH`
+for a write-enabled deploy key, or `LAB_ARENA_GITHUB_TOKEN`. Do not set both.
+SSH requires a verified GitHub host key and a private key readable only by its
+owner. Existing Git credential helpers can also provide HTTPS access. The
+optional `LAB_ARENA_PROMOTION_WORK_DIR` holds a bare Git cache; losing this cache
+does not lose the saved promotion plan. Credentials never enter miner runs.
+
+Outside promotion, `main` remains a development branch. A later `main`-only push
+does not affect production. The next daily round loads the promoted `lab` code;
+the organizer still owns the baseline entry, while the winning miner remains
+the reward payee.
 
 ## Rewards and independent disable controls
 
@@ -185,7 +214,12 @@ writes the participants, rankings, winner decision, and publication time
 directly to the round row. It does not need KMS, an epoch read, a signed
 receipt, a copied result bundle, or a replay. The driver later retries reward
 activation for enabled live rounds, oldest first. Shadow rounds and rounds
-created with rewards disabled cannot activate rewards later.
+created with rewards disabled cannot activate rewards later. New crowned rounds
+also require completed baseline promotion before activation. Historical published
+rounds are not retroactively promoted or rescored. The default champion pool is
+25% of total emissions, subject to the existing epoch eligibility and decay rules.
+An activated database record is not proof that chain weights were submitted;
+verify canonical publication, validator submission, finalization, and readback.
 
 To disable only the competition, set `LAB_ARENA_MODE=off` and stop the Arena
 service and runners. To disable only Arena rewards, turn off the Arena reward

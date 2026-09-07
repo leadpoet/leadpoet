@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -54,6 +55,45 @@ def _baseline_source_url_from_environment(mode: str) -> str:
     if mode == "live" and configured and configured != DEFAULT_BASELINE_SOURCE_URL:
         raise ServiceError("LAB_ARENA_BASELINE_SOURCE_URL is not the promoted lab source", 500)
     return configured or DEFAULT_BASELINE_SOURCE_URL
+
+
+def baseline_promoter_from_environment():
+    """Repository-scoped host Git access; no credential enters a miner run."""
+
+    from lab_arena.promotion import GitPromoter
+
+    environment = {}
+    repository = "https://github.com/leadpoet/pydantic-harness.git"
+    key_path = os.environ.get("LAB_ARENA_GIT_SSH_KEY_PATH", "").strip()
+    token = os.environ.get("LAB_ARENA_GITHUB_TOKEN", "").strip()
+    if key_path and token:
+        raise ServiceError("promotion_credentials_ambiguous", 500)
+    if key_path:
+        key = Path(key_path)
+        if not key.is_absolute() or key.is_symlink() or not key.is_file():
+            raise ServiceError("promotion_ssh_key_invalid", 500)
+        if key.stat().st_mode & 0o077:
+            raise ServiceError("promotion_ssh_key_permissions_invalid", 500)
+        repository = "git@github.com:leadpoet/pydantic-harness.git"
+        environment["GIT_SSH_COMMAND"] = (
+            "ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes "
+            "-o StrictHostKeyChecking=yes -o ConnectTimeout=15"
+        ) % shlex.quote(str(key))
+    elif token:
+        authorization = base64.b64encode(
+            ("x-access-token:" + token).encode("utf-8")
+        ).decode("ascii")
+        environment.update({
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic " + authorization,
+        })
+    work_dir = os.environ.get("LAB_ARENA_PROMOTION_WORK_DIR", "").strip()
+    return GitPromoter(
+        repository,
+        work_dir or Path.home() / ".cache" / "leadpoet" / "arena-promotion.git",
+        git_environment=environment,
+    )
 
 
 def fetch_public_source_archive(url: str, max_bytes: int) -> bytes:
@@ -394,6 +434,7 @@ def build_service_from_environment(mode: str):
         credential_manager=credential_manager,
         network_name=chain_config.network_name,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
+        baseline_promoter_factory=baseline_promoter_from_environment,
     )
     service = ArenaService(config)
     app = create_app(service)

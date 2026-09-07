@@ -294,6 +294,10 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
 
         class Store:
             @staticmethod
+            def pending_promotions(**_kwargs):
+                return []
+
+            @staticmethod
             def published_reward_bases(**_kwargs):
                 return prior
 

@@ -6,8 +6,18 @@ from __future__ import annotations
 def drive_once(service) -> str:
     """Advance all active rounds and ensure one submission round is open."""
 
+    parts = []
+    try:
+        promotion = service.promote_pending_baselines()
+    except Exception as exc:
+        parts.append("failed promote_baselines: %s" % type(exc).__name__)
+    else:
+        promoted = int(promotion.get("promoted") or 0)
+        if promoted:
+            parts.append("promoted baselines %d" % promoted)
     outcome = _advance_active(service)
-    parts = [] if outcome == "idle" else [outcome]
+    if outcome != "idle":
+        parts.append(outcome)
     try:
         rewards = service.activate_pending_rewards()
     except Exception as exc:

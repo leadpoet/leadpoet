@@ -13,6 +13,7 @@ import hashlib
 import gzip
 import io
 import json
+import subprocess
 import tarfile
 import threading
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,7 @@ from lab_arena import broker as br, contracts, driver as arena_driver, runner as
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
 from lab_arena.store import ArenaStore, PsycopgTransport
+from lab_arena.promotion import GitPromoter
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 
@@ -317,6 +319,35 @@ def flavor_source_archive(flavor: str) -> bytes:
     return payload
 
 
+def promotion_repository(root: Path) -> Path:
+    """Create local main/lab heads for the real baseline promoter."""
+
+    remote = root / "remote.git"
+    seed = root / "seed"
+
+    def git(cwd: Path, *arguments: str) -> str:
+        return subprocess.run(
+            ("git", *arguments), cwd=cwd, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout.decode().strip()
+
+    git(root, "init", "--bare", str(remote))
+    git(root, "init", str(seed))
+    git(seed, "config", "user.name", "Test")
+    git(seed, "config", "user.email", "test@example.test")
+    (seed / "old.txt").write_text("main", encoding="utf-8")
+    git(seed, "add", ".")
+    git(seed, "commit", "-m", "main")
+    main = git(seed, "rev-parse", "HEAD")
+    git(seed, "switch", "-c", "lab")
+    (seed / "old.txt").write_text("lab", encoding="utf-8")
+    git(seed, "commit", "-am", "lab")
+    lab = git(seed, "rev-parse", "HEAD")
+    git(seed, "remote", "add", "origin", str(remote))
+    git(seed, "push", "origin", "%s:refs/heads/main" % main, "%s:refs/heads/lab" % lab)
+    return remote
+
+
 class FixtureObjectStore(svc.LocalObjectStore):
     def presign_put(self, ref, *, size_bytes, content_type, expires_seconds):
         return {
@@ -540,12 +571,12 @@ class Harness:
 def test_startup_checks_require_the_current_arena_schema(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     checks = harness.service.startup_checks()
-    assert checks["schema_version"] == 185
+    assert checks["schema_version"] == 188
     assert checks["database_identity"]["current_user"] == "lab_arena_service"
 
 
 def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(connect, tmp_path):
-    """A normal round publishes scores; its winner does not replace tomorrow's baseline."""
+    """A crowned source is promoted before it becomes tomorrow's baseline."""
 
     harness = Harness(connect, tmp_path, challengers=["Alpha", "Bravo", "Charlie"], runners=["alpha", "beta"])
     participants = _start_round(harness, day=1, epoch=24800)
@@ -562,7 +593,32 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
     assert len(harness.service.store.list_runs(round_id, stage=1, kind="execute")) == contracts.STAGE_1_ICP_COUNT * participants
     assert len(harness.service.store.list_runs(round_id, stage=2, kind="execute")) == contracts.STAGE_2_ICP_COUNT * participants
 
-    # A later round always uses that day's configured public baseline.
+    decision = first["publication_doc"]["king_decision"]
+    winner_submission_id = decision["winner_submission_id"]
+    winner_flavor = harness.flavors[winner_submission_id]
+    repository_root = tmp_path / "promotion-repository"
+    repository_root.mkdir()
+    remote = promotion_repository(repository_root)
+    harness.service._config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "promotion-objects"
+    )
+
+    def promoted_baseline(_url, _limit):
+        return subprocess.run(
+            ("git", "--git-dir", str(remote), "archive", "--format=tar.gz", "lab"),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+
+    harness.service._config.baseline_source_fetcher = promoted_baseline
+    assert harness.service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
+    promoted_source = promoted_baseline("", source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+    with tarfile.open(fileobj=io.BytesIO(promoted_source), mode="r:gz") as archive:
+        assert archive.extractfile("flavor.txt").read().decode("utf-8") == winner_flavor
+
+    # A later round freezes the newly promoted source under the organizer's
+    # baseline identity. The winning miner remains the reward payee identity.
     harness.clock.now = datetime.now(timezone.utc)
     harness.chain.epoch = 24820
     configuration = harness.service.create_round(
@@ -577,7 +633,10 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
     king = next(participant for participant in second["participants"] if participant["is_king"])
     assert king["miner_hotkey"] == harness.baseline_hotkey
     assert king["miner_hotkey"] != first["king_hotkey"]
-    harness.flavors.setdefault(king["submission_id"], "PublicBaseline")
+    baseline_submission = harness.service.store.get_submission(king["submission_id"])
+    frozen_source = harness.objects.get(baseline_submission["source_ref"])
+    with tarfile.open(fileobj=io.BytesIO(frozen_source), mode="r:gz") as archive:
+        assert archive.extractfile("flavor.txt").read().decode("utf-8") == winner_flavor
 
     _run_stage_one_to_scoring(harness, len(second["participants"]), runners=2)
     harness.advance_until("published", runners=2)
@@ -1118,7 +1177,7 @@ def test_baseline_judge_failure_cancels_the_daily_round(connect, tmp_path):
 
 
 def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_path):
-    """A prior winner stays in reward history but never replaces the new daily baseline."""
+    """A prior winner can submit fresh source beside its promoted baseline source."""
 
     harness = Harness(connect, tmp_path, challengers=["Regal", "Rival"], runners=["alpha"])
     service = harness.service
@@ -1129,6 +1188,23 @@ def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_
     king_hotkey = first["king_hotkey"]
     assert first["king_outcome"] == "crowned" and king_hotkey
     king_label = next(flavor for flavor in ("Regal", "Rival") if keypair("svc-miner-" + flavor).ss58_address == king_hotkey)
+    repository_root = tmp_path / "fresh-promotion-repository"
+    repository_root.mkdir()
+    remote = promotion_repository(repository_root)
+    service._config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "fresh-promotion-objects"
+    )
+
+    def promoted_baseline(_url, _limit):
+        return subprocess.run(
+            ("git", "--git-dir", str(remote), "archive", "--format=tar.gz", "lab"),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+
+    service._config.baseline_source_fetcher = promoted_baseline
+    assert service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
     # Next day: the prior winner submits fresh source under the same hotkey.
     harness.chain.epoch = 30040
     harness.clock.now = datetime.now(timezone.utc)
@@ -1151,12 +1227,15 @@ def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_
     assert prior_winner_parts[0]["submission_id"] == fresh_row["submission_id"]
     assert baseline_parts[0]["miner_hotkey"] == harness.baseline_hotkey
     assert fresh_row["status"] == "frozen" and fresh_row["is_king"] is False
-    for participant in parts:
-        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+    baseline_row = service.store.get_submission(baseline_parts[0]["submission_id"])
+    with tarfile.open(
+        fileobj=io.BytesIO(harness.objects.get(baseline_row["source_ref"])), mode="r:gz"
+    ) as archive:
+        assert archive.extractfile("flavor.txt").read().decode("utf-8") == king_label
     _run_stage_one_to_scoring(harness, 3, runners=1)
     harness.advance_until("published", runners=1)
     second = service.store.get_round(harness.round_id)
-    assert second["king_outcome"] in ("crowned", "defended")
+    assert second["king_outcome"] in ("crowned", "no_king")
     assert_canary_absent(harness, connect)
 
 

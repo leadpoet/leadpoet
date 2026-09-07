@@ -295,6 +295,8 @@ class ServiceConfig:
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
+    # Only the host publishes accepted source. Miner code never gets GitHub access.
+    baseline_promoter_factory: Optional[Callable[[], Any]] = None
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -423,7 +425,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (184, 185) if self._config.credential_manager is None else (185,)
+        supported_versions = (188,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
@@ -998,6 +1000,8 @@ class ArenaService:
             except Exception:
                 try:
                     if str(configuration.get("mode") or self._config.mode) == "live":
+                        if self._store.pending_promotions():
+                            raise ServiceError("baseline_promotion_pending", 503)
                         selected_source_url = DEFAULT_BASELINE_SOURCE_URL
                     source_observation = (
                         selected_source_url
@@ -1012,6 +1016,8 @@ class ArenaService:
                     )
                     facts = source_bundle.validate_source_archive(payload)
                     self._objects.put(source_ref, payload)
+                except ServiceError:
+                    raise
                 except source_bundle.SourceBundleError as exc:
                     raise ServiceError(
                         "baseline_source_invalid:%s" % exc.code, 500
@@ -1176,7 +1182,7 @@ class ArenaService:
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
-            if exc.code == "baseline_source_not_ready":
+            if exc.code in ("baseline_source_not_ready", "baseline_promotion_pending"):
                 return {"status": "retry", "reason": exc.code, "set_id": set_id}
             raise
         evaluation_date = round_id.replace("arena-", "")[:10]
@@ -1503,6 +1509,82 @@ class ArenaService:
             "king_hotkey": str(decision.get("king_hotkey") or ""),
         }
 
+    def promote_pending_baselines(self) -> Dict[str, Any]:
+        """Finish accepted winners oldest-first before a new baseline or reward.
+
+        Git and PostgreSQL cannot share a transaction. Persist the prepared Git
+        update first, push both branches atomically, then mark completion. A
+        lost response is reconciled against those same branch heads on retry.
+        """
+
+        if self._config.mode != "live":
+            return {"status": "disabled", "promoted": 0}
+        promoted = 0
+        for row in self._store.pending_promotions(
+            pinned_round_id=self._config.pinned_round_id
+        ):
+            result = self.promote_baseline(str(row["round_id"]))
+            if result.get("status") not in ("promoted", "existing"):
+                return {"status": result.get("status", "pending"), "promoted": promoted}
+            promoted += int(result.get("status") == "promoted")
+        return {"status": "ok", "promoted": promoted}
+
+    def promote_baseline(self, round_id: str) -> Dict[str, Any]:
+        """Publish only the stored, scored winner, without executing its source."""
+
+        row = self._round(round_id)
+        if row.get("baseline_promoted_at"):
+            return {"status": "existing"}
+        configuration = row.get("configuration_doc") or {}
+        decision = (row.get("publication_doc") or {}).get("king_decision") or {}
+        if (
+            row.get("status") != "published"
+            or configuration.get("mode") != "live"
+            or not row.get("promotion_required")
+            or decision.get("outcome") != "crowned"
+        ):
+            return {"status": "not_required"}
+        factory = self._config.baseline_promoter_factory
+        if factory is None:
+            raise ServiceError("baseline_promoter_unavailable", 503)
+        submission_id = str(decision.get("winner_submission_id") or "")
+        submission = self._store.get_submission(submission_id)
+        if (
+            not submission
+            or submission.get("round_id") != round_id
+            or submission.get("miner_hotkey") != decision.get("king_hotkey")
+            or submission.get("is_king")
+            or submission.get("status") != "frozen"
+        ):
+            raise ServiceError("promotion_winner_invalid", 500)
+        payload = self._objects.get_bounded(
+            str(submission["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+        )
+        if len(payload) != int(submission["source_size_bytes"]):
+            raise ServiceError("promotion_source_size_mismatch", 500)
+        promoter = factory()
+        plan = row.get("promotion_doc")
+        if plan is None:
+            proposed = promoter.prepare(
+                payload, round_id=round_id, submission_id=submission_id,
+                timestamp=str(row["published_at"]),
+            )
+            prepared = self._store.prepare_promotion(round_id, proposed)
+            if prepared.get("status") not in ("prepared", "existing"):
+                return prepared
+            # Another worker can win the initial prepare. Its stored plan is
+            # authoritative; never silently replace it with a new Git base.
+            row = self._store.get_round(round_id) or {}
+            plan = row.get("promotion_doc")
+        if not isinstance(plan, dict):
+            raise ServiceError("promotion_plan_missing", 500)
+        commit = promoter.publish(
+            payload, plan=plan, round_id=round_id, submission_id=submission_id
+        )
+        if commit != plan["commit"]:
+            raise ServiceError("promotion_commit_mismatch", 500)
+        return self._store.complete_promotion(round_id, plan)
+
     def activate_pending_rewards(self) -> Dict[str, Any]:
         """Activate eligible live rounds oldest-first after publication.
 
@@ -1584,8 +1666,18 @@ class ArenaService:
             return {"status": "stale", "round_status": row.get("status")}
         if configuration.get("mode") != "live" or configuration.get("rewards_enabled") is not True:
             return {"status": "disabled"}
+        # A later no-winner round must not activate while an earlier accepted
+        # baseline is still unpublished. This is global, like Git ordering.
+        if self._store.pending_promotions(limit=1):
+            return {"status": "waiting_for_promotion"}
         publication = row.get("publication_doc") or {}
         decision = publication.get("king_decision") or {}
+        if (
+            row.get("promotion_required")
+            and decision.get("outcome") == "crowned"
+            and not row.get("baseline_promoted_at")
+        ):
+            return {"status": "waiting_for_promotion"}
         prior = self._store.published_reward_bases(mode="live", limit=200)
         maximum_epoch = max((int(item["effective_reward_epoch"]) for item in prior if item.get("effective_reward_epoch") is not None), default=-1)
         effective_epoch = max(int(self._config.chain.current_settlement_epoch()) + 1, maximum_epoch + 1)

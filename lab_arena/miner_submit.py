@@ -334,6 +334,7 @@ def run_interactive_submission(
     output_fn("Do not put API keys in your source; credentials are sent separately.")
     output_fn("The OpenRouter API key and Deepline API key pay for model execution and scoring.")
     output_fn("The OpenRouter management key is used by the gateway only.")
+    output_fn("If this agent wins, its source will be published as the public baseline.")
     source_dir = input_fn("Agent source directory: ").strip()
     if not source_dir:
         output_fn("Submission cancelled: a source directory is required.")

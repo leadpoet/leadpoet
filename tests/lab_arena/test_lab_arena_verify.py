@@ -203,6 +203,52 @@ def test_ranking_finalist_cut_and_king_decisions_do_not_use_image_identity():
     assert all("is_king" not in row for row in final)
 
 
+@pytest.mark.parametrize(
+    ("challenger_score", "expected_outcome"),
+    [
+        (75.0, "no_king"),
+        (75.000001, "no_king"),
+        (75.999999, "no_king"),
+        (76.0, "crowned"),
+    ],
+)
+def test_king_decision_uses_exact_one_point_promotion_boundary(
+    challenger_score: float, expected_outcome: str
+):
+    decision = verify.king_decision(
+        [_entry("challenger", challenger_score)],
+        _entry("baseline", 75.0, True),
+    )
+    assert decision["outcome"] == expected_outcome
+
+
+def test_king_decision_applies_threshold_to_highest_valid_finalist():
+    decision = verify.king_decision(
+        [
+            _entry("invalid", None),
+            _entry("lower", 79.0),
+            _entry("largest-b", 80.0),
+            _entry("largest-a", 80.0),
+        ],
+        _entry("baseline", 79.0, True),
+    )
+    assert decision["outcome"] == "crowned"
+    assert decision["winner_submission_id"] == "largest-a"
+
+
+def test_king_decision_requires_a_valid_baseline_for_promotion():
+    decision = verify.king_decision(
+        [_entry("challenger", 100.0)],
+        _entry("baseline", None, True),
+    )
+    assert decision == {
+        "outcome": "no_king",
+        "king_submission_id": None,
+        "king_hotkey": "",
+        "winner_submission_id": None,
+    }
+
+
 def _walk_keys(value: Any) -> set:
     keys = set()
     if isinstance(value, dict):

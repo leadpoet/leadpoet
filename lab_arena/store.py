@@ -46,6 +46,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
+    "lab_arena_prepare_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
+    "lab_arena_complete_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_accept_submission_with_credentials": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_credentials", "jsonb")),
@@ -72,6 +74,7 @@ TABLES = (
     "lab_arena_ledger",
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
+PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
 
 
 DEADLOCK_SQLSTATE = "40P01"
@@ -242,9 +245,9 @@ class PostgrestTransport(StoreTransport):
             raise ArenaStoreError("unknown Arena table")
         query: List[tuple] = [("select", columns)]
         for key, value in (filters or {}).items():
-            if key != ROUND_MODE_FILTER and not key.replace("_", "").isalnum():
+            if key not in (ROUND_MODE_FILTER, PROMOTION_OUTCOME_FILTER) and not key.replace("_", "").isalnum():
                 raise ArenaStoreError("invalid filter column")
-            query.append((key, "eq." + _check_filter_value(value)))
+            query.append((key, "is.null" if value is None else "eq." + _check_filter_value(value)))
         if status_in is not None:
             if table != "lab_arena_rounds" or "status" in (filters or {}):
                 raise ArenaStoreError("status inclusion filter is invalid")
@@ -403,12 +406,17 @@ class PsycopgTransport(StoreTransport):
         for key, value in (filters or {}).items():
             if key == ROUND_MODE_FILTER:
                 expression = "configuration_doc ->> 'mode'"
+            elif key == PROMOTION_OUTCOME_FILTER:
+                expression = "publication_doc #>> '{king_decision,outcome}'"
             elif key.replace("_", "").isalnum():
                 expression = key
             else:
                 raise ArenaStoreError("invalid filter column")
-            clauses.append("%s = %%s" % expression)
-            values.append(value)
+            if value is None:
+                clauses.append("%s IS NULL" % expression)
+            else:
+                clauses.append("%s = %%s" % expression)
+                values.append(value)
         if status_in is not None:
             if table != "lab_arena_rounds" or "status" in (filters or {}):
                 raise ArenaStoreError("status inclusion filter is invalid")
@@ -530,6 +538,46 @@ class ArenaStore:
             ),
             "activate_reward",
         )
+
+    def prepare_promotion(self, round_id: str, plan: Mapping[str, Any]) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_prepare_promotion",
+                {"p_round_id": round_id, "p_plan": dict(plan)},
+            ),
+            "prepare_promotion",
+        )
+
+    def complete_promotion(self, round_id: str, plan: Mapping[str, Any]) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_complete_promotion",
+                {"p_round_id": round_id, "p_plan": dict(plan)},
+            ),
+            "complete_promotion",
+        )
+
+    def pending_promotions(
+        self, *, pinned_round_id: Optional[str] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        filters: Dict[str, Any] = {
+            "status": "published",
+            ROUND_MODE_FILTER: "live",
+            "promotion_required": True,
+            "baseline_promoted_at": None,
+            PROMOTION_OUTCOME_FILTER: "crowned",
+        }
+        if pinned_round_id is not None:
+            filters["round_id"] = pinned_round_id
+        rows = self._transport.select(
+            "lab_arena_rounds",
+            filters=filters,
+            order="created_at",
+            descending=False,
+            limit=limit,
+            columns="round_id,publication_doc,promotion_doc,published_at,created_at",
+        )
+        return rows
 
     def get_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)

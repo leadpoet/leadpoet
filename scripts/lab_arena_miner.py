@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     source = commands.add_parser(
         "submit-model",
         aliases=["submit-source"],
-        help="archive, upload, and submit a local model",
+        help="submit a local model; winning source is published as the public baseline",
     )
     source.add_argument("--source", required=True, help="directory with harness.py")
     _common_arguments(source)

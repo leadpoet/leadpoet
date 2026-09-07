@@ -159,6 +159,8 @@ def test_execution_config_binds_clone_origin_into_registry_and_reader():
 
 
 def test_execution_config_binds_and_applies_lab_arena_reward_settings(monkeypatch):
+    # Applying this document also changes the parity origin and scoring flags.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     environment = _environment(
         LAB_ARENA_REWARDS_ENABLED="true",
         LAB_ARENA_SIGNING_PUBLIC_KEY_HASH=HASH,

@@ -760,6 +760,23 @@ def test_reward_activation_is_oldest_first_retry_idempotent_and_mismatch_safe(st
     second_at = _publish_compact(store, superuser, second, rewards_enabled=True)
     first_king = store.get_round(first)["king_hotkey"]
     second_king = store.get_round(second)["king_hotkey"]
+    # New live winners must finish baseline promotion before rewards activate.
+    for round_id, king in ((first, first_king), (second, second_king)):
+        with superuser.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO public.lab_arena_submissions "
+                "(submission_id, round_id, miner_hotkey, status, is_king) "
+                "VALUES (%s, %s, %s, 'frozen', FALSE)",
+                (round_id + "-winner", round_id, king),
+            )
+        plan = {
+            "commit": "1" * 40,
+            "main_before": "2" * 40,
+            "lab_before": "3" * 40,
+            "timestamp": first_at,
+        }
+        assert store.prepare_promotion(round_id, plan)["status"] == "prepared"
+        assert store.complete_promotion(round_id, plan)["status"] == "promoted"
     first_basis, first_key = _reward_docs(first, first_at, 100, first_king, marker="a")
     second_basis, second_key = _reward_docs(second, second_at, 101, second_king, marker="b")
     assert store.activate_reward(second, second_basis, second_key)["status"] == "waiting_for_older_round"

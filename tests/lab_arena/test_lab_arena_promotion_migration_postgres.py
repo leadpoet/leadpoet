@@ -33,12 +33,16 @@ def test_promotion_migrations_temporarily_restore_owner_schema_create():
     psycopg2, dsn = next(database)
     control = psycopg2.connect(**dsn)
     control.autocommit = True
+    admin_password = dsn.get("password", "arena-test")
     try:
         with control.cursor() as cursor:
-            cursor.execute("CREATE ROLE lab_arena_migration_admin LOGIN NOSUPERUSER")
+            cursor.execute(
+                "CREATE ROLE lab_arena_migration_admin LOGIN NOSUPERUSER PASSWORD %s",
+                (admin_password,),
+            )
             cursor.execute("GRANT lab_arena_owner TO lab_arena_migration_admin")
             cursor.execute("ALTER SCHEMA public OWNER TO lab_arena_migration_admin")
-        admin_dsn = dict(dsn, user="lab_arena_migration_admin")
+        admin_dsn = dict(dsn, user="lab_arena_migration_admin", password=admin_password)
         admin = psycopg2.connect(**admin_dsn)
         admin.autocommit = True
         try:

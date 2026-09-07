@@ -4527,6 +4527,16 @@
       "symbol": "InstalledGatewayControllerError"
     },
     {
+      "ast_sha256": "sha256:cfae1016011688de72ed89ca04e54bbebff92d47d4d94d2935ca5c91a01e05f4",
+      "path": "scripts/verify_installed_gateway_controller_v1.py",
+      "symbol": "LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY"
+    },
+    {
+      "ast_sha256": "sha256:7b698421d863993cce11096d27024a501cfb505bbc77040b0bcca809f2c98fbc",
+      "path": "scripts/verify_installed_gateway_controller_v1.py",
+      "symbol": "OPTIONAL_CONTROLLER_FILES"
+    },
+    {
       "ast_sha256": "sha256:09c055342871911d83bbe42aa6a03ef6abada7d6df05de089b5d1e7d9a402ce2",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "RECOVERY_HOST_CONTROLLER_COMMITS"
@@ -4642,7 +4652,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:3cb9a62b40348f1355a11cabe2e4329cf223ade2e00bdcbc5d578b608be8828b",
-  "protected_source_commit": "e5c76e9cb9293495816f7055c78fb4e54b1646dc",
+  "manifest_hash": "sha256:24a1cbad1377e948b7528c3be544df1b87548d3a2bb308ab2d35aa7b6606ffb2",
+  "protected_source_commit": "72fbf653de7b1e958695069ef81559ac43ce8aa1",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

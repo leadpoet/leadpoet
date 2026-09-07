@@ -1863,17 +1863,33 @@ async def _verify_company_fit(
         if str(icp.required_attribute or "").strip()
         else [aggregate]
     )
-    failed = [
+    mismatched = [
         name for name, dimension_decision in dimensions.items()
-        if dimension_decision != COMPANY_FIT_MATCH
+        if dimension_decision == COMPANY_FIT_MISMATCH
         and (name != "stage" or stage_required)
     ]
-    if required_attribute_decision != COMPANY_FIT_MATCH:
-        failed.append("required_attribute")
+    unproven = [
+        name for name, dimension_decision in dimensions.items()
+        if dimension_decision == COMPANY_FIT_UNAVAILABLE
+        and (name != "stage" or stage_required)
+    ]
+    if str(icp.required_attribute or "").strip():
+        target = (
+            mismatched
+            if required_attribute_decision == COMPANY_FIT_MISMATCH
+            else unproven
+        )
+        if required_attribute_decision != COMPANY_FIT_MATCH:
+            target.append("required_attribute")
+    failure_parts = []
+    if mismatched:
+        failure_parts.append(f"company fit mismatch: {', '.join(mismatched)}")
+    if unproven:
+        failure_parts.append(f"unproven dimensions: {', '.join(unproven)}")
     reason = (
         "company fit verified from independent identity and web evidence"
         if decision == COMPANY_FIT_MATCH
-        else f"company fit not proven: {', '.join(failed)}; {web.reason or ''}".strip()
+        else "; ".join(failure_parts)
     )
     return _complete_company_fit_result(
         decision,
@@ -2730,7 +2746,10 @@ def _competition_intent_failure_reason(signal_results: List[dict]) -> str:
         and row.get("same_entity_check") == "pass"
         for row in evaluations
     ):
-        return "Primary intent evidence mismatch: source contradicts the claim"
+        return (
+            "Primary intent evidence mismatch: source does not establish the "
+            "required intent"
+        )
 
     if "rejected_freshness" in decisions:
         return (

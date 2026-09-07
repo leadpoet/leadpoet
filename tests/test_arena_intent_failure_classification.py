@@ -14,6 +14,7 @@ from qualification.scoring.company_fit_decision import (
     company_fit_unavailable,
 )
 from qualification.scoring.competition import (
+    competition_score_from_breakdowns,
     count_penalizable_false_positives,
     scorer_breakdown_has_retryable_infrastructure_failure,
 )
@@ -67,7 +68,8 @@ def _detail(
         ),
         (
             [_detail(status="contradicted", same_entity="pass")],
-            "Primary intent evidence mismatch: source contradicts the claim",
+            "Primary intent evidence mismatch: source does not establish the "
+            "required intent",
         ),
         (
             [
@@ -228,6 +230,177 @@ def test_failed_primary_keeps_one_existing_penalty_and_no_gate_penalty(detail):
     assert count_penalizable_false_positives(
         [breakdown], icp_has_intent_signals=True
     ) == (0, 1)
+
+
+def test_category_mismatch_keeps_1password_verdict_and_penalty_arithmetic():
+    detail = _detail(
+        status="contradicted",
+        same_entity="pass",
+        rejection_reason="stage3_intent_category_mismatch",
+    )
+    evaluation = detail["judge_verdict"]["verification_trace"][
+        "intent_verdict"
+    ]["signal_evaluations"][0]
+    evaluation.update(
+        {
+            "claim_status": "supported",
+            "required_intent": "formal regulatory or compliance approval",
+            "observed_event": "AWS Security Competency distinction",
+        }
+    )
+    failure_reason = lead_scorer._competition_intent_failure_reason([detail])
+    rejected = {
+        "final_score": 0.0,
+        "failure_reason": failure_reason,
+        "intent_signals_detail": [detail],
+        "verifier_gate_receipts": [company_fit_match().receipt("company_fit")],
+    }
+
+    assert failure_reason == (
+        "Primary intent evidence mismatch: source does not establish the "
+        "required intent"
+    )
+    assert evaluation["claim_status"] == "supported"
+    assert count_penalizable_false_positives(
+        [rejected], icp_has_intent_signals=True
+    ) == (0, 1)
+    assert competition_score_from_breakdowns(
+        {"max_companies": 5, "intent_signal": "required"},
+        [{"final_score": 54.0}, rejected],
+    ) == {
+        "per_icp_score": 8.8,
+        "fp_gate_count": 0,
+        "fp_unverified_primary_count": 1,
+        "company_goal": 5,
+        "company_scores": [54.0, 0.0],
+    }
+
+
+def test_alex_bank_fit_summary_uses_final_dimension_decisions(monkeypatch):
+    company = CompanyOutput.model_validate(
+        {
+            "company_name": "Alex Bank",
+            "company_website": "https://alex.bank",
+            "company_linkedin": "https://linkedin.com/company/withalex",
+            "industry": "Financial Services",
+            "employee_count": "51-200",
+            "company_stage": "Series C",
+            "country": "Australia",
+            "intent_signals": [
+                {
+                    "source": "news",
+                    "description": "Announced a qualifying partnership.",
+                    "url": "https://news.example.com/alex-bank-partnership",
+                    "date": "2026-08-01",
+                    "snippet": "Alex Bank announced a partnership.",
+                    "matched_icp_signal": 0,
+                }
+            ],
+        }
+    )
+    icp = ICPPrompt(
+        icp_id="australian-digital-lending",
+        prompt="Australian digital lenders",
+        industry="Financial Services",
+        sub_industry="Digital lending",
+        employee_count="51-200",
+        company_stage="Series C",
+        geography="Australia",
+        country="Australia",
+        product_service="Digital lending",
+    )
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable("homepage identity binding unavailable")
+
+    async def web(*_args, **_kwargs):
+        return company_fit_mismatch(
+            "Public web pages identify Alex Bank as an Australian digital "
+            "bank with Brisbane headquarters, 51-200 employees, Series C",
+            details={
+                "identity_decision": "mismatch",
+                "identity_receipt": {
+                    "decision": "mismatch",
+                    "submitted_name": "Alex Bank",
+                    "submitted_domain": "alex.bank",
+                    "submitted_linkedin_slug": "withalex",
+                    "observed_name": "Alex Bank",
+                    "observed_domain": "alex.bank",
+                    "observed_linkedin_slug": "alexbankaus",
+                    "evidence_source": "company_web_reverification",
+                },
+                "dimension_decisions": {
+                    "employee_size": "unavailable",
+                    "industry": "match",
+                    "geography": "match",
+                    "stage": "match",
+                },
+                "required_attribute_decision": "unavailable",
+                "dimension_evidence": {
+                    dimension: {
+                        "url": f"https://alex.bank/evidence/{dimension}",
+                        "quote": f"Verified {dimension}",
+                    }
+                    for dimension in ("industry", "geography", "stage")
+                },
+                "provider_observations": {
+                    "observed_employee_count": None,
+                    "observed_linkedin_slug": "alexbankaus",
+                },
+            },
+        )
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", web)
+
+    fit = asyncio.run(
+        lead_scorer._verify_company_fit(
+            company,
+            icp,
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+    breakdown = {
+        "final_score": 0.0,
+        "failure_reason": lead_scorer._company_fit_failure_reason(
+            "Company fit", fit
+        ),
+        "verifier_gate_receipts": [fit.receipt("company_fit")],
+    }
+
+    assert fit.decision == "mismatch"
+    assert fit.reason == (
+        "company fit mismatch: identity; unproven dimensions: employee_size"
+    )
+    assert "51-200 employees" not in fit.reason
+    assert "required_attribute" not in fit.reason
+    assert fit.details["company_fit_dimensions"] == {
+        "identity": "mismatch",
+        "employee_size": "unavailable",
+        "industry": "match",
+        "geography": "match",
+        "stage": "match",
+    }
+    assert fit.details["dimension_evidence"]["employee_size"][
+        "web_evidence"
+    ] == {}
+    assert competition_score_from_breakdowns(
+        {"max_companies": 5, "intent_signal": "required"},
+        [{"final_score": 54.0}, breakdown],
+    ) == {
+        "per_icp_score": 8.8,
+        "fp_gate_count": 1,
+        "fp_unverified_primary_count": 0,
+        "company_goal": 5,
+        "company_scores": [54.0, 0.0],
+    }
 
 
 def test_fit_unavailable_remains_retryable_but_is_not_a_mismatch_penalty():

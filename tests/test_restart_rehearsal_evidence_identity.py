@@ -252,6 +252,43 @@ def test_local_chain_adapter_supports_exact_historical_epoch_search(
     )
 
 
+@pytest.mark.parametrize("use_keyword_arguments", [False, True])
+def test_local_chain_query_accepts_real_and_keyword_sdk_call_forms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    use_keyword_arguments: bool,
+) -> None:
+    monkeypatch.setattr(rehearsal_boundary, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_boundary,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    substrate = rehearsal_boundary._LocalSubstrate()
+    block_hash = rehearsal_boundary._block_hash(
+        rehearsal_boundary.CURRENT_BLOCK
+    )
+
+    if use_keyword_arguments:
+        result = substrate.query(
+            module="SubtensorModule",
+            storage_function="Tempo",
+            params=[71],
+            block_hash=block_hash,
+        )
+    else:
+        result = substrate.query(
+            "SubtensorModule",
+            "Tempo",
+            [71],
+            block_hash=block_hash,
+        )
+
+    assert result.value == rehearsal_boundary._subnet_epoch_state_at(
+        rehearsal_boundary.CURRENT_BLOCK
+    )["Tempo"]
+
+
 def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
     controller = (
         ROOT / "scripts/run_local_restart_rehearsal.py"

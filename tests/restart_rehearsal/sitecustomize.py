@@ -1008,10 +1008,10 @@ class _LocalSubstrate:
 
     def query(
         self,
-        *,
         module: str,
         storage_function: str,
         params: list[Any],
+        *,
         block_hash: str,
     ) -> _ScaleValue:
         exact_block = _block_number(block_hash)

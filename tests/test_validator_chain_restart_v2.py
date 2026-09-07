@@ -134,6 +134,8 @@ def test_validator_restart_and_container_are_v2_only():
     assert "verify_legacy_v1_enclave" not in script
     assert "APPROVED_LEGACY_V1_PCR0=" not in script
     assert '-e VALIDATOR_WEIGHT_PROTOCOL=authoritative_v2' in deploy
+    assert '-e LAB_ARENA_REWARDS_ENABLED' in deploy
+    assert '-e LAB_ARENA_SIGNING_PUBLIC_KEY_HASH' in deploy
     assert (
         '-e FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED='
         '"$FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED"'

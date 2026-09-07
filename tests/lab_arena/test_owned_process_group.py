@@ -127,8 +127,19 @@ def _kill(process: subprocess.Popen[bytes]) -> None:
 def _shell_function(script_name: str, function_name: str) -> str:
     script = (ROOT / script_name).read_text(encoding="utf-8")
     start = script.index(f"{function_name}() {{")
-    end = script.index("\n}\n", start) + 3
+    if function_name == "verify_controller_process_helper":
+        end = script.index("\n}\n\nstart_lab_arena_service", start) + len("\n}")
+    else:
+        end = script.index("\n}\n", start) + 3
     return script[start:end]
+
+
+def _shell_functions(script_name: str, function_name: str) -> str:
+    functions = []
+    if script_name == "gw_restart.sh":
+        functions.append(_shell_function(script_name, "verify_controller_process_helper"))
+    functions.append(_shell_function(script_name, function_name))
+    return "\n".join(functions)
 
 
 def _shell_process_helper_selector(script_name: str, role: str) -> str:
@@ -207,7 +218,7 @@ def test_current_controller_stops_historical_live_group_without_candidate_helper
         }
 
     shell = _shell_process_helper_selector(script_name, role)
-    shell += _shell_function(script_name, function_name)
+    shell += _shell_functions(script_name, function_name)
     shell += '\nsudo() { command "$@"; }\n'
     shell += f"\n{function_name}\n"
     _make_entrypoint(historical_checkout, relative_path)
@@ -275,7 +286,7 @@ def test_controller_helper_is_rejected_before_shutdown(
         }
 
     shell = "set -e\n" + _shell_process_helper_selector(script_name, role)
-    shell += _shell_function(script_name, function_name)
+    shell += _shell_functions(script_name, function_name)
     shell += '\nsudo() { command "$@"; }\n'
     shell += f'\n{function_name}\nprintf "shutdown-started\\n"\n'
     result = subprocess.run(
@@ -353,7 +364,7 @@ def test_post_activation_start_records_with_current_controller_helper(
         shell_suffix = "\nsleep() { :; }\n"
 
     selector = _shell_process_helper_selector(script_name, role)
-    start_function = _shell_function(script_name, function_name)
+    start_function = _shell_functions(script_name, function_name)
     _make_entrypoint(historical_checkout, relative_path)
     shell = "set -e\n" + selector + start_function + shell_suffix
     shell += f"\n{function_name}\n"

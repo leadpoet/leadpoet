@@ -17,6 +17,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import uuid
 from typing import Iterator
 
 import pytest
@@ -96,6 +97,32 @@ def _descriptor_slots(proof_fd: int | None, helper_fd: int | None) -> Iterator[N
                 os.close(target)
             except OSError:
                 pass
+            if previous is not None:
+                os.dup2(previous, target, inheritable=True)
+                os.close(previous)
+
+
+@contextmanager
+def _controller_descriptor_slots() -> Iterator[None]:
+    saved: dict[int, int | None] = {}
+    for target in range(190, 196):
+        try:
+            saved[target] = os.dup(target)
+        except OSError:
+            saved[target] = None
+        try:
+            os.close(target)
+        except OSError:
+            pass
+    try:
+        yield
+    finally:
+        for target in range(190, 196):
+            try:
+                os.close(target)
+            except OSError:
+                pass
+            previous = saved[target]
             if previous is not None:
                 os.dup2(previous, target, inheritable=True)
                 os.close(previous)
@@ -208,59 +235,111 @@ def test_memfd_helper_records_and_stops_group_after_bootstrap_tree_removal(
     process_cwd.mkdir()
     sidecar = tmp_path / "unrelated-sidecar.json"
     sidecar.write_text('{"keep":true}\n', encoding="utf-8")
-    bootstrap_root = tmp_path / "bootstrap"
+    bootstrap_root = Path("/tmp") / (
+        "gateway-miner-maintenance-bootstrap."
+        + str(os.getpid())
+        + uuid.uuid4().hex
+    )
+    bootstrap_root.mkdir(mode=0o700)
     n_minus_one_root = bootstrap_root / "controller"
-    n_minus_one_root.mkdir(parents=True)
-    (n_minus_one_root / "legacy-marker").write_text("four-file controller\n")
-    shutil.rmtree(bootstrap_root)
+    (n_minus_one_root / "scripts").mkdir(parents=True)
+    helper_source = n_minus_one_root / "scripts/manage_owned_process_group.py"
+    helper_source.write_bytes(PROCESS_HELPER.read_bytes())
+    helper_source.chmod(0o600)
+    wrapper_source = n_minus_one_root / "gw_restart.sh"
+    wrapper_source.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "os.execv(sys.executable, [sys.executable, '/proc/self/fd/195', *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    wrapper_source.chmod(0o700)
 
     process_code = "import time; time.sleep(30)"
-    process_argv = [sys.executable, "-c", process_code]
+    launch_argv = [sys.executable, "-c", process_code]
     child = subprocess.Popen(
-        process_argv,
+        launch_argv,
         cwd=process_cwd,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    helper_fd = _sealed_memfd("leadpoet-process-helper", PROCESS_HELPER.read_bytes())
     try:
+        process_argv = [
+            item.decode("utf-8", errors="surrogateescape")
+            for item in (Path("/proc") / str(child.pid) / "cmdline")
+            .read_bytes()
+            .split(b"\0")
+            if item
+        ]
         state_file = tmp_path / "owned-process.json"
-        def invoke(action: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                [
-                    sys.executable,
-                    "/proc/self/fd/195",
-                    action,
-                    "--state-file",
-                    str(state_file),
-                    "--cwd",
-                    str(process_cwd),
-                    "--uid",
-                    str(os.getuid()),
-                    *(["--launch-pgid", str(child.pid)] if action == "record" else []),
-                    "--",
-                    *process_argv,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                pass_fds=(PROCESS_HELPER_FD,),
-            )
+        unrelated = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=tmp_path,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            from gateway.tee import gateway_miner_maintenance_restart_v1 as maintenance
 
-        with _descriptor_slots(None, helper_fd):
-            recorded = invoke("record")
-            assert recorded.returncode == 0, recorded.stderr
-            assert state_file.is_file()
-            stopped = invoke("stop")
-            assert stopped.returncode == 0, stopped.stderr
+            payloads = {
+                "wrapper": wrapper_source.read_bytes(),
+                "git_helper": b"GIT_HELPER = True\n",
+                "exact_commit_helper": b"EXACT_COMMIT_HELPER = True\n",
+                "memory_guard": b"MEMORY_GUARD = True\n",
+                "process_helper": helper_source.read_bytes(),
+            }
+
+            def invoke(action: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "/proc/self/fd/191",
+                        action,
+                        "--state-file",
+                        str(state_file),
+                        "--cwd",
+                        str(process_cwd),
+                        "--uid",
+                        str(os.getuid()),
+                        *(["--launch-pgid", str(child.pid)] if action == "record" else []),
+                        "--",
+                        *process_argv,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    pass_fds=(191, PROCESS_HELPER_FD),
+                )
+
+            with _controller_descriptor_slots():
+                maintenance._install_controller_bundle_memfds(
+                    {"payloads": payloads}
+                )
+                assert os.readlink("/proc/self/fd/195") == (
+                    "/memfd:leadpoet-process-helper (deleted)"
+                )
+                maintenance._leave_and_close_bootstrap_tree(bootstrap_root)
+                assert not bootstrap_root.exists()
+                recorded = invoke("record")
+                assert recorded.returncode == 0, recorded.stderr
+                assert state_file.is_file()
+                stopped = invoke("stop")
+                assert stopped.returncode == 0, stopped.stderr
+                assert unrelated.poll() is None
+        finally:
+            if unrelated.poll() is None:
+                unrelated.terminate()
+                unrelated.wait(timeout=5)
         child.wait(timeout=5)
         assert not state_file.exists()
-        assert not bootstrap_root.exists()
         assert sidecar.read_text(encoding="utf-8") == '{"keep":true}\n'
     finally:
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
-        os.close(helper_fd)
+        shutil.rmtree(bootstrap_root, ignore_errors=True)

@@ -130,15 +130,16 @@ runs one exact forward transition and should prove:
   137.
 - [ ] Credential-envelope and provider preflight paths complete without
   plaintext fallback.
-- [ ] Signed private-model oldest -> newest-reviewed -> oldest transition,
-  pointer/source alignment,
-  exact contract/parity pairing, and KMS verification complete; hybrid,
-  unknown, and tampered artifacts fail closed.
+- [ ] Arena admits the public `lab` baseline and a miner source bundle through
+  the standard interface, freezes the round ICPs and source, and runs both
+  through the same scorer. Persistence and lease recovery preserve completed
+  work. Invalid submissions and infrastructure failures follow their defined
+  failure paths.
 - [ ] Gateway builds one canonical bundle.
 - [ ] Primary and audit validators receive byte-identical vectors.
 - [ ] Parsing, verification, SDK signing, submission, finalization,
   `LastUpdate`, reveal/readback, and cleanup complete.
-- [ ] Git-tree replacement, conditional-ICP policy, settlement authority, and
+- [ ] Arena round recovery, shared ICP scoring, SOURCE_ADD, settlement, and
   protected workflows satisfy the candidate-derived behavioral contract.
 - [ ] Every declared stage appears once as `passed`; no critical stage is
   `failed` or `unexercised`.

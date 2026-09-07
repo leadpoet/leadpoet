@@ -295,18 +295,6 @@ QUERY_POLICIES = {
         max_pages=2,
         order="created_at.asc,reward_ref.asc",
     ),
-    "source_add_provisioning_by_adapter": SupabaseQueryV2(
-        policy_id="source_add_provisioning_by_adapter",
-        table="research_lab_source_add_provisioning_current",
-        select=(
-            "provision_ref,catalog_id,submission_id,adapter_id,miner_hotkey,"
-            "registry_provider_id,provision_status"
-        ),
-        parameter_names=("adapter_id",),
-        max_pages=1,
-        order="adapter_id.asc",
-        limit=2,
-    ),
     "source_add_provisioning_eligible": SupabaseQueryV2(
         policy_id="source_add_provisioning_eligible",
         table="research_lab_source_add_provisioning_current",
@@ -911,14 +899,6 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
                 "in.(leg1_provenance_precheck_passed,leg1_functional_probe_passed)",
             ),
             ("created_at", "gte.%s" % day_start),
-        )
-    if policy.policy_id == "source_add_provisioning_by_adapter":
-        return (
-            (
-                "adapter_id",
-                "eq.%s" % _identifier(parameters["adapter_id"], "adapter_id"),
-            ),
-            ("provision_status", "eq.provisioned_autoresearch_eligible"),
         )
     if policy.policy_id in {
         "source_add_provisioning_eligible",

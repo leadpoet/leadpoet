@@ -604,7 +604,6 @@ class CoordinatorExecutorV2:
                 "champion_migration",
                 "source_add_migration",
                 "source_add_leg1",
-                "source_add_leg2",
             }:
                 if self._reward_source_resolver is None:
                     raise ValueError("measured reward source is unavailable")
@@ -719,12 +718,9 @@ class CoordinatorExecutorV2:
                     "reward migration cannot inherit host-selected ancestry"
                 )
             return
-        expected_purpose = {
-            "source_add_leg1": "research_lab.source_add_provenance.v2",
-            "source_add_leg2": "research_lab.source_add_judge.v2",
-        }.get(kind)
-        if expected_purpose is None:
+        if kind != "source_add_leg1":
             raise ValueError("reward ancestry kind is unsupported")
+        expected_purpose = "research_lab.source_add_provenance.v2"
         try:
             graphs = list(context.external_receipt_authority_graphs())
         except ExecutionJobV2Error as exc:
@@ -748,11 +744,7 @@ class CoordinatorExecutorV2:
             or root_hash not in context.parent_receipt_hashes
         ):
             raise ValueError("reward decision parent purpose is invalid")
-        bound_result = None
-        if kind == "source_add_leg1":
-            bound_result = decision_payload.get("provenance_result")
-        elif kind == "source_add_leg2":
-            bound_result = decision_payload.get("judge_result")
+        bound_result = decision_payload.get("provenance_result")
         if bound_result is not None and (
             not isinstance(bound_result, Mapping)
             or root.get("output_root") != sha256_json(dict(bound_result))

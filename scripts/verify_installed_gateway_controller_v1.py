@@ -28,6 +28,14 @@ RECOVERY_HOST_CONTROLLER_COMMITS = frozenset(
 LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY = (
     "202cd66a41f17f3030bcf6889d381cd3ecfd8f1c"
 )
+# The first supported N-1 controller is also the only legacy controller that
+# can be present in the production shallow checkout.  Keep this exact escape
+# hatch separate from the ancestry boundary: the boundary object is absent in
+# that checkout, so an ancestry query would fail closed before the candidate
+# fetch can restore the full Git history.
+LEGACY_FOUR_FILE_CONTROLLER_COMMITS = frozenset(
+    {"0dd3a385a23a3af0fa17210bfe02a39cc4023952"}
+)
 CONTROLLER_FILES: Mapping[str, tuple[int, str]] = {
     "gw_restart.sh": (0o700, "100755"),
     "scripts/gateway_git_deploy.py": (0o600, "100644"),
@@ -534,10 +542,13 @@ def verify_installed_controller_bundle(
         try:
             installed_path.lstat()
         except FileNotFoundError:
-            if not _git_is_ancestor(
-                repository,
-                controller_commit,
-                LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY,
+            if (
+                controller_commit not in LEGACY_FOUR_FILE_CONTROLLER_COMMITS
+                and not _git_is_ancestor(
+                    repository,
+                    controller_commit,
+                    LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY,
+                )
             ):
                 raise InstalledGatewayControllerError(
                     "installed controller optional helper is required"

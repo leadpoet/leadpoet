@@ -801,6 +801,60 @@ def _web_identity_receipt(
         observed_linkedin=observed_values["linkedin"],
         evidence_source="company_web_reverification",
     )
+    verified_anchor_receipt: Mapping[str, str] = {}
+    if isinstance(verified_homepage_identity, Mapping):
+        anchor_name = verified_homepage_identity.get("normalized_name")
+        anchor_domain = verified_homepage_identity.get(
+            "registrable_dns_domain"
+        )
+        anchor_linkedin_slug = verified_homepage_identity.get(
+            "linkedin_company_slug"
+        )
+        if all(
+            isinstance(value, str) and value.strip() and len(value) <= limit
+            for value, limit in (
+                (anchor_name, 200),
+                (anchor_domain, 253),
+                (anchor_linkedin_slug, 200),
+            )
+        ):
+            verified_anchor_receipt = evaluate_company_identity(
+                submitted_name=company.company_name,
+                submitted_website=company.company_website,
+                submitted_linkedin=company.company_linkedin,
+                observed_name=anchor_name,
+                observed_website=f"https://{anchor_domain}",
+                observed_linkedin=(
+                    "https://www.linkedin.com/company/"
+                    f"{anchor_linkedin_slug}"
+                ),
+                evidence_source="company_homepage",
+            )
+    if (
+        receipt.get("decision") == COMPANY_FIT_MISMATCH
+        and receipt.get("reason_code") == "identity_mismatch"
+        and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+        and receipt.get("submitted_name") == receipt.get("observed_name")
+        and receipt.get("submitted_domain")
+        == verified_homepage_identity.get("registrable_dns_domain")
+        and receipt.get("submitted_linkedin_slug")
+        == verified_homepage_identity.get("linkedin_company_slug")
+        and receipt.get("observed_domain")
+        == verified_homepage_identity.get("registrable_dns_domain")
+        and receipt.get("observed_linkedin_slug")
+        and receipt.get("observed_linkedin_slug")
+        != verified_homepage_identity.get("linkedin_company_slug")
+    ):
+        # A model-owned alternate LinkedIn slug is not stronger than the exact
+        # identity triplet independently fetched from the first-party
+        # homepage. It is also not enough to prove that the slugs are aliases.
+        # Keep the model observation in the receipt, classify the conflict as
+        # incomplete, and let the existing bounded repair request re-check it.
+        receipt.update(
+            decision=COMPANY_FIT_UNAVAILABLE,
+            reason_code="web_linkedin_conflicts_with_verified_homepage",
+        )
+        return receipt
     if (
         receipt["decision"] != COMPANY_FIT_UNAVAILABLE
         or str(company.company_linkedin or "").strip()
@@ -1102,9 +1156,18 @@ def _incomplete_company_reverify_dimensions(
 ) -> tuple[str, ...]:
     """Return only active dimensions that remain structurally unavailable."""
 
-    if result.decision != COMPANY_FIT_UNAVAILABLE:
-        return ()
     details = result.details if isinstance(result.details, Mapping) else {}
+    identity_receipt = details.get("identity_receipt")
+    conflicting_verified_identity = bool(
+        isinstance(identity_receipt, Mapping)
+        and identity_receipt.get("reason_code")
+        == "web_linkedin_conflicts_with_verified_homepage"
+    )
+    if (
+        result.decision != COMPANY_FIT_UNAVAILABLE
+        and not conflicting_verified_identity
+    ):
+        return ()
     incomplete: list[str] = []
     if str(details.get("identity_decision") or "") == COMPANY_FIT_UNAVAILABLE:
         incomplete.append("identity")
@@ -1387,6 +1450,24 @@ async def _llm_reverify_company(
     # not a merge with or reinterpretation of the first response.
     repair_prompt = (
         prompt
+        + (
+            "\nIDENTITY CONFLICT REPAIR: the prior observed_company_linkedin "
+            "conflicted with the server-verified first-party homepage anchor "
+            "while the normalized company name and domain matched. Perform a "
+            "fresh lookup. Return the exact LinkedIn company URL only when a "
+            "public source proves it; otherwise return an empty string. Do not "
+            "assume that two different slugs are aliases and do not repeat an "
+            "ungrounded alternate slug."
+            if (
+                isinstance(result.details, Mapping)
+                and isinstance(
+                    result.details.get("identity_receipt"), Mapping
+                )
+                and result.details["identity_receipt"].get("reason_code")
+                == "web_linkedin_conflicts_with_verified_homepage"
+            )
+            else ""
+        )
         + "\nSCHEMA REPAIR: the prior response was incomplete or invalid for "
         + ", ".join(incomplete)
         + ". Perform a fresh independent web lookup and return the FULL JSON "
@@ -1849,7 +1930,7 @@ async def score_company_competition_intent(
             intent_final,
             decay_multiplier,
             _max_confidence,
-            all_fabricated,
+            all_signals_unverified,
             signal_results,
         ) = await score_company_competition_intent_signal(company, icp)
         if _intent_verifier_unavailable(signal_results):
@@ -1858,7 +1939,7 @@ async def score_company_competition_intent(
                 intent_signals_detail=signal_results,
                 verifier_gate_receipts=gate_receipts or None,
             )
-        if all_fabricated:
+        if all_signals_unverified:
             # A real company whose submitted evidence URL was weak dies here
             # as a false negative. Before finalizing the zero, ask for
             # replacement evidence sources for the same claim and re-verify
@@ -1871,7 +1952,7 @@ async def score_company_competition_intent(
                     intent_final,
                     decay_multiplier,
                     _max_confidence,
-                    all_fabricated,
+                    all_signals_unverified,
                     signal_results,
                 ) = repaired
                 if _intent_verifier_unavailable(signal_results):
@@ -1880,13 +1961,13 @@ async def score_company_competition_intent(
                         intent_signals_detail=signal_results,
                         verifier_gate_receipts=gate_receipts or None,
                     )
-        if all_fabricated:
+        if all_signals_unverified:
             logger.warning(
                 f"All competition intent signals failed for company "
                 f"{company.company_name!r} — zeroing entire score"
             )
             return _zero_company_breakdown(
-                "Intent fabrication detected (hardcoded date or generic claim)",
+                _competition_intent_failure_reason(signal_results),
                 intent_signals_detail=signal_results,
                 verifier_gate_receipts=gate_receipts or None,
             )
@@ -2429,7 +2510,8 @@ async def score_company_competition_intent_signal(
     Enforce the buyer freshness cap deterministically here,
     then avoid a second Sonar date veto or graded decay for in-window evidence.
 
-    Returns ``(raw_total, final_total, avg_decay, max_confidence, all_fabricated,
+    Returns ``(raw_total, final_total, avg_decay, max_confidence,
+    all_signals_unverified,
     signal_results)``.  ``signal_results`` is the per-signal detail list — one
     row per company intent signal carrying ``matched_icp_signal`` (the index
     into ``icp.intent_signals`` this evidence satisfies, -1 if none) and
@@ -2567,7 +2649,7 @@ async def score_company_competition_intent_signal(
     final_total = aggregate_competition_intent_scores(decayed_scores)
     avg_decay = sum(decays) / len(decays) if decays else 0.0
     max_confidence = max(confidences) if confidences else 0
-    all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
+    all_signals_unverified = all(r["raw"] == 0.0 for r in signal_results)
     if icp_signals and not required_intent_satisfied(signal_results):
         # The ICP's PRIMARY intent (index 0) is a hard requirement: a company
         # whose required intent failed cannot be carried into a positive score
@@ -2579,7 +2661,100 @@ async def score_company_competition_intent_signal(
             company.company_name,
         )
         final_total = 0.0
-    return raw_total, final_total, avg_decay, max_confidence, all_fabricated, signal_results
+    return (
+        raw_total,
+        final_total,
+        avg_decay,
+        max_confidence,
+        all_signals_unverified,
+        signal_results,
+    )
+
+
+def _competition_intent_failure_reason(signal_results: List[dict]) -> str:
+    """Summarize an all-zero Arena verdict without claiming fabrication.
+
+    The per-signal judge receipts remain authoritative.  This summary calls a
+    result a mismatch only when those receipts contain a terminal, grounded
+    contradiction.  An ambiguous ``wrong_entity`` verdict is unverified, not
+    proof that the miner supplied evidence for another company.
+    """
+
+    primary_results = [
+        result
+        for result in signal_results
+        if isinstance(result, dict)
+        and result.get("matched_icp_signal") == 0
+    ]
+    if not primary_results:
+        return (
+            "Primary intent evidence unverified: no submitted evidence "
+            "targeted the primary intent"
+        )
+    verdicts = [
+        result.get("judge_verdict")
+        for result in primary_results
+        if isinstance(result, dict)
+        and isinstance(result.get("judge_verdict"), dict)
+    ]
+    evaluations: List[dict] = []
+    for verdict in verdicts:
+        if verdict.get("decision") == "rejected_freshness":
+            continue
+        trace = verdict.get("verification_trace") or {}
+        intent_verdict = (
+            trace.get("intent_verdict") if isinstance(trace, dict) else {}
+        ) or {}
+        rows = (
+            intent_verdict.get("signal_evaluations")
+            if isinstance(intent_verdict, dict)
+            else []
+        ) or []
+        evaluations.extend(row for row in rows if isinstance(row, dict))
+
+    decisions = {str(verdict.get("decision") or "") for verdict in verdicts}
+    rejection_reasons = {
+        str(verdict.get("rejection_reason") or "") for verdict in verdicts
+    }
+    if any(
+        row.get("signal_status") == "wrong_entity"
+        and row.get("same_entity_check") == "fail"
+        for row in evaluations
+    ):
+        return (
+            "Primary intent evidence mismatch: source is about a different "
+            "company"
+        )
+    if any(
+        row.get("signal_status") == "contradicted"
+        and row.get("same_entity_check") == "pass"
+        for row in evaluations
+    ):
+        return "Primary intent evidence mismatch: source contradicts the claim"
+
+    if "rejected_freshness" in decisions:
+        return (
+            "Primary intent evidence unverified: evidence is outside the "
+            "allowed freshness window"
+        )
+    if "duplicate_evidence_domain" in rejection_reasons:
+        return (
+            "Primary intent evidence unverified: duplicate evidence domain"
+        )
+
+    if any(
+        row.get("signal_status") == "wrong_entity"
+        and row.get("same_entity_check") != "fail"
+        for row in evaluations
+    ):
+        return (
+            "Primary intent evidence unverified: verifier could not confirm "
+            "the source-company identity"
+        )
+    return (
+        "Primary intent evidence unverified: verifier did not confirm the "
+        "submitted claim"
+    )
 
 
 def _intent_verifier_unavailable(signal_results: List[dict]) -> bool:

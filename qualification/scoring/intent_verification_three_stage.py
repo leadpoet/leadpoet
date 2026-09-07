@@ -2256,6 +2256,29 @@ async def _fetch_sd_then_exa(
 # ─────────────────────────────────────────────────────────────────────
 # OpenRouter call with 429 retry / fail-soft
 # ─────────────────────────────────────────────────────────────────────
+def _structured_verdict_error(answer: Mapping[str, Any]) -> str:
+    """Return an error for a contradictory model-owned verdict pair.
+
+    ``wrong_entity`` is reserved for a definitive entity mismatch, so it must
+    carry ``same_entity_check=fail``. A pass or unclear entity check means the
+    judge has not produced one coherent verdict. Do not infer the intended
+    status from its prose because that would turn untrusted model explanation
+    into a qualification decision.
+    """
+
+    evaluations = answer.get("signal_evaluations")
+    if not isinstance(evaluations, list):
+        return ""
+    for item in evaluations:
+        if (
+            isinstance(item, Mapping)
+            and item.get("signal_status") == "wrong_entity"
+            and item.get("same_entity_check") != "fail"
+        ):
+            return "wrong_entity_requires_same_entity_fail"
+    return ""
+
+
 async def _call_openrouter(
     client: httpx.AsyncClient, model: str, prompt: str,
 ) -> Dict[str, Any]:
@@ -2363,6 +2386,33 @@ async def _call_openrouter(
                         "_error": "invalid_json_content",
                         "provider_usage": provider_usage,
                     }
+                await asyncio.sleep(1)
+                continue
+            verdict_error = _structured_verdict_error(ans)
+            if verdict_error:
+                logger.warning(
+                    "intent_three_stage_openrouter_verdict_inconsistent "
+                    "model=%s attempt=%s reason=%s",
+                    model,
+                    attempt + 1,
+                    verdict_error,
+                )
+                if attempt == 2:
+                    return {
+                        "_error": "inconsistent_structured_verdict",
+                        "provider_usage": provider_usage,
+                    }
+                body["messages"][1]["content"] = prompt + """
+
+STRUCTURED VERDICT CORRECTION:
+Your previous answer returned signal_status=wrong_entity without
+same_entity_check=fail. Those fields contradict each other. Re-evaluate the
+exact evidence and return one fresh schema-valid verdict. Use wrong_entity
+only for a definitive entity mismatch and pair it with same_entity_check=fail.
+If entity identity passes, choose the claim status independently under the
+signal status rules. If identity is unclear, use unable_to_verify. Do not infer
+or copy a status from the previous answer's explanation.
+"""
                 await asyncio.sleep(1)
                 continue
             return {

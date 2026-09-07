@@ -193,6 +193,15 @@ class ModelSandbox:
                 if not scoring_run and status != 200:
                     # A caller-caused provider error makes this model run fail.
                     return runtime.fake_result(exit_code=1, output_bytes=None, stderr=b"provider error %d" % status)
+                if scoring_run and status != 200:
+                    failure = scoring.build_scoring_failure(
+                        input_document["scored_run_id"],
+                        "judge_error",
+                        detail="provider error %d" % status,
+                    )
+                    return runtime.fake_result(
+                        exit_code=0, output_bytes=json.dumps(failure).encode()
+                    )
                 assert status == 200
             finally:
                 os.environ.pop(shim.WORKER_SOCKET_ENV, None)
@@ -1080,7 +1089,7 @@ def _start_round(harness: Harness, *, day: int = 9, epoch: int = 30000) -> int:
     return len(service.store.get_round(harness.round_id)["participants"])
 
 
-def test_stage_one_judge_failure_excludes_only_that_challenger(connect, tmp_path):
+def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(connect, tmp_path):
     harness = Harness(
         connect,
         tmp_path,
@@ -1097,31 +1106,106 @@ def test_stage_one_judge_failure_excludes_only_that_challenger(connect, tmp_path
     )
     harness.sandbox.judge_failures.add(("JudgeFailOne", 0))
     _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.run_stage_with_runners(2)
 
-    harness.advance_until("published", runners=2)
+    closed = harness.service.advance_round(harness.round_id)
+    cancelled = harness.service.advance_round(harness.round_id)
 
     row = harness.service.store.get_round(harness.round_id)
-    assert failed["submission_id"] not in row["finalists"]
-    assert failed["submission_id"] not in {
-        item["submission_id"] for item in row["publication_doc"]["stage1_ranking"]
-    }
+    assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged"
+    assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert row["publication_doc"] is None and not row["finalists"]
     score_runs = harness.service.store.list_runs(
         harness.round_id,
         stage=1,
         submission_id=failed["submission_id"],
         kind="score",
     )
-    assert any(run["terminal_cause"] == "judge_error" for run in score_runs)
+    failed_score_runs = [run for run in score_runs if run["status"] == "failed"]
+    assert len(failed_score_runs) == 2
+    assert {run["terminal_cause"] for run in failed_score_runs} == {"judge_error"}
+    assert {int(run["attempt"]) for run in failed_score_runs} == {1, 2}
     execute_runs = harness.service.store.list_runs(
         harness.round_id,
         stage=1,
-        submission_id=failed["submission_id"],
         kind="execute",
     )
     assert all(run["per_icp_score"] is None for run in execute_runs)
 
 
-def test_final_judge_failure_excludes_only_that_challenger(connect, tmp_path):
+@pytest.mark.parametrize(
+    ("malformation", "day"),
+    (
+        ("invalid_json", 18),
+        ("wrong_run_id", 19),
+        ("invalid_breakdowns", 20),
+        ("failure_document", 21),
+    ),
+)
+def test_malformed_accepted_scoring_artifact_cancels_without_partial_scores(
+    connect, tmp_path, monkeypatch, malformation, day
+):
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["MalformedJudgeArtifact"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=day, epoch=30400 + day)
+    challenger_id = next(
+        participant["submission_id"]
+        for participant in harness.service.store.get_round(harness.round_id)[
+            "participants"
+        ]
+        if not participant["is_king"]
+    )
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.run_stage_with_runners(2)
+    closed = harness.service.advance_round(harness.round_id)
+    score_run = next(
+        run
+        for run in harness.service.store.list_runs(
+            harness.round_id,
+            stage=1,
+            submission_id=challenger_id,
+            kind="score",
+        )
+        if run["status"] == "accepted"
+    )
+    original_get = harness.objects.get
+    document = json.loads(original_get(score_run["output_ref"]).decode("utf-8"))
+    if malformation == "invalid_json":
+        malformed = b"{"
+    elif malformation == "wrong_run_id":
+        document["scored_run_id"] = "another-run"
+        malformed = json.dumps(document).encode("utf-8")
+    elif malformation == "invalid_breakdowns":
+        document["breakdowns"] = []
+        malformed = json.dumps(document).encode("utf-8")
+    else:
+        malformed = json.dumps(
+            scoring.build_scoring_failure(
+                score_run["scored_run_id"], "judge_error", "late failure"
+            )
+        ).encode("utf-8")
+
+    def get(ref):
+        return malformed if ref == score_run["output_ref"] else original_get(ref)
+
+    monkeypatch.setattr(harness.objects, "get", get)
+    cancelled = harness.service.advance_round(harness.round_id)
+
+    row = harness.service.store.get_round(harness.round_id)
+    assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged"
+    assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert row["publication_doc"] is None and not row["finalists"]
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id, stage=1, kind="execute"
+    )
+    assert all(run["per_icp_score"] is None for run in execute_runs)
+
+
+def test_persistent_final_judge_failure_cancels_without_partial_final_scores(connect, tmp_path):
     harness = Harness(
         connect,
         tmp_path,
@@ -1142,13 +1226,16 @@ def test_final_judge_failure_excludes_only_that_challenger(connect, tmp_path):
         harness.round_id
     )["finalists"]
     harness.sandbox.judge_failures.add(("JudgeFailFinal", 10))
+    harness.advance_until("stage2_scoring", runners=2)
+    harness.run_stage_with_runners(2)
 
-    harness.advance_until("published", runners=2)
+    closed = harness.service.advance_round(harness.round_id)
+    cancelled = harness.service.advance_round(harness.round_id)
 
-    publication = harness.service.store.get_round(harness.round_id)["publication_doc"]
-    assert failed["submission_id"] not in {
-        item["submission_id"] for item in publication["final_ranking"]
-    }
+    row = harness.service.store.get_round(harness.round_id)
+    assert closed["status"] == "closed" and closed["round_status"] == "stage2_judged"
+    assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert row["publication_doc"] is None
     execute_runs = harness.service.store.list_runs(
         harness.round_id,
         stage=2,
@@ -1156,6 +1243,57 @@ def test_final_judge_failure_excludes_only_that_challenger(connect, tmp_path):
         kind="execute",
     )
     assert all(run["per_icp_score"] is None for run in execute_runs)
+
+
+def test_miner_credential_failure_remains_challenger_ineligibility(
+    connect, tmp_path, monkeypatch
+):
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["CredentialFail", "CredentialPass"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=15, epoch=30275)
+    failed = next(
+        participant
+        for participant in harness.service.store.get_round(harness.round_id)[
+            "participants"
+        ]
+        if harness.flavors[participant["submission_id"]] == "CredentialFail"
+    )
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    credentials = harness.service.config.credential_manager
+    original_runtime_key = credentials.runtime_key
+
+    def runtime_key(row, provider):
+        if row["submission_id"] == failed["submission_id"]:
+            return "miner-refused"
+        return original_runtime_key(row, provider)
+
+    monkeypatch.setattr(credentials, "runtime_key", runtime_key)
+    harness.advance_until("stage1_scored", runners=2)
+
+    row = harness.service.store.get_round(harness.round_id)
+    assert failed["submission_id"] not in row["finalists"]
+    score_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        submission_id=failed["submission_id"],
+        kind="score",
+    )
+    assert score_runs and {run["terminal_cause"] for run in score_runs} == {
+        "credential_error"
+    }
+    assert {int(run["attempt"]) for run in score_runs} == {1}
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        submission_id=failed["submission_id"],
+        kind="execute",
+    )
+    assert all(run["per_icp_score"] is None for run in execute_runs)
+    harness.service.cancel(harness.round_id, sorted(svc.CANCEL_REASONS.values())[0])
 
 
 def test_baseline_judge_failure_cancels_the_daily_round(connect, tmp_path):
@@ -1296,6 +1434,16 @@ def test_a_validator_that_dies_mid_scoring_loses_its_lease_and_another_validator
     accepted = [run for run in service.store.list_runs(round_id, stage=1, kind="score") if run["status"] == "accepted"]
     assert len(accepted) == contracts.STAGE_1_ICP_COUNT * participants
     assert {run["runner_hotkey"] for run in accepted if run["attempt"] == 2} <= set(harness.runner_keys)
+    retried_execution_ids = {
+        run["scored_run_id"] for run in accepted if int(run["attempt"]) == 2
+    }
+    retried_execution_runs = [
+        run
+        for run in service.store.list_runs(round_id, stage=1, kind="execute")
+        if run["run_id"] in retried_execution_ids
+    ]
+    assert len(retried_execution_runs) == 3
+    assert all(float(run["per_icp_score"]) > 0.0 for run in retried_execution_runs)
 
 
 def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):

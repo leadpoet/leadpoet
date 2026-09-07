@@ -52,6 +52,14 @@ A shared provider account failure, rate limit, or provider server failure is
 an infrastructure failure. It does not give a miner a score of zero. A real
 caller error, such as invalid request data, is returned to the bundle.
 
+The judge uses bounded retries. If no valid judge result is available after
+those retries, the service cancels the incomplete round before publishing a
+ranking. It does not exclude one challenger for a judge or provider failure.
+A successful accepted retry takes precedence over a failed attempt. A miner's
+own credential or budget failure retains its existing ineligibility rule.
+Malformed accepted scoring artifacts also cancel the round before scores are
+recorded; they are not company-verification failures.
+
 ## Required service configuration
 
 Set these values on the Arena service host:

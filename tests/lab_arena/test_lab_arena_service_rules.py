@@ -267,6 +267,28 @@ def test_reward_activation_processes_only_enabled_live_rounds_oldest_first():
     assert calls == []
 
 
+@pytest.mark.parametrize("status", ["published", "open"])
+def test_pinned_reward_activation_never_scans_foreign_rounds(status):
+    round_id = "arena-2026-09-07-promotion-proof"
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(
+        mode="live", network_name="test", netuid=401, pinned_round_id=round_id
+    )
+    row = {
+        "round_id": round_id, "status": status,
+        "configuration_doc": {
+            "mode": "live", "network_name": "test", "netuid": 401,
+            "rewards_enabled": True,
+        },
+    }
+    service._store = SimpleNamespace(get_round=lambda selected: row if selected == round_id else None)
+    activated = []
+    service.activate_reward = lambda selected: activated.append(selected) or {"status": "activated"}
+    count = int(status == "published")
+    assert service.activate_pending_rewards() == {"status": "ok", "activated": count}
+    assert activated == ([round_id] if count else [])
+
+
 def test_round_scope_treats_legacy_rows_as_finney_71_and_rejects_cross_chain():
     service = object.__new__(ArenaService)
     service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71)

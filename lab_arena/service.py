@@ -1644,17 +1644,21 @@ class ArenaService:
 
         if self._config.mode != "live":
             return {"status": "disabled", "activated": 0}
-        network_name, netuid = self._chain_scope()
-        rows = list(
-            reversed(
-                self._store.list_rounds(
-                    status="published", mode="live",
-                    network_name=network_name,
-                    netuid=netuid,
-                    limit=200
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            rows = [row] if row is not None and row["status"] == "published" else []
+        else:
+            network_name, netuid = self._chain_scope()
+            rows = list(
+                reversed(
+                    self._store.list_rounds(
+                        status="published", mode="live",
+                        network_name=network_name,
+                        netuid=netuid,
+                        limit=200
+                    )
                 )
             )
-        )
         pending = [
             row for row in rows
             if (row.get("configuration_doc") or {}).get("mode") == "live"

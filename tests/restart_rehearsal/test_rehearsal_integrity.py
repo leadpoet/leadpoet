@@ -136,12 +136,12 @@ def python39_import_event_loop():
         )
 
 
-def _provider_persistence_batch_fixture() -> dict[str, Any]:
+def _provider_evidence_cache_fixture() -> dict[str, Any]:
     return {
-        "schema_version": (
-            "leadpoet.provider_persistence_batch_contract.v1"
-        ),
-        "cache_put": "atomic_exact_row",
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "insert_status": "inserted",
+        "replay_status": "existing",
+        "durable_row_exact": True,
     }
 
 
@@ -1687,7 +1687,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "expired_holder_replaced": True,
             "invalid_ttl_rejected": True,
         },
-        "provider_persistence_batch": _provider_persistence_batch_fixture(),
+        "provider_evidence_cache": _provider_evidence_cache_fixture(),
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
@@ -1902,7 +1902,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "expired_holder_replaced": True,
             "invalid_ttl_rejected": True,
         },
-        "provider_persistence_batch": _provider_persistence_batch_fixture(),
+        "provider_evidence_cache": _provider_evidence_cache_fixture(),
         "allocation_settlement_frontier": {
             "frontier_hash": "sha256:" + "a" * 64,
             "source_receipt_hash": "sha256:" + "b" * 64,
@@ -1980,6 +1980,15 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         hashlib.sha256(contract_path.read_bytes()).hexdigest()
     )
     invalid_contracts = []
+    missing_cache = json.loads(json.dumps(contract))
+    missing_cache.pop("provider_evidence_cache")
+    invalid_contracts.append(missing_cache)
+    failed_cache_replay = json.loads(json.dumps(contract))
+    failed_cache_replay["provider_evidence_cache"]["replay_status"] = "inserted"
+    invalid_contracts.append(failed_cache_replay)
+    mismatched_cache_row = json.loads(json.dumps(contract))
+    mismatched_cache_row["provider_evidence_cache"]["durable_row_exact"] = False
+    invalid_contracts.append(mismatched_cache_row)
     missing_check = json.loads(json.dumps(contract))
     missing_check["checks"][
         "measured_settlement_receipt_projection_exact"

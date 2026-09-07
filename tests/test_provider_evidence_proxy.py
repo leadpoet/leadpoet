@@ -359,7 +359,6 @@ class TestProxyEndToEnd:
         monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
         assert _request(port, "/exa/search?q=one")[0] == 200
         assert _request(port, "/exa/search?q=one")[0] == 200
-        server.usage_ledger.close()
 
         assert len(upstream_calls) == 1
         rows = _ledger_rows(_ledger_path)

@@ -280,8 +280,8 @@ class ProviderSemanticsAuthorityV2:
                         prior_result=retained_prior_result,
                     )
         finally:
-            # Exact semantic replays are not released until the terminal,
-            # encrypted cache work, and durable provider outcome all commit.
+            # Exact semantic replays are not released until the terminal and
+            # encrypted cache work commit.
             try:
                 self._release_semantic_owner()
             finally:

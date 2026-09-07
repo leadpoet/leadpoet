@@ -989,7 +989,6 @@ class ProviderUsageLedger:
         status: int,
         est_cost_microusd: int,
         caller: Mapping[str, Any] | None,
-        live_call: bool | None = None,
     ) -> None:
         with self._lock:
             self._roll_day_locked()
@@ -1402,7 +1401,6 @@ class ProviderRegistryState:
 
 class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
     registry_state: ProviderRegistryState
-    usage_ledger: ProviderUsageLedger
 
     def handle_error(self, request, client_address) -> None:
         # Recycled/timing-out worker clients drop their sockets mid-request;
@@ -1419,14 +1417,7 @@ class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
         registry_state = getattr(self, "registry_state", None)
         if registry_state is not None:
             registry_state.stop()
-        try:
-            super().server_close()
-        finally:
-            # ThreadingHTTPServer waits for active handlers in server_close;
-            # flush only after no request can append another outcome.
-            usage_ledger = getattr(self, "usage_ledger", None)
-            if usage_ledger is not None:
-                usage_ledger.close()
+        super().server_close()
 
 
 _HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}
@@ -1501,7 +1492,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         status: int,
         live_cost: bool,
         est_cost_microusd: int | None = None,
-        live_call: bool | None = None,
     ) -> None:
         if est_cost_microusd is None:
             est_cost_microusd = entry.est_cost_microusd() if live_cost else 0
@@ -1513,7 +1503,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             status=status,
             est_cost_microusd=est_cost_microusd,
             caller=self._caller(),
-            live_call=live_call,
         )
 
     def _request_deadline(self, *, started: float) -> float:
@@ -1908,7 +1897,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 evidence="error",
                 status=502,
                 live_cost=False,
-                live_call=True,
             )
             self._respond(502, b'{"error":"upstream unreachable"}', evidence="error", headers=event.to_headers())
             return
@@ -1987,7 +1975,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             status=status,
             live_cost=True,
             est_cost_microusd=measured_microusd,
-            live_call=True,
         )
         self._respond(status, body, evidence=evidence_label, headers=event.to_headers())
 
@@ -2069,7 +2056,6 @@ def serve_evidence_proxy(
     )
     server = _CapabilityAwareHTTPServer((host, port), handler)
     server.registry_state = registry_state
-    server.usage_ledger = ledger
     registry_state.start()
     thread = threading.Thread(target=server.serve_forever, name="evidence-proxy", daemon=True)
     thread.start()

@@ -427,6 +427,53 @@ def _error_result(code: str, call: Mapping[str, Any]) -> BrokerResult:
     return BrokerResult(GENERIC_ERRORS[code], {"content-type": "application/json", "content-length": str(len(body))}, body, dict(call, error_code=code))
 
 
+def _openrouter_effective_response(response: ProviderResponse) -> ProviderResponse:
+    """Expose errors which OpenRouter reports inside an HTTP 2xx body.
+
+    OpenRouter can commit the HTTP 200 response before a non-streaming model
+    request fails.  In that case the effective status is carried by either a
+    top-level error or an error-finished choice.  Reject an unrecognizable
+    error envelope rather than passing it to submitted code as a completion.
+    """
+
+    if not 200 <= response.status < 300:
+        return response
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise operations.OperationResponseError("invalid_response") from exc
+    if not isinstance(document, Mapping):
+        return response
+
+    errors = []
+    top_level_error = document.get("error")
+    if top_level_error is not None:
+        errors.append(top_level_error)
+    choices = document.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, Mapping) and choice.get("finish_reason") == "error":
+                choice_error = choice.get("error")
+                if choice_error is not None:
+                    errors.append(choice_error)
+                elif top_level_error is None:
+                    # An error-finished choice needs an error code somewhere
+                    # in the documented unified response.
+                    errors.append(None)
+    if not errors:
+        return response
+
+    statuses = []
+    for error in errors:
+        code = error.get("code") if isinstance(error, Mapping) else None
+        if isinstance(code, bool) or not isinstance(code, int) or not 400 <= code <= 599:
+            raise operations.OperationResponseError("invalid_response")
+        statuses.append(code)
+    if len(set(statuses)) != 1:
+        raise operations.OperationResponseError("invalid_response")
+    return ProviderResponse(statuses[0], response.headers, response.body)
+
+
 class Broker:
     """Section 7.5 state machine over the ledger functions."""
 
@@ -627,6 +674,8 @@ class Broker:
             del secret
 
         try:
+            if effective_operation.provider == "openrouter":
+                response = _openrouter_effective_response(response)
             if funding_source == "miner_key" and response.status in (401, 402, 403):
                 refused = _error_result("miner_credentials_unavailable", summary)
                 sanitized_status, sanitized_headers, sanitized_body = refused.status, refused.headers, refused.body

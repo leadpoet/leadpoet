@@ -212,6 +212,123 @@ def test_openrouter_reserves_maximum_cost_and_settles_actual_from_pinned_table()
     assert store.openrouter_capacity == 10_000_000 - expected_actual
 
 
+def test_openrouter_http_200_error_status_is_normalized_and_replayed_without_a_second_send():
+    payload = {"error": {"code": 429, "message": "upstream temporarily rate-limited"}}
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, payload)]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+
+    first = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    second = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+
+    expected_max = br.max_openrouter_cost_microusd(price_table(), "openai/gpt-4o-mini", dict(CHAT), max_output_tokens=200)
+    assert first.status == second.status == 502
+    assert json.loads(first.body) == json.loads(second.body) == {"error": {"code": "provider_unavailable"}}
+    assert first.call["provider_status"] == 429 and first.call["actual_microusd"] == expected_max
+    assert second.call["idempotent"] is True
+    assert store.openrouter_capacity == 10_000_000 - expected_max
+    assert len(transport.sent) == 1 and store.log.count("settle") == 1
+
+
+@pytest.mark.parametrize("provider_status", [500, 503, 599])
+def test_openrouter_http_200_server_error_envelope_is_infrastructure(provider_status):
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, {"error": {"code": provider_status, "message": "upstream failure"}})])
+    )
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["provider_status"] == provider_status
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+@pytest.mark.parametrize("provider_status", [401, 402, 403])
+def test_openrouter_http_200_credential_error_envelope_uses_miner_key_error(provider_status):
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, {"error": {"code": provider_status, "message": "credential rejected"}})]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == 402 and json.loads(result.body) == {"error": {"code": "miner_credentials_unavailable"}}
+    assert result.call["provider_status"] == provider_status
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+@pytest.mark.parametrize("provider_status", [400, 404, 408])
+def test_openrouter_http_200_caller_error_envelope_uses_effective_status(provider_status):
+    payload = {"error": {"code": provider_status, "message": "request rejected"}}
+    broker, store, _transport = make_broker(transport=FakeTransport([(200, payload)]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == provider_status and json.loads(result.body) == payload
+    assert result.call["provider_status"] == provider_status
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+def test_openrouter_http_200_error_finished_choice_is_normalized():
+    payload = {
+        "choices": [{
+            "message": {"role": "assistant", "content": "partial output"},
+            "finish_reason": "error",
+            "error": {"code": 502, "message": "provider disconnected"},
+        }]
+    }
+    broker, store, _transport = make_broker(transport=FakeTransport([(200, payload)]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["provider_status"] == 502
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+def test_openrouter_http_200_top_level_error_applies_to_error_finished_choice_without_nested_error():
+    payload = {
+        "error": {"code": 429, "message": "upstream temporarily rate-limited"},
+        "choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": "error"}],
+    }
+    broker, store, _transport = make_broker(transport=FakeTransport([(200, payload)]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["provider_status"] == 429
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"error": {"message": "missing status"}},
+    {"error": {"code": "429", "message": "string status"}},
+    {"error": {"code": 399, "message": "non-error status"}},
+    {"choices": [{"finish_reason": "error", "error": {"code": 600}}]},
+    {"error": {"code": 429}, "choices": [{"finish_reason": "error", "error": {"code": 502}}]},
+])
+def test_openrouter_http_200_malformed_error_envelope_fails_closed(payload):
+    broker, store, _transport = make_broker(transport=FakeTransport([(200, payload)]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+def test_openrouter_http_200_normal_completion_is_unchanged():
+    payload = {
+        "id": "gen",
+        "model": "openai/gpt-4o-mini",
+        "error": None,
+        "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+    }
+    broker, store, _transport = make_broker(transport=FakeTransport([(200, payload)]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == 200 and json.loads(result.body) == payload
+    assert result.call["actual_microusd"] < result.call["reserved_microusd"]
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
 @pytest.mark.parametrize("payload", [
     {"choices": []},
     {"usage": {"prompt_tokens": "x", "completion_tokens": 1}},

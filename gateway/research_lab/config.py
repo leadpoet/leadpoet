@@ -92,7 +92,6 @@ class ResearchLabGatewayConfig:
     production_writes_enabled: bool = False
     reports_enabled: bool = False
     shadow_bundles_enabled: bool = False
-    shadow_reimbursements_enabled: bool = False
     reimbursements_enabled: bool = False
     weight_mutation_enabled: bool = False
     fulfillment_mutation_enabled: bool = False
@@ -130,16 +129,11 @@ class ResearchLabGatewayConfig:
     source_add_rewards_enabled: bool = True
     source_add_dispatcher_enabled: bool = True
     source_add_functional_probes_enabled: bool = True
-    source_add_functional_rewards_enabled: bool = True
     source_add_dispatcher_poll_seconds: float = 2.0
     source_add_work_lease_seconds: int = 300
     source_add_probe_timeout_seconds: int = 45
     source_add_probe_max_attempts: int = 5
-    source_add_credential_kms_key_id: str = ""
-    source_add_sandbox_image: str = "python:3.11-slim"
-    source_add_trial_timeout_seconds: int = 300
     source_add_leg1_alpha_percent: float = 0.2
-    source_add_acceptance_floor_yield: float = 0.10
     source_add_max_concurrent_per_hotkey: int = 3
     source_add_max_per_day_per_hotkey: int = 5
     source_add_max_per_30d_per_hotkey: int = 10
@@ -170,9 +164,6 @@ class ResearchLabGatewayConfig:
             reports_enabled=_truthy("RESEARCH_LAB_REPORTS_ENABLED", prod_on),
             shadow_bundles_enabled=_truthy(
                 "RESEARCH_LAB_SHADOW_BUNDLES_ENABLED", prod_on
-            ),
-            shadow_reimbursements_enabled=_truthy(
-                "RESEARCH_LAB_SHADOW_REIMBURSEMENTS_ENABLED"
             ),
             reimbursements_enabled=_truthy("RESEARCH_LAB_REIMBURSEMENTS_ENABLED"),
             weight_mutation_enabled=_truthy(
@@ -273,9 +264,6 @@ class ResearchLabGatewayConfig:
             source_add_functional_probes_enabled=_truthy(
                 "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_PROBES_ENABLED", "true"
             ),
-            source_add_functional_rewards_enabled=_truthy(
-                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_REWARDS_ENABLED", "true"
-            ),
             source_add_dispatcher_poll_seconds=max(
                 0.25, _float("RESEARCH_LAB_SOURCE_ADD_DISPATCHER_POLL_SECONDS", 2.0)
             ),
@@ -285,20 +273,8 @@ class ResearchLabGatewayConfig:
                 5,
                 max(1, _int("RESEARCH_LAB_SOURCE_ADD_PROBE_MAX_ATTEMPTS", 5)),
             ),
-            source_add_credential_kms_key_id=os.getenv(
-                "RESEARCH_LAB_SOURCE_ADD_CREDENTIAL_KMS_KEY_ID", ""
-            ),
-            source_add_sandbox_image=os.getenv(
-                "RESEARCH_LAB_SOURCE_ADD_SANDBOX_IMAGE", "python:3.11-slim"
-            ),
-            source_add_trial_timeout_seconds=max(
-                30, _int("RESEARCH_LAB_SOURCE_ADD_TRIAL_TIMEOUT_SECONDS", 300)
-            ),
             source_add_leg1_alpha_percent=max(
                 0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", 0.2)
-            ),
-            source_add_acceptance_floor_yield=max(
-                0.0, _float("RESEARCH_LAB_SOURCE_ADD_ACCEPTANCE_FLOOR_YIELD", 0.10)
             ),
             source_add_max_concurrent_per_hotkey=max(
                 1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_CONCURRENT_PER_HOTKEY", 3)
@@ -362,16 +338,12 @@ class ResearchLabGatewayConfig:
         return {
             "api_enabled": self.api_enabled,
             "production_writes_enabled": self.production_writes_enabled,
-            # The retired loop intake stays closed during the first upgrade
-            # from an older gateway. There is no setting that can reopen it.
-            "miner_submissions_enabled": False,
             "source_add_enabled": self.source_add_enabled,
             "source_add": {
                 "enabled": self.source_add_enabled,
                 "rewards_enabled": self.source_add_rewards_enabled,
                 "dispatcher_enabled": self.source_add_dispatcher_enabled,
                 "functional_probes_enabled": self.source_add_functional_probes_enabled,
-                "functional_rewards_enabled": self.source_add_functional_rewards_enabled,
                 "leg1_alpha_percent": self.source_add_leg1_alpha_percent,
                 "reward_epochs": self.lab_reward_epochs,
                 "max_concurrent_per_hotkey": self.source_add_max_concurrent_per_hotkey,

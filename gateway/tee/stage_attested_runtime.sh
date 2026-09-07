@@ -16,8 +16,8 @@ BUILD_CONTEXT_ROOT="$GATEWAY_ROOT/_enclave_source"
 BUILD_CONTEXT_TMP="$GATEWAY_ROOT/.enclave_source.tmp"
 WHEELHOUSE_ROOT="$GATEWAY_ROOT/_enclave_wheelhouse"
 WHEELHOUSE_TMP="$GATEWAY_ROOT/.enclave_wheelhouse.tmp"
-RUNSC_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
-OFFLINE_WHEELHOUSE_ROOT="$RUNSC_ARTIFACT_ROOT/scoring-wheelhouse-py39"
+OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
+OFFLINE_WHEELHOUSE_ROOT="$OFFLINE_ARTIFACT_ROOT/scoring-wheelhouse-py39"
 PACKAGES=(
   "Leadpoet"
   "research_lab"
@@ -63,7 +63,6 @@ else
 fi
 
 SOURCE_GATEWAY_ROOT="$SOURCE_ROOT/gateway"
-RUNSC_LOCK="$SOURCE_GATEWAY_ROOT/tee/runsc-runtime.lock.json"
 SCORING_REQUIREMENTS_INPUT="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.in"
 SCORING_REQUIREMENTS_LOCK="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.lock"
 PROTECTED_WORKFLOW_MANIFEST="$SOURCE_GATEWAY_ROOT/tee/protected_workflows.json"
@@ -209,18 +208,6 @@ rsync -a --delete \
   --exclude='BUILD_INFO.json' \
   --exclude='.source_commit' \
   "$SOURCE_GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"
-RUNSC_ARTIFACT_NAME="$(python3 - "$RUNSC_LOCK" <<'PY'
-import json
-import sys
-print(json.load(open(sys.argv[1]))["artifact_filename"])
-PY
-)"
-RUNSC_ARTIFACT="$RUNSC_ARTIFACT_ROOT/$RUNSC_ARTIFACT_NAME"
-python3 "$SOURCE_GATEWAY_ROOT/tee/sandbox_runtime_artifact.py" verify \
-  --lock "$RUNSC_LOCK" \
-  --artifact "$RUNSC_ARTIFACT"
-mkdir -p "$BUILD_CONTEXT_TMP/tee/runtime"
-install -m 755 "$RUNSC_ARTIFACT" "$BUILD_CONTEXT_TMP/tee/runtime/runsc"
 mkdir -p "$BUILD_CONTEXT_TMP/_attested_runtime"
 rsync -a --delete "$DEST_ROOT/" "$BUILD_CONTEXT_TMP/_attested_runtime/"
 mkdir -p "$BUILD_CONTEXT_TMP/tee/wheelhouse"

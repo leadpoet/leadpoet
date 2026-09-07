@@ -34,7 +34,6 @@ MANIFEST_RELATIVE_PATH = "_attested_runtime/scoring_import_closure.json"
 MEASURED_DATA_PATHS = (
     "gateway/api/role_patterns.json",
     "gateway/tee/protected_workflows.json",
-    "gateway/tee/runsc-runtime.lock.json",
     "gateway/tee/topology.json",
     "gateway/utils/area_city_mappings.json",
     "gateway/utils/english_word_cities.txt",

@@ -1632,6 +1632,16 @@
       "symbol": "CONTROLLER_MEMORY_GUARD_FD_NUMBER"
     },
     {
+      "ast_sha256": "sha256:fa107e9fbfbcc252290188c300ef22d9af34508c870cd4f038bbd9728dd0d429",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "CONTROLLER_PROCESS_HELPER_FD_NUMBER"
+    },
+    {
+      "ast_sha256": "sha256:44b42c80f35d44652762511f60904efc9965db20b2310e266115c09bc4b3273d",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "CONTROLLER_PROCESS_HELPER_PATH"
+    },
+    {
       "ast_sha256": "sha256:250a064afc4749558b9f11c5889a3a890dd2d1a609cc92ae2c7fb186d67d06f7",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "CONTROLLER_WRAPPER_FD_NUMBER"
@@ -1782,12 +1792,12 @@
       "symbol": "_COMMIT_RE"
     },
     {
-      "ast_sha256": "sha256:852afa9094a2c331d341cd399997f3e335dc622bf0000fde7a0ec94d3169f832",
+      "ast_sha256": "sha256:9bfd3e7dbd3bf978f86df58375a0bf7c41878c8a37c5ce099fac94a6a7e7903a",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_PROOF_FIELDS"
     },
     {
-      "ast_sha256": "sha256:dc8f092dbd943d347f6f683ab56b35ebab576c5ba9617b04f35fc2330a2608af",
+      "ast_sha256": "sha256:772d77f8274bd1702ed69ca9998f13cb5eba6670697f2693cd32f8486aeba754",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_RESTART_AUTHORITY_NAMES"
     },
@@ -1822,7 +1832,7 @@
       "symbol": "_VERSION_ID_RE"
     },
     {
-      "ast_sha256": "sha256:3728692a474a5888f9ff9c4cc7278e5537f0849704c321352455f4f50238d0dd",
+      "ast_sha256": "sha256:b1e4b38b9ba4d4e10db1525ad252b4a872ec14a4bb78104b7b0c255f1d5bd3f3",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "__module__"
     },
@@ -1887,7 +1897,7 @@
       "symbol": "_harden_installed_controller_directory"
     },
     {
-      "ast_sha256": "sha256:0c9224a6d4b7872006982fe576cb350d5cffacc498c78a33905ffe404eea208b",
+      "ast_sha256": "sha256:ed7f67d524cb205f9410b4a14a1fd7bf93c69e497ad8f9df451949e4208007f1",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_install_controller_bundle_memfds"
     },
@@ -1957,7 +1967,7 @@
       "symbol": "_pre_hydration_live_process_commitment"
     },
     {
-      "ast_sha256": "sha256:b23cc3d35c743d9bfdd2a4d47ba44e207ca449fb443c636ecd7ee257a455c976",
+      "ast_sha256": "sha256:1c3c3646ce60ecd174854172b65cdaa2c60beda1fa0d2bd5b8fda46bd470a13d",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_proof_body"
     },
@@ -2072,7 +2082,7 @@
       "symbol": "_require_pre_hydration_runtime_source_add_closed"
     },
     {
-      "ast_sha256": "sha256:2adce5674ddbfb9dcd51ffb2c85a2ec2d339cdfd7ad407b91f91fae6e2cf4915",
+      "ast_sha256": "sha256:ce2129ed6b111118fe685117849fa885315786a272651b54325f34a7234b1fb0",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_require_reserved_memfd_numbers_available"
     },
@@ -2217,12 +2227,12 @@
       "symbol": "_validate_candidate_identity"
     },
     {
-      "ast_sha256": "sha256:ae1ac86f830ff67ddd7a3d6fd4c58fccfd633e8fbc90dc35134cdcdfff5f0270",
+      "ast_sha256": "sha256:9793b9c287c49cada4a5774c07ef8623cf683d2fe9d1552782ed505ca3cd0da1",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_validate_proof_document"
     },
     {
-      "ast_sha256": "sha256:4d3cb1015031342378fe734a2e5bf392c6e4eb324698348391dec7b6dcdc410c",
+      "ast_sha256": "sha256:370e68b87feb428359379bbc4ebcfe4b04a82e4dbbf4a351473051052cedccec",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_verified_installed_controller_bundle"
     },
@@ -2232,12 +2242,7 @@
       "symbol": "_verified_installed_controller_release_directory"
     },
     {
-      "ast_sha256": "sha256:30cd6a0fd5b15e68c6c1c87ca6a4a4c99b0211038864c9a20de37be5191799a0",
-      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
-      "symbol": "_verify_installed_controller"
-    },
-    {
-      "ast_sha256": "sha256:f426eb050e678ed85f4febe06b3a41188e7efe6112ae1cb0344d46983ddd1b4b",
+      "ast_sha256": "sha256:8a993ce4cdcdacb6dca09f5d0800d92718d03c9be1fe68080bb2c9b75f51e159",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_verify_proof_against_state"
     },
@@ -2252,7 +2257,7 @@
       "symbol": "_wait_for_source_add_quiescence"
     },
     {
-      "ast_sha256": "sha256:164bb4a80cea3f0ba3aa8d80cfbc5f4ed80020c17c239aa109a75ee4be1e804a",
+      "ast_sha256": "sha256:a5097813fc438584fa56db1fae2fde645016c77d89a0ce5fc49262cef2f48dab",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "bootstrap_gateway_miner_maintenance_restart"
     },
@@ -4542,7 +4547,7 @@
       "symbol": "_UNSAFE_GIT_ENV_NAMES"
     },
     {
-      "ast_sha256": "sha256:44f75bc4a4455250352f1c0c0bd4ec719cc3f28fd499a1b2ab3042d8439d704c",
+      "ast_sha256": "sha256:ce39948603e0da1ccebf184959b6a4d783d9e9335920c4d872fdf6153c51d9bb",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "__module__"
     },
@@ -4612,7 +4617,7 @@
       "symbol": "verify_candidate_bound_controller_lineage"
     },
     {
-      "ast_sha256": "sha256:43ccb14488e904f1de32b13374d5a09ea3ab513c6221b140fd640e28b7ff4dff",
+      "ast_sha256": "sha256:9d59711961e124b2dbd54d5c98a220cd05e167ff7b383c587ddc41fb5975ccf2",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "verify_installed_controller_bundle"
     },
@@ -4637,7 +4642,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:934e5d12fc42179043ee7251d6f5994c83238061ca2f7a8374e60dd4a43d29c6",
-  "protected_source_commit": "28efe6a993ac283054bb052ded76beae203286c6",
+  "manifest_hash": "sha256:3cb9a62b40348f1355a11cabe2e4329cf223ade2e00bdcbc5d578b608be8828b",
+  "protected_source_commit": "e5c76e9cb9293495816f7055c78fb4e54b1646dc",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -910,6 +910,59 @@ PY
       --materialized-root "$MINER_BOOTSTRAP_ROOT/candidate" \
       --phase prepared_archive \
       --strict-extras >/dev/null
+
+    # The production operator installs the candidate controller after the
+    # N-1 archive is verified.  Keep the old release available for rollback,
+    # then advance current and the host wrapper before bootstrap exec.
+    CANDIDATE_CONTROLLER_RELEASE="$CONTROLLER_ROOT/releases/$CANDIDATE_SHA"
+    CANDIDATE_CONTROLLER_STAGE="$CONTROLLER_ROOT/.candidate-controller.$$.tmp"
+    test ! -e "$CANDIDATE_CONTROLLER_RELEASE"
+    rm -rf -- "$CANDIDATE_CONTROLLER_STAGE"
+    install -d -m 0700 \
+      "$CANDIDATE_CONTROLLER_STAGE/scripts" \
+      "$CANDIDATE_CONTROLLER_STAGE/Leadpoet/utils" \
+      "$CANDIDATE_CONTROLLER_STAGE/gateway/tee"
+    git -C /source show "$CANDIDATE_SHA:gw_restart.sh" \
+      >"$CANDIDATE_CONTROLLER_STAGE/gw_restart.sh"
+    git -C /source show "$CANDIDATE_SHA:scripts/gateway_git_deploy.py" \
+      >"$CANDIDATE_CONTROLLER_STAGE/scripts/gateway_git_deploy.py"
+    git -C /source show \
+      "$CANDIDATE_SHA:Leadpoet/utils/exact_commit_restart_v2.py" \
+      >"$CANDIDATE_CONTROLLER_STAGE/Leadpoet/utils/exact_commit_restart_v2.py"
+    git -C /source show "$CANDIDATE_SHA:gateway/tee/host_memory_guard_v2.py" \
+      >"$CANDIDATE_CONTROLLER_STAGE/gateway/tee/host_memory_guard_v2.py"
+    if git -C /source cat-file -e \
+        "$CANDIDATE_SHA:scripts/manage_owned_process_group.py"; then
+      git -C /source show \
+        "$CANDIDATE_SHA:scripts/manage_owned_process_group.py" \
+        >"$CANDIDATE_CONTROLLER_STAGE/scripts/manage_owned_process_group.py"
+    fi
+    chmod 0700 "$CANDIDATE_CONTROLLER_STAGE/gw_restart.sh"
+    find "$CANDIDATE_CONTROLLER_STAGE" -type f \
+      ! -path "$CANDIDATE_CONTROLLER_STAGE/gw_restart.sh" \
+      -exec chmod 0600 {} +
+    mv -- "$CANDIDATE_CONTROLLER_STAGE" "$CANDIDATE_CONTROLLER_RELEASE"
+    CANDIDATE_CONTROLLER_LINK="$CONTROLLER_ROOT/.current.$$.tmp"
+    ln -s "releases/$CANDIDATE_SHA" "$CANDIDATE_CONTROLLER_LINK"
+    mv -Tf -- "$CANDIDATE_CONTROLLER_LINK" "$CONTROLLER_ROOT/current"
+    install -m 0700 \
+      "$CANDIDATE_CONTROLLER_RELEASE/gw_restart.sh" \
+      /home/ec2-user/gw_restart.sh
+    test -d "$CONTROLLER_RELEASE"
+    test "$(readlink "$CONTROLLER_ROOT/current")" = "releases/$CANDIDATE_SHA"
+    test "$(git -C /source hash-object --no-filters \
+      "$CANDIDATE_CONTROLLER_RELEASE/gw_restart.sh")" = \
+      "$(git -C /source rev-parse "$CANDIDATE_SHA:gw_restart.sh")"
+    if git -C /source cat-file -e \
+        "$CANDIDATE_SHA:scripts/manage_owned_process_group.py"; then
+      test -f "$CANDIDATE_CONTROLLER_RELEASE/scripts/manage_owned_process_group.py"
+      test "$(git -C /source hash-object --no-filters \
+        "$CANDIDATE_CONTROLLER_RELEASE/scripts/manage_owned_process_group.py")" = \
+        "$(git -C /source rev-parse \
+          "$CANDIDATE_SHA:scripts/manage_owned_process_group.py")"
+    else
+      test ! -e "$CANDIDATE_CONTROLLER_RELEASE/scripts/manage_owned_process_group.py"
+    fi
     MINER_HANDOFF_FILE="/tmp/leadpoet-gateway-miner-maintenance-handoff.rehearsal-${RUN_ORDINAL}.ready"
     MINER_HANDOFF_NONCE="$(
       printf '%s' "$FROM_SHA:$CANDIDATE_SHA:$RUN_ORDINAL" | sha256sum | cut -d' ' -f1

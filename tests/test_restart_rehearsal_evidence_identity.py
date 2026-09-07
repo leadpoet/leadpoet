@@ -133,6 +133,28 @@ def test_gateway_enclave_uses_the_exact_transition_target_tree() -> None:
     assert '"/source/gateway"' not in service
 
 
+def test_legacy_rollout_installs_candidate_controller_before_bootstrap() -> None:
+    launcher = (
+        ROOT / "tests/restart_rehearsal/run_inside.sh"
+    ).read_text(encoding="utf-8")
+    install = launcher.index(
+        'CANDIDATE_CONTROLLER_RELEASE="$CONTROLLER_ROOT/releases/$CANDIDATE_SHA"'
+    )
+    bootstrap = launcher.index(
+        'bash "$MINER_BOOTSTRAP_ROOT/candidate/gw_restart.sh"'
+    )
+    assert install < bootstrap
+    assert 'test -d "$CONTROLLER_RELEASE"' in launcher[install:bootstrap]
+    assert (
+        'test "$(readlink "$CONTROLLER_ROOT/current")" = "releases/$CANDIDATE_SHA"'
+        in launcher[install:bootstrap]
+    )
+    assert (
+        '"$CANDIDATE_SHA:scripts/manage_owned_process_group.py"'
+        in launcher[install:bootstrap]
+    )
+
+
 def test_gateway_provider_adapter_tracks_production_transport_interface() -> None:
     production = ast.parse(
         (ROOT / "gateway/tee/provider_broker_v2.py").read_text(encoding="utf-8")

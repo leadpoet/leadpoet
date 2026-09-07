@@ -2707,7 +2707,7 @@
       "symbol": "_headers_without_credentials"
     },
     {
-      "ast_sha256": "sha256:8735e5423bf81466a14388d1a4775e95c1feaaa126234f55797ee59586631f05",
+      "ast_sha256": "sha256:a8711c95f45e3ab6803a97707c8ad5844cb9bcec311a82e7ca74754fa1a0df47",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -4657,7 +4657,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:fef3c4b0a8418870dafa4cf6e5c2d9be0a38fcd1e14c141c358e65b7976453b4",
-  "protected_source_commit": "598d4e0f01966fe493c1980606688916c08ba3d6",
+  "manifest_hash": "sha256:bc806608729ac1ce516b10a111e095b155d167e4284b11e4b1b9382adb51f00b",
+  "protected_source_commit": "cab7b7d264b955c6361333c1e9bac3bba09f41aa",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

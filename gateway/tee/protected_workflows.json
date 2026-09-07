@@ -4532,6 +4532,11 @@
       "symbol": "LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY"
     },
     {
+      "ast_sha256": "sha256:238586abf827a6d97d1aa9e6900b2bd084344ac22ea7f964760112a800b8d21a",
+      "path": "scripts/verify_installed_gateway_controller_v1.py",
+      "symbol": "LEGACY_FOUR_FILE_CONTROLLER_COMMITS"
+    },
+    {
       "ast_sha256": "sha256:7b698421d863993cce11096d27024a501cfb505bbc77040b0bcca809f2c98fbc",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "OPTIONAL_CONTROLLER_FILES"
@@ -4557,7 +4562,7 @@
       "symbol": "_UNSAFE_GIT_ENV_NAMES"
     },
     {
-      "ast_sha256": "sha256:ce39948603e0da1ccebf184959b6a4d783d9e9335920c4d872fdf6153c51d9bb",
+      "ast_sha256": "sha256:b892b6ead49779f745afce89e7f4256cc08aa7a7590e9479e2add70915ca8177",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "__module__"
     },
@@ -4627,7 +4632,7 @@
       "symbol": "verify_candidate_bound_controller_lineage"
     },
     {
-      "ast_sha256": "sha256:9d59711961e124b2dbd54d5c98a220cd05e167ff7b383c587ddc41fb5975ccf2",
+      "ast_sha256": "sha256:62989978aad78cfea424598dcfd3a109dce75a4c1c53b0e71062d34097a6d167",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "verify_installed_controller_bundle"
     },
@@ -4652,7 +4657,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:24a1cbad1377e948b7528c3be544df1b87548d3a2bb308ab2d35aa7b6606ffb2",
-  "protected_source_commit": "72fbf653de7b1e958695069ef81559ac43ce8aa1",
+  "manifest_hash": "sha256:fef3c4b0a8418870dafa4cf6e5c2d9be0a38fcd1e14c141c358e65b7976453b4",
+  "protected_source_commit": "598d4e0f01966fe493c1980606688916c08ba3d6",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

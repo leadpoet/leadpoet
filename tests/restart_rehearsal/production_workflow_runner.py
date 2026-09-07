@@ -5573,6 +5573,7 @@ def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
         "observed_industry": "Software",
         "observed_subindustry": "SaaS",
         "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
         "industry_evidence_url": "https://example.com/about",
         "industry_evidence_quote": "Example builds software.",
         "observed_hq_country": "United States",

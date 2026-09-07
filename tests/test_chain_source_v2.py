@@ -83,6 +83,40 @@ def test_runtime_metadata_commitment_and_reviewed_reveal_default():
             "sha256:b592bafacd0f3cce1340a91f237f82a531968bd833cbd27339328c80ce92b1cf"
         ),
     ) == 1
+    assert resolve_reveal_period_metadata_default_v2(
+        genesis_hash=(
+            "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+        ),
+        runtime_spec_version=455,
+        runtime_transaction_version=1,
+        metadata_hash=(
+            "sha256:74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7"
+        ),
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("runtime_spec_version", 454),
+        ("runtime_transaction_version", 2),
+        ("metadata_hash", "sha256:" + "0" * 64),
+    ),
+)
+def test_runtime_455_reveal_default_rejects_a_different_authority(field, value):
+    arguments = {
+        "genesis_hash": (
+            "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+        ),
+        "runtime_spec_version": 455,
+        "runtime_transaction_version": 1,
+        "metadata_hash": (
+            "sha256:74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7"
+        ),
+    }
+    arguments[field] = value
+    with pytest.raises(ChainSourceV2Error, match="not reviewed"):
+        resolve_reveal_period_metadata_default_v2(**arguments)
 
 
 @pytest.mark.parametrize(

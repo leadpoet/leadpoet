@@ -371,6 +371,7 @@ def test_stateful_coordinator_rejects_skipped_cutover_index():
     (
         (1, 452, None),
         (None, 452, None),
+        (None, 455, None),
         (1, 440, "metadata is invalid"),
         (1, 436, "not explicitly supported"),
         (2, 452, "reveal period differs"),
@@ -390,6 +391,21 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
             chain_source_module,
             "resolve_reveal_period_metadata_default_v2",
             lambda **_kwargs: 1,
+        )
+    runtime_455_metadata_hash = (
+        "sha256:74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7"
+    )
+    if runtime_spec_version == 455:
+        # Exercise the coordinator's real reviewed-default resolver without
+        # embedding the 334 KiB public runtime metadata in this unit fixture.
+        monkeypatch.setattr(
+            chain_source_module,
+            "decode_runtime_metadata_commitment",
+            lambda _value: {
+                "metadata_hash": runtime_455_metadata_hash,
+                "metadata_version": 14,
+                "metadata_bytes": 334_642,
+            },
         )
 
     def block_hash(block):
@@ -523,7 +539,11 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
         reveal_period_epochs_storage_key(netuid=71)
     )
     assert result["reveal_period_storage_override"] == reveal_period_override
-    assert result["reveal_period_metadata_hash"] == sha256_bytes(b"meta\x0e")
+    assert result["reveal_period_metadata_hash"] == (
+        runtime_455_metadata_hash
+        if runtime_spec_version == 455
+        else sha256_bytes(b"meta\x0e")
+    )
     assert result["reveal_period_runtime_spec_version"] == runtime_spec_version
     assert result["chain_signing_profile"]["network"] == "finney"
     assert result["chain_signing_profile_hash"] == sha256_json(

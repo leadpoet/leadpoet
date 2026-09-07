@@ -71,6 +71,12 @@ _REVEAL_PERIOD_METADATA_DEFAULTS_V2 = {
         1,
         "sha256:b592bafacd0f3cce1340a91f237f82a531968bd833cbd27339328c80ce92b1cf",
     ): 1,
+    (
+        "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+        455,
+        1,
+        "sha256:74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7",
+    ): 1,
 }
 
 _RAW_HASH_RE = re.compile(r"^(?:0x)?[0-9a-f]{64}$")

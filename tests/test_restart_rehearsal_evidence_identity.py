@@ -12,6 +12,7 @@ from typing import Optional
 import pytest
 
 from Leadpoet.utils.subnet_epoch import read_subnet_epoch_snapshot
+import validator_tee.host.verify_chain_signing_profile_v2 as signing_profile_verifier
 from tests.restart_rehearsal.verify_evidence import (
     _verify_production_identity,
 )
@@ -224,6 +225,7 @@ def test_local_chain_adapter_supports_exact_historical_epoch_search(
             ).value
             for name in (
                 "Tempo",
+                "RevealPeriodEpochs",
                 "LastEpochBlock",
                 "PendingEpochAt",
                 "SubnetEpochIndex",
@@ -287,6 +289,51 @@ def test_local_chain_query_accepts_real_and_keyword_sdk_call_forms(
     assert result.value == rehearsal_boundary._subnet_epoch_state_at(
         rehearsal_boundary.CURRENT_BLOCK
     )["Tempo"]
+
+
+def test_local_chain_signing_profile_read_matches_full_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(rehearsal_boundary, "SOURCE_ROOT", ROOT)
+    monkeypatch.setattr(rehearsal_boundary, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_boundary,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    monkeypatch.setattr(
+        signing_profile_verifier.bt,
+        "Subtensor",
+        rehearsal_boundary._LocalSubtensor,
+    )
+
+    live = signing_profile_verifier.read_live_chain_signing_state(
+        "finney",
+        71,
+    )
+    profile = rehearsal_boundary._local_chain_signing_profile()
+    schedule = rehearsal_boundary._subnet_epoch_state_at(
+        rehearsal_boundary.CURRENT_BLOCK
+    )
+    verified = signing_profile_verifier.verify_chain_signing_profile_v2(
+        profile=profile,
+        runtime_version=live["runtime_version"],
+        genesis_hash=live["genesis_hash"],
+        call_metadata=live["call_metadata"],
+        tempo=live["tempo"],
+        subnet_reveal_period_epochs=live["subnet_reveal_period_epochs"],
+    )
+
+    assert live["netuid"] == 71
+    assert live["tempo"] == schedule["Tempo"] == profile["tempo"]
+    assert (
+        live["subnet_reveal_period_epochs"]
+        == schedule["RevealPeriodEpochs"]
+        == profile["subnet_reveal_period_epochs"]
+        == 1
+    )
+    assert verified["status"] == "ready"
 
 
 def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:

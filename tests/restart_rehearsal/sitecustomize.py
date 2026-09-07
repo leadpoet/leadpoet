@@ -545,6 +545,7 @@ def _subnet_epoch_state_at(block: int) -> dict[str, int]:
     next_epoch_block = _subnet_epoch_transition_block(epoch_index + 1)
     return {
         "Tempo": next_epoch_block - last_epoch_block,
+        "RevealPeriodEpochs": 1,
         "LastEpochBlock": last_epoch_block,
         "PendingEpochAt": next_epoch_block,
         "SubnetEpochIndex": epoch_index,

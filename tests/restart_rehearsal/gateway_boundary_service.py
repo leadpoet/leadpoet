@@ -608,12 +608,14 @@ def _migration_schema_contract(
         "176-research-lab-source-add-provenance-origin-repair.sql",
         "177-research-lab-source-add-provenance-authority-acl.sql",
         "178-research-lab-source-add-miner-status.sql",
+        "186-research-lab-source-add-provisioned-status.sql",
         "179-lab-arena-v1.sql",
         "180-lab-arena-daily-competition.sql",
         "181-lab-arena-source-submissions.sql",
         "182-lab-arena-source-execution.sql",
         "183-lab-arena-miner-reward-basis.sql",
         "184-lab-arena-scoring-failure-isolation.sql",
+        "185-lab-arena-miner-credentials.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (

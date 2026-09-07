@@ -618,3 +618,80 @@ async def test_live_allocation_failure_is_logged_before_failing(monkeypatch, cap
 
     assert "research_lab_live_allocation_build_failed" in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+def _no_disk_cache(monkeypatch):
+    """Make the disk cache a miss so these tests only exercise the memory cache."""
+
+    monkeypatch.setattr(
+        api.allocation_handoff_disk_cache,
+        "load_handoff",
+        lambda *args, **kwargs: None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_allocation_serves_an_already_built_bundle_without_rebuilding(
+    monkeypatch,
+):
+    """The live endpoint must not rebuild a bundle the attested path already has.
+
+    Both endpoints assemble the same deterministic document from the same
+    database pool and the same enclave, so a live rebuild launched while the
+    validator's attested build is in flight is exactly the contention the cache
+    above exists to prevent.
+    """
+
+    counter = {"n": 0}
+    _install(monkeypatch, build=_matched_build(counter))
+    _no_disk_cache(monkeypatch)
+
+    bundle = {"bundle_type": "live", "epoch": 24180}
+    api._allocation_handoff_cache_put(24180, True, {"bundle": bundle})
+
+    result = await api.get_research_lab_live_allocation(24180)
+
+    assert result == bundle
+    assert counter["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_live_allocation_authorized_caller_does_not_reuse_a_read_only_handoff(
+    monkeypatch,
+):
+    """persist_snapshot=True owes a snapshot write, so it may not take a False entry."""
+
+    counter = {"n": 0}
+
+    async def persisting_guard(config, epoch, key):
+        return True
+
+    _install(monkeypatch, build=_matched_build(counter), guard=persisting_guard)
+    _no_disk_cache(monkeypatch)
+
+    api._allocation_handoff_cache_put(
+        24181,
+        False,
+        {"bundle": {"bundle_type": "live", "epoch": 24181, "stale": True}},
+    )
+
+    result = await api.get_research_lab_live_allocation(
+        24181, x_leadpoet_internal_key="validator-secret"
+    )
+
+    assert counter["n"] == 1
+    assert result == {"bundle_type": "live", "epoch": 24181}
+
+
+@pytest.mark.asyncio
+async def test_live_allocation_still_builds_when_nothing_is_cached(monkeypatch):
+    """The reuse is an optimisation only; a cold epoch still gets its own build."""
+
+    counter = {"n": 0}
+    _install(monkeypatch, build=_matched_build(counter))
+    _no_disk_cache(monkeypatch)
+
+    result = await api.get_research_lab_live_allocation(24182)
+
+    assert counter["n"] == 1
+    assert result == {"bundle_type": "live", "epoch": 24182}

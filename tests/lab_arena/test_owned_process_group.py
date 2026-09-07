@@ -143,7 +143,12 @@ def _shell_process_helper_selector(script_name: str, role: str) -> str:
         if role == "gateway"
         else "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE"
     )
-    start = script.index(f'if [ -n "${authority_variable}" ]; then')
+    try:
+        start = script.index(f'if [ -n "${authority_variable}" ]; then')
+    except ValueError:
+        legacy_assignment = "LAB_ARENA_PROCESS_HELPER="
+        start = script.index(legacy_assignment)
+        return script[start : script.index("\n", start) + 1]
     end_marker = f'\n{state_variable}='
     end = script.index("\n", script.index(end_marker, start) + 1) + 1
     return script[start:end]

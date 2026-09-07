@@ -138,13 +138,15 @@ python3 scripts/run_lab_arena_runner.py
 
 ## Miner flow
 
-Choose **Agent Competition** in `neurons/miner.py`. It asks for only the local
-source directory, then archives, uploads, signs, and finalizes it. It never
-asks for provider credentials, a Dockerfile, or an image tag. The same helper
-can run directly:
+Choose **Submit Model** in `neurons/miner.py`. It reads the local source
+directory and the miner's OpenRouter API key, OpenRouter management key, and
+Deepline API key from environment variables or masked prompts. It archives,
+uploads, signs, and finalizes the source. Credentials are sent separately and
+encrypted for the model's runs. No Dockerfile or image tag is required. The
+same helper can run directly with those credentials in the environment:
 
 ```bash
-python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
+python3 scripts/lab_arena_miner.py submit-model --source ./my-agent \
   --wallet-name default --hotkey-name default
 ```
 

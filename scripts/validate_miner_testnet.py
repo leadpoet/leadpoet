@@ -603,6 +603,7 @@ def _serve(args: argparse.Namespace) -> int:
                 broker_factory=broker_factory,
                 defaults=defaults,
                 network_name=TESTNET_NETWORK,
+                pinned_round_id=round_id,
                 baseline_source_fetcher=fetch_public_source_archive,
                 reward_signer_factory=None,
                 credential_manager=credential_manager,

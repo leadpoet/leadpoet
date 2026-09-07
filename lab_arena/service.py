@@ -289,6 +289,9 @@ class ServiceConfig:
     defaults: RoundDefaults = field(default_factory=RoundDefaults)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     network_name: str = "finney"
+    # Optional process-local ownership boundary for isolated one-round hosts.
+    # It is deliberately not persisted in a round configuration or schema.
+    pinned_round_id: Optional[str] = None
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
@@ -298,6 +301,12 @@ class ServiceConfig:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
             raise ServiceError("mode_off", 500)
+        if self.pinned_round_id is not None and (
+            not isinstance(self.pinned_round_id, str)
+            or not self.pinned_round_id
+            or self.pinned_round_id != self.pinned_round_id.strip()
+        ):
+            raise ServiceError("pinned_round_id_invalid", 500)
 
 
 def _iso(moment: datetime) -> str:
@@ -369,9 +378,27 @@ class ArenaService:
             return self._signer
 
     def _round(self, round_id: str) -> Dict[str, Any]:
+        self._require_round_ownership(round_id)
         row = self._store.get_round(round_id)
         if row is None:
             raise ServiceError("round_missing", 404)
+        return self._require_round_mode(row)
+
+    def _pinned_round_id(self) -> Optional[str]:
+        return getattr(getattr(self, "_config", None), "pinned_round_id", None)
+
+    def _require_round_ownership(self, round_id: str) -> None:
+        pinned_round_id = self._pinned_round_id()
+        if pinned_round_id is not None and round_id != pinned_round_id:
+            raise ServiceError("round_scope_mismatch", 409)
+
+    def _pinned_round(self) -> Optional[Dict[str, Any]]:
+        pinned_round_id = self._pinned_round_id()
+        if pinned_round_id is None:
+            return None
+        row = self._store.get_round(pinned_round_id)
+        if row is None:
+            return None
         return self._require_round_mode(row)
 
     def _require_round_mode(self, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -483,6 +510,7 @@ class ArenaService:
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
         round_id = round_id or round_id_for_cutoff(cutoff)
+        self._require_round_ownership(round_id)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
         document = {
             "schema_version": contracts.ROUND_CONFIGURATION_SCHEMA_VERSION,
@@ -559,6 +587,9 @@ class ArenaService:
     def current_round(self) -> Optional[Dict[str, Any]]:
         """The newest round that is not published or cancelled (operator status)."""
 
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            return row if row is not None and row["status"] not in TERMINAL_STATUSES else None
         # Scan ids and statuses only; a full row can be large at hundreds of participants.
         for row in self._store.list_rounds(
             statuses=ACTIVE_ROUND_STATUSES,
@@ -576,6 +607,16 @@ class ArenaService:
         Rounds overlap (one open for submissions while the previous one runs),
         so the driver advances each of them on every tick.
         """
+
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            if row is None or row["status"] in TERMINAL_STATUSES:
+                return []
+            return [{
+                "round_id": row["round_id"],
+                "status": row["status"],
+                "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
+            }]
 
         rows: List[Dict[str, Any]] = []
         offset = 0
@@ -609,6 +650,9 @@ class ArenaService:
     def open_round(self) -> Optional[Dict[str, Any]]:
         """The round open for submissions, if any (at most one at a time)."""
 
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            return row if row is not None and row["status"] == "open" else None
         for row in self._store.list_rounds(
             status="open",
             mode=self._config.mode,
@@ -627,6 +671,7 @@ class ArenaService:
         only yields a structured refusal.
         """
 
+        self._require_round_ownership(round_id)
         now = time.monotonic()
         with self._hot_round_lock:
             cached = self._hot_rounds.get(round_id)
@@ -650,6 +695,7 @@ class ArenaService:
 
         validated = self.validate_request(envelope, scope=scope, round_id=None)
         round_id = str(validated["round_id"])
+        self._require_round_ownership(round_id)
         round_row = self._hot_round(round_id) if hot else self._store.get_round(round_id)
         if round_row is None:
             raise ServiceError("round_unknown", 404)
@@ -659,6 +705,9 @@ class ArenaService:
         return validated, round_row
 
     def latest_published_round(self) -> Optional[Dict[str, Any]]:
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            return row if row is not None and row["status"] == "published" else None
         rows = self._store.list_rounds(
             status="published", mode=self._config.mode, limit=200
         )
@@ -687,6 +736,17 @@ class ArenaService:
         return set(str(item) for item in (round_row.get("configuration_doc") or {}).get("banned_hotkeys") or [])
 
     # -- submissions (sections 6, 7, 14.2) -------------------------------------
+
+    def submission_status(self, submission_id: str) -> Dict[str, Any]:
+        row = self._store.get_submission(submission_id)
+        if row is None:
+            raise ServiceError("submission_missing", 404)
+        self._require_round_ownership(str(row.get("round_id") or ""))
+        return {
+            "submission_id": submission_id,
+            "status": row["status"],
+            "rejection_rule": row.get("rejection_rule"),
+        }
 
     def _require_submission_window(self, round_row: Mapping[str, Any]) -> None:
         if round_row["status"] != "open":
@@ -1658,6 +1718,7 @@ class ArenaService:
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
         return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"), round_id=str(run.get("round_id") or ""))
 
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
@@ -1666,6 +1727,7 @@ class ArenaService:
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
         if run.get("kind") != "execute":
             raise ServiceError("run_source_unavailable", 409)
         expected_token_hash = str(run.get("lease_token_hash") or "")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 from pathlib import Path
 
 import pytest
@@ -130,3 +131,8 @@ def test_managed_driver_is_pinned_and_does_not_create_daily_rounds():
         "advanced arena-2026-09-07-e2e1:waiting"
     )
     assert calls == [("advance", "arena-2026-09-07-e2e1")]
+
+
+def test_serve_pins_the_runtime_service_to_the_requested_round():
+    source = inspect.getsource(SCRIPT._serve)
+    assert "pinned_round_id=round_id" in source

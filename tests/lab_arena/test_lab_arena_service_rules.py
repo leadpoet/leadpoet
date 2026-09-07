@@ -379,6 +379,106 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
         service._round("shadow-round")
 
 
+def test_runtime_round_pin_rejects_alien_shadow_rounds_and_scopes_discovery():
+    pinned = {
+        "round_id": "arena-2026-09-07-pinned",
+        "status": "open",
+        "created_at": "2026-09-07T00:00:00Z",
+        "configuration_doc": {
+            "mode": "shadow",
+            "schedule": {"submission_cutoff": "2026-09-08T00:00:00Z"},
+        },
+    }
+    alien = {
+        "round_id": "arena-2026-09-07-alien",
+        "status": "published",
+        "created_at": "2026-09-07T01:00:00Z",
+        "configuration_doc": {"mode": "shadow", "schedule": {}},
+    }
+    rows = {row["round_id"]: row for row in (pinned, alien)}
+
+    class Store:
+        get_round_calls = []
+
+        @classmethod
+        def get_round(cls, round_id):
+            cls.get_round_calls.append(round_id)
+            return rows.get(round_id)
+
+        @staticmethod
+        def list_rounds(**_kwargs):
+            raise AssertionError("a pinned service must not scan shared round history")
+
+        @staticmethod
+        def get_run(_run_id):
+            return {
+                "run_id": "alien-run",
+                "round_id": alien["round_id"],
+                "assignment_id": "assignment-1",
+                "attempt": 1,
+                "icp_position": 0,
+                "miner_hotkey": "5" * 48,
+                "submission_id": "alien-submission",
+                "stage": 1,
+                "kind": "execute",
+            }
+
+        @staticmethod
+        def get_submission(_submission_id):
+            return {
+                "submission_id": "alien-submission",
+                "round_id": alien["round_id"],
+                "status": "frozen",
+            }
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._config = SimpleNamespace(mode="shadow", pinned_round_id=pinned["round_id"])
+
+    assert service.current_round() == pinned
+    assert service.open_round() == pinned
+    assert service.active_rounds() == [
+        {
+            "round_id": pinned["round_id"],
+            "status": "open",
+            "schedule": {"submission_cutoff": "2026-09-08T00:00:00Z"},
+        }
+    ]
+    assert service.latest_published_round() is None
+    assert set(Store.get_round_calls) == {pinned["round_id"]}
+
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service._round(alien["round_id"])
+    service.validate_request = lambda *_args, **_kwargs: {
+        "round_id": alien["round_id"],
+        "hotkey": "5" * 48,
+    }
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service.handle_claim({})
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service._run_context("alien-run", "lease-token")
+    service._broker_for = lambda _round_id: (_ for _ in ()).throw(
+        AssertionError("alien run must not reach provider credentials")
+    )
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service.handle_provider(
+            "alien-run",
+            "lease-token",
+            {
+                "operation_id": "openrouter.chat",
+                "parameters": {},
+                "timeout_ms": 1_000,
+                "action_sequence": 0,
+            },
+        )
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service.handle_source("alien-run", "lease-token")
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service.public_results(alien["round_id"], "alien-submission")
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service.submission_status("alien-submission")
+
+
 def test_round_discovery_filters_before_limits_and_pages_every_active_round():
     def row(round_id, status, mode, created_at, **extra):
         return {

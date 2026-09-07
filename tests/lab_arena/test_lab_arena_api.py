@@ -50,6 +50,16 @@ class StubService:
     def public_results(self, round_id, submission_id):
         return {"round_id": round_id, "submission_id": submission_id}
 
+    def submission_status(self, submission_id):
+        row = self.store.get_submission(submission_id)
+        if row is None:
+            raise ServiceError("submission_missing", 404)
+        return {
+            "submission_id": submission_id,
+            "status": row["status"],
+            "rejection_rule": row.get("rejection_rule"),
+        }
+
     def handle_submission_presign(self, envelope):
         self.calls["submission_presign"] = envelope
         return {"status": "upload_ready", "submission_id": "sub-1"}

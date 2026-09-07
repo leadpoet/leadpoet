@@ -133,12 +133,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.get("/arena/v1/submissions/{submission_id}")
     async def submission_status(submission_id: str) -> Any:
-        row = await run_in_threadpool(service.store.get_submission, submission_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="unknown submission")
-        return {
-            "submission_id": submission_id, "status": row["status"], "rejection_rule": row.get("rejection_rule"),
-        }
+        return await run_in_threadpool(service.submission_status, submission_id)
 
     # -- runner -------------------------------------------------------------
 

@@ -192,6 +192,79 @@ def test_service_jwt_reaches_whoami_and_functions_through_postgrest(stack):
     assert response.status_code in (401, 403, 404), response.text
 
 
+def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
+    transport = make_transport(stack, "lab_arena_service")
+    original_post = transport._client.post
+    original_get = transport._client.get
+    transport._client.post = lambda url, **kwargs: original_post(url.replace("/rest/v1", ""), **kwargs)
+    transport._client.get = lambda url, **kwargs: original_get(url.replace("/rest/v1", ""), **kwargs)
+    store = ArenaStore(transport)
+    suffix = uuid4().hex[:10]
+    shadow_id = "arena-2026-09-04-%s" % suffix
+    live_id = "arena-2026-09-05-%s" % suffix
+    shadow_open_ids = ["arena-2026-09-06-%s%02d" % (suffix[:8], index) for index in range(21)]
+    shadow_published_ids = ["arena-2026-09-07-%s%02d" % (suffix[:8], index) for index in range(21)]
+    live_published_id = "arena-2026-09-08-%s" % suffix
+    try:
+        for round_id, mode, rewards in (
+            (shadow_id, "shadow", False),
+            (live_id, "live", True),
+        ):
+            assert store.create_round(
+                round_id,
+                {"round_id": round_id, "mode": mode, "rewards_enabled": rewards},
+            )["status"] == "created"
+        # Seed enough rows to make an unfiltered limit-20 query fail to find
+        # the live row. These rows are local PostgREST fixture data only.
+        with stack["connection"].cursor() as cursor:
+            for round_id in shadow_open_ids:
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_rounds (round_id, configuration_doc, rewards_enabled) VALUES (%s, %s::jsonb, FALSE)",
+                    (round_id, '{"mode":"shadow","rewards_enabled":false}'),
+                )
+            for index, round_id in enumerate(shadow_published_ids):
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled, king_outcome, effective_reward_epoch, reward_basis_hash, reward_basis_doc, signing_key_doc, reward_activated_at, published_at) VALUES (%s, 'published', %s::jsonb, FALSE, 'no_king', %s, %s, %s::jsonb, %s::jsonb, clock_timestamp(), clock_timestamp())",
+                    (
+                        round_id,
+                        '{"mode":"shadow","rewards_enabled":false,"baseline_hotkey":"baseline"}',
+                        10000 + index,
+                        "sha256:" + ("%02x" % index) * 32,
+                        '{"schema_version":"leadpoet.lab_arena.reward_basis.v1","king_outcome":"no_king"}',
+                        '{"public_key_hash":"sha256:' + ("a" * 64) + '"}',
+                    ),
+                )
+            cursor.execute(
+                "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled, king_outcome, effective_reward_epoch, reward_basis_hash, reward_basis_doc, signing_key_doc, reward_activated_at, published_at) VALUES (%s, 'published', %s::jsonb, TRUE, 'no_king', 20000, %s, %s::jsonb, %s::jsonb, clock_timestamp(), clock_timestamp())",
+                (
+                    live_published_id,
+                    '{"mode":"live","rewards_enabled":true,"baseline_hotkey":"baseline"}',
+                    "sha256:" + "b" * 64,
+                    '{"schema_version":"leadpoet.lab_arena.reward_basis.v1","king_outcome":"no_king"}',
+                    '{"public_key_hash":"sha256:' + ("c" * 64) + '"}',
+                ),
+            )
+        stack["connection"].commit()
+        shadow_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="shadow")}
+        live_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="live")}
+        assert {shadow_id, *shadow_open_ids} <= shadow_rounds
+        assert live_id in live_rounds and shadow_id not in live_rounds
+        # The reward query is also mode-scoped before its bounded limit. The
+        # live basis remains visible despite 21 earlier shadow publications.
+        assert {row["round_id"] for row in store.published_reward_bases(mode="shadow")} >= set(shadow_published_ids)
+        live_bases = store.published_reward_bases(mode="live")
+        assert live_published_id in {row["round_id"] for row in live_bases}
+    finally:
+        # The module-scoped Postgres container is disposable. Arena rounds are
+        # intentionally write-once, so cleanup must not disable that trigger.
+        for round_id in (shadow_id, live_id):
+            transport.rpc(
+                "lab_arena_cancel_round",
+                {"p_round_id": round_id, "p_reason": "operator_abort"},
+            )
+        transport.close()
+
+
 def test_anon_and_service_role_tokens_are_denied_on_arena_tables_and_functions(stack):
     for role in ("anon", "service_role", "authenticated"):
         transport = make_transport(stack, role)

@@ -57,6 +57,11 @@ REQUIRED_ORGANIZER_KEYS = (
     "LAB_ARENA_DEEPLINE_API_KEY",
     "LAB_ARENA_SCRAPINGDOG_API_KEY",
 )
+ORGANIZER_KEY_ALIASES = {
+    "LAB_ARENA_OPENROUTER_API_KEY": "OPENROUTER_API_KEY",
+    "LAB_ARENA_DEEPLINE_API_KEY": "DEEPLINE_API_KEY",
+    "LAB_ARENA_SCRAPINGDOG_API_KEY": "SCRAPINGDOG_API_KEY",
+}
 REQUIRED_SEED_KEYS = ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY")
 _ROUND_RE = re.compile(r"^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9]{1,16}$")
 _PREFIX_RE = re.compile(r"^miner-testnet-[a-z0-9][a-z0-9_-]{5,63}$")
@@ -137,6 +142,18 @@ def _require_secret_names(secret: Mapping[str, str], names: tuple[str, ...]) -> 
         raise ConfigurationError("gateway secret lacks required keys: %s" % ",".join(missing))
 
 
+def _secret_alias(secret: Mapping[str, str], name: str) -> str:
+    """Read one Arena key, accepting the pre-Arena gateway alias."""
+
+    values = [str(secret.get(candidate) or "").strip() for candidate in (name, ORGANIZER_KEY_ALIASES.get(name, ""))]
+    values = [value for value in values if value]
+    if not values:
+        raise ConfigurationError("gateway secret lacks required key: %s" % name)
+    if len(set(values)) != 1:
+        raise ConfigurationError("gateway secret has conflicting aliases for: %s" % name)
+    return values[0]
+
+
 def _database_parameters(
     dsn: str, *, expected_database: str, expected_port: int
 ) -> dict[str, str]:
@@ -177,6 +194,40 @@ def _database_connect(args: argparse.Namespace):
     import psycopg2
 
     return lambda: psycopg2.connect(**parameters)
+
+
+def _managed_postgrest_transport(args: argparse.Namespace):
+    """Build the Arena transport from the protected LAB_ARENA environment.
+
+    The managed path deliberately does not accept a DSN or a database name.
+    Its only mutable target is the configured HTTPS PostgREST origin, and the
+    service credential stays in the process environment.
+    """
+
+    if args.arena_environment_file is not None:
+        from scripts.run_lab_arena_service import load_scoped_environment
+
+        load_scoped_environment(args.arena_environment_file)
+    from lab_arena.store import PostgrestTransport
+
+    url = os.environ.get("LAB_ARENA_SUPABASE_URL", "").strip()
+    anon_key = os.environ.get("LAB_ARENA_SUPABASE_ANON_KEY", "").strip()
+    service_key = os.environ.get("LAB_ARENA_SERVICE_KEY", "").strip()
+    service_jwt = os.environ.get("LAB_ARENA_SERVICE_JWT", "").strip()
+    if not url or not anon_key or not (service_key or service_jwt):
+        raise ConfigurationError(
+            "managed PostgREST requires LAB_ARENA_SUPABASE_URL, "
+            "LAB_ARENA_SUPABASE_ANON_KEY, and one Arena service credential"
+        )
+    try:
+        return PostgrestTransport(
+            url,
+            anon_key=anon_key,
+            service_key=service_key,
+            service_jwt=service_jwt,
+        )
+    except Exception as exc:
+        raise ConfigurationError("managed PostgREST transport is invalid") from exc
 
 
 def _validate_s3_prefix(prefix: str) -> str:
@@ -394,6 +445,19 @@ def _cutoff_and_round(args: argparse.Namespace) -> tuple[datetime, str]:
     return cutoff, round_id
 
 
+def _advance_pinned(service: Any, round_id: str) -> str:
+    """Advance exactly one round without daily-round creation or rewards."""
+
+    try:
+        result = service.advance_round(round_id)
+    except Exception as exc:
+        return "failed advance_round %s: %s" % (round_id, type(exc).__name__)
+    if isinstance(result, Mapping):
+        status = str(result.get("status") or "unknown")
+        return "advanced %s:%s" % (round_id, status)
+    return "advanced %s" % round_id
+
+
 def _validate_chain_endpoint(endpoint: str) -> str:
     parts = urllib.parse.urlsplit(endpoint)
     if (
@@ -419,12 +483,18 @@ def _serve(args: argparse.Namespace) -> int:
     if len({args.runner_hotkey, args.miner_hotkey, args.baseline_hotkey}) != 3:
         raise ConfigurationError("runner, miner, and baseline hotkeys must be distinct")
     _validate_chain_endpoint(args.chain_endpoint)
+    if args.managed_postgrest and args.port == 8792:
+        args.port = 8794
     if args.resume_round and not args.round_id:
         raise ConfigurationError("--resume-round requires the exact --round-id")
     cutoff, round_id = _cutoff_and_round(args)
     _assert_aws_account(args.aws_region, args.expected_aws_account)
     secret = _load_gateway_secret(args.gateway_secret_id, args.aws_region)
-    _require_secret_names(secret, REQUIRED_ORGANIZER_KEYS)
+    provider_keys = {
+        "openrouter": _secret_alias(secret, "LAB_ARENA_OPENROUTER_API_KEY"),
+        "deepline": _secret_alias(secret, "LAB_ARENA_DEEPLINE_API_KEY"),
+        "scrapingdog": _secret_alias(secret, "LAB_ARENA_SCRAPINGDOG_API_KEY"),
+    }
     kms_client = _assert_kms_key(
         args.kms_key_id, region=args.aws_region, account=args.expected_aws_account
     )
@@ -441,8 +511,11 @@ def _serve(args: argparse.Namespace) -> int:
     from lab_arena.submission_runtime import SubmissionProviderKeys
     from lab_arena.wiring import ChainReadsAdapter, fetch_public_source_archive, registry_client_from_environment
 
-    connect = _database_connect(args)
-    transport = PsycopgTransport(connect)
+    if args.managed_postgrest:
+        transport = _managed_postgrest_transport(args)
+    else:
+        connect = _database_connect(args)
+        transport = PsycopgTransport(connect)
     store = ArenaStore(transport)
     chain_config = chain_module.ArenaChainConfig(
         endpoint=args.chain_endpoint,
@@ -480,11 +553,6 @@ def _serve(args: argparse.Namespace) -> int:
         )
         chain_reads = ChainReadsAdapter(arena_chain)
         credential_manager = CredentialManager(kms_key_id=args.kms_key_id, kms_client=kms_client)
-        provider_keys = {
-            "openrouter": secret["LAB_ARENA_OPENROUTER_API_KEY"],
-            "deepline": secret["LAB_ARENA_DEEPLINE_API_KEY"],
-            "scrapingdog": secret["LAB_ARENA_SCRAPINGDOG_API_KEY"],
-        }
         submission_keys = SubmissionProviderKeys(
             store=store, credentials=credential_manager, organizer_keys=provider_keys
         )
@@ -548,11 +616,17 @@ def _serve(args: argparse.Namespace) -> int:
         checks = service.startup_checks()
         if checks.get("schema_version") != EXPECTED_SCHEMA_VERSION:
             raise ConfigurationError("Arena startup did not verify schema 185")
-        existing_rounds = store.list_rounds(limit=2)
         if args.resume_round:
-            if len(existing_rounds) != 1 or existing_rounds[0].get("round_id") != round_id:
-                raise ConfigurationError("resume target is not the only round in the isolated database")
-            existing_configuration = existing_rounds[0].get("configuration_doc") or {}
+            if args.managed_postgrest:
+                existing_round = store.get_round(round_id)
+                if existing_round is None:
+                    raise ConfigurationError("resume target does not exist")
+            else:
+                existing_rounds = store.list_rounds(limit=2)
+                if len(existing_rounds) != 1 or existing_rounds[0].get("round_id") != round_id:
+                    raise ConfigurationError("resume target is not the only round in the isolated database")
+                existing_round = existing_rounds[0]
+            existing_configuration = existing_round.get("configuration_doc") or {}
             if (
                 existing_configuration.get("mode") != "shadow"
                 or existing_configuration.get("rewards_enabled") is not False
@@ -562,11 +636,16 @@ def _serve(args: argparse.Namespace) -> int:
                 or existing_configuration.get("scorer_image_reference") != str(scorer.reference)
             ):
                 raise ConfigurationError("existing round configuration does not match the resume request")
+        elif args.managed_postgrest:
+            if store.get_round(round_id) is not None:
+                raise ConfigurationError("managed target round already exists")
+            service.create_round(cutoff, round_id=round_id)
         else:
+            existing_rounds = store.list_rounds(limit=2)
             if existing_rounds:
                 raise ConfigurationError("isolated database already contains an Arena round")
             service.create_round(cutoff, round_id=round_id)
-        initial = drive_once(service)
+        initial = _advance_pinned(service, round_id) if args.managed_postgrest else drive_once(service)
         if "failed" in initial:
             raise ConfigurationError("initial Arena driver tick failed")
         _json_output(
@@ -587,7 +666,11 @@ def _serve(args: argparse.Namespace) -> int:
 
         def driver() -> None:
             while not stop.wait(max(5, args.tick_seconds)):
-                outcome = drive_once(service)
+                outcome = (
+                    _advance_pinned(service, round_id)
+                    if args.managed_postgrest
+                    else drive_once(service)
+                )
                 if "failed" in outcome:
                     print("Arena driver tick failed", file=sys.stderr)
 
@@ -642,6 +725,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = commands.add_parser("serve", help="create and drive one isolated shadow testnet401 round")
     add_aws(serve)
+    serve.add_argument(
+        "--managed-postgrest",
+        action="store_true",
+        help="use the configured managed Supabase PostgREST target",
+    )
+    serve.add_argument(
+        "--arena-environment-file",
+        type=Path,
+        help="load only LAB_ARENA_* values for managed PostgREST",
+    )
     serve.add_argument("--chain-endpoint", required=True)
     serve.add_argument("--cutoff", required=True, help="current-day UTC instant, 1 to 60 minutes ahead")
     serve.add_argument("--round-id")

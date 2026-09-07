@@ -1791,6 +1791,12 @@ def _rehearsal_failure_diagnostics(
         ):
             return projection
         stages: list[dict[str, Any]] = []
+        summary_error_type = document.get("error_type")
+        if (
+            isinstance(summary_error_type, str)
+            and summary_error_type in SAFE_REHEARSAL_ERROR_TYPES
+        ):
+            projection["error_type"] = summary_error_type
         for item in document["stages"]:
             if not isinstance(item, Mapping) or item.get("status") not in {
                 "failed",
@@ -2013,6 +2019,9 @@ def _write_rehearsal_failure_projection(
         "status": "failed",
         "timeout": diagnostics.get("timeout") is True,
     }
+    error_type = diagnostics.get("error_type")
+    if isinstance(error_type, str) and error_type in SAFE_REHEARSAL_ERROR_TYPES:
+        projection["error_type"] = error_type
     encoded = json.dumps(projection, sort_keys=True, indent=2) + "\n"
     if len(encoded.encode("utf-8")) > 16_384:
         projection["output_markers"] = []

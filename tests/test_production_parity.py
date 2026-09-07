@@ -3842,6 +3842,56 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
     assert projection["timeout"] is True
 
 
+def test_empty_stage_error_type_reaches_retained_projection_without_raw_text(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "e" * 40
+    durable_root = tmp_path / (
+        f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-empty"
+    )
+    durable_root.mkdir()
+    secret = "do-not-retain-this-exception-text"
+    (durable_root / "failure-summary.json").write_text(
+        json.dumps(
+            {
+                "candidate_sha": candidate_sha,
+                "status": "failed",
+                "error_type": "RuntimeError",
+                "error": secret,
+                "stages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fast_parity.tempfile, "gettempdir", lambda: str(tmp_path))
+    result = fast_parity.subprocess.CompletedProcess(
+        args=["rehearsal"],
+        returncode=1,
+        stdout="",
+        stderr=f"REHEARSAL_BOUNDED_FAILURE_PROJECTION {durable_root}\n",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result, candidate_sha=candidate_sha
+    )
+    assert diagnostics["error_type"] == "RuntimeError"
+    assert diagnostics["stages"] == []
+    assert secret not in json.dumps(diagnostics)
+
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    encoded = projection_path.read_text(encoding="utf-8")
+    projection = json.loads(encoded)
+    assert projection["error_type"] == "RuntimeError"
+    assert projection["stages"] == []
+    assert secret not in encoded
+
+
 @pytest.mark.parametrize(
     ("stream_kind", "expects_safe_markers"),
     (("bytes", True), ("str", True), ("malformed", False)),

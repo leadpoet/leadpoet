@@ -50,13 +50,39 @@ def test_candidate_bundles_hash_selectable_testnet_profile(monkeypatch):
     assert selected["genesis_hash"] == (
         "8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
     )
-    assert selected["tempo"] == 99
+    assert selected["tempo"] == 360
     result = verify_chain_signing_profile_v2(
         profile=selected,
         runtime_version={"specVersion": 447, "transactionVersion": 1},
         genesis_hash="0x" + selected["genesis_hash"],
     )
     assert result["status"] == "ready"
+
+
+def test_chain_signing_profile_accepts_matching_live_subnet_schedule():
+    result = verify_chain_signing_profile_v2(
+        profile=_compatible_profile(),
+        runtime_version={"specVersion": 438, "transactionVersion": 1},
+        genesis_hash="0x" + "ab" * 32,
+        tempo=360,
+        subnet_reveal_period_epochs=1,
+    )
+
+    assert result["status"] == "ready"
+
+
+def test_chain_signing_profile_rejects_tempo_after_runtime_passes():
+    with pytest.raises(
+        ChainSigningProfileV2Error,
+        match="live subnet tempo differs from measured profile",
+    ):
+        verify_chain_signing_profile_v2(
+            profile=_compatible_profile(),
+            runtime_version={"specVersion": 438, "transactionVersion": 1},
+            genesis_hash="0x" + "ab" * 32,
+            tempo=99,
+            subnet_reveal_period_epochs=1,
+        )
 
 
 def test_chain_signing_profile_accepts_exact_live_runtime():

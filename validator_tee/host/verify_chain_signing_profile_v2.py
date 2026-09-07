@@ -39,6 +39,8 @@ def verify_chain_signing_profile_v2(
     runtime_version: Mapping[str, Any],
     genesis_hash: str,
     call_metadata: Optional[Mapping[str, Any]] = None,
+    tempo: Optional[int] = None,
+    subnet_reveal_period_epochs: Optional[int] = None,
 ) -> Dict[str, Any]:
     expected = dict(profile)
     observed_genesis = str(genesis_hash or "").lower().removeprefix("0x")
@@ -115,6 +117,29 @@ def verify_chain_signing_profile_v2(
                     % name
                 )
 
+    if (tempo is None) != (subnet_reveal_period_epochs is None):
+        raise ChainSigningProfileV2Error(
+            "live subnet schedule is incomplete"
+        )
+    if tempo is not None:
+        try:
+            observed_tempo = int(tempo)
+            observed_reveal_period = int(subnet_reveal_period_epochs)
+        except (TypeError, ValueError) as exc:
+            raise ChainSigningProfileV2Error(
+                "live subnet schedule is invalid"
+            ) from exc
+        if observed_tempo != int(selected["tempo"]):
+            raise ChainSigningProfileV2Error(
+                "live subnet tempo differs from measured profile"
+            )
+        if observed_reveal_period != int(
+            selected["subnet_reveal_period_epochs"]
+        ):
+            raise ChainSigningProfileV2Error(
+                "live subnet reveal period differs from measured profile"
+            )
+
     return {
         "schema_version": "leadpoet.chain_signing_profile_compatibility.v2",
         "status": "ready",
@@ -125,7 +150,7 @@ def verify_chain_signing_profile_v2(
     }
 
 
-def read_live_chain_signing_state(network: str) -> Dict[str, Any]:
+def read_live_chain_signing_state(network: str, netuid: int = 71) -> Dict[str, Any]:
     subtensor = bt.Subtensor(network=str(network))
     finalized_hash = str(
         _rpc_result(
@@ -206,31 +231,60 @@ def read_live_chain_signing_state(network: str) -> Dict[str, Any]:
             "call_index": bytes((module_index, function_index)).hex(),
             "fields": list(value.get("fields") or ()),
         }
+    try:
+        tempo = int(
+            subtensor.substrate.query(
+                "SubtensorModule", "Tempo", [int(netuid)], block_hash=finalized_hash
+            ).value
+        )
+        subnet_reveal_period_epochs = int(
+            subtensor.substrate.query(
+                "SubtensorModule",
+                "RevealPeriodEpochs",
+                [int(netuid)],
+                block_hash=finalized_hash,
+            ).value
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ChainSigningProfileV2Error(
+            "exact finalized subnet schedule is invalid"
+        ) from exc
     return {
         "runtime_version": dict(runtime_version),
         "genesis_hash": str(genesis_hash or ""),
         "finalized_block_hash": finalized_hash,
         "finalized_block": finalized_block,
         "call_metadata": call_metadata,
+        "netuid": int(netuid),
+        "tempo": tempo,
+        "subnet_reveal_period_epochs": subnet_reveal_period_epochs,
     }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--network", default="finney")
+    parser.add_argument("--netuid", type=int, default=71)
     parser.add_argument("--profile", type=Path, required=True)
     args = parser.parse_args(argv)
 
     profile = load_chain_signing_profile(args.profile)
-    live = read_live_chain_signing_state(args.network)
+    live = read_live_chain_signing_state(args.network, args.netuid)
     result = verify_chain_signing_profile_v2(
         profile=profile,
         runtime_version=live["runtime_version"],
         genesis_hash=live["genesis_hash"],
         call_metadata=live["call_metadata"],
+        tempo=live["tempo"],
+        subnet_reveal_period_epochs=live["subnet_reveal_period_epochs"],
     )
     result["finalized_block"] = live["finalized_block"]
     result["finalized_block_hash"] = live["finalized_block_hash"]
+    result["netuid"] = live["netuid"]
+    result["tempo"] = live["tempo"]
+    result["subnet_reveal_period_epochs"] = live[
+        "subnet_reveal_period_epochs"
+    ]
     print(json.dumps(result, sort_keys=True))
     return 0
 

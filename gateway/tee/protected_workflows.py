@@ -235,10 +235,6 @@ PROTECTED_SYMBOLS = {
         "insert_rows",
         "_is_seq_conflict",
     ),
-    "gateway/research_lab/source_add_trial_runner.py": (
-        "_remove_interrupted_source_add_container",
-        "build_source_add_sandbox_runner",
-    ),
     "gateway/research_lab/provider_capabilities.py": (
         "_SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION",
         "_SOURCE_ADD_REGISTRATION_FIELDS",

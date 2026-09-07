@@ -24,8 +24,10 @@ same frozen ICPs and scorer. Arena publishes the competition result.
   responses. Cost exhaustion and cost-tracking failures use the existing
   HTTP 402 refusal, accounting, and request cleanup paths.
 - Uncalled loop-generated SOURCE_ADD suggestions and the old local P1.5
-  sandbox-review, workflow-guard, IP-assignment, and bounty simulator. Active
-  SOURCE_ADD manifests, trial outputs, intake, and their validators remain.
+  sandbox-review, workflow-guard, IP-assignment, and bounty simulator.
+- The disabled manual SOURCE_ADD CLI, its exclusive Docker trial and persistence
+  writer, and its private trial-output contract. Active SOURCE_ADD manifests,
+  intake records, measured V2 functional probes, and provisioning remain.
 - The model sandbox rootfs marker and gVisor installation inside the gateway
   enclave. Arena executes on validator hosts and retains its verified gVisor
   runtime.

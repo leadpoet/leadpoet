@@ -5564,7 +5564,6 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/provider_client_v2.py",
         "gateway/tee/rpc_authority.py",
         "gateway/main.py",
-        "gateway/research_lab/source_add_trial_runner.py",
         "gateway/tee/code_hash.py",
         "gateway/tee/prepare_gateway_envelopes_v2.py",
         "gateway/tee/protected_workflows.py",

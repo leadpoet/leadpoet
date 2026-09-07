@@ -102,7 +102,7 @@ def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 
-def test_shared_docker_host_veto_and_source_add_lifecycle_are_protected():
+def test_shared_docker_host_veto_is_protected():
     assert {
         "ATTESTED_RUNTIME_DIR",
         "ATTESTED_RUNTIME_PACKAGES",
@@ -177,9 +177,6 @@ def test_shared_docker_host_veto_and_source_add_lifecycle_are_protected():
         "_run_sync_build_step_to_completion",
         "_communicate_build_process_to_completion",
     } <= set(PROTECTED_SYMBOLS["gateway/utils/pcr0_builder.py"])
-    assert "build_source_add_sandbox_runner" in PROTECTED_SYMBOLS[
-        "gateway/research_lab/source_add_trial_runner.py"
-    ]
 
 
 def test_enclave_surface_stages_every_external_protected_source(tmp_path: Path):

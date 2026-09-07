@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from enum import Enum
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 SOURCE_ADD_OUTPUT_FIELDS: tuple[str, ...] = (
     "evidence_refs",
@@ -261,39 +261,6 @@ class SourceAddAdapterManifest:
         return data
 
 
-@dataclass(frozen=True)
-class SourceAddTrialOutputRecord:
-    output_ref: str
-    adapter_id: str
-    icp_ref: str
-    evidence_refs: tuple[str, ...]
-    snapshot_refs: tuple[str, ...]
-    content_hashes: tuple[str, ...]
-    normalized_text_hashes: tuple[str, ...]
-    metadata_refs: tuple[str, ...] = ()
-    output_schema_ref: str = "schema:source-add-output:v1"
-
-    @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "SourceAddTrialOutputRecord":
-        return cls(
-            output_ref=str(data["output_ref"]),
-            adapter_id=str(data["adapter_id"]),
-            icp_ref=str(data["icp_ref"]),
-            evidence_refs=tuple(str(item) for item in data.get("evidence_refs", [])),
-            snapshot_refs=tuple(str(item) for item in data.get("snapshot_refs", [])),
-            content_hashes=tuple(str(item) for item in data.get("content_hashes", [])),
-            normalized_text_hashes=tuple(str(item) for item in data.get("normalized_text_hashes", [])),
-            metadata_refs=tuple(str(item) for item in data.get("metadata_refs", [])),
-            output_schema_ref=str(data.get("output_schema_ref", "schema:source-add-output:v1")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        for field in SOURCE_ADD_OUTPUT_FIELDS:
-            data[field] = list(getattr(self, field))
-        return data
-
-
 def validate_source_add_adapter_manifest(
     manifest: SourceAddAdapterManifest | Mapping[str, Any],
 ) -> list[str]:
@@ -345,45 +312,6 @@ def validate_source_add_adapter_manifest(
     if manifest.artifact_release_state != "private_live_champion":
         errors.append("SOURCE_ADD adapter manifest must remain private")
     return errors
-
-
-def validate_source_add_trial_output(output: SourceAddTrialOutputRecord | Mapping[str, Any]) -> list[str]:
-    raw = output if isinstance(output, Mapping) else output.to_dict()
-    if not isinstance(output, SourceAddTrialOutputRecord):
-        output = SourceAddTrialOutputRecord.from_mapping(output)
-    errors: list[str] = []
-    if _contains_any_key(raw, RAW_OUTPUT_FIELDS):
-        errors.append("adapter trial outputs must not contain raw scraped content fields")
-    if not output.evidence_refs:
-        errors.append("evidence_refs must not be empty")
-    if not output.snapshot_refs:
-        errors.append("snapshot_refs must not be empty")
-    if not output.content_hashes:
-        errors.append("content_hashes must not be empty")
-    if not output.normalized_text_hashes:
-        errors.append("normalized_text_hashes must not be empty")
-    for field in ("content_hashes", "normalized_text_hashes"):
-        bad = [value for value in getattr(output, field) if not value.startswith("sha256:")]
-        if bad:
-            errors.append(f"{field} must be sha256-prefixed")
-    for evidence_ref in output.evidence_refs:
-        if not (evidence_ref.startswith("evidence:") or evidence_ref.startswith("sha256:")):
-            errors.append("evidence_refs must be evidence: or sha256: references")
-    return errors
-
-
-def _contains_any_key(value: Any, keys: Sequence[str]) -> bool:
-    key_set = {key.lower() for key in keys}
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            normalized_key = str(key).lower()
-            if normalized_key in key_set:
-                return True
-            if _contains_any_key(nested, keys):
-                return True
-    elif isinstance(value, list):
-        return any(_contains_any_key(item, keys) for item in value)
-    return False
 
 
 def _contains_raw_credential_key(value: Any) -> bool:

@@ -132,7 +132,6 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/research_lab/attested_v2_store.py",
     "gateway/research_lab/api.py",
     "gateway/research_lab/provider_preflight.py",
-    "gateway/research_lab/source_add_trial_runner.py",
     "gateway/research_lab/store.py",
     "gateway/research_lab/v2_authority.py",
     "research_lab/docker_operation_lock_v2.py",

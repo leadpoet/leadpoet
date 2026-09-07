@@ -103,6 +103,52 @@ EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
 )
 FULL_WORK_ROOT = Path("/opt/leadpoet-production-parity")
+GATEWAY_RESTART_TIMING_STAGES = frozenset(
+    {
+        "active_release_lineage_selection",
+        "ancestry_frontier_recovery",
+        "ancestry_postcheckpoint",
+        "ancestry_precheckpoint",
+        "attested_runtime_and_enclave_build",
+        "build_provenance",
+        "bootstrap",
+        "completed",
+        "dependency_import_preflight",
+        "dependency_install",
+        "dependency_preflight",
+        "docker_disk_cleanup",
+        "gateway_health_check",
+        "gateway_process_launch",
+        "git_activate",
+        "git_prepare",
+        "git_prepared_tree_verification",
+        "git_tree_verification",
+        "historical_release_acquisition",
+        "host_restart_script_install",
+        "lab_arena_service_start",
+        "local_release_build",
+        "miner_maintenance_pre_hydration",
+        "miner_maintenance_runtime_verify",
+        "python_cache_cleanup",
+        "restart_reexec",
+        "runtime_env_and_ecr",
+        "source_add_shutdown_quiescence",
+        "stateful_epoch_cutover",
+        "stateful_epoch_cutover_preflight",
+        "v2_credential_envelope_preparation",
+        "v2_kms_provision",
+        "v2_offline_artifact_prepare",
+        "v2_pre_shutdown_preflight",
+        "v2_release_lineage_revalidation",
+        "v2_runtime_bootstrap",
+        "v2_runtime_readiness",
+        "validator_weight_input_http_check",
+        "validator_weight_input_repair",
+        "validator_weight_input_storage_preflight",
+    }
+)
+GATEWAY_RESTART_TIMING_STATUSES = frozenset({"failed", "passed", "reached"})
+GATEWAY_RESTART_TIMING_MAX_BYTES = 128 * 1024
 ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
 ATTESTED_V2_KMS_KEY_ID = (
@@ -218,6 +264,64 @@ def _failure_identity(stage: str, exc: BaseException) -> tuple[str, str]:
     raw_type = type(exc).__name__
     bounded_type = raw_type if raw_type in FULL_ERROR_TYPES else "UnexpectedError"
     return bounded_stage, bounded_type
+
+
+def _gateway_restart_timing_diagnostic(timing_dir: Path) -> dict[str, Any] | None:
+    """Return only the final bounded fields from one run-owned timing ledger."""
+
+    try:
+        ledgers = list(timing_dir.glob("gateway-*.jsonl"))
+    except OSError:
+        return None
+    if len(ledgers) != 1:
+        return None
+    descriptor = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(ledgers[0], flags)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or not 0 < metadata.st_size <= GATEWAY_RESTART_TIMING_MAX_BYTES
+        ):
+            return None
+        raw = os.read(descriptor, GATEWAY_RESTART_TIMING_MAX_BYTES + 1)
+        if len(raw) != metadata.st_size:
+            return None
+        lines = raw.decode("utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if not lines or len(lines) > 512:
+        return None
+    try:
+        final = json.loads(lines[-1])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(final, Mapping):
+        return None
+    stage = final.get("stage")
+    status = final.get("status")
+    elapsed = final.get("elapsed_seconds")
+    if (
+        not isinstance(stage, str)
+        or stage not in GATEWAY_RESTART_TIMING_STAGES
+        or not isinstance(status, str)
+        or status not in GATEWAY_RESTART_TIMING_STATUSES
+        or not isinstance(elapsed, (int, float))
+        or isinstance(elapsed, bool)
+        or not math.isfinite(elapsed)
+        or not 0 <= elapsed <= MAX_FULL_TIMEOUT_SECONDS
+    ):
+        return None
+    return {
+        "final_stage": stage,
+        "final_status": status,
+        "elapsed_seconds": round(float(elapsed), 3),
+    }
 
 
 def _write_early_failure_evidence(
@@ -3189,12 +3293,14 @@ def run_full(
     manifest_path = work / "snapshot-manifest.json"
     gateway_env_file = work / "gateway.env"
     gateway_log = work / "gateway-restart.log"
+    gateway_restart_timing_dir = work / "restart-timings"
     allocation_override = work / "production-allocation.json"
     artifact_policy = work / "v2-config" / "encrypted-artifact-policy.json"
     secrets_client: Any | None = None
     database: _DockerDatabase | None = None
     prefix_adapter: _ClonePostgrestPrefixAdapter | None = None
     secret_created = False
+    gateway_restart_diagnostic: dict[str, Any] | None = None
     failure_stage = "initialization"
     evidence: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -3379,6 +3485,7 @@ def run_full(
                 "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT": str(work / "offline-artifacts"),
                 "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(work / "offline-artifacts" / "validator-runtime"),
                 "GATEWAY_RESTART_LOCK_FILE": str(work / "gateway-restart.lock"),
+                "GATEWAY_RESTART_TIMING_DIR": str(gateway_restart_timing_dir),
                 "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(work / "docker-operation.lock"),
                 "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "full-parity",
                 "GATEWAY_DEPLOY_COMMIT": candidate_sha,
@@ -3389,18 +3496,30 @@ def run_full(
             },
         )
         failure_stage = "gateway-restart"
-        restart = _run(
-            ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
-            timeout=min(
-                _remaining_full_timeout(
-                    deadline=deadline,
-                    stage="exact gateway restart",
-                ),
-                10800,
+        restart_timeout = min(
+            _remaining_full_timeout(
+                deadline=deadline,
+                stage="exact gateway restart",
             ),
-            env=env,
-            log_path=gateway_log,
+            10800,
         )
+        try:
+            restart = _run(
+                ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
+                timeout=restart_timeout,
+                env=env,
+                log_path=gateway_log,
+            )
+        except subprocess.TimeoutExpired:
+            gateway_restart_diagnostic = {
+                "outcome": "timed_out",
+                "timeout_seconds": restart_timeout,
+            }
+            raise
+        gateway_restart_diagnostic = {
+            "outcome": "exited",
+            "returncode": restart.returncode,
+        }
         if restart.returncode != 0:
             raise FullParityError("exact gateway restart failed")
         failure_stage = "gateway-health"
@@ -3550,6 +3669,16 @@ def run_full(
         raise
     finally:
         cleanup: dict[str, Any] = {}
+        if gateway_restart_diagnostic is not None:
+            try:
+                timing = _gateway_restart_timing_diagnostic(
+                    gateway_restart_timing_dir
+                )
+                if timing is not None:
+                    gateway_restart_diagnostic["timing"] = timing
+            except Exception:  # noqa: BLE001 - diagnostics cannot suppress cleanup
+                pass
+            evidence["gateway_restart_diagnostic"] = gateway_restart_diagnostic
         if prefix_adapter is not None:
             try:
                 cleanup["prefix_adapter"] = prefix_adapter.cleanup()

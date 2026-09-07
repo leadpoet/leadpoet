@@ -29,11 +29,9 @@ silent ``QUALIFICATION_*`` fallback.
 
 Cost caps: paid live calls are metered per cost scope (the
 ``X-Research-Lab-Cost-Scope`` header, e.g. one ICP) against
-``RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP``; a scope over its cap gets a
-typed zero-cost soft stop for private-model traffic before any upstream
-contact, and every response carries the cost event headers so the
-container-side trace tee can attribute spend. Non-model/debug callers can
-still receive the hard 402 behavior by omitting the soft-stop header.
+``RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP``; a scope over its cap receives
+an HTTP 402 refusal before any upstream contact, and every response carries
+the cost event headers so the container-side trace tee can attribute spend.
 """
 
 from __future__ import annotations

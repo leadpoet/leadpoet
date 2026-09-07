@@ -1173,6 +1173,8 @@ prepare_running_validator_release_requirements() {
     "set -Eeuo pipefail
      umask 077
      cd '$VALIDATOR_REPO_ROOT'
+     git cat-file -e '$branch_commit^{commit}' 2>/dev/null \\
+       || git fetch --no-tags origin '$branch_commit'
      test \"\$(git rev-parse --verify HEAD)\" = '$commit'
      running_commit=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' leadpoet-validator-main | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p')
      test \"\$running_commit\" = '$commit'

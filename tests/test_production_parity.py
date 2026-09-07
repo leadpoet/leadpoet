@@ -2308,6 +2308,213 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
 
 
 @pytest.mark.parametrize(
+    ("timing_record", "restart_outcome", "expected_timing"),
+    [
+        (
+            {
+                "stage": "v2_runtime_bootstrap",
+                "status": "failed",
+                "elapsed_seconds": 9321.1254,
+            },
+            "exited",
+            {
+                "final_stage": "v2_runtime_bootstrap",
+                "final_status": "failed",
+                "elapsed_seconds": 9321.125,
+            },
+        ),
+        (
+            {
+                "stage": "must_not_survive",
+                "status": ["failed", "must-not-survive"],
+                "elapsed_seconds": 12,
+            },
+            "exited",
+            None,
+        ),
+        (
+            {
+                "stage": "local_release_build",
+                "status": "failed",
+                "elapsed_seconds": 10800,
+            },
+            "timed_out",
+            {
+                "final_stage": "local_release_build",
+                "final_status": "failed",
+                "elapsed_seconds": 10800.0,
+            },
+        ),
+        (
+            {
+                "stage": "git_prepared_tree_verification",
+                "status": "failed",
+                "elapsed_seconds": 259.607,
+            },
+            "epoch_gate",
+            {
+                "final_stage": "git_prepared_tree_verification",
+                "final_status": "failed",
+                "elapsed_seconds": 259.607,
+            },
+        ),
+    ],
+)
+def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+    timing_record,
+    restart_outcome,
+    expected_timing,
+):
+    marker = tmp_path / "early-boot-isolated"
+    marker.write_text("isolated\n", encoding="utf-8")
+    work_root = tmp_path / "encrypted-root-volume"
+    output = tmp_path / "evidence" / "full.json"
+
+    class Database:
+        target_dsn = "postgresql://postgres:x@127.0.0.1/leadpoet_parity_test"
+        jwt_secret = "clone-jwt"
+
+        start = staticmethod(lambda: None)
+        prepare_snapshot_restore = staticmethod(lambda: {"verified": True})
+        verify_snapshot_restore = staticmethod(lambda: {"verified": True})
+        start_postgrest = staticmethod(lambda: ("http://127.0.0.1:3001", None))
+        cleanup = staticmethod(lambda: {"status": "removed"})
+
+    class PrefixAdapter:
+        start = staticmethod(
+            lambda: {
+                "listen_host": "0.0.0.0",
+                "listen_port": 3000,
+                "path_prefix": "/rest/v1",
+            }
+        )
+        cleanup = staticmethod(lambda: "removed")
+
+    def fake_run(command, **kwargs):
+        assert command[0:2] == ["bash", str(full_host.ROOT / "gw_restart.sh")]
+        timing_dir = Path(kwargs["env"]["GATEWAY_RESTART_TIMING_DIR"])
+        timing_dir.mkdir(parents=True)
+        (timing_dir / "gateway-1-2.jsonl").write_text(
+            json.dumps(
+                {
+                    "schema_version": "leadpoet.gateway_restart_timing.v1",
+                    **timing_record,
+                    "commit_sha": "b" * 40,
+                    "ignored_free_text": "must-not-survive",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if restart_outcome == "timed_out":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if restart_outcome == "epoch_gate":
+            # Earlier log context must not become a guessed cause for a safe
+            # epoch-gate stop that leaves both production runtimes healthy.
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "RuntimeError: enclave relay unavailable\n"
+                "RestartEpochGateError: production restart may start only at "
+                "official subnet epoch block 300 or earlier; observed 312\n",
+                encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(command, 75)
+
+    monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
+    monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
+    monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
+    monkeypatch.setattr(
+        full_host,
+        "_materialize_run_owned_runtime_identity",
+        lambda path: (
+            path.parent.joinpath("sensitive.txt").write_text(
+                "must-not-survive", encoding="utf-8"
+            )
+            and {
+                "gateway_private_key_path": "/run/parity/gateway-private.pem",
+                "gateway_public_key": PARITY_GATEWAY_PUBLIC_KEY,
+                "gateway_public_key_hash": "sha256:" + "1" * 64,
+                "arweave_keyfile_path": "/run/parity/arweave.json",
+                "arweave_address_hash": "sha256:" + "2" * 64,
+            }
+        ),
+    )
+    monkeypatch.setattr(full_host.boto3, "client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(full_host, "_DockerDatabase", lambda **_kwargs: Database())
+    monkeypatch.setattr(full_host, "capture", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        full_host,
+        "build_contract",
+        lambda **_kwargs: {"contract_hash": HASH},
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_secret_value",
+        lambda *_args, **_kwargs: "postgresql://reader:x@db.example/postgres",
+    )
+    monkeypatch.setattr(
+        full_host,
+        "capture_snapshot",
+        lambda **_kwargs: {
+            "capture_mode": "full",
+            "database": {"target_rebenchmark_date": "2026-08-19"},
+        },
+    )
+    monkeypatch.setattr(full_host, "restore_snapshot", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        full_host,
+        "_ClonePostgrestPrefixAdapter",
+        lambda **_kwargs: PrefixAdapter(),
+    )
+    monkeypatch.setattr(full_host, "_wait_https_origin", lambda _origin: None)
+    monkeypatch.setattr(
+        full_host,
+        "create_gateway_secret",
+        lambda **_kwargs: {"secret_id": "run-secret"},
+    )
+    monkeypatch.setattr(full_host, "delete_gateway_secret", lambda **_kwargs: "removed")
+    monkeypatch.setattr(full_host, "_run", fake_run)
+
+    expected_exception = (
+        subprocess.TimeoutExpired
+        if restart_outcome == "timed_out"
+        else FullParityError
+    )
+    with pytest.raises(expected_exception):
+        full_host.run_full(
+            region="us-east-1",
+            run_id="pp-test-1",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            production_gateway_secret_id="gateway-secret",
+            readonly_dsn_secret_id="readonly-secret",
+            miner_intake_secret_id="miner-secret",
+            supabase_origin=ORIGIN,
+            artifact_bucket="parity-artifacts",
+            postgres_image="postgres@sha256:" + "c" * 64,
+            postgrest_image="postgrest@sha256:" + "d" * 64,
+            output=output,
+            timeout_seconds=20_000,
+        )
+
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    expected = (
+        {"outcome": "timed_out", "timeout_seconds": 10800}
+        if restart_outcome == "timed_out"
+        else {"outcome": "exited", "returncode": 75}
+    )
+    if expected_timing is not None:
+        expected["timing"] = expected_timing
+    assert evidence["gateway_restart_diagnostic"] == expected
+    assert evidence["cleanup"]["work"] == "removed"
+    assert not (work_root / "pp-test-1" / "runtime").exists()
+    assert "must-not-survive" not in output.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         (("archive", "persisted"), True),

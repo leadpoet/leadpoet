@@ -52,7 +52,7 @@ def test_gateway_secret_parser_reports_names_without_values():
     assert secret["SUPABASE_URL"] == "https://x.supabase.co"
     assert secret["unrelated.lowercase-key"] == "ignored"
     with pytest.raises(SCRIPT.ConfigurationError) as error:
-        SCRIPT._require_secret_names(secret, SCRIPT.REQUIRED_ORGANIZER_KEYS)
+        SCRIPT._require_secret_names(secret, tuple(SCRIPT.ORGANIZER_KEY_ALIASES))
     assert "private-value" not in str(error.value)
 
 
@@ -96,16 +96,20 @@ def test_parser_fixes_shadow_limits_and_requires_explicit_resources():
     assert args.miner_hotkey == SCRIPT.DEFAULT_MINER
 
 
-def test_managed_transport_uses_arena_environment_without_network(monkeypatch):
+@pytest.mark.parametrize("service_key", ("", "sb_secret_example"))
+def test_managed_transport_uses_arena_environment_without_network(monkeypatch, service_key):
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setenv("LAB_ARENA_SUPABASE_ANON_KEY", "anon")
     monkeypatch.setenv("LAB_ARENA_SERVICE_JWT", "header.payload.signature")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", service_key)
     args = type("Args", (), {"arena_environment_file": None})()
 
     transport = SCRIPT._managed_postgrest_transport(args)
     try:
         assert "header.payload.signature" not in repr(transport)
         assert "example.supabase.co" in repr(transport)
+        assert ("Authorization" in transport._headers) is not bool(service_key)
+        assert transport._headers["apikey"] == (service_key or "anon")
     finally:
         transport.close()
 

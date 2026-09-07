@@ -235,7 +235,7 @@ def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
                     ),
                 )
             cursor.execute(
-                "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled, king_outcome, effective_reward_epoch, reward_basis_hash, reward_basis_doc, signing_key_doc, reward_activated_at, published_at) VALUES (%s, 'published', %s::jsonb, TRUE, 'no_king', 20000, %s, %s::jsonb, %s::jsonb, clock_timestamp(), clock_timestamp())",
+                "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled, king_outcome, effective_reward_epoch, reward_basis_hash, reward_basis_doc, signing_key_doc, reward_activated_at, published_at) VALUES (%s, 'published', %s::jsonb, TRUE, 'no_king', 9000, %s, %s::jsonb, %s::jsonb, clock_timestamp(), clock_timestamp())",
                 (
                     live_published_id,
                     '{"mode":"live","rewards_enabled":true,"baseline_hotkey":"baseline"}',
@@ -245,15 +245,24 @@ def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
                 ),
             )
         stack["connection"].commit()
-        shadow_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="shadow")}
-        live_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="live")}
-        assert {shadow_id, *shadow_open_ids} <= shadow_rounds
+        shadow_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="shadow", limit=20)}
+        live_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="live", limit=20)}
+        assert len(shadow_rounds) == 20
+        assert shadow_rounds <= {shadow_id, *shadow_open_ids}
         assert live_id in live_rounds and shadow_id not in live_rounds
-        # The reward query is also mode-scoped before its bounded limit. The
-        # live basis remains visible despite 21 earlier shadow publications.
-        assert {row["round_id"] for row in store.published_reward_bases(mode="shadow")} >= set(shadow_published_ids)
-        live_bases = store.published_reward_bases(mode="live")
-        assert live_published_id in {row["round_id"] for row in live_bases}
+        assert live_id not in {
+            row["round_id"] for row in store.list_rounds(status="open", limit=20)
+        }
+        # Without the database mode predicate, the newer shadow rows consume
+        # the whole page. The live reward basis must still be returned.
+        assert live_published_id not in {
+            row["round_id"] for row in store.published_reward_bases(limit=20)
+        }
+        shadow_bases = store.published_reward_bases(mode="shadow", limit=20)
+        assert len(shadow_bases) == 20
+        assert {row["round_id"] for row in shadow_bases} <= set(shadow_published_ids)
+        live_bases = store.published_reward_bases(mode="live", limit=20)
+        assert {row["round_id"] for row in live_bases} == {live_published_id}
     finally:
         # The module-scoped Postgres container is disposable. Arena rounds are
         # intentionally write-once, so cleanup must not disable that trigger.

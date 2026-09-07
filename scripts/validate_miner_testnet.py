@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run one real Lab Arena round against isolated local PostgreSQL and testnet401.
+"""Run one real Lab Arena testnet401 round with rewards disabled.
 
-This operator-only helper keeps all durable database state on a named loopback
-database and all object writes below an explicit S3 prefix. It uses the normal
-Arena service, provider broker, KMS credential vault, chain reader, and driver.
-It never enables rewards and it never writes to the chain.
+By default, durable state uses a named loopback PostgreSQL database. Explicit
+managed mode writes one shadow round through the configured Supabase PostgREST
+service. Both modes use an explicit S3 prefix and the normal Arena service,
+provider broker, KMS credential vault, and chain reader. Neither writes weights.
 """
 
 from __future__ import annotations
@@ -52,11 +52,6 @@ DEFAULT_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 DEFAULT_RUNNER = "5GsGcRyR4kWCcsa1qEAwxtbDq34ZwkQt3rHAGniPFjv1JoXW"
 DEFAULT_BASELINE = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
 DEFAULT_MINER = "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth"
-REQUIRED_ORGANIZER_KEYS = (
-    "LAB_ARENA_OPENROUTER_API_KEY",
-    "LAB_ARENA_DEEPLINE_API_KEY",
-    "LAB_ARENA_SCRAPINGDOG_API_KEY",
-)
 ORGANIZER_KEY_ALIASES = {
     "LAB_ARENA_OPENROUTER_API_KEY": "OPENROUTER_API_KEY",
     "LAB_ARENA_DEEPLINE_API_KEY": "DEEPLINE_API_KEY",
@@ -224,7 +219,7 @@ def _managed_postgrest_transport(args: argparse.Namespace):
             url,
             anon_key=anon_key,
             service_key=service_key,
-            service_jwt=service_jwt,
+            service_jwt="" if service_key else service_jwt,
         )
     except Exception as exc:
         raise ConfigurationError("managed PostgREST transport is invalid") from exc

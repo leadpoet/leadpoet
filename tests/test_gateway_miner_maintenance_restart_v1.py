@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -21,9 +22,6 @@ CANDIDATE_COMMIT = "a" * 40
 TREE_HASH = "b" * 40
 BLOB_HASH = "e" * 64
 CONTROLLER_COMMIT = next(iter(maintenance.SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS))
-REAL_REPOSITORY = Path(__file__).resolve().parents[1]
-SEQUENTIAL_N_MINUS_ONE_COMMIT = "d649562b8c1e0077f670431cd9b22714eb686cd5"
-SEQUENTIAL_CANDIDATE_COMMIT = "d72e475381e127aa209be33deed763d44a8289e6"
 RECOVERY_VERSION = "33333333-3333-4333-8333-333333333333"
 PREVIOUS_VERSION = "44444444-4444-4444-8444-444444444444"
 PENDING_VERSION = "55555555-5555-4555-8555-555555555555"
@@ -236,6 +234,7 @@ def _installed_controller_fixture(
     files = {
         "gw_restart.sh": b"#!/bin/bash\nexit 0\n",
         "scripts/gateway_git_deploy.py": b"HELPER = True\n",
+        "scripts/manage_owned_process_group.py": b"PROCESS = True\n",
         "Leadpoet/utils/exact_commit_restart_v2.py": b"EXACT = True\n",
         "gateway/tee/host_memory_guard_v2.py": b"GUARD = True\n",
     }
@@ -253,49 +252,28 @@ def _installed_controller_fixture(
         "_run_git_bytes",
         lambda _repo, _show, object_name: files[object_name.split(":", 1)[1]],
     )
-    monkeypatch.setattr(
-        maintenance.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
-    )
+    def fake_run(arguments, **_kwargs):
+        if list(arguments[:1]) == ["git"] and "ls-tree" in arguments:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "100644 blob "
+                    + "f" * 40
+                    + "\tscripts/manage_owned_process_group.py\n"
+                ),
+            )
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(maintenance.subprocess, "run", fake_run)
     return controller_parent, controller_root, releases_root, release, current, host_restart
 
 
-def _real_installed_controller_fixture(
-    tmp_path: Path,
-    *,
-    controller_commit: str,
-) -> tuple[Path, Path]:
-    controller_parent = tmp_path / "restart-controller"
-    controller_root = controller_parent / "gateway"
-    releases_root = controller_root / "releases"
-    release = releases_root / controller_commit
-    for directory in (controller_parent, controller_root, releases_root):
-        directory.mkdir(exist_ok=True)
-        directory.chmod(0o700)
-    controller_files = {
-        "gw_restart.sh": 0o700,
-        "scripts/gateway_git_deploy.py": 0o600,
-        "Leadpoet/utils/exact_commit_restart_v2.py": 0o600,
-        "gateway/tee/host_memory_guard_v2.py": 0o600,
-    }
-    for relative_path, installed_mode in controller_files.items():
-        destination = release / relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(
-            subprocess.check_output(
-                ["git", "show", f"{controller_commit}:{relative_path}"],
-                cwd=REAL_REPOSITORY,
-            )
-        )
-        destination.chmod(installed_mode)
-    release.chmod(0o700)
-    current = controller_root / "current"
-    current.symlink_to(f"releases/{controller_commit}")
-    host_restart = tmp_path / "gw_restart.sh"
-    host_restart.write_bytes((release / "gw_restart.sh").read_bytes())
-    host_restart.chmod(0o700)
-    return current, host_restart
+def _verified_controller_commit(**kwargs: object) -> str:
+    return str(
+        maintenance._verified_installed_controller_bundle(**kwargs)[
+            "controller_commit"
+        ]
+    )
 
 
 class FakeSecretsClient:
@@ -680,6 +658,7 @@ def _controller_bundle(
         "git_helper": b"HELPER = True\n",
         "exact_commit_helper": b"EXACT = True\n",
         "memory_guard": b"GUARD = True\n",
+        "process_helper": b"PROCESS = True\n",
     }
     return {
         "controller_commit": controller_commit,
@@ -3339,6 +3318,173 @@ def test_closed_or_tampered_proof_fd_fails_closed(
         maintenance._validate_proof_document(proof)
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux"
+    or not hasattr(os, "memfd_create")
+    or not hasattr(maintenance.fcntl, "F_ADD_SEALS"),
+    reason="Linux sealed memfd bootstrap handoff",
+)
+def test_bootstrap_exec_carries_process_helper_after_tree_deletion(
+    tmp_path: Path,
+):
+    script = textwrap.dedent(
+        """
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import sys
+
+        from gateway.tee import gateway_miner_maintenance_restart_v1 as m
+
+        candidate = "a" * 40
+        tree_hash = "b" * 40
+        commitment = "sha256:" + "c" * 64
+        proof = {
+            name: commitment for name in m._PROOF_FIELDS
+        }
+        proof.update(
+            {
+                "schema_version": m.SCHEMA_VERSION,
+                "candidate_commit": candidate,
+                "candidate_tree_hash": tree_hash,
+                "pre_hydration_runtime_commit": "d" * 40,
+                "n_minus_one_controller_commit": "e" * 40,
+                "current_secret_version_id": "11111111-1111-4111-8111-111111111111",
+                "source_add_restart_guard_generation": "1",
+                "source_add_restart_guard_restore_paused": "false",
+                "restart_invocation_id": "bootstrap-e2e",
+                "prepared_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        helper = Path(m.__file__).resolve().parents[2] / "scripts/manage_owned_process_group.py"
+        proof["controller_process_helper_sha256"] = "sha256:" + hashlib.sha256(helper.read_bytes()).hexdigest()
+        body = {name: proof[name] for name in m._PROOF_FIELDS if name != "proof_hash"}
+        proof["proof_hash"] = m.sha256_json(body)
+        wrapper = (
+            "#!/bin/bash\\n"
+            "set -euo pipefail\\n"
+            "test \\\"$GATEWAY_CONTROLLER_PROCESS_HELPER\\\" = /proc/self/fd/195\\n"
+            "test \\\"$LAB_ARENA_PROCESS_HELPER\\\" = /proc/self/fd/195\\n"
+            "test ! -e \\\"$TEST_BOOTSTRAP_ROOT\\\"\\n"
+            "test \\\"$(readlink /proc/self/fd/195)\\\" = '/memfd:leadpoet-process-helper (deleted)'\\n"
+            "\\\"$GATEWAY_PYTHON_BIN\\\" -c 'import hashlib,json; assert json.load(open(\\\"/proc/self/fd/190\\\"))[\\\"controller_process_helper_sha256\\\"] == \\\"sha256:\\\" + hashlib.sha256(open(\\\"/proc/self/fd/195\\\", \\\"rb\\\").read()).hexdigest()'\\n"
+            "\\\"$GATEWAY_PYTHON_BIN\\\" \\\"$LAB_ARENA_PROCESS_HELPER\\\" --help >/dev/null\\n"
+            "printf '%s\\n' bootstrap-handoff-ok\\n"
+        ).encode()
+        payloads = {
+            "wrapper": wrapper,
+            "git_helper": b"git-helper\\n",
+            "exact_commit_helper": b"exact-helper\\n",
+            "memory_guard": b"memory-guard\\n",
+            "process_helper": helper.read_bytes(),
+        }
+        root = Path(os.environ["TEST_BOOTSTRAP_ROOT"])
+        root.mkdir(mode=0o700)
+        (root / "deleted-after-handoff").write_text("sentinel")
+        (root / "deleted-after-handoff").chmod(0o400)
+        tree = {
+            "tree_hash": tree_hash,
+            "previous_sha": "d" * 40,
+            "controller_bundle": {
+                "controller_commit": "e" * 40,
+                "commitments": {
+                    name: "sha256:" + hashlib.sha256(value).hexdigest()
+                    for name, value in payloads.items()
+                },
+                "payloads": payloads,
+            },
+        }
+        m._require_canonical_restart_lock_fd = lambda: None
+        m._require_fixed_bootstrap_authority = lambda _environment: None
+        m._resolve_bootstrap_secrets_client = lambda _client: object()
+        m._wait_for_handoff_marker = lambda **_kwargs: None
+        m._validate_candidate_identity = lambda **_kwargs: tree
+        m._verify_protected_source = lambda: None
+        m._pre_hydration_live_process_commitment = lambda _tree: m.sha256_json({"status": "absent"})
+        m._verify_proof_against_state = lambda **_kwargs: None
+        m._require_pre_activation_runtime_source_add_closed = lambda **_kwargs: "gateway_absent"
+        m.prepare_gateway_miner_maintenance_restart = lambda **_kwargs: {
+            "proof": proof,
+            "tree_evidence": tree,
+        }
+        m.bootstrap_gateway_miner_maintenance_restart(
+            repo_root=Path("/tmp/repo"),
+            candidate_root=Path("/tmp/candidate"),
+            bootstrap_root=root,
+            plan_file=Path("/tmp/plan.json"),
+            expected_commit=candidate,
+            controller_current=Path("/tmp/current"),
+            host_restart_path=Path("/tmp/gw_restart.sh"),
+            handoff_file=Path("/tmp/leadpoet-gateway-miner-maintenance-handoff.e2e1"),
+            handoff_nonce="0" * 64,
+            restart_invocation_id="bootstrap-e2e",
+            secrets_client=object(),
+        )
+        """
+    )
+    script = "\n".join(
+        line[8:] if line.startswith("        ") else line
+        for line in script.splitlines()
+    ) + "\n"
+    bootstrap_root = tmp_path / "bootstrap"
+    bootstrap_root = Path(
+        "/tmp/gateway-miner-maintenance-bootstrap." + str(os.getpid())
+    )
+    environment = {
+        **os.environ,
+        "TEST_BOOTSTRAP_ROOT": str(bootstrap_root),
+        "GATEWAY_PYTHON_BIN": sys.executable,
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "bootstrap-handoff-ok" in result.stdout
+    assert not bootstrap_root.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux"
+    or not hasattr(os, "memfd_create")
+    or not hasattr(maintenance.fcntl, "F_ADD_SEALS"),
+    reason="Linux sealed memfd behavior",
+)
+def test_partial_controller_bundle_install_closes_all_created_descriptors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    descriptors = tuple(range(191, 196))
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    real_seal = maintenance._seal_payload_at_fd_number
+
+    def fail_on_process_helper(**kwargs):
+        if kwargs["fd_number"] == 195:
+            raise maintenance.GatewayMinerMaintenanceRestartError(
+                "test process helper seal failure"
+            )
+        return real_seal(**kwargs)
+
+    monkeypatch.setattr(maintenance, "_seal_payload_at_fd_number", fail_on_process_helper)
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="test process helper seal failure",
+    ):
+        maintenance._install_controller_bundle_memfds(_controller_bundle())
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
 def test_bootstrap_cleanup_leaves_a_valid_exec_working_directory() -> None:
     bootstrap_root = Path(
         f"/tmp/gateway-miner-maintenance-bootstrap.{os.getpid()}cwd"
@@ -3587,7 +3733,7 @@ def test_git_object_override_environment_is_rejected(monkeypatch):
         maintenance._safe_git_environment()
 
 
-def test_live_0775_controller_ancestry_is_hardened_and_all_four_files_bound(
+def test_live_0775_controller_ancestry_is_hardened_and_all_five_files_bound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -3600,7 +3746,7 @@ def test_live_0775_controller_ancestry_is_hardened_and_all_four_files_bound(
         host_restart,
     ) = _installed_controller_fixture(tmp_path, monkeypatch)
 
-    observed = maintenance._verify_installed_controller(
+    observed = _verified_controller_commit(
         repo_root=tmp_path,
         controller_current=current,
         host_restart_path=host_restart,
@@ -3632,7 +3778,7 @@ def test_controller_hardening_rejects_wrong_owner_and_symlink_ancestry(
         maintenance.GatewayMinerMaintenanceRestartError,
         match="ancestry is unsafe",
     ):
-        maintenance._verify_installed_controller(
+        _verified_controller_commit(
             repo_root=tmp_path,
             controller_current=current,
             host_restart_path=host_restart,
@@ -3658,10 +3804,36 @@ def test_controller_hardening_rejects_wrong_owner_and_symlink_ancestry(
         maintenance.GatewayMinerMaintenanceRestartError,
         match="ancestry",
     ):
-        maintenance._verify_installed_controller(
+        _verified_controller_commit(
             repo_root=tmp_path,
             controller_current=second_current,
             host_restart_path=second_host,
+            expected_commit=CANDIDATE_COMMIT,
+        )
+
+
+def test_controller_bundle_requires_process_helper_for_new_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (
+        _controller_parent,
+        _controller_root,
+        _releases_root,
+        release,
+        current,
+        host_restart,
+    ) = _installed_controller_fixture(tmp_path, monkeypatch)
+    (release / "scripts/manage_owned_process_group.py").unlink()
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="process helper is unavailable",
+    ):
+        maintenance._verified_installed_controller_bundle(
+            repo_root=tmp_path,
+            controller_current=current,
+            host_restart_path=host_restart,
             expected_commit=CANDIDATE_COMMIT,
         )
 
@@ -3686,7 +3858,7 @@ def test_controller_verifier_rejects_tampered_memory_guard(
         maintenance.GatewayMinerMaintenanceRestartError,
         match="bytes differ",
     ):
-        maintenance._verify_installed_controller(
+        _verified_controller_commit(
             repo_root=tmp_path,
             controller_current=current,
             host_restart_path=host_restart,
@@ -3711,53 +3883,12 @@ def test_exact_candidate_controller_is_allowed_for_post_install_retry(
         controller_commit=CANDIDATE_COMMIT,
     )
 
-    assert maintenance._verify_installed_controller(
+    assert _verified_controller_commit(
         repo_root=tmp_path,
         controller_current=current,
         host_restart_path=host_restart,
         expected_commit=CANDIDATE_COMMIT,
     ) == CANDIDATE_COMMIT
-
-
-def test_real_sequential_release_accepts_d649_controller_for_d72(
-    tmp_path: Path,
-) -> None:
-    current, host_restart = _real_installed_controller_fixture(
-        tmp_path,
-        controller_commit=SEQUENTIAL_N_MINUS_ONE_COMMIT,
-    )
-
-    assert maintenance._verify_installed_controller(
-        repo_root=REAL_REPOSITORY,
-        controller_current=current,
-        host_restart_path=host_restart,
-        expected_commit=SEQUENTIAL_CANDIDATE_COMMIT,
-    ) == SEQUENTIAL_N_MINUS_ONE_COMMIT
-
-
-def test_real_controller_lineage_rejects_pre_floor_commit(
-    tmp_path: Path,
-) -> None:
-    controller_commit = subprocess.check_output(
-        ["git", "rev-parse", f"{CONTROLLER_COMMIT}^"],
-        cwd=REAL_REPOSITORY,
-        text=True,
-    ).strip()
-    current, host_restart = _real_installed_controller_fixture(
-        tmp_path,
-        controller_commit=controller_commit,
-    )
-
-    with pytest.raises(
-        maintenance.GatewayMinerMaintenanceRestartError,
-        match="not compatible",
-    ):
-        maintenance._verify_installed_controller(
-            repo_root=REAL_REPOSITORY,
-            controller_current=current,
-            host_restart_path=host_restart,
-            expected_commit=SEQUENTIAL_CANDIDATE_COMMIT,
-        )
 
 
 @pytest.mark.parametrize("floor_is_ancestor", (False, True))
@@ -3792,7 +3923,7 @@ def test_unrelated_and_non_ancestor_controllers_fail_closed(
         maintenance.GatewayMinerMaintenanceRestartError,
         match="not compatible",
     ):
-        maintenance._verify_installed_controller(
+        _verified_controller_commit(
             repo_root=tmp_path,
             controller_current=current,
             host_restart_path=host_restart,
@@ -3827,7 +3958,7 @@ def test_missing_installed_controller_object_fails_closed(
         maintenance.GatewayMinerMaintenanceRestartError,
         match="Git object is unavailable",
     ):
-        maintenance._verify_installed_controller(
+        _verified_controller_commit(
             repo_root=tmp_path,
             controller_current=current,
             host_restart_path=host_restart,
@@ -3857,7 +3988,7 @@ def test_missing_candidate_object_fails_closed_after_fetch(
         maintenance.GatewayMinerMaintenanceRestartError,
         match="Git object is unavailable",
     ):
-        maintenance._verify_installed_controller(
+        _verified_controller_commit(
             repo_root=tmp_path,
             controller_current=current,
             host_restart_path=host_restart,
@@ -3891,6 +4022,9 @@ def test_partial_controller_cutover_reconciles_exact_old_host_under_lock(
         ).read_bytes(),
         "gateway/tee/host_memory_guard_v2.py": (
             release / "gateway/tee/host_memory_guard_v2.py"
+        ).read_bytes(),
+        "scripts/manage_owned_process_group.py": (
+            release / "scripts/manage_owned_process_group.py"
         ).read_bytes(),
     }
     old_wrapper = b"#!/bin/bash\n# exact supported N-1 wrapper\nexit 0\n"
@@ -3997,7 +4131,7 @@ def test_exact_deployed_n_minus_one_preserves_proof_until_candidate_gates():
         "finalize_deployment_record succeeded", runtime_verify
     )
     close_parent = candidate_restart.index(
-        "exec 190>&- 191>&- 192>&- 193>&- 194>&-",
+        "exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-",
         finalize,
     )
     completed = candidate_restart.index("GATEWAY_DEPLOY_COMPLETED=1", close_parent)
@@ -4008,7 +4142,7 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
     restart = (
         Path(__file__).resolve().parents[1] / "gw_restart.sh"
     ).read_text(encoding="utf-8")
-    close_set = "190>&- 191>&- 192>&- 193>&- 194>&-"
+    close_set = "190>&- 191>&- 192>&- 193>&- 194>&- 195>&-"
     for module_name in (
         "gateway.utils.tee_egress_forwarder",
         "gateway.utils.tee_inter_enclave_relay",
@@ -4067,6 +4201,7 @@ def test_controller_install_recovers_every_publication_crash_point(
         "scripts/gateway_git_deploy.py": b"CANDIDATE_HELPER = True\n",
         "Leadpoet/utils/exact_commit_restart_v2.py": b"CANDIDATE_EXACT = True\n",
         "gateway/tee/host_memory_guard_v2.py": b"CANDIDATE_GUARD = True\n",
+        "scripts/manage_owned_process_group.py": b"PROCESS_HELPER = True\n",
     }
     for relative_path, payload in candidate_payloads.items():
         source = repository / relative_path

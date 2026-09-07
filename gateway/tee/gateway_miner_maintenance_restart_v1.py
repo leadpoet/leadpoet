@@ -83,6 +83,8 @@ CONTROLLER_WRAPPER_FD_NUMBER = 191
 CONTROLLER_GIT_HELPER_FD_NUMBER = 192
 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER = 193
 CONTROLLER_MEMORY_GUARD_FD_NUMBER = 194
+CONTROLLER_PROCESS_HELPER_FD_NUMBER = 195
+CONTROLLER_PROCESS_HELPER_PATH = "scripts/manage_owned_process_group.py"
 MAX_PROOF_BYTES = 32 * 1024
 MAX_RUNTIME_STATUS_BYTES = 256 * 1024
 DEFAULT_RUNTIME_STATUS_URL = "http://127.0.0.1:8000/research-lab/status"
@@ -166,6 +168,8 @@ _RESTART_AUTHORITY_NAMES = frozenset(
         "GATEWAY_GIT_HELPER",
         "GATEWAY_EXACT_COMMIT_HELPER",
         "GATEWAY_HOST_MEMORY_GUARD_PATH",
+        "GATEWAY_CONTROLLER_PROCESS_HELPER",
+        "LAB_ARENA_PROCESS_HELPER",
     }
 )
 _PROOF_FIELDS = frozenset(
@@ -190,6 +194,7 @@ _PROOF_FIELDS = frozenset(
         "controller_git_helper_sha256",
         "controller_exact_commit_helper_sha256",
         "controller_memory_guard_sha256",
+        "controller_process_helper_sha256",
         "pre_hydration_live_process_commitment",
         "restart_invocation_id",
         "prepared_at",
@@ -2720,6 +2725,30 @@ def _verified_installed_controller_bundle(
         expected_mode=0o600,
         label="installed N-1 memory guard",
     )
+    process_helper_tree_row = _run_git(
+        repo_root,
+        "ls-tree",
+        controller_commit,
+        "--",
+        CONTROLLER_PROCESS_HELPER_PATH,
+    ).split()
+    if (
+        len(process_helper_tree_row) < 3
+        or process_helper_tree_row[0] != "100644"
+        or process_helper_tree_row[-1] != CONTROLLER_PROCESS_HELPER_PATH
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller process helper Git authority is unavailable"
+        )
+    controller_process_helper = _run_git_bytes(
+        repo_root,
+        "show",
+        f"{controller_commit}:{CONTROLLER_PROCESS_HELPER_PATH}",
+    )
+    if not 2 <= len(controller_process_helper) <= 4 * 1024 * 1024:
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller process helper is out of bounds"
+        )
     host_restart = _read_exact_installed_file(
         Path(host_restart_path),
         expected_mode=0o700,
@@ -2750,6 +2779,21 @@ def _verified_installed_controller_bundle(
     ):
         raise GatewayMinerMaintenanceRestartError(
             "installed N-1 controller bytes differ from Git authority"
+        )
+    installed_process_helper = resolved / CONTROLLER_PROCESS_HELPER_PATH
+    try:
+        installed_process_helper.lstat()
+    except FileNotFoundError as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller process helper is unavailable"
+        ) from exc
+    if _read_exact_installed_file(
+        installed_process_helper,
+        expected_mode=0o600,
+        label="installed N-1 process helper",
+    ) != controller_process_helper:
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 process helper bytes differ from Git authority"
         )
     if host_restart != controller_restart:
         compatible_host_commits = {
@@ -2802,6 +2846,7 @@ def _verified_installed_controller_bundle(
         "exact_commit_helper": controller_exact_restart,
         "memory_guard": controller_memory_guard,
     }
+    payloads["process_helper"] = controller_process_helper
     return {
         "controller_commit": controller_commit,
         "payloads": payloads,
@@ -2810,27 +2855,6 @@ def _verified_installed_controller_bundle(
             for name, payload in payloads.items()
         },
     }
-
-
-def _verify_installed_controller(
-    *,
-    repo_root: Path,
-    controller_current: Path,
-    host_restart_path: Path,
-    expected_commit: str,
-    host_restart_is_open_fd: bool = False,
-) -> str:
-    """Return the exact verified controller commit for compatibility callers."""
-
-    bundle = _verified_installed_controller_bundle(
-        repo_root=repo_root,
-        controller_current=controller_current,
-        host_restart_path=host_restart_path,
-        expected_commit=expected_commit,
-        host_restart_is_open_fd=host_restart_is_open_fd,
-    )
-    return str(bundle["controller_commit"])
-
 
 def _validate_candidate_identity(
     *,
@@ -2994,6 +3018,7 @@ def _proof_body(
             commitments["exact_commit_helper"]
         ),
         "controller_memory_guard_sha256": str(commitments["memory_guard"]),
+        "controller_process_helper_sha256": str(commitments["process_helper"]),
         "pre_hydration_live_process_commitment": str(
             live_process_commitment
         ),
@@ -3027,6 +3052,7 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
         "controller_git_helper_sha256",
         "controller_exact_commit_helper_sha256",
         "controller_memory_guard_sha256",
+        "controller_process_helper_sha256",
         "pre_hydration_live_process_commitment",
     )
     if (
@@ -3094,6 +3120,7 @@ def _require_reserved_memfd_numbers_available() -> None:
         CONTROLLER_GIT_HELPER_FD_NUMBER,
         CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
         CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+        CONTROLLER_PROCESS_HELPER_FD_NUMBER,
     ):
         try:
             os.fstat(descriptor)
@@ -3424,6 +3451,8 @@ def _verify_proof_against_state(
             != str(commitments["exact_commit_helper"])
             or validated["controller_memory_guard_sha256"]
             != str(commitments["memory_guard"])
+            or validated["controller_process_helper_sha256"]
+            != str(commitments["process_helper"])
         ):
             raise GatewayMinerMaintenanceRestartError(
                 "verified N-1 controller differs from the invocation proof"
@@ -3986,19 +4015,32 @@ def _install_controller_bundle_memfds(
         ("git_helper", CONTROLLER_GIT_HELPER_FD_NUMBER),
         ("exact_commit_helper", CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER),
         ("memory_guard", CONTROLLER_MEMORY_GUARD_FD_NUMBER),
+        ("process_helper", CONTROLLER_PROCESS_HELPER_FD_NUMBER),
     )
-    for name, descriptor in assignments:
-        payload = payloads.get(name)
-        if not isinstance(payload, bytes):
-            raise GatewayMinerMaintenanceRestartError(
-                "verified N-1 controller bundle is incomplete"
+    installed_descriptors: list[int] = []
+    try:
+        for name, descriptor in assignments:
+            payload = payloads.get(name)
+            if not isinstance(payload, bytes):
+                raise GatewayMinerMaintenanceRestartError(
+                    "verified N-1 controller bundle is incomplete"
+                )
+            # Reserve cleanup ownership before sealing.  The sealing helper can
+            # fail after dup2 has installed the target descriptor.
+            installed_descriptors.append(descriptor)
+            _seal_payload_at_fd_number(
+                payload=payload,
+                fd_number=descriptor,
+                name="leadpoet-" + name.replace("_", "-"),
+                max_bytes=4 * 1024 * 1024,
             )
-        _seal_payload_at_fd_number(
-            payload=payload,
-            fd_number=descriptor,
-            name="leadpoet-" + name.replace("_", "-"),
-            max_bytes=4 * 1024 * 1024,
-        )
+    except Exception:
+        for descriptor in installed_descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
 
 
 def _controller_exec_environment(
@@ -4105,6 +4147,7 @@ def bootstrap_gateway_miner_maintenance_restart(
             CONTROLLER_GIT_HELPER_FD_NUMBER,
             CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
             CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+            CONTROLLER_PROCESS_HELPER_FD_NUMBER,
         ):
             os.set_inheritable(descriptor, True)
         _require_canonical_restart_lock_fd()
@@ -4128,6 +4171,12 @@ def bootstrap_gateway_miner_maintenance_restart(
                 ),
                 "GATEWAY_HOST_MEMORY_GUARD_PATH": (
                     f"/proc/self/fd/{CONTROLLER_MEMORY_GUARD_FD_NUMBER}"
+                ),
+                "GATEWAY_CONTROLLER_PROCESS_HELPER": (
+                    f"/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}"
+                ),
+                "LAB_ARENA_PROCESS_HELPER": (
+                    f"/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}"
                 ),
                 "LEADPOET_GATEWAY_ENV_SECRET_ID": GATEWAY_SECRET_ID,
                 "AWS_REGION": EXPECTED_AWS_REGION,
@@ -4167,6 +4216,7 @@ def bootstrap_gateway_miner_maintenance_restart(
                 CONTROLLER_GIT_HELPER_FD_NUMBER,
                 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
                 CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+                CONTROLLER_PROCESS_HELPER_FD_NUMBER,
             ):
                 try:
                     os.close(descriptor)

@@ -32,6 +32,7 @@ VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
 RELEASE_PREFIX="${LEADPOET_RELEASE_PREFIX:-attested-v2/releases}"
 HISTORICAL_THREE_ROLE_TOPOLOGY_HASH="sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
 HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB="f79cf108e4a98ca950a0087d786958f92c5f691f"
+LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY="202cd66a41f17f3030bcf6889d381cd3ecfd8f1c"
 # Three-second retries allow up to 2.5 hours for the gateway rebuild, plus a
 # five-minute margin for the final bounded release probes.
 VALIDATOR_COORDINATION_ATTEMPTS=3000
@@ -1603,6 +1604,7 @@ build_gateway_restart_command() {
       install -m 600 \"\$authority_root/scripts/gateway_git_deploy.py\" \"\$controller_stage/scripts/gateway_git_deploy.py\"
       install -m 600 \"\$authority_root/Leadpoet/utils/exact_commit_restart_v2.py\" \"\$controller_stage/Leadpoet/utils/exact_commit_restart_v2.py\"
       install -m 600 \"\$authority_root/gateway/tee/host_memory_guard_v2.py\" \"\$controller_stage/gateway/tee/host_memory_guard_v2.py\"
+      install -m 600 \"\$authority_root/scripts/manage_owned_process_group.py\" \"\$controller_stage/scripts/manage_owned_process_group.py\"
       if [ -e \"\$controller_release\" ] || [ -L \"\$controller_release\" ]; then
         test -d \"\$controller_release\" && test ! -L \"\$controller_release\"
         test \"\$(stat -c '%u:%g:%a' \"\$controller_release\")\" = \"\$(id -u):\$(id -g):700\"
@@ -1614,6 +1616,15 @@ build_gateway_restart_command() {
         cmp -s \"\$controller_stage/scripts/gateway_git_deploy.py\" \"\$controller_release/scripts/gateway_git_deploy.py\"
         cmp -s \"\$controller_stage/Leadpoet/utils/exact_commit_restart_v2.py\" \"\$controller_release/Leadpoet/utils/exact_commit_restart_v2.py\"
         cmp -s \"\$controller_stage/gateway/tee/host_memory_guard_v2.py\" \"\$controller_release/gateway/tee/host_memory_guard_v2.py\"
+        if [ -e \"\$controller_release/scripts/manage_owned_process_group.py\" ] || [ -L \"\$controller_release/scripts/manage_owned_process_group.py\" ]; then
+          test ! -L \"\$controller_release/scripts/manage_owned_process_group.py\"
+          test \"\$(stat -c '%u:%g:%a' \"\$controller_release/scripts/manage_owned_process_group.py\")\" = \"\$(id -u):\$(id -g):600\"
+          cmp -s \"\$controller_stage/scripts/manage_owned_process_group.py\" \"\$controller_release/scripts/manage_owned_process_group.py\"
+        else
+          git -C '$GATEWAY_REPO_ROOT' merge-base --is-ancestor '$branch_commit' '$LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY'
+          git -C '$GATEWAY_REPO_ROOT' cat-file -e '$branch_commit:scripts/manage_owned_process_group.py'
+          git -C '$GATEWAY_REPO_ROOT' show '$branch_commit:scripts/manage_owned_process_group.py' | cmp -s - \"\$controller_stage/scripts/manage_owned_process_group.py\"
+        fi
         rm -rf -- \"\$controller_stage\"
       else
         mv -- \"\$controller_stage\" \"\$controller_release\"

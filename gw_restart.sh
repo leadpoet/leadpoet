@@ -21,6 +21,7 @@ ENV_CLONE="/tmp/gw_env_clone.sh"
 ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
+LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY="202cd66a41f17f3030bcf6889d381cd3ecfd8f1c"
 HISTORICAL_THREE_ROLE_TOPOLOGY_HASH="sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
 HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB="f79cf108e4a98ca950a0087d786958f92c5f691f"
 GATEWAY_HISTORICAL_TOPOLOGY_HASH=""
@@ -217,7 +218,7 @@ wait_for_gateway_v2_authority() {
 
 stop_lab_arena_service() {
   local process_helper="${1:-$GATEWAY_CONTROLLER_PROCESS_HELPER}"
-  if [ ! -r "$process_helper" ] || [ -L "$process_helper" ]; then
+  if ! verify_controller_process_helper "$process_helper"; then
     echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
     return 1
   fi
@@ -229,6 +230,71 @@ stop_lab_arena_service() {
     "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
     --environment-file "$GATEWAY_ENV_FILE" \
     --host 127.0.0.1 --port 8792
+}
+
+verify_controller_process_helper() {
+  local process_helper="${1:-}"
+  if [ "$process_helper" = "/proc/self/fd/195" ]; then
+    "$GATEWAY_PYTHON_BIN" - "$process_helper" <<'PY'
+import fcntl
+import hashlib
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+if path != "/proc/self/fd/195":
+    raise SystemExit("controller process helper descriptor path is invalid")
+required_seals = sum(
+    int(getattr(fcntl, name))
+    for name in ("F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL")
+)
+try:
+    original = os.fstat(195)
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(original.st_mode)
+            or original.st_uid != os.geteuid()
+            or original.st_gid != os.getegid()
+            or stat.S_IMODE(original.st_mode) != 0o400
+            or not os.get_inheritable(195)
+            or os.readlink(path) != "/memfd:leadpoet-process-helper (deleted)"
+            or (original.st_dev, original.st_ino) != (opened.st_dev, opened.st_ino)
+            or int(fcntl.fcntl(195, fcntl.F_GET_SEALS)) & required_seals
+            != required_seals
+        ):
+            raise SystemExit("controller process helper descriptor identity is unsafe")
+        if os.environ.get("GATEWAY_MINER_MAINTENANCE_PROOF_FD") != "190":
+            raise SystemExit("controller process helper proof descriptor is unavailable")
+        proof = os.fstat(190)
+        if (
+            not stat.S_ISREG(proof.st_mode)
+            or proof.st_uid != os.geteuid()
+            or proof.st_gid != os.getegid()
+            or stat.S_IMODE(proof.st_mode) != 0o400
+            or not os.get_inheritable(190)
+            or int(fcntl.fcntl(190, fcntl.F_GET_SEALS)) & required_seals
+            != required_seals
+        ):
+            raise SystemExit("controller process helper proof identity is unsafe")
+        process_payload = os.pread(195, 4 * 1024 * 1024 + 1, 0)
+        proof_payload = os.pread(190, 32 * 1024 + 1, 0)
+        document = json.loads(proof_payload.decode("ascii"))
+        expected = document.get("controller_process_helper_sha256")
+        observed = "sha256:" + hashlib.sha256(process_payload).hexdigest()
+        if expected != observed:
+            raise SystemExit("controller process helper proof commitment differs")
+    finally:
+        os.close(descriptor)
+except OSError as exc:
+    raise SystemExit("controller process helper descriptor is unavailable") from exc
+PY
+    return $?
+  fi
+  [ -r "$process_helper" ] && [ ! -L "$process_helper" ]
 }
 
 start_lab_arena_service() {
@@ -249,21 +315,22 @@ start_lab_arena_service() {
     echo "ERROR: Lab Arena service entrypoint is unavailable" >&2
     return 1
   fi
-  if [ ! -r "$GATEWAY_CONTROLLER_PROCESS_HELPER" ] \
-      || [ -L "$GATEWAY_CONTROLLER_PROCESS_HELPER" ]; then
+  if ! verify_controller_process_helper "$GATEWAY_CONTROLLER_PROCESS_HELPER"; then
     echo "ERROR: verified controller Lab Arena process helper is unavailable" >&2
     return 1
   fi
   mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     setsid "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
       --environment-file "$GATEWAY_ENV_FILE" \
       --host 127.0.0.1 --port 8792 \
       > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
-      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   pid="$!"
   if ! "$GATEWAY_PYTHON_BIN" "$GATEWAY_CONTROLLER_PROCESS_HELPER" record \
       --state-file "$GATEWAY_CONTROLLER_PROCESS_STATE_FILE" \
@@ -760,6 +827,8 @@ start_gateway_offline_artifact_prepare() {
   # cannot outlive the candidate tree.  Keep this release-independent work at
   # low CPU and I/O priority while the attestation runner is building.
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -789,7 +858,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${prepare_command[@]}" \
     >"$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" \
@@ -1101,6 +1170,8 @@ exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
@@ -1127,7 +1198,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${checkpoint_command[@]}" \
     >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   GATEWAY_ANCESTRY_CHECKPOINT_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_ANCESTRY_CHECKPOINT_PID" \
@@ -2406,6 +2477,8 @@ install_successful_restart_script() {
     "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py"
   install -m 600 "$controller_source_root/gateway/tee/host_memory_guard_v2.py" \
     "$temporary_dir/gateway/tee/host_memory_guard_v2.py"
+  install -m 600 "$controller_source_root/scripts/manage_owned_process_group.py" \
+    "$temporary_dir/scripts/manage_owned_process_group.py"
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
     if [ ! -d "$release_dir" ] \
         || [ -L "$release_dir" ] \
@@ -2420,6 +2493,27 @@ install_successful_restart_script() {
         || ! cmp -s "$temporary_dir/gateway/tee/host_memory_guard_v2.py" "$release_dir/gateway/tee/host_memory_guard_v2.py"; then
       rm -rf -- "$temporary_dir"
       echo "ERROR: installed gateway restart controller release differs from the exact candidate" >&2
+      return 1
+    fi
+    if [ -e "$release_dir/scripts/manage_owned_process_group.py" ] \
+        || [ -L "$release_dir/scripts/manage_owned_process_group.py" ]; then
+      if [ -L "$release_dir/scripts/manage_owned_process_group.py" ] \
+          || [ "$(stat -c '%u:%g:%a' "$release_dir/scripts/manage_owned_process_group.py")" != "$(id -u):$(id -g):600" ] \
+          || ! cmp -s "$temporary_dir/scripts/manage_owned_process_group.py" \
+              "$release_dir/scripts/manage_owned_process_group.py"; then
+        rm -rf -- "$temporary_dir"
+        echo "ERROR: installed gateway restart controller process helper differs from the exact candidate" >&2
+        return 1
+      fi
+    elif ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
+        "$controller_sha" "$LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY" \
+        || ! git -C "$LEADPOET_REPO_ROOT" cat-file -e \
+        "$controller_sha:scripts/manage_owned_process_group.py" \
+        || ! git -C "$LEADPOET_REPO_ROOT" show \
+        "$controller_sha:scripts/manage_owned_process_group.py" \
+        | cmp -s - "$temporary_dir/scripts/manage_owned_process_group.py"; then
+      rm -rf -- "$temporary_dir"
+      echo "ERROR: installed gateway restart controller lacks a bounded exact process helper transition" >&2
       return 1
     fi
     rm -rf -- "$temporary_dir"
@@ -2887,6 +2981,8 @@ restart_only_keys = {
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
+    "GATEWAY_CONTROLLER_PROCESS_HELPER",
+    "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
@@ -3044,6 +3140,8 @@ skip_keys = {
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
+    "GATEWAY_CONTROLLER_PROCESS_HELPER",
+    "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
@@ -3204,6 +3302,8 @@ skip_keys = {
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
+    "GATEWAY_CONTROLLER_PROCESS_HELPER",
+    "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
@@ -3913,8 +4013,7 @@ if ! (
 fi
 
 GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
-if [ ! -r "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER" ] \
-    || [ -L "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER" ]; then
+if ! verify_controller_process_helper "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"; then
   echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
@@ -4284,7 +4383,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
     >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   TEE_EGRESS_FORWARDER_PID="$!"
   sleep 2
   if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
@@ -4299,6 +4398,8 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
@@ -4312,7 +4413,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
     >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
@@ -4494,6 +4595,8 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_GIT_HELPER \
   -u GATEWAY_EXACT_COMMIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+  -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+  -u LAB_ARENA_PROCESS_HELPER \
   -u GATEWAY_RESTART_AUTHORITY_ROOT \
   -u GATEWAY_RESTART_AUTHORITY_COMMIT \
   -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
@@ -4506,7 +4609,7 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
   > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
-  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
 
 GATEWAY_LAUNCHER_PID="$!"
 GATEWAY_PID=""
@@ -4604,10 +4707,11 @@ GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
 if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
-  exec 190>&- 191>&- 192>&- 193>&- 194>&-
+  exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-
   unset GATEWAY_MINER_MAINTENANCE_PROOF_FD
   unset GATEWAY_GIT_HELPER GATEWAY_EXACT_COMMIT_HELPER
   unset GATEWAY_HOST_MEMORY_GUARD_PATH
+  unset GATEWAY_CONTROLLER_PROCESS_HELPER LAB_ARENA_PROCESS_HELPER
 fi
 GATEWAY_DEPLOY_COMPLETED=1
 rm -f "$GATEWAY_DEPLOY_PLAN_FILE" || true

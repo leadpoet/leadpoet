@@ -32,7 +32,7 @@ from leadpoet_canonical.production_parity_boundary_v2 import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v9"
+SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v10"
 
 HOST_ONLY_SECRET_FIELDS = frozenset({"internal_api_key"})
 

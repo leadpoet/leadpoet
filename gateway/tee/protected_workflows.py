@@ -759,13 +759,8 @@ PROTECTED_SYMBOLS = {
         "validate_legacy_settlement_document_v2",
     ),
     "leadpoet_verifier/economics.py": (
-        "compute_reimbursement_award",
-        "build_reimbursement_schedule",
-        "build_champion_reward_obligation",
         "allocate_research_lab_epoch",
         "_allocate_research_lab_epoch_existing",
-        "cap_reimbursement_schedules_by_epoch",
-        "compose_final_weight_vector",
         "_allocate_reimbursements_at_set_rate",
         "_allocate_pro_rata_exact",
         "_allocate_fallback_reimbursements",

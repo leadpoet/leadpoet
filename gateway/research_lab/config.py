@@ -101,17 +101,7 @@ class ResearchLabGatewayConfig:
     evaluation_epoch: int = 0
 
     reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
-    reimbursement_min_rebate_rate: float = 1.0
-    reimbursement_base_rebate_rate: float = 1.0
-    reimbursement_max_rebate_rate: float = 1.0
-    reimbursement_high_participation_target: float = 10.0
     reimbursement_epochs: int = 20
-    reimbursement_max_usd_per_run: float = 100.0
-    reimbursement_max_usd_per_hotkey_day: float = 100.0
-    reimbursement_max_usd_per_island_day: float = 1000.0
-    reimbursement_global_budget_usd: float = 5000.0
-    reimbursement_material_spend_ratio: float = 0.80
-    reimbursement_default_island: str = "generalist"
     reimbursement_usd_per_0_1_percent_epoch: float = 0.162
     reimbursement_dynamic_alpha_price_enabled: bool = True
     reimbursement_require_live_alpha_price: bool = False
@@ -198,49 +188,12 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_REIMBURSEMENT_POLICY_ID",
                 "alpha-reimbursement-production-v1",
             ),
-            reimbursement_min_rebate_rate=max(
-                0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MIN_REBATE_RATE", 1.0)
-            ),
-            reimbursement_base_rebate_rate=max(
-                0.0, _float("RESEARCH_LAB_REIMBURSEMENT_BASE_REBATE_RATE", 1.0)
-            ),
-            reimbursement_max_rebate_rate=max(
-                0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MAX_REBATE_RATE", 1.0)
-            ),
-            reimbursement_high_participation_target=max(
-                0.01,
-                _float("RESEARCH_LAB_REIMBURSEMENT_HIGH_PARTICIPATION_TARGET", 10.0),
-            ),
             reimbursement_epochs=max(
                 1,
                 _int(
                     "RESEARCH_LAB_REIMBURSEMENT_EPOCHS",
                     _int("RESEARCH_LAB_REWARD_EPOCHS", 20),
                 ),
-            ),
-            reimbursement_max_usd_per_run=max(
-                0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MAX_USD_PER_RUN", 100.0)
-            ),
-            reimbursement_max_usd_per_hotkey_day=max(
-                0.0,
-                _float("RESEARCH_LAB_REIMBURSEMENT_MAX_USD_PER_HOTKEY_DAY", 100.0),
-            ),
-            reimbursement_max_usd_per_island_day=max(
-                0.0,
-                _float("RESEARCH_LAB_REIMBURSEMENT_MAX_USD_PER_ISLAND_DAY", 1000.0),
-            ),
-            reimbursement_global_budget_usd=max(
-                0.0, _float("RESEARCH_LAB_REIMBURSEMENT_GLOBAL_BUDGET_USD", 5000.0)
-            ),
-            reimbursement_material_spend_ratio=min(
-                1.0,
-                max(
-                    0.0,
-                    _float("RESEARCH_LAB_REIMBURSEMENT_MATERIAL_SPEND_RATIO", 0.80),
-                ),
-            ),
-            reimbursement_default_island=os.getenv(
-                "RESEARCH_LAB_REIMBURSEMENT_DEFAULT_ISLAND", "generalist"
             ),
             reimbursement_usd_per_0_1_percent_epoch=max(
                 0.000001,
@@ -381,25 +334,11 @@ class ResearchLabGatewayConfig:
         return {
             "policy_id": self.reimbursement_policy_id,
             "enabled": self.reimbursements_enabled if enabled is None else bool(enabled),
-            "min_rebate_rate": self.reimbursement_min_rebate_rate,
-            "base_rebate_rate": self.reimbursement_base_rebate_rate,
-            "max_rebate_rate": self.reimbursement_max_rebate_rate,
-            "high_participation_target": self.reimbursement_high_participation_target,
             "reimbursement_epochs": self.reimbursement_epochs,
-            "max_usd_per_run": self.reimbursement_max_usd_per_run,
-            "max_usd_per_hotkey_day": self.reimbursement_max_usd_per_hotkey_day,
-            "max_usd_per_island_day": self.reimbursement_max_usd_per_island_day,
-            "global_budget_usd": self.reimbursement_global_budget_usd,
-            "include_loop_start_fee_in_base": False,
-            "material_spend_ratio": self.reimbursement_material_spend_ratio,
-            "default_island": self.reimbursement_default_island,
             "usd_per_0_1_percent_epoch": self.reimbursement_usd_per_0_1_percent_epoch,
             "dynamic_alpha_price_enabled": self.reimbursement_dynamic_alpha_price_enabled,
             "require_live_alpha_price": self.reimbursement_require_live_alpha_price,
             "miner_alpha_per_epoch": self.reimbursement_miner_alpha_per_epoch,
-            "distinct_funded_hotkey_weight": 1,
-            "paid_loop_weight": 1,
-            "unique_brief_weight": 1,
             "research_lab_emission_percent": self.lab_emission_percent,
             "fulfillment_emission_percent": self.fulfillment_emission_percent,
             "fulfillment_leaderboard_emission_percent": self.fulfillment_leaderboard_emission_percent,

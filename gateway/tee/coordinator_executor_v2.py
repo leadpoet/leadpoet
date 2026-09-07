@@ -259,7 +259,7 @@ def coordinator_failed_parent_graph_policy_v2(
     payload: Mapping[str, Any],
     graph: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    """Authorize one exact failed autoresearch root for terminal lineage only."""
+    """Permit failed source ancestry only when persisting its artifacts."""
 
     root_hash = str(graph.get("root_receipt_hash") or "")
     receipts = {

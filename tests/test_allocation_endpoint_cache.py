@@ -630,6 +630,20 @@ def _no_disk_cache(monkeypatch):
     )
 
 
+def _live_build(counter):
+    """A bundle build as the live endpoint calls it — no ``attestation_out``.
+
+    ``_matched_build`` is written for the attested path, which passes an
+    attestation dict for the build to fill in. The live endpoint does not.
+    """
+
+    async def build(**kwargs):
+        counter["n"] += 1
+        return {"bundle_type": "live", "epoch": kwargs["epoch"]}
+
+    return build
+
+
 @pytest.mark.asyncio
 async def test_live_allocation_serves_an_already_built_bundle_without_rebuilding(
     monkeypatch,
@@ -643,7 +657,7 @@ async def test_live_allocation_serves_an_already_built_bundle_without_rebuilding
     """
 
     counter = {"n": 0}
-    _install(monkeypatch, build=_matched_build(counter))
+    _install(monkeypatch, build=_live_build(counter))
     _no_disk_cache(monkeypatch)
 
     bundle = {"bundle_type": "live", "epoch": 24180}
@@ -666,7 +680,7 @@ async def test_live_allocation_authorized_caller_does_not_reuse_a_read_only_hand
     async def persisting_guard(config, epoch, key):
         return True
 
-    _install(monkeypatch, build=_matched_build(counter), guard=persisting_guard)
+    _install(monkeypatch, build=_live_build(counter), guard=persisting_guard)
     _no_disk_cache(monkeypatch)
 
     api._allocation_handoff_cache_put(
@@ -688,7 +702,7 @@ async def test_live_allocation_still_builds_when_nothing_is_cached(monkeypatch):
     """The reuse is an optimisation only; a cold epoch still gets its own build."""
 
     counter = {"n": 0}
-    _install(monkeypatch, build=_matched_build(counter))
+    _install(monkeypatch, build=_live_build(counter))
     _no_disk_cache(monkeypatch)
 
     result = await api.get_research_lab_live_allocation(24182)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import gzip
 import io
 import json
@@ -17,7 +18,7 @@ import tempfile
 import tarfile
 import threading
 import time
-from datetime import datetime, timezone
+from unittest.mock import Mock
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,6 +26,7 @@ import pytest
 import httpx
 from bittensor_wallet import Keypair
 
+from lab_arena import broker as br
 from lab_arena import contracts, runner as rn, runtime, shim, source_bundle
 from lab_arena.output import output_document_from_bytes
 
@@ -113,6 +115,8 @@ class FakeApi:
 
     def provider(self, run_id, lease_token, frame):
         self.provider_frames.append(dict(frame))
+        if self.broker_documents:
+            return self.broker_documents.pop(0)
         call = {"call_identity": contracts.document_hash(["call", frame["action_sequence"]]), "operation_id": frame["operation_id"], "reserved_microusd": 5000, "actual_microusd": 5000, "outcome": "settled", "status": 200, "request_hash": contracts.document_hash(frame["parameters"]), "response_hash": contracts.document_hash("resp")}
         body = json.dumps({"results": [{"url": "https://co1.example.com"}]}).encode()
         return {"status": 200, "headers": {"content-type": "application/json", "content-length": str(len(body))}, "body_b64": base64.b64encode(body).decode(), "call": call}
@@ -340,6 +344,85 @@ def test_model_failures_map_to_terminal_causes_with_no_output_hash(tmp_path, kin
     rn.Runner(make_config(tmp_path, api, sandbox)).run_once()
     result = api.completions[0]["body"]["result"]
     assert result["terminal_status"] == expected
+    assert api.completions[0]["body"]["output"] is None
+
+
+def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_error(tmp_path):
+    """Regression boundary only: this in-process test is not an end-to-end provider run."""
+
+    store = Mock()
+    store.reserve_call.return_value = {"status": "reserved"}
+    store.mark_dispatched.return_value = {"status": "dispatched"}
+    store.settle_call.return_value = {"status": "settled"}
+    transport = Mock()
+    transport.send.return_value = br.ProviderResponse(
+        200,
+        {"content-type": "application/json"},
+        b'{"error":{"code":429,"message":"upstream temporarily rate-limited"}}',
+    )
+    price_table = br.validate_price_table({
+        "schema_version": br.PRICE_TABLE_SCHEMA_VERSION,
+        "fetched_at": "2026-09-02T00:00:00Z",
+        "source": br.OPENROUTER_MODELS_URL,
+        "models": {
+            "openai/gpt-4o-mini": {
+                "prompt": "0.00000015", "completion": "0.0000006", "request": "0",
+                "image": "0", "web_search": "0", "internal_reasoning": "0",
+            }
+        },
+    })
+    provider_broker = br.Broker(
+        store=store,
+        key_for=lambda _provider: "sk-or-v1-" + "k" * 40,
+        price_table=price_table,
+        transport=transport,
+        funding_source_for=lambda _context: "miner_key",
+        credential_for=lambda _context, _provider: "sk-or-v1-" + "k" * 40,
+    )
+    broker_result = provider_broker.execute(
+        br.RunContext(
+            run_id="r1", assignment_id=lease()["assignment_id"], icp_position=0,
+            lease_token_hash=contracts.document_hash("tok-r1"), miner_hotkey=MINER,
+            submission_id="s1", stage=1, round_id=ROUND,
+        ),
+        operation_id="openrouter.chat",
+        parameters={
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "find fintech companies"}],
+            "max_tokens": 32,
+        },
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+    assert broker_result.status == 502
+    assert broker_result.call["error_code"] == "provider_unavailable"
+
+    class ProviderFailureRuntime(BridgingRuntime):
+        def run_icp(self, spec, **_):
+            self.specs.append(spec)
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                status, _headers, body = shim.dispatch(
+                    "openrouter.chat",
+                    {
+                        "model": "openai/gpt-4o-mini",
+                        "messages": [{"role": "user", "content": "find fintech companies"}],
+                        "max_tokens": 32,
+                    },
+                    5000,
+                )
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            assert status == 502 and json.loads(body) == {"error": {"code": "provider_unavailable"}}
+            return runtime.fake_result(exit_code=1, output_bytes=None, stderr=b"model raised provider error")
+
+    api = FakeApi([lease()], broker_documents=[broker_result.to_document()])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, ProviderFailureRuntime()))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "provider_error"
+    assert result["resource_summary"]["provider_call_count"] == 1
     assert api.completions[0]["body"]["output"] is None
 
 

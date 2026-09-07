@@ -13,7 +13,7 @@ from that commit rather than copied into a staging controller:
 
 - SQL migrations and PostgREST/RPC contracts;
 - real production-shaped database rows and large historical responses;
-- provider credentials, immutable model artifacts, and scoring code;
+- provider credentials, public baseline source, submitted source, and scoring code;
 - gateway restart, Nitro enclave, attestation, PCR0, and exact-commit checks;
 - all configured ICP scoring, retry, aggregate, assignment, and persistence;
 - canonical allocation and bundle construction;
@@ -49,7 +49,7 @@ attestation and targets 5-10 minutes. It:
    database;
 6. runs the candidate-derived N-1 gateway/validator/auditor rehearsal; and
 7. validates canonical-bundle equality, signing, finalization, readback,
-   Git-tree, ICP, settlement, retry, and cleanup contracts.
+   Arena, ICP, settlement, retry, and cleanup contracts.
 
 The candidate contract's independent source commitments include the exact
 miner signing helpers, intake models and routes, and SOURCE_ADD miner helper.
@@ -78,7 +78,7 @@ release succeeds. It dynamically:
    exact Git bundle through that bucket;
 5. captures production through the dedicated read-only DSN and restores it
    only on the encrypted transient volume;
-6. creates one run-scoped gateway secret that retains real provider and model
+6. creates one run-scoped gateway secret that retains real provider and source
    reads but redirects every mutable Research Lab write to the clone;
 7. runs the candidate's exact `gw_restart.sh --commit` and requires matching
    build, attestation, PCR0, and V2 readiness;
@@ -129,6 +129,25 @@ redacted evidence cannot be deleted early; the scheduled cleanup job deletes
 their versions and the bucket after retention expires. The same cleanup job
 removes only stale resources bearing the exact run, candidate, and ephemeral
 ownership tags after hard cancellation.
+
+### Manual restart diagnostics
+
+Use the Full workflow's manual dispatch with the exact attested `main` commit
+when investigating a failed restart. The production gateway must be healthy,
+and its deployed commit must be an ancestor distinct from the candidate. Start
+the diagnostic before deploying that candidate to production.
+
+Automatic Full runs can be cancelled to release the shared gateway build
+runner for a newer release. Manual runs use a separate concurrency group and
+are excluded from automatic release admission. A new manual run can still
+cancel an older manual run, so check for an existing diagnostic first.
+
+For a failed gateway restart, the retained `full-evidence.json` records the
+actual return code or timeout and bounded restart timing stages before cleanup
+removes the transient work. Compare these facts with the workflow cancellation
+time. An error recorded during cancellation cleanup does not establish a
+natural failure in that stage. If an older artifact lacks the inner restart
+details, retain that uncertainty and run a fresh diagnostic.
 
 ## One-time prerequisites
 

@@ -153,6 +153,7 @@ def judge_reply(normalized: Mapping[str, Any]) -> str:
         "observed_industry": "Software",
         "observed_subindustry": "Robotics software",
         "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
         "observed_hq_country": "United States",
         "observed_hq_state": "California",
         "geography_matches": True,

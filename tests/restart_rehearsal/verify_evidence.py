@@ -24,13 +24,11 @@ with redirect_stdout(sys.stderr):
 
     if __package__:
         from .postgres_v2_contract_probe import (
-            EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
             EXPECTED_APPLIED_MIGRATIONS,
             EXPECTED_POSTGRES_CONTRACT_CHECKS,
         )
     else:
         from postgres_v2_contract_probe import (
-            EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
             EXPECTED_APPLIED_MIGRATIONS,
             EXPECTED_POSTGRES_CONTRACT_CHECKS,
         )
@@ -911,13 +909,6 @@ def verify_migration_backed_database_contract(
     ):
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"
-        )
-    if (
-        document.get("atomic_credit_resume")
-        != EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
-    ):
-        raise SystemExit(
-            "migration-backed atomic credit resume evidence is missing"
         )
     if document.get("compact_weight_settlement_contract") != {
         "schema_version": (

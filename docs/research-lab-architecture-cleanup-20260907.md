@@ -16,6 +16,8 @@ same frozen ICPs and scorer. Arena publishes the competition result.
   profile, reward producer, and configuration.
 - Provider outcome digests, checkpoint chains, snapshots, sidecar files,
   restart settings, and their runtime schema requirements.
+- The old loop credit-resume queue rehearsal and its release checks. Historical
+  migrations remain available for settlement and existing data.
 - The unused Git-tree provider-call cap. Current request and provider quotas
   remain in force.
 - The model sandbox rootfs marker and gVisor installation inside the gateway

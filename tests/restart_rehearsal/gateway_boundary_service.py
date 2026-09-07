@@ -106,28 +106,6 @@ SENSITIVE_DOCUMENT_RE = re.compile(
     r"authorization|proxy-authorization|://[^/]+:[^/@]+@)",
     re.IGNORECASE,
 )
-EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE = {
-    "event_id": "40000000-0000-0000-0000-000000000147",
-    "event_hash": "sha256:" + "2" * 64,
-    "identical_replay": True,
-    "concurrent_replay_serialized": True,
-    "differing_replay_rejected": True,
-    "invalid_arguments_rejected": True,
-    "stale_head_rejected": True,
-    "empty_head_rejected": True,
-    "wrong_paused_head_rejected": True,
-    "rpc_security_contract_valid": True,
-    "queue_capacity_guard_exercised": True,
-    "hotkey_capacity_guard_exercised": True,
-    "row_counts": {
-        "resumed_run": 2,
-        "empty_run": 0,
-        "wrong_paused_run": 1,
-        "capacity_closed_run": 1,
-        "hotkey_capacity_closed_run": 1,
-        "concurrent_run": 2,
-    },
-}
 CONTROL_QUERY_FIELDS = frozenset(
     {"columns", "limit", "offset", "on_conflict", "order", "select"}
 )
@@ -655,13 +633,6 @@ def _migration_schema_contract(
         raise RuntimeError(
             "migration-backed schema contract checks are incomplete"
         )
-    if (
-        document.get("atomic_credit_resume")
-        != EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
-    ):
-        raise RuntimeError(
-            "migration-backed atomic credit resume evidence is incomplete"
-        )
     raw_relations = document.get("relations")
     if not isinstance(raw_relations, dict) or not raw_relations:
         raise RuntimeError(
@@ -740,7 +711,6 @@ def _migration_schema_contract(
         "persist_research_lab_allocation_frontier_bootstrap_v2",
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
         "research_lab_allocation_frontier_bootstrap_contract_v2",
-        "resume_research_lab_credit_blocked_run_v1",
         "research_lab_compact_weight_settlement_contract_v1",
         "research_lab_source_add_provider_origin_contract_v1",
         "research_lab_source_add_duplicate_privacy_contract_v1",

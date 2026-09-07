@@ -46,7 +46,6 @@ from tests.restart_rehearsal.fixture_contract import (
     load_rehearsal_metagraph_hotkeys,
 )
 from tests.restart_rehearsal.gateway_boundary_service import (
-    EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE as GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE,
     LocalPostgRESTServer,
     LocalPostgRESTState,
     RUNTIME_TABLES,
@@ -72,16 +71,10 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
     DisposablePostgres,
     EVENT_PROJECTIONS_MIGRATION,
-    EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
     EXPECTED_APPLIED_MIGRATIONS,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
     EXPECTED_POSTGRES_CONTRACT_CHECKS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
-    HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
-    MAINTENANCE_PAUSE_MIGRATION,
-    PAUSED_CAPACITY_AGING_MIGRATION,
-    QUEUE_CAPACITY_GUARD_MIGRATION,
-    RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
@@ -309,8 +302,6 @@ def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
     }
 
 
-def _atomic_credit_resume_fixture() -> dict[str, Any]:
-    return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
 
 
 def _source_add_miner_status_contract_fixture() -> dict[str, Any]:
@@ -1640,7 +1631,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_allocation_frontier_historical_source_contract_v1",
             "research_lab_source_catalog_replay_contract_v2",
             "research_lab_compact_checkpoint_graph_contract_v1",
-            "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_source_add_provider_origin_contract_v1",
@@ -1675,7 +1665,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_candidate_append_waterfall_receipt_v1",
             "research_lab_candidate_append_waterfall_metric_v1",
         ],
-        "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
             _compact_weight_settlement_contract_fixture()
         ),
@@ -1750,7 +1739,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     )
     assert "research_lab_champion_lifetime_credit_contract_v1" in rpcs
     assert "research_lab_active_model_replay_contract_v2" in rpcs
-    assert "resume_research_lab_credit_blocked_run_v1" in rpcs
     assert "persist_research_lab_ancestry_checkpoint_v2" in rpcs
     assert "research_lab_ancestry_disclosure_lookup_contract_v1" in rpcs
     assert "leadpoet_production_parity_reader_contract_v1" in rpcs
@@ -1772,20 +1760,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     ][:-1]
     path.write_text(json.dumps(stale_migrations), encoding="utf-8")
     with pytest.raises(RuntimeError, match="final migration order"):
-        _migration_schema_contract(path, candidate_sha=COMMIT)
-
-    missing_atomic_resume = json.loads(json.dumps(contract))
-    missing_atomic_resume.pop("atomic_credit_resume")
-    path.write_text(json.dumps(missing_atomic_resume), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="atomic credit resume evidence"):
-        _migration_schema_contract(path, candidate_sha=COMMIT)
-
-    missing_atomic_resume_rpc = json.loads(json.dumps(contract))
-    missing_atomic_resume_rpc["rpcs"].remove(
-        "resume_research_lab_credit_blocked_run_v1"
-    )
-    path.write_text(json.dumps(missing_atomic_resume_rpc), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="RPCs are unavailable"):
         _migration_schema_contract(path, candidate_sha=COMMIT)
 
     incomplete = json.loads(json.dumps(contract))
@@ -1884,7 +1858,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_compact_checkpoint_graph_contract_v1",
             "put_research_lab_provider_evidence_cache_v2",
             "research_lab_provider_persistence_batch_contract_v1",
-            "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_source_add_provider_origin_contract_v1",
@@ -1907,7 +1880,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_add_reserve_leg1_slot_v3",
             "research_lab_source_add_finalize_leg1_v3",
         ],
-        "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
             _compact_weight_settlement_contract_fixture()
         ),
@@ -2023,14 +1995,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         reordered_migrations["applied_migrations"][0:2]
     )
     invalid_contracts.append(reordered_migrations)
-    missing_atomic_credit_resume = json.loads(json.dumps(contract))
-    missing_atomic_credit_resume.pop("atomic_credit_resume")
-    invalid_contracts.append(missing_atomic_credit_resume)
-    altered_atomic_credit_resume = json.loads(json.dumps(contract))
-    altered_atomic_credit_resume["atomic_credit_resume"]["row_counts"][
-        "resumed_run"
-    ] = 3
-    invalid_contracts.append(altered_atomic_credit_resume)
     for invalid in invalid_contracts:
         contract_path.write_text(json.dumps(invalid), encoding="utf-8")
         with pytest.raises(
@@ -2113,58 +2077,6 @@ def test_source_add_rehearsal_migrations_preserve_prerequisite_order() -> None:
     )
 
 
-def test_credit_resume_rehearsal_uses_final_production_queue_guard() -> None:
-    applied = list(EXPECTED_APPLIED_MIGRATIONS)
-    ordered = (
-        EVENT_PROJECTIONS_MIGRATION,
-        QUEUE_CAPACITY_GUARD_MIGRATION,
-        MAINTENANCE_PAUSE_MIGRATION,
-        PAUSED_CAPACITY_AGING_MIGRATION,
-        RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
-        HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
-        postgres_probe.ATOMIC_CREDIT_RESUME_MIGRATION,
-    )
-    positions = [applied.index(name) for name in ordered]
-
-    assert positions == sorted(positions)
-    assert "CREATE SCHEMA extensions;" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    assert (
-        "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;"
-        in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    )
-    assert "miner_hotkey TEXT NOT NULL" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    assert (
-        "CREATE TABLE public.research_loop_run_queue_events"
-        not in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    )
-
-    source_root = Path(__file__).resolve().parents[2]
-    projections = (source_root / "scripts" / EVENT_PROJECTIONS_MIGRATION).read_text(
-        encoding="utf-8"
-    )
-    final_guard = (
-        source_root / "scripts" / HOTKEY_ACTIVE_LOOP_CAP_MIGRATION
-    ).read_text(encoding="utf-8")
-    assert (
-        "CREATE TABLE IF NOT EXISTS public.research_loop_run_queue_events"
-        in projections
-    )
-    assert (
-        "CREATE OR REPLACE VIEW public.research_loop_run_queue_current"
-        in projections
-    )
-    assert "hotkey_capacity_text" in final_guard
-    assert "same_hotkey_count >= hotkey_capacity" in final_guard
-    assert EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE[
-        "hotkey_capacity_guard_exercised"
-    ] is True
-    assert EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE[
-        "rpc_security_contract_valid"
-    ] is True
-    assert (
-        GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE
-        == EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
-    )
 
 
 def test_event_projection_prerequisites_cover_migration_28_base_relations() -> None:

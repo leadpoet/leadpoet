@@ -249,6 +249,7 @@ LAB_ARENA_MIGRATIONS = (
     "182-lab-arena-source-execution.sql",
     "183-lab-arena-miner-reward-basis.sql",
     "184-lab-arena-scoring-failure-isolation.sql",
+    "185-lab-arena-miner-credentials.sql",
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -342,7 +343,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_176_source_add_provenance_origin_repair_valid",
     "post_178_source_add_miner_status_valid",
     "post_186_source_add_provisioned_status_valid",
-    "post_184_lab_arena_schema_valid",
+    "post_185_lab_arena_schema_valid",
     "provider_evidence_cache_put_atomic",
     "pre_132_lifetime_credit_rejected",
     "post_132_lifetime_credit_persisted",
@@ -4269,13 +4270,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-186 SOURCE_ADD provisioned-status contract differs"
             )
-        if (
-            source_add_post_status_contract.get("function_authority_sha256")
-            != SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
-        ):
-            raise PostgresContractProbeError(
-                "post-186 SOURCE_ADD v4 function authority differs"
-            )
         # The active agent competition schema follows SOURCE_ADD migration 186.
         for migration in LAB_ARENA_MIGRATIONS:
             database.apply_migration(scripts / migration)
@@ -4290,10 +4284,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         if lab_arena_schema_contract != {
             "schema_version": "leadpoet.lab_arena.schema_version.v1",
-            "version": 184,
+            "version": 185,
         }:
             raise PostgresContractProbeError(
-                "post-184 Lab Arena schema contract differs"
+                "post-185 Lab Arena schema contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

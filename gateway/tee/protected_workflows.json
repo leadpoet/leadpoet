@@ -3172,6 +3172,11 @@
       "symbol": "SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256"
     },
     {
+      "ast_sha256": "sha256:693dad878771015e09085591566b6cfd460926343ca8cc667403da1a88a9cb16",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256"
+    },
+    {
       "ast_sha256": "sha256:6461f04a3f8c8883d15b8da5dbc20c055b115ef16eca0cc441f4ba4709fe10a9",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256"
@@ -3207,7 +3212,7 @@
       "symbol": "_verify_source_add_post_accept_leg1_contract_v2"
     },
     {
-      "ast_sha256": "sha256:037be5f64317c0e62815c970b84b8f0e90f754a046222151a1e0b580796d972a",
+      "ast_sha256": "sha256:038e59520359da930908f59d7cf8f78d8f4db8351a6a488a2d098f4428bf81ed",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_verify_source_add_post_accept_leg1_contract_v3"
     },
@@ -4632,7 +4637,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:4d1708a80275e88efa6006ee8c5a83c8ef489bd7a64a241a7f67aa01677e454a",
+  "manifest_hash": "sha256:14da95b6aa56f75074d903e1efcde7f03f1f56bb8c92f96c7ab4d2aa8856274a",
   "protected_source_commit": "28a79db14a2ef3fa43e2fca07b5bac7955500722",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

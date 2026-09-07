@@ -1471,6 +1471,14 @@ SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:f17fab75262f612bf6aa5ca1dc4cb7dfe60d08f4b4cbf7b95fa5e7ea28084fb3"
 )
 
+# Migrations 175 and 176 expose the historical v3/v4 function authority.
+# Migration 186 rewrites the active SOURCE_ADD predicates and publishes the
+# current v4 authority. Keep the historical v3 value separate from the active
+# post-186 v4 value.
+SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:fe7df9f9336217f3e738f420fae0d9720959042080df431c1bcb2d4baa8ee954"
+)
+
 SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256 = (
     "sha256:208de2069d2b44826fe466de01a2d1a91f4c762869227b39bdba969c8586be16"
 )
@@ -1633,7 +1641,7 @@ def _verify_source_add_post_accept_leg1_contract_v3(
             "research_lab_source_add_provenance_leg1_authority_v1"
         ),
         "function_authority_sha256": (
-            SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+            SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256
         ),
         "trigger_authority_sha256": (
             SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256

@@ -40,6 +40,7 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256,
     SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256,
@@ -238,6 +239,9 @@ SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "178-research-lab-source-add-miner-status.sql"
 )
+SOURCE_ADD_PROVISIONED_STATUS_MIGRATION = (
+    "186-research-lab-source-add-provisioned-status.sql"
+)
 LAB_ARENA_MIGRATIONS = (
     "179-lab-arena-v1.sql",
     "180-lab-arena-daily-competition.sql",
@@ -303,6 +307,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
     SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
     SOURCE_ADD_MINER_STATUS_MIGRATION,
+    SOURCE_ADD_PROVISIONED_STATUS_MIGRATION,
     *LAB_ARENA_MIGRATIONS,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
@@ -336,6 +341,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_175_source_add_provenance_leg1_valid",
     "post_176_source_add_provenance_origin_repair_valid",
     "post_178_source_add_miner_status_valid",
+    "post_186_source_add_provisioned_status_valid",
     "post_184_lab_arena_schema_valid",
     "provider_evidence_cache_put_atomic",
     "pre_132_lifetime_credit_rejected",
@@ -4077,7 +4083,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "research_lab_source_add_provenance_leg1_authority_v1"
             ),
             "function_authority_sha256": (
-                SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+                SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256
             ),
             "trigger_authority_sha256": (
                 SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
@@ -4240,7 +4246,37 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-178 SOURCE_ADD miner status contract differs"
             )
-        # The active agent competition schema follows SOURCE_ADD migration 178.
+        database.apply_migration(
+            scripts / SOURCE_ADD_PROVISIONED_STATUS_MIGRATION
+        )
+        applied.append(SOURCE_ADD_PROVISIONED_STATUS_MIGRATION)
+        source_add_post_status_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_post_accept_leg1_contract_v4()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        expected_post_status_contract = dict(
+            expected_provenance_origin_contract
+        )
+        expected_post_status_contract[
+            "function_authority_sha256"
+        ] = SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+        if source_add_post_status_contract != expected_post_status_contract:
+            raise PostgresContractProbeError(
+                "post-186 SOURCE_ADD provisioned-status contract differs"
+            )
+        if (
+            source_add_post_status_contract.get("function_authority_sha256")
+            != SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+        ):
+            raise PostgresContractProbeError(
+                "post-186 SOURCE_ADD v4 function authority differs"
+            )
+        # The active agent competition schema follows SOURCE_ADD migration 186.
         for migration in LAB_ARENA_MIGRATIONS:
             database.apply_migration(scripts / migration)
             applied.append(migration)

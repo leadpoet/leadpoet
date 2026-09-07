@@ -1702,6 +1702,74 @@ def test_outer_evidence_cleanup_retains_path_without_replacing_deadline(
     assert str(evidence_root) in captured
 
 
+@pytest.mark.parametrize("failure_kind", ["timeout", "handoff"])
+def test_bounded_failure_projection_survives_early_cleanup_without_raw_output(
+    failure_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    evidence_root = tmp_path / "evidence"
+    durable_root = tmp_path / "durable"
+    evidence_root.mkdir()
+
+    def fake_mkdtemp(*, prefix: str) -> str:
+        if prefix.startswith("leadpoet-restart-evidence-"):
+            return str(evidence_root)
+        durable_root.mkdir(exist_ok=True)
+        return str(durable_root)
+
+    monkeypatch.setattr(controller.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(
+        controller,
+        "_normalize_evidence_ownership",
+        lambda *_args, **_kwargs: None,
+    )
+    original = (
+        controller.RehearsalTimeBudgetExceeded("deadline")
+        if failure_kind == "timeout"
+        else RuntimeError("raw secret must not escape")
+    )
+    stages = [
+        {
+            "command": ["docker", "--secret", "raw-secret"],
+            "duration_seconds": 12.3456,
+            "error": "raw secret must not escape",
+            "error_type": "CalledProcessError",
+            "returncode": 17,
+            "stage": "gateway-forward-1",
+            "status": "failed",
+        }
+    ]
+
+    with pytest.raises(type(original)):
+        with controller._temporary_evidence_directory(
+            "rehearsal-image",
+            docker_platform="linux/amd64",
+            handoff_attempted=(lambda: failure_kind == "handoff"),
+            failure_projection=lambda error: controller._preserve_bounded_failure_projection(
+                candidate_sha="a" * 40,
+                stages=stages,
+                original=error,
+            ),
+        ) as active_root:
+            (active_root / "launcher.log").write_text(
+                "raw secret must not escape\n", encoding="utf-8"
+            )
+            raise original
+
+    report = (durable_root / "failure-summary.json").read_text(encoding="utf-8")
+    assert "raw secret" not in report
+    assert "docker" not in report
+    assert '"stage": "gateway-forward-1"' in report
+    if failure_kind == "timeout":
+        assert '"timeout": true' in report
+        assert '"stage": "time-budget"' in report
+    else:
+        assert '"timeout": false' in report
+    assert not evidence_root.exists()
+
+
 def test_prepush_main_alarm_cancels_and_reaps_blocked_probe(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

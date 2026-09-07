@@ -1497,6 +1497,16 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
         if not line or len(line) > 2048 or SECRET_LIKE_DIAGNOSTIC_RE.search(line):
             continue
         projected: dict[str, Any] | None = None
+        match = re.match(
+            r"REHEARSAL_TIME_BUDGET_EXCEEDED "
+            r"profile=(prepush|unaccelerated)(?: |$)",
+            line,
+        )
+        if match:
+            projected = {
+                "marker": "time_budget",
+                "profile": match.group(1),
+            }
         match = re.fullmatch(
             r"REHEARSAL_FAILURE_DIAGNOSTICS "
             r"component=(gateway|validator|workflow) status=([0-9]{1,3})",
@@ -1733,10 +1743,17 @@ def _rehearsal_failure_diagnostics(
     ]
     if output_diagnostics:
         projection["output_markers"] = output_diagnostics
-    # The rehearsal emits this fixed-format authority marker to stderr before
-    # outer cleanup. Cleanup can exceed the bounded diagnostic tail, so locate
-    # the marker in the captured stderr while keeping projected output bounded.
-    matches = re.findall(
+    projection["timeout"] = any(
+        item.get("marker") == "time_budget" for item in output_diagnostics
+    )
+    # The rehearsal emits fixed-format authority markers to stderr before outer
+    # cleanup. Cleanup can exceed the bounded diagnostic tail, so locate the
+    # marker in captured stderr while keeping projected output bounded.
+    bounded_matches = re.findall(
+        r"(?:^|\n)REHEARSAL_BOUNDED_FAILURE_PROJECTION ([^\s]+)",
+        stderr_text,
+    )
+    matches = bounded_matches or re.findall(
         r"(?:^|\n)REHEARSAL_BATCH_FAILURE_EVIDENCE ([^\s]+)",
         stderr_text,
     )
@@ -1767,6 +1784,10 @@ def _rehearsal_failure_diagnostics(
             or document.get("status") != "failed"
             or not isinstance(document.get("stages"), list)
             or len(document["stages"]) > 64
+            or (
+                "timeout" in document
+                and type(document.get("timeout")) is not bool
+            )
         ):
             return projection
         stages: list[dict[str, Any]] = []
@@ -1846,6 +1867,7 @@ def _rehearsal_failure_diagnostics(
                     item["status"] == "unexercised" for item in stages
                 ),
                 "stages": stages,
+                "timeout": projection["timeout"] or document.get("timeout") is True,
             }
         )
     except (OSError, TypeError, ValueError, UnicodeDecodeError):
@@ -1876,6 +1898,7 @@ def _rehearsal_timeout_diagnostics(
         result, candidate_sha=candidate_sha
     )
     projection["parent_watchdog_timeout_seconds"] = int(exc.timeout)
+    projection["timeout"] = True
     return projection
 
 
@@ -1902,18 +1925,22 @@ def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
         diagnostics = _rehearsal_timeout_diagnostics(
             exc, candidate_sha=candidate_sha
         )
-        raise ProductionParityError(
+        error = ProductionParityError(
             "candidate-derived N-1 rehearsal parent watchdog timed out: "
             + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
-        ) from None
+        )
+        setattr(error, "_rehearsal_failure_diagnostics", diagnostics)
+        raise error from None
     if result.returncode != 0:
         diagnostics = _rehearsal_failure_diagnostics(
             result, candidate_sha=candidate_sha
         )
-        raise ProductionParityError(
+        error = ProductionParityError(
             "candidate-derived N-1 rehearsal failed: "
             + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
         )
+        setattr(error, "_rehearsal_failure_diagnostics", diagnostics)
+        raise error
     evidence = _load_json(
         evidence_path, description="joined restart rehearsal evidence"
     )
@@ -1925,6 +1952,75 @@ def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
     ):
         raise ProductionParityError("joined restart rehearsal identity differs")
     return evidence
+
+
+def _write_rehearsal_failure_projection(
+    path: Path,
+    *,
+    candidate_sha: str,
+    diagnostics: Mapping[str, Any],
+) -> None:
+    """Write only the bounded diagnostic contract used by CI retention."""
+
+    stages = diagnostics.get("stages")
+    safe_stages: list[dict[str, Any]] = []
+    if isinstance(stages, list):
+        for item in stages:
+            if not isinstance(item, Mapping):
+                continue
+            stage = item.get("stage")
+            status = item.get("status")
+            if (
+                not isinstance(stage, str)
+                or not _safe_rehearsal_stage(stage)
+                or status not in {"failed", "unexercised"}
+            ):
+                continue
+            projected: dict[str, Any] = {
+                "stage": stage,
+                "status": status,
+            }
+            error_type = item.get("error_type")
+            if error_type in SAFE_REHEARSAL_ERROR_TYPES:
+                projected["error_type"] = error_type
+            returncode = item.get("returncode")
+            if type(returncode) is int and -255 <= returncode <= 255:
+                projected["returncode"] = returncode
+            duration = item.get("duration_seconds")
+            if type(duration) in {int, float} and 0 <= float(duration) <= 3600:
+                projected["duration_seconds"] = round(float(duration), 3)
+            safe_stages.append(projected)
+    markers = diagnostics.get("output_markers")
+    safe_markers = sorted(
+        {
+            str(item.get("marker"))
+            for item in markers
+            if isinstance(item, Mapping)
+            and re.fullmatch(r"[a-z_]{1,64}", str(item.get("marker") or ""))
+        }
+    )[:32] if isinstance(markers, list) else []
+    projection = {
+        "candidate_sha": candidate_sha,
+        "output_markers": safe_markers,
+        "returncode": (
+            diagnostics.get("returncode")
+            if type(diagnostics.get("returncode")) is int
+            and -255 <= diagnostics["returncode"] <= 255
+            else None
+        ),
+        "schema_version": "leadpoet.fast_rehearsal_failure_projection.v1",
+        "stages": safe_stages,
+        "status": "failed",
+        "timeout": diagnostics.get("timeout") is True,
+    }
+    encoded = json.dumps(projection, sort_keys=True, indent=2) + "\n"
+    if len(encoded.encode("utf-8")) > 16_384:
+        projection["output_markers"] = []
+        projection["stages"] = []
+        projection["truncated"] = True
+        encoded = json.dumps(projection, sort_keys=True, indent=2) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(encoded, encoding="utf-8")
 
 
 def _run_database_lane(
@@ -2366,6 +2462,18 @@ def run_fast_lane(
     ledger_path.write_text(
         json.dumps(final, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
+    rehearsal_error = failures.get("rehearsal")
+    rehearsal_diagnostics = (
+        getattr(rehearsal_error, "_rehearsal_failure_diagnostics", None)
+        if rehearsal_error is not None
+        else None
+    )
+    if isinstance(rehearsal_diagnostics, Mapping):
+        _write_rehearsal_failure_projection(
+            ledger_path.with_name("rehearsal-failure-projection.json"),
+            candidate_sha=contract["candidate_sha"],
+            diagnostics=rehearsal_diagnostics,
+        )
     return final
 
 

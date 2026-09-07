@@ -3790,9 +3790,56 @@ def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
     assert "candidate-derived N-1 rehearsal failed" in message
     assert "parent watchdog timed out" not in message
     assert '"failure_summary_available":true' in message
+    assert '"timeout":true' in message
     assert '"stage":"time-budget"' in message
     assert '"stage":"evidence-join-prepush"' in message
     assert secret not in message
+    diagnostics = getattr(raised.value, "_rehearsal_failure_diagnostics")
+    assert diagnostics["timeout"] is True
+
+
+def test_rehearsal_failure_projection_drops_raw_diagnostics(
+    tmp_path: Path,
+) -> None:
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha="f" * 40,
+        diagnostics={
+            "output_markers": [
+                {"marker": "stage_failure", "raw": "secret"},
+                {"marker": "time_budget", "raw": "secret"},
+            ],
+            "returncode": 1,
+            "stages": [
+                {
+                    "command": ["docker", "--token", "secret"],
+                    "duration_seconds": 12.3456,
+                    "error": "secret",
+                    "error_type": "CalledProcessError",
+                    "returncode": 17,
+                    "stage": "gateway-forward-1",
+                    "status": "failed",
+                }
+            ],
+            "timeout": True,
+        },
+    )
+
+    encoded = projection_path.read_text(encoding="utf-8")
+    projection = json.loads(encoded)
+    assert "secret" not in encoded
+    assert projection["output_markers"] == ["stage_failure", "time_budget"]
+    assert projection["stages"] == [
+        {
+            "duration_seconds": 12.346,
+            "error_type": "CalledProcessError",
+            "returncode": 17,
+            "stage": "gateway-forward-1",
+            "status": "failed",
+        }
+    ]
+    assert projection["timeout"] is True
 
 
 @pytest.mark.parametrize(

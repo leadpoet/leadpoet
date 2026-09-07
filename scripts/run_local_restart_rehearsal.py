@@ -37,7 +37,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 from urllib.request import Request, urlopen
 
 
@@ -400,6 +400,21 @@ _SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = frozenset(
         "RuntimeError",
         "SystemExit",
         "TimeoutError",
+        "TypeError",
+        "ValueError",
+    }
+)
+_SAFE_FAILURE_PROJECTION_ERROR_TYPES = frozenset(
+    {
+        "AssertionError",
+        "CalledProcessError",
+        "FileNotFoundError",
+        "OSError",
+        "PermissionError",
+        "RehearsalTimeBudgetExceeded",
+        "RuntimeError",
+        "SystemExit",
+        "TimeoutExpired",
         "TypeError",
         "ValueError",
     }
@@ -2088,6 +2103,7 @@ def _temporary_evidence_directory(
     *,
     docker_platform: str,
     handoff_attempted: Callable[[], bool] | None = None,
+    failure_projection: Callable[[BaseException], Path] | None = None,
 ) -> Iterator[Path]:
     """Normalize after the last possible writer and before host cleanup."""
 
@@ -2122,6 +2138,11 @@ def _temporary_evidence_directory(
     try:
         yield evidence_root
     except BaseException as original:
+        if failure_projection is not None and isinstance(original, Exception):
+            try:
+                failure_projection(original)
+            except BaseException:
+                pass
         cleanup_errors = []
         try:
             normalize()
@@ -2346,6 +2367,82 @@ def _preserve_batched_failure_evidence(
     )
     print(
         f"REHEARSAL_BATCH_FAILURE_EVIDENCE {durable_root}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return durable_root
+
+
+def _preserve_bounded_failure_projection(
+    *,
+    candidate_sha: str,
+    stages: Sequence[dict[str, Any]],
+    original: BaseException,
+) -> Path:
+    """Retain only bounded, secret-safe failure metadata before cleanup."""
+
+    durable_root = Path(
+        tempfile.mkdtemp(
+            prefix=(
+                "leadpoet-rehearsal-failure-"
+                f"{candidate_sha[:12]}-full-path-"
+            )
+        )
+    )
+    projected_stages: list[dict[str, Any]] = []
+    for item in stages:
+        if not isinstance(item, Mapping):
+            continue
+        stage = item.get("stage")
+        status = item.get("status")
+        if (
+            not isinstance(stage, str)
+            or re.fullmatch(r"[a-z0-9-]{1,128}", stage) is None
+            or status not in {"failed", "unexercised"}
+        ):
+            continue
+        projected: dict[str, Any] = {
+            "stage": stage,
+            "status": status,
+        }
+        error_type = item.get("error_type")
+        if error_type in _SAFE_FAILURE_PROJECTION_ERROR_TYPES:
+            projected["error_type"] = error_type
+        returncode = item.get("returncode")
+        if type(returncode) is int and -255 <= returncode <= 255:
+            projected["returncode"] = returncode
+        duration = item.get("duration_seconds")
+        if type(duration) in {int, float} and 0 <= float(duration) <= 3600:
+            projected["duration_seconds"] = round(float(duration), 3)
+        projected_stages.append(projected)
+    if (
+        isinstance(original, RehearsalTimeBudgetExceeded)
+        and not any(item.get("stage") == "time-budget" for item in projected_stages)
+    ):
+        projected_stages.append(
+            {
+                "error_type": "RehearsalTimeBudgetExceeded",
+                "stage": "time-budget",
+                "status": "failed",
+            }
+        )
+    projected_stages = projected_stages[:64]
+    report = {
+        "candidate_sha": candidate_sha,
+        "failure_count": sum(item["status"] == "failed" for item in projected_stages),
+        "stages": projected_stages,
+        "status": "failed",
+        "timeout": isinstance(original, RehearsalTimeBudgetExceeded),
+        "unexercised_count": sum(
+            item["status"] == "unexercised" for item in projected_stages
+        ),
+    }
+    durable_root.joinpath("failure-summary.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        f"REHEARSAL_BOUNDED_FAILURE_PROJECTION {durable_root}",
         file=sys.stderr,
         flush=True,
     )
@@ -3589,6 +3686,11 @@ def _run_profile(
             tag,
             docker_platform=docker_platform,
             handoff_attempted=lambda: evidence_handoff_attempted,
+            failure_projection=lambda original: _preserve_bounded_failure_projection(
+                candidate_sha=candidate_sha,
+                stages=stage_results,
+                original=original,
+            ),
         ) as evidence_root:
             transitions = (transition,)
             if args.profile == "release" and transition == "forward":

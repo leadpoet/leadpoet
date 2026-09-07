@@ -186,8 +186,6 @@ v2_kms_recipient = None
 v2_kms_recipient_lock = Lock()
 v2_artifact_vault = None
 v2_artifact_vault_lock = Lock()
-v2_inter_enclave_artifact_ingest = None
-v2_inter_enclave_artifact_ingest_lock = Lock()
 v2_artifact_persistence_verifier = None
 v2_artifact_persistence_verifier_lock = Lock()
 v2_ingress_seal_cache = {}
@@ -1747,21 +1745,6 @@ def get_v2_artifact_vault():
     return v2_artifact_vault
 
 
-def get_v2_inter_enclave_artifact_ingest():
-    global v2_inter_enclave_artifact_ingest
-    with v2_inter_enclave_artifact_ingest_lock:
-        if v2_inter_enclave_artifact_ingest is None:
-            from gateway.tee.inter_enclave_artifact_v2 import (
-                InterEnclaveArtifactIngestV2,
-            )
-            from gateway.tee.rpc_authority import active_enclave_role
-
-            if active_enclave_role() != "gateway_coordinator":
-                raise RuntimeError("artifact ingestion is coordinator-only")
-            v2_inter_enclave_artifact_ingest = InterEnclaveArtifactIngestV2(
-                vault=get_v2_artifact_vault(),
-            )
-        return v2_inter_enclave_artifact_ingest
 
 
 def get_v2_artifact_persistence_verifier():
@@ -1813,24 +1796,6 @@ def execute_v2_provider_request(request: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def seal_v2_inter_enclave_artifact(
-    *,
-    plaintext: bytes,
-    job_id: str,
-    purpose: str,
-    artifact_kind: str,
-) -> Dict[str, Any]:
-    from gateway.tee.inter_enclave_artifact_v2 import (
-        seal_artifact_over_attested_tls_v2,
-    )
-
-    return seal_artifact_over_attested_tls_v2(
-        client=get_v2_inter_enclave_client(),
-        plaintext=plaintext,
-        job_id=job_id,
-        purpose=purpose,
-        artifact_kind=artifact_kind,
-    )
 
 
 def _gateway_ancestry_manager_kwargs(runtime: Any) -> Dict[str, Any]:
@@ -2256,22 +2221,6 @@ def handle_inter_enclave_rpc(
         if peer["physical_role"] != "gateway_scoring":
             raise ValueError("provider caller role is not authorized")
         return get_v2_provider_semantics_authority().execute(params)
-    if method in {
-        "artifact_seal_begin",
-        "artifact_seal_chunk",
-        "artifact_seal_finish",
-        "artifact_seal_cancel",
-    }:
-        if active_enclave_role() != "gateway_coordinator":
-            raise ValueError("artifact ingestion is coordinator-only")
-        ingest = get_v2_inter_enclave_artifact_ingest()
-        action = {
-            "artifact_seal_begin": ingest.begin,
-            "artifact_seal_chunk": ingest.put_chunk,
-            "artifact_seal_finish": ingest.finish,
-            "artifact_seal_cancel": ingest.cancel,
-        }[method]
-        return action(params, peer=peer)
     raise ValueError("inter-enclave method is not authorized")
 
 

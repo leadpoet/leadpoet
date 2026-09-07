@@ -1908,33 +1908,7 @@ async def execute_scoring_v2(
             "V2 scoring failed closed: %s" % result["failure_code"],
             authority=outcome,
         )
-    sealed_model_artifacts = result.get("sealed_artifacts") or []
-    if not isinstance(sealed_model_artifacts, list) or any(
-        not isinstance(item, Mapping) for item in sealed_model_artifacts
-    ):
-        raise AttestedScoringV2Error("V2 sealed model artifacts are invalid")
-    expected_sealed_hashes = []
-    expected_sealed_ids = set()
-    for descriptor in sealed_model_artifacts:
-        if (
-            descriptor.get("status") != "sealed"
-            or descriptor.get("job_id") != job_id
-            or descriptor.get("purpose") != purpose
-            or descriptor.get("artifact_kind")
-            not in {"model_output", "model_trace", "provider_evidence_tape"}
-            or not _HASH_RE.fullmatch(str(descriptor.get("artifact_id") or ""))
-            or not _HASH_RE.fullmatch(
-                str(descriptor.get("plaintext_hash") or "")
-            )
-        ):
-            raise AttestedScoringV2Error(
-                "V2 sealed model artifact commitment is invalid"
-            )
-        expected_sealed_ids.add(str(descriptor["artifact_id"]))
-        expected_sealed_hashes.append(str(descriptor["plaintext_hash"]))
-    expected_artifact_hashes = sorted(
-        transport_artifact_hashes + expected_sealed_hashes
-    )
+    expected_artifact_hashes = sorted(transport_artifact_hashes)
     graph = checkpointed_graph
     await _validate_receipt_graph_async(
         graph,
@@ -1971,11 +1945,6 @@ async def execute_scoring_v2(
             for item in artifacts
             if isinstance(item, Mapping)
         )
-        observed_ids = {
-            str(item.get("artifact_id") or "")
-            for item in artifacts
-            if isinstance(item, Mapping)
-        }
         committed_hashes = set(job_artifact_hashes)
         observed_descriptor_hashes = {
             str(item.get(field) or "")
@@ -1998,7 +1967,6 @@ async def execute_scoring_v2(
         )
         if (
             any(observed_counts[key] < count for key, count in expected_counts.items())
-            or not expected_sealed_ids.issubset(observed_ids)
             or not observed_commitments.issubset(committed_hashes)
         ):
             raise AttestedScoringV2Error(

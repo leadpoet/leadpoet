@@ -33,7 +33,6 @@ _PENALIZABLE_FAILURE_MARKERS = (
     "data quality issue",
     "missing industry",
     "company verification failed",
-    "intent fabrication detected",
 )
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
 _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
@@ -368,7 +367,7 @@ def count_penalizable_false_positives(
                 marker in reason for marker in _PENALIZABLE_FAILURE_MARKERS
             ):
                 gate_failures += 1
-            continue
+                continue
         if not icp_has_intent_signals:
             continue
         details = row.get("intent_signals_detail")

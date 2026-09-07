@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
+from qualification.competition_models import CompetitionCompany
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
@@ -122,8 +123,31 @@ def _complete_verdict(*, name="Acme", website="https://acme.example.com"):
     return verdict
 
 
-def test_public_fit_urls_survive_normalization_and_internal_json_round_trip():
-    projected = _normalized_company(_public_company())
+def _verified_homepage_identity(
+    *,
+    observed_name="acme",
+    observed_domain="acme.example.com",
+    observed_linkedin_slug="acme",
+):
+    return company_fit_match(
+        "verified from homepage",
+        details={
+            "identity": {
+                "decision": "match",
+                "evidence_source": "company_homepage",
+                "observed_name": observed_name,
+                "observed_domain": observed_domain,
+                "observed_linkedin_slug": observed_linkedin_slug,
+            }
+        },
+    )
+
+
+def test_public_fit_urls_reach_internal_verifier_hints():
+    public = CompetitionCompany.model_validate(_public_company()).model_dump(
+        mode="json"
+    )
+    projected = _normalized_company(public)
     assert projected["fit_evidence_urls"] == [
         "https://acme.example.com/about",
         "https://news.example.com/acme-profile",
@@ -132,6 +156,7 @@ def test_public_fit_urls_survive_normalization_and_internal_json_round_trip():
     internal = CompanyOutput(**projected)
     restored = CompanyOutput.model_validate_json(internal.model_dump_json())
     assert restored.fit_evidence_urls == projected["fit_evidence_urls"]
+    assert _fit_evidence_url_hints(restored) == projected["fit_evidence_urls"]
     legacy_values = _company().model_dump()
     legacy_values.pop("fit_evidence_urls")
     assert CompanyOutput(**legacy_values).fit_evidence_urls == []
@@ -392,8 +417,13 @@ def test_unverified_incomplete_or_oversized_homepage_identity_is_not_anchored(
     )
 
 
-def test_verified_anchor_does_not_override_returned_linkedin_mismatch(monkeypatch):
-    async def request(**_kwargs):
+def test_verified_anchor_linkedin_conflict_retries_then_stays_unavailable(
+    monkeypatch,
+):
+    prompts = []
+
+    async def request(**kwargs):
+        prompts.append(kwargs["prompt"])
         verdict = _complete_verdict()
         verdict["observed_company_linkedin"] = (
             "https://linkedin.com/company/same-name-other-company"
@@ -405,17 +435,94 @@ def test_verified_anchor_does_not_override_returned_linkedin_mismatch(monkeypatc
         "qualification.scoring.lead_scorer._request_company_reverify_json",
         request,
     )
-    homepage_identity = company_fit_match(
-        "verified from homepage",
-        details={
-            "identity": {
-                "decision": "match",
-                "evidence_source": "company_homepage",
-                "observed_name": "acme",
-                "observed_domain": "acme.example.com",
-                "observed_linkedin_slug": "acme",
-            }
-        },
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_verified_homepage_identity(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "web_linkedin_conflicts_with_verified_homepage"
+    )
+    assert result.details["identity_receipt"]["observed_linkedin_slug"] == (
+        "same-name-other-company"
+    )
+    assert len(prompts) == 2
+    assert "IDENTITY CONFLICT REPAIR" in prompts[1]
+    assert "Do not assume that two different slugs are aliases" in prompts[1]
+
+
+def test_verified_anchor_linkedin_conflict_can_be_repaired(monkeypatch):
+    prompts = []
+
+    async def request(**kwargs):
+        prompts.append(kwargs["prompt"])
+        verdict = _complete_verdict(
+            name="Keppel",
+            website="https://www.keppel.com/",
+        )
+        if len(prompts) == 1:
+            verdict["observed_company_linkedin"] = (
+                "https://linkedin.com/company/keppel-ltd"
+            )
+        else:
+            verdict["observed_company_linkedin"] = (
+                "https://linkedin.com/company/keppel"
+            )
+        return verdict, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company(
+                company_name="Keppel",
+                company_website="https://www.keppel.com/",
+                company_linkedin="https://linkedin.com/company/keppel",
+            ),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_verified_homepage_identity(
+                observed_name=(
+                    "keppelglobalassetmanagerandoperatorcreatingsolutions"
+                    "forasustainablefuture"
+                ),
+                observed_domain="keppel.com",
+                observed_linkedin_slug="keppel",
+            ),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert len(prompts) == 2
+    assert result.details["identity_receipt"]["observed_linkedin_slug"] == (
+        "keppel"
+    )
+
+
+def test_web_linkedin_conflict_without_verified_anchor_remains_mismatch(
+    monkeypatch,
+):
+    async def request(**_kwargs):
+        verdict = _complete_verdict()
+        verdict["observed_company_linkedin"] = (
+            "https://linkedin.com/company/acme-ltd"
+        )
+        return verdict, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
     )
 
     result = asyncio.run(
@@ -423,7 +530,6 @@ def test_verified_anchor_does_not_override_returned_linkedin_mismatch(monkeypatc
             _company(),
             _icp(),
             require_company_fit_dimensions=True,
-            verified_homepage_identity=homepage_identity,
         )
     )
 
@@ -431,6 +537,75 @@ def test_verified_anchor_does_not_override_returned_linkedin_mismatch(monkeypatc
     assert result.details["identity_receipt"]["reason_code"] == (
         "identity_mismatch"
     )
+
+
+def test_verified_anchor_does_not_hide_a_different_web_entity(monkeypatch):
+    async def request(**_kwargs):
+        return _complete_verdict(
+            name="Other Company",
+            website="https://other.example.com",
+        ), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_verified_homepage_identity(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "identity_mismatch"
+    )
+
+
+def test_identity_conflict_repair_preserves_a_real_dimension_mismatch(
+    monkeypatch,
+):
+    prompts = []
+
+    async def request(**kwargs):
+        prompts.append(kwargs["prompt"])
+        verdict = _complete_verdict()
+        verdict.update(
+            observed_company_linkedin=(
+                "https://linkedin.com/company/acme-ltd"
+            ),
+            observed_employee_count="201-500",
+            employee_size_matches=False,
+        )
+        return verdict, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_verified_homepage_identity(),
+        )
+    )
+
+    assert len(prompts) == 2
+    assert "IDENTITY CONFLICT REPAIR" in prompts[1]
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_MISMATCH
+    )
+    assert result.details["identity_decision"] == COMPANY_FIT_UNAVAILABLE
 
 
 def test_fit_url_alone_cannot_replace_independent_dimension_proof(monkeypatch):

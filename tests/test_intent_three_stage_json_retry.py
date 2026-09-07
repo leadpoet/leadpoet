@@ -39,6 +39,41 @@ def _completion(content: str) -> dict:
     }
 
 
+def _verdict(*, status: str, same_entity: str) -> dict:
+    return {
+        "overall_verdict": (
+            "qualified" if status == "supported" else "not_qualified"
+        ),
+        "overall_confidence": "high",
+        "signal_evaluations": [{
+            "signal_id": "signal-1",
+            "claim": "Nightworks has an active business development role.",
+            "verification_mode": "source_grounded",
+            "signal_status": status,
+            "source_urls_supplied": ["https://nightworks.example/careers"],
+            "evidence_urls_used": ["https://nightworks.example/careers"],
+            "source_accessibility": "accessible",
+            "same_entity_check": same_entity,
+            "entity_match_reason": (
+                "The source and lead identify the same company."
+            ),
+            "supporting_quotes": [
+                "Nightworks is seeking a Business Development Representative."
+            ],
+            "contradicting_quotes": [],
+            "unsupported_parts": [],
+            "source_quality": "first-party careers page",
+            "risk_notes": [],
+            "confidence": "high",
+            "claim_matches_miner_date": "consistent",
+            "author_type": "n/a",
+            "author_employer_matches_lead": "n/a",
+            "author_role_matches_spec": "n/a",
+            "author_satisfies_role_spec": "n/a",
+        }],
+    }
+
+
 def _install_call_fakes(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-a-secret")
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
@@ -106,6 +141,121 @@ def test_malformed_response_envelope_retries_without_leaking_body(
     assert result["answer"] == {"signal_evaluations": []}
     assert "private body" not in caplog.text
     assert "private body" not in str(result)
+
+
+def test_wrong_entity_with_unclear_entity_check_gets_a_fresh_judgment(
+    monkeypatch,
+):
+    """Regression shaped like the observed same-company contradiction."""
+
+    _install_call_fakes(monkeypatch)
+    contradictory = _verdict(status="wrong_entity", same_entity="unclear")
+    repaired = _verdict(status="supported", same_entity="pass")
+    client = _Client([
+        _Response(_completion(json.dumps(contradictory))),
+        _Response(_completion(json.dumps(repaired))),
+    ])
+
+    result = asyncio.run(verifier._call_openrouter(
+        client, "test/model", "judge this exact source",
+    ))
+
+    assert client.calls == 2
+    assert result["answer"] == repaired
+    assert contradictory["signal_evaluations"][0]["signal_status"] == "wrong_entity"
+    retry_prompt = client.requests[1]["kwargs"]["json"]["messages"][1]["content"]
+    assert "wrong_entity without" in retry_prompt
+    assert "same_entity_check=fail" in retry_prompt
+
+
+def test_wrong_entity_with_pass_exhaustion_is_verifier_error(monkeypatch):
+    _install_call_fakes(monkeypatch)
+    contradictory = _verdict(status="wrong_entity", same_entity="pass")
+    client = _Client([
+        _Response(_completion(json.dumps(contradictory)))
+        for _ in range(3)
+    ])
+
+    result = asyncio.run(verifier._call_openrouter(
+        client, "test/model", "judge this exact source",
+    ))
+
+    assert client.calls == 3
+    assert result["_error"] == "inconsistent_structured_verdict"
+    assert "answer" not in result
+
+
+def test_proven_wrong_entity_and_content_mismatch_remain_terminal(monkeypatch):
+    _install_call_fakes(monkeypatch)
+    proven_wrong_entity = _verdict(
+        status="wrong_entity", same_entity="fail",
+    )
+    content_mismatch = _verdict(
+        status="contradicted", same_entity="pass",
+    )
+    client = _Client([
+        _Response(_completion(json.dumps(proven_wrong_entity))),
+        _Response(_completion(json.dumps(content_mismatch))),
+    ])
+
+    first = asyncio.run(verifier._call_openrouter(
+        client, "test/model", "judge proven entity mismatch",
+    ))
+    second = asyncio.run(verifier._call_openrouter(
+        client, "test/model", "judge content mismatch",
+    ))
+
+    assert client.calls == 2
+    assert first["answer"] == proven_wrong_entity
+    assert second["answer"] == content_mismatch
+
+
+def test_exhausted_stage_three_contradiction_is_unavailable(monkeypatch):
+    _install_call_fakes(monkeypatch)
+    stage_one = _verdict(status="supported", same_entity="pass")
+    contradictory = _verdict(status="wrong_entity", same_entity="unclear")
+    client = _Client([
+        _Response(_completion(json.dumps(stage_one))),
+        *[
+            _Response(_completion(json.dumps(contradictory)))
+            for _ in range(3)
+        ],
+    ])
+
+    async def fetched(_urls):
+        return {
+            "results": [{
+                "url": "https://nightworks.example/careers",
+                "title": "Careers",
+                "text": (
+                    "Nightworks is seeking a Business Development "
+                    "Representative. Apply for this role."
+                ),
+            }],
+            "statuses": [{"source": "scrapingdog", "stage": "ok"}],
+        }
+
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetched)
+    result = asyncio.run(verifier.verify_three_stage(
+        client,
+        company_name="Nightworks",
+        company_linkedin="https://linkedin.com/company/nightworks",
+        company_website="https://nightworks.example",
+        source_url="https://nightworks.example/careers",
+        miner_claim=(
+            "Nightworks has an active business development role."
+        ),
+        target_signal_text="Company is hiring business development staff.",
+        stage1_soft_reject=True,
+    ))
+
+    assert client.calls == 4
+    assert result["client_ready"] is False
+    assert result["decision"] == "unavailable"
+    assert result["rejection_reason"] == (
+        "stage3_llm_error:inconsistent_structured_verdict"
+    )
+    assert result["stage3"]["status"] == "llm_error"
 
 
 def test_verifier_fails_closed_without_raising_after_malformed_json(monkeypatch):

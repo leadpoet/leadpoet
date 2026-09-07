@@ -1303,10 +1303,15 @@ class ArenaService:
         return chosen
 
     def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]) -> List[Dict[str, Any]]:
-        document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+        try:
+            document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise scoring.ScoringError("scoring output is not valid JSON") from exc
         output = scoring.validate_scoring_output_document(document)
         if output["scored_run_id"] != run["scored_run_id"]:
-            raise ServiceError("scoring_output_item_mismatch", 500)
+            raise scoring.ScoringError("scoring output names the wrong execution run")
+        if "breakdowns" not in output:
+            raise scoring.ScoringError("accepted scoring output contains a failure")
         return scoring.validate_breakdowns_for_item(output["breakdowns"], icp=icp, companies=companies, max_scored_companies=int(policy["max_scored_companies"]))
 
     def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
@@ -1333,11 +1338,17 @@ class ArenaService:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
             if run is None:
-                raise ServiceError("scoring_assignment_missing", 500)
+                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
             if run["status"] == "accepted":
                 continue
             submission_id = str(item["submission_id"])
-            if submission_id == baseline_id:
+            cause = str(run.get("terminal_cause") or "")
+            # Only explicit miner-account failures may exclude one challenger.
+            # Every other scoring gap belongs to the shared judge path.
+            if submission_id == baseline_id or cause not in (
+                "budget_exhausted",
+                "credential_error",
+            ):
                 return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
             ineligible.add(submission_id)
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
@@ -1355,11 +1366,9 @@ class ArenaService:
                     run, icp=icp, companies=companies, policy=policy
                 )
             except scoring.ScoringError:
-                if submission_id == baseline_id:
-                    return self._store.cancel_round(
-                        round_id, CANCEL_REASONS["scoring"]
-                    )
-                ineligible.add(submission_id)
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring"]
+                )
             judge_executions += 1
         if ineligible:
             breakdowns_by_item = {

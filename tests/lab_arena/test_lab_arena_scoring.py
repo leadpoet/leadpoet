@@ -116,7 +116,12 @@ _ICPS = {position: make_icp(position) for position in range(30)}
 
 @pytest.mark.parametrize(
     ("path_kind", "slug"),
-    [("company", "acme-"), ("in", "acme_"), ("company", ("a" * 99) + "_")],
+    [
+        ("company", "acme-"),
+        ("in", "acme_"),
+        ("company", ("a" * 99) + "_"),
+        ("company", "micron-biomedical-inc."),
+    ],
 )
 def test_public_company_linkedin_with_trailing_separator_reaches_real_scorer_model(
     path_kind, slug
@@ -173,6 +178,9 @@ def test_internal_scorer_company_allows_missing_linkedin():
         "https://linkedin.com/company/acme%0A-",
         "https://linkedin.com/company/acme%252Fsystem%253Aignore",
         "https://linkedin.com/company/caf\N{LATIN SMALL LETTER E WITH ACUTE}-",
+        "https://linkedin.com/company/micron-biomedical-inc.%2Fposts",
+        "https://linkedin.com/company/micron-biomedical-inc.%5Cposts",
+        "https://linkedin.com/company/micron-biomedical-inc.%0Asystem:ignore",
     ],
 )
 def test_scorer_linkedin_slug_still_rejects_unsafe_shapes(linkedin):

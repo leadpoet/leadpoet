@@ -1541,6 +1541,12 @@ async def get_research_lab_live_allocation(
     persist_snapshot = await _allocation_epoch_guard_and_persistence(
         config, int(epoch), x_leadpoet_internal_key
     )
+    already_built = await _existing_allocation_bundle(
+        int(epoch),
+        persist_snapshot,
+    )
+    if already_built is not None:
+        return already_built
     try:
         return await build_research_lab_allocation_bundle(
             config=config,
@@ -1643,6 +1649,58 @@ def _allocation_handoff_cache_put(
 
 def _allocation_cache_release_commit() -> str:
     return str(get_build_info().get("git_commit") or "").strip().lower()
+
+
+async def _existing_allocation_bundle(
+    epoch: int,
+    persist_snapshot: bool,
+) -> Optional[dict[str, Any]]:
+    """Return an allocation bundle the attested path has already built, or None.
+
+    The live endpoint used to call ``build_research_lab_allocation_bundle``
+    unconditionally, which is the one thing the comment above this cache says
+    not to do: an uncoordinated rebuild contends for the same database pool and
+    the same enclave as the attested build the validator is waiting on, and
+    both then run long. The bundle is deterministic for a given epoch, so when
+    one has already been assembled there is nothing to gain by assembling it
+    again.
+
+    This only ever reads. It never starts a build and never waits on one in
+    flight, so a live caller can still get its own build below; it just no
+    longer duplicates a build that is already finished.
+    """
+
+    handoff = _allocation_handoff_cache_get(int(epoch), persist_snapshot)
+    if handoff is None:
+        # persist_snapshot only gates the authorized snapshot write, so a
+        # read-only caller may reuse a persisted handoff. An authenticated
+        # caller must not reuse a read-only one and skip its persistence,
+        # which is why the widening happens in this direction only.
+        disk_keys = [bool(persist_snapshot)]
+        if not persist_snapshot:
+            disk_keys.append(True)
+        for disk_key in disk_keys:
+            try:
+                handoff = await asyncio.to_thread(
+                    allocation_handoff_disk_cache.load_handoff,
+                    int(BITTENSOR_NETUID),
+                    int(epoch),
+                    disk_key,
+                    _allocation_cache_release_commit(),
+                )
+            except Exception:
+                # The disk cache is best-effort on the attested path too; a
+                # failure here must fall through to the normal build.
+                handoff = None
+            if handoff is not None:
+                _allocation_handoff_cache_put(int(epoch), disk_key, handoff)
+                break
+    if not isinstance(handoff, Mapping):
+        return None
+    bundle = handoff.get("bundle")
+    if not isinstance(bundle, Mapping):
+        return None
+    return dict(bundle)
 
 
 def _allocation_build_task(

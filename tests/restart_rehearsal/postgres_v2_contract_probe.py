@@ -326,7 +326,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_141_allocation_frontier_source_contract_valid",
     "post_142_source_catalog_replay_contract_valid",
     "post_143_compact_checkpoint_contract_valid",
-    "post_144_provider_persistence_batch_contract_valid",
+    "post_144_provider_evidence_cache_contract_valid",
     "post_096_source_add_functional_workflow_valid",
     "post_145_source_add_admission_control_contract_valid",
     "post_147_source_catalog_auth_metadata_contract_valid",
@@ -836,6 +836,66 @@ def _provider_cache_put_sql(row: Mapping[str, Any]) -> str:
         "SELECT public.put_research_lab_provider_evidence_cache_v2("
         "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
     )
+
+
+def _provider_evidence_cache_contract(
+    database: DisposablePostgres,
+) -> dict[str, Any]:
+    encrypted_cache_doc = {
+        "schema_version": "leadpoet.encrypted_artifact.v2",
+        "artifact_id": "sha256:" + "a" * 64,
+        "plaintext_hash": "sha256:" + "b" * 64,
+        "ciphertext_hash": "sha256:" + "c" * 64,
+        "nonce_b64": "bm9uY2U=",
+        "aad_b64": "YWFk",
+        "encryption_context_hash": "sha256:" + "d" * 64,
+        "ciphertext_b64": "Y2lwaGVydGV4dA==",
+        "object_lock_mode": "COMPLIANCE",
+        "retain_until": "2026-08-10T12:00:00Z",
+    }
+    cache_row = {
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "artifact_master_key_ref_hash": "sha256:" + "e" * 64,
+        "utc_day": "2026-07-11",
+        "request_fingerprint": "f" * 64,
+        "cache_entry_hash": "sha256:" + "0" * 64,
+        "cache_artifact_id": encrypted_cache_doc["artifact_id"],
+        "source_record_hash": "sha256:" + "1" * 64,
+        "source_boot_identity_hash": "sha256:" + "2" * 64,
+        "response_body_hash": "sha256:" + "3" * 64,
+        "encrypted_cache_doc": encrypted_cache_doc,
+    }
+    inserted = json.loads(
+        database.psql(
+            _provider_cache_put_sql(cache_row),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    expected_inserted = {
+        "status": "inserted",
+        "cache_entry_hash": cache_row["cache_entry_hash"],
+        "cache_row": cache_row,
+    }
+    if inserted != expected_inserted:
+        raise PostgresContractProbeError(
+            "provider evidence cache insert result differs"
+        )
+    replayed = json.loads(
+        database.psql(
+            _provider_cache_put_sql(cache_row),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if replayed != {**expected_inserted, "status": "existing"}:
+        raise PostgresContractProbeError(
+            "provider evidence cache replay result differs"
+        )
+    return {
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "insert_status": "inserted",
+        "replay_status": "existing",
+        "durable_row_exact": True,
+    }
 
 
 
@@ -3104,6 +3164,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / PROVIDER_PERSISTENCE_BATCH_MIGRATION
         )
         applied.append(PROVIDER_PERSISTENCE_BATCH_MIGRATION)
+        provider_evidence_cache_contract = _provider_evidence_cache_contract(
+            database
+        )
         database.apply_migration(
             scripts / SOURCE_ADD_ADMISSION_CONTROL_MIGRATION
         )
@@ -4419,6 +4482,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "allocation_settlement_frontier_bootstrap": (
                 allocation_frontier_bootstrap_contract
             ),
+            "provider_evidence_cache": provider_evidence_cache_contract,
             "required_schema_declarations": declaration_counts,
         }
     finally:

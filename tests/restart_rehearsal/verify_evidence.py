@@ -924,14 +924,14 @@ def verify_migration_backed_database_contract(
         raise SystemExit(
             "migration-backed compact weight settlement contract is missing"
         )
-    if document.get("provider_persistence_batch") != {
-        "schema_version": (
-            "leadpoet.provider_persistence_batch_contract.v1"
-        ),
-        "cache_put": "atomic_exact_row",
+    if document.get("provider_evidence_cache") != {
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "insert_status": "inserted",
+        "replay_status": "existing",
+        "durable_row_exact": True,
     }:
         raise SystemExit(
-            "migration-backed provider persistence batch evidence is missing"
+            "migration-backed provider evidence cache evidence is missing"
         )
     if document.get("maintenance_lease") != {
         "schema_version": "leadpoet.maintenance_lease_contract.v1",

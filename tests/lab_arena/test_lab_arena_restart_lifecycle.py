@@ -14,12 +14,18 @@ def test_gateway_restart_replaces_and_checks_the_arena_sidecar() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1")
+    stop_helper = script.index(
+        'GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_PREFLIGHT_TREE/'
+    )
     stop = script.index("stop_lab_arena_service", destructive)
-    gateway_health = script.index('record_gateway_restart_timing "gateway_v2_health_ready"')
+    gateway_health = script.index(
+        'record_gateway_restart_timing "gateway_v2_health_ready"'
+    )
     start = script.index("start_lab_arena_service", gateway_health)
     handoff = script.index("gateway.tee.verify_weight_submission_ready_v2", start)
 
-    assert stop < gateway_health < start < handoff
+    assert stop_helper < destructive < stop < gateway_health < start < handoff
+    assert 'stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"' in script
     assert "scripts/run_lab_arena_service.py" in script
     function_start = script.index("start_lab_arena_service() {")
     function_end = script.index("\n}\n", function_start)
@@ -30,6 +36,8 @@ def test_gateway_restart_replaces_and_checks_the_arena_sidecar() -> None:
     assert 'case "$mode" in' in script
     assert "shadow|live" in script
     assert '--environment-file "$GATEWAY_ENV_FILE"' in function
+    assert "manage_owned_process_group.py" in script
+    assert 'pkill -TERM -f "scripts/run_lab_arena_service' not in script
 
 
 def test_arena_service_loads_only_scoped_values(tmp_path, monkeypatch) -> None:
@@ -118,17 +126,38 @@ def test_validator_restart_replaces_runner_after_gateway_alignment() -> None:
     destructive = script.index(
         'record_validator_restart_timing "destructive_phase_started"'
     )
+    preflight = script.index("python3 -m validator_tee.host.restart_preflight_v2")
+    stop_helper = script.index(
+        'VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_ROOT/'
+    )
     stop = script.index("stop_lab_arena_runner", destructive)
-    application = script.index('record_validator_restart_timing "validator_application_ready"')
+    application = script.index(
+        'record_validator_restart_timing "validator_application_ready"'
+    )
     alignment = script.index("verify_pinned_gateway_release", application)
     start = script.index("start_lab_arena_runner", alignment)
     complete = script.index('VALIDATOR_DEPLOY_STAGE="completed"', start)
 
-    assert stop < application < alignment < start < complete
+    assert (
+        preflight
+        < stop_helper
+        < destructive
+        < stop
+        < application
+        < alignment
+        < start
+        < complete
+    )
+    assert 'stop_lab_arena_runner "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER"' in script
     assert "scripts/run_lab_arena_runner.py" in script
-    assert 'LAB_ARENA_WALLET_PATH="${LAB_ARENA_WALLET_PATH:-$VALIDATOR_WALLET_ROOT}"' in script
-    assert 'LAB_ARENA_API_BASE_URL:-$VALIDATOR_V2_GATEWAY_URL' in script
+    assert (
+        'LAB_ARENA_WALLET_PATH="${LAB_ARENA_WALLET_PATH:-$VALIDATOR_WALLET_ROOT}"'
+        in script
+    )
+    assert "LAB_ARENA_API_BASE_URL:-$VALIDATOR_V2_GATEWAY_URL" in script
     assert "gateway/tee/runsc-runtime.lock.json" in script
+    assert "manage_owned_process_group.py" in script
+    assert 'pkill -TERM -f "scripts/run_lab_arena_runner' not in script
 
 
 def test_restart_scripts_leave_arena_disabled_by_default() -> None:

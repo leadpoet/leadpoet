@@ -3,6 +3,8 @@ set -euo pipefail
 
 VALIDATOR_ROOT="${VALIDATOR_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/validator.env}"
+LAB_ARENA_RUNNER_STATE_FILE="${LAB_ARENA_RUNNER_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-runner-process.json}"
+LAB_ARENA_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$VALIDATOR_ROOT/scripts/manage_owned_process_group.py}"
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
 VALIDATOR_ENV_BACKUP_DIR="${VALIDATOR_ENV_BACKUP_DIR:-/home/ec2-user/.config/leadpoet/env-backups}"
 EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
@@ -125,9 +127,17 @@ run_bounded_validator_restart_artifact_cleanup() {
 }
 
 stop_lab_arena_runner() {
-  sudo pkill -TERM -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
-  sleep 1
-  sudo pkill -KILL -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
+  local process_helper="${1:-$LAB_ARENA_PROCESS_HELPER}"
+  if [ ! -r "$process_helper" ] || [ -L "$process_helper" ]; then
+    echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+    return 1
+  fi
+  sudo "$VALIDATOR_PYTHON_BIN" "$process_helper" stop \
+    --state-file "$LAB_ARENA_RUNNER_STATE_FILE" \
+    --cwd "$VALIDATOR_ROOT" \
+    --uid "$(sudo id -u)" \
+    -- \
+    "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py
 }
 
 start_lab_arena_runner() {
@@ -151,6 +161,10 @@ start_lab_arena_runner() {
   fi
   if [ ! -r "$VALIDATOR_ROOT/scripts/run_lab_arena_runner.py" ]; then
     echo "ERROR: Lab Arena runner entrypoint is unavailable" >&2
+    return 1
+  fi
+  if [ ! -r "$LAB_ARENA_PROCESS_HELPER" ]; then
+    echo "ERROR: Lab Arena process ownership helper is unavailable" >&2
     return 1
   fi
   runsc_path="${LAB_ARENA_RUNSC_PATH:-}"
@@ -183,10 +197,19 @@ start_lab_arena_runner() {
       > "$LAB_ARENA_RUNNER_LOG_FILE" 2>&1 < /dev/null &
   pid="$!"
   sleep 3
-  if ! sudo kill -0 "$pid" 2>/dev/null; then
+  if ! sudo "$VALIDATOR_PYTHON_BIN" "$LAB_ARENA_PROCESS_HELPER" record \
+      --state-file "$LAB_ARENA_RUNNER_STATE_FILE" \
+      --cwd "$VALIDATOR_ROOT" \
+      --uid "$(sudo id -u)" \
+      --launch-pgid "$pid" \
+      --discover-timeout-seconds 5 \
+      -- \
+      "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py; then
+    sudo kill -TERM -- "-$pid" 2>/dev/null || true
+    sleep 1
+    sudo kill -KILL -- "-$pid" 2>/dev/null || true
     tail -120 "$LAB_ARENA_RUNNER_LOG_FILE" >&2 || true
-    echo "ERROR: Lab Arena runner exited during startup" >&2
-    wait "$pid" 2>/dev/null || true
+    echo "ERROR: Lab Arena runner exited or its ownership could not be recorded" >&2
     return 1
   fi
   echo "Lab Arena runner started"
@@ -1690,6 +1713,14 @@ python3 -m validator_tee.host.restart_preflight_v2 \
   --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
   --host-hotkey-directory "$HOST_HOTKEY_DIR"
 
+VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_ROOT/scripts/manage_owned_process_group.py"
+if [ ! -r "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER" ] \
+    || [ -L "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER" ]; then
+  echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 if [ ! -r "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER" ]; then
   echo "ERROR: validator Docker operation lock helper is unavailable" >&2
   exit 1
@@ -1728,7 +1759,7 @@ VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"
 record_validator_restart_timing "destructive_phase_started"
 echo "Stopping validator processes and containers"
-stop_lab_arena_runner
+stop_lab_arena_runner "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
 sudo pkill -TERM -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true

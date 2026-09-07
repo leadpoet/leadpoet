@@ -7,6 +7,8 @@ GATEWAY_ROOT="${GATEWAY_ROOT:-$LEADPOET_REPO_ROOT/gateway}"
 GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
 LAB_ARENA_SERVICE_LOG_FILE="${LAB_ARENA_SERVICE_LOG_FILE:-$GATEWAY_LOG_ROOT/lab_arena_service.log}"
+LAB_ARENA_SERVICE_STATE_FILE="${LAB_ARENA_SERVICE_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-service-process.json}"
+LAB_ARENA_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$LEADPOET_REPO_ROOT/scripts/manage_owned_process_group.py}"
 GATEWAY_PRIVATE_KEY_PATH="${GATEWAY_PRIVATE_KEY_PATH:-$GATEWAY_LOG_ROOT/secrets/gateway_private_key.pem}"
 ARWEAVE_KEYFILE_PATH="${ARWEAVE_KEYFILE_PATH:-$GATEWAY_LOG_ROOT/secrets/arweave_keyfile.json}"
 GATEWAY_RESTART_GIT_SSH_COMMAND="${GATEWAY_RESTART_GIT_SSH_COMMAND:-}"
@@ -208,9 +210,19 @@ wait_for_gateway_v2_authority() {
 }
 
 stop_lab_arena_service() {
-  pkill -TERM -f "scripts/run_lab_arena_service[.]py" 2>/dev/null || true
-  sleep 1
-  pkill -KILL -f "scripts/run_lab_arena_service[.]py" 2>/dev/null || true
+  local process_helper="${1:-$LAB_ARENA_PROCESS_HELPER}"
+  if [ ! -r "$process_helper" ] || [ -L "$process_helper" ]; then
+    echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+    return 1
+  fi
+  "$GATEWAY_PYTHON_BIN" "$process_helper" stop \
+    --state-file "$LAB_ARENA_SERVICE_STATE_FILE" \
+    --cwd "$LEADPOET_REPO_ROOT" \
+    --uid "$(id -u)" \
+    -- \
+    "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
+    --environment-file "$GATEWAY_ENV_FILE" \
+    --host 127.0.0.1 --port 8792
 }
 
 start_lab_arena_service() {
@@ -231,6 +243,10 @@ start_lab_arena_service() {
     echo "ERROR: Lab Arena service entrypoint is unavailable" >&2
     return 1
   fi
+  if [ ! -r "$LAB_ARENA_PROCESS_HELPER" ]; then
+    echo "ERROR: Lab Arena process ownership helper is unavailable" >&2
+    return 1
+  fi
   mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
@@ -242,6 +258,22 @@ start_lab_arena_service() {
       > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
       9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
   pid="$!"
+  if ! "$GATEWAY_PYTHON_BIN" "$LAB_ARENA_PROCESS_HELPER" record \
+      --state-file "$LAB_ARENA_SERVICE_STATE_FILE" \
+      --cwd "$LEADPOET_REPO_ROOT" \
+      --uid "$(id -u)" \
+      --launch-pgid "$pid" \
+      --discover-timeout-seconds 5 \
+      -- \
+      "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
+      --environment-file "$GATEWAY_ENV_FILE" \
+      --host 127.0.0.1 --port 8792; then
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    echo "ERROR: Lab Arena service ownership could not be recorded" >&2
+    return 1
+  fi
   for attempt in $(seq 1 30); do
     if ! kill -0 "$pid" 2>/dev/null; then
       tail -120 "$LAB_ARENA_SERVICE_LOG_FILE" >&2 || true
@@ -256,7 +288,7 @@ start_lab_arena_service() {
     fi
     sleep 2
   done
-  kill "$pid" 2>/dev/null || true
+  stop_lab_arena_service || true
   wait "$pid" 2>/dev/null || true
   tail -120 "$LAB_ARENA_SERVICE_LOG_FILE" >&2 || true
   echo "ERROR: Lab Arena service did not become ready" >&2
@@ -3869,6 +3901,13 @@ if ! (
   exit 1
 fi
 
+GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+if [ ! -r "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER" ] \
+    || [ -L "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER" ]; then
+  echo "ERROR: verified candidate Lab Arena stop helper is unavailable" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
 echo "Stopping existing gateway and Research Lab worker processes"
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
 export GATEWAY_DESTRUCTIVE_PHASE_STARTED
@@ -3884,7 +3923,7 @@ pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
-stop_lab_arena_service
+stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 

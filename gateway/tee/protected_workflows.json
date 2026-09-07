@@ -672,16 +672,6 @@
       "symbol": "sanitize_source_add_precheck_doc"
     },
     {
-      "ast_sha256": "sha256:fa20efb6471afccacdc38b90ed3080510c583dda634023cfd301e891ef9e24f4",
-      "path": "gateway/research_lab/source_add_trial_runner.py",
-      "symbol": "_remove_interrupted_source_add_container"
-    },
-    {
-      "ast_sha256": "sha256:39f5a8bef5bafbc870ee790c858257c2f117b9a0f9656309dbdc97f5546aed1c",
-      "path": "gateway/research_lab/source_add_trial_runner.py",
-      "symbol": "build_source_add_sandbox_runner"
-    },
-    {
       "ast_sha256": "sha256:dccf03f3e67df52064c94540f125c830a7a184638dc34954966d82f0ac842892",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_DOCUMENTATION_HTTP_400_MAX_ATTEMPTS"
@@ -4657,7 +4647,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:bc806608729ac1ce516b10a111e095b155d167e4284b11e4b1b9382adb51f00b",
-  "protected_source_commit": "cab7b7d264b955c6361333c1e9bac3bba09f41aa",
+  "manifest_hash": "sha256:110acd06432624e94fd556199a32ba21beb884dadf1679931818fa04ca525185",
+  "protected_source_commit": "dbca5f0c5219e8db7ac4cededaa4549c2823739c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

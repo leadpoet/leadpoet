@@ -74,10 +74,14 @@ def _sealed_memfd(name: str, payload: bytes, *, seal: bool = True) -> int:
 
 @contextmanager
 def _descriptor_slots(proof_fd: int | None, helper_fd: int | None) -> Iterator[None]:
-    saved: dict[int, int | None] = {}
+    saved: dict[int, tuple[int, bool] | None] = {}
     for target in (PROOF_FD, PROCESS_HELPER_FD):
         try:
-            saved[target] = os.dup(target)
+            inheritable = os.get_inheritable(target)
+            duplicate_command = getattr(fcntl, "F_DUPFD_CLOEXEC", fcntl.F_DUPFD)
+            duplicate = fcntl.fcntl(target, duplicate_command, 200)
+            os.set_inheritable(duplicate, False)
+            saved[target] = (duplicate, inheritable)
         except OSError:
             saved[target] = None
     try:
@@ -98,16 +102,21 @@ def _descriptor_slots(proof_fd: int | None, helper_fd: int | None) -> Iterator[N
             except OSError:
                 pass
             if previous is not None:
-                os.dup2(previous, target, inheritable=True)
-                os.close(previous)
+                duplicate, inheritable = previous
+                os.dup2(duplicate, target, inheritable=inheritable)
+                os.close(duplicate)
 
 
 @contextmanager
 def _controller_descriptor_slots() -> Iterator[None]:
-    saved: dict[int, int | None] = {}
+    saved: dict[int, tuple[int, bool] | None] = {}
     for target in range(190, 196):
         try:
-            saved[target] = os.dup(target)
+            inheritable = os.get_inheritable(target)
+            duplicate_command = getattr(fcntl, "F_DUPFD_CLOEXEC", fcntl.F_DUPFD)
+            duplicate = fcntl.fcntl(target, duplicate_command, 200)
+            os.set_inheritable(duplicate, False)
+            saved[target] = (duplicate, inheritable)
         except OSError:
             saved[target] = None
         try:
@@ -124,8 +133,9 @@ def _controller_descriptor_slots() -> Iterator[None]:
                 pass
             previous = saved[target]
             if previous is not None:
-                os.dup2(previous, target, inheritable=True)
-                os.close(previous)
+                duplicate, inheritable = previous
+                os.dup2(duplicate, target, inheritable=inheritable)
+                os.close(duplicate)
 
 
 def _run_validator(
@@ -258,6 +268,8 @@ def test_memfd_helper_records_and_stops_group_after_bootstrap_tree_removal(
 
     process_code = "import time; time.sleep(30)"
     launch_argv = [sys.executable, "-c", process_code]
+    original_cwd = os.getcwd()
+    original_cwd_fd = os.open(".", os.O_RDONLY)
     child = subprocess.Popen(
         launch_argv,
         cwd=process_cwd,
@@ -339,7 +351,12 @@ def test_memfd_helper_records_and_stops_group_after_bootstrap_tree_removal(
         assert not state_file.exists()
         assert sidecar.read_text(encoding="utf-8") == '{"keep":true}\n'
     finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait(timeout=5)
-        shutil.rmtree(bootstrap_root, ignore_errors=True)
+        try:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            shutil.rmtree(bootstrap_root, ignore_errors=True)
+        finally:
+            os.fchdir(original_cwd_fd)
+            os.close(original_cwd_fd)
+    assert os.getcwd() == original_cwd

@@ -499,6 +499,7 @@ def _provision_after_leg1(
     *,
     reject_current_builtin: bool = False,
     allow_unrewarded: bool = False,
+    stop_before_rpc: bool = False,
 ) -> tuple[str, tuple] | None:
     submission_id = case["record"]["submission_id"]
     adapter_id = case["record"]["adapter_id"]
@@ -834,6 +835,8 @@ def _provision_after_leg1(
                 %s::JSONB,%s::JSONB
             )
         """
+        if stop_before_rpc:
+            return rejection_sql, rejection_args
         assert _scalar(cursor, rejection_sql, rejection_args) == {
             "status": "not_eligible"
         }

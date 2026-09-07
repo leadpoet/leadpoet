@@ -2,8 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_source_add_end_to_end_postgres import _database_with_migrations
-from tests.test_source_add_provenance_leg1_postgres import PRE_MIGRATIONS
+from tests.test_source_add_end_to_end_postgres import _database_with_migrations, _json
+from tests.test_source_add_provenance_leg1_postgres import (
+    PRE_MIGRATIONS,
+    _provision_after_leg1,
+    _seed_boot_identity,
+    _seed_case,
+    _set_paused,
+)
+from leadpoet_canonical.attested_v2 import sha256_json
 
 MIGRATION = Path(__file__).parents[1] / "scripts/186-research-lab-source-add-provisioned-status.sql"
 
@@ -70,119 +77,142 @@ def test_source_add_status_migration_runs_on_postgres_and_is_idempotent(
                     $function$;
                     """
                 )
+                cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+                cursor.execute("BEGIN")
+                _set_paused(cursor, False, "status migration test")
+                _seed_boot_identity(cursor)
+                case = _seed_case(cursor, 0x1860000000000000)
+                smoke_work_id = (
+                    "source_add_work:"
+                    + sha256_json({"smoke": case["record"]["submission_id"]})[7:23]
+                )
+                rejection_sql, rejection_args = _provision_after_leg1(
+                    cursor,
+                    case,
+                    reject_current_builtin=True,
+                    allow_unrewarded=True,
+                    stop_before_rpc=True,
+                )
+                assert rejection_sql
                 cursor.execute(
                     """
-                    -- Seed an already-deployed append-only row.  The
-                    -- production-origin trigger needs a full admission
-                    -- history, which is outside this migration test.
-                    SET session_replication_role = replica;
-                    INSERT INTO public.research_lab_source_catalog (
-                        catalog_id, adapter_id, miner_ref, source_name, source_kind,
-                        declared_base_domains, registry_provider_id,
-                        measured_trial_yield, catalog_doc
-                    ) VALUES (
-                        'source_catalog:1111111111111111',
-                        'adapter:status-migration-test', '5StatusMigrationMiner',
-                        'Status migration test', 'registry', '["status.test"]'::JSONB,
-                        'status-migration', 0, '{"immutable":true}'::JSONB
+                    SELECT job_doc->'catalog_row', job_doc->'provision_row'
+                    FROM public.research_lab_source_add_work_items
+                    WHERE work_id = %s
+                    """,
+                    (
+                            smoke_work_id,
+                    ),
+                )
+                catalog_row, eligible_row = cursor.fetchone()
+                eligible_row = dict(eligible_row)
+                eligible_row["provision_ref"] = (
+                    "source_add_provision:"
+                    + sha256_json({"migration": case["record"]["submission_id"]})[7:23]
+                )
+                cursor.execute(
+                    """
+                    SELECT public.research_lab_source_add_finalize_provision_v3(
+                        %s, %s::JSONB, %s::JSONB, %s::JSONB
                     )
-                    """
+                    """,
+                    (
+                        case["record"]["submission_id"],
+                        _json(catalog_row),
+                        _json(eligible_row),
+                        _json(rejection_args[-1].adapted),
+                    ),
                 )
-                cursor.execute(
-                    """
-                    INSERT INTO public.research_lab_source_add_provisioning_events (
-                        provision_ref, catalog_id, submission_id, adapter_id,
-                        miner_hotkey, source_identity_hash, registry_provider_id,
-                        provision_status, seq, provision_doc, credential_envelope
-                    ) VALUES (
-                        'source_add_provision:1111111111111111',
-                        'source_catalog:1111111111111111',
-                        'source_add_submission:1111111111111111',
-                        'adapter:status-migration-test', '5StatusMigrationMiner',
-                        'sha256:' || repeat('1', 64), 'status-migration',
-                        'provisioned_autoresearch_eligible', 0,
-                        '{"immutable":"provision-doc"}'::JSONB,
-                        '{"immutable":"credential-envelope"}'::JSONB
-                        )
-                    """
-                )
-                cursor.execute("SET session_replication_role = origin")
-                cursor.execute(MIGRATION.read_text(encoding="utf-8"))
-                cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+                assert cursor.fetchone()[0]["status"] == "provisioned"
+                cursor.execute("SAVEPOINT before_status_rpc")
+                assert cursor.execute(rejection_sql, rejection_args) is None
+                assert cursor.fetchone()[0] == {"status": "not_eligible"}
+                cursor.execute("ROLLBACK TO SAVEPOINT before_status_rpc")
                 cursor.execute(
                     """
                     SELECT provision_ref, provision_status, provision_doc,
                            credential_envelope
-                    FROM public.research_lab_source_add_provisioning_events
-                    WHERE adapter_id = 'adapter:status-migration-test'
-                    """
+                        FROM public.research_lab_source_add_provisioning_events
+                        WHERE adapter_id = %s
+                        ORDER BY seq DESC
+                        LIMIT 1
+                        """,
+                    (case["record"]["adapter_id"],),
                 )
-                assert cursor.fetchone() == (
-                    "source_add_provision:1111111111111111",
-                    "provisioned_autoresearch_eligible",
-                    {"immutable": "provision-doc"},
-                    {"immutable": "credential-envelope"},
+                historical_row = cursor.fetchone()
+                cursor.execute(
+                    "SELECT provision_ref, provision_status, seq FROM public.research_lab_source_add_provisioning_events WHERE adapter_id=%s ORDER BY seq",
+                    (case["record"]["adapter_id"],),
                 )
+                cursor.fetchall()
+                assert historical_row[1] == "provisioned_autoresearch_eligible"
+                assert historical_row[2]["provider_registry_entry"]["active"] is True
+                assert historical_row[3] == {}
                 cursor.execute(
                     """
                     SELECT provision_ref, provision_status, provision_doc,
                            credential_envelope
                     FROM public.research_lab_source_add_provisioning_current
-                    WHERE adapter_id = 'adapter:status-migration-test'
-                    """
+                    WHERE adapter_id = %s
+                    """,
+                    (case["record"]["adapter_id"],),
                 )
-                assert cursor.fetchone() == (
-                    "source_add_provision:1111111111111111",
-                    "provisioned",
-                    {"immutable": "provision-doc"},
-                    {"immutable": "credential-envelope"},
+                current_row = cursor.fetchone()
+                assert current_row[1] == "provisioned"
+                assert current_row[2] == historical_row[2]
+                assert current_row[3] == historical_row[3]
+                cursor.execute(
+                    """
+                    SELECT to_jsonb(work),
+                           (SELECT COUNT(*) FROM public.research_lab_source_add_provisioning_events),
+                           (SELECT COUNT(*) FROM public.research_lab_source_add_submissions)
+                    FROM public.research_lab_source_add_work_items work
+                    WHERE work.work_id = %s
+                    """,
+                    (
+                            smoke_work_id,
+                    ),
+                )
+                cursor.fetchone()
+                cursor.execute(
+                    """
+                    UPDATE public.research_lab_source_add_work_items
+                    SET job_doc = job_doc #- '{provision_row,provision_status}'
+                    WHERE work_id = %s
+                    """,
+                    (
+                            smoke_work_id,
+                    ),
                 )
                 cursor.execute(
                     """
-                    INSERT INTO public.research_lab_source_add_work_items (
-                        work_id, submission_id, adapter_id, work_kind, work_status,
-                        attempt_count, lease_token, leased_by, job_doc
-                    ) VALUES (
-                        'source_add_work:1111111111111111',
-                        'source_add_submission:1111111111111111',
-                        'adapter:status-migration-test', 'provisioning_smoke',
-                        'leased', 0, '11111111-1111-1111-1111-111111111111',
-                        'status-migration-test',
-                        jsonb_build_object(
-                            'config_ref', 'source_add_probe_config:1111111111111111',
-                            'host_hash', 'sha256:' || repeat('a', 64),
-                            'catalog_row', '{}'::JSONB,
-                            'provision_row', jsonb_build_object(
-                                'provision_ref', 'source_add_provision:1111111111111111'
-                            )
-                        )
-                    )
-                    """
+                    SELECT to_jsonb(work),
+                           (SELECT COUNT(*) FROM public.research_lab_source_add_provisioning_events),
+                           (SELECT COUNT(*) FROM public.research_lab_source_add_submissions)
+                    FROM public.research_lab_source_add_work_items work
+                    WHERE work.work_id = %s
+                    """,
+                    (smoke_work_id,),
                 )
-                with pytest.raises(psycopg2.errors.RaiseException, match="binding differs"):
+                missing_status = cursor.fetchone()
+                cursor.execute("SAVEPOINT before_missing_status_rpc")
+                with pytest.raises(psycopg2.errors.RaiseException, match="current-provider smoke binding differs"):
                     cursor.execute(
-                        """
-                        SELECT public.research_lab_source_add_finalize_provision_smoke_v3(
-                            'source_add_work:1111111111111111',
-                            '11111111-1111-1111-1111-111111111111',
-                            'source_add_submission:1111111111111111',
-                            '{}'::JSONB,
-                            '{"provision_status":"provisioned"}'::JSONB,
-                            '{"work_id":"source_add_work:1111111111111111",'
-                            '"attempt_number":0}'::JSONB
-                        )
-                        """
+                        rejection_sql, rejection_args
                     )
-                connection.rollback()
+                cursor.execute("ROLLBACK TO SAVEPOINT before_missing_status_rpc")
                 cursor.execute(
                     """
-                    SELECT COUNT(*)
-                    FROM public.research_lab_source_add_work_items
-                    WHERE work_id = 'source_add_work:1111111111111111'
-                      AND work_status = 'leased'
-                    """
+                    SELECT to_jsonb(work),
+                           (SELECT COUNT(*) FROM public.research_lab_source_add_provisioning_events),
+                           (SELECT COUNT(*) FROM public.research_lab_source_add_submissions)
+                    FROM public.research_lab_source_add_work_items work
+                    WHERE work.work_id = %s
+                        """,
+                        (smoke_work_id,),
                 )
-                assert cursor.fetchone()[0] == 1
+                assert cursor.fetchone() == missing_status
                 cursor.execute(
                     "SELECT public.research_lab_source_add_post_accept_leg1_contract_v4()"
                 )

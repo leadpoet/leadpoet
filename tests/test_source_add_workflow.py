@@ -300,7 +300,7 @@ def _smoke_result(status: str) -> dict:
     }
 
 
-def _smoke_work() -> dict:
+def _smoke_work(provision_status: str = "provisioned") -> dict:
     return {
         "work_id": "source_add_work:" + "b" * 16,
         "submission_id": "source_add_submission:" + "a" * 16,
@@ -315,7 +315,7 @@ def _smoke_work() -> dict:
             "catalog_row": {"adapter_id": "adapter:test-source"},
             "provision_row": {
                 "adapter_id": "adapter:test-source",
-                "provision_status": "provisioned",
+                "provision_status": provision_status,
                 "provision_doc": {
                     "provider_registry_entry": {
                         "base_url": "https://api.test-source.example/v1"
@@ -347,8 +347,14 @@ def _functional_proof(work: dict) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypatch):
-    work = _smoke_work()
+@pytest.mark.parametrize(
+    "provision_status",
+    ("provisioned", "provisioned_autoresearch_eligible"),
+)
+async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(
+    monkeypatch, provision_status
+):
+    work = _smoke_work(provision_status)
     result = _smoke_result("passed")
 
     async def fake_load(_submission_id):

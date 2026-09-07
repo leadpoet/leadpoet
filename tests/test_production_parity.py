@@ -2308,7 +2308,7 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
 
 
 @pytest.mark.parametrize(
-    ("timing_record", "restart_outcome", "expected_timing", "expected_code"),
+    ("timing_record", "restart_outcome", "expected_timing"),
     [
         (
             {
@@ -2322,7 +2322,6 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
                 "final_status": "failed",
                 "elapsed_seconds": 9321.125,
             },
-            "runtime.enclave_relay_unavailable",
         ),
         (
             {
@@ -2331,7 +2330,6 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
                 "elapsed_seconds": 12,
             },
             "exited",
-            None,
             None,
         ),
         (
@@ -2346,7 +2344,19 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
                 "final_status": "failed",
                 "elapsed_seconds": 10800.0,
             },
-            "restart.terminal_failure",
+        ),
+        (
+            {
+                "stage": "git_prepared_tree_verification",
+                "status": "failed",
+                "elapsed_seconds": 259.607,
+            },
+            "epoch_gate",
+            {
+                "final_stage": "git_prepared_tree_verification",
+                "final_status": "failed",
+                "elapsed_seconds": 259.607,
+            },
         ),
     ],
 )
@@ -2356,7 +2366,6 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
     timing_record,
     restart_outcome,
     expected_timing,
-    expected_code,
 ):
     marker = tmp_path / "early-boot-isolated"
     marker.write_text("isolated\n", encoding="utf-8")
@@ -2401,6 +2410,17 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
         )
         if restart_outcome == "timed_out":
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if restart_outcome == "epoch_gate":
+            # Earlier log context must not become a guessed cause for a safe
+            # epoch-gate stop that leaves both production runtimes healthy.
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "RuntimeError: enclave relay unavailable\n"
+                "RestartEpochGateError: production restart may start only at "
+                "official subnet epoch block 300 or earlier; observed 312\n",
+                encoding="utf-8",
+            )
         return subprocess.CompletedProcess(command, 75)
 
     monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
@@ -2488,7 +2508,6 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
     )
     if expected_timing is not None:
         expected["timing"] = expected_timing
-        expected["failure_code"] = expected_code
     assert evidence["gateway_restart_diagnostic"] == expected
     assert evidence["cleanup"]["work"] == "removed"
     assert not (work_root / "pp-test-1" / "runtime").exists()

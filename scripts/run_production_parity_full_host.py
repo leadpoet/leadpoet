@@ -54,9 +54,6 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 from leadpoet_canonical.production_parity_boundary_v2 import (  # noqa: E402
     validate_production_parity_boundary_document_v2,
 )
-from leadpoet_observability.sentry_operations import (  # noqa: E402
-    classify_restart_failure,
-)
 from scripts.build_production_parity_contract import build_contract  # noqa: E402
 from scripts.capture_production_parity_runtime_config import capture  # noqa: E402
 from scripts.materialize_production_parity_secrets import (  # noqa: E402
@@ -3679,12 +3676,6 @@ def run_full(
                 )
                 if timing is not None:
                     gateway_restart_diagnostic["timing"] = timing
-                    if gateway_restart_diagnostic.get("returncode") != 0:
-                        gateway_restart_diagnostic["failure_code"] = classify_restart_failure(
-                            component="gateway",
-                            stage=timing["final_stage"],
-                            evidence_paths=(gateway_log,),
-                        )
             except Exception:  # noqa: BLE001 - diagnostics cannot suppress cleanup
                 pass
             evidence["gateway_restart_diagnostic"] = gateway_restart_diagnostic

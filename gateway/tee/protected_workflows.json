@@ -3827,7 +3827,7 @@
       "symbol": "CHAIN_MAX_RUNTIME_METADATA_BYTES"
     },
     {
-      "ast_sha256": "sha256:2ab3dcccf4435378690f9611a800f820e9b14bf3648e86ec6530feceb9591836",
+      "ast_sha256": "sha256:8025868d5fd244b64c7d29c8dae9f4bdf137752ba97545b032a438988585a2a8",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "_REVEAL_PERIOD_METADATA_DEFAULTS_V2"
     },
@@ -4647,7 +4647,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:872e5c2a4326a6dd8d812e3e9e81e9ceea9ccfa066c02e1331e5f778953542a3",
-  "protected_source_commit": "25c8a51b502ceb8258ea91e2a78b1b2ea4ffd919",
+  "manifest_hash": "sha256:63d48ed8fa2a220b7ccfdef161cce3330837d17d931406790c9d88d30df00cb9",
+  "protected_source_commit": "d2a3f8f18fc76f7a590f05fb05c82132dbde9891",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

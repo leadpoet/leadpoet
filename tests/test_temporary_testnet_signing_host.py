@@ -1054,6 +1054,21 @@ def test_temporary_workflow_reuses_oidc_route_and_scheduled_expiry_cleanup():
     assert "cleanup-expired --apply" in cleanup
 
 
+def test_physical_workflow_wires_public_release_export_and_prior_pair():
+    workflow = (
+        ROOT / ".github/workflows/physical-v2-staging.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "- testnet401-export-public-release" in workflow
+    assert "testnet401_prior_release_run_id:" in workflow
+    assert "testnet401_prior_release_commit:" in workflow
+    assert "ssm-export-public-release" in workflow
+    assert "temporary-testnet401-public-release.json" in workflow
+    assert '--prior-release-run-id "$TESTNET401_PRIOR_RELEASE_RUN_ID"' in workflow
+    assert '--prior-release-commit "$TESTNET401_PRIOR_RELEASE_COMMIT"' in workflow
+    assert workflow.count("inputs.operation == 'testnet401-export-public-release'") == 1
+
+
 def test_combined_one_host_nitro_capacity_leaves_bounded_parent_headroom():
     parent_vcpus = 16
     parent_memory_mib = 128 * 1024

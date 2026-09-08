@@ -444,6 +444,9 @@ def provider_routes_for_execution_config(
             normalized["behavior_environment"],
             network=str(normalized["deployment"]["network"]),
             netuid=int(normalized["deployment"]["netuid"]),
+            chain_signing_profile=normalized["epoch_authority"][
+                "chain_signing_profile"
+            ],
         )
         origin = str(boundary["supabase_origin"])
     hostname = str(urlsplit(origin).hostname or "").lower()

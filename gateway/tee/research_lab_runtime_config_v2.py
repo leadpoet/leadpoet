@@ -24,6 +24,10 @@ from Leadpoet.utils.subnet_epoch import (
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.tee.scoring_executor import SCORING_CONFIG_ENV_NAMES
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+from leadpoet_canonical.chain_source_v2 import (
+    ChainSourceV2Error,
+    chain_source_boundary_for_profile_v2,
+)
 from leadpoet_canonical.hotkey_authority_v2 import validate_chain_signing_profile
 from leadpoet_canonical.production_parity_boundary_v2 import (
     PRODUCTION_PARITY_ENV_NAMES,
@@ -176,21 +180,35 @@ def _normalized_environment(
     return normalized
 
 
-def _default_chain_signing_profile() -> Dict[str, Any]:
+def _default_chain_signing_profile(*, network: str, netuid: int) -> Dict[str, Any]:
+    profile_name = {
+        ("finney", 71): "chain_signing_profile_v2.json",
+        ("test", 401): "chain_signing_profile_test_v2.json",
+    }.get((str(network), int(netuid)))
+    if profile_name is None:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab chain identity has no measured signing profile"
+        )
     path = (
         Path(__file__).resolve().parents[2]
         / "validator_tee"
         / "enclave"
-        / "chain_signing_profile_v2.json"
+        / profile_name
     )
     try:
-        return validate_chain_signing_profile(
+        profile = validate_chain_signing_profile(
             json.loads(path.read_text(encoding="utf-8"))
         )
-    except (OSError, ValueError) as exc:
+        chain_source_boundary_for_profile_v2(profile)
+    except (OSError, TypeError, ValueError, ChainSourceV2Error) as exc:
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab chain signing profile is unavailable"
         ) from exc
+    if profile["network"] != network:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab chain signing profile targets another network"
+        )
+    return profile
 
 
 def _normalized_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
@@ -262,6 +280,16 @@ def build_research_lab_execution_config(
     if resolved_netuid < 0:
         raise ResearchLabRuntimeConfigV2Error("Research Lab netuid is invalid")
     try:
+        validate_production_parity_boundary_v2(
+            source_environment,
+            network=resolved_network,
+            netuid=resolved_netuid,
+        )
+    except ProductionParityBoundaryV2Error as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab production-parity boundary is invalid"
+        ) from exc
+    try:
         cutover = load_subnet_epoch_cutover(source_environment).to_dict()
     except SubnetEpochError as exc:
         raise ResearchLabRuntimeConfigV2Error(
@@ -288,7 +316,10 @@ def build_research_lab_execution_config(
                     "chain_signing_profile": (
                         dict(chain_signing_profile)
                         if chain_signing_profile is not None
-                        else _default_chain_signing_profile()
+                        else _default_chain_signing_profile(
+                            network=resolved_network,
+                            netuid=resolved_netuid,
+                        )
                     ),
                 }
             ),
@@ -344,17 +375,6 @@ def validate_research_lab_execution_config(
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab host-only field classification differs"
         )
-    environment = _normalized_environment(value.get("behavior_environment"))
-    try:
-        validate_production_parity_boundary_v2(
-            environment,
-            network=network,
-            netuid=netuid,
-        )
-    except ProductionParityBoundaryV2Error as exc:
-        raise ResearchLabRuntimeConfigV2Error(
-            "Research Lab production-parity boundary is invalid"
-        ) from exc
     epoch_authority = _normalized_epoch_authority(value.get("epoch_authority"))
     if epoch_authority["chain_signing_profile"]["network"] != network:
         raise ResearchLabRuntimeConfigV2Error(
@@ -364,6 +384,18 @@ def validate_research_lab_execution_config(
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab epoch authority targets another netuid"
         )
+    environment = _normalized_environment(value.get("behavior_environment"))
+    try:
+        validate_production_parity_boundary_v2(
+            environment,
+            network=network,
+            netuid=netuid,
+            chain_signing_profile=epoch_authority["chain_signing_profile"],
+        )
+    except ProductionParityBoundaryV2Error as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab production-parity boundary is invalid"
+        ) from exc
     normalized = {
         "schema_version": SCHEMA_VERSION,
         "deployment": {"network": network, "netuid": netuid},

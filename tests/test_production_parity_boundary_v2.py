@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import os
+from pathlib import Path
 
 import pytest
 
+from Leadpoet.utils.subnet_epoch import CUTOVER_JSON_ENV, SubnetEpochCutover
 from gateway.tee.provider_broker_v2 import (
     provider_registry_hash,
     provider_routes_for_execution_config,
@@ -50,6 +53,25 @@ def _environment(**overrides: str | None) -> dict[str, str | None]:
             **overrides,
         }
     )
+
+
+def _testnet401_environment() -> dict[str, str]:
+    cutover = SubnetEpochCutover(
+        network_genesis_hash=(
+            "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+        ),
+        netuid=401,
+        cutover_block=7_700_000,
+        cutover_block_hash="0x" + "4" * 64,
+        first_subnet_epoch_index=1,
+        first_settlement_epoch_id=1,
+        last_legacy_epoch_id=0,
+    )
+    return {
+        "BITTENSOR_NETWORK": "test",
+        "BITTENSOR_NETUID": "401",
+        CUTOVER_JSON_ENV: json.dumps(cutover.to_dict()),
+    }
 
 
 def test_production_boundary_is_unchanged_without_parity_configuration():
@@ -156,6 +178,67 @@ def test_execution_config_binds_clone_origin_into_registry_and_reader():
             record_artifact=lambda _artifact: None,
         )
     assert requests[0]["url"].startswith(PARITY_ORIGIN + "/rest/v1/")
+
+
+def test_testnet401_bootstrap_profile_drives_exact_provider_routes():
+    execution = build_research_lab_execution_config(
+        environment=_testnet401_environment()
+    )
+    profile = execution["epoch_authority"]["chain_signing_profile"]
+    routes = provider_routes_for_execution_config(execution)
+
+    assert execution["deployment"] == {"network": "test", "netuid": 401}
+    assert profile["network"] == "test"
+    assert profile["chain_endpoint"] == "wss://test.finney.opentensor.ai:443"
+    assert routes["bittensor_chain"].hosts == ("test.finney.opentensor.ai",)
+    assert routes["bittensor_archive"].hosts == ("test.finney.opentensor.ai",)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        (
+            "chain_endpoint",
+            "wss://attacker.example:443",
+            "production-parity boundary",
+        ),
+        ("network", "finney", "targets another network"),
+    ],
+)
+def test_testnet401_bootstrap_rejects_profile_boundary_mismatch(
+    field, value, match
+):
+    profile_path = (
+        Path(__file__).resolve().parents[1]
+        / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+    )
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile[field] = value
+
+    with pytest.raises(ResearchLabRuntimeConfigV2Error, match=match):
+        build_research_lab_execution_config(
+            environment=_testnet401_environment(),
+            chain_signing_profile=profile,
+        )
+
+
+def test_testnet401_bootstrap_rejects_cutover_genesis_mismatch():
+    environment = _testnet401_environment()
+    cutover = SubnetEpochCutover.from_mapping(
+        json.loads(environment[CUTOVER_JSON_ENV])
+    )
+    mismatched_cutover = {
+        **cutover.to_dict(),
+        "network_genesis_hash": "0x" + "a" * 64,
+    }
+    mismatched_cutover.pop("mapping_hash")
+    environment[CUTOVER_JSON_ENV] = json.dumps(mismatched_cutover)
+
+    with pytest.raises(
+        ResearchLabRuntimeConfigV2Error,
+        match="epoch and signing genesis differ",
+    ):
+        build_research_lab_execution_config(environment=environment)
 
 
 def test_execution_config_binds_and_applies_lab_arena_reward_settings(monkeypatch):

@@ -40,31 +40,9 @@ DEFAULT_SN71_CUTOVER_MANIFEST_PATH = (
     / "config"
     / "stateful-epoch-cutover-sn71.json"
 )
-FINNEY_OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT = (
+OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT = (
     "wss://archive.chain.opentensor.ai:443"
 )
-TESTNET401_BITTENSOR_ARCHIVE_ENDPOINT = (
-    "wss://test.finney.opentensor.ai:443"
-)
-
-
-def configured_bittensor_archive_endpoint(
-    environ: Optional[Mapping[str, Any]] = None,
-) -> str:
-    """Select the measured archive route for the exact process network."""
-
-    source = os.environ if environ is None else environ
-    network = str(source.get("BITTENSOR_NETWORK") or "").strip().lower()
-    netuid = str(source.get("BITTENSOR_NETUID") or "").strip()
-    if network == "test" and netuid == "401":
-        return TESTNET401_BITTENSOR_ARCHIVE_ENDPOINT
-    return FINNEY_OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-
-
-# This value is intentionally process-scoped. Temporary testnet401 processes
-# receive both selectors before Python starts; production and every incomplete
-# or different selector retain the established Finney archive authority.
-OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT = configured_bittensor_archive_endpoint()
 
 _STORAGE_FIELDS = {
     "tempo": "Tempo",

@@ -177,21 +177,7 @@ def chain_source_boundary_for_profile_v2(
     endpoint = urlsplit(str(normalized["chain_endpoint"]))
     host = str(endpoint.hostname or "").lower()
     network = str(normalized["network"])
-    try:
-        port = endpoint.port
-    except ValueError as exc:
-        raise ChainSourceV2Error(
-            "chain signing endpoint is outside measured policy"
-        ) from exc
-    if (
-        endpoint.scheme != "wss"
-        or port not in (None, 443)
-        or endpoint.username is not None
-        or endpoint.password is not None
-        or endpoint.path not in ("", "/")
-        or endpoint.query
-        or endpoint.fragment
-    ):
+    if endpoint.scheme != "wss" or endpoint.port not in (None, 443):
         raise ChainSourceV2Error("chain signing endpoint is outside measured policy")
     if network == "finney" and host == PRODUCTION_CHAIN_HOST:
         archive_host = PRODUCTION_CHAIN_ARCHIVE_HOST

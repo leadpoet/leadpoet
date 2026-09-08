@@ -307,7 +307,7 @@
       "symbol": "verify_published_weight_authority_stage_v2"
     },
     {
-      "ast_sha256": "sha256:626a02f67f85d200b0911b30f623eb31d54874d7f262b8d3c186799cdc8eced1",
+      "ast_sha256": "sha256:6ee33a1eeaa8f1caee2c81862db72870578c2ec43ef02559154e4abb297ac656",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "chain_source_boundary_for_profile_v2"
     },
@@ -612,12 +612,12 @@
       "symbol": "production_parity_enabled_v2"
     },
     {
-      "ast_sha256": "sha256:0ea56f06548218b61f8af911cf150ecc3d514b173c52064f03b840236f81aea3",
+      "ast_sha256": "sha256:f69b052b4675b2e36ea55447d3d124a7ef69f6472f2a529d19e0a583025027a3",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "validate_production_parity_boundary_document_v2"
     },
     {
-      "ast_sha256": "sha256:2caa34518fbff787cf80ffb3aa6a871ac915ac5434440fac03d9bbdf702ddba4",
+      "ast_sha256": "sha256:32187ea94aa4ec5f434b91d186caede5513317577d36e200ffd9ed97caaeab97",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "validate_production_parity_boundary_v2"
     },

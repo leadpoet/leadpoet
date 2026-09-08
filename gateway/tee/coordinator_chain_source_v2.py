@@ -28,14 +28,15 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     validate_chain_signing_profile,
 )
 from leadpoet_canonical.chain_source_v2 import (
+    CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_FINALIZATION_EPOCH_BLOCKS,
     CHAIN_SUBTENSOR_MAX_TEMPO,
+    CHAIN_ENDPOINT_HOST,
     CHAIN_RPC_METHOD,
     CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS,
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
     ChainSourceV2Error,
-    chain_source_boundary_for_profile_v2,
     decode_last_update_storage,
     decode_reveal_period_epochs_storage,
     decode_runtime_metadata_commitment,
@@ -59,9 +60,6 @@ from leadpoet_canonical.chain_source_v2 import (
     timelocked_weight_commits_storage_key,
     weights_storage_key,
 )
-from leadpoet_canonical.production_parity_boundary_v2 import (
-    configured_chain_source_boundary_v2,
-)
 from leadpoet_canonical.subtensor_events_v2 import (
     RUNTIME_CODE_STORAGE_KEY,
     SubtensorEventsV2Error,
@@ -71,6 +69,8 @@ from leadpoet_canonical.subtensor_events_v2 import (
 )
 
 
+CHAIN_ENDPOINT_URL = "https://%s/" % CHAIN_ENDPOINT_HOST
+CHAIN_ARCHIVE_ENDPOINT_URL = "https://%s/" % CHAIN_ARCHIVE_ENDPOINT_HOST
 COINGECKO_TAO_USD_URL = (
     "https://api.coingecko.com/api/v3/simple/price"
     "?ids=bittensor&vs_currencies=usd"
@@ -80,14 +80,6 @@ ALPHA_PRICE_TIMEOUT_MS = 8_000
 ALPHA_PRICE_MAX_ATTEMPTS = 3
 ALPHA_PRICE_RETRY_BACKOFF_SECONDS = (0.25, 0.5)
 logger = logging.getLogger(__name__)
-
-# Compatibility exports for offline rehearsal callers. Coordinator instances
-# do not use these process-global defaults for provider requests.
-_DEFAULT_CHAIN_BOUNDARY = configured_chain_source_boundary_v2()
-CHAIN_ENDPOINT_HOST = _DEFAULT_CHAIN_BOUNDARY["chain_host"]
-CHAIN_ARCHIVE_ENDPOINT_HOST = _DEFAULT_CHAIN_BOUNDARY["chain_archive_host"]
-CHAIN_ENDPOINT_URL = "https://%s/" % CHAIN_ENDPOINT_HOST
-CHAIN_ARCHIVE_ENDPOINT_URL = "https://%s/" % CHAIN_ARCHIVE_ENDPOINT_HOST
 
 
 class CoordinatorChainSourceV2Error(RuntimeError):
@@ -168,20 +160,6 @@ class CoordinatorChainSourceV2:
                 raise CoordinatorChainSourceV2Error(
                     "coordinator epoch and signing genesis differ"
                 )
-        try:
-            chain_boundary = (
-                chain_source_boundary_for_profile_v2(self._chain_signing_profile)
-                if self._chain_signing_profile is not None
-                else configured_chain_source_boundary_v2()
-            )
-        except (TypeError, ValueError, ChainSourceV2Error) as exc:
-            raise CoordinatorChainSourceV2Error(
-                "coordinator chain source boundary is invalid"
-            ) from exc
-        self._chain_endpoint_url = "https://%s/" % chain_boundary["chain_host"]
-        self._chain_archive_endpoint_url = (
-            "https://%s/" % chain_boundary["chain_archive_host"]
-        )
         for provider_id in ("bittensor_chain", "coingecko"):
             if not self._retry_policy_hashes.get(provider_id):
                 raise CoordinatorChainSourceV2Error(
@@ -1753,7 +1731,7 @@ class CoordinatorChainSourceV2:
             logical_operation_id=logical_operation_id,
             attempt_number=attempt_number,
             method="POST",
-            url=self._chain_endpoint_url,
+            url=CHAIN_ENDPOINT_URL,
             headers={"accept": "application/json", "content-type": "application/json"},
             body=body,
             timeout_ms=CHAIN_RPC_TIMEOUT_MS,
@@ -1784,7 +1762,7 @@ class CoordinatorChainSourceV2:
                     logical_operation_id=logical_operation_id,
                     attempt_number=attempt_number,
                     method="POST",
-                    url=self._chain_archive_endpoint_url,
+                    url=CHAIN_ARCHIVE_ENDPOINT_URL,
                     headers={
                         "accept": "application/json",
                         "content-type": "application/json",

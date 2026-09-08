@@ -777,7 +777,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:c81c4e1a1cd8648874ba73cfc1c6319d6bfd4187102688a18951442a45476bdf",
+      "ast_sha256": "sha256:b72571771ed5f7a5a6cfad40678dbcefe17532563882d427c63eee5a2e14a5b7",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -1057,7 +1057,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:93af847cb5a283b8bc370324f51fd504484b7d0e0924f5077944dac2b4c43945",
+      "ast_sha256": "sha256:5e331e07d7426c3f90404af188564625d1310ebd84fa2f52c726cec9f921e9ed",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -4687,7 +4687,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8a312a3533cfc40334824efc83e438159439b9f2d93a72e97bbe286035132286",
-  "protected_source_commit": "a14b09fb53fa54911a3af65ea3fadb95a637a8f0",
+  "manifest_hash": "sha256:cf665ab94b7585db6fc6f86f9f5e9f1476d93f49da6294821706e414c2ad2e5d",
+  "protected_source_commit": "8f8ab5464fe56eab54c3429be882c7f0241d29c0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

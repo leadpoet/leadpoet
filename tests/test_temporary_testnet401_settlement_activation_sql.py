@@ -9,7 +9,7 @@ from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migrati
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "scripts/193-activate-temporary-testnet401-chain-realized-settlement.sql"
+MIGRATION = ROOT / "scripts/195-activate-temporary-testnet401-chain-realized-settlement.sql"
 MIGRATION_SQL = MIGRATION.read_text(encoding="utf-8")
 VALIDATOR = "5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz"
 

@@ -705,6 +705,7 @@ def _gateway_runtime_overrides(config: Mapping[str, Any]) -> Dict[str, str]:
         Path(config["gateway"]["artifact_policy"]),
         "encrypted artifact policy",
     )
+    runtime_root = Path(config["runtime_root"])
     bucket = str(policy.get("bucket_host") or "").split(".s3", 1)[0]
     if not re.fullmatch(r"leadpoet-parity-493765492819-[a-z0-9-]+", bucket):
         raise TemporaryTestnetBootstrapError(
@@ -713,7 +714,15 @@ def _gateway_runtime_overrides(config: Mapping[str, Any]) -> Dict[str, str]:
     return {
         **SAFE_GATEWAY_ENV,
         **_cutover_environment(config),
+        "NITRO_CLI_ARTIFACTS": str(runtime_root / "nitro-cli-artifacts"),
+        "NITRO_CLI_BLOBS": "/usr/share/nitro_enclaves/blobs",
+        "PCR0_BUILD_DIR": str(runtime_root / "pcr0-builder"),
+        "PCR0_STARTUP_HISTORICAL_WARM_ENABLED": "false",
         "RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET": bucket,
+        "VALIDATOR_DRAND_CARGO_CACHE_DIR": str(runtime_root / "drand-cargo-cache"),
+        "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(
+            runtime_root / "offline-artifacts" / "validator-runtime"
+        ),
     }
 
 

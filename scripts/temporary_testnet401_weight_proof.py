@@ -36,6 +36,7 @@ from scripts.temporary_testnet_signing_host import (
 
 
 SCHEMA_VERSION = "leadpoet.temporary_testnet401_weight_proof_ssm.v1"
+LOG_READER_SHA256 = "14c53ff6be8e26e617b8e6f5e6196c0055f21852981d4ca9227c745b981372cd"
 VERIFIER_PATH = Path(__file__).with_name("verify_temporary_testnet_weights.py")
 VERIFIER_SHA256 = (
     "0d4dd9db6164b73bed1064e0bea67bf939328773c9a1742fb618c05d88eb7f51"
@@ -126,6 +127,27 @@ def _load_verifier(path: Path = VERIFIER_PATH) -> bytes:
     return value
 
 
+def _load_log_reader(
+    path: Path = Path(__file__).with_name(
+        "extract_temporary_testnet401_validator_log.py"
+    ),
+) -> bytes:
+    try:
+        metadata = path.lstat()
+        value = path.read_bytes()
+    except OSError as exc:
+        raise TemporaryWeightProofError("fixed log reader is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or path.is_symlink()
+        or not value
+        or len(value) > 32 * 1024
+        or hashlib.sha256(value).hexdigest() != LOG_READER_SHA256
+    ):
+        raise TemporaryWeightProofError("fixed log reader identity differs")
+    return value
+
+
 def verifier_command(*, candidate_sha: str, epoch_id: int, verifier: bytes) -> str:
     epoch = _epoch_id(epoch_id)
     if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
@@ -151,6 +173,28 @@ def verifier_command(*, candidate_sha: str, epoch_id: int, verifier: bytes) -> s
             "BITTENSOR_NETWORK=test BITTENSOR_NETUID=401 "
             "PYTHONDONTWRITEBYTECODE=1 "
             f"{q(SOURCE_VENV + '/bin/python3')} -I - --epoch-id {epoch}",
+        )
+    )
+
+
+def log_reader_command(
+    *, candidate_sha: str, epoch_id: int, run_id: str, instance_id: str, reader: bytes
+) -> str:
+    epoch = _epoch_id(epoch_id)
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
+        raise TemporaryWeightProofError("testnet401 proof candidate is invalid")
+    q = shlex.quote
+    encoded = base64.b64encode(reader).decode("ascii")
+    return "\n".join(
+        (
+            "set -Eeuo pipefail",
+            f"test -f {q(NATIVE_CONFIG)}",
+            f"test -x {q(SOURCE_VENV + '/bin/python3')}",
+            f"cd {q(SOURCE_REPOSITORY)}",
+            f"printf '%s' {q(encoded)} | /usr/bin/base64 --decode | "
+            f"PYTHONDONTWRITEBYTECODE=1 {q(SOURCE_VENV + '/bin/python3')} -I - "
+            f"--run-id {q(run_id)} --candidate-sha {q(candidate_sha)} "
+            f"--instance-id {q(instance_id)} --epoch-id {epoch}",
         )
     )
 
@@ -250,6 +294,50 @@ def _require_join(
         raise TemporaryWeightProofError("native and independent chain readback differs")
 
 
+def _log_evidence(stdout: str, *, epoch_id: int) -> dict[str, Any]:
+    if len(stdout.encode("utf-8")) > 8192 or stdout.count("\n") != 1:
+        raise TemporaryWeightProofError("automatic validator log evidence is invalid")
+    try:
+        value = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise TemporaryWeightProofError(
+            "automatic validator log evidence is invalid"
+        ) from exc
+    fields = {
+        "status",
+        "epoch_id",
+        "process_name",
+        "cmdline_hash",
+        "block",
+        "epoch_block",
+        "weight_submission_event_hash_prefix",
+        "weight_finalization_event_hash_prefix",
+        "marker_line_numbers",
+        "raw_log_returned",
+    }
+    prefix = re.compile(r"^sha256:[0-9a-f]{13}$")
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != fields
+        or value.get("status") != "matched"
+        or _epoch_id(value.get("epoch_id")) != epoch_id
+        or value.get("process_name") != "validator_application"
+        or HASH_RE.fullmatch(str(value.get("cmdline_hash") or "")) is None
+        or prefix.fullmatch(str(value.get("weight_submission_event_hash_prefix") or ""))
+        is None
+        or prefix.fullmatch(
+            str(value.get("weight_finalization_event_hash_prefix") or "")
+        )
+        is None
+        or value.get("raw_log_returned") is not False
+    ):
+        raise TemporaryWeightProofError("automatic validator log evidence differs")
+    lines = value.get("marker_line_numbers")
+    if not isinstance(lines, list) or len(lines) != 6 or lines != sorted(set(lines)):
+        raise TemporaryWeightProofError("automatic validator log marker order differs")
+    return dict(value)
+
+
 def run_weight_proof(
     *,
     ec2: Any,
@@ -301,6 +389,25 @@ def run_weight_proof(
         stdout, candidate_sha=candidate_sha, epoch_id=epoch
     )
     _require_join(automatic, independent)
+    log_command_id, log_stdout = _send_fixed_ssm(
+        ssm,
+        instance_id=instance_id,
+        command=log_reader_command(
+            candidate_sha=candidate_sha,
+            epoch_id=epoch,
+            run_id=run_id,
+            instance_id=instance_id,
+            reader=_load_log_reader(),
+        ),
+        timeout_seconds=120,
+    )
+    log_evidence = _log_evidence(log_stdout, epoch_id=epoch)
+    if not independent["weight_submission_event_hash"].startswith(
+        log_evidence["weight_submission_event_hash_prefix"]
+    ) or not independent["weight_finalization_event_hash"].startswith(
+        log_evidence["weight_finalization_event_hash_prefix"]
+    ):
+        raise TemporaryWeightProofError("automatic validator log hashes differ")
     if (
         previous_last_update is not None
         and independent["revealed_last_update_block"] <= previous_last_update
@@ -318,9 +425,11 @@ def run_weight_proof(
         "after_last_update": previous_last_update,
         "status_ssm_command_id": status_result["ssm_command_id"],
         "proof_ssm_command_id": command_id,
+        "actor_log_ssm_command_id": log_command_id,
         "automatic_native_proof": automatic,
         "independent_proof": independent,
-        "manual_submission_exclusion": "requires_validator_process_log_join",
+        "automatic_validator_log_evidence": log_evidence,
+        "manual_submission_exclusion": "excluded_by_automatic_validator_log_join",
     }
 
 

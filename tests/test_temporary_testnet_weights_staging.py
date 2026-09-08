@@ -209,6 +209,18 @@ def test_drand_cache_assignment_runs_in_nonlogin_environment():
     assert "HOME" not in stage.NATIVE_BUILD_CACHE_ENV
 
 
+def test_gateway_source_assignment_runs_in_nonlogin_environment():
+    repository = Path(stage.__file__).resolve().parents[1]
+    builder = repository / "gateway/tee/stage_attested_runtime.sh"
+    assignment = next(line for line in builder.read_text().splitlines() if line.startswith("DEPLOY_SOURCE_ROOT="))
+    environment = stage.source_build_environment(repository)
+    result = subprocess.run(["bash", "-c", 'set -eu\n' + assignment + '\nprintf "%s" "$DEPLOY_SOURCE_ROOT"'],
+                            env={"PATH": os.environ["PATH"], **environment}, capture_output=True, text=True, check=True)
+    assert result.stdout == str(repository)
+    assert environment["ATTESTED_RUNTIME_GIT_SOURCE_ROOT"] == "/run/leadpoet-testnet401/gateway-stage-source"
+    assert "HOME" not in environment
+
+
 @pytest.mark.parametrize("field,value", [
     ("candidate", "main"),
     ("run_id", "../../another-run"),

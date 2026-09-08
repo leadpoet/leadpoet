@@ -5888,7 +5888,7 @@ def _local_postgrest_startup_function() -> str:
             "outcome=process_exit returncode=23",
         ),
         ("readiness_timeout", 1, "outcome=readiness_timeout"),
-        ("ready", 0, None),
+        ("delayed_ready", 0, None),
     ],
 )
 def test_local_postgrest_startup_gate_executes_bounded_outcomes(
@@ -5921,12 +5921,13 @@ def test_local_postgrest_startup_gate_executes_bounded_outcomes(
                 "    done",
                 "    ;;",
                 "  readiness_timeout)",
-                "    /bin/sleep 10 &",
+                "    /bin/sleep 40 &",
                 "    BOUNDARY_SERVICE_PID=$!",
                 "    ;;",
-                "  ready)",
-                '    : >"$REHEARSAL_STATE_ROOT/local-postgrest.ready"',
-                "    /bin/sleep 10 &",
+                "  delayed_ready)",
+                '    (/bin/sleep 6; '
+                ': >"$REHEARSAL_STATE_ROOT/local-postgrest.ready"; '
+                "exec /bin/sleep 40) &",
                 "    BOUNDARY_SERVICE_PID=$!",
                 "    ;;",
                 "esac",
@@ -5944,15 +5945,23 @@ def test_local_postgrest_startup_gate_executes_bounded_outcomes(
     )
     runner.chmod(0o700)
 
+    started = time.monotonic()
     result = subprocess.run(
         ["/bin/bash", str(runner), component, str(state_root), scenario],
         capture_output=True,
         text=True,
-        timeout=8,
+        timeout=40,
         check=False,
     )
+    elapsed = time.monotonic() - started
 
     assert result.returncode == expected_status
+    if scenario == "process_exit":
+        assert elapsed < 2
+    elif scenario == "delayed_ready":
+        assert 5.5 <= elapsed < 15
+    else:
+        assert 25 <= elapsed < 40
     if expected_marker is None:
         assert "REHEARSAL_POSTGREST_STARTUP" not in result.stderr
         assert "ERROR: strict local PostgREST" not in result.stderr

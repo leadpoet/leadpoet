@@ -121,7 +121,7 @@ preserve_rehearsal_evidence() {
 wait_for_local_postgrest_startup() {
   local child_status=0
   local _attempt=""
-  for _attempt in $(seq 1 100); do
+  for _attempt in $(seq 1 600); do
     [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && return 0
     if ! kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null; then
       wait "$BOUNDARY_SERVICE_PID" || child_status=$?

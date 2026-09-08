@@ -612,12 +612,12 @@
       "symbol": "production_parity_enabled_v2"
     },
     {
-      "ast_sha256": "sha256:0ea56f06548218b61f8af911cf150ecc3d514b173c52064f03b840236f81aea3",
+      "ast_sha256": "sha256:f69b052b4675b2e36ea55447d3d124a7ef69f6472f2a529d19e0a583025027a3",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "validate_production_parity_boundary_document_v2"
     },
     {
-      "ast_sha256": "sha256:2caa34518fbff787cf80ffb3aa6a871ac915ac5434440fac03d9bbdf702ddba4",
+      "ast_sha256": "sha256:32187ea94aa4ec5f434b91d186caede5513317577d36e200ffd9ed97caaeab97",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "validate_production_parity_boundary_v2"
     },
@@ -797,7 +797,7 @@
       "symbol": "_validator_weight_protocol"
     },
     {
-      "ast_sha256": "sha256:c6b3306c33b7131c723dc4f8d2ca34572c8a606b5cc2d00b99b3a070b7030faa",
+      "ast_sha256": "sha256:4cd33892727b379e7205b5129ad63582d0f0670d57642ae390d334172c552a70",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "EnclaveChainRpcTransportV2"
     },
@@ -972,12 +972,12 @@
       "symbol": "ValidatorChainRelayCleanupError"
     },
     {
-      "ast_sha256": "sha256:9e2152cba5aa170695cb13b297320c46d6e7207119a35805cd155576a8eb2d06",
+      "ast_sha256": "sha256:e9f2e23b873a82c5bb0a85404f602f6dfb3401bee816163624ecad1cf9123c1a",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "ValidatorChainRelayV2"
     },
     {
-      "ast_sha256": "sha256:0adda5f0fa421ccb435240ae00905ea8c39c2f86764a4dab41ea77d30ae40e18",
+      "ast_sha256": "sha256:9bcba02966cb19fabcb252884abdebbc859d89b7c8ec78313ee1355f15da2a43",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "_connect_chain"
     },
@@ -987,12 +987,12 @@
       "symbol": "_shutdown_and_close_socket"
     },
     {
-      "ast_sha256": "sha256:a181cad547d5b50e51f4d9dea752a3f42c5a8e23609963831880cd3e7d391adc",
+      "ast_sha256": "sha256:76d986743f586a34df8821565b4d4a4169e9ffb709e50f2c75f12df013cbd994",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "handle_chain_relay_connection"
     },
     {
-      "ast_sha256": "sha256:83e9605341dad97f2f2f09d4deaa13d8bfe17998652af7a488b4633b729e325e",
+      "ast_sha256": "sha256:533f9137139c9a82ce6aeb2e4d450bad5379386cec061222e107ec82959c0073",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "main"
     },
@@ -1092,7 +1092,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:6b9874f20ca8895ee6f9a203662098ad5f35266bd3561babdddccacd13d095b5",
-  "protected_source_commit": "5f8d39f6cc42c686de2c9527867756951c2d78d5",
+  "manifest_hash": "sha256:e8c6e9c3e5adf68ff1c8d8d2c3b3729bae96aa9d6a2f207bc5b5378ae520ea2a",
+  "protected_source_commit": "70991f8d8c97b436733eacb6c19244a8ea3838d3",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

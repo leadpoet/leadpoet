@@ -427,7 +427,7 @@
       "symbol": "build_unattributed_chain_realized_settlement_package_v2"
     },
     {
-      "ast_sha256": "sha256:c91e27adbd817823f83e16a22c2e47bf938ec786a7dbc718f534d22eb9e5f7b3",
+      "ast_sha256": "sha256:5368082ffbcb6fd16be373861bb803acab474f4f650355e5d832f21608a011b9",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "champion_v2_cutover_readiness"
     },
@@ -777,7 +777,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:aa22c5c8ae0d7c36d5221ead789aa7027dcc2502658467a526db88397539841d",
+      "ast_sha256": "sha256:97f98a5fda04f9c58a5baa6d05b82851ff2b8a0f4b60bc25f4ab04650b1fbc09",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -1057,7 +1057,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:5e331e07d7426c3f90404af188564625d1310ebd84fa2f52c726cec9f921e9ed",
+      "ast_sha256": "sha256:df76e279147a3f7339a63efaf53cb60963981124a87371a4b46acc02e592d7bb",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -1067,17 +1067,17 @@
       "symbol": "CoordinatorChainRealizedSettlementV1"
     },
     {
-      "ast_sha256": "sha256:aac33f5d9651220d1cb4ffa5c7f0687c22542ca2a694818aa88b42efc5849c40",
+      "ast_sha256": "sha256:7c2687560e8cc6b7a44fde2cfedc2efe43055011de9eeed81a4a0e0c34e04026",
       "path": "gateway/tee/coordinator_chain_source_v2.py",
       "symbol": "CoordinatorChainSourceV2"
     },
     {
-      "ast_sha256": "sha256:76ec425dad3c69a277a96dcdf0b96a6ed847acd04940d8e2321c71c8bc9a0726",
+      "ast_sha256": "sha256:7b7f690177c071572a37aaa2c37a5081f674ce81bf386ff512eaabe7d2638733",
       "path": "gateway/tee/coordinator_epoch_cutover_v2.py",
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:cb4fc732350266ea0384df09ca0e51cb94d11efdcfbf110474afc2cd5b96b1f6",
+      "ast_sha256": "sha256:48841b2a24526f67c285344db478723787abd4207efe64b2dc2dd496e0d48209",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -2992,7 +2992,7 @@
       "symbol": "SCHEMA_VERSION"
     },
     {
-      "ast_sha256": "sha256:5271bdabd1079ac9b8477d4a1df3803fc4291e1223db6a32e11fd61da551ef02",
+      "ast_sha256": "sha256:4f396a5658c4f95f5653eeac5bb2a97db2c2cac75838565aab318a3e80f355cd",
       "path": "gateway/tee/research_lab_runtime_config_v2.py",
       "symbol": "_default_chain_signing_profile"
     },
@@ -3002,12 +3002,12 @@
       "symbol": "_normalized_epoch_authority"
     },
     {
-      "ast_sha256": "sha256:9b3f75f17f7116c7834d449f4123649bfc0829ea82044e44dc9a3d082ba0f166",
+      "ast_sha256": "sha256:6c0a12017c8809ed28f00d6369a61d6db416b03137776479d67f0acc7e6d2b70",
       "path": "gateway/tee/research_lab_runtime_config_v2.py",
       "symbol": "build_research_lab_execution_config"
     },
     {
-      "ast_sha256": "sha256:115047987968197e10573c069e7c98a28c218c3086ee7357619554eada7ab7be",
+      "ast_sha256": "sha256:a2b28524af31aebe1cede34448f79ef1588a75a301981e5e4d4caee25f04fc4d",
       "path": "gateway/tee/research_lab_runtime_config_v2.py",
       "symbol": "validate_research_lab_execution_config"
     },
@@ -3382,7 +3382,7 @@
       "symbol": "execute_v2_provider_request"
     },
     {
-      "ast_sha256": "sha256:b09ba6687469b0d96da7dd1aaaa00d7368ca85453d53cd57c306fa2b47ea7480",
+      "ast_sha256": "sha256:c31b581cf9ae3afb4ba3a7a7a52274eede4409f8761b19ff441020fc1b0a6573",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_coordinator_job_manager"
     },
@@ -4207,12 +4207,12 @@
       "symbol": "production_parity_enabled_v2"
     },
     {
-      "ast_sha256": "sha256:0ea56f06548218b61f8af911cf150ecc3d514b173c52064f03b840236f81aea3",
+      "ast_sha256": "sha256:f69b052b4675b2e36ea55447d3d124a7ef69f6472f2a529d19e0a583025027a3",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "validate_production_parity_boundary_document_v2"
     },
     {
-      "ast_sha256": "sha256:2caa34518fbff787cf80ffb3aa6a871ac915ac5434440fac03d9bbdf702ddba4",
+      "ast_sha256": "sha256:32187ea94aa4ec5f434b91d186caede5513317577d36e200ffd9ed97caaeab97",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "validate_production_parity_boundary_v2"
     },
@@ -4687,7 +4687,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:87e212f50d3126e140260996e5fa91093b855f1b634abffc4e52d50a71f51c6b",
-  "protected_source_commit": "5f8d39f6cc42c686de2c9527867756951c2d78d5",
+  "manifest_hash": "sha256:8beca098bd6577987502683ab9ba4f76f646e713c50f3ac8f7b2b30255818978",
+  "protected_source_commit": "70991f8d8c97b436733eacb6c19244a8ea3838d3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

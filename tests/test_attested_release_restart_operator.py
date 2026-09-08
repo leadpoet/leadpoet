@@ -1000,6 +1000,10 @@ for arg in "$@"; do
     exit 0
   fi
 done
+if [[ " $* " == *" rev-parse --verify origin/main^{{commit}} "* ]]; then
+  printf '%s\\n' "$FAKE_OPERATOR_CONTROLLER_COMMIT"
+  exit 0
+fi
 if [[ " $* " == *" rev-parse "* ]]; then
   case "$last_arg" in
     "$FAKE_OPERATOR_SELECTED_COMMIT:"gateway/*|\

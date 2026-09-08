@@ -870,7 +870,10 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "        data = stream.read(65536).decode('utf-8', 'replace')",
         "    result['log_diagnostics'].append({'file': path.name, "
         "'bytes': path.stat().st_size, 'categories': [p for p in patterns if p in data], "
-        "'trace_locations': re.findall(r'File \"[^\"\\n]*/([a-zA-Z0-9_]+\\.py)\", line ([0-9]{1,6})', data)[-8:]})",
+        "'trace_locations': re.findall(r'File \"[^\"\\n]*/([a-zA-Z0-9_]+\\.py)\", line ([0-9]{1,6})', data)[-8:], "
+        "'nitro_error_codes': sorted(set(re.findall(r'\\[\\s*(E[0-9]{1,3})\\s*\\]', data))), "
+        "'child_exit_codes': re.findall(r'failed with exit code ([0-9]{1,3})', data)[-4:], "
+        "'system_error_categories': [p for p in ('Permission denied', 'No such file or directory', 'Cannot allocate memory', 'Invalid argument', 'Read-only file system', 'File exists', 'Out of memory') if p in data]})",
         "probe = " + repr("\n".join([
             "import json,sys,traceback",
             f"sys.path.insert(0, {SOURCE_REPOSITORY!r})",

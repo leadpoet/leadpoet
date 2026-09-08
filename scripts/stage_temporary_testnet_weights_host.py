@@ -58,15 +58,18 @@ def read_locked_private_input(
         or not 0 < len(version_id.encode("utf-8")) <= 1024
     ):
         raise ValueError("private input retention metadata differs")
-    response = s3.get_object(Bucket=bucket, Key=key, VersionId=version_id)
-    if (
-        int(response.get("ContentLength", 0)) != size
-        or str(response.get("VersionId") or "") != version_id
-        or response.get("ServerSideEncryption") != "AES256"
-    ):
-        raise ValueError("private input version differs")
+    # The runner can read current parity objects, not historical versions.
+    # Require the GET to match the locked HEAD; a concurrent replacement fails
+    # closed without expanding the runner's IAM permissions.
+    response = s3.get_object(Bucket=bucket, Key=key)
     body = response["Body"]
     try:
+        if (
+            int(response.get("ContentLength", 0)) != size
+            or str(response.get("VersionId") or "") != version_id
+            or response.get("ServerSideEncryption") != "AES256"
+        ):
+            raise ValueError("private input version differs")
         payload = body.read(MAX_PRIVATE_INPUT_BYTES + 1)
     finally:
         body.close()

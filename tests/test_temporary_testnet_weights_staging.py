@@ -17,7 +17,8 @@ class _Body(BytesIO):
         super().close()
 
 
-def test_runner_pins_and_reads_only_unexpired_compliance_version():
+@pytest.mark.parametrize("response_version", ["exact-locked-version", "replaced-version"])
+def test_runner_pins_and_reads_only_unexpired_compliance_version(response_version):
     now = datetime(2026, 9, 8, tzinfo=timezone.utc)
     body = _Body(b"encrypted-input")
 
@@ -36,18 +37,23 @@ def test_runner_pins_and_reads_only_unexpired_compliance_version():
             assert kwargs == {
                 "Bucket": "task-bucket",
                 "Key": "fixed/input",
-                "VersionId": "exact-locked-version",
             }
             return {
                 "Body": body,
                 "ContentLength": 15,
                 "ServerSideEncryption": "AES256",
-                "VersionId": "exact-locked-version",
+                "VersionId": response_version,
             }
 
-    assert stage.read_locked_private_input(
-        S3(), bucket="task-bucket", key="fixed/input", now=now
-    ) == b"encrypted-input"
+    if response_version == "exact-locked-version":
+        assert stage.read_locked_private_input(
+            S3(), bucket="task-bucket", key="fixed/input", now=now
+        ) == b"encrypted-input"
+    else:
+        with pytest.raises(ValueError, match="version differs"):
+            stage.read_locked_private_input(
+                S3(), bucket="task-bucket", key="fixed/input", now=now
+            )
     assert body.was_closed is True
 
 

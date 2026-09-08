@@ -77,6 +77,8 @@ GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
+PREPARED_GATEWAY_SHA="${PREPARED_GATEWAY_SHA:-}"
+LAB_ARENA_RESTART_GUARD_GENERATION="${LAB_ARENA_RESTART_GUARD_GENERATION:-}"
 GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN=""
 GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT=""
 GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE=""
@@ -377,8 +379,6 @@ start_lab_arena_service() {
   return 1
 }
 
-LAB_ARENA_RESTART_GUARD_GENERATION=""
-
 run_lab_arena_restart_guard() {
   local source_root="$1"
   shift
@@ -402,6 +402,30 @@ run_lab_arena_restart_guard() {
     "$source_root/scripts/lab_arena_restart_claim_guard.py" "$@" \
     --candidate "$PREPARED_GATEWAY_SHA" \
     --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+}
+
+validate_post_activate_arena_guard_authority() {
+  if ! [[ "$PREPARED_GATEWAY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: post-activation Lab Arena guard candidate is invalid" >&2
+    return 1
+  fi
+  if ! [[ "$LAB_ARENA_RESTART_GUARD_GENERATION" =~ ^[1-9][0-9]{0,18}$ ]] \
+      || { [ "${#LAB_ARENA_RESTART_GUARD_GENERATION}" -eq 19 ] \
+        && [[ "$LAB_ARENA_RESTART_GUARD_GENERATION" > "9223372036854775807" ]]; }; then
+    echo "ERROR: post-activation Lab Arena guard generation is invalid" >&2
+    return 1
+  fi
+}
+
+bind_activated_gateway_guard_candidate() {
+  GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"
+  GATEWAY_DEPLOY_BRANCH="$(deployment_field branch)"
+  GATEWAY_DEPLOY_REMOTE="$(deployment_field remote_url)"
+  if [ "$PREPARED_GATEWAY_SHA" != "$GATEWAY_DEPLOY_SHA" ] \
+      || [ "$(git -C "$LEADPOET_REPO_ROOT" rev-parse HEAD)" != "$GATEWAY_DEPLOY_SHA" ]; then
+    echo "ERROR: canonical gateway checkout, prepared guard candidate, and activated deployment differ" >&2
+    return 1
+  fi
 }
 
 abort_lab_arena_restart_guard_before_destructive() {
@@ -2898,6 +2922,10 @@ acquire_gateway_restart_lock() {
 }
 
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
+  # Fresh preparation never trusts guard authority inherited from a caller.
+  # The exact drain below establishes and replaces this value.
+  PREPARED_GATEWAY_SHA=""
+  LAB_ARENA_RESTART_GUARD_GENERATION=""
   mkdir -p \
     "$(dirname "$GATEWAY_RESTART_LOCK_FILE")" \
     "$(dirname "$GATEWAY_RESTART_RECOVERY_LOCK_FILE")" \
@@ -2918,6 +2946,7 @@ if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
     export GATEWAY_RESTART_LOCK_HELD=1
   fi
 elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
+  validate_post_activate_arena_guard_authority || exit 1
   if [ "${GATEWAY_RESTART_LOCK_HELD:-0}" != "1" ] || [ ! -e "/proc/$$/fd/9" ]; then
     echo "ERROR: post-activation gateway restart lost the deployment lock" >&2
     exit 1
@@ -4187,6 +4216,7 @@ exec env \
   GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
   GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+  GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
   GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
   GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
   GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
@@ -4207,6 +4237,8 @@ exec env \
   GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH:-unknown}-$$}" \
   GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}" \
   GATEWAY_DESTRUCTIVE_PHASE_STARTED="$GATEWAY_DESTRUCTIVE_PHASE_STARTED" \
+  PREPARED_GATEWAY_SHA="$PREPARED_GATEWAY_SHA" \
+  LAB_ARENA_RESTART_GUARD_GENERATION="$LAB_ARENA_RESTART_GUARD_GENERATION" \
   GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
   GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
   GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
@@ -4236,14 +4268,8 @@ exec env \
   bash "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" "$@"
 fi
 
-GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"
-GATEWAY_DEPLOY_BRANCH="$(deployment_field branch)"
-GATEWAY_DEPLOY_REMOTE="$(deployment_field remote_url)"
+bind_activated_gateway_guard_candidate || exit 1
 record_gateway_restart_timing "candidate_activated"
-if [ "$(git -C "$LEADPOET_REPO_ROOT" rev-parse HEAD)" != "$GATEWAY_DEPLOY_SHA" ]; then
-  echo "ERROR: canonical gateway checkout does not match activated deployment" >&2
-  exit 1
-fi
 echo "Cleaning stale read-only gateway vsock probes"
 "$GATEWAY_PYTHON_BIN" \
   "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \

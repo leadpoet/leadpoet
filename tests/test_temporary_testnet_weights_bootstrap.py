@@ -1,10 +1,15 @@
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 import pytest
 
 from scripts import bootstrap_temporary_testnet_weights_host as bootstrap
+from validator_tee.host.release_v2 import (
+    build_local_validator_release_identity,
+    build_validator_release,
+)
 
 
 EXPIRY_EPOCH = int(time.time()) + 3600
@@ -265,6 +270,100 @@ def test_gateway_bootstrap_uses_only_expected_ciphertext_envelopes():
         bootstrap.GATEWAY_ENVELOPE_NAMES
     )
     assert all("plaintext" not in value.lower() for value in command)
+
+
+def test_static_inputs_reads_hash_from_real_local_validator_release(
+    monkeypatch, tmp_path
+):
+    digest = "sha256:" + "1" * 64
+    release = build_validator_release(
+        commit_sha="a" * 40,
+        pcr0="2" * 96,
+        app_manifest_hash=digest,
+        dependency_lock_hash=digest,
+        normalized_image_hash=digest,
+        eif_hash=digest,
+        dockerfile_hash=digest,
+        base_dockerfile_hash=digest,
+    )
+    validator_manifest = build_local_validator_release_identity(release)
+    profile = {
+        "network": bootstrap.NETWORK,
+        "chain_endpoint": bootstrap.CHAIN_ENDPOINT,
+        "genesis_hash": "3" * 64,
+    }
+    from leadpoet_canonical.attested_v2 import sha256_json
+    from gateway.tee import release_lineage_v2, release_manifest_v2
+    from Leadpoet.utils import subnet_epoch
+    from validator_tee.enclave import hotkey_authority_v2
+    from validator_tee.host import hotkey_bootstrap_v2
+
+    class Cutover:
+        netuid = bootstrap.NETUID
+        cutover_block = bootstrap.EXPECTED_CUTOVER_BLOCK
+        first_settlement_epoch_id = bootstrap.EXPECTED_FIRST_SETTLEMENT_EPOCH
+        mapping_hash = bootstrap.EXPECTED_CUTOVER_MAPPING_HASH
+        network_genesis_hash = "0x" + profile["genesis_hash"]
+
+        @classmethod
+        def from_mapping(cls, _value):
+            return cls()
+
+    documents = {
+        "gateway release manifest": {},
+        "validator release manifest": validator_manifest,
+        "gateway release lineage": {},
+        "validator hotkey config": {},
+        "validator hotkey envelope": {},
+        "testnet cutover manifest": {},
+    }
+    monkeypatch.setattr(bootstrap, "_validate_candidate_checkout", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_private_regular_file", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_regular_file", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_load_json", lambda _path, field: documents[field])
+    monkeypatch.setattr(
+        release_manifest_v2, "validate_release_manifest",
+        lambda _value: {"commit_sha": "a" * 40, "release_hash": digest},
+    )
+    monkeypatch.setattr(
+        release_lineage_v2, "validate_compact_release_lineage_v2", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        hotkey_authority_v2, "load_chain_signing_profile", lambda _path: profile
+    )
+    monkeypatch.setattr(
+        hotkey_authority_v2, "validate_hotkey_authority_configuration",
+        lambda _value: {
+            "validator_hotkey": bootstrap.EXPECTED_VALIDATOR_HOTKEY,
+            "hotkey_public_key": "4" * 64,
+            "chain_signing_profile_hash": sha256_json(profile),
+        },
+    )
+    monkeypatch.setattr(
+        hotkey_bootstrap_v2, "validate_hotkey_envelope",
+        lambda _value: {
+            "validator_hotkey": bootstrap.EXPECTED_VALIDATOR_HOTKEY,
+            "hotkey_public_key": "4" * 64,
+        },
+    )
+    monkeypatch.setattr(subnet_epoch, "SubnetEpochCutover", Cutover)
+    config = {
+        "repo_root": str(tmp_path), "python_bin": sys.executable,
+        "candidate_sha": "a" * 40,
+        "gateway": {name: "/unused" for name in (
+            "source_env_file", "release_manifest", "release_lineage", "eif_root",
+            "artifact_policy", "protected_workflow_manifest",
+        )},
+        "validator": {name: "/unused" for name in (
+            "source_env_file", "release_manifest", "eif_path", "hotkey_config",
+            "hotkey_envelope", "chain_profile", "cutover_manifest",
+        )},
+    }
+
+    result = bootstrap.validate_static_inputs(config)
+
+    assert "release_hash" not in validator_manifest
+    assert result["validator_release_hash"] == release["release_hash"]
 
 
 def test_candidate_checkout_allows_only_exact_native_build_outputs(tmp_path):

@@ -481,7 +481,7 @@ def validate_static_inputs(config: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "candidate_sha": candidate_sha,
         "gateway_release_hash": gateway_release["release_hash"],
-        "validator_release_hash": validator_release["release_hash"],
+        "validator_release_hash": validator_release["release"]["release_hash"],
         "validator_hotkey": hotkey_config["validator_hotkey"],
         "chain_profile_hash": sha256_json(profile),
         "cutover_mapping_hash": canonical_cutover.mapping_hash,

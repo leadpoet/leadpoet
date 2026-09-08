@@ -176,6 +176,22 @@ class _Reader:
 
 
 class _MeasuredChain:
+    def read_finalized_metagraph(self, *, netuid, context, attempt_number=0):
+        assert netuid == 401
+        assert context.purpose == "research_lab.allocation.v2"
+        assert attempt_number == 0
+        hotkeys = ["unused-%d" % index for index in range(12)]
+        hotkeys[origin.TESTNET401_BURN_UID] = origin.TESTNET401_BURN_HOTKEY
+        hotkeys[origin.TESTNET401_VALIDATOR_UID] = (
+            origin.TESTNET401_VALIDATOR_HOTKEY
+        )
+        return {
+            "finalized_block_hash": "b" * 64,
+            "header": {"block": 22_058 * 360 + 1},
+            "workflow_epoch_id": 22_058,
+            "metagraph": {"hotkeys": hotkeys},
+        }
+
     def fresh_testnet401_cutover_scope(self, *, netuid):
         assert netuid == 401
         return _cutover()
@@ -238,6 +254,62 @@ def test_measured_first_allocation_requires_cutover_parent_and_empty_history(
         "finalized_allocation_authorities",
         {"netuid": 401, "start_epoch": 22_042, "end_epoch": 22_057},
     ) in reader.calls
+
+
+def test_measured_full_first_allocation_accepts_empty_legacy_reward_sources(
+    monkeypatch,
+):
+    graph = _cutover_graph()
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, _roots: {origin.TESTNET401_CUTOVER_RECEIPT_HASH: graph},
+    )
+    monkeypatch.setattr(origin, "validate_receipt_graph", lambda _graph: None)
+    reader = _Reader()
+    config = SimpleNamespace(
+        reimbursement_dynamic_alpha_price_enabled=False,
+        reimbursement_require_live_alpha_price=False,
+        reimbursement_miner_alpha_per_epoch=100.0,
+        reimbursement_usd_per_0_1_percent_epoch=0.666667,
+        reimbursement_policy_doc=lambda enabled: {
+            "policy_id": "policy:testnet401",
+            "enabled": bool(enabled),
+            "research_lab_emission_percent": 20.0,
+            "reward_epochs": 20,
+            "reimbursement_epochs": 20,
+            "reimbursement_max_cost_multiplier_with_champions": 1.0,
+            "champion_placeholder_alpha_percent": 0.0001,
+            "champion_queue_trigger_ratio": 0.5,
+            "usd_per_0_1_percent_epoch": 0.666667,
+        },
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=_MeasuredChain(),
+        config_supplier=lambda: config,
+        network_supplier=lambda: "test",
+    )
+    context = ExecutionContextV2(
+        job_id="allocation-v2:testnet401",
+        purpose="research_lab.allocation.v2",
+        epoch_id=22_058,
+        parent_receipt_hashes=(origin.TESTNET401_CUTOVER_RECEIPT_HASH,),
+        external_receipt_graphs=[graph],
+    )
+
+    result = resolver.resolve(
+        payload={"epoch": 22_058, "netuid": 401},
+        context=context,
+    )
+
+    assert result["source_state"]["fresh_network_origin"][
+        "cutover_receipt_hash"
+    ] == origin.TESTNET401_CUTOVER_RECEIPT_HASH
+    assert result["source_state"]["champion_obligations"] == []
+    assert result["source_state"]["settlement_frontier"]["mode"] == (
+        "legacy_full_history_bootstrap"
+    )
 
 
 def test_measured_first_allocation_rejects_existing_history(monkeypatch):

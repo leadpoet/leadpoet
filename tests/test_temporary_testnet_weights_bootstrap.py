@@ -391,6 +391,7 @@ def test_live_455_selects_the_exact_approved_testnet_profile():
 def test_gateway_dynamic_pcr_builder_uses_only_task_owned_build_paths(monkeypatch):
     config = {
         "runtime_root": "/run/leadpoet-testnet401",
+        "resume_existing_epoch_authority": True,
         "gateway": {"artifact_policy": "/unused/artifact-policy.json"},
         "validator": {"cutover_manifest": "/unused/cutover.json"},
     }
@@ -421,6 +422,9 @@ def test_gateway_dynamic_pcr_builder_uses_only_task_owned_build_paths(monkeypatc
         "/run/leadpoet-testnet401/pcr0-builder"
     )
     assert environment["PCR0_STARTUP_HISTORICAL_WARM_ENABLED"] == "false"
+    assert environment[
+        "LEADPOET_TEMPORARY_TESTNET401_LOCAL_RELEASE_CHANNELS"
+    ] == "true"
 
 
 def test_testnet_gateway_flags_do_not_modify_global_intake_control():

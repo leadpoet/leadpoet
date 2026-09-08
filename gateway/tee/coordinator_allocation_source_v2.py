@@ -1807,7 +1807,26 @@ class CoordinatorAllocationSourceV2:
             for row in champion_rows
             if int(row.get("start_epoch") or 0) <= epoch
         ]
-        if epoch <= 0 or (history_start is None and not starts):
+        if epoch <= 0:
+            return []
+        if history_start is None and not starts:
+            if (
+                str(self._network_supplier() or "").strip().lower() == "test"
+                and int(netuid) == 401
+                and TESTNET401_CUTOVER_RECEIPT_HASH
+                in set(context.parent_receipt_hashes)
+                and isinstance(chain_state, Mapping)
+            ):
+                origin = self._validate_fresh_testnet401_first_allocation(
+                    epoch=epoch,
+                    netuid=netuid,
+                    chain_state=chain_state,
+                    context=context,
+                    required_parents=required_parents,
+                )
+                if fresh_network_origin_out is not None:
+                    fresh_network_origin_out.clear()
+                    fresh_network_origin_out.update(origin)
             return []
         normalized_history_start = (
             min(starts)

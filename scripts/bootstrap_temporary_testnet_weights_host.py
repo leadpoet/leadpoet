@@ -84,6 +84,9 @@ EXPECTED_ARENA_SIGNING_KEY_HASH = (
 )
 BEFORE_TESTNET401_LAST_UPDATE = 7_431_466
 EXPECTED_RUNTIME_ROOT = Path("/run/leadpoet-testnet401")
+CANONICAL_GATEWAY_RELEASE_MANIFEST = Path(
+    "/home/ec2-user/tee/gateway-v2-release-manifest.json"
+)
 KNOWN_FINNEY_ADDRESSES = frozenset({"52.91.135.79", "100.59.201.156"})
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
@@ -503,6 +506,61 @@ def validate_static_inputs(config: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _install_canonical_gateway_release(
+    config: Mapping[str, Any],
+    *,
+    destination: Path = CANONICAL_GATEWAY_RELEASE_MANIFEST,
+) -> Dict[str, Any]:
+    """Install the validated task release at the normal coordinator path."""
+
+    from gateway.tee.release_manifest_v2 import validate_release_manifest
+    from leadpoet_canonical.attested_v2 import canonical_json
+
+    source = Path(config["gateway"]["release_manifest"])
+    release = validate_release_manifest(
+        _load_json(source, "gateway release manifest")
+    )
+    if release.get("commit_sha") != config["candidate_sha"]:
+        raise TemporaryTestnetBootstrapError(
+            "canonical gateway release commit differs"
+        )
+    target = Path(destination)
+    parent = target.parent
+    parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not parent.is_dir() or parent.is_symlink():
+        raise TemporaryTestnetBootstrapError(
+            "canonical gateway release directory is invalid"
+        )
+    if target.exists() or target.is_symlink():
+        _private_regular_file(target, "canonical gateway release manifest")
+        existing = validate_release_manifest(
+            _load_json(target, "canonical gateway release manifest")
+        )
+        if existing != release:
+            raise TemporaryTestnetBootstrapError(
+                "canonical gateway release manifest differs"
+            )
+        return release
+    descriptor = os.open(
+        target,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+        stream.write(canonical_json(release) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    _private_regular_file(target, "canonical gateway release manifest")
+    installed = validate_release_manifest(
+        _load_json(target, "canonical gateway release manifest")
+    )
+    if installed != release:
+        raise TemporaryTestnetBootstrapError(
+            "canonical gateway release manifest readback differs"
+        )
+    return installed
+
+
 def _imds_instance_id() -> str:
     token_request = request.Request(
         "http://169.254.169.254/latest/api/token",
@@ -716,7 +774,7 @@ def _gateway_runtime_overrides(config: Mapping[str, Any]) -> Dict[str, str]:
         raise TemporaryTestnetBootstrapError(
             "encrypted artifact policy is not task-owned"
         )
-    return {
+    overrides = {
         **SAFE_GATEWAY_ENV,
         **_cutover_environment(config),
         "NITRO_CLI_ARTIFACTS": str(runtime_root / "nitro-cli-artifacts"),
@@ -729,6 +787,11 @@ def _gateway_runtime_overrides(config: Mapping[str, Any]) -> Dict[str, str]:
             runtime_root / "offline-artifacts" / "validator-runtime"
         ),
     }
+    if config.get("resume_existing_epoch_authority") is True:
+        overrides[
+            "LEADPOET_TEMPORARY_TESTNET401_LOCAL_RELEASE_CHANNELS"
+        ] = "true"
+    return overrides
 
 
 def _validator_runtime_overrides(config: Mapping[str, Any]) -> Dict[str, str]:
@@ -1362,6 +1425,7 @@ def run_launch(config: Mapping[str, Any], *, confirm_instance_id: str) -> Dict[s
     live = _profile_live_check(config)
     if live.get("selected_profile_hash") != EXPECTED_PROFILE_HASH:
         raise TemporaryTestnetBootstrapError("live profile changed after preflight")
+    _install_canonical_gateway_release(config)
     root = Path(config["runtime_root"])
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     gateway = config["gateway"]

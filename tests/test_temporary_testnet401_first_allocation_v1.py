@@ -552,6 +552,36 @@ async def test_host_loads_only_exact_durable_cutover_without_activation(
     assert loaded == graph
 
 
+@pytest.mark.asyncio
+async def test_host_fresh_parent_stops_at_real_activation(monkeypatch):
+    async def select_many(*_args, **_kwargs):
+        return [{"netuid": 401}]
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("cutover authority loaded after real activation")
+
+    monkeypatch.setenv("BITTENSOR_NETWORK", "test")
+    monkeypatch.setattr("gateway.research_lab.store.select_many", select_many)
+    monkeypatch.setattr("gateway.research_lab.store.select_all", forbidden)
+    loaded = await v2_authority._load_fresh_testnet401_first_allocation_parent_v1(
+        netuid=401
+    )
+    assert loaded is None
+
+
+@pytest.mark.asyncio
+async def test_host_fresh_parent_does_not_route_finney(monkeypatch):
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("testnet401 authority storage read on Finney")
+
+    monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
+    monkeypatch.setattr("gateway.research_lab.store.select_many", forbidden)
+    loaded = await v2_authority._load_fresh_testnet401_first_allocation_parent_v1(
+        netuid=401
+    )
+    assert loaded is None
+
+
 def _allocation_outcome(*, epoch: int, predecessor: dict | None = None) -> dict:
     frontier = build_allocation_settlement_frontier_v2(
         mode="bounded_delta_v1" if predecessor else "legacy_full_history_bootstrap",
@@ -811,6 +841,136 @@ def _unfinalized_frontier_rows():
         "source_state_hash": source_state_hash, "frontier_doc": frontier,
     }
     return frontier, allocation, receipt, execution, row
+
+
+@pytest.mark.asyncio
+async def test_host_default_parent_loader_reuses_strict_fresh_empty_history(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, champion_settlement_v2, store
+
+    frontier, _allocation, receipt, _execution, row = _unfinalized_frontier_rows()
+    cutover_graph = _cutover_graph()
+    frontier_graph = {
+        "root_receipt_hash": receipt["receipt_hash"],
+        "receipts": [receipt],
+    }
+    frontier_context = {
+        "frontier": frontier,
+        "row": row,
+        "source": {"receipt_graph": frontier_graph},
+        "activation": {"source_receipt_hash": receipt["receipt_hash"]},
+        "activation_source": {"receipt_graph": frontier_graph},
+    }
+    activation_reads = []
+    captured = {}
+
+    async def select_many(table, **kwargs):
+        activation_reads.append((table, kwargs))
+        return []
+
+    async def select_all(table, **_kwargs):
+        if table == "research_lab_stateful_subnet_epoch_cutovers_v1":
+            return [{
+                "schema_version": "leadpoet.subnet_epoch_cutover_authority.v3",
+                "previous_epoch_scheme": "fresh_network_v1",
+                "cutover_authority_hash": origin.TESTNET401_CUTOVER_AUTHORITY_HASH,
+                "cutover_receipt_hash": origin.TESTNET401_CUTOVER_RECEIPT_HASH,
+                "manifest_doc": _cutover(),
+            }]
+        return []
+
+    async def load_graph(receipt_hash):
+        assert receipt_hash == origin.TESTNET401_CUTOVER_RECEIPT_HASH
+        return cutover_graph
+
+    async def empty_graphs(_values):
+        return {}
+
+    async def forbidden_history(**_kwargs):
+        raise AssertionError("legacy settled history loaded for strict fresh origin")
+
+    async def forbidden_settlement(**_kwargs):
+        raise AssertionError("chain settlement required for strict fresh origin")
+
+    async def execute(**kwargs):
+        captured["parents"] = list(kwargs["parent_graphs"])
+        return _allocation_outcome(epoch=22_063, predecessor=frontier)
+
+    async def persist_frontier(**kwargs):
+        captured["persisted_frontier"] = kwargs["frontier"]
+        return {}
+
+    async def persist_links(*_args, **_kwargs):
+        return {"status": "persisted"}
+
+    async def load_frontier(**kwargs):
+        assert kwargs == {"netuid": 401, "before_epoch": 22_064}
+        return frontier_context
+
+    monkeypatch.setenv("BITTENSOR_NETWORK", "test")
+    monkeypatch.setattr(store, "select_many", select_many)
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        "Leadpoet.utils.subnet_epoch.load_subnet_epoch_cutover",
+        lambda: SubnetEpochCutover.from_mapping(_cutover()),
+    )
+    monkeypatch.setattr(attested_v2_store, "load_receipt_graph_v2", load_graph)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_allocation_settlement_frontier_context_v2",
+        load_frontier,
+    )
+    monkeypatch.setattr(
+        attested_v2_store, "load_business_artifact_graphs_v2", empty_graphs
+    )
+    monkeypatch.setattr(
+        attested_v2_store, "load_business_artifact_graphs_by_ref_v2", empty_graphs
+    )
+    monkeypatch.setattr(attested_v2_store, "load_receipt_graphs_v2", empty_graphs)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_settled_allocation_history_v2",
+        forbidden_history,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_allocation_settlement_frontier_v2",
+        persist_frontier,
+    )
+    monkeypatch.setattr(origin, "validate_receipt_graph", lambda _graph: None)
+    monkeypatch.setattr(v2_authority, "validate_receipt_graph", lambda _graph: None)
+    monkeypatch.setattr(
+        v2_authority,
+        "_validate_allocation_parent_graphs",
+        lambda _graphs: [],
+    )
+    monkeypatch.setattr(
+        v2_authority, "ensure_chain_realized_settlements_v1", forbidden_settlement
+    )
+    monkeypatch.setattr(v2_authority, "_persist_business_links", persist_links)
+    monkeypatch.setattr(v2_authority, "execute_coordinator_v2", execute)
+    monkeypatch.setitem(v2_authority.build_allocation_v2.__kwdefaults__, "execute", execute)
+
+    result = await v2_authority.build_allocation_v2(
+        epoch_id=22_063,
+        netuid=401,
+        policy={},
+    )
+    assert result["status"] == "matched"
+    assert [item["root_receipt_hash"] for item in captured["parents"]] == [
+        receipt["receipt_hash"],
+        origin.TESTNET401_CUTOVER_RECEIPT_HASH,
+    ]
+    assert captured["persisted_frontier"]["allocation_epoch"] == 22_063
+    assert activation_reads == [(
+        "research_lab_chain_realized_settlement_activation_v1",
+        {
+            "columns": "netuid",
+            "filters": (("netuid", 401),),
+            "limit": 2,
+        },
+    )]
 
 
 def _signed_frontier_rows_from_result(*, result, parents, digit):

@@ -632,8 +632,8 @@ jobs:
           failure_stage=canonical-origin-fetch
           candidate_git -C "$candidate_repo" fetch --no-tags origin \
             refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1
-          test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" = \
-            {q(required['CANDIDATE_SHA'])}
+          candidate_git -C "$candidate_repo" merge-base --is-ancestor \
+            {q(required['CANDIDATE_SHA'])} origin/main
           cd "$candidate_repo"
           host_venv={q(root + "/controller-venv")}
           host_python="$host_venv/bin/python3"

@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
+import textwrap
 import time
 
 import pytest
@@ -1402,7 +1404,7 @@ def test_full_workflow_normal_lane_uses_exact_candidate_and_tears_down_without_t
     assert 'arena_recovery.get("service_restarted") is not True' in normal_lane
 
 
-def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
+def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main_ancestry():
     source = (
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
@@ -1428,8 +1430,8 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     fetch = source.index(
         'candidate_git -C "$candidate_repo" fetch --no-tags origin'
     )
-    exact_main = source.index(
-        'test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" ='
+    canonical_main_ancestry = source.index(
+        'candidate_git -C "$candidate_repo" merge-base --is-ancestor'
     )
     runner = source.index(
         '"$host_python" scripts/run_production_parity_full_host.py'
@@ -1444,7 +1446,7 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         < canonical_origin
         < exact_origin
         < fetch
-        < exact_main
+        < canonical_main_ancestry
         < runner
     )
     assert '"$candidate_git_bin" -c init.templateDir=' in source
@@ -1491,6 +1493,154 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     assert "python3.11-pip-wheel" not in source
     assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
+
+
+def test_full_host_origin_check_accepts_only_candidate_ancestry(tmp_path: Path):
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_EMAIL": "parity-test@leadpoet.invalid",
+        "GIT_AUTHOR_NAME": "Parity Test",
+        "GIT_COMMITTER_EMAIL": "parity-test@leadpoet.invalid",
+        "GIT_COMMITTER_NAME": "Parity Test",
+    }
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            check=check,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+
+    remote = tmp_path / "origin.git"
+    source = tmp_path / "source"
+    candidate_repo = tmp_path / "candidate"
+    candidate_git_home = tmp_path / "git-home"
+    bundle = tmp_path / "candidate.bundle"
+    candidate_git_home.mkdir()
+    git("init", "--bare", str(remote))
+    git("init", "-b", "main", str(source))
+    (source / "release.txt").write_text("candidate\n", encoding="utf-8")
+    git("-C", str(source), "add", "release.txt")
+    git("-C", str(source), "commit", "-m", "candidate")
+    candidate = git("-C", str(source), "rev-parse", "HEAD").stdout.strip()
+    git("-C", str(source), "remote", "add", "origin", str(remote))
+    git("-C", str(source), "push", "origin", "main")
+    git("-C", str(source), "bundle", "create", str(bundle), "HEAD")
+
+    git("init", str(candidate_repo))
+    git("-C", str(candidate_repo), "fetch", "--no-tags", str(bundle), "HEAD")
+    assert git(
+        "-C", str(candidate_repo), "rev-parse", "FETCH_HEAD"
+    ).stdout.strip() == candidate
+    git("-C", str(candidate_repo), "checkout", "--detach", candidate)
+    git("-C", str(candidate_repo), "remote", "add", "origin", str(remote))
+
+    workflow_source = (
+        ROOT / ".github/workflows/physical-v2-staging.yml"
+    ).read_text(encoding="utf-8")
+    fragment_start = workflow_source.index(
+        "          failure_stage=canonical-origin-fetch"
+    )
+    fragment_end = workflow_source.index(
+        '          cd "$candidate_repo"', fragment_start
+    )
+    canonical_fragment = textwrap.dedent(
+        workflow_source[fragment_start:fragment_end]
+    )
+    ancestry_command = (
+        'candidate_git -C "$candidate_repo" merge-base --is-ancestor \\\n'
+        "  {q(required['CANDIDATE_SHA'])} origin/main"
+    )
+    equality_command = (
+        'test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" = \\\n'
+        "  {q(required['CANDIDATE_SHA'])}"
+    )
+    assert ancestry_command in canonical_fragment
+
+    def run_origin_check(
+        selected_candidate: str, *, use_old_equality: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        fragment = canonical_fragment
+        if use_old_equality:
+            fragment = fragment.replace(ancestry_command, equality_command)
+        fragment = fragment.replace(
+            "{q(required['CANDIDATE_SHA'])}", shlex.quote(selected_candidate)
+        )
+        script = textwrap.dedent(
+            f"""\
+            set -eu
+            candidate_repo={shlex.quote(str(candidate_repo))}
+            candidate_git_home={shlex.quote(str(candidate_git_home))}
+            candidate_git_bin=/usr/bin/git
+            candidate_git() {{
+              /usr/bin/env -i \\
+                PATH=/usr/bin:/bin \\
+                LC_ALL=C \\
+                HOME="$candidate_git_home" \\
+                XDG_CONFIG_HOME="$candidate_git_home/.config" \\
+                GIT_CONFIG_NOSYSTEM=1 \\
+                GIT_TERMINAL_PROMPT=0 \\
+                "$candidate_git_bin" -c init.templateDir= "$@"
+            }}
+            {textwrap.indent(fragment, '            ').lstrip()}
+            """
+        )
+        return subprocess.run(
+            ["/bin/bash", "-c", script],
+            check=False,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+
+    (source / "release.txt").write_text("newer main\n", encoding="utf-8")
+    git("-C", str(source), "commit", "-am", "newer main")
+    newer_main = git("-C", str(source), "rev-parse", "HEAD").stdout.strip()
+    git("-C", str(source), "push", "origin", "main")
+    assert run_origin_check(candidate, use_old_equality=True).returncode != 0
+    assert run_origin_check(candidate).returncode == 0
+    assert git(
+        "-C", str(candidate_repo), "rev-parse", "origin/main"
+    ).stdout.strip() == newer_main
+    assert git(
+        "-C", str(candidate_repo), "rev-parse", "HEAD"
+    ).stdout.strip() == candidate
+
+    foreign = git(
+        "-C",
+        str(candidate_repo),
+        "commit-tree",
+        f"{candidate}^{{tree}}",
+        "-p",
+        candidate,
+        "-m",
+        "foreign candidate",
+    ).stdout.strip()
+    assert run_origin_check(foreign).returncode != 0
+
+    git(
+        "-C",
+        str(candidate_repo),
+        "remote",
+        "set-url",
+        "origin",
+        str(tmp_path / "missing"),
+    )
+    assert run_origin_check(candidate).returncode != 0
+    git("-C", str(candidate_repo), "remote", "set-url", "origin", str(remote))
+
+    rewritten = git(
+        "-C",
+        str(source),
+        "commit-tree",
+        f"{candidate}^{{tree}}",
+        "-m",
+        "rewritten main",
+    ).stdout.strip()
+    git("-C", str(source), "push", "--force", "origin", f"{rewritten}:main")
+    assert run_origin_check(candidate).returncode != 0
 
 
 def test_parity_workflows_reject_non_main_code_before_aws_credentials():

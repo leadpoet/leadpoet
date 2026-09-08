@@ -640,3 +640,22 @@ def test_all_verified_details_keep_existing_nonretryable_result():
     assert has_verified_primary_intent(details)
     assert not intent_unavailability_requires_retry(details)
     assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+def test_legacy_positive_primary_retains_prior_penalty_accounting():
+    breakdown = {
+        "final_score": 45.0,
+        "failure_reason": None,
+        "intent_signals_detail": [
+            {
+                "raw": 45.0,
+                "after_decay": 45.0,
+                "matched_icp_signal": "0",
+            }
+        ],
+        "verifier_gate_receipts": [company_fit_match().receipt("company_fit")],
+    }
+
+    assert count_penalizable_false_positives(
+        [breakdown], icp_has_intent_signals=True
+    ) == (0, 0)

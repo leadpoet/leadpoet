@@ -436,7 +436,25 @@ def count_penalizable_false_positives(
         details = row.get("intent_signals_detail")
         if not isinstance(details, Sequence) or isinstance(details, (str, bytes)):
             continue
-        if details and not has_verified_primary_intent(details):
+        primary_verified = False
+        verifier_failed = False
+        for detail in details:
+            if not isinstance(detail, Mapping):
+                continue
+            verdict = detail.get("judge_verdict")
+            if isinstance(verdict, Mapping) and (
+                str(verdict.get("decision") or "") == "rejected_verifier_error"
+                or bool(verdict.get("error_class"))
+            ):
+                verifier_failed = True
+            try:
+                index = int(detail.get("matched_icp_signal", -1))
+            except (TypeError, ValueError):
+                continue
+            if index == 0 and float(detail.get("after_decay") or 0.0) > 0.0:
+                primary_verified = True
+                break
+        if details and not primary_verified and not verifier_failed:
             unverified_primary += 1
     return gate_failures, unverified_primary
 

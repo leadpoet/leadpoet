@@ -1113,6 +1113,9 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False, gateway_stopped=Fal
         validator.symlink_to(target)
     else:
         validator.write_bytes(target.read_bytes())
+    if gateway_stopped:
+        with (logs / "gateway_application.log").open("a") as stream:
+            stream.write("transparency signer is already initialized with another log tip private-secret\n")
     config = {
         "run_id": RUN_ID, "candidate_sha": SHA,
         "expected_instance_id": INSTANCE_ID, "runtime_root": str(runtime),
@@ -1211,6 +1214,7 @@ def test_stopped_gateway_log_remains_available_without_claiming_live_process(tmp
     value = json.loads(result.stdout)
     temporary_host._validate_runtime_log_diagnostics(value)
     assert value["logs"][0]["process_live"] is False
+    assert "event_signer_reinitialization_tip_differs" in value["logs"][0]["reason_codes"]
     assert value["logs"][1]["process_live"] is True
     assert "provider-secret-canary" not in result.stdout
     assert "private.example" not in result.stdout

@@ -1533,7 +1533,7 @@ def _validate_runtime_log_diagnostics(value: Any) -> None:
     for item in value["logs"]:
         if not isinstance(item, Mapping) or not set(item) <= allowed:
             raise TemporaryHostError("runtime log diagnostics differ")
-        if item.get("process_live") is not True:
+        if not isinstance(item.get("process_live"), bool):
             raise TemporaryHostError("runtime log diagnostics differ")
         for name in ("log_size_bytes", "tail_bytes_read"):
             if not isinstance(item.get(name), int) or not 0 <= item[name] <= 2**31:
@@ -1644,7 +1644,8 @@ def runtime_log_diagnostic_program(
         "rows = []",
         "for name in names:",
         "    records = [p for p in state['processes'] if p.get('name') == name]",
-        "    assert len(records) == 1 and native._same_process(records[0]), 'process differs'",
+        "    assert len(records) <= 1, 'process records differ'",
+        "    process_live = bool(records and native._same_process(records[0]))",
         "    path = Path(config['runtime_root']) / 'logs' / (name + '.log')",
         "    meta = path.lstat()",
         "    assert stat.S_ISREG(meta.st_mode) and not stat.S_ISLNK(meta.st_mode), 'log differs'",
@@ -1652,6 +1653,7 @@ def runtime_log_diagnostic_program(
         "    with path.open('rb') as stream:",
         "        stream.seek(max(0, size - 262144)); data = stream.read(262144)",
         "    row = {'process_name': name, 'process_live': True, 'log_size_bytes': size, 'tail_bytes_read': len(data), 'progress_markers': [label for token,label in progress[name] if token in data], 'failure_markers': [label for token,label in failures if token in data], 'exception_types': [token.decode() for token in exceptions if token in data], 'reason_codes': [label for token,label in reasons if token in data], 'source_locations': [{'file': f.decode(), 'line': int(line)} for f,line in re.findall(rb'File \"(?:[^\"\\n]*/)?([A-Za-z0-9_]+\\.py)\", line ([0-9]{1,6})', data)[-8:]]}",
+        "    row['process_live'] = process_live",
         "    callbacks = []",
         "    for line in data.splitlines():",
         "        if b'research_lab_allocation_build_failed ' not in line: continue",

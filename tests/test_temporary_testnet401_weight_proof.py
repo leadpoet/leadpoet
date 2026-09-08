@@ -55,7 +55,7 @@ def _independent() -> dict:
         "netuid": 401,
         "epoch_id": EPOCH_ID,
         "selected_profile_hash": proof.EXPECTED_PROFILE_HASH,
-        "selected_spec_version": 454,
+        "selected_spec_version": proof.EXPECTED_PROFILE_SPEC_VERSION,
         **HASHES,
         "commit_inclusion_block": 7_959_800,
         "commit_inclusion_block_hash": "0x" + "6" * 64,
@@ -144,6 +144,24 @@ def test_join_rejects_a_status_hash_that_differs():
         match="native and independent proof hashes differ",
     ):
         proof._require_join(automatic, _independent())
+
+
+def test_independent_proof_rejects_the_retired_live_profile_identity():
+    value = _independent()
+    value["selected_spec_version"] = 454
+    value["selected_profile_hash"] = (
+        "sha256:a2db2db86ffb10bbf41dd6923e1310726031bc4183841e07e6d2da50e6e58677"
+    )
+
+    with pytest.raises(
+        proof.TemporaryWeightProofError,
+        match="independent proof identity differs",
+    ):
+        proof._independent_proof(
+            json.dumps(value, sort_keys=True) + "\n",
+            candidate_sha=CANDIDATE,
+            epoch_id=EPOCH_ID,
+        )
 
 
 def test_run_requires_last_update_to_advance_and_returns_joined_proof(monkeypatch):

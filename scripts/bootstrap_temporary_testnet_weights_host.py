@@ -56,8 +56,9 @@ EXPECTED_SUBNET = "subnet-025170c1eff61494d"
 EXPECTED_VPC = "vpc-0c975a643bc1e0e79"
 EXPECTED_INSTANCE_PROFILE = "leadpoet-production-parity-runner"
 EXPECTED_PROFILE_HASH = (
-    "sha256:a2db2db86ffb10bbf41dd6923e1310726031bc4183841e07e6d2da50e6e58677"
+    "sha256:20407ea2590f8d93be932db8dd578d2feb1ec3f1c71331495d224ef48057824f"
 )
+EXPECTED_PROFILE_SPEC_VERSION = 455
 EXPECTED_CUTOVER_BLOCK = 7_955_391
 EXPECTED_FIRST_SETTLEMENT_EPOCH = 22_042
 EXPECTED_CUTOVER_MAPPING_HASH = (
@@ -767,7 +768,7 @@ def _profile_live_check(config: Mapping[str, Any]) -> Dict[str, Any]:
         result.get("status") != "ready"
         or result.get("netuid") != NETUID
         or result.get("selected_profile_hash") != EXPECTED_PROFILE_HASH
-        or result.get("spec_version") != 454
+        or result.get("spec_version") != EXPECTED_PROFILE_SPEC_VERSION
         or result.get("transaction_version") != 1
         or result.get("tempo") != 360
         or result.get("subnet_reveal_period_epochs") != 1

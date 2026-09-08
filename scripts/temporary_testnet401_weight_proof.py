@@ -39,15 +39,16 @@ SCHEMA_VERSION = "leadpoet.temporary_testnet401_weight_proof_ssm.v1"
 LOG_READER_SHA256 = "14c53ff6be8e26e617b8e6f5e6196c0055f21852981d4ca9227c745b981372cd"
 VERIFIER_PATH = Path(__file__).with_name("verify_temporary_testnet_weights.py")
 VERIFIER_SHA256 = (
-    "16830b14d6ebd265618abb6bc81cb91f9781f982e62e57077b330a46a6c9592e"
+    "05d9472549d9f5b8788a6b57f636ca05ca6e037560bc3daacc93c8586eecf6a1"
 )
 MAX_VERIFIER_BYTES = 32 * 1024
 FIRST_SETTLEMENT_EPOCH_ID = 22_042
 BASELINE_LAST_UPDATE = 7_431_466
 NETUID = 401
 EXPECTED_PROFILE_HASH = (
-    "sha256:a2db2db86ffb10bbf41dd6923e1310726031bc4183841e07e6d2da50e6e58677"
+    "sha256:20407ea2590f8d93be932db8dd578d2feb1ec3f1c71331495d224ef48057824f"
 )
+EXPECTED_PROFILE_SPEC_VERSION = 455
 EXPECTED_REVEALED_WEIGHTS = [[0, 65_535], [11, 21_845]]
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RESULT_FIELDS = frozenset(
@@ -248,7 +249,7 @@ def _independent_proof(
         or value.get("netuid") != NETUID
         or _epoch_id(value.get("epoch_id")) != epoch_id
         or value.get("selected_profile_hash") != EXPECTED_PROFILE_HASH
-        or value.get("selected_spec_version") != 454
+        or value.get("selected_spec_version") != EXPECTED_PROFILE_SPEC_VERSION
         or value.get("revealed_weights") != EXPECTED_REVEALED_WEIGHTS
         or value.get("champion_uid") != 11
         or value.get("champion_share_exact") != "1/4"

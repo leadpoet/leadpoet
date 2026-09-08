@@ -32,8 +32,9 @@ EXPECTED_MAPPING_HASH = (
     "sha256:4b3941c091d3a29daf9ea863bb6cb587bad7dfd9426cf66a56bcf7de04ce4328"
 )
 EXPECTED_PROFILE_HASH = (
-    "sha256:a2db2db86ffb10bbf41dd6923e1310726031bc4183841e07e6d2da50e6e58677"
+    "sha256:20407ea2590f8d93be932db8dd578d2feb1ec3f1c71331495d224ef48057824f"
 )
+EXPECTED_PROFILE_SPEC_VERSION = 455
 EXPECTED_VALIDATOR = "5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz"
 EXPECTED_MINER = "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth"
 EXPECTED_BURN = "5E6zy3Dt8BrwsSKbocSF2uxjpMAbr4EksVzxgPJiXh8jq4vf"
@@ -243,7 +244,7 @@ def main() -> int:
         "live selected profile differs",
     )
     require(
-        selected_profile["spec_version"] == 454
+        selected_profile["spec_version"] == EXPECTED_PROFILE_SPEC_VERSION
         and selected_profile["transaction_version"] == 1
         and selected_profile["chain_endpoint"] == CHAIN_ENDPOINT
         and selected_profile["tempo"] == 360

@@ -3515,6 +3515,149 @@ def test_rehearsal_failure_diagnostics_retain_marker_before_long_cleanup(
     assert len(encoded) < 4096
 
 
+def test_gateway_failure_diagnostics_survive_later_validator_output(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "e" * 40
+    durable_root = tmp_path / (
+        f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-gateway"
+    )
+    durable_root.mkdir()
+    (durable_root / "failure-summary.json").write_text(
+        json.dumps(
+            {
+                "candidate_sha": candidate_sha,
+                "status": "failed",
+                "stages": [
+                    {
+                        "stage": "gateway-forward-1",
+                        "status": "failed",
+                        "error_type": "CalledProcessError",
+                        "returncode": 17,
+                        "duration_seconds": 37.081,
+                    },
+                    {
+                        "stage": "evidence-join-prepush",
+                        "status": "unexercised",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fast_parity.tempfile, "gettempdir", lambda: str(tmp_path))
+    secret = "must-not-escape-early-gateway-diagnostic"
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=(
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=17\n"
+            "REHEARSAL_HTTP_DIAGNOSTIC endpoint=/research-lab/status status=503\n"
+            "REHEARSAL CONTRACT ERROR [docker]: launcher command failed\n"
+            "ERROR: process terminated out of memory\n"
+            f"ERROR: bearer token={secret} permission denied\n"
+            "ERROR: exact gateway launcher failed\n"
+            + (f"validator output {secret}\n" * 1024)
+        ),
+        stderr=(
+            "REHEARSAL_PREPUSH_PHASE phase=gateway-runtime "
+            "status=started duration_seconds=0.0\n"
+            "REHEARSAL_PREPUSH_PHASE phase=gateway-runtime "
+            "status=failed duration_seconds=37.081\n"
+            "REHEARSAL_STAGE_FAILED_CONTINUING stage=gateway-forward-1 "
+            "error_type=CalledProcessError duration_seconds=37.081 "
+            "error='launcher failed'\n"
+            f"REHEARSAL_BATCH_FAILURE_EVIDENCE {durable_root}\n"
+        ),
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert diagnostics["stages"] == [
+        {
+            "stage": "gateway-forward-1",
+            "status": "failed",
+            "error_type": "CalledProcessError",
+            "returncode": 17,
+            "duration_seconds": 37.081,
+        },
+        {
+            "stage": "evidence-join-prepush",
+            "status": "unexercised",
+        },
+    ]
+    assert {
+        "marker": "component_failure",
+        "component": "gateway",
+        "status": 17,
+    } in diagnostics["output_markers"]
+    assert {
+        "marker": "http",
+        "endpoint": "/research-lab/status",
+        "status": "503",
+    } in diagnostics["output_markers"]
+    assert {"marker": "error", "category": "resource_oom"} in diagnostics[
+        "output_markers"
+    ]
+    assert {"marker": "error", "category": "gateway_launcher"} in diagnostics[
+        "output_markers"
+    ]
+    assert {"marker": "contract_error", "kind": "docker"} in diagnostics[
+        "output_markers"
+    ]
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert secret not in encoded
+    assert "stdout" not in diagnostics
+    assert "stderr" not in diagnostics
+    assert "validator output" not in encoded
+    assert "permission denied" not in encoded
+    assert len(encoded) < 4096
+
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert retained["stages"] == [
+        {
+            "stage": "gateway-forward-1",
+            "status": "failed",
+            "error_type": "CalledProcessError",
+            "returncode": 17,
+            "duration_seconds": 37.081,
+        },
+        {
+            "stage": "evidence-join-prepush",
+            "status": "unexercised",
+        },
+    ]
+    assert retained["timeout"] is False
+    assert retained["component_failure_diagnostics"] == [
+        {
+            "marker": "component_failure",
+            "component": "gateway",
+            "status": 17,
+        },
+        {
+            "marker": "http",
+            "endpoint": "/research-lab/status",
+            "status": "503",
+        },
+        {"marker": "contract_error", "kind": "docker"},
+        {"marker": "error", "category_hint": "resource_oom"},
+        {"marker": "error", "category_hint": "gateway_launcher"},
+    ]
+    retained_encoded = json.dumps(retained, sort_keys=True)
+    assert secret not in retained_encoded
+    assert "validator output" not in retained_encoded
+
+
 def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
     secret = "must-not-escape-fixed-marker"
     stage_hash = "a" * 64
@@ -4016,6 +4159,38 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
             "output_markers": [
                 {"marker": "stage_failure", "raw": "secret"},
                 {"marker": "time_budget", "raw": "secret"},
+                {
+                    "marker": "component_failure",
+                    "component": "gateway",
+                    "status": 17,
+                    "raw": "secret",
+                },
+                {
+                    "marker": "http",
+                    "endpoint": "/attest",
+                    "status": "503",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "error",
+                    "category": "resource_oom",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "error",
+                    "category": "attacker-controlled",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "contract_error",
+                    "kind": "docker",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "contract_error",
+                    "kind": "attacker-controlled",
+                    "raw": "secret",
+                },
             ],
             "returncode": 1,
             "stages": [
@@ -4036,7 +4211,24 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
     encoded = projection_path.read_text(encoding="utf-8")
     projection = json.loads(encoded)
     assert "secret" not in encoded
-    assert projection["output_markers"] == ["stage_failure", "time_budget"]
+    assert projection["output_markers"] == [
+        "component_failure",
+        "contract_error",
+        "error",
+        "http",
+        "stage_failure",
+        "time_budget",
+    ]
+    assert projection["component_failure_diagnostics"] == [
+        {
+            "marker": "component_failure",
+            "component": "gateway",
+            "status": 17,
+        },
+        {"marker": "http", "endpoint": "/attest", "status": "503"},
+        {"marker": "error", "category_hint": "resource_oom"},
+        {"marker": "contract_error", "kind": "docker"},
+    ]
     assert projection["stages"] == [
         {
             "duration_seconds": 12.346,

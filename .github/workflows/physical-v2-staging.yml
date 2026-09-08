@@ -1109,6 +1109,12 @@ jobs:
             python3 scripts/provision_production_parity_staging.py \
               --region "$AWS_REGION" delete \
               --state "$parity_temp/parity-stack.json" || cleanup_status=$?
+          else
+            python3 scripts/cleanup_production_parity_staging.py \
+              --region "$AWS_REGION" \
+              --run-id "${{ steps.inputs.outputs.run_id }}" \
+              --candidate-sha "$CANDIDATE_SHA" \
+              --apply || cleanup_status=$?
           fi
           shred -u "$parity_temp/candidate.bundle" 2>/dev/null || \
             rm -f "$parity_temp/candidate.bundle"

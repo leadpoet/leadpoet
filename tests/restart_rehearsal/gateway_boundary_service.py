@@ -768,8 +768,12 @@ def _migration_schema_contract(
         "183-lab-arena-miner-reward-basis.sql",
         "184-lab-arena-scoring-failure-isolation.sql",
         "185-lab-arena-miner-credentials.sql",
+        "187-lab-arena-promotion-threshold.sql",
+        "188-lab-arena-baseline-promotion.sql",
+        "189-lab-arena-round-network-scope.sql",
         "190-lab-arena-restart-claim-drain.sql",
         "193-lab-arena-upload-recovery.sql",
+        "194-lab-arena-open-scorer-refresh.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (

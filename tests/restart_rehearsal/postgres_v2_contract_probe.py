@@ -254,6 +254,11 @@ LAB_ARENA_MIGRATIONS = (
     "184-lab-arena-scoring-failure-isolation.sql",
     "185-lab-arena-miner-credentials.sql",
 )
+LAB_ARENA_POST_185_MIGRATIONS = (
+    "187-lab-arena-promotion-threshold.sql",
+    "188-lab-arena-baseline-promotion.sql",
+    "189-lab-arena-round-network-scope.sql",
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -313,8 +318,10 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_MINER_STATUS_MIGRATION,
     SOURCE_ADD_PROVISIONED_STATUS_MIGRATION,
     *LAB_ARENA_MIGRATIONS,
+    *LAB_ARENA_POST_185_MIGRATIONS,
     LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION,
     "193-lab-arena-upload-recovery.sql",
+    "194-lab-arena-open-scorer-refresh.sql",
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -4430,6 +4437,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-185 Lab Arena schema contract differs"
             )
+        for migration in LAB_ARENA_POST_185_MIGRATIONS:
+            database.apply_migration(scripts / migration)
+            applied.append(migration)
         database.apply_migration(
             scripts / LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION
         )
@@ -4484,6 +4494,22 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-193 Lab Arena upload recovery contract differs"
+            )
+        scorer_refresh_migration = "194-lab-arena-open-scorer-refresh.sql"
+        database.apply_migration(scripts / scorer_refresh_migration)
+        applied.append(scorer_refresh_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 194,
+        }:
+            raise PostgresContractProbeError(
+                "post-194 Lab Arena scorer refresh contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

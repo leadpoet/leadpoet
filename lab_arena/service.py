@@ -452,7 +452,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (193,)
+        supported_versions = (194,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
@@ -1197,6 +1197,18 @@ class ArenaService:
         round_row = self._round(round_id)
         if round_row["status"] != "open":
             return {"status": "existing", "round_status": round_row["status"]}
+        scorer_image = {
+            "scorer_image_digest": self._config.defaults.scorer_image_digest,
+            "scorer_image_reference": self._config.defaults.scorer_image_reference,
+        }
+        refreshed_configuration = {
+            **dict(round_row.get("configuration_doc") or {}),
+            **scorer_image,
+        }
+        try:
+            contracts.validate_round_configuration(refreshed_configuration)
+        except ArenaContractError as exc:
+            raise ServiceError("scorer_image_invalid", 500) from exc
         started = self.now()
         set_id = int(round_id.replace("arena-", "").replace("-", "")[:8])
         source = self._config.daily_icp_source(set_id=set_id, active_at=started)
@@ -1261,6 +1273,7 @@ class ArenaService:
             "participants": participants,
             "benchmark_ref": benchmark_ref,
             "evaluation_date": evaluation_date,
+            **scorer_image,
         })
         return {"status": transition.get("status"), "participants": len(participants)}
 

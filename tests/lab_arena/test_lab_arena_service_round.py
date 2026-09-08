@@ -16,6 +16,7 @@ import json
 import subprocess
 import tarfile
 import threading
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -580,8 +581,65 @@ class Harness:
 def test_startup_checks_require_the_current_arena_schema(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     checks = harness.service.startup_checks()
-    assert checks["schema_version"] == 193
+    assert checks["schema_version"] == 194
     assert checks["database_identity"]["current_user"] == "lab_arena_service"
+
+
+def test_benchmark_commit_refreshes_a_delayed_open_round_scorer_before_jobs(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=["Refresh"], runners=["alpha"])
+    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    configuration = harness.service.create_round(
+        cutoff, round_id="arena-2026-09-25-refresh"
+    )
+    submission_id = harness.submit("Refresh", "arena-2026-09-25-refresh")
+    accepted = harness.service.store.get_submission(submission_id)
+    accepted_source = harness.objects.get(accepted["source_ref"])
+    assert harness.service.store.list_runs("arena-2026-09-25-refresh") == []
+    new_digest = "sha256:" + "6" * 64
+    new_reference = "arena.example/lab-arena/judge@" + new_digest
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        scorer_image_digest=new_digest,
+        scorer_image_reference=new_reference,
+    )
+    harness.round_id = "arena-2026-09-25-refresh"
+    harness.clock.advance_to(configuration["schedule"]["submission_cutoff"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    committed = harness.service.store.get_round(harness.round_id)
+    assert committed["status"] == "committed"
+    assert committed["configuration_doc"] == {
+        **configuration,
+        "scorer_image_digest": new_digest,
+        "scorer_image_reference": new_reference,
+    }
+    frozen = harness.service.store.get_submission(submission_id)
+    assert frozen["status"] == "frozen"
+    assert frozen["source_ref"] == accepted["source_ref"]
+    assert frozen["submission_doc"] == accepted["submission_doc"]
+    assert harness.objects.get(frozen["source_ref"]) == accepted_source
+    assert harness.service.store.list_runs(harness.round_id) == []
+
+
+def test_benchmark_commit_rejects_an_invalid_current_scorer_before_freeze(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    configuration = harness.service.create_round(
+        cutoff, round_id="arena-2026-09-26-badscorer"
+    )
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        scorer_image_digest="sha256:" + "6" * 64,
+        scorer_image_reference="arena.example/lab-arena/judge@sha256:" + "7" * 64,
+    )
+    harness.round_id = "arena-2026-09-26-badscorer"
+    harness.clock.advance_to(configuration["schedule"]["submission_cutoff"])
+    with pytest.raises(svc.ServiceError, match="scorer_image_invalid"):
+        harness.service.commit_benchmark(harness.round_id)
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["status"] == "open"
+    assert row["configuration_doc"] == configuration
+    assert harness.service.store.list_submissions(harness.round_id) == []
+    assert harness.service.store.list_runs(harness.round_id) == []
 
 
 def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(connect, tmp_path):

@@ -109,9 +109,10 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/185-lab-arena-miner-credentials.sql`,
 `scripts/187-lab-arena-promotion-threshold.sql`, and
 `scripts/188-lab-arena-baseline-promotion.sql`,
-`scripts/189-lab-arena-round-network-scope.sql`, and
+`scripts/189-lab-arena-round-network-scope.sql`,
 `scripts/190-lab-arena-restart-claim-drain.sql`, and
-`scripts/193-lab-arena-upload-recovery.sql` with the database owner
+`scripts/193-lab-arena-upload-recovery.sql`, then
+`scripts/194-lab-arena-open-scorer-refresh.sql` with the database owner
 before service startup. Then check the service wiring:
 
 ```bash
@@ -123,6 +124,11 @@ Migration 193 adds safe replacement of unfinished uploads and accurate
 cancellation labels. It preserves historical results and source objects.
 Deploy its matching service after applying the migration. Source admission
 still uses the existing upload MD5 and server-assigned submission ID.
+
+Migration 194 refreshes only the trusted scorer digest and pinned reference
+when an existing open round atomically commits its benchmark. This lets a
+deployed scorer fix apply before any work is created. The committed scorer
+pin and every other round setting remain immutable.
 
 Start the service:
 

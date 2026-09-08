@@ -243,6 +243,124 @@ def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
         assert len(policies) == 4 and all(name.endswith("_service_read") for _, name in policies)
 
 
+def test_open_commit_refreshes_only_the_scorer_pin_and_legacy_callers_preserve_it(store):
+    new_digest = "sha256:" + "b" * 64
+    new_reference = "registry.example/lab/scorer@" + new_digest
+    round_id = "arena-2026-09-21-refresh"
+    original = round_config(round_id, [hotkey("refresh-runner")])
+    assert store.create_round(round_id, original)["status"] == "created"
+    assert store.list_runs(round_id) == []
+    assert store.transition_round(
+        round_id,
+        "open",
+        "committed",
+        {
+            "participants": [],
+            "benchmark_ref": "arena/%s/benchmark.json" % round_id,
+            "evaluation_date": "2026-09-21",
+            "scorer_image_digest": new_digest,
+            "scorer_image_reference": new_reference,
+        },
+    )["status"] == "ok"
+    refreshed = store.get_round(round_id)
+    assert refreshed["configuration_doc"] == {
+        **original,
+        "scorer_image_digest": new_digest,
+        "scorer_image_reference": new_reference,
+    }
+    assert store.list_runs(round_id) == []
+
+    legacy_id = "arena-2026-09-22-legacy"
+    legacy = round_config(legacy_id, [hotkey("legacy-runner")])
+    assert store.create_round(legacy_id, legacy)["status"] == "created"
+    commit_round(store, legacy_id, [])
+    assert store.get_round(legacy_id)["configuration_doc"] == legacy
+
+
+@pytest.mark.parametrize(
+    ("suffix", "digest", "reference"),
+    [
+        ("shape", "sha256:not-a-digest", "registry.example/scorer@sha256:not-a-digest"),
+        ("pair", "sha256:" + "b" * 64, "registry.example/scorer@sha256:" + "c" * 64),
+    ],
+)
+def test_open_commit_rejects_invalid_scorer_pin(store, suffix, digest, reference):
+    round_id = "arena-2026-09-23-bad" + suffix
+    original = round_config(round_id, [hotkey("bad-scorer-" + suffix)])
+    assert store.create_round(round_id, original)["status"] == "created"
+    with pytest.raises(ArenaStoreError, match="lab_arena_scorer_image_invalid"):
+        store.transition_round(
+            round_id,
+            "open",
+            "committed",
+            {
+                "participants": [],
+                "benchmark_ref": "arena/%s/benchmark.json" % round_id,
+                "evaluation_date": "2026-09-23",
+                "scorer_image_digest": digest,
+                "scorer_image_reference": reference,
+            },
+        )
+    row = store.get_round(round_id)
+    assert row["status"] == "open" and row["configuration_doc"] == original
+    assert store.list_runs(round_id) == []
+
+
+@pytest.mark.parametrize("status", ["committed", "stage1", "published", "cancelled"])
+def test_scorer_pin_cannot_change_after_commit(database, superuser, status):
+    round_id = "arena-2026-09-24-i" + status
+    configuration = round_config(round_id, [hotkey("immutable-" + status)])
+    with superuser.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled) "
+            "VALUES (%s, %s, %s::jsonb, FALSE)",
+            (round_id, status, json.dumps(configuration)),
+        )
+        with pytest.raises(database[0].Error):
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET configuration_doc = "
+                "configuration_doc || %s::jsonb WHERE round_id = %s",
+                (
+                    json.dumps({
+                        "scorer_image_digest": "sha256:" + "b" * 64,
+                        "scorer_image_reference": "registry.example/scorer@sha256:" + "b" * 64,
+                    }),
+                    round_id,
+                ),
+            )
+
+
+def test_open_commit_cannot_change_any_other_configuration_field(database, superuser):
+    round_id = "arena-2026-09-24-otherconfig"
+    configuration = round_config(round_id, [hotkey("other-config")])
+    new_digest = "sha256:" + "b" * 64
+    with superuser.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled) "
+            "VALUES (%s, 'open', %s::jsonb, FALSE)",
+            (round_id, json.dumps(configuration)),
+        )
+        with pytest.raises(database[0].Error, match="round configuration is write-once"):
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET status = 'committed', "
+                "status_generation = status_generation + 1, configuration_doc = "
+                "configuration_doc || %s::jsonb WHERE round_id = %s",
+                (
+                    json.dumps({
+                        "mode": "shadow",
+                        "scorer_image_digest": new_digest,
+                        "scorer_image_reference": "registry.example/scorer@" + new_digest,
+                    }),
+                    round_id,
+                ),
+            )
+        cursor.execute(
+            "SELECT status, configuration_doc FROM public.lab_arena_rounds WHERE round_id = %s",
+            (round_id,),
+        )
+        assert cursor.fetchone() == ("open", configuration)
+
+
 def test_daily_icp_function_is_current_only_and_source_table_is_private(database):
     psycopg2, dsn = database
     now = datetime.now(timezone.utc)

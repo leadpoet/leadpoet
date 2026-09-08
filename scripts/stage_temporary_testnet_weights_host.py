@@ -17,7 +17,7 @@ import shlex
 import subprocess
 import sys
 import traceback
-from typing import Any
+from typing import Any, Mapping
 
 import boto3
 
@@ -48,6 +48,8 @@ NITRO_CLI_BLOB_NAMES = (
     "linuxkit",
     "nsm.ko",
 )
+PRIOR_RELEASE_CHANNEL = ROOT / "prior-release-channel-v2.json"
+PRIOR_RELEASE_LINEAGE = ROOT / "prior-release-lineage-v1.json"
 
 
 def read_locked_private_input(
@@ -218,8 +220,65 @@ def build_config(*, repository: Path, candidate: str, run_id: str,
     }
 
 
+def validated_public_release_documents(
+    config: Mapping[str, Any], *, expected_commit: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return only the validated public release channel and compact lineage."""
+
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+        validate_release_channel_v2,
+    )
+    from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+
+    if config.get("candidate_sha") != expected_commit:
+        raise ValueError("release document commit differs")
+    gateway = json.loads(Path(config["gateway"]["release_manifest"]).read_text())
+    validator = json.loads(Path(config["validator"]["release_manifest"]).read_text())
+    channel = validate_release_channel_v2(
+        build_release_channel_v2(
+            gateway_release_manifest=gateway,
+            validator_release_manifest=validator,
+        ),
+        expected_commit=expected_commit,
+    )
+    lineage = validate_compact_release_lineage_v2(
+        json.loads(Path(config["gateway"]["release_lineage"]).read_text()),
+        expected_current_commit=expected_commit,
+    )
+    expected = build_release_lineage_v2([channel], current_commit=expected_commit)
+    if lineage != expected:
+        raise ValueError("release lineage differs from the exact public channel")
+    return channel, lineage
+
+
+def load_prior_release_documents(
+    *, channel_path: Path, lineage_path: Path, expected_commit: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load one fixed prior pair through the existing strict validators."""
+
+    from gateway.tee.release_channel_v2 import (
+        build_release_lineage_v2,
+        validate_prior_release_channel_v2,
+    )
+    from gateway.tee.release_lineage_v2 import validate_prior_compact_release_lineage_v2
+
+    channel = validate_prior_release_channel_v2(
+        json.loads(channel_path.read_text()), expected_commit=expected_commit
+    )
+    lineage = validate_prior_compact_release_lineage_v2(
+        json.loads(lineage_path.read_text()), expected_current_commit=expected_commit
+    )
+    expected = build_release_lineage_v2([channel], current_commit=expected_commit)
+    if lineage != expected:
+        raise ValueError("prior release documents differ")
+    return channel, lineage
+
+
 def stage(*, candidate: str, run_id: str, instance_id: str,
-          assets_bucket: str, assets_prefix: str) -> dict[str, Any]:
+          assets_bucket: str, assets_prefix: str,
+          prior_commit: str | None = None) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", candidate):
         raise ValueError("invalid candidate")
     if not re.fullmatch(r"pp-[0-9]{1,20}-[0-9]{1,6}", run_id):
@@ -339,7 +398,18 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
     validator_release = json.loads(Path(config["validator"]["release_manifest"]).read_text())
     channel = build_release_channel_v2(gateway_release_manifest=gateway_release,
                                       validator_release_manifest=validator_release)
-    lineage = build_release_lineage_v2([channel], current_commit=candidate)
+    channels = [channel]
+    if prior_commit is not None:
+        if not re.fullmatch(r"[0-9a-f]{40}", prior_commit) or prior_commit == candidate:
+            raise ValueError("prior release commit is invalid")
+        prior_channel, _prior_lineage = load_prior_release_documents(
+            channel_path=PRIOR_RELEASE_CHANNEL,
+            lineage_path=PRIOR_RELEASE_LINEAGE,
+            expected_commit=prior_commit,
+        )
+        channels.insert(0, prior_channel)
+        config["resume_existing_epoch_authority"] = True
+    lineage = build_release_lineage_v2(channels, current_commit=candidate)
     private_write(ROOT / "gateway-lineage.json", json.dumps(lineage).encode())
     private_write(ROOT / "config.json", json.dumps(config).encode())
     checked = native.load_config(ROOT / "config.json")
@@ -354,11 +424,13 @@ def main() -> int:
     parser.add_argument("--instance-id", required=True)
     parser.add_argument("--assets-bucket", required=True)
     parser.add_argument("--assets-prefix", required=True)
+    parser.add_argument("--prior-release-commit")
     args = parser.parse_args()
     try:
         result = stage(candidate=args.candidate_sha, run_id=args.run_id,
                        instance_id=args.instance_id, assets_bucket=args.assets_bucket,
-                       assets_prefix=args.assets_prefix)
+                       assets_prefix=args.assets_prefix,
+                       prior_commit=args.prior_release_commit)
     except Exception as exc:
         print(json.dumps(failure_receipt(exc), sort_keys=True), flush=True)
         return 1

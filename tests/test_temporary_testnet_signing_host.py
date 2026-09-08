@@ -36,6 +36,59 @@ def test_direct_workflow_script_can_import_repository_siblings(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_fixed_public_release_reader_executes_locally_and_writes_canonical_pair(tmp_path):
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+    )
+    from scripts.stage_temporary_testnet_weights_host import build_config
+    from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
+    gateway = _gateway_manifest(SHA)
+    validator = _validator_manifest(SHA)
+    channel = build_release_channel_v2(
+        gateway_release_manifest=gateway,
+        validator_release_manifest=validator,
+    )
+    lineage = build_release_lineage_v2([channel], current_commit=SHA)
+    gateway_path = tmp_path / "gateway.json"
+    validator_path = tmp_path / "validator.json"
+    lineage_path = tmp_path / "lineage.json"
+    gateway_path.write_text(json.dumps(gateway))
+    validator_path.write_text(json.dumps(validator))
+    lineage_path.write_text(json.dumps(lineage))
+    config = build_config(
+        repository=ROOT,
+        candidate=SHA,
+        run_id=RUN_ID,
+        instance_id=INSTANCE_ID,
+        expiry=1788890400,
+    )
+    config["gateway"]["release_manifest"] = str(gateway_path)
+    config["gateway"]["release_lineage"] = str(lineage_path)
+    config["validator"]["release_manifest"] = str(validator_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+    config_path.chmod(0o600)
+    channel_output = tmp_path / "channel-output.json"
+    lineage_output = tmp_path / "lineage-output.json"
+    program = temporary_host.public_release_export_program(
+        candidate_sha=SHA,
+        repository=str(ROOT),
+        config_path=str(config_path),
+        channel_output=str(channel_output),
+        lineage_output=str(lineage_output),
+    )
+
+    subprocess.run([sys.executable, "-I", "-c", program], check=True, timeout=30)
+
+    assert channel_output.read_text().endswith("\n")
+    assert lineage_output.read_text().endswith("\n")
+    assert json.loads(channel_output.read_text()) == channel
+    assert json.loads(lineage_output.read_text()) == lineage
+    assert "secret" not in channel_output.read_text().lower()
+
+
 class _Waiter:
     def wait(self, **_kwargs):
         return None
@@ -358,6 +411,27 @@ def test_source_bootstrap_is_fixed_to_exact_private_parity_prefix():
         )
 
 
+def test_source_bootstrap_loads_only_fixed_prior_release_objects():
+    bucket = temporary_host._artifact_bucket_name(run_id=RUN_ID, candidate_sha=SHA)
+    prefix = f"production-parity/runs/{RUN_ID}/testnet401"
+    prior = "b" * 40
+
+    command = temporary_host.source_bootstrap_command(
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+        instance_id=INSTANCE_ID,
+        assets_bucket=bucket,
+        assets_prefix=prefix,
+        prior_release_commit=prior,
+    )
+
+    for name in temporary_host.PUBLIC_RELEASE_ASSET_NAMES:
+        assert f"--key {prefix}/{name}" in command
+        assert f"/run/leadpoet-testnet401/{name}" in command
+    assert f"--prior-release-commit {prior}" in command
+    assert "prior-release-run" not in command
+
+
 def test_asset_bucket_reuses_locked_parity_bucket_and_exact_prefix(
     monkeypatch, tmp_path
 ):
@@ -495,7 +569,11 @@ def test_asset_cleanup_removes_only_staging_heads_and_preserves_proof_prefix():
     )
     expected = [
         f"production-parity/runs/{RUN_ID}/testnet401/{name}"
-        for name in (*temporary_host.SOURCE_ASSET_NAMES, *temporary_host.PRIVATE_ASSET_NAMES)
+        for name in (
+            *temporary_host.SOURCE_ASSET_NAMES,
+            *temporary_host.PRIVATE_ASSET_NAMES,
+            *temporary_host.PUBLIC_RELEASE_ASSET_NAMES,
+        )
     ]
     assert [item["Key"] for item in deleted] == expected
     assert result["staging_object_heads_removed"] == expected

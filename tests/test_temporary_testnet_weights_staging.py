@@ -13,6 +13,43 @@ import pytest
 from scripts import stage_temporary_testnet_weights_host as stage
 
 
+def test_prior_public_pair_validates_and_public_builder_accepts_next_release(tmp_path):
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+    )
+    from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
+    prior = "a" * 40
+    current = "b" * 40
+    prior_channel = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(prior),
+        validator_release_manifest=_validator_manifest(prior),
+    )
+    prior_lineage = build_release_lineage_v2([prior_channel], current_commit=prior)
+    channel_path = tmp_path / "prior-release-channel-v2.json"
+    lineage_path = tmp_path / "prior-release-lineage-v1.json"
+    channel_path.write_text(json.dumps(prior_channel))
+    lineage_path.write_text(json.dumps(prior_lineage))
+
+    loaded, loaded_lineage = stage.load_prior_release_documents(
+        channel_path=channel_path,
+        lineage_path=lineage_path,
+        expected_commit=prior,
+    )
+    current_channel = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(current),
+        validator_release_manifest=_validator_manifest(current),
+    )
+    merged = build_release_lineage_v2(
+        [loaded, current_channel], current_commit=current
+    )
+
+    assert loaded_lineage == prior_lineage
+    assert set(merged["releases"]) == {prior, current}
+    assert merged["current_commit_sha"] == current
+
+
 def test_gateway_env_dump_roundtrips_through_native_load_and_scrub(tmp_path):
     from gateway.tee import prepare_gateway_envelopes_v2 as envelopes
     from scripts.materialize_production_parity_secrets import _parse_environment_document

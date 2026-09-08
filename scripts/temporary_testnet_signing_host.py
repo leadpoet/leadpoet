@@ -79,6 +79,10 @@ PRIVATE_ASSET_NAMES = (
     "testnet401-epoch-cutover.json",
 )
 SOURCE_ASSET_NAMES = ("candidate.bundle", "candidate-bundle-binding.json")
+PUBLIC_RELEASE_ASSET_NAMES = (
+    "prior-release-channel-v2.json",
+    "prior-release-lineage-v1.json",
+)
 MAX_CANDIDATE_BUNDLE_BYTES = 512 * 1024 * 1024
 EARLY_BOOT_ISOLATION = """#cloud-boothook
 #!/bin/bash
@@ -299,6 +303,8 @@ def create_asset_bucket(
     candidate_sha: str,
     bundle_path: Path,
     binding_path: Path,
+    prior_release_run_id: str | None = None,
+    prior_release_commit: str | None = None,
 ) -> dict[str, Any]:
     if (
         account_id != ACCOUNT_ID
@@ -349,6 +355,7 @@ def create_asset_bucket(
         candidate_sha=candidate_sha,
     )
     prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
+    public_release_objects: list[str] = []
     try:
         for path, name in (
             (bundle_path, SOURCE_ASSET_NAMES[0]),
@@ -360,6 +367,50 @@ def create_asset_bucket(
                 f"{prefix}/{name}",
                 ExtraArgs={"ServerSideEncryption": "AES256"},
             )
+        if (prior_release_run_id is None) != (prior_release_commit is None):
+            raise TemporaryHostError("prior release identity is incomplete")
+        if prior_release_run_id is not None:
+            prior_bucket = _artifact_bucket_name(
+                run_id=prior_release_run_id,
+                candidate_sha=str(prior_release_commit),
+            )
+            prior_prefix = ASSET_PREFIX_TEMPLATE.format(run_id=prior_release_run_id)
+            values = []
+            for name in PUBLIC_RELEASE_ASSET_NAMES:
+                response = s3.get_object(
+                    Bucket=prior_bucket, Key=f"{prior_prefix}/{name}"
+                )
+                payload = response["Body"].read(4 * 1024 * 1024 + 1)
+                if not 0 < len(payload) <= 4 * 1024 * 1024:
+                    raise TemporaryHostError("prior release document is unbounded")
+                values.append(json.loads(payload))
+            from gateway.tee.release_channel_v2 import (
+                build_release_lineage_v2,
+                validate_prior_release_channel_v2,
+            )
+            from gateway.tee.release_lineage_v2 import (
+                validate_prior_compact_release_lineage_v2,
+            )
+
+            prior_channel = validate_prior_release_channel_v2(
+                values[0], expected_commit=str(prior_release_commit)
+            )
+            prior_lineage = validate_prior_compact_release_lineage_v2(
+                values[1], expected_current_commit=str(prior_release_commit)
+            )
+            if prior_lineage != build_release_lineage_v2(
+                [prior_channel], current_commit=str(prior_release_commit)
+            ):
+                raise TemporaryHostError("prior release documents differ")
+            for name, value in zip(PUBLIC_RELEASE_ASSET_NAMES, values):
+                key = f"{prefix}/{name}"
+                s3.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"),
+                    ServerSideEncryption="AES256",
+                )
+                public_release_objects.append(key)
     except Exception as exc:
         raise TemporaryHostError(
             "temporary asset bucket created but source upload failed"
@@ -372,6 +423,7 @@ def create_asset_bucket(
         "bucket": bucket,
         "prefix": prefix,
         "source_objects": [f"{prefix}/{name}" for name in SOURCE_ASSET_NAMES],
+        "public_release_objects": public_release_objects,
         "private_inputs_pending": [
             f"{prefix}/{name}" for name in PRIVATE_ASSET_NAMES
         ],
@@ -489,7 +541,11 @@ def remove_staging_asset_heads(
         raise TemporaryHostError("temporary asset-bucket ownership differs")
     prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
     deleted: list[str] = []
-    for name in (*SOURCE_ASSET_NAMES, *PRIVATE_ASSET_NAMES):
+    for name in (
+        *SOURCE_ASSET_NAMES,
+        *PRIVATE_ASSET_NAMES,
+        *PUBLIC_RELEASE_ASSET_NAMES,
+    ):
         key = f"{prefix}/{name}"
         s3.delete_object(Bucket=bucket, Key=key)
         deleted.append(key)
@@ -687,6 +743,7 @@ def source_bootstrap_command(
     instance_id: str,
     assets_bucket: str,
     assets_prefix: str,
+    prior_release_commit: str | None = None,
 ) -> str:
     expected_bucket = _artifact_bucket_name(
         run_id=run_id,
@@ -768,6 +825,23 @@ def source_bootstrap_command(
         f"rm -f {q(bundle)} {q(binding)}",
         "printf '%s\\n' temporary_testnet401_source_ready",
     ]
+    if prior_release_commit is not None:
+        if SHA_RE.fullmatch(prior_release_commit) is None or prior_release_commit == candidate_sha:
+            raise TemporaryHostError("prior release commit is invalid")
+        channel = f"{RUNTIME_ROOT}/{PUBLIC_RELEASE_ASSET_NAMES[0]}"
+        lineage = f"{RUNTIME_ROOT}/{PUBLIC_RELEASE_ASSET_NAMES[1]}"
+        insertion = 8
+        lines[insertion:insertion] = [
+            f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
+            f"--key {q(assets_prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[0])} {q(channel)} >/dev/null 2>&1",
+            f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
+            f"--key {q(assets_prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[1])} {q(lineage)} >/dev/null 2>&1",
+        ]
+        stage_index = next(
+            index for index, line in enumerate(lines)
+            if "-m scripts.stage_temporary_testnet_weights_host " in line
+        )
+        lines[stage_index] += f" --prior-release-commit {q(prior_release_commit)}"
     return "\n".join(lines)
 
 
@@ -783,6 +857,7 @@ def run_source_bootstrap(
     assets_bucket: str,
     assets_prefix: str,
     now: datetime,
+    prior_release_commit: str | None = None,
 ) -> dict[str, Any]:
     if account_id != ACCOUNT_ID or region != REGION:
         raise TemporaryHostError("temporary source-bootstrap AWS identity differs")
@@ -799,6 +874,7 @@ def run_source_bootstrap(
         instance_id=instance_id,
         assets_bucket=assets_bucket,
         assets_prefix=assets_prefix,
+        prior_release_commit=prior_release_commit,
     )
     command_id, stdout = _send_fixed_ssm(
         ssm,
@@ -818,6 +894,101 @@ def run_source_bootstrap(
         "assets_prefix": assets_prefix,
         "ssm_command_id": command_id,
     }
+
+
+def export_public_release_documents(
+    *, ec2: Any, ssm: Any, s3: Any, account_id: str, region: str, run_id: str,
+    candidate_sha: str, instance_id: str, now: datetime,
+) -> dict[str, Any]:
+    """Store the retained host's validated public release pair in its task bucket."""
+
+    if account_id != ACCOUNT_ID or region != REGION:
+        raise TemporaryHostError("temporary release export AWS identity differs")
+    _require_live_host(
+        ec2, instance_id=instance_id, run_id=run_id,
+        candidate_sha=candidate_sha, now=now,
+    )
+    bucket = _artifact_bucket_name(run_id=run_id, candidate_sha=candidate_sha)
+    prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
+    q = shlex.quote
+    channel_file = f"{RUNTIME_ROOT}/export-{PUBLIC_RELEASE_ASSET_NAMES[0]}"
+    lineage_file = f"{RUNTIME_ROOT}/export-{PUBLIC_RELEASE_ASSET_NAMES[1]}"
+    program = public_release_export_program(
+        candidate_sha=candidate_sha,
+        repository=SOURCE_REPOSITORY,
+        config_path=NATIVE_CONFIG,
+        channel_output=channel_file,
+        lineage_output=lineage_file,
+    )
+    command = "\n".join((
+        "set -Eeuo pipefail", "umask 077",
+        f"test ! -e {q(channel_file)} && test ! -e {q(lineage_file)}",
+        f"cleanup_public_release_export() {{ rm -f -- {q(channel_file)} {q(lineage_file)}; }}",
+        "trap cleanup_public_release_export EXIT",
+        f"test \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} rev-parse HEAD)\" = {q(candidate_sha)}",
+        f"test -z \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} status --porcelain --untracked-files=no)\"",
+        f"{q(SOURCE_VENV + '/bin/python3')} -I -c {q(program)}",
+        f"aws s3api put-object --region {q(REGION)} --bucket {q(bucket)} --key {q(prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[0])} --server-side-encryption AES256 --body {q(channel_file)} >/dev/null",
+        f"aws s3api put-object --region {q(REGION)} --bucket {q(bucket)} --key {q(prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[1])} --server-side-encryption AES256 --body {q(lineage_file)} >/dev/null",
+        "printf '%s\\n' temporary_public_release_export_ready",
+    ))
+    command_id, stdout = _send_fixed_ssm(
+        ssm, instance_id=instance_id, command=command, timeout_seconds=120,
+    )
+    if stdout != "temporary_public_release_export_ready\n":
+        raise TemporaryHostError("temporary public release export receipt differs")
+    values = []
+    for name in PUBLIC_RELEASE_ASSET_NAMES:
+        response = s3.get_object(Bucket=bucket, Key=f"{prefix}/{name}")
+        payload = response["Body"].read(4 * 1024 * 1024 + 1)
+        if not 0 < len(payload) <= 4 * 1024 * 1024:
+            raise TemporaryHostError("exported public release document is unbounded")
+        values.append(json.loads(payload))
+    from gateway.tee.release_channel_v2 import (
+        build_release_lineage_v2,
+        validate_release_channel_v2,
+    )
+    from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+    channel = validate_release_channel_v2(values[0], expected_commit=candidate_sha)
+    lineage = validate_compact_release_lineage_v2(
+        values[1], expected_current_commit=candidate_sha
+    )
+    if lineage != build_release_lineage_v2([channel], current_commit=candidate_sha):
+        raise TemporaryHostError("exported public release documents differ")
+    return {
+        "status": "ready", "run_id": run_id, "candidate_sha": candidate_sha,
+        "instance_id": instance_id, "bucket": bucket,
+        "objects": [f"{prefix}/{name}" for name in PUBLIC_RELEASE_ASSET_NAMES],
+        "channel_hash": channel["channel_hash"],
+        "lineage_hash": lineage["lineage_hash"],
+        "ssm_command_id": command_id,
+    }
+
+
+def public_release_export_program(
+    *, candidate_sha: str, repository: str, config_path: str,
+    channel_output: str, lineage_output: str,
+) -> str:
+    """Build the fixed old-host reader from APIs already present at f927."""
+
+    if SHA_RE.fullmatch(candidate_sha) is None:
+        raise TemporaryHostError("temporary release export commit is invalid")
+    return (
+        "import json,sys; from pathlib import Path; "
+        f"sys.path.insert(0,{repository!r}); "
+        "from scripts import bootstrap_temporary_testnet_weights_host as n; "
+        "from gateway.tee.release_channel_v2 import build_release_channel_v2 as bc,build_release_lineage_v2 as bl,validate_release_channel_v2 as vc; "
+        "from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2 as vl; "
+        "from leadpoet_canonical.attested_v2 import canonical_json; "
+        f"c=n.load_config(Path({config_path!r})); "
+        "g=json.loads(Path(c['gateway']['release_manifest']).read_text()); "
+        "v=json.loads(Path(c['validator']['release_manifest']).read_text()); "
+        f"a=vc(bc(gateway_release_manifest=g,validator_release_manifest=v),expected_commit={candidate_sha!r}); "
+        f"b=vl(json.loads(Path(c['gateway']['release_lineage']).read_text()),expected_current_commit={candidate_sha!r}); "
+        f"assert b==bl([a],current_commit={candidate_sha!r}); "
+        f"Path({channel_output!r}).write_text(canonical_json(a)+'\\n',encoding='ascii'); "
+        f"Path({lineage_output!r}).write_text(canonical_json(b)+'\\n',encoding='ascii')"
+    )
 
 
 def run_native_stage(
@@ -1657,6 +1828,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     create_assets.add_argument("--candidate-sha", required=True)
     create_assets.add_argument("--bundle", type=Path, required=True)
     create_assets.add_argument("--binding", type=Path, required=True)
+    create_assets.add_argument("--prior-release-run-id")
+    create_assets.add_argument("--prior-release-commit")
     create_assets.add_argument("--state", type=Path, required=True)
     wait_assets = commands.add_parser("wait-assets")
     wait_assets.add_argument("--run-id", required=True)
@@ -1673,7 +1846,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     source_bootstrap.add_argument("--instance-id", required=True)
     source_bootstrap.add_argument("--assets-bucket", required=True)
     source_bootstrap.add_argument("--assets-prefix", required=True)
+    source_bootstrap.add_argument("--prior-release-commit")
     source_bootstrap.add_argument("--state", type=Path, required=True)
+    export_release = commands.add_parser("ssm-export-public-release")
+    export_release.add_argument("--run-id", required=True)
+    export_release.add_argument("--candidate-sha", required=True)
+    export_release.add_argument("--instance-id", required=True)
+    export_release.add_argument("--state", type=Path, required=True)
     native_stage = commands.add_parser("ssm-native-stage")
     native_stage.add_argument("--run-id", required=True)
     native_stage.add_argument("--candidate-sha", required=True)
@@ -1700,6 +1879,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_sha=candidate_sha,
                 bundle_path=args.bundle,
                 binding_path=args.binding,
+                prior_release_run_id=args.prior_release_run_id,
+                prior_release_commit=args.prior_release_commit,
             )
             _write(args.state, result)
         elif args.command == "wait-assets":
@@ -1733,6 +1914,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 now=now,
             )
             _write(args.state, result)
+        elif args.command == "ssm-export-public-release":
+            result = export_public_release_documents(
+                ec2=ec2,
+                ssm=session.client("ssm"),
+                s3=session.client("s3"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+                instance_id=args.instance_id,
+                now=now,
+            )
+            _write(args.state, result)
         elif args.command == "ssm-source-bootstrap":
             result = run_source_bootstrap(
                 ec2=ec2,
@@ -1745,6 +1939,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assets_bucket=args.assets_bucket,
                 assets_prefix=args.assets_prefix,
                 now=now,
+                prior_release_commit=args.prior_release_commit,
             )
             _write(args.state, result)
         elif args.command == "ssm-native-stage":

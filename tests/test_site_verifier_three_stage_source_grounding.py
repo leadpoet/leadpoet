@@ -9,10 +9,12 @@ import httpx
 
 from qualification.scoring.intent_verification_three_stage import (
     _apply_guardrails,
+    _canonical_target_absence_receipt,
     _exa_target_absence_receipt,
     _fetch_sd_then_exa,
     _rescue_medium_with_corroboration,
     _scrape_exa,
+    _scrape_sd_hardened,
     _search_exa_corroboration,
     verify_three_stage,
 )
@@ -70,13 +72,17 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             )
         super().tearDown()
 
-    async def _scrape_exa_document(self, url: str, document: object):
+    async def _scrape_exa_outcomes(self, url: str, outcomes: list[object]):
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
             nonlocal calls
+            outcome = outcomes[calls]
             calls += 1
-            return httpx.Response(200, request=request, json=document)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            status, document = outcome
+            return httpx.Response(status, request=request, json=document)
 
         transport = httpx.MockTransport(handler)
         real_async_client = httpx.AsyncClient
@@ -95,6 +101,11 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await _scrape_exa(url)
         return result, calls
+
+    async def _scrape_exa_document(self, url: str, document: object):
+        return await self._scrape_exa_outcomes(
+            url, [(200, document), (200, document)]
+        )
 
     async def _verify_empty_fetch(self, url: str, statuses: list[dict]):
         call = AsyncMock(return_value=supported(url))
@@ -303,6 +314,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 "status": "error",
                 "error_tag": "CRAWL_NOT_FOUND",
                 "error_http_status": 404,
+                "confirmed_attempts": 2,
             },
         })
 
@@ -341,12 +353,115 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 **exact_status,
                 "error": {"tag": "CRAWL_NOT_FOUND"},
             }]},
+            {"results": [], "statuses": [{
+                **exact_status,
+                "error": {
+                    "tag": "CRAWL_NOT_FOUND",
+                    "httpStatusCode": 404.0,
+                },
+            }]},
         )
         for document in documents:
             with self.subTest(document=document):
                 self.assertIsNone(
                     _exa_target_absence_receipt(document, url)
                 )
+
+        canonical = {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 2,
+        }
+        self.assertEqual(
+            _canonical_target_absence_receipt(canonical), canonical
+        )
+        for field, value in (
+            ("id_matches_requested_url", 1),
+            ("error_http_status", 404.0),
+            ("confirmed_attempts", 2.0),
+        ):
+            with self.subTest(field=field, value=value):
+                self.assertIsNone(_canonical_target_absence_receipt({
+                    **canonical,
+                    field: value,
+                }))
+
+    async def test_exa_requires_matching_absence_on_both_attempts(self):
+        url = "https://news.example/acme-funding"
+        exact_absence = {
+            "results": [],
+            "statuses": [{
+                "id": url,
+                "status": "error",
+                "error": {
+                    "tag": "CRAWL_NOT_FOUND",
+                    "httpStatusCode": 404,
+                },
+            }],
+        }
+        mixed_first_outcomes = (
+            (200, {"results": [], "statuses": [{"status": "pending"}]}),
+            (200, {"results": [{"text": "too short"}], "statuses": []}),
+            (200, {
+                "results": [],
+                "statuses": [{
+                    "id": "https://news.example/a-different-page",
+                    "status": "error",
+                    "error": {
+                        "tag": "CRAWL_NOT_FOUND",
+                        "httpStatusCode": 404,
+                    },
+                }],
+            }),
+            (429, {}),
+            (503, {}),
+            httpx.TimeoutException("timed out"),
+        )
+        for first in mixed_first_outcomes:
+            with self.subTest(first=first):
+                result, calls = await self._scrape_exa_outcomes(
+                    url, [first, (200, exact_absence)]
+                )
+
+                self.assertEqual(calls, 2)
+                self.assertNotIn("target_absence", result)
+
+    async def test_sd_requires_every_attempt_to_return_target_404(self):
+        async def scrape(responses):
+            calls = 0
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                nonlocal calls
+                status, body = responses[calls]
+                calls += 1
+                return httpx.Response(status, request=request, text=body)
+
+            transport = httpx.MockTransport(handler)
+            real_async_client = httpx.AsyncClient
+            with (
+                patch.dict(os.environ, {"SCRAPINGDOG_API_KEY": "test-key"}),
+                patch(
+                    "qualification.scoring.intent_verification_three_stage.httpx.AsyncClient",
+                    side_effect=lambda *args, **kwargs: real_async_client(
+                        transport=transport
+                    ),
+                ),
+            ):
+                return await _scrape_sd_hardened(
+                    "https://news.example/acme-funding"
+                )
+
+        confirmed = await scrape([(404, ""), (404, "")])
+        mixed = await scrape([(200, "short"), (404, "")])
+
+        self.assertEqual(confirmed["stage"], "genuine_404")
+        self.assertNotEqual(mixed["stage"], "genuine_404")
+        self.assertEqual(
+            [item[1] for item in mixed["stage_history"]],
+            ["body_too_short", "http_404"],
+        )
 
     async def test_fetch_preserves_both_exact_absence_receipts(self):
         url = "https://news.example/acme-funding"
@@ -366,6 +481,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 "status": "error",
                 "error_tag": "CRAWL_NOT_FOUND",
                 "error_http_status": 404,
+                "confirmed_attempts": 2,
             },
         })
         with (
@@ -394,6 +510,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                     "status": "error",
                     "error_tag": "CRAWL_NOT_FOUND",
                     "error_http_status": 404,
+                    "confirmed_attempts": 2,
                 },
             }],
         })
@@ -532,6 +649,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 "status": "error",
                 "error_tag": "CRAWL_NOT_FOUND",
                 "error_http_status": 404,
+                "confirmed_attempts": 2,
             },
         }]
         result, call, _fetch = await self._verify_empty_fetch(url, statuses)
@@ -566,6 +684,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                     "status": "error",
                     "error_tag": "CRAWL_NOT_FOUND",
                     "error_http_status": 404,
+                    "confirmed_attempts": 2,
                 },
             }],
             [{
@@ -579,6 +698,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                     "status": "error",
                     "error_tag": "CRAWL_NOT_FOUND",
                     "error_http_status": 404,
+                    "confirmed_attempts": 2,
                 },
             }],
         )

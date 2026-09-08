@@ -7,6 +7,8 @@ import asyncio
 import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
+from lab_arena import scoring as arena_scoring
+from lab_arena import verify as arena_verify
 from qualification.scoring import lead_scorer
 from qualification.scoring.company_fit_decision import (
     company_fit_match,
@@ -239,6 +241,38 @@ def test_confirmed_missing_evidence_is_a_nonretryable_zero(monkeypatch):
     assert not scorer_breakdown_has_retryable_infrastructure_failure(
         breakdown
     )
+
+    calls = 0
+
+    def counted_scorer(companies, icp, is_reference_model):
+        nonlocal calls
+        calls += 1
+        assert companies == [_company().model_dump(mode="json")]
+        assert icp == _icp().model_dump(mode="json")
+        assert is_reference_model is False
+        return [breakdown]
+
+    companies = [_company().model_dump(mode="json")]
+    icp = _icp().model_dump(mode="json")
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": "execution-1"},
+        icp=icp,
+        companies=companies,
+        scorer=counted_scorer,
+    )
+
+    assert calls == 1
+    assert accepted == [breakdown]
+    row = arena_verify.scored_row(
+        "submission-1",
+        0,
+        "execution-1",
+        icp,
+        companies,
+        accepted,
+        arena_scoring.build_scorer_policy(),
+    )
+    assert row["per_icp_score"] == 0.0
 
 
 @pytest.mark.parametrize(

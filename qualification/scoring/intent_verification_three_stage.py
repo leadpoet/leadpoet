@@ -1441,8 +1441,12 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
     # A target 404 alone cannot prove semantic absence. The caller compares it
     # with the independent Exa result before separating a missing source from
     # verifier infrastructure failure. Neither case proves miner fabrication.
+    every_attempt_not_found = bool(history) and all(
+        verdict == "http_404" for _tier, verdict in history
+    )
     fail_label = (
-        "genuine_404" if last_verdict == "http_404"
+        "genuine_404"
+        if every_attempt_not_found and last_status == 404
         else f"all_tiers_exhausted:{last_verdict}"
     )
     return {"ok": False, "stage": fail_label,
@@ -1480,7 +1484,7 @@ def _exa_target_absence_receipt(
         or status.get("status") != "error"
         or not isinstance(error, Mapping)
         or error.get("tag") != "CRAWL_NOT_FOUND"
-        or isinstance(http_status, bool)
+        or type(http_status) is not int
         or http_status != 404
     ):
         return None
@@ -1498,12 +1502,21 @@ def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
         "status": "error",
         "error_tag": "CRAWL_NOT_FOUND",
         "error_http_status": 404,
+        "confirmed_attempts": 2,
     }
-    return (
-        dict(expected)
-        if isinstance(value, Mapping) and dict(value) == expected
-        else None
-    )
+    if not isinstance(value, Mapping) or set(value) != set(expected):
+        return None
+    if (
+        value.get("id_matches_requested_url") is not True
+        or value.get("status") != "error"
+        or value.get("error_tag") != "CRAWL_NOT_FOUND"
+        or type(value.get("error_http_status")) is not int
+        or value.get("error_http_status") != 404
+        or type(value.get("confirmed_attempts")) is not int
+        or value.get("confirmed_attempts") != 2
+    ):
+        return None
+    return dict(expected)
 
 
 async def _scrape_exa(url: str) -> Dict[str, Any]:
@@ -1515,6 +1528,7 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
     payload = {"ids": [url], "text": {"maxCharacters": MAX_SCRAPED_CHARS},
                "maxAgeHours": 0}
     last_error = "not attempted"
+    first_target_absence = None
     async with httpx.AsyncClient() as cli:
         for attempt in range(2):
             try:
@@ -1557,6 +1571,7 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                     # second attempt before accepting even its exact not-found
                     # receipt as a persistent source-absence observation.
                     if attempt == 0:
+                        first_target_absence = target_absence
                         await asyncio.sleep(0.25)
                         continue
                     failure = {
@@ -1565,8 +1580,19 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                         "content": "",
                         "error": last_error,
                     }
-                    if target_absence is not None:
-                        failure["target_absence"] = target_absence
+                    if (
+                        target_absence is not None
+                        and first_target_absence == target_absence
+                    ):
+                        failure["target_absence"] = {
+                            **target_absence,
+                            "confirmed_attempts": 2,
+                        }
+                    elif target_absence is not None:
+                        failure.update({
+                            "stage": "exa_target_not_found_unconfirmed",
+                            "error": "mixed_fetch_results",
+                        })
                     return failure
                 last_error = f"HTTP {r.status_code}"
                 # Retry only transient transport/rate-limit responses. A 4xx

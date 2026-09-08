@@ -42,6 +42,7 @@ from gateway.research_lab.stateful_epoch_cutover_cli_v1 import (
     _mixed_boot_verifier_from_release,
     activate_staged_subnet_epoch_cutover_v1,
     activate_subnet_epoch_cutover_v1,
+    bootstrap_fresh_testnet401_cutover_v1,
 )
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     CUTOVER_AUTHORITY_SCHEMA_VERSION,
@@ -703,7 +704,6 @@ async def test_fresh_network_cutover_rejects_finney_and_extra_parent():
             payload,
             context,
         )
-
     payload["manifest"] = {
         **payload["manifest"],
         "network_genesis_hash": (
@@ -722,6 +722,140 @@ async def test_fresh_network_cutover_rejects_finney_and_extra_parent():
             context,
         )
 
+
+@pytest.mark.asyncio
+async def test_fresh_testnet401_bootstrap_executes_one_parent_and_reads_back():
+    cutover = _testnet401_cutover()
+    snapshot_doc = _snapshot(cutover=cutover)
+    capture, snapshot_receipt, *_ = _capture_evidence(snapshot_doc)
+    candidate = build_pre_cutover_candidate_row_v1(
+        capture,
+        cutover=cutover.to_dict(),
+        **_candidate_auth(capture, cutover),
+    )
+    candidate["created_at"] = NOW
+    snapshot_graph = capture["receipt_graph"]
+    stored_graphs = {
+        snapshot_graph["root_receipt_hash"]: snapshot_graph,
+    }
+    durable = None
+    execute_calls = 0
+    persist_calls = 0
+
+    async def select_rows(table, **kwargs):
+        assert kwargs["max_rows"] == 2
+        if table == CUTOVER_TABLE:
+            return [] if durable is None else [copy.deepcopy(durable)]
+        if table == CANDIDATE_TABLE:
+            return [copy.deepcopy(candidate)]
+        if table == RECEIPT_TABLE:
+            return []
+        raise AssertionError(table)
+
+    async def load_graph(root):
+        return copy.deepcopy(stored_graphs[root])
+
+    async def execute(**kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        assert kwargs["operation"] == OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2
+        assert kwargs["parent_graphs"] == (snapshot_graph,)
+        assert kwargs["input_artifact_hashes"] == (
+            cutover.mapping_hash,
+            candidate["snapshot_hash"],
+        )
+        context = ExecutionContextV2(
+            job_id="fresh-testnet401-cutover:101",
+            purpose=kwargs["purpose"],
+            epoch_id=kwargs["epoch_id"],
+            parent_receipt_hashes=(snapshot_receipt["receipt_hash"],),
+            external_receipt_graphs=[snapshot_graph],
+        )
+        measured = await CoordinatorExecutorV2()(
+            kwargs["operation"],
+            kwargs["payload"],
+            context,
+        )
+        private_key, public_key = _keypair()
+        boot = _boot(COORDINATOR_ROLE, private_key, public_key)
+        receipt = _receipt(
+            private_key=private_key,
+            public_key=public_key,
+            boot=boot,
+            role=COORDINATOR_ROLE,
+            purpose=CUTOVER_PURPOSE,
+            job_id="fresh-testnet401-cutover:101",
+            epoch_id=cutover.first_settlement_epoch_id,
+            output_root=sha256_json(measured.output),
+            parents=[snapshot_receipt["receipt_hash"]],
+        )
+        graph = build_receipt_graph(
+            root_receipt_hash=receipt["receipt_hash"],
+            boot_identities=snapshot_graph["boot_identities"] + [boot],
+            receipts=snapshot_graph["receipts"] + [receipt],
+            transport_attempts=snapshot_graph["transport_attempts"],
+        )
+        stored_graphs[receipt["receipt_hash"]] = graph
+        return {
+            "status": "succeeded",
+            "result": measured.output,
+            "receipt_graph": graph,
+        }
+
+    async def persist_cutover(**kwargs):
+        nonlocal durable, persist_calls
+        persist_calls += 1
+        durable = build_cutover_row_v1(
+            authority_doc=kwargs["authority_doc"],
+            first_snapshot_doc=kwargs["first_snapshot_doc"],
+            receipt_graph=kwargs["receipt_graph"],
+        )
+        return copy.deepcopy(durable)
+
+    async def validate_anchor(_cutover):
+        assert _cutover == cutover
+
+    dry_run = await bootstrap_fresh_testnet401_cutover_v1(
+        cutover=cutover,
+        select_rows=select_rows,
+        load_graph=load_graph,
+        validate_anchor=validate_anchor,
+    )
+    assert dry_run["status"] == "fresh_network_eligible"
+    assert dry_run["would_write"] is False
+    assert execute_calls == persist_calls == 0
+
+    report = await bootstrap_fresh_testnet401_cutover_v1(
+        cutover=cutover,
+        apply=True,
+        select_rows=select_rows,
+        load_graph=load_graph,
+        execute=execute,
+        persist_graph=lambda graph: graph,
+        persist_cutover=persist_cutover,
+        boot_verifier=lambda identity: identity,
+        validate_anchor=validate_anchor,
+    )
+    assert report["status"] == "fresh_network_durable"
+    assert report["origin_kind"] == FRESH_NETWORK_ORIGIN_KIND
+    assert durable["previous_epoch_scheme"] == "fresh_network_v1"
+    assert durable["predecessor_receipt_hash"] is None
+    assert execute_calls == persist_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_testnet401_bootstrap_rejects_finney_before_database_read():
+    async def select_rows(*_args, **_kwargs):
+        raise AssertionError("database must not be read for a Finney manifest")
+
+    with pytest.raises(
+        StatefulEpochCutoverActivationError,
+        match="restricted to the exact test401 origin",
+    ):
+        await bootstrap_fresh_testnet401_cutover_v1(
+            cutover=_cutover(),
+            select_rows=select_rows,
+        )
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation,match", [

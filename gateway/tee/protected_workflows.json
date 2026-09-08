@@ -1072,12 +1072,12 @@
       "symbol": "CoordinatorChainSourceV2"
     },
     {
-      "ast_sha256": "sha256:7b7f690177c071572a37aaa2c37a5081f674ce81bf386ff512eaabe7d2638733",
+      "ast_sha256": "sha256:76ec425dad3c69a277a96dcdf0b96a6ed847acd04940d8e2321c71c8bc9a0726",
       "path": "gateway/tee/coordinator_epoch_cutover_v2.py",
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:48841b2a24526f67c285344db478723787abd4207efe64b2dc2dd496e0d48209",
+      "ast_sha256": "sha256:cb4fc732350266ea0384df09ca0e51cb94d11efdcfbf110474afc2cd5b96b1f6",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -4692,7 +4692,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:29ce13eb6555b488b583127adef3e370b325e1a9a6ae2718cb8ed2be8b170226",
-  "protected_source_commit": "e29e9c2e3cd9f47c4dd4961e5e819d558e82aadc",
+  "manifest_hash": "sha256:602b68d0078a3aed8f2085386aec7eea25f9201020f7fe3b4305cc371dad5d10",
+  "protected_source_commit": "8d643f960ed2ab03f4f4cefa1e2803516c08e8ae",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

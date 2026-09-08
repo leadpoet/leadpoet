@@ -612,7 +612,8 @@ def test_native_ssm_stage_exposes_no_arbitrary_command(stage, confirmed):
                     "log_size_bytes": 10, "tail_bytes_read": 10,
                     "progress_markers": [], "failure_markers": [],
                     "exception_types": [], "reason_codes": [],
-                    "http_statuses": [], "source_locations": [],
+                    "http_statuses": [], "allocation_build_callbacks": [],
+                    "source_locations": [],
                 }
                 for name in ("gateway_application", "validator_application")
             ],
@@ -771,6 +772,11 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False):
         "persist_snapshot=True error_type=ResearchLabV2AuthorityError "
         "error=fresh testnet401 cutover authority is unavailable or ambiguous "
         "raw-payload=https://private.example/secret\n"
+        "research_lab_allocation_build_failed epoch=22058 "
+        "persist_snapshot=True error_type=HTTPException error=500: TypeError: "
+        "champion_v2_cutover_readiness got an unexpected keyword argument "
+        "_fresh_testnet401_empty_origin token=credential-canary "
+        "https://private.example/raw-body\n"
     )
     validator = logs / "validator_application.log"
     target = tmp_path / "validator-real.log"
@@ -830,9 +836,28 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
         {"endpoint": "weight_inputs", "status": 503}
     ]
     assert gateway["failure_markers"] == ["allocation_build_failed"]
-    assert gateway["exception_types"] == ["ResearchLabV2AuthorityError"]
+    assert gateway["exception_types"] == [
+        "HTTPException", "ResearchLabV2AuthorityError",
+    ]
     assert gateway["reason_codes"] == [
         "fresh_testnet401_cutover_authority_unavailable_or_ambiguous"
+    ]
+    assert gateway["allocation_build_callbacks"] == [
+        {
+            "error_type": "ResearchLabV2AuthorityError",
+            "tokens": [
+                "[redacted]", "authority", "[redacted]", "unavailable",
+                "[redacted]", "ambiguous",
+            ],
+        },
+        {
+            "error_type": "HTTPException",
+            "tokens": [
+                "typeerror", "champion_v2_cutover_readiness", "[redacted]",
+                "unexpected", "keyword", "argument",
+                "_fresh_testnet401_empty_origin",
+            ],
+        },
     ]
     assert validator["latest_epoch_id"] == 22058
     assert validator["latest_block"] == 7961407
@@ -869,7 +894,8 @@ def test_runtime_log_diagnostics_reject_symlink_and_arbitrary_remote_fields(tmp_
                     "log_size_bytes": 1, "tail_bytes_read": 1,
                     "progress_markers": [], "failure_markers": [],
                     "exception_types": [], "reason_codes": [],
-                    "http_statuses": [], "source_locations": [],
+                    "http_statuses": [], "allocation_build_callbacks": [],
+                    "source_locations": [],
                     "raw_line": "provider-secret-canary",
                 }
                 for name in ("gateway_application", "validator_application")

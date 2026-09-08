@@ -72,6 +72,43 @@ RUNTIME_ROOT = "/run/leadpoet-testnet401"
 SOURCE_REPOSITORY = "/home/ec2-user/leadpoet/leadpoet"
 SOURCE_VENV = "/home/ec2-user/venv311"
 NATIVE_CONFIG = f"{RUNTIME_ROOT}/config.json"
+RUNTIME_CALLBACK_ERROR_TYPES = (
+    "AttributeError", "HTTPException", "ImportError", "KeyError", "NameError",
+    "ResearchLabV2AuthorityError", "RuntimeError", "TypeError",
+    "UnboundLocalError", "ValueError", "unclassified",
+)
+RUNTIME_CALLBACK_TOKEN_VOCAB = (
+    "_fresh_testnet401_empty_origin", "activation", "allocation",
+    "allocation_inputs", "allocation_sequence", "ambiguous",
+    "absent", "argument", "authority", "available", "boot",
+    "build_allocation_v2", "callback",
+    "champion_v2_cutover_readiness", "checkpoint", "column", "connection",
+    "context", "coordinator", "coordinatorallocationsourcev2",
+    "coordinatorallocationfrontierbootstrapv2error", "coordinatorchainsourcev2",
+    "coordinatorlegacysettlementv2error", "coordinatorrewardsourcev2error",
+    "coordinatorweightsourcev2error", "database", "declared", "defined", "differs",
+    "document", "duplicate", "empty", "execute_coordinator_v2", "execution",
+    "ensure_chain_realized_settlements_v1", "epoch", "executioncontextv2",
+    "execution_receipt", "field", "graph",
+    "failed", "failure", "finalized", "frontier", "function", "hash", "history",
+    "http", "httpexception", "identity", "import", "importerror", "invalid",
+    "job", "keyerror",
+    "keyword", "lineage", "load_allocation_parent_graphs", "missing",
+    "load", "nameerror", "network", "none", "not", "origin", "parameter",
+    "parent", "parent_graphs", "parent_receipt_hashes", "payload", "policy",
+    "postgrest", "provider", "query", "read", "receipt_graph",
+    "receipt", "required", "response", "result", "retry", "root", "rpc",
+    "research_lab_allocation_settlement_frontier_activation_v2",
+    "research_lab_allocation_settlement_frontiers_v2",
+    "research_lab_chain_realized_settlement_activation_v1",
+    "research_lab_stateful_subnet_epoch_cutovers_v1", "runtimeerror", "schema",
+    "scope", "select", "settlement", "source", "source_state",
+    "source_state_hash", "state", "status", "storage",
+    "supabase", "table", "temporarytestnet401firstallocationerror", "timeout",
+    "typeerror", "unexpected", "unavailable", "unboundlocalerror", "validation",
+    "valueerror", "verify",
+    "validate_testnet401_cutover_parent_v1",
+)
 PRIVATE_ASSET_NAMES = (
     "validator.env",
     "testnet-hotkey-config.json",
@@ -1116,7 +1153,7 @@ def _validate_runtime_log_diagnostics(value: Any) -> None:
         "process_name", "process_live", "log_size_bytes", "tail_bytes_read",
         "progress_markers", "failure_markers", "exception_types",
         "source_locations", "latest_epoch_id", "latest_block",
-        "reason_codes", "http_statuses",
+        "reason_codes", "http_statuses", "allocation_build_callbacks",
     }
     progress_allowed = {
         "gateway_application": {
@@ -1218,6 +1255,20 @@ def _validate_runtime_log_diagnostics(value: Any) -> None:
             for entry in statuses
         ):
             raise TemporaryHostError("runtime log diagnostics differ")
+        callbacks = item.get("allocation_build_callbacks")
+        if not isinstance(callbacks, list) or len(callbacks) > 2 or any(
+            not isinstance(entry, Mapping)
+            or set(entry) != {"error_type", "tokens"}
+            or entry["error_type"] not in RUNTIME_CALLBACK_ERROR_TYPES
+            or not isinstance(entry["tokens"], list)
+            or len(entry["tokens"]) > 40
+            or any(
+                token != "[redacted]" and token not in RUNTIME_CALLBACK_TOKEN_VOCAB
+                for token in entry["tokens"]
+            )
+            for entry in callbacks
+        ):
+            raise TemporaryHostError("runtime log diagnostics differ")
         exceptions = item.get("exception_types")
         if (
             not isinstance(exceptions, list)
@@ -1266,6 +1317,8 @@ def runtime_log_diagnostic_program(
         "failures = ((b'\"event\": \"automatic_weight_tick_failed\"', 'automatic_weight_tick_failed'), (b'Research Lab pre-submission guard blocked weights', 'pre_submission_guard_blocked'), (b'weight_submission_blocked_by_guard', 'submission_guard_blocked'), (b'Authoritative V2 Research Lab allocation failed closed', 'allocation_failed_closed'), (b'leaderboard snapshot failed', 'leaderboard_snapshot_failed'), (b'Failed to submit burn weights', 'burn_submission_failed'), (b'research_lab_allocation_build_failed', 'allocation_build_failed'), (b'research_lab_attested_allocation_not_ready', 'attested_allocation_not_ready'))",
         "exceptions = tuple(name.encode() for name in ('AssertionError', 'AuthoritativeWeightFlowV2Error', 'ChampionSettlementV2Error', 'ConnectionError', 'CoordinatorAllocationSourceV2Error', 'CoordinatorChainSourceV2Error', 'FileNotFoundError', 'HTTPError', 'HTTPException', 'PermissionError', 'ResearchLabV2AuthorityError', 'RuntimeError', 'TemporaryTestnet401FirstAllocationError', 'TimeoutError', 'ValueError'))",
         "reasons = ((b'allocation response gzip is invalid', 'allocation_response_gzip_invalid'), (b'allocation response gzip is truncated', 'allocation_response_gzip_truncated'), (b'allocation response gzip exceeds size limit', 'allocation_response_gzip_size_limit'), (b'allocation response exceeds wire size limit', 'allocation_response_wire_size_limit'), (b'unsupported allocation response encoding', 'allocation_response_encoding_unsupported'), (b'allocation fetch exhausted without a response', 'allocation_fetch_exhausted'), (b'Research Lab allocation arithmetic or policy verification failed', 'allocation_policy_verification_failed'), (b'Authoritative V2 weight input reconstruction failed closed', 'weight_input_reconstruction_failed'), (b'champion V2 cutover blocked:', 'champion_v2_cutover_blocked'), (b'chain-realized settlement activation is unavailable or ambiguous', 'chain_realized_settlement_activation_unavailable_or_ambiguous'), (b'chain-realized settlement activation is invalid', 'chain_realized_settlement_activation_invalid'), (b'fresh allocation readiness is restricted to testnet401', 'fresh_allocation_readiness_wrong_network'), (b'fresh testnet401 allocation history is not empty', 'fresh_testnet401_allocation_history_not_empty'), (b'temporary first allocation is not the approved testnet401 origin', 'temporary_first_allocation_origin_unapproved'), (b'temporary first allocation cutover root differs', 'temporary_first_allocation_cutover_root_differs'), (b'temporary first allocation cutover receipt is unavailable', 'temporary_first_allocation_cutover_receipt_unavailable'), (b'temporary first allocation cutover receipt differs', 'temporary_first_allocation_cutover_receipt_differs'), (b'testnet401 settlement activation is ambiguous', 'testnet401_settlement_activation_ambiguous'), (b'fresh testnet401 cutover authority is unavailable or ambiguous', 'fresh_testnet401_cutover_authority_unavailable_or_ambiguous'), (b'fresh testnet401 cutover authority differs', 'fresh_testnet401_cutover_authority_differs'), (b'fresh testnet401 cutover receipt differs', 'fresh_testnet401_cutover_receipt_differs'), (b'fresh testnet401 cutover parent is duplicated', 'fresh_testnet401_cutover_parent_duplicated'), (b'temporary first allocation cutover parent is absent', 'temporary_first_allocation_cutover_parent_absent'), (b'fresh testnet401 allocation origin is invalid', 'fresh_testnet401_allocation_origin_invalid'), (b'fresh testnet401 finalized identities differ', 'fresh_testnet401_finalized_identities_differ'), (b'fresh testnet401 validator LastUpdate is absent', 'fresh_testnet401_validator_last_update_absent'), (b'fresh testnet401 finalized origin is invalid', 'fresh_testnet401_finalized_origin_invalid'), (b'fresh testnet401 finalized origin is not empty', 'fresh_testnet401_finalized_origin_not_empty'), (b'request_shape_invalid', 'request_shape_invalid'), (b'primary_validator_configuration_missing', 'primary_validator_configuration_missing'), (b'validator_hotkey_unauthorized', 'validator_hotkey_unauthorized'), (b'netuid_unauthorized', 'netuid_unauthorized'), (b'calculation_snapshot_hash_mismatch', 'calculation_snapshot_hash_mismatch'), (b'calculation_scope_mismatch', 'calculation_scope_mismatch'), (b'allocation_hash_mismatch', 'allocation_hash_mismatch'), (b'validator_signature_invalid', 'validator_signature_invalid'), (b'epoch_authority_rejected', 'epoch_authority_rejected'), (b'compact_ancestry_unavailable', 'compact_ancestry_unavailable'))",
+        f"callback_types = {RUNTIME_CALLBACK_ERROR_TYPES!r}",
+        f"callback_vocab = {RUNTIME_CALLBACK_TOKEN_VOCAB!r}",
         "rows = []",
         "for name in names:",
         "    records = [p for p in state['processes'] if p.get('name') == name]",
@@ -1277,6 +1330,22 @@ def runtime_log_diagnostic_program(
         "    with path.open('rb') as stream:",
         "        stream.seek(max(0, size - 262144)); data = stream.read(262144)",
         "    row = {'process_name': name, 'process_live': True, 'log_size_bytes': size, 'tail_bytes_read': len(data), 'progress_markers': [label for token,label in progress[name] if token in data], 'failure_markers': [label for token,label in failures if token in data], 'exception_types': [token.decode() for token in exceptions if token in data], 'reason_codes': [label for token,label in reasons if token in data], 'source_locations': [{'file': f.decode(), 'line': int(line)} for f,line in re.findall(rb'File \"(?:[^\"\\n]*/)?([A-Za-z0-9_]+\\.py)\", line ([0-9]{1,6})', data)[-8:]]}",
+        "    callbacks = []",
+        "    for line in data.splitlines():",
+        "        if b'research_lab_allocation_build_failed ' not in line: continue",
+        "        kind = re.search(rb'error_type=([A-Za-z_][A-Za-z0-9_]{0,79})', line)",
+        "        kind = kind.group(1).decode() if kind and kind.group(1).decode() in callback_types else 'unclassified'",
+        "        error = line.split(b' error=', 1)[1] if b' error=' in line else b''",
+        "        error = re.sub(rb'(?:api[_-]?key|token|secret|credential|password|raw[_-]?payload)[=:][^\\s]+', b' ', error, flags=re.I)",
+        "        error = re.sub(rb'https?://[^\\s]+', b' ', error, flags=re.I)",
+        "        tokens = []",
+        "        for raw in re.findall(rb'[A-Za-z_][A-Za-z0-9_]{0,127}', error):",
+        "            token = raw.decode().lower()",
+        "            projected = token if token in callback_vocab else '[redacted]'",
+        "            if not tokens or projected != '[redacted]' or tokens[-1] != '[redacted]': tokens.append(projected)",
+        "            if len(tokens) == 40: break",
+        "        callbacks.append({'error_type': kind, 'tokens': tokens})",
+        "    row['allocation_build_callbacks'] = callbacks[-2:]",
         "    endpoints = ((b'/research-lab/allocations/attested/', 'allocation_handoff'), (b'/weights/inputs/v2', 'weight_inputs'), (b'/weights/submit/compact/v2', 'compact_submission'), (b'/weights/finalize/compact/v2', 'compact_finalization'), (b'/health/v2-authority', 'authority_health'))",
         "    found_statuses = []",
         "    for line in data.splitlines():",

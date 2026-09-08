@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -1280,7 +1281,7 @@ def test_fixed_host_profile_repair_installs_public_profile_without_runtime_mutat
         temporary_host._repair_testnet401_host_profile(**call)
 
 
-def test_host_profile_repair_program_is_fixed_to_9ce2_and_has_no_restart():
+def test_host_profile_repair_program_is_fixed_redacted_and_locates_failure(capsys):
     program = temporary_host.host_profile_repair_program(
         run_id=RUN_ID,
         candidate_sha=temporary_host.HOST_PROFILE_REPAIR_CANDIDATE_SHA,
@@ -1292,6 +1293,21 @@ def test_host_profile_repair_program_is_fixed_to_9ce2_and_has_no_restart():
     assert "terminate-enclave" not in program
     assert "set_weights" not in program
     assert "secret-canary" not in program
+    with pytest.raises(SystemExit) as stopped:
+        exec(program, {})
+    assert stopped.value.code == 1
+    failure = json.loads(capsys.readouterr().out)
+    assert failure == {
+        "status": "failed",
+        "error_type": "TemporaryTestnetBootstrapError",
+        "operation": "host_profile_repair",
+        "code": "host_profile_repair_failed",
+        "location": failure["location"],
+    }
+    assert re.fullmatch(
+        r"scripts/temporary_testnet_signing_host\.py:[0-9]{1,6}",
+        failure["location"],
+    )
     with pytest.raises(temporary_host.TemporaryHostError, match="frozen candidate"):
         temporary_host.host_profile_repair_program(
             run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID,

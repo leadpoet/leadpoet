@@ -9,6 +9,7 @@ import sys
 import time
 
 import pytest
+from botocore.exceptions import ClientError
 
 from scripts import temporary_testnet_signing_host as temporary_host
 
@@ -750,6 +751,139 @@ def test_public_channel_recovery_rehides_head_when_read_fails():
     assert calls[-1] == (
         "delete", {"Bucket": "fixed-bucket", "Key": "fixed"}
     )
+
+
+@pytest.mark.parametrize("tamper_historical", (False, True))
+def test_asset_bucket_recovers_exact_old_pair_channel_store_and_rehides_sources(
+    monkeypatch, tmp_path, tamper_historical,
+):
+    from io import BytesIO
+
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+    )
+    from scripts import provision_production_parity_staging as parity_provision
+    from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
+    commits = tuple(temporary_host.TEMPORARY_TESTNET401_RECOVERY_RELEASE_SOURCES)
+    channels = {
+        commit: build_release_channel_v2(
+            gateway_release_manifest=_gateway_manifest(commit),
+            validator_release_manifest=_validator_manifest(commit),
+        )
+        for commit in commits
+    }
+    current = commits[-1]
+    lineage = build_release_lineage_v2(
+        list(channels.values()), current_commit=current
+    )
+    prior_run = temporary_host.TEMPORARY_TESTNET401_RECOVERY_RELEASE_SOURCES[
+        current
+    ][1]
+    prior_bucket = temporary_host._artifact_bucket_name(
+        run_id=prior_run, candidate_sha=current
+    )
+    prior_prefix = f"production-parity/runs/{prior_run}/testnet401"
+    hidden = {commit: True for commit in commits[:-1]}
+    copied = {}
+
+    def missing(key):
+        return ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "missing"}},
+            "GetObject",
+        )
+
+    class S3:
+        def upload_file(self, *_args, **_kwargs):
+            return None
+
+        def get_object(self, *, Bucket, Key):
+            name = Key.rsplit("/", 1)[-1]
+            if Bucket == prior_bucket and Key == f"{prior_prefix}/{name}":
+                if name == temporary_host.PUBLIC_RELEASE_ASSET_NAMES[0]:
+                    value = channels[current]
+                elif name == temporary_host.PUBLIC_RELEASE_ASSET_NAMES[1]:
+                    value = lineage
+                else:
+                    raise missing(Key)
+                return {"Body": BytesIO(json.dumps(value).encode("ascii"))}
+            matched = [
+                commit for commit, (bucket, run) in
+                temporary_host.TEMPORARY_TESTNET401_RECOVERY_RELEASE_SOURCES.items()
+                if Bucket == bucket and Key == (
+                    f"production-parity/runs/{run}/testnet401/"
+                    "prior-release-channel-v2.json"
+                )
+            ]
+            assert len(matched) == 1
+            commit = matched[0]
+            if hidden[commit]:
+                raise missing(Key)
+            value = channels[commit]
+            if tamper_historical and commit == commits[0]:
+                value = channels[commits[1]]
+            return {"Body": BytesIO(json.dumps(value).encode("ascii"))}
+
+        def list_object_versions(self, *, Bucket, Prefix, MaxKeys):
+            assert MaxKeys == 32
+            return {
+                "IsTruncated": False,
+                "Versions": [{"Key": Prefix, "IsLatest": False}],
+                "DeleteMarkers": [{
+                    "Key": Prefix, "IsLatest": True,
+                    "VersionId": "marker-" + Bucket[-8:],
+                }],
+            }
+
+        def delete_object(self, *, Bucket, Key, VersionId=None):
+            commit = next(
+                commit for commit, (bucket, _run) in
+                temporary_host.TEMPORARY_TESTNET401_RECOVERY_RELEASE_SOURCES.items()
+                if bucket == Bucket
+            )
+            hidden[commit] = VersionId is None
+            if VersionId is None:
+                return {"DeleteMarker": True, "VersionId": "replacement-marker"}
+            return {}
+
+        def put_object(self, *, Bucket, Key, Body, ServerSideEncryption):
+            del Bucket
+            assert ServerSideEncryption == "AES256"
+            copied[Key.rsplit("/", 1)[-1]] = json.loads(Body)
+
+    bundle = tmp_path / "candidate.bundle"
+    binding = tmp_path / "candidate-bundle-binding.json"
+    bundle.write_bytes(b"bounded candidate bundle")
+    digest = __import__("hashlib").sha256(bundle.read_bytes()).hexdigest()
+    binding.write_text(json.dumps({
+        "candidate-sha": SHA,
+        "bundle-sha256": digest,
+        "bundle-size-bytes": str(bundle.stat().st_size),
+    }))
+    monkeypatch.setattr(
+        parity_provision, "_create_artifact_bucket",
+        lambda *_args, **_kwargs: temporary_host._artifact_bucket_name(
+            run_id=RUN_ID, candidate_sha=SHA
+        ),
+    )
+
+    call = lambda: temporary_host.create_asset_bucket(
+        s3=S3(), account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION, run_id=RUN_ID, candidate_sha=SHA,
+        bundle_path=bundle, binding_path=binding,
+        prior_release_run_id=prior_run, prior_release_commit=current,
+    )
+    if tamper_historical:
+        with pytest.raises(temporary_host.TemporaryHostError):
+            call()
+        assert copied == {}
+    else:
+        result = call()
+        assert copied[temporary_host.PUBLIC_RELEASE_ASSET_NAMES[2]] == channels
+        assert len(result["public_release_objects"]) == 3
+        assert result["temporarily_recovered_release_commits"] == sorted(commits[:-1])
+    assert all(hidden.values())
 
 
 def test_controller_wait_uses_locked_bucket_when_object_retention_is_hidden():

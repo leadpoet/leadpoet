@@ -1250,10 +1250,7 @@ async def build_allocation_v2(
                 {
                     "finalized_champion_history": (
                         finalized_history
-                        if (
-                            settlement_frontier_context is None
-                            or fresh_testnet401_parent is not None
-                        )
+                        if settlement_frontier_context is None
                         else None
                     ),
                     "preloaded_receipt_graph_records": (

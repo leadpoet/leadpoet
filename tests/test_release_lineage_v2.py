@@ -5,6 +5,13 @@ import sys
 import pytest
 
 from gateway.tee import release_lineage_v2
+from gateway.tee.release_channel_v2 import (
+    build_release_channel_v2,
+    build_release_lineage_v2,
+)
+from gateway.research_lab.stateful_epoch_cutover_cli_v1 import (
+    build_cutover_mixed_boot_verifier_v1,
+)
 from gateway.tee.release_lineage_v2 import (
     ReleaseLineageV2Error,
     build_compact_release_lineage_boot_verifier_v2,
@@ -170,6 +177,92 @@ def test_compact_lineage_verifies_historical_gateway_and_validator_boots():
         ("gateway_scoring", gateway_boot["pcr0"]),
         ("validator_weights", validator_boot["pcr0"]),
     ]
+
+
+def test_fresh_cutover_lineage_binds_current_pair_and_prior_boots(monkeypatch):
+    current = _release("1")
+    historical = _release("2")
+    lineage = build_release_lineage_v2(
+        (
+            build_release_channel_v2(
+                gateway_release_manifest=historical,
+                validator_release_manifest=_validator_manifest(
+                    historical["commit_sha"]
+                ),
+            ),
+            build_release_channel_v2(
+                gateway_release_manifest=current,
+                validator_release_manifest=_validator_manifest(
+                    current["commit_sha"]
+                ),
+            ),
+        ),
+        current_commit=current["commit_sha"],
+    )
+    observed = []
+    monkeypatch.setattr(
+        release_lineage_v2,
+        "verify_boot_identity_nitro",
+        lambda identity, **kwargs: observed.append(
+            (identity["physical_role"], kwargs["expected_pcr0"])
+        )
+        or identity,
+    )
+    verifier = build_cutover_mixed_boot_verifier_v1(
+        current,
+        validator_release_manifest=_validator_manifest(
+            current["commit_sha"]
+        ),
+        approved_release_lineage=lineage,
+    )
+    coordinator = {
+        **_identity(historical, role="gateway_coordinator"),
+        "role": "gateway_coordinator",
+    }
+    validator = _validator_identity("2")
+    assert verifier(coordinator) == coordinator
+    assert verifier(validator) == validator
+    assert observed == [
+        ("gateway_coordinator", coordinator["pcr0"]),
+        ("validator_weights", validator["pcr0"]),
+    ]
+
+    mismatched = {
+        **lineage,
+        "releases": {
+            commit: {
+                **entry,
+                "roles": (
+                    {
+                        **entry["roles"],
+                        "validator_weights": {
+                            **entry["roles"]["validator_weights"],
+                            "pcr0": "9" * 96,
+                        },
+                    }
+                    if commit == current["commit_sha"]
+                    else entry["roles"]
+                ),
+            }
+            for commit, entry in lineage["releases"].items()
+        },
+    }
+    mismatched_body = {
+        key: value for key, value in mismatched.items() if key != "lineage_hash"
+    }
+    mismatched["lineage_hash"] = release_lineage_v2.sha256_json(
+        mismatched_body
+    )
+    with pytest.raises(ValueError, match="current release pair differs"):
+        build_cutover_mixed_boot_verifier_v1(
+            current,
+            validator_release_manifest=_validator_manifest(
+                current["commit_sha"]
+            ),
+            approved_release_lineage=mismatched,
+        )
+    with pytest.raises(ValueError, match="unexpected boot role"):
+        verifier({**coordinator, "role": "scoring"})
 
 
 def test_installed_prior_lineage_accepts_exact_legacy_current_role_set():

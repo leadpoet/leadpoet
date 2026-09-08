@@ -225,7 +225,16 @@ def load_config(path: Path) -> Dict[str, Any]:
         "validator",
         "aws",
     }
-    if set(config) != expected_fields or config.get("schema_version") != SCHEMA_VERSION:
+    optional_fields = {"resume_existing_epoch_authority"}
+    if (
+        not expected_fields <= set(config)
+        or set(config) - expected_fields - optional_fields
+        or config.get("schema_version") != SCHEMA_VERSION
+        or (
+            "resume_existing_epoch_authority" in config
+            and config["resume_existing_epoch_authority"] is not True
+        )
+    ):
         raise TemporaryTestnetBootstrapError("bootstrap config fields are invalid")
     run_id = str(config.get("run_id") or "")
     candidate_sha = str(config.get("candidate_sha") or "")
@@ -1098,6 +1107,7 @@ def launch_sequence_names() -> tuple[str, ...]:
         "validator_chain_relay_cid18",
         "validator_runtime_bootstrap_cid18",
         "validator_hotkey_recipient_cid18",
+        "gateway_epoch_cutover_resume_preflight",
         "validator_epoch_boundary_capture_cid18",
         "validator_epoch_candidate_ingest",
         "gateway_epoch_cutover_attestation",
@@ -1124,90 +1134,117 @@ def _bootstrap_fresh_epoch_authority(
     mapping_hash = str(cutover.get("mapping_hash") or "")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", mapping_hash):
         raise TemporaryTestnetBootstrapError("cutover mapping hash is invalid")
-    candidate_path = Path(config["runtime_root"]) / "evidence" / "epoch-candidate.json"
-    runner.run_json(
-        "validator_epoch_boundary_capture",
-        [
-            config["python_bin"],
-            "-m",
-            "validator_tee.host.subnet_epoch_boundary_capture_v2",
-            "--cutover-manifest",
-            validator["cutover_manifest"],
-            "--validator-release-manifest",
-            validator["release_manifest"],
-            "--settlement-epoch-id",
-            str(EXPECTED_FIRST_SETTLEMENT_EPOCH),
-            "--candidate-output",
-            str(candidate_path),
-            "--wallet-name",
-            validator["wallet_name"],
-            "--wallet-hotkey",
-            validator["wallet_hotkey"],
-            "--wallet-path",
-            validator["wallet_path"],
-        ],
-        env=validator_env,
-        cwd=repo_root,
-    )
-    preview = runner.run_json(
-        "validator_epoch_candidate_preview",
-        [
-            config["python_bin"],
-            "-m",
-            "gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1",
-            "--candidate",
-            str(candidate_path),
-            "--validator-release-manifest",
-            validator["release_manifest"],
-        ],
-        env=gateway_env,
-        cwd=repo_root,
-    )
-    payload_hash = str(preview.get("candidate_payload_hash") or "")
-    if (
-        preview.get("status") != "validated_no_writes"
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", payload_hash)
-    ):
-        raise TemporaryTestnetBootstrapError("epoch candidate preview differs")
-    staged = runner.run_json(
-        "validator_epoch_candidate_ingest",
-        [
-            config["python_bin"],
-            "-m",
-            "gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1",
-            "--candidate",
-            str(candidate_path),
-            "--validator-release-manifest",
-            validator["release_manifest"],
-            "--apply",
-            "--confirm-candidate-payload-hash",
-            payload_hash,
-        ],
-        env=gateway_env,
-        cwd=repo_root,
-    )
-    if staged.get("status") != "durably_staged":
-        raise TemporaryTestnetBootstrapError("epoch candidate durable ingest differs")
+    cutover_command = [
+        config["python_bin"],
+        "-m",
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+        "--manifest",
+        validator["cutover_manifest"],
+        "--release-manifest",
+        gateway["release_manifest"],
+        "--validator-release-manifest",
+        validator["release_manifest"],
+        "--approved-release-lineage",
+        gateway["release_lineage"],
+        "--fresh-testnet401-network",
+        "--confirm-mapping-hash",
+        mapping_hash,
+        "--confirm-first-settlement-epoch-id",
+        str(EXPECTED_FIRST_SETTLEMENT_EPOCH),
+        "--confirm-all-writers-stopped",
+    ]
+    payload_hash = None
+    candidate_authorization_hash = None
+    if config.get("resume_existing_epoch_authority") is True:
+        resume = runner.run_json(
+            "gateway_epoch_cutover_resume_preflight",
+            cutover_command,
+            env=gateway_env,
+            cwd=repo_root,
+        )
+        if resume.get("status") == "fresh_network_eligible" and isinstance(
+            resume.get("coordinator_receipt_exists"), bool
+        ):
+            pass
+        elif resume.get("status") != "fresh_network_already_durable":
+            raise TemporaryTestnetBootstrapError(
+                "stored fresh testnet401 epoch authority is incomplete"
+            )
+    else:
+        candidate_path = (
+            Path(config["runtime_root"]) / "evidence" / "epoch-candidate.json"
+        )
+        runner.run_json(
+            "validator_epoch_boundary_capture",
+            [
+                config["python_bin"],
+                "-m",
+                "validator_tee.host.subnet_epoch_boundary_capture_v2",
+                "--cutover-manifest",
+                validator["cutover_manifest"],
+                "--validator-release-manifest",
+                validator["release_manifest"],
+                "--settlement-epoch-id",
+                str(EXPECTED_FIRST_SETTLEMENT_EPOCH),
+                "--candidate-output",
+                str(candidate_path),
+                "--wallet-name",
+                validator["wallet_name"],
+                "--wallet-hotkey",
+                validator["wallet_hotkey"],
+                "--wallet-path",
+                validator["wallet_path"],
+            ],
+            env=validator_env,
+            cwd=repo_root,
+        )
+        preview = runner.run_json(
+            "validator_epoch_candidate_preview",
+            [
+                config["python_bin"],
+                "-m",
+                "gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1",
+                "--candidate",
+                str(candidate_path),
+                "--validator-release-manifest",
+                validator["release_manifest"],
+            ],
+            env=gateway_env,
+            cwd=repo_root,
+        )
+        payload_hash = str(preview.get("candidate_payload_hash") or "")
+        if (
+            preview.get("status") != "validated_no_writes"
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", payload_hash)
+        ):
+            raise TemporaryTestnetBootstrapError("epoch candidate preview differs")
+        staged = runner.run_json(
+            "validator_epoch_candidate_ingest",
+            [
+                config["python_bin"],
+                "-m",
+                "gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1",
+                "--candidate",
+                str(candidate_path),
+                "--validator-release-manifest",
+                validator["release_manifest"],
+                "--apply",
+                "--confirm-candidate-payload-hash",
+                payload_hash,
+            ],
+            env=gateway_env,
+            cwd=repo_root,
+        )
+        if staged.get("status") != "durably_staged":
+            raise TemporaryTestnetBootstrapError(
+                "epoch candidate durable ingest differs"
+            )
+        candidate_authorization_hash = staged.get(
+            "candidate_authorization_hash"
+        )
     attested = runner.run_json(
         "gateway_epoch_cutover_attestation",
-        [
-            config["python_bin"],
-            "-m",
-            "gateway.research_lab.stateful_epoch_cutover_cli_v1",
-            "--manifest",
-            validator["cutover_manifest"],
-            "--release-manifest",
-            gateway["release_manifest"],
-            "--validator-release-manifest",
-            validator["release_manifest"],
-            "--fresh-testnet401-network",
-            "--apply",
-            "--confirm-mapping-hash",
-            mapping_hash,
-            "--confirm-first-settlement-epoch-id",
-            str(EXPECTED_FIRST_SETTLEMENT_EPOCH),
-            "--confirm-all-writers-stopped",
-        ],
+        [*cutover_command, "--apply"],
         env=gateway_env,
         cwd=repo_root,
     )
@@ -1223,7 +1260,7 @@ def _bootstrap_fresh_epoch_authority(
         raise TemporaryTestnetBootstrapError("durable epoch authority readback differs")
     return {
         "candidate_payload_hash": payload_hash,
-        "candidate_authorization_hash": staged.get("candidate_authorization_hash"),
+        "candidate_authorization_hash": candidate_authorization_hash,
         "mapping_hash": mapping_hash,
         "cutover_status": attested.get("status"),
         "durable_mapping_hash": durable["mapping_hash"],

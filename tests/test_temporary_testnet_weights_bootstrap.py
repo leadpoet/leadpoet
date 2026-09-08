@@ -202,6 +202,135 @@ def test_fresh_epoch_authority_is_created_after_measured_boot_before_apps():
     assert "validate_stateful_cutover_authority" in source
 
 
+@pytest.mark.parametrize("resume_existing", [False, True])
+def test_fresh_epoch_authority_reuses_only_explicit_durable_resume(
+    monkeypatch, resume_existing
+):
+    mapping_hash = bootstrap.EXPECTED_CUTOVER_MAPPING_HASH
+    config = {
+        "python_bin": sys.executable,
+        "repo_root": "/runtime/repository",
+        "runtime_root": "/run/leadpoet-testnet401",
+        "candidate_sha": "a" * 40,
+        "gateway": {
+            "release_manifest": "/runtime/gateway-release.json",
+            "release_lineage": "/runtime/gateway-lineage.json",
+            "source_env_file": "/runtime/gateway.env",
+        },
+        "validator": {
+            "cutover_manifest": "/runtime/cutover.json",
+            "release_manifest": "/runtime/validator-release.json",
+            "wallet_name": "validator",
+            "wallet_hotkey": "default",
+            "wallet_path": "/runtime/wallets",
+        },
+    }
+    if resume_existing:
+        config["resume_existing_epoch_authority"] = True
+    calls = []
+
+    class Runner:
+        def run_json(self, stage, command, **_kwargs):
+            calls.append((stage, command))
+            if stage == "gateway_epoch_cutover_resume_preflight":
+                return {
+                    "status": "fresh_network_eligible",
+                    "coordinator_receipt_exists": True,
+                }
+            if stage == "validator_epoch_candidate_preview":
+                return {
+                    "status": "validated_no_writes",
+                    "candidate_payload_hash": "sha256:" + "1" * 64,
+                }
+            if stage == "validator_epoch_candidate_ingest":
+                return {
+                    "status": "durably_staged",
+                    "candidate_authorization_hash": "sha256:" + "2" * 64,
+                }
+            if stage == "gateway_epoch_cutover_attestation":
+                return {"status": "fresh_network_durable"}
+            return {}
+
+    monkeypatch.setattr(
+        bootstrap,
+        "_load_json",
+        lambda *_args, **_kwargs: {"mapping_hash": mapping_hash},
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_durable_epoch_authority_check",
+        lambda _config: {"mapping_hash": mapping_hash, "netuid": 401},
+    )
+    result = bootstrap._bootstrap_fresh_epoch_authority(
+        config,
+        Runner(),
+        gateway_env={},
+        validator_env={},
+    )
+
+    stages = [stage for stage, _command in calls]
+    if resume_existing:
+        assert stages == [
+            "gateway_epoch_cutover_resume_preflight",
+            "gateway_epoch_cutover_attestation",
+        ]
+        assert result["candidate_payload_hash"] is None
+    else:
+        assert stages == [
+            "validator_epoch_boundary_capture",
+            "validator_epoch_candidate_preview",
+            "validator_epoch_candidate_ingest",
+            "gateway_epoch_cutover_attestation",
+        ]
+    attestation_command = calls[-1][1]
+    assert attestation_command[
+        attestation_command.index("--approved-release-lineage") + 1
+    ] == config["gateway"]["release_lineage"]
+
+
+def test_fresh_epoch_authority_resume_rejects_invalid_preflight(monkeypatch):
+    config = {
+        "python_bin": sys.executable,
+        "repo_root": "/runtime/repository",
+        "runtime_root": "/run/leadpoet-testnet401",
+        "candidate_sha": "a" * 40,
+        "resume_existing_epoch_authority": True,
+        "gateway": {
+            "release_manifest": "/runtime/gateway-release.json",
+            "release_lineage": "/runtime/gateway-lineage.json",
+        },
+        "validator": {
+            "cutover_manifest": "/runtime/cutover.json",
+            "release_manifest": "/runtime/validator-release.json",
+        },
+    }
+
+    class Runner:
+        def run_json(self, *_args, **_kwargs):
+            return {
+                "status": "fresh_network_eligible",
+                "coordinator_receipt_exists": "unknown",
+            }
+
+    monkeypatch.setattr(
+        bootstrap,
+        "_load_json",
+        lambda *_args, **_kwargs: {
+            "mapping_hash": bootstrap.EXPECTED_CUTOVER_MAPPING_HASH
+        },
+    )
+    with pytest.raises(
+        bootstrap.TemporaryTestnetBootstrapError,
+        match="stored fresh testnet401 epoch authority is incomplete",
+    ):
+        bootstrap._bootstrap_fresh_epoch_authority(
+            config,
+            Runner(),
+            gateway_env={},
+            validator_env={},
+        )
+
+
 def test_validator_runtime_is_pinned_to_cid18_and_loopback_gateway():
     source = Path(bootstrap.__file__).read_text(encoding="utf-8")
     assert bootstrap.SAFE_VALIDATOR_ENV["ENCLAVE_CID"] == "18"

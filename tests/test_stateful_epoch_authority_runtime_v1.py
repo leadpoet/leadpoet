@@ -43,6 +43,7 @@ from gateway.research_lab.stateful_epoch_cutover_cli_v1 import (
     activate_staged_subnet_epoch_cutover_v1,
     activate_subnet_epoch_cutover_v1,
     bootstrap_fresh_testnet401_cutover_v1,
+    main as cutover_cli_main,
 )
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     CUTOVER_AUTHORITY_SCHEMA_VERSION,
@@ -110,6 +111,13 @@ def test_existing_and_activation_cutover_paths_verify_historical_parent_lineage(
 
     assert existing_source.count("parent_graphs=(graph,)") == 1
     assert activation_source.count("parent_graphs=(graph,)") == 1
+
+
+def test_approved_release_lineage_cli_is_fresh_test401_only(capsys):
+    with pytest.raises(SystemExit) as error:
+        cutover_cli_main(["--approved-release-lineage", "/tmp/lineage.json"])
+    assert error.value.code == 2
+    assert "restricted to fresh test401 mode" in capsys.readouterr().err
 
 
 def _cutover(**updates):

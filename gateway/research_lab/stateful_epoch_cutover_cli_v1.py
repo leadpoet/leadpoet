@@ -64,8 +64,10 @@ from gateway.tee.coordinator_epoch_cutover_v2 import (
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.release_lineage_v2 import (
+    build_compact_release_lineage_boot_verifier_v2,
     build_release_lineage_boot_verifier_v2,
     load_approved_release_lineage_v2,
+    validate_compact_release_lineage_v2,
 )
 from gateway.utils.subnet_epoch_archive import (
     read_exact_subnet_epoch_snapshot_from_archive,
@@ -386,8 +388,57 @@ def build_cutover_mixed_boot_verifier_v1(
     *,
     validator_release_manifest: Optional[Mapping[str, Any]] = None,
     parent_graphs: Sequence[Mapping[str, Any]] = (),
+    approved_release_lineage: Optional[Mapping[str, Any]] = None,
 ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
     current = validate_release_manifest(release)
+    if approved_release_lineage is not None:
+        if validator_release_manifest is None:
+            raise ValueError(
+                "approved cutover lineage requires a validator release manifest"
+            )
+        from gateway.tee.release_channel_v2 import (
+            build_release_channel_v2,
+            build_release_lineage_v2,
+        )
+        current_lineage = build_release_lineage_v2(
+            (
+                build_release_channel_v2(
+                    gateway_release_manifest=current,
+                    validator_release_manifest=validator_release_manifest,
+                ),
+            ),
+            current_commit=str(current["commit_sha"]),
+        )
+        lineage = validate_compact_release_lineage_v2(
+            approved_release_lineage,
+            expected_current_commit=str(current["commit_sha"]),
+            expected_current_gateway_release_hash=str(current["release_hash"]),
+        )
+        if lineage["releases"][str(current["commit_sha"])] != (
+            current_lineage["releases"][str(current["commit_sha"])]
+        ):
+            raise ValueError(
+                "current release pair differs from approved cutover lineage"
+            )
+        lineage_verifier = build_compact_release_lineage_boot_verifier_v2(
+            lineage
+        )
+
+        def verify_lineage(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+            role_pair = (
+                str(identity.get("physical_role") or ""),
+                str(identity.get("role") or ""),
+            )
+            if role_pair not in {
+                ("gateway_coordinator", COORDINATOR_ROLE),
+                ("validator_weights", WEIGHT_ROLE),
+            }:
+                raise ValueError(
+                    "cutover receipt graph contains an unexpected boot role"
+                )
+            return lineage_verifier(identity)
+
+        return verify_lineage
     validator_boot_verifier = None
     if validator_release_manifest is not None:
         from gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1 import (
@@ -452,6 +503,20 @@ def _load_validator_release(path: Optional[Path]) -> Dict[str, Any]:
         raise StatefulEpochCutoverActivationError(
             "approved validator V2 release manifest is invalid"
         ) from exc
+
+
+def _load_gateway_release_lineage(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StatefulEpochCutoverActivationError(
+            "approved gateway V2 release lineage is unavailable"
+        ) from exc
+    if not isinstance(value, Mapping):
+        raise StatefulEpochCutoverActivationError(
+            "approved gateway V2 release lineage is invalid"
+        )
+    return dict(value)
 
 
 def _validate_initialization(
@@ -1142,6 +1207,7 @@ async def bootstrap_fresh_testnet401_cutover_v1(
     ] = None,
     release_manifest_path: Optional[Path] = None,
     validator_release_manifest_path: Optional[Path] = None,
+    approved_release_lineage_path: Optional[Path] = None,
     validate_anchor: Callable[[SubnetEpochCutover], Awaitable[None]] = (
         _validate_official_archive_anchor
     ),
@@ -1172,10 +1238,18 @@ async def bootstrap_fresh_testnet401_cutover_v1(
         nonlocal release, resolved_boot_verifier
         if resolved_boot_verifier is None:
             release = _load_gateway_release(release_manifest_path)
+            validator_release = _load_validator_release(
+                validator_release_manifest_path
+            )
             resolved_boot_verifier = build_cutover_mixed_boot_verifier_v1(
                 release,
-                validator_release_manifest=_load_validator_release(
-                    validator_release_manifest_path
+                validator_release_manifest=validator_release,
+                approved_release_lineage=(
+                    _load_gateway_release_lineage(
+                        approved_release_lineage_path
+                    )
+                    if approved_release_lineage_path is not None
+                    else None
                 ),
             )
         return resolved_boot_verifier
@@ -1245,6 +1319,13 @@ async def bootstrap_fresh_testnet401_cutover_v1(
         cutover=cutover.to_dict(),
         receipt_graph=snapshot_graph,
     )
+    if approved_release_lineage_path is not None:
+        validate_receipt_graph(
+            snapshot_graph,
+            required_purposes={SNAPSHOT_PURPOSE},
+            boot_attestation_verifier=resolve_boot_verifier(),
+            require_boot_attestation_verification=True,
+        )
     payload = {
         "schema_version": CUTOVER_REQUEST_SCHEMA_VERSION,
         "manifest": cutover.to_dict(),
@@ -2181,6 +2262,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--release-manifest", type=Path)
     parser.add_argument("--validator-release-manifest", type=Path)
+    parser.add_argument("--approved-release-lineage", type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--fence-before-boundary", action="store_true")
@@ -2224,6 +2306,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ):
         parser.error(
             "--fresh-testnet401-network is incompatible with legacy cutover modes"
+        )
+    if (
+        args.approved_release_lineage is not None
+        and not args.fresh_testnet401_network
+    ):
+        parser.error(
+            "--approved-release-lineage is restricted to fresh test401 mode"
         )
 
     if (args.apply or args.activate_staged) and args.release_manifest is None:
@@ -2338,6 +2427,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     release_manifest_path=args.release_manifest,
                     validator_release_manifest_path=(
                         args.validator_release_manifest
+                    ),
+                    approved_release_lineage_path=(
+                        args.approved_release_lineage
                     ),
                 )
             )

@@ -40,6 +40,7 @@ CANCEL_REASONS = {
     "benchmark_invalid": "benchmark_data_invalid",
     "capacity": "runner_capacity",
     "scoring": "scoring_window_closed",
+    "scoring_incomplete": "scoring_incomplete",
     "publication": "publication_sanitizer_failed",
     "operator": "operator",
 }
@@ -1381,7 +1382,9 @@ class ArenaService:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
             if run is None:
-                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
+                )
             if run["status"] == "accepted":
                 continue
             submission_id = str(item["submission_id"])
@@ -1392,7 +1395,9 @@ class ArenaService:
                 "budget_exhausted",
                 "credential_error",
             ):
-                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
+                )
             ineligible.add(submission_id)
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0
@@ -1410,7 +1415,7 @@ class ArenaService:
                 )
             except scoring.ScoringError:
                 return self._store.cancel_round(
-                    round_id, CANCEL_REASONS["scoring"]
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
             judge_executions += 1
         if ineligible:
@@ -1454,7 +1459,9 @@ class ArenaService:
                 (entry for entry in final_entries if entry["is_king"]), None
             )
             if baseline_entry is None or baseline_entry["final_score"] is None:
-                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
+                )
         if stage == 1:
             ranking = verify.stage1_ranking(
                 self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
@@ -1531,7 +1538,9 @@ class ArenaService:
         )
         king_entry = next((e for e in final_entries if e["is_king"]), None)
         if king_entry is None or king_entry["final_score"] is None:
-            return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+            return self._store.cancel_round(
+                round_id, CANCEL_REASONS["scoring_incomplete"]
+            )
         decision = verify.king_decision([e for e in final_entries if not e["is_king"]], king_entry)
         published_at = _iso(self.now())
         publication = {

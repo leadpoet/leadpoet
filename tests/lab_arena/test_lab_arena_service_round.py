@@ -1114,6 +1114,7 @@ def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(conne
     row = harness.service.store.get_round(harness.round_id)
     assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged"
     assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
     assert row["publication_doc"] is None and not row["finalists"]
     score_runs = harness.service.store.list_runs(
         harness.round_id,
@@ -1198,7 +1199,49 @@ def test_malformed_accepted_scoring_artifact_cancels_without_partial_scores(
     row = harness.service.store.get_round(harness.round_id)
     assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged"
     assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
     assert row["publication_doc"] is None and not row["finalists"]
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id, stage=1, kind="execute"
+    )
+    assert all(run["per_icp_score"] is None for run in execute_runs)
+
+
+def test_missing_scoring_result_reports_incomplete_without_partial_scores(
+    connect, tmp_path, monkeypatch
+):
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["MissingJudgeResult"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=22, epoch=30422)
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.run_stage_with_runners(2)
+    closed = harness.service.advance_round(harness.round_id)
+    participants_before = list(
+        harness.service.store.get_round(harness.round_id)["participants"]
+    )
+    scoring_outputs = harness.service._scoring_outputs(harness.round_id, 1)
+    missing_run_id = next(iter(scoring_outputs))
+    monkeypatch.setattr(
+        harness.service,
+        "_scoring_outputs",
+        lambda round_id, stage: {
+            run_id: run
+            for run_id, run in scoring_outputs.items()
+            if run_id != missing_run_id
+        },
+    )
+
+    cancelled = harness.service.advance_round(harness.round_id)
+
+    row = harness.service.store.get_round(harness.round_id)
+    assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged"
+    assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
+    assert row["participants"] == participants_before and not row["finalists"]
     execute_runs = harness.service.store.list_runs(
         harness.round_id, stage=1, kind="execute"
     )
@@ -1225,9 +1268,16 @@ def test_persistent_final_judge_failure_cancels_without_partial_final_scores(con
     assert failed["submission_id"] in harness.service.store.get_round(
         harness.round_id
     )["finalists"]
+    finalists_before = list(
+        harness.service.store.get_round(harness.round_id)["finalists"]
+    )
     harness.sandbox.judge_failures.add(("JudgeFailFinal", 10))
     harness.advance_until("stage2_scoring", runners=2)
     harness.run_stage_with_runners(2)
+    final_scoring_close = datetime.strptime(
+        harness.schedule()["final_scoring_close"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+    assert harness.clock.now < final_scoring_close
 
     closed = harness.service.advance_round(harness.round_id)
     cancelled = harness.service.advance_round(harness.round_id)
@@ -1235,6 +1285,8 @@ def test_persistent_final_judge_failure_cancels_without_partial_final_scores(con
     row = harness.service.store.get_round(harness.round_id)
     assert closed["status"] == "closed" and closed["round_status"] == "stage2_judged"
     assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
+    assert row["finalists"] == finalists_before
     assert row["publication_doc"] is None
     execute_runs = harness.service.store.list_runs(
         harness.round_id,

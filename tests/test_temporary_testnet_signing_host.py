@@ -769,14 +769,19 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False):
         canary + "\nApplication startup complete\n"
         'POST /weights/inputs/v2 HTTP/1.1" 503 private-request-body\n'
         "research_lab_allocation_build_failed epoch=22058 "
-        "persist_snapshot=True error_type=ResearchLabV2AuthorityError "
-        "error=fresh testnet401 cutover authority is unavailable or ambiguous "
-        "raw-payload=https://private.example/secret\n"
-        "research_lab_allocation_build_failed epoch=22058 "
         "persist_snapshot=True error_type=HTTPException error=500: TypeError: "
         "champion_v2_cutover_readiness got an unexpected keyword argument "
         "_fresh_testnet401_empty_origin token=credential-canary "
         "https://private.example/raw-body\n"
+        "research_lab_allocation_build_failed epoch=22058 "
+        "persist_snapshot=True error_type=ResearchLabV2AuthorityError "
+        "error=fresh testnet401 cutover authority is unavailable or ambiguous "
+        "raw-payload=https://private.example/secret\n"
+        + (
+            "research_lab_allocation_build_failed epoch=22058 "
+            "persist_snapshot=True error_type=HTTPException "
+            "error=500: durable allocation retry is cooling down\n"
+        ) * 3
     )
     validator = logs / "validator_application.log"
     target = tmp_path / "validator-real.log"
@@ -844,18 +849,18 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
     ]
     assert gateway["allocation_build_callbacks"] == [
         {
-            "error_type": "ResearchLabV2AuthorityError",
-            "tokens": [
-                "[redacted]", "authority", "[redacted]", "unavailable",
-                "[redacted]", "ambiguous",
-            ],
-        },
-        {
             "error_type": "HTTPException",
             "tokens": [
                 "typeerror", "champion_v2_cutover_readiness", "[redacted]",
                 "unexpected", "keyword", "argument",
                 "_fresh_testnet401_empty_origin",
+            ],
+        },
+        {
+            "error_type": "HTTPException",
+            "tokens": [
+                "durable", "allocation", "retry", "[redacted]", "cooling",
+                "down",
             ],
         },
     ]

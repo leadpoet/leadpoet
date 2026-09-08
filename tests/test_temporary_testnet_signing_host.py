@@ -891,6 +891,33 @@ def test_gateway_restart_program_is_fixed_redacted_and_retryable(tmp_path):
         )
 
 
+@pytest.mark.parametrize("failure", ("env", "stop"))
+def test_gateway_restart_pre_stop_failure_keeps_original_record(tmp_path, monkeypatch, failure):
+    native = _RestartNative(tmp_path)
+    original = [dict(item) for item in native.processes]
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps(_restart_enclaves()), ""),
+    )
+    if failure == "env":
+        def invalid_env(*_args, **_kwargs):
+            raise RuntimeError("invalid private environment")
+        native._runtime_environment = invalid_env
+    else:
+        native._stop_owned_processes = lambda _items: None
+    with pytest.raises(RuntimeError):
+        temporary_host._gateway_network_restart_host(
+            repository=str(ROOT), config_path=str(tmp_path / "config.json"),
+            expected_run_id=RUN_ID,
+            expected_candidate_sha=temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA,
+            expected_instance_id=INSTANCE_ID, native_module=native,
+        )
+    assert native.processes == original
+    assert not native.persisted
+    assert native.live == {10, 11, 12, 13, 14}
+
+
 def test_controller_restart_is_fixed_to_owned_b056_host():
     candidate = temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA
     ec2 = _EC2()

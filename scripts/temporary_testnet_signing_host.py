@@ -1224,6 +1224,10 @@ def _gateway_network_restart_host(
         except Exception:
             if new_record is not None:
                 n._stop_owned_processes([new_record])
+                if n._same_process(new_record):
+                    runner.processes = preserved + [new_record]
+                    runner.persist()
+                    raise RuntimeError("gateway restart replacement remained live")
             elif process is not None and process.poll() is None:
                 try:
                     if _os.getpgid(process.pid) == process.pid:

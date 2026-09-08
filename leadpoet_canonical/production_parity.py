@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 
 CONTRACT_SCHEMA_VERSION = "leadpoet.production_parity_contract.v1"
-SNAPSHOT_SCHEMA_VERSION = "leadpoet.production_parity_snapshot.v4"
+SNAPSHOT_SCHEMA_VERSION = "leadpoet.production_parity_snapshot.v5"
 LEDGER_SCHEMA_VERSION = "leadpoet.production_parity_ledger.v1"
 HISTORICAL_ORACLE_SCHEMA_VERSION = (
     "leadpoet.production_parity_historical_oracle.v1"
@@ -356,15 +356,6 @@ def validate_snapshot_manifest(
         target_date_value = datetime.fromisoformat(target_rebenchmark_date).date()
     except ValueError as exc:
         raise ProductionParityError("snapshot database date frontier is invalid") from exc
-    latest_completed_benchmark_date = database.get(
-        "latest_completed_benchmark_date"
-    )
-    current_day_rebenchmark_run_count = database.get(
-        "current_day_rebenchmark_run_count"
-    )
-    current_day_benchmark_bundle_count = database.get(
-        "current_day_benchmark_bundle_count"
-    )
     source_role = database.get("source_role")
     weight_history_scope = database.get("weight_history_scope")
     if (
@@ -381,23 +372,6 @@ def validate_snapshot_manifest(
         or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", capture_utc_date)
         or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", target_rebenchmark_date)
         or target_date_value != capture_date_value + timedelta(days=1)
-        or (
-            latest_completed_benchmark_date is not None
-            and not re.fullmatch(
-                r"\d{4}-\d{2}-\d{2}",
-                str(latest_completed_benchmark_date),
-            )
-        )
-        or (
-            latest_completed_benchmark_date is not None
-            and str(latest_completed_benchmark_date) > capture_utc_date
-        )
-        or not isinstance(current_day_rebenchmark_run_count, int)
-        or isinstance(current_day_rebenchmark_run_count, bool)
-        or current_day_rebenchmark_run_count < 0
-        or not isinstance(current_day_benchmark_bundle_count, int)
-        or isinstance(current_day_benchmark_bundle_count, bool)
-        or current_day_benchmark_bundle_count < 0
         or not isinstance(source_role, Mapping)
         or not str(source_role.get("role_hash") or "").startswith("sha256:")
         or source_role.get("transaction_read_only") is not True
@@ -428,13 +402,6 @@ def validate_snapshot_manifest(
         "largest_relation_bytes": largest_relation_bytes,
         "capture_utc_date": capture_utc_date,
         "target_rebenchmark_date": target_rebenchmark_date,
-        "latest_completed_benchmark_date": (
-            str(latest_completed_benchmark_date)
-            if latest_completed_benchmark_date is not None
-            else None
-        ),
-        "current_day_rebenchmark_run_count": current_day_rebenchmark_run_count,
-        "current_day_benchmark_bundle_count": current_day_benchmark_bundle_count,
         "source_role": {
             "role_hash": _require_hash(
                 source_role.get("role_hash"), field_name="database.source_role.role_hash"

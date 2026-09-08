@@ -265,9 +265,6 @@ def _snapshot(*, bypass_rls: bool = True, capture_mode: str = "full") -> dict:
             "largest_relation_bytes": 2_000_000_000,
             "capture_utc_date": "2026-08-15",
             "target_rebenchmark_date": "2026-08-16",
-            "latest_completed_benchmark_date": "2026-08-14",
-            "current_day_rebenchmark_run_count": 1,
-            "current_day_benchmark_bundle_count": 1,
             "source_role": {
                 "role_hash": HASH,
                 "transaction_read_only": True,
@@ -306,6 +303,19 @@ def test_snapshot_binds_real_scale_future_day_and_readonly_role():
     assert value["database"]["source_role"]["bypass_rls"] is True
     assert value["database"]["source_role"]["table_write_capable"] is False
     assert value["database"]["weight_history_scope"]["expected_rows"] == 571
+
+
+def test_snapshot_v5_rejects_v4_instead_of_reinterpreting_old_metadata():
+    document = _snapshot()
+    document["schema_version"] = "leadpoet.production_parity_snapshot.v4"
+    body = {key: item for key, item in document.items() if key != "manifest_hash"}
+    document["manifest_hash"] = sha256_json(body)
+
+    with pytest.raises(ProductionParityError, match="snapshot schema differs"):
+        validate_snapshot_manifest(
+            document,
+            now=datetime(2026, 8, 15, 12, 30, tzinfo=timezone.utc),
+        )
 
 
 def test_schema_only_snapshot_is_explicit_and_cannot_claim_full_data():
@@ -614,9 +624,6 @@ def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(
         "largest_relation_bytes": 48_022_609_920,
         "capture_utc_timestamp": "2026-08-18T12:00:00+00:00",
         "capture_utc_date": "2026-08-18",
-        "latest_completed_benchmark_date": "2026-08-17",
-        "current_day_rebenchmark_run_count": 0,
-        "current_day_benchmark_bundle_count": 0,
         "weight_history_scope": {"netuid": 71},
         "source_role": {
             "role_name": "readonly",
@@ -836,9 +843,6 @@ def test_full_failure_document_projects_only_typed_allowlisted_snapshot_category
 def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
     observed = {}
     value = {
-        "latest_completed_benchmark_date": None,
-        "current_day_rebenchmark_run_count": 0,
-        "current_day_benchmark_bundle_count": 0,
         "source_role": {
             "role_name": "readonly",
             "transaction_read_only": True,
@@ -863,9 +867,9 @@ def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
     stats = parity_snapshot._database_stats({})
 
     assert "lab_arena_rounds" not in observed["sql"]
-    assert stats["latest_completed_benchmark_date"] is None
-    assert stats["current_day_rebenchmark_run_count"] == 0
-    assert stats["current_day_benchmark_bundle_count"] == 0
+    assert "latest_completed_benchmark_date" not in stats
+    assert "current_day_rebenchmark_run_count" not in stats
+    assert "current_day_benchmark_bundle_count" not in stats
 
 
 def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
@@ -1388,9 +1392,6 @@ def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypa
             "largest_relation_bytes": 1,
             "capture_utc_timestamp": "2026-09-04T00:00:00+00:00",
             "capture_utc_date": "2026-09-04",
-            "latest_completed_benchmark_date": None,
-            "current_day_rebenchmark_run_count": 0,
-            "current_day_benchmark_bundle_count": 0,
             "weight_history_scope": None,
             "source_role": {
                 "role_name": "readonly",
@@ -1412,9 +1413,9 @@ def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypa
     )
 
     assert "FROM public.lab_arena_rounds" not in observed["sql"]
-    assert result["latest_completed_benchmark_date"] is None
-    assert result["current_day_rebenchmark_run_count"] == 0
-    assert result["current_day_benchmark_bundle_count"] == 0
+    assert "latest_completed_benchmark_date" not in result
+    assert "current_day_rebenchmark_run_count" not in result
+    assert "current_day_benchmark_bundle_count" not in result
 
 
 def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(

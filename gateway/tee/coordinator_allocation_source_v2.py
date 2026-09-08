@@ -366,13 +366,6 @@ class CoordinatorAllocationSourceV2:
             if prior_frontier_context is not None
             else None
         )
-        fresh_frontier_activation_absence_observed = bool(
-            prior_frontier_context is not None
-            and prior_frontier_context.get(
-                "fresh_testnet401_activation_absence_observed"
-            )
-            is True
-        )
         prior_reward_checkpoints = (
             reward_checkpoint_index_v2(prior_frontier["reward_checkpoints"])
             if prior_frontier is not None
@@ -600,16 +593,6 @@ class CoordinatorAllocationSourceV2:
                 raise CoordinatorAllocationSourceV2Error(
                     "allocation settlement frontier exists without activation"
                 )
-            if (
-                str(self._network_supplier() or "").strip().lower() == "test"
-                and int(netuid) == TESTNET401_NETUID
-                and TESTNET401_CUTOVER_RECEIPT_HASH
-                in set(context.parent_receipt_hashes)
-            ):
-                return {
-                    "frontier": None,
-                    "fresh_testnet401_activation_absence_observed": True,
-                }
             return None
         if len(activation_rows) != 1:
             raise CoordinatorAllocationSourceV2Error(

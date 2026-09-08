@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import stat
@@ -129,6 +130,27 @@ def test_private_output_does_not_follow_symlinks(tmp_path):
     with pytest.raises(FileExistsError):
         stage.private_write(link, b"replacement")
     assert target.read_text() == "preserve"
+
+
+def test_failure_receipt_reports_only_bounded_identity():
+    def verify_host_is_empty():
+        raise FileNotFoundError(2, "secret-bearing message", "/private/nitro-cli")
+
+    try:
+        verify_host_is_empty()
+    except FileNotFoundError as exc:
+        result = stage.failure_receipt(exc)
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "FileNotFoundError"
+    assert result["operation"] == "verify_host_is_empty"
+    assert result["location"].startswith(
+        "tests/test_temporary_testnet_weights_staging.py:"
+    )
+    assert "code" not in result
+    encoded = json.dumps(result, sort_keys=True)
+    assert "secret-bearing" not in encoded
+    assert "/private/nitro-cli" not in encoded
 
 
 @pytest.mark.parametrize("field,value", [

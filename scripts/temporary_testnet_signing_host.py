@@ -653,6 +653,15 @@ def source_bootstrap_command(
         f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
         f"--key {q(assets_prefix + '/candidate-bundle-binding.json')} {q(binding)} >/dev/null 2>&1",
         f"/usr/bin/python3 -I -c {q(binding_probe)} {q(binding)} {q(bundle)} {q(candidate_sha)}",
+        "/usr/bin/dnf -q -y install aws-nitro-enclaves-cli "
+        "aws-nitro-enclaves-cli-devel docker rsync jq tar gzip >/dev/null 2>&1",
+        "test -x /usr/bin/nitro-cli",
+        "/usr/bin/rpm -q aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel "
+        "docker rsync jq tar gzip >/dev/null",
+        "test -x /usr/bin/curl",
+        "/usr/bin/systemctl enable --now docker.service >/dev/null 2>&1",
+        "/usr/bin/systemctl is-active --quiet docker.service",
+        "/usr/bin/docker info >/dev/null 2>&1",
         "if [ ! -x /usr/bin/git ]; then /usr/bin/dnf -q -y install git-core >/dev/null 2>&1; fi",
         f"install -d -m 0700 {q(str(Path(SOURCE_REPOSITORY).parent))} {q(SOURCE_REPOSITORY)}",
         f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} init >/dev/null 2>&1",
@@ -660,8 +669,7 @@ def source_bootstrap_command(
         f"test \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} rev-parse FETCH_HEAD)\" = {q(candidate_sha)}",
         f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} checkout --detach {q(candidate_sha)} >/dev/null 2>&1",
         f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} remote add origin https://github.com/leadpoet/leadpoet.git",
-        f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} fetch --no-tags origin "
-        "refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1",
+        f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} update-ref refs/remotes/origin/main {q(candidate_sha)}",
         f"test \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} rev-parse origin/main)\" = {q(candidate_sha)}",
         f"test -z \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} status --porcelain --untracked-files=all)\"",
         "/usr/bin/dnf -q -y install python3.11-pip >/dev/null 2>&1",

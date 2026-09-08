@@ -329,8 +329,20 @@ def test_source_bootstrap_is_fixed_to_exact_private_parity_prefix():
     assert f"--assets-prefix {prefix}" in command
     assert "/run/leadpoet-testnet401/config.json" in command
     assert "candidate-bundle-binding.json" in command
-    assert "refs/heads/main:refs/remotes/origin/main" in command
+    assert "refs/heads/main:refs/remotes/origin/main" not in command
+    assert f"update-ref refs/remotes/origin/main {SHA}" in command
+    assert f'rev-parse origin/main)" = {SHA}' in command
     assert "--requirement /run/leadpoet-testnet401/requirements.txt" in command
+    host_dependencies = command.index(
+        "aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker rsync jq tar gzip"
+    )
+    docker_ready = command.index("/usr/bin/docker info")
+    native_stage = command.index("-m scripts.stage_temporary_testnet_weights_host")
+    assert host_dependencies < docker_ready < native_stage
+    assert "/usr/bin/systemctl enable --now docker.service" in command
+    assert "test -x /usr/bin/curl" in command
+    assert "install curl" not in command
+    assert "nitro-enclaves-allocator.service" not in command
 
     with pytest.raises(temporary_host.TemporaryHostError, match="assets differ"):
         temporary_host.source_bootstrap_command(

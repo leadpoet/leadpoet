@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import traceback
 from typing import Any
 
 import boto3
@@ -31,6 +32,8 @@ INPUT_NAMES = (
     "testnet401-epoch-cutover.json",
 )
 MAX_PRIVATE_INPUT_BYTES = 262_144
+DIAGNOSTIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+DIAGNOSTIC_LOCATION_RE = re.compile(r"^[A-Za-z0-9_./-]{1,220}:[0-9]{1,6}$")
 
 
 def read_locked_private_input(
@@ -82,6 +85,34 @@ def private_write(path: Path, data: bytes) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as stream:
         stream.write(data)
+
+
+def failure_receipt(exc: BaseException) -> dict[str, str]:
+    """Return bounded failure identity without exception text or input values."""
+    result = {"status": "failed", "error_type": type(exc).__name__}
+    response = getattr(exc, "response", {})
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    code = str(error.get("Code") or "") if isinstance(error, dict) else ""
+    operation = str(getattr(exc, "operation_name", "") or "")
+    repository = Path(__file__).resolve().parents[1]
+    location = ""
+    for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+        try:
+            relative = Path(frame.filename).resolve().relative_to(repository)
+        except (OSError, ValueError):
+            continue
+        candidate = f"{relative.as_posix()}:{frame.lineno}"
+        if DIAGNOSTIC_LOCATION_RE.fullmatch(candidate):
+            location = candidate
+            if not operation:
+                operation = frame.name
+            break
+    for name, value in (("operation", operation), ("code", code)):
+        if DIAGNOSTIC_VALUE_RE.fullmatch(value):
+            result[name] = value
+    if DIAGNOSTIC_LOCATION_RE.fullmatch(location):
+        result["location"] = location
+    return result
 
 
 def build_config(*, repository: Path, candidate: str, run_id: str,
@@ -275,7 +306,7 @@ def main() -> int:
                        instance_id=args.instance_id, assets_bucket=args.assets_bucket,
                        assets_prefix=args.assets_prefix)
     except Exception as exc:
-        print(json.dumps({"status": "failed", "error_type": type(exc).__name__}), flush=True)
+        print(json.dumps(failure_receipt(exc), sort_keys=True), flush=True)
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0

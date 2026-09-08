@@ -548,6 +548,33 @@ def test_native_ssm_stage_rechecks_owner_before_command():
     assert ssm.sent is None
 
 
+def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
+    program = temporary_host.staging_diagnostic_program(
+        run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID,
+    )
+    task = tmp_path / "task"
+    logs = task / "staging-logs"
+    logs.mkdir(parents=True)
+    (logs / "native_host_dependencies.log").write_text(
+        "secret-value-never-print\nModuleNotFoundError: hidden module\n"
+        'File "/private/path/native.py", line 42\n'
+    )
+    (task / "source-stage.json").write_text(
+        '{"stage":"native_host_dependencies","status":"running","secret":"hidden"}\n'
+    )
+    program = program.replace(repr(temporary_host.RUNTIME_ROOT), repr(str(task)))
+    result = subprocess.run([sys.executable, "-I", "-c", program],
+                            capture_output=True, text=True, timeout=10, check=True)
+    assert not result.stderr
+    assert "secret" not in result.stdout
+    assert "hidden" not in result.stdout
+    value = json.loads(result.stdout)
+    assert value["status"] == "staging_incomplete"
+    assert value["stage_states"] == [{"stage": "native_host_dependencies", "status": "running"}]
+    assert value["log_diagnostics"][0]["categories"] == ["ModuleNotFoundError"]
+    assert value["log_diagnostics"][0]["trace_locations"] == [["native.py", "42"]]
+
+
 def test_expired_cleanup_terminates_only_after_protected_expiry():
     ec2 = _EC2()
     _create(ec2, ttl_hours=2)

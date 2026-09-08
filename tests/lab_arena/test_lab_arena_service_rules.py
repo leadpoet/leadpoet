@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena import contracts, rewards, scoring, signing, source_bundle
+from lab_arena.output import validate_output_document
 from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
 from lab_arena.store import hash_lease_token
 
@@ -949,6 +950,36 @@ def test_public_results_take_valid_identity_from_the_round_publication():
     }
 
 
+def _stored_public_output(name):
+    return validate_output_document({
+        "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        "companies": [
+            {
+                "company_name": name,
+                "company_website": "https://visible.example.com",
+                "company_linkedin": "",
+                "industry": "Software",
+                "employee_count": "51-200",
+                "company_stage": "Series A",
+                "country": "United States",
+                "state": "",
+                "fit_summary": "The company matches the ICP.",
+                "fit_evidence_urls": ["https://visible.example.com/about"],
+                "intent_signals": [
+                    {
+                        "matched_icp_signal": 0,
+                        "description": "Raised a round",
+                        "date": "2026-08-01",
+                        "why_now": "The funding makes outreach timely.",
+                        "url": "https://visible.example.com/news",
+                        "snippet": "Funding announced",
+                    }
+                ],
+            }
+        ],
+    })
+
+
 def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evidence():
     hotkey = "5" + "D" * 47
     round_id = "arena-2026-09-07"
@@ -1019,11 +1050,12 @@ def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evide
     service = object.__new__(ArenaService)
     service._round = lambda _round_id: round_row
     service._store = Store()
+    output_document = _stored_public_output("Visible Company")
     service._objects = SimpleNamespace(
-        get=lambda ref: json.dumps(
-            {"companies": [{"company_name": "Visible Company"}]}
+        get=lambda ref: json.dumps(output_document).encode(),
+        get_bounded=lambda ref, limit: json.dumps(
+            output_document if ref == execute["output_ref"] else judge_document
         ).encode(),
-        get_bounded=lambda ref, limit: json.dumps(judge_document).encode(),
     )
 
     result = service.public_results(round_id, "sub-target")
@@ -1032,7 +1064,7 @@ def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evide
     assert result["cancel_reason"] == "scoring_incomplete"
     assert result["incomplete"] is True
     assert result["outputs"] == {
-        execute["run_id"]: {"companies": [{"company_name": "Visible Company"}]}
+        execute["run_id"]: output_document
     }
     assert result["scores"]["stage_1"] == [
         {
@@ -1042,6 +1074,16 @@ def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evide
         }
     ]
     assert result["submission_scores"] == {"stage_1": None, "final": None}
+    assert result["execution_jobs"] == [
+        {
+            "run_id": execute["run_id"],
+            "stage": 1,
+            "icp_position": 0,
+            "status": "accepted",
+            "terminal_cause": "accepted",
+            "output_status": "available",
+        }
+    ]
     assert result["judge_jobs"] == [
         {
             "run_id": score["run_id"],
@@ -1050,6 +1092,7 @@ def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evide
             "icp_position": 0,
             "status": "accepted",
             "terminal_cause": "accepted",
+            "evidence_status": "available",
         }
     ]
     assert result["judge_evidence"][0]["per_icp_score"] == 72.5
@@ -1132,15 +1175,20 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
         ],
     }
     service._store = Store()
+    output_document = _stored_public_output("Partial")
     service._objects = SimpleNamespace(
-        get=lambda _ref: b'{"companies": [{"company_name": "Partial"}]}',
-        get_bounded=lambda *_args: pytest.fail("failed judge has no public artifact"),
+        get=lambda _ref: json.dumps(output_document).encode(),
+        get_bounded=lambda ref, _limit: json.dumps(output_document).encode(),
     )
 
     result = service.public_results(round_id, "sub-partial")
 
     assert result["incomplete"] is True
     assert list(result["outputs"]) == ["execute-complete"]
+    assert [job["output_status"] for job in result["execution_jobs"]] == [
+        "available",
+        "unavailable",
+    ]
     assert result["scores"] == {"stage_1": [], "stage_2": []}
     assert result["judge_evidence"] == []
     assert result["judge_jobs"] == [
@@ -1151,9 +1199,108 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
             "icp_position": 0,
             "status": "failed",
             "terminal_cause": "judge_timeout",
+            "evidence_status": "unavailable",
         }
     ]
     assert "unsafe_detail" not in json.dumps(result)
+
+
+def test_cancelled_results_preserve_good_evidence_when_other_artifacts_fail():
+    round_id = "arena-2026-09-07-mixed-evidence"
+    execute_runs = [
+        {
+            "run_id": "execute-%s" % label,
+            "submission_id": "sub-mixed",
+            "kind": "execute",
+            "stage": 1,
+            "icp_position": position,
+            "status": "accepted",
+            "output_ref": "arena/output-%s.json" % label,
+            "per_icp_score": None,
+            "result_doc": {"terminal_status": "accepted"},
+        }
+        for position, label in enumerate(("good", "missing", "invalid"))
+    ]
+    score_runs = [
+        {
+            "run_id": "score-%s" % label,
+            "scored_run_id": "execute-%s" % label,
+            "submission_id": "sub-mixed",
+            "kind": "score",
+            "stage": 1,
+            "icp_position": position,
+            "attempt": 1,
+            "status": "accepted",
+            "terminal_cause": "accepted",
+            "output_ref": "arena/score-%s.json" % label,
+        }
+        for position, label in enumerate(("good", "missing", "invalid"))
+    ]
+
+    class Store:
+        @staticmethod
+        def list_runs(_round_id, **filters):
+            return execute_runs if filters["kind"] == "execute" else score_runs
+
+    good = scoring.build_scoring_output(
+        "execute-good", [{"final_score": 50.0, "proof_quote": "private"}]
+    )
+
+    def get_bounded(ref, _limit):
+        if "/output-" in ref:
+            if ref.endswith("output-invalid.json"):
+                return b'{"secret": "raw execute secret"}'
+            return json.dumps(
+                {
+                    "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+                    "companies": [],
+                }
+            ).encode()
+        if ref.endswith("score-good.json"):
+            return json.dumps(good).encode()
+        if ref.endswith("score-missing.json"):
+            raise OSError("private bucket diagnostic")
+        return b"not-json"
+
+    service = object.__new__(ArenaService)
+    service._round = lambda _round_id: {
+        "round_id": round_id,
+        "status": "cancelled",
+        "cancel_reason": "scoring_incomplete",
+        "participants": [
+            {
+                "submission_id": "sub-mixed",
+                "miner_hotkey": "5" + "I" * 47,
+                "is_king": False,
+            }
+        ],
+    }
+    service._store = Store()
+    service._objects = SimpleNamespace(
+        get=lambda _ref: b'{"companies": []}',
+        get_bounded=get_bounded,
+    )
+
+    result = service.public_results(round_id, "sub-mixed")
+
+    assert [job["evidence_status"] for job in result["judge_jobs"]] == [
+        "available",
+        "unavailable",
+        "invalid",
+    ]
+    assert [item["scored_run_id"] for item in result["judge_evidence"]] == [
+        "execute-good"
+    ]
+    assert [job["output_status"] for job in result["execution_jobs"]] == [
+        "available",
+        "available",
+        "invalid",
+    ]
+    assert set(result["outputs"]) == {"execute-good", "execute-missing"}
+    serialized = json.dumps(result, sort_keys=True)
+    assert "private bucket diagnostic" not in serialized
+    assert "proof_quote" not in serialized
+    assert "raw execute secret" not in serialized
 
 
 def test_cancelled_results_refuse_an_unrelated_submission_before_run_lookup():

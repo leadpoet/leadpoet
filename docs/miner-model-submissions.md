@@ -98,11 +98,14 @@ If a round is cancelled after work has completed, the same result endpoint
 returns the completed data for participants frozen into that round. The response
 sets `round_status` to `cancelled`, includes `cancel_reason`, and sets
 `incomplete` to `true`. `judge_jobs` reports only terminal status and a safe
-cause. `judge_evidence` contains validated, redacted evidence for accepted judge
-jobs. Missing outputs and scores remain missing, and aggregate scores, ranking,
-king decisions, and rewards are not created for a cancelled round. Results stay
-private for every nonterminal round, and another round's submission ID does not
-grant access.
+cause. Its `evidence_status` says whether redacted evidence is `available`,
+`unavailable`, or `invalid`; it never includes an object-store or validation
+error. `execution_jobs` uses the same safe approach and labels each output as
+`available`, `unavailable`, or `invalid`. `judge_evidence` contains validated,
+redacted evidence for accepted judge jobs. Missing outputs and scores remain
+missing, and aggregate scores, ranking, king decisions, and rewards are not
+created for a cancelled round. Results stay private for every nonterminal round,
+and another round's submission ID does not grant access.
 
 Provider calls made while a round is running can incur the miner's upstream
 charges even if a later infrastructure failure cancels the round. A cancelled

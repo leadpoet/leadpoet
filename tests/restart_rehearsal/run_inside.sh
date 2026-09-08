@@ -67,6 +67,7 @@ fi
 
 export REHEARSAL_STATE_ROOT=/rehearsal-state
 export REHEARSAL_DURABLE_STATE_ROOT=/rehearsal-durable-state
+export GATEWAY_RESTART_TIMING_DIR="$REHEARSAL_STATE_ROOT/gateway-restart-timings-${RUN_ORDINAL}-${CANDIDATE_SHA}"
 DURABLE_SCHEMA_SEED_ROOT=/rehearsal-durable-schema-seed
 mkdir -p \
   "$REHEARSAL_STATE_ROOT" \
@@ -117,6 +118,13 @@ preserve_rehearsal_evidence() {
       "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-miner-maintenance-bootstrap.log" \
       2>/dev/null || true
   fi
+}
+
+emit_gateway_restart_timing_diagnostic() {
+  /usr/bin/python3.11 \
+    /source/scripts/gateway_restart_timing_diagnostic.py \
+    --timing-dir "$GATEWAY_RESTART_TIMING_DIR" \
+    --candidate-sha "$CANDIDATE_SHA" >&2 || true
 }
 wait_for_local_postgrest_startup() {
   local child_status=0
@@ -1515,6 +1523,7 @@ PY
   fi
   if [ "$RESTART_STATUS" -ne 0 ]; then
     echo "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=$RESTART_STATUS" >&2
+    emit_gateway_restart_timing_diagnostic
     for endpoint in /research-lab/status /attest; do
       body_file="$(mktemp)"
       http_status="$(

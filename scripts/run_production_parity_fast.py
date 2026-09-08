@@ -64,6 +64,10 @@ from scripts.materialize_production_parity_secrets import (  # noqa: E402
     SecretMaterializationError,
     _parse_environment_document,
 )
+from scripts.gateway_restart_timing_diagnostic import (  # noqa: E402
+    GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS,
+    GATEWAY_RESTART_TIMING_STAGES,
+)
 
 
 CRITICAL_STAGES = (
@@ -1715,6 +1719,7 @@ def _rehearsal_postgrest_startup_diagnostics(
 
 def _rehearsal_component_failure_diagnostics(
     *streams: str,
+    candidate_sha: str,
 ) -> list[dict[str, Any]]:
     """Retain only fixed diagnostics from complete component failure blocks."""
 
@@ -1722,6 +1727,7 @@ def _rehearsal_component_failure_diagnostics(
     for stream in streams:
         active_component: str | None = None
         active_diagnostics: list[dict[str, Any]] = []
+        timing_diagnostic_count = 0
         for raw_line in stream.splitlines():
             line = raw_line.strip()
             start = re.fullmatch(
@@ -1738,8 +1744,44 @@ def _rehearsal_component_failure_diagnostics(
                         "status": int(start.group(2)),
                     }
                 ]
+                timing_diagnostic_count = 0
                 continue
             if active_component is None:
+                continue
+            timing = None
+            if line.startswith("REHEARSAL_GATEWAY_RESTART_TIMING "):
+                timing_diagnostic_count += 1
+                timing = re.fullmatch(
+                    r"REHEARSAL_GATEWAY_RESTART_TIMING "
+                    r"candidate=([0-9a-f]{40}) stage=([a-z0-9_]{1,64}) "
+                    r"status=([a-z]{1,16}) "
+                    r"elapsed_seconds=([0-9]+(?:\.[0-9]{1,3})?)",
+                    line,
+                )
+                elapsed = float(timing.group(4)) if timing is not None else -1
+                if (
+                    timing is not None
+                    and active_component == "gateway"
+                    and timing_diagnostic_count == 1
+                    and timing.group(1) == candidate_sha
+                    and timing.group(2) in GATEWAY_RESTART_TIMING_STAGES
+                    and timing.group(3) == "failed"
+                    and 0 <= elapsed <= GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS
+                ):
+                    active_diagnostics.append(
+                        {
+                            "marker": "gateway_restart_timing",
+                            "final_stage": timing.group(2),
+                            "final_status": timing.group(3),
+                            "elapsed_seconds": round(elapsed, 3),
+                        }
+                    )
+                else:
+                    active_diagnostics = [
+                        item
+                        for item in active_diagnostics
+                        if item.get("marker") != "gateway_restart_timing"
+                    ]
                 continue
             for projected in _rehearsal_output_diagnostics(line):
                 if (
@@ -1782,6 +1824,22 @@ def _retained_component_failure_diagnostics(
                 "marker": marker,
                 "component": item["component"],
                 "status": item["status"],
+            }
+        elif (
+            marker == "gateway_restart_timing"
+            and isinstance(item.get("final_stage"), str)
+            and item["final_stage"] in GATEWAY_RESTART_TIMING_STAGES
+            and item.get("final_status") == "failed"
+            and type(item.get("elapsed_seconds")) in {int, float}
+            and 0
+            <= float(item["elapsed_seconds"])
+            <= GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS
+        ):
+            projected = {
+                "marker": marker,
+                "final_stage": item["final_stage"],
+                "final_status": item["final_status"],
+                "elapsed_seconds": round(float(item["elapsed_seconds"]), 3),
             }
         elif (
             marker == "http"
@@ -1926,7 +1984,11 @@ def _rehearsal_failure_diagnostics(
             exact_image_build_failed=exact_image_build_failed,
         ),
         *_rehearsal_postgrest_startup_diagnostics(stdout_text, stderr_text),
-        *_rehearsal_component_failure_diagnostics(stdout_text, stderr_text),
+        *_rehearsal_component_failure_diagnostics(
+            stdout_text,
+            stderr_text,
+            candidate_sha=candidate_sha,
+        ),
         *_rehearsal_output_diagnostics(output_tail),
     ]:
         if diagnostic not in output_diagnostics:

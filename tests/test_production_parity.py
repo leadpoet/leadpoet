@@ -42,6 +42,10 @@ from scripts import production_parity_snapshot as parity_snapshot
 from scripts import run_local_restart_rehearsal as restart_rehearsal
 from scripts import run_production_parity_fast as fast_parity
 from scripts import run_production_parity_full_host as full_host
+from scripts.gateway_restart_timing_diagnostic import (
+    GATEWAY_RESTART_TIMING_STAGES,
+    gateway_restart_timing_diagnostic,
+)
 from scripts.production_parity_snapshot import (
     DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
@@ -3829,6 +3833,279 @@ def test_gateway_failure_diagnostics_survive_later_validator_output(
     retained_encoded = json.dumps(retained, sort_keys=True)
     assert secret not in retained_encoded
     assert "validator output" not in retained_encoded
+
+
+@pytest.mark.parametrize(
+    "final_stage",
+    [
+        "lab_arena_claim_drain",
+        "lab_arena_destructive_authorization",
+        "v2_credential_envelope_preparation",
+    ],
+)
+def test_gateway_failure_retains_candidate_bound_timing_from_real_emitter(
+    tmp_path: Path,
+    final_stage: str,
+) -> None:
+    candidate_sha = "c" * 40
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function_start = restart.index("record_gateway_restart_timing() {")
+    function_end = restart.index(
+        "\nemit_gateway_restart_sentry_summary()", function_start
+    )
+    timing_function = restart[function_start:function_end]
+    timing_dir = tmp_path / "timings"
+    timing_file = timing_dir / "gateway-1700000000-123.jsonl"
+    emitted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "set -euo pipefail\n"
+                + timing_function
+                + "\nGATEWAY_RESTART_STARTED_EPOCH=$(date -u +%s)\n"
+                + f"GATEWAY_RESTART_TIMING_DIR={timing_dir!s}\n"
+                + f"GATEWAY_RESTART_TIMING_FILE={timing_file!s}\n"
+                + f"GATEWAY_DEPLOY_SHA={candidate_sha}\n"
+                + f'record_gateway_restart_timing "{final_stage}" "failed"\n'
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert f"GATEWAY_RESTART_TIMING stage={final_stage}" in emitted.stdout
+    run_inside = (ROOT / "tests/restart_rehearsal/run_inside.sh").read_text(
+        encoding="utf-8"
+    )
+    diagnostic_start = run_inside.index("emit_gateway_restart_timing_diagnostic() {")
+    diagnostic_end = run_inside.index("\n}", diagnostic_start) + 2
+    diagnostic_function = run_inside[diagnostic_start:diagnostic_end]
+    diagnostic_function = diagnostic_function.replace(
+        "/usr/bin/python3.11", str(Path(sys.executable).resolve())
+    ).replace("/source", str(ROOT))
+    projected = subprocess.run(
+        [
+            "bash",
+            "-c",
+            diagnostic_function + "\nemit_gateway_restart_timing_diagnostic",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={
+            **os.environ,
+            "CANDIDATE_SHA": candidate_sha,
+            "GATEWAY_RESTART_TIMING_DIR": str(timing_dir),
+        },
+    )
+    elapsed_match = re.search(
+        r"elapsed_seconds=([0-9]+(?:\.[0-9]+)?)", projected.stderr
+    )
+    assert elapsed_match is not None
+    elapsed_seconds = float(elapsed_match.group(1))
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=(
+            f"REHEARSAL_START component=gateway from={'b' * 40} "
+            f"candidate={candidate_sha} transition=forward "
+            "scenario=production_success scope=exact\n"
+        ),
+        stderr=(
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=1\n"
+            + projected.stderr
+            + "ERROR: exact gateway launcher failed\n"
+            + ("later validator output must not survive\n" * 512)
+            + "REHEARSAL_TIME_BUDGET_EXCEEDED "
+            "profile=prepush elapsed_seconds=608\n"
+        ),
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert {
+        "marker": "gateway_restart_timing",
+        "final_stage": final_stage,
+        "final_status": "failed",
+        "elapsed_seconds": elapsed_seconds,
+    } in diagnostics["output_markers"]
+    assert {"marker": "time_budget", "profile": "prepush"} in diagnostics[
+        "output_markers"
+    ]
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert "later validator output" not in encoded
+    projection_path = tmp_path / "failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert retained["timeout"] is True
+    assert {
+        "marker": "gateway_restart_timing",
+        "final_stage": final_stage,
+        "final_status": "failed",
+        "elapsed_seconds": elapsed_seconds,
+    } in retained["component_failure_diagnostics"]
+
+
+@pytest.mark.parametrize(
+    "timing_marker",
+    [
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'d' * 40} stage=lab_arena_claim_drain "
+            "status=failed elapsed_seconds=12.0"
+        ),
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=attacker_controlled "
+            "status=failed elapsed_seconds=12.0"
+        ),
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=v2_credential_envelope_preparation "
+            "status=failed elapsed_seconds=12.0 raw=must-not-survive"
+        ),
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=lab_arena_claim_drain "
+            "status=reached elapsed_seconds=10.0\n"
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=lab_arena_claim_drain "
+            "status=failed elapsed_seconds=12.0"
+        ),
+    ],
+)
+def test_gateway_failure_rejects_foreign_or_unsafe_timing_marker(
+    timing_marker: str,
+) -> None:
+    candidate_sha = "c" * 40
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=(
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=1\n"
+            + timing_marker
+            + "\nERROR: exact gateway launcher failed\n"
+        ),
+        stderr="",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert all(
+        marker.get("marker") != "gateway_restart_timing"
+        for marker in diagnostics["output_markers"]
+    )
+    assert "must-not-survive" not in json.dumps(diagnostics, sort_keys=True)
+
+
+def test_gateway_timing_marker_without_failed_gateway_is_ignored() -> None:
+    candidate_sha = "c" * 40
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        0,
+        stdout=(
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={candidate_sha} stage=completed "
+            "status=passed elapsed_seconds=12.0\n"
+        ),
+        stderr="",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert "output_markers" not in diagnostics
+    assert diagnostics["timeout"] is False
+
+
+def test_gateway_restart_timing_allowlist_covers_active_deploy_stages() -> None:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    active_stages = set(
+        re.findall(r'^GATEWAY_DEPLOY_STAGE="([a-z0-9_]+)"$', restart, re.MULTILINE)
+    )
+
+    assert active_stages
+    assert active_stages <= GATEWAY_RESTART_TIMING_STAGES
+    assert "lab_arena_claim_drain" in active_stages
+    assert "lab_arena_destructive_authorization" in active_stages
+    assert "v2_credential_envelope_preparation" in active_stages
+
+
+@pytest.mark.parametrize(
+    ("stage", "commit_sha", "accepted"),
+    [
+        ("bootstrap", None, True),
+        ("git_prepare", None, True),
+        ([], None, False),
+        ("v2_runtime_bootstrap", None, False),
+        ("git_prepare", "d" * 40, False),
+        ("v2_runtime_bootstrap", "c" * 40, True),
+    ],
+)
+def test_gateway_restart_timing_candidate_binding_preserves_early_diagnostics(
+    tmp_path: Path,
+    stage: object,
+    commit_sha: str | None,
+    accepted: bool,
+) -> None:
+    timing_dir = tmp_path / "timings"
+    timing_dir.mkdir()
+    (timing_dir / "gateway-1-2.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "leadpoet.gateway_restart_timing.v1",
+                "stage": stage,
+                "status": "failed",
+                "elapsed_seconds": 12.0,
+                "commit_sha": commit_sha,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    diagnostic = gateway_restart_timing_diagnostic(
+        timing_dir,
+        expected_candidate_sha="c" * 40,
+    )
+
+    assert (diagnostic is not None) is accepted
+
+
+def test_retained_gateway_timing_rejects_malformed_types() -> None:
+    retained = fast_parity._retained_component_failure_diagnostics(
+        [
+            {
+                "marker": "gateway_restart_timing",
+                "final_stage": ["lab_arena_claim_drain"],
+                "final_status": "failed",
+                "elapsed_seconds": 12.0,
+            },
+            {
+                "marker": "gateway_restart_timing",
+                "final_stage": "lab_arena_claim_drain",
+                "final_status": "failed",
+                "elapsed_seconds": "12.0",
+            },
+        ]
+    )
+
+    assert retained == []
 
 
 @pytest.mark.parametrize(

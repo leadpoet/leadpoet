@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import time
 from unittest.mock import patch
 from urllib.request import urlopen
@@ -81,6 +82,53 @@ def _clone_service_role_token(secret: str) -> str:
     return f"{header}.{payload}.{encoded_signature.rstrip('=')}"
 
 
+def _postgrest_run_command(
+    *,
+    container: str,
+    database_port: int,
+    postgrest_port: int,
+    jwt_secret: str,
+    native_linux: bool,
+) -> list[str]:
+    network = (
+        [
+            "--network",
+            "host",
+            "--env",
+            f"PGRST_SERVER_PORT={postgrest_port}",
+        ]
+        if native_linux
+        else [
+            "--add-host",
+            "host.docker.internal:host-gateway",
+            "--publish",
+            f"127.0.0.1:{postgrest_port}:3000",
+        ]
+    )
+    database_host = "127.0.0.1" if native_linux else "host.docker.internal"
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--detach",
+        "--name",
+        container,
+        *network,
+        "--env",
+        (
+            "PGRST_DB_URI=postgres://postgres:postgres@"
+            f"{database_host}:{database_port}/postgres"
+        ),
+        "--env",
+        "PGRST_DB_SCHEMAS=public",
+        "--env",
+        "PGRST_DB_ANON_ROLE=anon",
+        "--env",
+        f"PGRST_JWT_SECRET={jwt_secret}",
+        "postgrest/postgrest:v12.2.8",
+    ]
+
+
 @pytest.fixture
 def clone_database():
     database = _database_with_migrations(MIGRATIONS)
@@ -91,37 +139,20 @@ def clone_database():
     started = False
     try:
         result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--detach",
-                "--name",
-                postgrest,
-                "--add-host",
-                "host.docker.internal:host-gateway",
-                "--publish",
-                f"127.0.0.1:{port}:3000",
-                "--env",
-                (
-                    "PGRST_DB_URI=postgres://postgres:postgres@"
-                    f"host.docker.internal:{dsn['port']}/postgres"
-                ),
-                "--env",
-                "PGRST_DB_SCHEMAS=public",
-                "--env",
-                "PGRST_DB_ANON_ROLE=anon",
-                "--env",
-                f"PGRST_JWT_SECRET={jwt_secret}",
-                "postgrest/postgrest:v12.2.8",
-            ],
+            _postgrest_run_command(
+                container=postgrest,
+                database_port=int(dsn["port"]),
+                postgrest_port=port,
+                jwt_secret=jwt_secret,
+                native_linux=sys.platform.startswith("linux"),
+            ),
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
         if result.returncode != 0:
-            pytest.skip("PostgREST container could not start")
+            pytest.fail("PostgREST container could not start")
         started = True
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
@@ -267,6 +298,43 @@ def _parity_environment(
                 f"{RUN_ID}/gateway"
             ),
         },
+    )
+
+
+def test_postgrest_command_keeps_postgres_on_platform_loopback():
+    linux = _postgrest_run_command(
+        container="linux-clone",
+        database_port=54321,
+        postgrest_port=30001,
+        jwt_secret="test-jwt-secret",
+        native_linux=True,
+    )
+    assert linux[linux.index("--network") : linux.index("--network") + 2] == [
+        "--network",
+        "host",
+    ]
+    assert "--publish" not in linux
+    assert "PGRST_SERVER_PORT=30001" in linux
+    assert (
+        "PGRST_DB_URI=postgres://postgres:postgres@127.0.0.1:54321/postgres"
+        in linux
+    )
+
+    desktop = _postgrest_run_command(
+        container="desktop-clone",
+        database_port=54321,
+        postgrest_port=30001,
+        jwt_secret="test-jwt-secret",
+        native_linux=False,
+    )
+    assert "--network" not in desktop
+    assert "host.docker.internal:host-gateway" in desktop
+    assert "127.0.0.1:30001:3000" in desktop
+    assert not any(item.startswith("PGRST_SERVER_PORT=") for item in desktop)
+    assert (
+        "PGRST_DB_URI=postgres://postgres:postgres@"
+        "host.docker.internal:54321/postgres"
+        in desktop
     )
 
 

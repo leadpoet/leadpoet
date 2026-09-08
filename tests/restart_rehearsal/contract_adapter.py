@@ -599,7 +599,6 @@ def _gateway_secret() -> dict[str, str]:
         "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
         "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
         "RESEARCH_LAB_RECEIPTS_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
         "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",

@@ -228,13 +228,6 @@ _FORCED_KEYS = {
     "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
     "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED",
     "ENABLE_FULFILLMENT",
-    "RESEARCH_LAB_AUTO_START_WORKERS",
-    "RESEARCH_LAB_AUTO_START_HOSTED_WORKERS",
-    "RESEARCH_LAB_AUTO_START_SCORING_WORKERS",
-    "RESEARCH_LAB_HOSTED_RUNS_ENABLED",
-    "RESEARCH_LAB_HOSTED_WORKER_ENABLED",
-    "RESEARCH_LAB_HOSTED_WORKER_DRY_RUN",
-    "RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS",
     "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED",
 }
 
@@ -462,30 +455,13 @@ def build_gateway_environment(
         "GATEWAY_OTEL_ENABLED": "0",
         "GATEWAY_OTEL_ENDPOINT": "",
         "GATEWAY_OTEL_METRICS_ENDPOINT": "",
-        # The clone must use real persistence and scoring code, but no path may
-        # accept miners, create loops, mutate Git/model pointers, or promote.
+        # Use real persistence and scoring with isolated clone state.
         "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
         "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
-        "RESEARCH_LAB_AUTO_START_WORKERS": "true",
-        "RESEARCH_LAB_AUTO_START_HOSTED_WORKERS": "true",
-        "RESEARCH_LAB_AUTO_START_SCORING_WORKERS": "true",
-        "RESEARCH_LAB_SCORING_WORKER_ENABLED": "true",
-        "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED": "true",
         "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
-        "RESEARCH_LAB_PAID_LOOPS_ENABLED": "false",
-        "RESEARCH_LAB_LOOP_TOPUPS_ENABLED": "false",
-        # Full V2 startup requires the production fleet topology. Hosted
-        # processes start in dry-run mode so copied queue rows are never
-        # claimed or executed.
-        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_WORKER_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_WORKER_DRY_RUN": "true",
-        "RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS": "0",
         # Intake is exercised explicitly after the rebenchmark and weight
         # proofs. Nothing may claim its queued provenance work in this run.
         "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
-        "RESEARCH_LAB_AUTO_PROMOTION_ENABLED": "false",
-        "RESEARCH_LAB_AUTO_COMMIT_ENABLED": "false",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED": "false",
         "RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED": "false",

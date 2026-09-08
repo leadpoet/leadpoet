@@ -7,6 +7,7 @@ terminates in the validator enclave.
 
 from __future__ import annotations
 
+import argparse
 import errno
 import ipaddress
 import json
@@ -15,20 +16,28 @@ import socket
 import threading
 import time
 import os
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_ENDPOINT_HOST,
     CHAIN_ENDPOINT_PORT,
+    chain_source_boundary_for_profile_v2,
     chain_source_policy_hash,
 )
+from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import validate_chain_signing_profile
 from leadpoet_observability import capture_failure, record_retry, record_stage
 
 
 AF_VSOCK = 40
 VMADDR_CID_ANY = 0xFFFFFFFF
 CHAIN_RELAY_VSOCK_PORT = 5002
+TESTNET401_CHAIN_RELAY_VSOCK_PORT = 5004
+TESTNET401_CHAIN_PROFILE_HASH = (
+    "sha256:d3ee86c262b6616cd6af1d50de3218795c8dbb738648d0563a2687e5bc846bdd"
+)
 MAX_CONTROL_BYTES = 16 * 1024
 MAX_BYTES_PER_DIRECTION = 32 * 1024 * 1024
 RELAY_CHUNK_BYTES = 64 * 1024
@@ -56,6 +65,56 @@ class ValidatorChainRelayCleanupError(ValidatorChainRelayV2Error):
         super().__init__("chain connection cleanup failed")
         self.primary_error = primary_error
         self._resources = (resource,)
+
+
+def _chain_relay_policy(
+    chain_signing_profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    if chain_signing_profile is None:
+        return {
+            "chain_host": CHAIN_ENDPOINT_HOST,
+            "chain_archive_host": CHAIN_ARCHIVE_ENDPOINT_HOST,
+            "policy_hash": chain_source_policy_hash(),
+            "port": CHAIN_RELAY_VSOCK_PORT,
+            "dependency": "finney",
+        }
+    try:
+        profile = validate_chain_signing_profile(chain_signing_profile)
+        boundary = chain_source_boundary_for_profile_v2(profile)
+    except (TypeError, ValueError) as exc:
+        raise ValidatorChainRelayV2Error(
+            "chain relay signing profile is invalid"
+        ) from exc
+    if (
+        sha256_json(profile) != TESTNET401_CHAIN_PROFILE_HASH
+        or profile["network"] != "test"
+        or boundary["chain_host"] != "test.finney.opentensor.ai"
+        or boundary["chain_archive_host"] != "test.finney.opentensor.ai"
+    ):
+        raise ValidatorChainRelayV2Error(
+            "chain relay signing profile is not exact testnet401"
+        )
+    return {
+        "chain_host": boundary["chain_host"],
+        "chain_archive_host": boundary["chain_archive_host"],
+        "policy_hash": boundary["chain_source_policy_hash"],
+        "port": TESTNET401_CHAIN_RELAY_VSOCK_PORT,
+        "dependency": "testnet401",
+    }
+
+
+def _load_testnet401_chain_signing_profile(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValidatorChainRelayV2Error(
+            "chain relay signing profile is unavailable"
+        ) from exc
+    if not isinstance(value, dict):
+        raise ValidatorChainRelayV2Error(
+            "chain relay signing profile is invalid"
+        )
+    return value
 
 
 def _shutdown_and_close_socket(candidate: Any) -> bool:
@@ -111,7 +170,13 @@ def _read_control(connection: Any) -> dict:
     return value
 
 
-def _validate_control(value: Any) -> str:
+def _validate_control(
+    value: Any,
+    *,
+    chain_host: str = CHAIN_ENDPOINT_HOST,
+    chain_archive_host: str = CHAIN_ARCHIVE_ENDPOINT_HOST,
+    policy_hash: Optional[str] = None,
+) -> str:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
         "host",
@@ -124,20 +189,27 @@ def _validate_control(value: Any) -> str:
     destination_host = value.get("host")
     if (
         destination_host
-        not in (CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST)
+        not in (chain_host, chain_archive_host)
         or value.get("port") != CHAIN_ENDPOINT_PORT
     ):
         raise ValidatorChainRelayV2Error("relay destination is not the measured chain")
-    if value.get("policy_hash") != chain_source_policy_hash():
+    expected_policy_hash = policy_hash or chain_source_policy_hash(
+        chain_host=chain_host,
+        chain_archive_host=chain_archive_host,
+    )
+    if value.get("policy_hash") != expected_policy_hash:
         raise ValidatorChainRelayV2Error("relay policy hash differs")
     return str(destination_host)
 
 
 def _global_addresses(
     destination_host: str,
+    *,
+    chain_host: str = CHAIN_ENDPOINT_HOST,
+    chain_archive_host: str = CHAIN_ARCHIVE_ENDPOINT_HOST,
     resolver: Callable[..., Iterable[Any]] = socket.getaddrinfo,
 ) -> list:
-    if destination_host not in (CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST):
+    if destination_host not in (chain_host, chain_archive_host):
         raise ValidatorChainRelayV2Error("chain destination is not measured")
     try:
         entries = resolver(
@@ -166,13 +238,17 @@ def _global_addresses(
 def _connect_chain(
     destination_host: str,
     *,
+    chain_host: str = CHAIN_ENDPOINT_HOST,
+    chain_archive_host: str = CHAIN_ARCHIVE_ENDPOINT_HOST,
     resolver: Callable[..., Iterable[Any]] = socket.getaddrinfo,
     socket_factory: Callable[..., Any] = socket.socket,
 ) -> Any:
     last_error = None
     for family, socktype, protocol, address in _global_addresses(
         destination_host,
-        resolver,
+        chain_host=chain_host,
+        chain_archive_host=chain_archive_host,
+        resolver=resolver,
     ):
         connection = socket_factory(family, socktype, protocol)
         try:
@@ -226,19 +302,31 @@ def handle_chain_relay_connection(
     cleanup_failure_callback: Optional[
         Callable[[Any, str, Optional[Exception]], None]
     ] = None,
+    chain_host: str = CHAIN_ENDPOINT_HOST,
+    chain_archive_host: str = CHAIN_ARCHIVE_ENDPOINT_HOST,
+    policy_hash: Optional[str] = None,
 ) -> None:
     upstream = None
     primary_error = None  # type: Optional[Exception]
     cleanup_failed = False
     try:
         request = _read_control(connection)
-        destination_host = _validate_control(request)
+        expected_policy_hash = policy_hash or chain_source_policy_hash(
+            chain_host=chain_host,
+            chain_archive_host=chain_archive_host,
+        )
+        destination_host = _validate_control(
+            request,
+            chain_host=chain_host,
+            chain_archive_host=chain_archive_host,
+            policy_hash=expected_policy_hash,
+        )
         upstream = connector(destination_host)
         _send_control(
             connection,
             {
                 "status": "connected",
-                "policy_hash": chain_source_policy_hash(),
+                "policy_hash": expected_policy_hash,
             },
         )
         _relay(connection, upstream)
@@ -286,11 +374,27 @@ class ValidatorChainRelayV2:
         *,
         port: int = CHAIN_RELAY_VSOCK_PORT,
         socket_factory: Callable[..., Any] = socket.socket,
-        connector: Callable[[str], Any] = _connect_chain,
+        connector: Optional[Callable[[str], Any]] = None,
+        chain_signing_profile: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        self.port = int(port)
+        policy = _chain_relay_policy(chain_signing_profile)
+        if int(port) != int(policy["port"]):
+            raise ValidatorChainRelayV2Error(
+                "chain relay port differs from the measured profile"
+            )
+        self.port = int(policy["port"])
+        self._chain_host = str(policy["chain_host"])
+        self._chain_archive_host = str(policy["chain_archive_host"])
+        self._policy_hash = str(policy["policy_hash"])
+        self._dependency = str(policy["dependency"])
         self._socket_factory = socket_factory
-        self._connector = connector
+        self._connector = connector or (
+            lambda destination_host: _connect_chain(
+                destination_host,
+                chain_host=self._chain_host,
+                chain_archive_host=self._chain_archive_host,
+            )
+        )
         self._listener = None  # type: Optional[Any]
         self._thread = None  # type: Optional[threading.Thread]
         self._stop = threading.Event()
@@ -541,7 +645,7 @@ class ValidatorChainRelayV2:
                 else "stopped"
             ),
             "port": self.port,
-            "policy_hash": chain_source_policy_hash(),
+            "policy_hash": self._policy_hash,
             "socket_cleanup_failure_count": cleanup_count,
             "pending_endpoint_cleanup_count": pending_cleanup_count,
         }
@@ -628,6 +732,9 @@ class ValidatorChainRelayV2:
                 connection,
                 connector=self._connector,
                 cleanup_failure_callback=self._retain_endpoint_cleanup_failure,
+                chain_host=self._chain_host,
+                chain_archive_host=self._chain_archive_host,
+                policy_hash=self._policy_hash,
             )
         except Exception as exc:
             record_retry(
@@ -636,7 +743,7 @@ class ValidatorChainRelayV2:
                 stage="chain_relay_request",
                 attempt=1,
                 attempts=1,
-                dependency="finney",
+                dependency=self._dependency,
                 exception_class=type(exc).__name__,
                 runtime_sha=(
                     os.environ.get("GITHUB_SHA")
@@ -651,7 +758,7 @@ class ValidatorChainRelayV2:
                 stage="chain_relay_request",
                 status="passed",
                 duration_seconds=time.monotonic() - started,
-                dependency="finney",
+                dependency=self._dependency,
                 runtime_sha=(
                     os.environ.get("GITHUB_SHA")
                     or os.environ.get("GIT_COMMIT")
@@ -682,8 +789,20 @@ class ValidatorChainRelayV2:
                 return 0 if stop_event.is_set() else 1
 
 
-def main() -> int:
-    relay = ValidatorChainRelayV2()
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--chain-signing-profile", type=Path)
+    parser.add_argument("--port", type=int, default=CHAIN_RELAY_VSOCK_PORT)
+    args = parser.parse_args(argv or [])
+    profile = (
+        _load_testnet401_chain_signing_profile(args.chain_signing_profile)
+        if args.chain_signing_profile is not None
+        else None
+    )
+    relay = ValidatorChainRelayV2(
+        port=args.port,
+        chain_signing_profile=profile,
+    )
     print(json.dumps(relay.start(), sort_keys=True), flush=True)
     try:
         exit_code = relay.wait_for_accept_loop()
@@ -697,4 +816,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(os.sys.argv[1:]))

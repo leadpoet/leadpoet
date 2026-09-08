@@ -145,6 +145,13 @@ def prepare_nitro_cli_environment(
     }
 
 
+def source_build_environment(repository: Path) -> dict[str, str]:
+    return {
+        "RESEARCH_LAB_RUNTIME_SOURCE_ROOT": str(repository),
+        "ATTESTED_RUNTIME_GIT_SOURCE_ROOT": str(ROOT / "gateway-stage-source"),
+    }
+
+
 def build_config(*, repository: Path, candidate: str, run_id: str,
                  instance_id: str, expiry: int) -> dict[str, Any]:
     return {
@@ -273,6 +280,7 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
         "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(ROOT / "offline-artifacts/validator-runtime"),
         "VALIDATOR_V2_BUILD_COMMIT": candidate,
         "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(ROOT / "docker.lock"),
+        **source_build_environment(repository),
         **NATIVE_BUILD_CACHE_ENV,
         **nitro_environment,
     })

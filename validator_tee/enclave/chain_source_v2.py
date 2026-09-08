@@ -55,6 +55,7 @@ from leadpoet_canonical.hotkey_authority_v2 import signed_extrinsic_hash_v2
 AF_VSOCK = 40
 PARENT_CID = 3
 CHAIN_RELAY_VSOCK_PORT = 5002
+TESTNET401_CHAIN_RELAY_VSOCK_PORT = 5004
 MAX_CONTROL_BYTES = 16 * 1024
 DEFAULT_CA_BUNDLE = "/etc/pki/tls/certs/ca-bundle.crt"
 FINALIZATION_RPC_PACING_SECONDS = 1.05
@@ -62,6 +63,23 @@ FINALIZATION_RPC_PACING_SECONDS = 1.05
 
 class ValidatorChainSourceV2Error(RuntimeError):
     """The validator enclave could not authenticate a complete chain snapshot."""
+
+
+def _chain_relay_vsock_port() -> int:
+    boundary = (CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST)
+    if boundary == (
+        "test.finney.opentensor.ai",
+        "test.finney.opentensor.ai",
+    ):
+        return TESTNET401_CHAIN_RELAY_VSOCK_PORT
+    if boundary == (
+        "entrypoint-finney.opentensor.ai",
+        "archive.chain.opentensor.ai",
+    ):
+        return CHAIN_RELAY_VSOCK_PORT
+    raise ValidatorChainSourceV2Error(
+        "validator chain relay has no measured port for this boundary"
+    )
 
 
 class ValidatorChainTransportCleanupError(ValidatorChainSourceV2Error):
@@ -252,7 +270,7 @@ class EnclaveChainRpcTransportV2:
         try:
             parent = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
             parent.settimeout(CHAIN_RPC_TIMEOUT_MS / 1000.0)
-            parent.connect((PARENT_CID, CHAIN_RELAY_VSOCK_PORT))
+            parent.connect((PARENT_CID, _chain_relay_vsock_port()))
             request = canonical_json(
                 {
                     "schema_version": "leadpoet.validator_chain_relay.v2",

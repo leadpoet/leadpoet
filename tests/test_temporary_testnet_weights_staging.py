@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 
 import pytest
 
@@ -190,6 +191,22 @@ def test_nitro_cli_environment_rejects_non_rpm_blob_shape(tmp_path):
             artifacts=tmp_path / "nitro-cli-artifacts",
             blobs=blobs,
         )
+
+
+def test_drand_cache_assignment_runs_in_nonlogin_environment():
+    builder = Path(stage.__file__).resolve().parents[1] / "validator_tee/scripts/build_drand_cabi_v2.sh"
+    assignment = next(line for line in builder.read_text().splitlines() if line.startswith("CACHE_DIR="))
+    assert stage.NATIVE_BUILD_CACHE_ENV == {
+        "VALIDATOR_DRAND_CARGO_CACHE_DIR": "/run/leadpoet-testnet401/drand-cargo-cache",
+    }
+    command = ["bash", "-c", 'set -eu\n' + assignment + '\nprintf "%s" "$CACHE_DIR"']
+    absent = subprocess.run(command, env={"PATH": os.environ["PATH"]}, capture_output=True, text=True)
+    assert absent.returncode != 0
+    assert "unbound variable" in absent.stderr
+    result = subprocess.run(command, env={"PATH": os.environ["PATH"], **stage.NATIVE_BUILD_CACHE_ENV},
+                            capture_output=True, text=True, check=True)
+    assert result.stdout == "/run/leadpoet-testnet401/drand-cargo-cache"
+    assert "HOME" not in stage.NATIVE_BUILD_CACHE_ENV
 
 
 @pytest.mark.parametrize("field,value", [

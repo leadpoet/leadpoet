@@ -1468,7 +1468,16 @@ def run_launch(config: Mapping[str, Any], *, confirm_instance_id: str) -> Dict[s
         )
         runner.start(
             "validator_chain_relay",
-            [config["python_bin"], "-u", "-m", "validator_tee.host.chain_relay_v2"],
+            [
+                config["python_bin"],
+                "-u",
+                "-m",
+                "validator_tee.host.chain_relay_v2",
+                "--chain-signing-profile",
+                validator["chain_profile"],
+                "--port",
+                "5004",
+            ],
             env=validator_env,
             cwd=repo_root,
         )

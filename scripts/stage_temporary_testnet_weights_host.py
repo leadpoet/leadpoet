@@ -36,6 +36,9 @@ DIAGNOSTIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 DIAGNOSTIC_LOCATION_RE = re.compile(r"^[A-Za-z0-9_./-]{1,220}:[0-9]{1,6}$")
 NITRO_CLI_ARTIFACTS = ROOT / "nitro-cli-artifacts"
 NITRO_CLI_BLOBS = Path("/usr/share/nitro_enclaves/blobs")
+NATIVE_BUILD_CACHE_ENV = {
+    "VALIDATOR_DRAND_CARGO_CACHE_DIR": str(ROOT / "drand-cargo-cache"),
+}
 NITRO_CLI_BLOB_NAMES = (
     "bzImage",
     "bzImage.config",
@@ -270,6 +273,7 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
         "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(ROOT / "offline-artifacts/validator-runtime"),
         "VALIDATOR_V2_BUILD_COMMIT": candidate,
         "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(ROOT / "docker.lock"),
+        **NATIVE_BUILD_CACHE_ENV,
         **nitro_environment,
     })
 

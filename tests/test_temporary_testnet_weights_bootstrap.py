@@ -167,6 +167,7 @@ def test_fresh_epoch_authority_is_created_after_measured_boot_before_apps():
 
 
 def test_validator_runtime_is_pinned_to_cid18_and_loopback_gateway():
+    source = Path(bootstrap.__file__).read_text(encoding="utf-8")
     assert bootstrap.SAFE_VALIDATOR_ENV["ENCLAVE_CID"] == "18"
     assert bootstrap.SAFE_VALIDATOR_ENV["GATEWAY_URL"] == "http://127.0.0.1:8000"
     assert (
@@ -177,6 +178,8 @@ def test_validator_runtime_is_pinned_to_cid18_and_loopback_gateway():
     assert bootstrap.SAFE_VALIDATOR_ENV["VALIDATOR_SUBTENSOR_NETWORK"] == "test"
     assert bootstrap.SAFE_VALIDATOR_ENV["RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED"] == "true"
     assert bootstrap.SAFE_VALIDATOR_ENV["BURN_TARGET_UID"] == "0"
+    assert '"--chain-signing-profile"' in source
+    assert '"--port",\n                "5004"' in source
     assert (
         bootstrap.SAFE_VALIDATOR_ENV["EXPECTED_BURN_TARGET_HOTKEY"]
         == bootstrap.EXPECTED_BURN_TARGET_HOTKEY

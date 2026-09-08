@@ -115,6 +115,39 @@ RUNTIME_CALLBACK_TOKEN_VOCAB = (
     "valueerror", "verify",
     "validate_testnet401_cutover_parent_v1",
 )
+RUNTIME_WEIGHT_INPUT_HTTP400_REASONS = (
+    (b"Invalid V2 weight input request:", "weight_input_request_invalid"),
+    (b"Invalid netuid:", "weight_input_netuid_invalid"),
+    (
+        b"V2 weight input request does not bind the calculation snapshot",
+        "weight_input_calculation_snapshot_unbound",
+    ),
+    (
+        b"V2 weight input request differs from snapshot at",
+        "weight_input_calculation_scope_differs",
+    ),
+    (
+        b"V2 weight input request differs from the Research Lab allocation",
+        "weight_input_allocation_differs",
+    ),
+    (b"block drift is too large", "weight_input_block_drift_too_large"),
+    (
+        b"does not map to official subnet epoch",
+        "weight_input_settlement_epoch_mapping_differs",
+    ),
+    (
+        b"weight submission snapshot is not in the live official subnet epoch",
+        "weight_input_snapshot_not_in_live_epoch",
+    ),
+    (
+        b"weight submission is outside the live official subnet epoch window",
+        "weight_input_outside_live_epoch_window",
+    ),
+    (
+        b"finalized weight snapshot is outside the permitted official subnet epoch lag buffer",
+        "weight_input_finalized_snapshot_outside_lag_buffer",
+    ),
+)
 PRIVATE_ASSET_NAMES = (
     "validator.env",
     "testnet-hotkey-config.json",
@@ -1160,6 +1193,7 @@ def _validate_runtime_log_diagnostics(value: Any) -> None:
         "progress_markers", "failure_markers", "exception_types",
         "source_locations", "latest_epoch_id", "latest_block",
         "reason_codes", "http_statuses", "allocation_build_callbacks",
+        "latest_weight_input_http400_category",
     }
     progress_allowed = {
         "gateway_application": {
@@ -1219,6 +1253,7 @@ def _validate_runtime_log_diagnostics(value: Any) -> None:
         "fresh_testnet401_finalized_origin_invalid",
         "fresh_testnet401_finalized_origin_not_empty",
     }
+    reason_allowed.update(label for _, label in RUNTIME_WEIGHT_INPUT_HTTP400_REASONS)
     endpoint_allowed = {
         "allocation_handoff", "weight_inputs", "compact_submission",
         "compact_finalization", "authority_health",
@@ -1301,6 +1336,11 @@ def _validate_runtime_log_diagnostics(value: Any) -> None:
                 not isinstance(item[name], int) or not 0 <= item[name] <= 10**20 - 1
             ):
                 raise TemporaryHostError("runtime log diagnostics differ")
+        latest_http400_category = item.get("latest_weight_input_http400_category")
+        if latest_http400_category is not None and latest_http400_category not in {
+            label for _, label in RUNTIME_WEIGHT_INPUT_HTTP400_REASONS
+        }:
+            raise TemporaryHostError("runtime log diagnostics differ")
 
 
 def runtime_log_diagnostic_program(
@@ -1325,6 +1365,8 @@ def runtime_log_diagnostic_program(
         "exceptions = tuple(name.encode() for name in ('AssertionError', 'AuthoritativeWeightFlowV2Error', 'ChampionSettlementV2Error', 'ConnectionError', 'CoordinatorAllocationSourceV2Error', 'CoordinatorChainSourceV2Error', 'FileNotFoundError', 'HTTPError', 'HTTPException', 'PermissionError', 'ResearchLabV2AuthorityError', 'RuntimeError', 'TemporaryTestnet401FirstAllocationError', 'TimeoutError', 'ValueError'))",
         "reasons = ((b'allocation response gzip is invalid', 'allocation_response_gzip_invalid'), (b'allocation response gzip is truncated', 'allocation_response_gzip_truncated'), (b'allocation response gzip exceeds size limit', 'allocation_response_gzip_size_limit'), (b'allocation response exceeds wire size limit', 'allocation_response_wire_size_limit'), (b'unsupported allocation response encoding', 'allocation_response_encoding_unsupported'), (b'allocation fetch exhausted without a response', 'allocation_fetch_exhausted'), (b'Research Lab allocation arithmetic or policy verification failed', 'allocation_policy_verification_failed'), (b'Authoritative V2 weight input reconstruction failed closed', 'weight_input_reconstruction_failed'), (b'champion V2 cutover blocked:', 'champion_v2_cutover_blocked'), (b'chain-realized settlement activation is unavailable or ambiguous', 'chain_realized_settlement_activation_unavailable_or_ambiguous'), (b'chain-realized settlement activation is invalid', 'chain_realized_settlement_activation_invalid'), (b'fresh allocation readiness is restricted to testnet401', 'fresh_allocation_readiness_wrong_network'), (b'fresh testnet401 allocation history is not empty', 'fresh_testnet401_allocation_history_not_empty'), (b'temporary first allocation is not the approved testnet401 origin', 'temporary_first_allocation_origin_unapproved'), (b'temporary first allocation cutover root differs', 'temporary_first_allocation_cutover_root_differs'), (b'temporary first allocation cutover receipt is unavailable', 'temporary_first_allocation_cutover_receipt_unavailable'), (b'temporary first allocation cutover receipt differs', 'temporary_first_allocation_cutover_receipt_differs'), (b'testnet401 settlement activation is ambiguous', 'testnet401_settlement_activation_ambiguous'), (b'fresh testnet401 cutover authority is unavailable or ambiguous', 'fresh_testnet401_cutover_authority_unavailable_or_ambiguous'), (b'fresh testnet401 cutover authority differs', 'fresh_testnet401_cutover_authority_differs'), (b'fresh testnet401 cutover receipt differs', 'fresh_testnet401_cutover_receipt_differs'), (b'fresh testnet401 cutover parent is duplicated', 'fresh_testnet401_cutover_parent_duplicated'), (b'temporary first allocation cutover parent is absent', 'temporary_first_allocation_cutover_parent_absent'), (b'fresh testnet401 allocation origin is invalid', 'fresh_testnet401_allocation_origin_invalid'), (b'fresh testnet401 finalized identities differ', 'fresh_testnet401_finalized_identities_differ'), (b'fresh testnet401 validator LastUpdate is absent', 'fresh_testnet401_validator_last_update_absent'), (b'fresh testnet401 finalized origin is invalid', 'fresh_testnet401_finalized_origin_invalid'), (b'fresh testnet401 finalized origin is not empty', 'fresh_testnet401_finalized_origin_not_empty'), (b'request_shape_invalid', 'request_shape_invalid'), (b'primary_validator_configuration_missing', 'primary_validator_configuration_missing'), (b'validator_hotkey_unauthorized', 'validator_hotkey_unauthorized'), (b'netuid_unauthorized', 'netuid_unauthorized'), (b'calculation_snapshot_hash_mismatch', 'calculation_snapshot_hash_mismatch'), (b'calculation_scope_mismatch', 'calculation_scope_mismatch'), (b'allocation_hash_mismatch', 'allocation_hash_mismatch'), (b'validator_signature_invalid', 'validator_signature_invalid'), (b'epoch_authority_rejected', 'epoch_authority_rejected'), (b'compact_ancestry_unavailable', 'compact_ancestry_unavailable'))",
         "reasons += ((b'V2 release manifest is unavailable', 'v2_release_manifest_unavailable'),)",
+        f"weight_input_400_reasons = {RUNTIME_WEIGHT_INPUT_HTTP400_REASONS!r}",
+        "reasons += weight_input_400_reasons",
         f"callback_types = {RUNTIME_CALLBACK_ERROR_TYPES!r}",
         f"callback_vocab = {RUNTIME_CALLBACK_TOKEN_VOCAB!r}",
         "rows = []",
@@ -1368,6 +1410,12 @@ def runtime_log_diagnostic_program(
         "            else:",
         "                if name == 'validator_application' and b'Authoritative V2 Research Lab allocation failed closed' in line: found_statuses.append({'endpoint': 'allocation_handoff', 'status': int(status.group(1))})",
         "    row['http_statuses'] = found_statuses[-8:]",
+        "    latest_weight_input_http400_category = None",
+        "    for line in data.splitlines():",
+        "        if b'gateway V2 weight input request failed with HTTP 400:' not in line: continue",
+        "        matched = next((label for token,label in weight_input_400_reasons if token in line), None)",
+        "        if matched is not None: latest_weight_input_http400_category = matched",
+        "    if latest_weight_input_http400_category is not None: row['latest_weight_input_http400_category'] = latest_weight_input_http400_category",
         "    epochs = re.findall(rb'SUBMITTING WEIGHTS FOR EPOCH ([0-9]{1,20})', data)",
         "    blocks = re.findall(rb'Block: ([0-9]{1,20}) \\(block ', data)",
         "    if epochs: row['latest_epoch_id'] = int(epochs[-1])",

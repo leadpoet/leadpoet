@@ -794,6 +794,12 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False):
         "chain-realized settlement activation is unavailable or ambiguous\n"
         "chain-realized settlement activation is invalid\n"
         "fresh testnet401 allocation origin is invalid\n"
+        "GatewayWeightInputsV2Error: gateway V2 weight input request failed "
+        "with HTTP 400: {\"detail\":\"block drift is too large\","
+        "\"secret\":\"http400-secret-canary\"}\n"
+        "GatewayWeightInputsV2Error: gateway V2 weight input request failed "
+        "with HTTP 400: {\"detail\":\"V2 weight input request differs from "
+        "snapshot at block\",\"url\":\"https://private.example/http400\"}\n"
         '{"event": "automatic_weight_tick_failed", '
         '"failure_type": "RuntimeError"} secret-private-detail\n'
         'File "/private/path/validator.py", line 5557\n'
@@ -831,6 +837,8 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
     assert "secret-value" not in result.stdout
     assert "private-request-body" not in result.stdout
     assert "raw-payload" not in result.stdout
+    assert "http400-secret-canary" not in result.stdout
+    assert "private.example/http400" not in result.stdout
     value = json.loads(result.stdout)
     temporary_host._validate_runtime_log_diagnostics(value)
     gateway, validator = value["logs"]
@@ -877,7 +885,12 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
         "chain_realized_settlement_activation_unavailable_or_ambiguous",
         "chain_realized_settlement_activation_invalid",
         "fresh_testnet401_allocation_origin_invalid",
+        "weight_input_calculation_scope_differs",
+        "weight_input_block_drift_too_large",
     ]
+    assert validator["latest_weight_input_http400_category"] == (
+        "weight_input_calculation_scope_differs"
+    )
     assert validator["http_statuses"] == [
         {"endpoint": "allocation_handoff", "status": 503}
     ]

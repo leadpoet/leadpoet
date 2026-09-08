@@ -797,7 +797,7 @@
       "symbol": "_validator_weight_protocol"
     },
     {
-      "ast_sha256": "sha256:4cd33892727b379e7205b5129ad63582d0f0670d57642ae390d334172c552a70",
+      "ast_sha256": "sha256:c6b3306c33b7131c723dc4f8d2ca34572c8a606b5cc2d00b99b3a070b7030faa",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "EnclaveChainRpcTransportV2"
     },
@@ -972,12 +972,12 @@
       "symbol": "ValidatorChainRelayCleanupError"
     },
     {
-      "ast_sha256": "sha256:e9f2e23b873a82c5bb0a85404f602f6dfb3401bee816163624ecad1cf9123c1a",
+      "ast_sha256": "sha256:9e2152cba5aa170695cb13b297320c46d6e7207119a35805cd155576a8eb2d06",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "ValidatorChainRelayV2"
     },
     {
-      "ast_sha256": "sha256:9bcba02966cb19fabcb252884abdebbc859d89b7c8ec78313ee1355f15da2a43",
+      "ast_sha256": "sha256:0adda5f0fa421ccb435240ae00905ea8c39c2f86764a4dab41ea77d30ae40e18",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "_connect_chain"
     },
@@ -987,12 +987,12 @@
       "symbol": "_shutdown_and_close_socket"
     },
     {
-      "ast_sha256": "sha256:76d986743f586a34df8821565b4d4a4169e9ffb709e50f2c75f12df013cbd994",
+      "ast_sha256": "sha256:a181cad547d5b50e51f4d9dea752a3f42c5a8e23609963831880cd3e7d391adc",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "handle_chain_relay_connection"
     },
     {
-      "ast_sha256": "sha256:533f9137139c9a82ce6aeb2e4d450bad5379386cec061222e107ec82959c0073",
+      "ast_sha256": "sha256:83e9605341dad97f2f2f09d4deaa13d8bfe17998652af7a488b4633b729e325e",
       "path": "validator_tee/host/chain_relay_v2.py",
       "symbol": "main"
     },
@@ -1092,7 +1092,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:655a834e6b32c05063b8a490862e985c0318062231d78389e02114ba27a931cf",
-  "protected_source_commit": "ba8c0891141ab3888265691fe686ab6a5f8eb3db",
+  "manifest_hash": "sha256:5823ace1ccc86ec4e9442aa7bee8f9e859f89953da6e02243aac5e5860b15875",
+  "protected_source_commit": "6064229c397bccd9875fa105a559d5282337502e",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

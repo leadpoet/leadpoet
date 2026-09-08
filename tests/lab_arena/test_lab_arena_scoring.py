@@ -262,6 +262,84 @@ def test_judge_infrastructure_failures_retry_then_raise_never_zero():
         scoring.score_work_item(item, icp=_ICPS[0], companies=[company(1)], scorer=broken)
 
 
+def test_judge_accepts_nonempty_score_with_unavailable_extra_evidence():
+    calls = {"n": 0}
+    verified_primary = {
+        "raw": 60.0,
+        "after_decay": 60.0,
+        "matched_icp_signal": 0,
+        "judge_verdict": {
+            "decision": "verified",
+            "pipeline_decision": "accept",
+            "client_ready": True,
+            "verification_trace": {
+                "intent_verdict": {
+                    "signal_evaluations": [
+                        {
+                            "signal_status": "supported",
+                            "same_entity_check": "pass",
+                        }
+                    ]
+                }
+            },
+        },
+    }
+    unavailable_extra = {
+        "raw": 0.0,
+        "after_decay": 0.0,
+        "matched_icp_signal": 1,
+        "judge_verdict": {
+            "decision": "rejected_verifier_error",
+            "pipeline_decision": "unavailable",
+            "error_class": "ProviderTimeout",
+        },
+    }
+    expected = {
+        "final_score": 60.0,
+        "failure_reason": None,
+        "intent_signals_detail": [verified_primary, unavailable_extra],
+        "verifier_gate_receipts": [
+            {
+                "gate": "company_fit",
+                "decision": "match",
+                "reason": "fit verified",
+            }
+        ],
+    }
+
+    def score(companies, icp, is_reference_model):
+        assert companies and icp and is_reference_model is False
+        calls["n"] += 1
+        return [expected]
+
+    item = {
+        "scored_run_id": "run-highnote-0",
+        "icp_position": 0,
+        "output_ref": "arena/outputs/run-highnote-0.json",
+        "submission_id": "highnote",
+    }
+    result = scoring.score_work_item(
+        item,
+        icp=_ICPS[0],
+        companies=[company(1)],
+        scorer=score,
+        max_retries=3,
+    )
+
+    assert result == [expected]
+    assert calls["n"] == 1
+    calculated = verify.per_icp_score(
+        _ICPS[0], result, scoring.build_scorer_policy()
+    )
+    assert calculated == {
+        "per_icp_score": 12.0,
+        "fp_gate_count": 0,
+        "fp_unverified_primary_count": 0,
+        "company_goal": 5,
+        "company_scores": [60.0],
+    }
+
+
 def test_stage_cut_uses_ten_then_ten_and_final_mean_uses_all_twenty():
     policy = scoring.build_scorer_policy()
     counter = {"executions": 0, "lock": threading.Lock()}

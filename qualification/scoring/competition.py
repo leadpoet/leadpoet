@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from importlib import import_module
 import logging
+import math
 import os
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -308,14 +309,8 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 return True
     details = breakdown.get("intent_signals_detail")
     if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
-        for detail in details:
-            verdict = detail.get("judge_verdict") if isinstance(detail, Mapping) else None
-            if isinstance(verdict, Mapping) and (
-                str(verdict.get("decision") or "") == "rejected_verifier_error"
-                or bool(verdict.get("error_class"))
-                or str(verdict.get("pipeline_decision") or "") == "unavailable"
-            ):
-                return True
+        if intent_unavailability_requires_retry(details):
+            return True
     reason = str(breakdown.get("failure_reason") or "").strip().lower()
     return bool(reason) and any(
         marker in reason
@@ -335,6 +330,74 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
             "http 429",
             "no_openrouter_key",
         )
+    )
+
+
+def _intent_detail_is_unavailable(detail: Any) -> bool:
+    if not isinstance(detail, Mapping):
+        return False
+    verdict = detail.get("judge_verdict")
+    return isinstance(verdict, Mapping) and (
+        str(verdict.get("decision") or "") == "rejected_verifier_error"
+        or bool(verdict.get("error_class"))
+        or str(verdict.get("pipeline_decision") or "") == "unavailable"
+    )
+
+
+def has_verified_primary_intent(details: Sequence[Any]) -> bool:
+    """Return whether structured details contain a usable primary score."""
+
+    rejected_statuses = {"contradicted", "unable_to_verify", "wrong_entity"}
+    for detail in details:
+        if not isinstance(detail, Mapping):
+            continue
+        index = detail.get("matched_icp_signal")
+        score = detail.get("after_decay")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index != 0
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or float(score) <= 0.0
+        ):
+            continue
+        verdict = detail.get("judge_verdict")
+        if (
+            not isinstance(verdict, Mapping)
+            or str(verdict.get("decision") or "") != "verified"
+            or bool(verdict.get("error_class"))
+            or str(verdict.get("pipeline_decision") or "")
+            in {"reject", "unavailable"}
+        ):
+            continue
+        trace = verdict.get("verification_trace")
+        intent_verdict = (
+            trace.get("intent_verdict") if isinstance(trace, Mapping) else None
+        )
+        evaluations = (
+            intent_verdict.get("signal_evaluations")
+            if isinstance(intent_verdict, Mapping)
+            else None
+        )
+        if isinstance(evaluations, Sequence) and not isinstance(
+            evaluations, (str, bytes)
+        ) and any(
+            isinstance(evaluation, Mapping)
+            and str(evaluation.get("signal_status") or "") in rejected_statuses
+            for evaluation in evaluations
+        ):
+            continue
+        return True
+    return False
+
+
+def intent_unavailability_requires_retry(details: Sequence[Any]) -> bool:
+    """Retry unavailable intent evidence unless a primary verdict scored."""
+
+    return any(_intent_detail_is_unavailable(detail) for detail in details) and not (
+        has_verified_primary_intent(details)
     )
 
 

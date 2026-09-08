@@ -90,6 +90,9 @@ from qualification.scoring.company_fit_decision import (
     reconcile_company_fit_decisions,
     strict_company_fit_boolean,
 )
+from qualification.scoring.competition import (
+    intent_unavailability_requires_retry,
+)
 from qualification.scoring.linkedin_company_size import (
     fetch_current_linkedin_company_size,
     is_linkedin_evidence_url,
@@ -2834,21 +2837,9 @@ def _competition_intent_failure_reason(signal_results: List[dict]) -> str:
 
 
 def _intent_verifier_unavailable(signal_results: List[dict]) -> bool:
-    """Whether any signal lacks a content verdict because its verifier failed."""
+    """Whether unavailable evidence leaves no verified primary score."""
 
-    for result in signal_results:
-        if not isinstance(result, dict):
-            continue
-        verdict = result.get("judge_verdict")
-        if not isinstance(verdict, dict):
-            continue
-        if (
-            verdict.get("decision") == "rejected_verifier_error"
-            or verdict.get("error_class")
-            or verdict.get("pipeline_decision") == "unavailable"
-        ):
-            return True
-    return False
+    return intent_unavailability_requires_retry(signal_results)
 
 
 def required_intent_satisfied(signal_results: List[dict]) -> bool:

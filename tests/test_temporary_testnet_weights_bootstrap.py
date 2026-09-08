@@ -5,6 +5,11 @@ import time
 
 import pytest
 
+from gateway.research_lab.config import ResearchLabGatewayConfig
+from leadpoet_canonical.lab_arena_rewards import (
+    rewards_enabled_from_environment,
+    signing_key_hash_from_environment,
+)
 from scripts import bootstrap_temporary_testnet_weights_host as bootstrap
 from validator_tee.host.release_v2 import (
     build_local_validator_release_identity,
@@ -409,6 +414,23 @@ def test_testnet_gateway_flags_do_not_modify_global_intake_control():
     )
     assert "RESEARCH_LAB_SOURCE_ADD_PAUSED" not in bootstrap.SAFE_GATEWAY_ENV
     assert "RESEARCH_LAB_AUTORESEARCH_ENABLED" not in bootstrap.SAFE_GATEWAY_ENV
+
+
+def test_testnet_gateway_overrides_enable_only_required_weight_api_gates(monkeypatch):
+    from gateway.research_lab import config as gateway_config
+
+    monkeypatch.setattr(gateway_config.os, "environ", dict(bootstrap.SAFE_GATEWAY_ENV))
+    config = ResearchLabGatewayConfig.from_env()
+
+    assert config.api_enabled is True
+    assert config.reports_enabled is True
+    assert config.shadow_bundles_enabled is True
+    assert config.weight_mutation_enabled is True
+    assert rewards_enabled_from_environment(bootstrap.SAFE_GATEWAY_ENV) is True
+    assert (
+        signing_key_hash_from_environment(bootstrap.SAFE_GATEWAY_ENV)
+        == bootstrap.EXPECTED_ARENA_SIGNING_KEY_HASH
+    )
 
 
 def test_gateway_bootstrap_uses_only_expected_ciphertext_envelopes():

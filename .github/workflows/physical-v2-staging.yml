@@ -6,6 +6,14 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      operation:
+        description: Exact manual operation
+        required: true
+        default: production-parity
+        type: choice
+        options:
+          - production-parity
+          - temporary-testnet401
       candidate_sha:
         description: Exact attested main commit to validate
         required: true
@@ -13,8 +21,14 @@ on:
 
 concurrency:
   # Release admission can preempt automatic runs; explicit diagnostics survive.
-  group: production-parity-full-${{ github.event_name }}
-  cancel-in-progress: true
+  group: >-
+    production-parity-full-${{
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'temporary-testnet401' &&
+      format('testnet401-{0}', inputs.candidate_sha) || github.event_name }}
+  cancel-in-progress: >-
+    ${{ !(github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'temporary-testnet401') }}
 
 permissions:
   actions: read
@@ -25,7 +39,8 @@ jobs:
   validate:
     if: >-
       vars.LEADPOET_PARITY_ENABLED == 'true' &&
-      (github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'workflow_dispatch' &&
+        inputs.operation == 'production-parity') ||
        (github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'))
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
@@ -1202,3 +1217,106 @@ jobs:
             if [ "$cleanup_status" -eq 0 ]; then cleanup_status=$status; fi
           }
           exit "$cleanup_status"
+
+  temporary_testnet401:
+    if: >-
+      vars.LEADPOET_PARITY_ENABLED == 'true' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'temporary-testnet401'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      AWS_REGION: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      RUNNER_INSTANCE_PROFILE: ${{ vars.LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE }}
+      TESTNET401_HOST_TTL_HOURS: "6"
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+
+      - name: Require exact current main before credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test "$CANDIDATE_SHA" = "$(git rev-parse origin/main)"
+          test "$AWS_REGION" = "us-east-1"
+          test "$RUNNER_INSTANCE_PROFILE" = \
+            "leadpoet-production-parity-runner"
+          test "$TESTNET401_HOST_TTL_HOURS" = "6"
+
+      - name: Set up trusted controller Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: ./.github/actions/setup-production-parity-controller
+        with:
+          python-executable: ${{ env.pythonLocation }}/bin/python3
+
+      - name: Configure bounded parity controller role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - name: Require exact parity AWS account
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
+
+      - name: Provision one isolated temporary Nitro host
+        id: provision
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          run_id="pp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          state="$RUNNER_TEMP/temporary-testnet401-host.json"
+          provision_pid=""
+          cleanup_signal() {
+            signal_status="$1"
+            trap - INT TERM
+            if [ -n "$provision_pid" ]; then
+              kill -TERM "$provision_pid" 2>/dev/null || true
+              wait "$provision_pid" 2>/dev/null || true
+            fi
+            python3 scripts/temporary_testnet_signing_host.py \
+              --region "$AWS_REGION" cleanup-run \
+              --run-id "$run_id" \
+              --candidate-sha "$CANDIDATE_SHA" \
+              --apply || true
+            exit "$signal_status"
+          }
+          trap 'cleanup_signal 130' INT
+          trap 'cleanup_signal 143' TERM
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" create \
+            --run-id "$run_id" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --ttl-hours "$TESTNET401_HOST_TTL_HOURS" \
+            --state "$state" &
+          provision_pid=$!
+          wait "$provision_pid"
+          provision_pid=""
+          trap - INT TERM
+          test -s "$state"
+          printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Upload temporary host receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: temporary-testnet401-host-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/temporary-testnet401-host.json

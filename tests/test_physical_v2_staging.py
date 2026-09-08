@@ -1367,38 +1367,39 @@ def test_cleanup_dispatch_validates_exact_pair_before_credentials():
     assert '--candidate-sha "$EXACT_CANDIDATE_SHA"' in source
 
 
-def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
+def test_full_workflow_normal_lane_uses_exact_candidate_and_tears_down_without_testnet():
     source = (ROOT / ".github/workflows/physical-v2-staging.yml").read_text()
-    assert "Production Parity Full" in source
-    assert "CANDIDATE_SHA" in source
-    assert "scripts/provision_production_parity_staging.py" in source
-    assert "scripts/run_production_parity_full_host.py" in source
-    assert "if: always()" in source
-    assert "testnet" not in source.lower()
-    assert "funded" not in source.lower()
-    assert "environment:" not in source
-    assert "LEADPOET_PARITY_MINER_INTAKE_SECRET_ID" in source
-    assert "leadpoet.production_parity_full.v3" in source
-    assert 'test "$AWS_REGION" = "us-east-1"' in source
-    assert "export AWS_REGION={q(required['AWS_REGION'])}" in source
-    assert "export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}" in source
-    assert 'get("external_write_boundaries", {}).get("arweave")' in source
-    assert '!= "blocked-production-parity"' in source
-    assert "leadpoet.production_parity_arena_rebenchmark_evidence.v1" in source
+    normal_lane = source[:source.index("\n  temporary_testnet401:")]
+    assert "Production Parity Full" in normal_lane
+    assert "CANDIDATE_SHA" in normal_lane
+    assert "scripts/provision_production_parity_staging.py" in normal_lane
+    assert "scripts/run_production_parity_full_host.py" in normal_lane
+    assert "if: always()" in normal_lane
+    assert "testnet401:" not in normal_lane.lower()
+    assert "funded" not in normal_lane.lower()
+    assert "environment:" not in normal_lane
+    assert "LEADPOET_PARITY_MINER_INTAKE_SECRET_ID" in normal_lane
+    assert "leadpoet.production_parity_full.v3" in normal_lane
+    assert 'test "$AWS_REGION" = "us-east-1"' in normal_lane
+    assert "export AWS_REGION={q(required['AWS_REGION'])}" in normal_lane
+    assert "export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}" in normal_lane
+    assert 'get("external_write_boundaries", {}).get("arweave")' in normal_lane
+    assert '!= "blocked-production-parity"' in normal_lane
+    assert "leadpoet.production_parity_arena_rebenchmark_evidence.v1" in normal_lane
     assert (
         "https://github.com/leadpoet/pydantic-harness/"
         "archive/refs/heads/lab.tar.gz"
-    ) in source
-    assert 'arena_counts.get("accepted_execute_runs")' in source
-    assert 'arena_counts.get("accepted_score_runs")' in source
-    assert "configured_icps != 20" in source
-    assert "per_icp_evidence_is_complete" in source
-    assert 'item.get("execute_accepted") is True' in source
-    assert 'item.get("score_accepted") is True' in source
-    assert '"valid_company_with_https_evidence_count"' in source
-    assert '"successful_openrouter_execute_call_count"' in source
-    assert '"successful_openrouter_score_settlement_count"' in source
-    assert 'arena_recovery.get("service_restarted") is not True' in source
+    ) in normal_lane
+    assert 'arena_counts.get("accepted_execute_runs")' in normal_lane
+    assert 'arena_counts.get("accepted_score_runs")' in normal_lane
+    assert "configured_icps != 20" in normal_lane
+    assert "per_icp_evidence_is_complete" in normal_lane
+    assert 'item.get("execute_accepted") is True' in normal_lane
+    assert 'item.get("score_accepted") is True' in normal_lane
+    assert '"valid_company_with_https_evidence_count"' in normal_lane
+    assert '"successful_openrouter_execute_call_count"' in normal_lane
+    assert '"successful_openrouter_score_settlement_count"' in normal_lane
+    assert 'arena_recovery.get("service_restarted") is not True' in normal_lane
 
 
 def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():

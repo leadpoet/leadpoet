@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ SHA = "a" * 40
 RUN_ID = "pp-123456-1"
 INSTANCE_ID = "i-0123456789abcdef0"
 GROUP_ID = "sg-0123456789abcdef0"
+VOLUME_ID = "vol-0123456789abcdef0"
+NETWORK_INTERFACE_ID = "eni-0123456789abcdef0"
 NOW = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
 
 
@@ -22,12 +25,27 @@ class _Waiter:
 
 
 class _SSM:
+    def __init__(self):
+        self.sent = None
+
     def describe_instance_information(self, **_kwargs):
         return {
             "InstanceInformationList": [{
                 "InstanceId": INSTANCE_ID,
                 "PingStatus": "Online",
             }]
+        }
+
+    def send_command(self, **kwargs):
+        self.sent = kwargs
+        return {"Command": {"CommandId": "12345678-1234-1234-1234-123456789abc"}}
+
+    def get_command_invocation(self, **_kwargs):
+        return {
+            "Status": "Success",
+            "ResponseCode": 0,
+            "StandardOutputContent": "expiry_timer_ready\n",
+            "StandardErrorContent": "",
         }
 
 
@@ -37,6 +55,8 @@ class _EC2:
         self.group_create = None
         self.instance_active = True
         self.group_active = True
+        self.volume_active = True
+        self.network_interface_active = True
         self.terminated: list[str] = []
         self.deleted_groups: list[str] = []
 
@@ -70,6 +90,17 @@ class _EC2:
                         "State": {"Name": "running"},
                         "EnclaveOptions": {"Enabled": True},
                         "MetadataOptions": {"HttpTokens": "required"},
+                        "BlockDeviceMappings": [{
+                            "DeviceName": "/dev/xvda",
+                            "Ebs": {
+                                "VolumeId": VOLUME_ID,
+                                "DeleteOnTermination": True,
+                            },
+                        }],
+                        "NetworkInterfaces": [{
+                            "NetworkInterfaceId": NETWORK_INTERFACE_ID,
+                            "Attachment": {"DeleteOnTermination": True},
+                        }],
                         "Tags": self._tags(),
                     }]
                 }]
@@ -89,19 +120,38 @@ class _EC2:
             }]
         }
 
+    def describe_volumes(self, **_kwargs):
+        if not self.volume_active:
+            return {"Volumes": []}
+        return {"Volumes": [{
+            "VolumeId": VOLUME_ID,
+            "Encrypted": True,
+            "Size": 512,
+            "VolumeType": "gp3",
+        }]}
+
+    def describe_network_interfaces(self, **_kwargs):
+        if not self.network_interface_active:
+            return {"NetworkInterfaces": []}
+        return {"NetworkInterfaces": [{
+            "NetworkInterfaceId": NETWORK_INTERFACE_ID,
+        }]}
+
     def terminate_instances(self, **kwargs):
         self.terminated.extend(kwargs["InstanceIds"])
         self.instance_active = False
+        self.volume_active = False
+        self.network_interface_active = False
 
     def delete_security_group(self, **kwargs):
         self.deleted_groups.append(kwargs["GroupId"])
         self.group_active = False
 
 
-def _create(ec2: _EC2, *, ttl_hours: int = 6):
+def _create(ec2: _EC2, *, ttl_hours: int = 6, ssm: _SSM | None = None):
     return temporary_host.create_host(
         ec2=ec2,
-        ssm=_SSM(),
+        ssm=ssm or _SSM(),
         account_id=temporary_host.ACCOUNT_ID,
         region=temporary_host.REGION,
         run_id=RUN_ID,
@@ -113,7 +163,8 @@ def _create(ec2: _EC2, *, ttl_hours: int = 6):
 
 def test_create_is_one_pinned_nitro_host_with_no_ingress_or_ssh_key():
     ec2 = _EC2()
-    state = _create(ec2)
+    ssm = _SSM()
+    state = _create(ec2, ssm=ssm)
 
     assert state == {
         "schema_version": temporary_host.SCHEMA_VERSION,
@@ -127,6 +178,8 @@ def test_create_is_one_pinned_nitro_host_with_no_ingress_or_ssh_key():
         "expires_at": (NOW + timedelta(hours=6)).isoformat(),
         "instance_id": INSTANCE_ID,
         "security_group_id": GROUP_ID,
+        "volume_id": VOLUME_ID,
+        "network_interface_id": NETWORK_INTERFACE_ID,
         "instance_type": "r7i.4xlarge",
         "volume_gib": 512,
         "nitro_enclaves_enabled": True,
@@ -157,6 +210,14 @@ def test_create_is_one_pinned_nitro_host_with_no_ingress_or_ssh_key():
     assert ec2.group_create["VpcId"] == temporary_host.VPC_ID
     assert "IpPermissions" not in ec2.group_create
     assert "systemctl mask --now" in launch["UserData"]
+    assert "OnCalendar=@1788890400" in launch["UserData"]
+    assert "leadpoet-testnet401-expiry.timer" in launch["UserData"]
+    assert ssm.sent["InstanceIds"] == [INSTANCE_ID]
+    assert ssm.sent["DocumentName"] == "AWS-RunShellScript"
+    timer_probe = ssm.sent["Parameters"]["commands"]
+    assert len(timer_probe) == 1
+    assert "leadpoet-testnet401-expiry.timer" in timer_probe[0]
+    assert "1788890400" in timer_probe[0]
     volume = launch["BlockDeviceMappings"][0]["Ebs"]
     assert volume == {
         "DeleteOnTermination": True,
@@ -199,6 +260,128 @@ def test_create_rejects_unbounded_ttl_before_aws_writes(ttl):
         _create(ec2, ttl_hours=ttl)
     assert ec2.group_create is None
     assert ec2.launch is None
+
+
+class _StageSSM(_SSM):
+    def __init__(self, stdout: str):
+        super().__init__()
+        self.stdout = stdout
+
+    def get_command_invocation(self, **_kwargs):
+        return {
+            "Status": "Success",
+            "ResponseCode": 0,
+            "StandardOutputContent": self.stdout,
+            "StandardErrorContent": "",
+        }
+
+
+def test_source_bootstrap_is_fixed_to_exact_private_parity_prefix():
+    ec2 = _EC2()
+    _create(ec2)
+    bucket = temporary_host._artifact_bucket_name(
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+    )
+    prefix = f"production-parity/runs/{RUN_ID}/testnet401"
+    ssm = _StageSSM("temporary_testnet401_source_ready\n")
+
+    result = temporary_host.run_source_bootstrap(
+        ec2=ec2,
+        ssm=ssm,
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+        instance_id=INSTANCE_ID,
+        assets_bucket=bucket,
+        assets_prefix=prefix,
+        now=NOW,
+    )
+
+    assert result["status"] == "ready"
+    command = ssm.sent["Parameters"]["commands"][0]
+    assert "scripts.stage_temporary_testnet_weights_host" in command
+    assert f"--candidate-sha {SHA}" in command
+    assert f"--run-id {RUN_ID}" in command
+    assert f"--instance-id {INSTANCE_ID}" in command
+    assert f"--assets-bucket {bucket}" in command
+    assert f"--assets-prefix {prefix}" in command
+    assert "/run/leadpoet-testnet401/config.json" in command
+    assert "candidate-bundle-binding.json" in command
+    assert "refs/heads/main:refs/remotes/origin/main" in command
+    assert "--requirement /run/leadpoet-testnet401/requirements.txt" in command
+
+    with pytest.raises(temporary_host.TemporaryHostError, match="assets differ"):
+        temporary_host.source_bootstrap_command(
+            run_id=RUN_ID,
+            candidate_sha=SHA,
+            instance_id=INSTANCE_ID,
+            assets_bucket=bucket,
+            assets_prefix="attacker-controlled/prefix",
+        )
+
+
+@pytest.mark.parametrize(
+    ("stage", "confirmed"),
+    (("preflight", False), ("launch", True), ("status", False), ("cleanup", True)),
+)
+def test_native_ssm_stage_exposes_no_arbitrary_command(stage, confirmed):
+    ec2 = _EC2()
+    _create(ec2)
+    receipt = {
+        "schema_version": temporary_host.NATIVE_RECEIPT_SCHEMA_VERSION,
+        "stage": stage,
+        "status": "passed",
+        "run_id": RUN_ID,
+        "candidate_sha": SHA,
+        "instance_id": INSTANCE_ID,
+        "recorded_at_unix": int(NOW.timestamp()),
+        "evidence": {},
+    }
+    ssm = _StageSSM(json.dumps(receipt, sort_keys=True) + "\n")
+
+    result = temporary_host.run_native_stage(
+        ec2=ec2,
+        ssm=ssm,
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+        instance_id=INSTANCE_ID,
+        stage=stage,
+        now=NOW,
+    )
+
+    command = ssm.sent["Parameters"]["commands"][0]
+    assert result["receipt"] == receipt
+    assert f"scripts.bootstrap_temporary_testnet_weights_host {stage}" in command
+    assert "--config /run/leadpoet-testnet401/config.json" in command
+    assert ("--confirm-instance-id" in command) is confirmed
+    assert ssm.sent["DocumentName"] == "AWS-RunShellScript"
+
+
+def test_native_ssm_stage_rechecks_owner_before_command():
+    ec2 = _EC2()
+    _create(ec2)
+    ec2.launch["TagSpecifications"][0]["Tags"] = [
+        {"Key": "leadpoet:ephemeral", "Value": "false"}
+    ]
+    ssm = _StageSSM("{}\n")
+
+    with pytest.raises(temporary_host.TemporaryHostError, match="authority differs"):
+        temporary_host.run_native_stage(
+            ec2=ec2,
+            ssm=ssm,
+            account_id=temporary_host.ACCOUNT_ID,
+            region=temporary_host.REGION,
+            run_id=RUN_ID,
+            candidate_sha=SHA,
+            instance_id=INSTANCE_ID,
+            stage="status",
+            now=NOW,
+        )
+    assert ssm.sent is None
 
 
 def test_expired_cleanup_terminates_only_after_protected_expiry():
@@ -248,19 +431,229 @@ def test_exact_cleanup_does_not_wait_for_expiry():
     assert result["residue"] == {}
 
 
+def test_exact_inventory_uses_exact_filters_and_consumes_every_page():
+    ec2 = _EC2()
+    _create(ec2)
+    instance_calls = []
+    group_calls = []
+    original_instances = ec2.describe_instances
+    original_groups = ec2.describe_security_groups
+
+    def paged_instances(**kwargs):
+        if "Filters" not in kwargs:
+            return original_instances(**kwargs)
+        instance_calls.append(kwargs)
+        if "NextToken" not in kwargs:
+            return {"Reservations": [], "NextToken": "instance-page-2"}
+        assert kwargs["NextToken"] == "instance-page-2"
+        return original_instances(Filters=kwargs["Filters"])
+
+    def paged_groups(**kwargs):
+        if "Filters" not in kwargs:
+            return original_groups(**kwargs)
+        group_calls.append(kwargs)
+        if "NextToken" not in kwargs:
+            return {"SecurityGroups": [], "NextToken": "group-page-2"}
+        assert kwargs["NextToken"] == "group-page-2"
+        return original_groups(Filters=kwargs["Filters"])
+
+    ec2.describe_instances = paged_instances
+    ec2.describe_security_groups = paged_groups
+    result = temporary_host.cleanup_hosts(
+        ec2=ec2,
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        now=NOW,
+        apply=False,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+    )
+
+    expected_filters = [
+        {"Name": "tag:leadpoet:ephemeral", "Values": ["true"]},
+        {"Name": "tag:leadpoet:parity-run", "Values": [RUN_ID]},
+        {"Name": "tag:leadpoet:candidate-sha", "Values": [SHA]},
+    ]
+    assert [call["Filters"] for call in instance_calls] == [
+        expected_filters,
+        expected_filters,
+    ]
+    assert [call["Filters"] for call in group_calls] == [
+        expected_filters,
+        expected_filters,
+    ]
+    assert result["instances"] == [INSTANCE_ID]
+    assert result["security_groups"] == [GROUP_ID]
+
+
+def test_inventory_fails_closed_on_repeated_page_token():
+    class RepeatedTokenEC2:
+        def describe_instances(self, **_kwargs):
+            return {"Reservations": [], "NextToken": "same-token"}
+
+    with pytest.raises(
+        temporary_host.TemporaryHostError,
+        match="pagination",
+    ):
+        temporary_host._inventory(
+            RepeatedTokenEC2(),
+            run_id=RUN_ID,
+            candidate_sha=SHA,
+        )
+
+
+def test_cleanup_reports_ownership_loss_without_terminating():
+    ec2 = _EC2()
+    _create(ec2)
+    original = ec2.describe_instances
+
+    def ownership_changes(**kwargs):
+        response = original(**kwargs)
+        if "InstanceIds" in kwargs:
+            response["Reservations"][0]["Instances"][0]["Tags"] = [
+                {"Key": "leadpoet:ephemeral", "Value": "false"}
+            ]
+        return response
+
+    ec2.describe_instances = ownership_changes
+    result = temporary_host.cleanup_hosts(
+        ec2=ec2,
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        now=NOW,
+        apply=True,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+    )
+
+    assert ec2.terminated == []
+    assert result["residue"]["instances"] == [INSTANCE_ID]
+    assert result["errors"] == [
+        f"instance:{INSTANCE_ID}:TemporaryHostError"
+    ]
+
+
+def test_cleanup_reports_security_group_ownership_loss_without_deleting():
+    ec2 = _EC2()
+    _create(ec2)
+    ec2.instance_active = False
+    ec2.volume_active = False
+    ec2.network_interface_active = False
+    original = ec2.describe_security_groups
+
+    def ownership_changes(**kwargs):
+        response = original(**kwargs)
+        if "GroupIds" in kwargs:
+            response["SecurityGroups"][0]["Tags"] = [
+                {"Key": "leadpoet:ephemeral", "Value": "false"}
+            ]
+        return response
+
+    ec2.describe_security_groups = ownership_changes
+    result = temporary_host.cleanup_hosts(
+        ec2=ec2,
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        now=NOW,
+        apply=True,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+    )
+
+    assert ec2.deleted_groups == []
+    assert result["residue"]["security_groups"] == [GROUP_ID]
+    assert result["errors"] == [
+        f"security-group:{GROUP_ID}:TemporaryHostError"
+    ]
+
+
+def test_failed_provision_writes_cleanup_incomplete_receipt_with_public_ids(
+    monkeypatch, tmp_path, capsys
+):
+    class FailingEC2(_EC2):
+        def terminate_instances(self, **_kwargs):
+            raise RuntimeError("injected terminate failure")
+
+        def delete_security_group(self, **_kwargs):
+            raise RuntimeError("injected group failure")
+
+        def get_waiter(self, name):
+            if name == "volume_deleted":
+                class FailedWaiter:
+                    def wait(self, **_kwargs):
+                        raise RuntimeError("injected volume residue")
+
+                return FailedWaiter()
+            return _Waiter()
+
+    class FailingSSM(_SSM):
+        def get_command_invocation(self, **_kwargs):
+            return {
+                "Status": "Failed",
+                "ResponseCode": 1,
+                "StandardOutputContent": "",
+                "StandardErrorContent": "timer unavailable",
+            }
+
+    ec2 = FailingEC2()
+
+    class STS:
+        def get_caller_identity(self):
+            return {"Account": temporary_host.ACCOUNT_ID}
+
+    class Session:
+        def client(self, name):
+            return {"sts": STS(), "ec2": ec2, "ssm": FailingSSM()}[name]
+
+    monkeypatch.setattr(temporary_host.boto3.session, "Session", lambda **_kwargs: Session())
+    monkeypatch.setattr(temporary_host.time, "sleep", lambda _seconds: None)
+    state = tmp_path / "failed-host.json"
+    status = temporary_host.main([
+        "--region",
+        temporary_host.REGION,
+        "create",
+        "--run-id",
+        RUN_ID,
+        "--candidate-sha",
+        SHA,
+        "--ttl-hours",
+        "6",
+        "--state",
+        str(state),
+    ])
+
+    assert status == 1
+    receipt = json.loads(state.read_text(encoding="utf-8"))
+    assert receipt["status"] == "provision_failed_cleanup_incomplete"
+    assert receipt["instance_id"] == INSTANCE_ID
+    assert receipt["security_group_id"] == GROUP_ID
+    assert receipt["volume_id"] == VOLUME_ID
+    assert receipt["network_interface_id"] == NETWORK_INTERFACE_ID
+    assert receipt["rollback"]["cleanup_complete"] is False
+    assert receipt["rollback"]["residue"] == {
+        "instances": [INSTANCE_ID],
+        "network_interfaces": [NETWORK_INTERFACE_ID],
+        "security_groups": [GROUP_ID],
+        "volumes": [VOLUME_ID],
+    }
+    assert "see receipt" in capsys.readouterr().err
+
+
 def test_temporary_workflow_reuses_oidc_route_and_scheduled_expiry_cleanup():
-    workflow = (
+    assert not (
         ROOT / ".github/workflows/temporary-testnet-signing-host.yml"
-    ).read_text(
+    ).exists()
+    workflow = (ROOT / ".github/workflows/physical-v2-staging.yml").read_text(
         encoding="utf-8"
     )
     cleanup = (
         ROOT / ".github/workflows/production-parity-cleanup.yml"
     ).read_text(encoding="utf-8")
     assert "name: Production Parity Full" in workflow
-    assert "on:\n  workflow_dispatch:" in workflow
-    assert "TESTNET_FUNCTION: ${{ inputs.function }}" in workflow
-    assert 'test "$TESTNET_FUNCTION" = "testnet401"' in workflow
+    assert "inputs.operation == 'production-parity'" in workflow
+    assert "inputs.operation == 'temporary-testnet401'" in workflow
+    assert "format('testnet401-{0}', inputs.candidate_sha)" in workflow
+    assert "cancel-in-progress: >-" in workflow
     assert "scripts/temporary_testnet_signing_host.py" in workflow
     assert "leadpoet-production-parity-runner" in workflow
     assert "cleanup-run" in workflow

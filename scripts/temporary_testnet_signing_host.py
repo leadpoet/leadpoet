@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 import time
 from typing import Any, Mapping, Sequence
@@ -32,6 +34,11 @@ RUN_RE = re.compile(r"^pp-[0-9]{1,20}-[0-9]{1,6}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 INSTANCE_ID_RE = re.compile(r"^i-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
 SECURITY_GROUP_ID_RE = re.compile(r"^sg-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
+VOLUME_ID_RE = re.compile(r"^vol-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
+NETWORK_INTERFACE_ID_RE = re.compile(r"^eni-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
+SSM_COMMAND_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 NAME_RE = re.compile(
     r"^leadpoet-parity-(?P<run>pp-[0-9]{1,20}-[0-9]{1,6})-"
     r"testnet401-exp-(?P<expiry>[0-9]{10})$"
@@ -42,6 +49,24 @@ TAG_EPHEMERAL = "leadpoet:ephemeral"
 MIN_TTL_HOURS = 1
 MAX_TTL_HOURS = 12
 DEFAULT_TTL_HOURS = 6
+ASSET_PREFIX_TEMPLATE = "production-parity/runs/{run_id}/testnet401"
+SOURCE_BOOTSTRAP_SCHEMA_VERSION = (
+    "leadpoet.temporary_testnet401_source_bootstrap.v1"
+)
+NATIVE_RECEIPT_SCHEMA_VERSION = (
+    "leadpoet.temporary_testnet401_native_bootstrap_receipt.v1"
+)
+NATIVE_STAGES = frozenset({"preflight", "launch", "status", "cleanup"})
+NATIVE_STAGE_TIMEOUTS = {
+    "preflight": 900,
+    "launch": 7200,
+    "status": 900,
+    "cleanup": 900,
+}
+RUNTIME_ROOT = "/run/leadpoet-testnet401"
+SOURCE_REPOSITORY = "/home/ec2-user/leadpoet/leadpoet"
+SOURCE_VENV = "/home/ec2-user/venv311"
+NATIVE_CONFIG = f"{RUNTIME_ROOT}/config.json"
 EARLY_BOOT_ISOLATION = """#cloud-boothook
 #!/bin/bash
 set -eu
@@ -49,13 +74,48 @@ for unit in $(systemctl list-unit-files --no-legend 2>/dev/null \
   | awk '$1 ~ /(leadpoet|research-lab|gateway|validator)/ {print $1}'); do
   systemctl mask --now "$unit" >/dev/null 2>&1 || true
 done
-install -d -m 0700 /run/leadpoet-temporary-testnet
-printf '%s\n' isolated >/run/leadpoet-temporary-testnet/early-boot-isolated
+install -d -m 0700 /run/leadpoet-testnet401
+printf '%s\n' isolated >/run/leadpoet-testnet401/early-isolation
+printf '%s\n' '{expiry_epoch}' >/run/leadpoet-testnet401/expires-epoch
+chmod 600 /run/leadpoet-testnet401/expires-epoch
+cat >/etc/systemd/system/leadpoet-testnet401-expiry.service <<'EOF'
+[Unit]
+Description=Terminate temporary Leadpoet testnet401 host
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/shutdown -h now
+EOF
+cat >/etc/systemd/system/leadpoet-testnet401-expiry.timer <<'EOF'
+[Unit]
+Description=Bound temporary Leadpoet testnet401 host lifetime
+
+[Timer]
+OnCalendar=@{expiry_epoch}
+Persistent=true
+Unit=leadpoet-testnet401-expiry.service
+
+[Install]
+WantedBy=timers.target
+EOF
+chmod 644 \
+  /etc/systemd/system/leadpoet-testnet401-expiry.service \
+  /etc/systemd/system/leadpoet-testnet401-expiry.timer
+systemctl daemon-reload
+systemctl enable --now leadpoet-testnet401-expiry.timer
 """
 
 
 class TemporaryHostError(RuntimeError):
     """The temporary host operation was not safely bounded."""
+
+
+class TemporaryHostCreateError(TemporaryHostError):
+    """Provisioning failed and has a public cleanup receipt."""
+
+    def __init__(self, receipt: Mapping[str, Any]):
+        super().__init__("temporary host provisioning failed")
+        self.receipt = dict(receipt)
 
 
 def _utc(value: datetime) -> datetime:
@@ -67,11 +127,21 @@ def _utc(value: datetime) -> datetime:
 def _tag_map(tags: Any) -> dict[str, str]:
     if not isinstance(tags, list):
         return {}
-    return {
-        str(item.get("Key") or ""): str(item.get("Value") or "")
+    pairs = [
+        (str(item.get("Key") or ""), str(item.get("Value") or ""))
         for item in tags
         if isinstance(item, Mapping) and item.get("Key")
-    }
+    ]
+    if len(pairs) != len(tags) or len({key for key, _value in pairs}) != len(pairs):
+        return {}
+    return dict(pairs)
+
+
+def _error_label(operation: str, exc: BaseException) -> str:
+    code = ""
+    if isinstance(exc, ClientError):
+        code = str(exc.response.get("Error", {}).get("Code") or "")
+    return f"{operation}:{code or type(exc).__name__}"
 
 
 def _name(*, run_id: str, expires_at: datetime) -> str:
@@ -132,6 +202,374 @@ def _wait_ssm_online(
     raise TemporaryHostError("temporary Nitro host did not become SSM-online")
 
 
+def _verify_expiry_timer(
+    ssm: Any,
+    *,
+    instance_id: str,
+    expiry_epoch: int,
+    timeout_seconds: int = 180,
+) -> None:
+    command = "\n".join([
+        "set -u",
+        "for attempt in $(seq 1 60); do",
+        "  if test -f /run/leadpoet-testnet401/expires-epoch &&",
+        f"     test \"$(cat /run/leadpoet-testnet401/expires-epoch)\" = {expiry_epoch} &&",
+        "     systemctl is-enabled --quiet leadpoet-testnet401-expiry.timer &&",
+        "     systemctl is-active --quiet leadpoet-testnet401-expiry.timer &&",
+        (
+            "     grep -Fx 'OnCalendar=@%s' "
+            "/etc/systemd/system/leadpoet-testnet401-expiry.timer >/dev/null; then"
+        ) % expiry_epoch,
+        "    printf '%s\\n' expiry_timer_ready",
+        "    exit 0",
+        "  fi",
+        "  sleep 2",
+        "done",
+        "exit 1",
+    ])
+    response = ssm.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands": [command]},
+        TimeoutSeconds=150,
+    )
+    command_id = str(response.get("Command", {}).get("CommandId") or "")
+    if re.fullmatch(r"[0-9a-f-]{36}", command_id) is None:
+        raise TemporaryHostError("expiry-timer SSM command identity is invalid")
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            result = ssm.get_command_invocation(
+                CommandId=command_id,
+                InstanceId=instance_id,
+            )
+        except ClientError as exc:
+            if str(exc.response.get("Error", {}).get("Code") or "") == (
+                "InvocationDoesNotExist"
+            ):
+                time.sleep(2)
+                continue
+            raise
+        status = str(result.get("Status") or "")
+        if status in {"Pending", "InProgress", "Delayed"}:
+            time.sleep(2)
+            continue
+        if (
+            status != "Success"
+            or int(result.get("ResponseCode", -1)) != 0
+            or result.get("StandardOutputContent") != "expiry_timer_ready\n"
+            or result.get("StandardErrorContent") not in (None, "")
+        ):
+            raise TemporaryHostError("expiry-timer SSM verification failed")
+        return
+    raise TemporaryHostError("expiry-timer SSM verification timed out")
+
+
+def _artifact_bucket_name(*, run_id: str, candidate_sha: str) -> str:
+    if RUN_RE.fullmatch(run_id) is None or SHA_RE.fullmatch(candidate_sha) is None:
+        raise TemporaryHostError("temporary asset ownership inputs are invalid")
+    suffix = hashlib.sha256(
+        f"{ACCOUNT_ID}:{run_id}:{candidate_sha}".encode("ascii")
+    ).hexdigest()[:16]
+    return f"leadpoet-parity-{ACCOUNT_ID}-{suffix}"
+
+
+def _require_live_host(
+    ec2: Any,
+    *,
+    instance_id: str,
+    run_id: str,
+    candidate_sha: str,
+    now: datetime,
+) -> Mapping[str, Any]:
+    if (
+        INSTANCE_ID_RE.fullmatch(instance_id) is None
+        or RUN_RE.fullmatch(run_id) is None
+        or SHA_RE.fullmatch(candidate_sha) is None
+    ):
+        raise TemporaryHostError("temporary SSM host identity is invalid")
+    host = _instance_by_id(ec2, instance_id)
+    identity = _owned_identity(host.get("Tags")) if host is not None else None
+    if (
+        host is None
+        or identity is None
+        or identity[:2] != (run_id, candidate_sha)
+        or identity[2] <= _utc(now)
+        or host.get("State", {}).get("Name") != "running"
+        or host.get("ImageId") != AMI_ID
+        or host.get("InstanceType") != INSTANCE_TYPE
+        or host.get("SubnetId") != SUBNET_ID
+        or host.get("VpcId") != VPC_ID
+        or host.get("EnclaveOptions", {}).get("Enabled") is not True
+    ):
+        raise TemporaryHostError("temporary SSM host authority differs")
+    _child_ids(host)
+    return host
+
+
+def _wait_ssm_command(
+    ssm: Any,
+    *,
+    instance_id: str,
+    command_id: str,
+    timeout_seconds: int,
+) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            result = ssm.get_command_invocation(
+                CommandId=command_id,
+                InstanceId=instance_id,
+            )
+        except ClientError as exc:
+            if str(exc.response.get("Error", {}).get("Code") or "") == (
+                "InvocationDoesNotExist"
+            ):
+                time.sleep(2)
+                continue
+            raise
+        status = str(result.get("Status") or "")
+        if status in {"Pending", "InProgress", "Delayed"}:
+            time.sleep(5)
+            continue
+        stdout = str(result.get("StandardOutputContent") or "")
+        stderr = str(result.get("StandardErrorContent") or "")
+        if (
+            status != "Success"
+            or int(result.get("ResponseCode", -1)) != 0
+            or stderr
+            or len(stdout.encode("utf-8")) > 1024 * 1024
+        ):
+            raise TemporaryHostError("fixed temporary SSM stage failed")
+        return stdout
+    raise TemporaryHostError("fixed temporary SSM stage timed out")
+
+
+def _send_fixed_ssm(
+    ssm: Any,
+    *,
+    instance_id: str,
+    command: str,
+    timeout_seconds: int,
+) -> tuple[str, str]:
+    response = ssm.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands": [command]},
+        TimeoutSeconds=timeout_seconds,
+    )
+    command_id = str(response.get("Command", {}).get("CommandId") or "")
+    if SSM_COMMAND_ID_RE.fullmatch(command_id) is None:
+        raise TemporaryHostError("fixed temporary SSM command identity is invalid")
+    return command_id, _wait_ssm_command(
+        ssm,
+        instance_id=instance_id,
+        command_id=command_id,
+        timeout_seconds=timeout_seconds + 120,
+    )
+
+
+def source_bootstrap_command(
+    *,
+    run_id: str,
+    candidate_sha: str,
+    instance_id: str,
+    assets_bucket: str,
+    assets_prefix: str,
+) -> str:
+    expected_bucket = _artifact_bucket_name(
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+    )
+    expected_prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
+    if (
+        INSTANCE_ID_RE.fullmatch(instance_id) is None
+        or assets_bucket != expected_bucket
+        or assets_prefix != expected_prefix
+    ):
+        raise TemporaryHostError("temporary source-bootstrap assets differ")
+    q = shlex.quote
+    bundle = f"{RUNTIME_ROOT}/candidate.bundle"
+    binding = f"{RUNTIME_ROOT}/candidate-bundle-binding.json"
+    requirements = f"{RUNTIME_ROOT}/requirements.txt"
+    stage_receipt = f"{RUNTIME_ROOT}/source-stage.json"
+    config_probe = (
+        "import json,os,stat,sys; p=sys.argv[1]; s=os.lstat(p); "
+        "assert stat.S_ISREG(s.st_mode) and not stat.S_ISLNK(s.st_mode) "
+        "and not s.st_mode & 0o077; v=json.load(open(p, encoding='utf-8')); "
+        "assert v['run_id']==sys.argv[2] and v['candidate_sha']==sys.argv[3] "
+        "and v['expected_instance_id']==sys.argv[4]"
+    )
+    binding_probe = (
+        "import hashlib,json,os,sys; b=json.load(open(sys.argv[1], encoding='utf-8')); "
+        "assert set(b)=={'candidate-sha','bundle-sha256','bundle-size-bytes'}; "
+        "assert b['candidate-sha']==sys.argv[3]; p=sys.argv[2]; "
+        "assert os.path.getsize(p)==int(b['bundle-size-bytes']); "
+        "assert hashlib.sha256(open(p,'rb').read()).hexdigest()==b['bundle-sha256']"
+    )
+    lines = [
+        "set -Eeuo pipefail",
+        "umask 077",
+        f"test -f {q(RUNTIME_ROOT + '/early-isolation')}",
+        f"test \"$(cat {q(RUNTIME_ROOT + '/early-isolation')})\" = isolated",
+        f"test ! -e {q(SOURCE_REPOSITORY)}",
+        f"test ! -e {q(SOURCE_VENV)}",
+        f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
+        f"--key {q(assets_prefix + '/candidate.bundle')} {q(bundle)} >/dev/null 2>&1",
+        f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
+        f"--key {q(assets_prefix + '/candidate-bundle-binding.json')} {q(binding)} >/dev/null 2>&1",
+        f"/usr/bin/python3 -I -c {q(binding_probe)} {q(binding)} {q(bundle)} {q(candidate_sha)}",
+        "if [ ! -x /usr/bin/git ]; then /usr/bin/dnf -q -y install git-core >/dev/null 2>&1; fi",
+        f"install -d -m 0700 {q(str(Path(SOURCE_REPOSITORY).parent))} {q(SOURCE_REPOSITORY)}",
+        f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} init >/dev/null 2>&1",
+        f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} fetch --no-tags {q(bundle)} HEAD >/dev/null 2>&1",
+        f"test \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} rev-parse FETCH_HEAD)\" = {q(candidate_sha)}",
+        f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} checkout --detach {q(candidate_sha)} >/dev/null 2>&1",
+        f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} remote add origin https://github.com/leadpoet/leadpoet.git",
+        f"/usr/bin/git -C {q(SOURCE_REPOSITORY)} fetch --no-tags origin "
+        "refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1",
+        f"test \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} rev-parse origin/main)\" = {q(candidate_sha)}",
+        f"test -z \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} status --porcelain --untracked-files=all)\"",
+        "/usr/bin/dnf -q -y install python3.11-pip >/dev/null 2>&1",
+        f"/usr/bin/python3.11 -I -m venv {q(SOURCE_VENV)}",
+        f"/usr/bin/python3.11 {q(SOURCE_REPOSITORY + '/scripts/resolve_production_parity_controller_requirements.py')} "
+        f"--requirements {q(SOURCE_REPOSITORY + '/requirements.txt')} --output {q(requirements)}",
+        f"PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 {q(SOURCE_VENV + '/bin/python3')} -m pip install "
+        f"--disable-pip-version-check --no-input --no-cache-dir --requirement {q(requirements)} >/dev/null 2>&1",
+        f"PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 {q(SOURCE_VENV + '/bin/python3')} -m pip check >/dev/null 2>&1",
+        f"test -f {q(SOURCE_REPOSITORY + '/scripts/stage_temporary_testnet_weights_host.py')}",
+        f"cd {q(SOURCE_REPOSITORY)}",
+        f"PYTHONPATH={q(SOURCE_REPOSITORY)} {q(SOURCE_VENV + '/bin/python3')} "
+        "-m scripts.stage_temporary_testnet_weights_host "
+        f"--candidate-sha {q(candidate_sha)} --run-id {q(run_id)} "
+        f"--instance-id {q(instance_id)} --assets-bucket {q(assets_bucket)} "
+        f"--assets-prefix {q(assets_prefix)} >{q(stage_receipt)}",
+        f"chmod 600 {q(stage_receipt)} {q(NATIVE_CONFIG)}",
+        f"/usr/bin/python3 -I -c {q(config_probe)} {q(NATIVE_CONFIG)} {q(run_id)} {q(candidate_sha)} {q(instance_id)}",
+        f"rm -f {q(bundle)} {q(binding)}",
+        "printf '%s\\n' temporary_testnet401_source_ready",
+    ]
+    return "\n".join(lines)
+
+
+def run_source_bootstrap(
+    *,
+    ec2: Any,
+    ssm: Any,
+    account_id: str,
+    region: str,
+    run_id: str,
+    candidate_sha: str,
+    instance_id: str,
+    assets_bucket: str,
+    assets_prefix: str,
+    now: datetime,
+) -> dict[str, Any]:
+    if account_id != ACCOUNT_ID or region != REGION:
+        raise TemporaryHostError("temporary source-bootstrap AWS identity differs")
+    _require_live_host(
+        ec2,
+        instance_id=instance_id,
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+        now=now,
+    )
+    command = source_bootstrap_command(
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+        instance_id=instance_id,
+        assets_bucket=assets_bucket,
+        assets_prefix=assets_prefix,
+    )
+    command_id, stdout = _send_fixed_ssm(
+        ssm,
+        instance_id=instance_id,
+        command=command,
+        timeout_seconds=7200,
+    )
+    if stdout != "temporary_testnet401_source_ready\n":
+        raise TemporaryHostError("temporary source-bootstrap receipt differs")
+    return {
+        "schema_version": SOURCE_BOOTSTRAP_SCHEMA_VERSION,
+        "status": "ready",
+        "run_id": run_id,
+        "candidate_sha": candidate_sha,
+        "instance_id": instance_id,
+        "assets_bucket": assets_bucket,
+        "assets_prefix": assets_prefix,
+        "ssm_command_id": command_id,
+    }
+
+
+def run_native_stage(
+    *,
+    ec2: Any,
+    ssm: Any,
+    account_id: str,
+    region: str,
+    run_id: str,
+    candidate_sha: str,
+    instance_id: str,
+    stage: str,
+    now: datetime,
+) -> dict[str, Any]:
+    if account_id != ACCOUNT_ID or region != REGION or stage not in NATIVE_STAGES:
+        raise TemporaryHostError("temporary native-stage inputs differ")
+    _require_live_host(
+        ec2,
+        instance_id=instance_id,
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+        now=now,
+    )
+    argv = [
+        f"{SOURCE_VENV}/bin/python3",
+        "-m",
+        "scripts.bootstrap_temporary_testnet_weights_host",
+        stage,
+        "--config",
+        NATIVE_CONFIG,
+    ]
+    if stage in {"launch", "cleanup"}:
+        argv.extend(("--confirm-instance-id", instance_id))
+    command = (
+        "set -Eeuo pipefail\n"
+        f"cd {shlex.quote(SOURCE_REPOSITORY)}\n"
+        f"export PYTHONPATH={shlex.quote(SOURCE_REPOSITORY)}\n"
+        "exec "
+    ) + " ".join(
+        shlex.quote(value) for value in argv
+    )
+    command_id, stdout = _send_fixed_ssm(
+        ssm,
+        instance_id=instance_id,
+        command=command,
+        timeout_seconds=NATIVE_STAGE_TIMEOUTS[stage],
+    )
+    try:
+        receipt = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise TemporaryHostError("temporary native-stage receipt is invalid") from exc
+    if (
+        not isinstance(receipt, Mapping)
+        or receipt.get("schema_version") != NATIVE_RECEIPT_SCHEMA_VERSION
+        or receipt.get("stage") != stage
+        or receipt.get("run_id") != run_id
+        or receipt.get("candidate_sha") != candidate_sha
+        or receipt.get("instance_id") != instance_id
+    ):
+        raise TemporaryHostError("temporary native-stage receipt differs")
+    return {
+        "schema_version": "leadpoet.temporary_testnet401_native_ssm.v1",
+        "stage": stage,
+        "run_id": run_id,
+        "candidate_sha": candidate_sha,
+        "instance_id": instance_id,
+        "ssm_command_id": command_id,
+        "receipt": dict(receipt),
+    }
+
+
 def _delete_security_group(ec2: Any, group_id: str) -> None:
     for attempt in range(1, 7):
         try:
@@ -146,20 +584,211 @@ def _delete_security_group(ec2: Any, group_id: str) -> None:
             time.sleep(5)
 
 
-def _rollback(ec2: Any, journal: Mapping[str, str]) -> None:
+def _pages(call: Any, **request: Any) -> list[Mapping[str, Any]]:
+    pages: list[Mapping[str, Any]] = []
+    token: str | None = None
+    seen: set[str] = set()
+    for _ in range(1000):
+        current = dict(request)
+        if token is not None:
+            current["NextToken"] = token
+        response = call(**current)
+        if not isinstance(response, Mapping):
+            raise TemporaryHostError("AWS inventory page is invalid")
+        pages.append(response)
+        next_token = response.get("NextToken")
+        if next_token in (None, ""):
+            return pages
+        if (
+            not isinstance(next_token, str)
+            or next_token in seen
+            or next_token == token
+        ):
+            raise TemporaryHostError("AWS inventory pagination is invalid")
+        seen.add(next_token)
+        token = next_token
+    raise TemporaryHostError("AWS inventory pagination exceeded its bound")
+
+
+def _instance_by_id(ec2: Any, instance_id: str) -> Mapping[str, Any] | None:
+    response = ec2.describe_instances(InstanceIds=[instance_id])
+    values = [
+        item
+        for reservation in response.get("Reservations", [])
+        for item in reservation.get("Instances", [])
+    ]
+    if not values:
+        return None
+    if len(values) != 1 or values[0].get("InstanceId") != instance_id:
+        raise TemporaryHostError("temporary instance inventory is ambiguous")
+    return values[0]
+
+
+def _child_ids(host: Mapping[str, Any]) -> tuple[str, str]:
+    volumes = host.get("BlockDeviceMappings", [])
+    interfaces = host.get("NetworkInterfaces", [])
+    if len(volumes) != 1 or len(interfaces) != 1:
+        raise TemporaryHostError("temporary child-resource inventory differs")
+    volume = volumes[0]
+    interface = interfaces[0]
+    volume_id = str(volume.get("Ebs", {}).get("VolumeId") or "")
+    interface_id = str(interface.get("NetworkInterfaceId") or "")
+    if (
+        volume.get("DeviceName") != "/dev/xvda"
+        or volume.get("Ebs", {}).get("DeleteOnTermination") is not True
+        or VOLUME_ID_RE.fullmatch(volume_id) is None
+        or NETWORK_INTERFACE_ID_RE.fullmatch(interface_id) is None
+        or interface.get("Attachment", {}).get("DeleteOnTermination") is not True
+    ):
+        raise TemporaryHostError("temporary child-resource identity differs")
+    return volume_id, interface_id
+
+
+def _confirm_children_deleted(
+    ec2: Any,
+    *,
+    volume_ids: Sequence[str],
+    network_interface_ids: Sequence[str],
+) -> list[str]:
+    errors: list[str] = []
+    if volume_ids:
+        try:
+            ec2.get_waiter("volume_deleted").wait(
+                VolumeIds=sorted(set(volume_ids)),
+                WaiterConfig={"Delay": 5, "MaxAttempts": 24},
+            )
+        except Exception as exc:  # noqa: BLE001 - return bounded residue evidence
+            errors.append(_error_label("volumes-delete-on-termination", exc))
+    remaining = set(network_interface_ids)
+    for _ in range(24):
+        if not remaining:
+            break
+        try:
+            response = ec2.describe_network_interfaces(
+                NetworkInterfaceIds=sorted(remaining)
+            )
+        except ClientError as exc:
+            if str(exc.response.get("Error", {}).get("Code") or "") == (
+                "InvalidNetworkInterfaceID.NotFound"
+            ):
+                remaining.clear()
+                break
+            errors.append(_error_label("network-interfaces-delete", exc))
+            break
+        observed = {
+            str(item.get("NetworkInterfaceId") or "")
+            for item in response.get("NetworkInterfaces", [])
+        }
+        remaining &= observed
+        if remaining:
+            time.sleep(5)
+    if remaining:
+        errors.append("network-interfaces-delete:residue")
+    return errors
+
+
+def _rollback(
+    ec2: Any,
+    *,
+    account_id: str,
+    region: str,
+    run_id: str,
+    candidate_sha: str,
+    journal: Mapping[str, str],
+) -> dict[str, Any]:
     instance_id = str(journal.get("instance_id") or "")
     group_id = str(journal.get("security_group_id") or "")
+    volume_id = str(journal.get("volume_id") or "")
+    network_interface_id = str(journal.get("network_interface_id") or "")
+    errors: list[str] = []
     if INSTANCE_ID_RE.fullmatch(instance_id):
         try:
-            ec2.terminate_instances(InstanceIds=[instance_id])
-            ec2.get_waiter("instance_terminated").wait(InstanceIds=[instance_id])
-        except Exception:  # noqa: BLE001 - preserve the provisioning failure
-            pass
+            instance = _instance_by_id(ec2, instance_id)
+            identity = (
+                _owned_identity(instance.get("Tags"))
+                if instance is not None
+                else None
+            )
+            if instance is not None and (
+                identity is None or identity[:2] != (run_id, candidate_sha)
+            ):
+                raise TemporaryHostError("rollback instance ownership changed")
+            if instance is not None:
+                volume_id, network_interface_id = _child_ids(instance)
+            if instance is not None and instance.get("State", {}).get("Name") not in {
+                "terminated",
+                "shutting-down",
+            }:
+                ec2.terminate_instances(InstanceIds=[instance_id])
+                ec2.get_waiter("instance_terminated").wait(
+                    InstanceIds=[instance_id]
+                )
+        except Exception as exc:  # noqa: BLE001 - report bounded rollback failure
+            errors.append(_error_label(f"instance:{instance_id}", exc))
+    child_errors = _confirm_children_deleted(
+        ec2,
+        volume_ids=[volume_id] if VOLUME_ID_RE.fullmatch(volume_id) else [],
+        network_interface_ids=(
+            [network_interface_id]
+            if NETWORK_INTERFACE_ID_RE.fullmatch(network_interface_id)
+            else []
+        ),
+    )
+    errors.extend(child_errors)
     if SECURITY_GROUP_ID_RE.fullmatch(group_id):
         try:
-            _delete_security_group(ec2, group_id)
-        except Exception:  # noqa: BLE001 - scheduled cleanup remains the backstop
-            pass
+            values = ec2.describe_security_groups(GroupIds=[group_id]).get(
+                "SecurityGroups", []
+            )
+            if len(values) > 1:
+                raise TemporaryHostError("rollback security group is ambiguous")
+            if values:
+                identity = _owned_identity(values[0].get("Tags"))
+                if identity is None or identity[:2] != (run_id, candidate_sha):
+                    raise TemporaryHostError(
+                        "rollback security-group ownership changed"
+                    )
+                _delete_security_group(ec2, group_id)
+        except Exception as exc:  # noqa: BLE001 - report bounded rollback failure
+            errors.append(_error_label(f"security-group:{group_id}", exc))
+    residue: dict[str, list[str]] | dict[str, bool]
+    try:
+        instances, groups = _inventory(
+            ec2,
+            run_id=run_id,
+            candidate_sha=candidate_sha,
+        )
+        residue = {
+            key: values
+            for key, values in {
+                "instances": sorted(str(item["InstanceId"]) for item in instances),
+                "security_groups": sorted(
+                    str(item["GroupId"]) for item in groups
+                ),
+            }.items()
+            if values
+        }
+        if child_errors:
+            if VOLUME_ID_RE.fullmatch(volume_id):
+                residue["volumes"] = [volume_id]
+            if NETWORK_INTERFACE_ID_RE.fullmatch(network_interface_id):
+                residue["network_interfaces"] = [network_interface_id]
+    except Exception as exc:  # noqa: BLE001 - make unknown residue explicit
+        errors.append(_error_label("rollback-inventory", exc))
+        residue = {"inventory_unknown": True}
+    return {
+        "attempted": True,
+        "cleanup_complete": not errors and not residue,
+        "errors": sorted(set(errors)),
+        "residue": residue,
+        "instance_id": instance_id or None,
+        "security_group_id": group_id or None,
+        "volume_id": volume_id or None,
+        "network_interface_id": network_interface_id or None,
+        "delete_on_termination_confirmed": not child_errors,
+        "account_id": account_id,
+        "region": region,
+    }
 
 
 def create_host(
@@ -234,7 +863,9 @@ def create_host(
                 },
             }],
             InstanceInitiatedShutdownBehavior="terminate",
-            UserData=EARLY_BOOT_ISOLATION,
+            UserData=EARLY_BOOT_ISOLATION.replace(
+                "{expiry_epoch}", str(int(expires_at.timestamp()))
+            ),
             TagSpecifications=[
                 {"ResourceType": kind, "Tags": tags}
                 for kind in ("instance", "volume", "network-interface")
@@ -269,6 +900,18 @@ def create_host(
             != (run_id, candidate_sha, expires_at.replace(microsecond=0))
         ):
             raise TemporaryHostError("temporary instance readback differs")
+        volume_id, network_interface_id = _child_ids(host)
+        journal["volume_id"] = volume_id
+        journal["network_interface_id"] = network_interface_id
+        volumes = ec2.describe_volumes(VolumeIds=[volume_id]).get("Volumes", [])
+        if (
+            len(volumes) != 1
+            or volumes[0].get("VolumeId") != volume_id
+            or volumes[0].get("Encrypted") is not True
+            or volumes[0].get("Size") != VOLUME_GIB
+            or volumes[0].get("VolumeType") != "gp3"
+        ):
+            raise TemporaryHostError("temporary root-volume readback differs")
         groups = ec2.describe_security_groups(GroupIds=[group_id]).get(
             "SecurityGroups", []
         )
@@ -282,9 +925,41 @@ def create_host(
         ):
             raise TemporaryHostError("temporary security-group readback differs")
         _wait_ssm_online(ssm, instance_id)
-    except Exception:
-        _rollback(ec2, journal)
-        raise
+        _verify_expiry_timer(
+            ssm,
+            instance_id=instance_id,
+            expiry_epoch=int(expires_at.timestamp()),
+        )
+    except Exception as exc:
+        rollback = _rollback(
+            ec2,
+            account_id=account_id,
+            region=region,
+            run_id=run_id,
+            candidate_sha=candidate_sha,
+            journal=journal,
+        )
+        raise TemporaryHostCreateError({
+            "schema_version": SCHEMA_VERSION,
+            "status": (
+                "provision_failed_cleanup_complete"
+                if rollback["cleanup_complete"]
+                else "provision_failed_cleanup_incomplete"
+            ),
+            "account_id": account_id,
+            "region": region,
+            "run_id": run_id,
+            "candidate_sha": candidate_sha,
+            "function": FUNCTION,
+            "created_at": created_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "instance_id": rollback["instance_id"],
+            "security_group_id": rollback["security_group_id"],
+            "volume_id": rollback["volume_id"],
+            "network_interface_id": rollback["network_interface_id"],
+            "failure": _error_label("provision", exc),
+            "rollback": rollback,
+        }) from exc
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -298,6 +973,8 @@ def create_host(
         "expires_at": expires_at.isoformat(),
         "instance_id": instance_id,
         "security_group_id": group_id,
+        "volume_id": volume_id,
+        "network_interface_id": network_interface_id,
         "instance_type": INSTANCE_TYPE,
         "volume_gib": VOLUME_GIB,
         "nitro_enclaves_enabled": True,
@@ -310,25 +987,61 @@ def create_host(
     }
 
 
-def _inventory(ec2: Any) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
-    response = ec2.describe_instances(
-        Filters=[{"Name": f"tag:{TAG_EPHEMERAL}", "Values": ["true"]}]
-    )
+def _inventory(
+    ec2: Any,
+    *,
+    run_id: str | None = None,
+    candidate_sha: str | None = None,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    exact = run_id is not None or candidate_sha is not None
+    if exact and (
+        not isinstance(run_id, str)
+        or RUN_RE.fullmatch(run_id) is None
+        or not isinstance(candidate_sha, str)
+        or SHA_RE.fullmatch(candidate_sha) is None
+    ):
+        raise TemporaryHostError("exact inventory inputs are invalid")
+    filters = [{"Name": f"tag:{TAG_EPHEMERAL}", "Values": ["true"]}]
+    if exact:
+        filters.extend([
+            {"Name": f"tag:{TAG_RUN}", "Values": [run_id]},
+            {"Name": f"tag:{TAG_SHA}", "Values": [candidate_sha]},
+        ])
+
+    def owned(tags: Any) -> bool:
+        identity = _owned_identity(tags)
+        return identity is not None and (
+            not exact or identity[:2] == (run_id, candidate_sha)
+        )
+
+    instance_pages = _pages(ec2.describe_instances, Filters=filters)
     instances = [
         item
-        for reservation in response.get("Reservations", [])
+        for page in instance_pages
+        for reservation in page.get("Reservations", [])
         for item in reservation.get("Instances", [])
-        if _owned_identity(item.get("Tags")) is not None
+        if owned(item.get("Tags"))
         and item.get("State", {}).get("Name") not in {"terminated", "shutting-down"}
     ]
+    group_pages = _pages(ec2.describe_security_groups, Filters=filters)
     groups = [
         item
-        for item in ec2.describe_security_groups(
-            Filters=[{"Name": f"tag:{TAG_EPHEMERAL}", "Values": ["true"]}]
-        ).get("SecurityGroups", [])
-        if _owned_identity(item.get("Tags")) is not None
+        for page in group_pages
+        for item in page.get("SecurityGroups", [])
+        if owned(item.get("Tags"))
         and item.get("VpcId") == VPC_ID
     ]
+    instance_ids = [str(item.get("InstanceId") or "") for item in instances]
+    group_ids = [str(item.get("GroupId") or "") for item in groups]
+    if (
+        any(INSTANCE_ID_RE.fullmatch(value) is None for value in instance_ids)
+        or len(instance_ids) != len(set(instance_ids))
+        or any(
+            SECURITY_GROUP_ID_RE.fullmatch(value) is None for value in group_ids
+        )
+        or len(group_ids) != len(set(group_ids))
+    ):
+        raise TemporaryHostError("temporary inventory identity is invalid")
     return instances, groups
 
 
@@ -353,22 +1066,36 @@ def cleanup_hosts(
     ):
         raise TemporaryHostError("exact temporary cleanup inputs are invalid")
     current = _utc(now)
-    instances, groups = _inventory(ec2)
+    instances, groups = _inventory(
+        ec2,
+        run_id=run_id if exact else None,
+        candidate_sha=candidate_sha if exact else None,
+    )
 
     def selected(resource: Mapping[str, Any]) -> bool:
         identity = _owned_identity(resource.get("Tags"))
-        assert identity is not None
+        if identity is None:
+            return False
         owner_run, owner_sha, expiry = identity
         if exact:
             return owner_run == run_id and owner_sha == candidate_sha
         return expiry <= current
 
-    instance_ids = sorted(
-        str(item["InstanceId"]) for item in instances if selected(item)
-    )
+    selected_instances = [item for item in instances if selected(item)]
+    instance_ids = sorted(str(item["InstanceId"]) for item in selected_instances)
     group_ids = sorted(
         str(item["GroupId"]) for item in groups if selected(item)
     )
+    errors: list[str] = []
+    child_ids: dict[str, tuple[str, str]] = {}
+    for item in selected_instances:
+        instance_id = str(item.get("InstanceId") or "")
+        try:
+            child_ids[instance_id] = _child_ids(item)
+        except Exception as exc:  # noqa: BLE001 - preserve cleanup receipt
+            errors.append(_error_label(f"children:{instance_id}", exc))
+    volume_ids = sorted({value[0] for value in child_ids.values()})
+    network_interface_ids = sorted({value[1] for value in child_ids.values()})
     result = {
         "schema_version": "leadpoet.temporary_testnet_signing_cleanup.v1",
         "mode": "apply" if apply else "dry-run",
@@ -377,34 +1104,87 @@ def cleanup_hosts(
         "candidate_sha": candidate_sha,
         "instances": instance_ids,
         "security_groups": group_ids,
+        "volumes": volume_ids,
+        "network_interfaces": network_interface_ids,
+        "delete_on_termination_confirmed": False,
+        "errors": errors,
         "residue": {},
     }
     if not apply:
         return result
+    terminated: list[str] = []
     for instance_id in instance_ids:
-        ec2.terminate_instances(InstanceIds=[instance_id])
-    if instance_ids:
-        ec2.get_waiter("instance_terminated").wait(InstanceIds=instance_ids)
+        if instance_id not in child_ids:
+            continue
+        try:
+            live = _instance_by_id(ec2, instance_id)
+            if live is None:
+                continue
+            if not selected(live):
+                raise TemporaryHostError("temporary instance ownership changed")
+            if _child_ids(live) != child_ids[instance_id]:
+                raise TemporaryHostError("temporary child-resource identity changed")
+            if live.get("State", {}).get("Name") not in {
+                "terminated",
+                "shutting-down",
+            }:
+                ec2.terminate_instances(InstanceIds=[instance_id])
+                terminated.append(instance_id)
+        except Exception as exc:  # noqa: BLE001 - preserve cleanup receipt
+            errors.append(_error_label(f"instance:{instance_id}", exc))
+    if terminated:
+        try:
+            ec2.get_waiter("instance_terminated").wait(InstanceIds=terminated)
+        except Exception as exc:  # noqa: BLE001 - preserve cleanup receipt
+            errors.append(_error_label("instances-terminate", exc))
+    child_errors = _confirm_children_deleted(
+        ec2,
+        volume_ids=[child_ids[item][0] for item in terminated],
+        network_interface_ids=[child_ids[item][1] for item in terminated],
+    )
+    errors.extend(child_errors)
+    result["delete_on_termination_confirmed"] = not child_errors
     for group_id in group_ids:
-        live = ec2.describe_security_groups(GroupIds=[group_id]).get(
-            "SecurityGroups", []
+        try:
+            live = ec2.describe_security_groups(GroupIds=[group_id]).get(
+                "SecurityGroups", []
+            )
+            if not live:
+                continue
+            if len(live) != 1 or not selected(live[0]):
+                raise TemporaryHostError(
+                    "temporary security-group ownership changed"
+                )
+            _delete_security_group(ec2, group_id)
+        except Exception as exc:  # noqa: BLE001 - preserve cleanup receipt
+            errors.append(_error_label(f"security-group:{group_id}", exc))
+    try:
+        remaining_instances, remaining_groups = _inventory(
+            ec2,
+            run_id=run_id if exact else None,
+            candidate_sha=candidate_sha if exact else None,
         )
-        if len(live) != 1 or not selected(live[0]):
-            raise TemporaryHostError("temporary security-group ownership changed")
-        _delete_security_group(ec2, group_id)
-    remaining_instances, remaining_groups = _inventory(ec2)
-    residue = {
-        "instances": sorted(
-            str(item["InstanceId"])
-            for item in remaining_instances
-            if selected(item)
-        ),
-        "security_groups": sorted(
-            str(item["GroupId"])
-            for item in remaining_groups
-            if selected(item)
-        ),
-    }
+        residue = {
+            "instances": sorted(
+                str(item["InstanceId"])
+                for item in remaining_instances
+                if selected(item)
+            ),
+            "security_groups": sorted(
+                str(item["GroupId"])
+                for item in remaining_groups
+                if selected(item)
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - make unknown residue explicit
+        errors.append(_error_label("cleanup-inventory", exc))
+        residue = {"inventory_unknown": True}
+    if child_errors:
+        residue["volumes"] = [child_ids[item][0] for item in terminated]
+        residue["network_interfaces"] = [
+            child_ids[item][1] for item in terminated
+        ]
+    result["errors"] = sorted(set(errors))
     result["residue"] = {key: value for key, value in residue.items() if value}
     return result
 
@@ -432,12 +1212,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     cleanup_run.add_argument("--apply", action="store_true")
     cleanup_expired = commands.add_parser("cleanup-expired")
     cleanup_expired.add_argument("--apply", action="store_true")
+    source_bootstrap = commands.add_parser("ssm-source-bootstrap")
+    source_bootstrap.add_argument("--run-id", required=True)
+    source_bootstrap.add_argument("--candidate-sha", required=True)
+    source_bootstrap.add_argument("--instance-id", required=True)
+    source_bootstrap.add_argument("--assets-bucket", required=True)
+    source_bootstrap.add_argument("--assets-prefix", required=True)
+    source_bootstrap.add_argument("--state", type=Path, required=True)
+    native_stage = commands.add_parser("ssm-native-stage")
+    native_stage.add_argument("--run-id", required=True)
+    native_stage.add_argument("--candidate-sha", required=True)
+    native_stage.add_argument("--instance-id", required=True)
+    native_stage.add_argument("--stage", choices=sorted(NATIVE_STAGES), required=True)
+    native_stage.add_argument("--state", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         session = boto3.session.Session(region_name=args.region)
         account_id = str(session.client("sts").get_caller_identity()["Account"])
         ec2 = session.client("ec2")
         now = datetime.now(timezone.utc).replace(microsecond=0)
+        candidate_sha = (
+            args.candidate_sha.lower()
+            if hasattr(args, "candidate_sha")
+            else None
+        )
         if args.command == "create":
             result = create_host(
                 ec2=ec2,
@@ -445,8 +1243,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 account_id=account_id,
                 region=args.region,
                 run_id=args.run_id,
-                candidate_sha=args.candidate_sha.lower(),
+                candidate_sha=candidate_sha,
                 ttl_hours=args.ttl_hours,
+                now=now,
+            )
+            _write(args.state, result)
+        elif args.command == "ssm-source-bootstrap":
+            result = run_source_bootstrap(
+                ec2=ec2,
+                ssm=session.client("ssm"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+                instance_id=args.instance_id,
+                assets_bucket=args.assets_bucket,
+                assets_prefix=args.assets_prefix,
+                now=now,
+            )
+            _write(args.state, result)
+        elif args.command == "ssm-native-stage":
+            result = run_native_stage(
+                ec2=ec2,
+                ssm=session.client("ssm"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+                instance_id=args.instance_id,
+                stage=args.stage,
                 now=now,
             )
             _write(args.state, result)
@@ -459,16 +1284,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 apply=args.apply,
                 run_id=args.run_id if args.command == "cleanup-run" else None,
                 candidate_sha=(
-                    args.candidate_sha.lower()
+                    candidate_sha
                     if args.command == "cleanup-run"
                     else None
                 ),
             )
+    except TemporaryHostCreateError as exc:
+        _write(args.state, exc.receipt)
+        print(json.dumps(exc.receipt, sort_keys=True))
+        print("ERROR: temporary host provisioning failed; see receipt", file=sys.stderr)
+        return 1
     except (BotoCoreError, ClientError, OSError, TemporaryHostError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))
-    if result.get("residue"):
+    if result.get("errors") or result.get("residue"):
         return 1
     return 0
 

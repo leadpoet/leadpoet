@@ -28,8 +28,14 @@ the masked prompts:
 
 The gateway checks the keys without changing the OpenRouter account. It
 discards the management key after the check. It stores only encrypted runtime
-keys. Neither the validator sandbox nor the submitted code receives real keys;
-the gateway adds them to approved provider calls for that submission.
+keys. The OpenRouter runtime key must be usable and non-management. If
+OpenRouter reports `limit_remaining`, it must be above zero. The management key must control that exact runtime key; the
+gateway proves this through the runtime key's SHA256 hash. A runtime-only key,
+a management key in the runtime slot, a disabled key, or a key with no
+reported credit is rejected. The gateway reports safe error codes and never
+includes key values in them. Neither the validator sandbox nor the submitted code receives
+real keys; the gateway adds them to approved provider calls for that
+submission.
 The miner pays those upstream charges. There is no organizer-key fallback.
 
 For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and
@@ -40,11 +46,20 @@ python3 scripts/lab_arena_miner.py submit-model --source ./my-agent \
   --wallet-name YOUR_WALLET --hotkey-name YOUR_HOTKEY
 ```
 
-Do not put keys in command arguments or model source. Runtime `.env` files
-are rejected. `.env.example`, `.env.sample`, and `.env.template` files
-are allowed, but no archive may contain a submitted key.
+Do not put keys in command arguments or model source. An archive rejects every
+file whose basename is `.env` or starts with `.env.`, except for the exact
+templates `.env.example`, `.env.sample`, and `.env.template`. Those templates
+must contain placeholders only; no archive may contain a submitted key.
+For example, a secret-free loader named `.env.local.sh` is still rejected by
+its basename; rename it to a neutral name such as `arena-env-loader.sh` before
+including it.
 
 Admission requires a registered miner hotkey and an open submission window.
+If the chain no longer registers the selected hotkey, presign returns
+`hotkey_unregistered`. Check registration before submitting and update the
+wallet or miner configuration to a currently registered hotkey. Do not rotate
+a registered key just because an older key was pruned; preserve the key that
+owns existing submissions and use the signed owner for status and results.
 The archive limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 entries.
 The result gives a submission ID and round ID. **Accepted means admitted, not
 scored.** Validator execution and scoring follow through that round's queue.
@@ -59,6 +74,13 @@ The result includes companies, per-ICP scores, and the aggregate score.
 Before publication, this endpoint returns HTTP 403 with `results_not_public`.
 That response does not mean the submission failed. Check the round status at
 `/arena/v1/rounds/ROUND_ID`; do not submit again just to check progress.
+
+Provider calls made while a round is running can incur the miner's upstream
+charges even if a later infrastructure failure cancels the round. A cancelled
+round does not publish a ranking and does not automatically refund provider
+charges. Arena reward activation is a separate setting: disabling rewards
+prevents champion allocation, while scoring and competition execution remain
+separate configuration behavior.
 
 ## Operator setup
 

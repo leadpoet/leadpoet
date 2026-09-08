@@ -36,17 +36,24 @@ dependencies read-only. It rejects URLs, local paths, nested requirements,
 VCS dependencies, and source builds. The common trusted scorer image supplies
 Python for every agent; it is not a miner image or a miner identity.
 
-The organizer supplies one host key for each provider:
+The organizer supplies host provider keys for the public baseline and the
+trusted judge:
 
 - `LAB_ARENA_OPENROUTER_API_KEY`
 - `LAB_ARENA_SCRAPINGDOG_API_KEY`
 - `LAB_ARENA_DEEPLINE_API_KEY`
 
-The OpenRouter key is shared by bundle calls and judge calls. Only the
-organizer configures provider keys on the host. The broker
-permits any model in the organizer-fetched OpenRouter catalog that has usable
-pricing. It still enforces the fixed call, token, cost, privacy, and time
-limits. The trusted judge can use only its configured judge models.
+The host keys are used for baseline and judge traffic. A competing model's
+OpenRouter runtime key and Deepline key are submitted separately, encrypted in
+the gateway vault, and attached only to that submission's broker calls. The
+matching OpenRouter management key is used for admission validation and then
+discarded. The miner funds those upstream calls. The validator receives an
+opaque runtime lease and cannot read the credentials; submitted code receives
+provider access only through the broker transport.
+
+The broker permits any model in the organizer-fetched OpenRouter catalog that
+has usable pricing. It still enforces the fixed call, token, cost, privacy, and
+time limits. The trusted judge can use only its configured judge models.
 
 A shared provider account failure, rate limit, or provider server failure is
 an infrastructure failure. It does not give a miner a score of zero. A real

@@ -162,6 +162,8 @@ _SAFE_ADMISSION_ERRORS = frozenset({
     "submission_rate_limited", "submission_conflict", "submission_not_uploading",
     "source_upload_unavailable", "credential_validation_unavailable",
     "credential_kms_unavailable", "submission_credentials_missing",
+    "submission_superseded", "submission_rejected:source_checksum_mismatch",
+    "submission_rejected:source_contains_credentials",
     "submission_rejected:openrouter_api_key_invalid",
     "submission_rejected:openrouter_api_key_no_credit",
     "submission_rejected:openrouter_management_key_invalid",
@@ -191,10 +193,22 @@ def find_open_round(api_base_url: str, *, session: Any = requests) -> str:
     """Return the one round that currently accepts submissions."""
 
     base = _api_base_url(api_base_url)
-    try:
-        response = session.get(base + "/arena/v1/current", timeout=30)
-    except requests.RequestException as exc:
-        raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
+    response = None
+    for attempt in range(3):
+        try:
+            response = session.get(base + "/arena/v1/current", timeout=30)
+        except requests.RequestException as exc:
+            if attempt == 2:
+                raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
+            time.sleep(1 << attempt)
+            continue
+        status = int(getattr(response, "status_code", 0))
+        if status not in {502, 503, 504}:
+            break
+        if attempt == 2:
+            raise MinerSubmissionError("arena_unreachable", "http_%d" % status)
+        time.sleep(1 << attempt)
+    assert response is not None
     document = _json_response(response, "current_round")
     open_round = document.get("open_round")
     if not isinstance(open_round, Mapping) or open_round.get("status") != "open":
@@ -251,17 +265,18 @@ def _upload_source(
             "SignatureDoesNotMatch",
         }
         try:
-            match = re.search(r"<Code>\s*([^<\s]{1,80})\s*</Code>", response.text)
+            match = re.search(
+                r"<Code>\s*([^<\s]{1,80})\s*</Code>",
+                str(response.text)[:8192],
+            )
         except (AttributeError, TypeError):
             match = None
         if match and match.group(1) in known_codes:
             detail += " code=%s" % match.group(1)
         request_id = ""
-        for header in ("x-amz-request-id", "x-amz-id-2"):
-            value = response.headers.get(header, "") if hasattr(response, "headers") else ""
-            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", value):
-                request_id = value
-                break
+        value = response.headers.get("x-amz-request-id", "") if hasattr(response, "headers") else ""
+        if isinstance(value, str) and re.fullmatch(r"[A-Z0-9]{16}", value):
+            request_id = value
         if request_id:
             detail += " request_id=%s" % request_id
         raise MinerSubmissionError("source_upload_failed", detail)
@@ -294,7 +309,7 @@ def submit_agent_source(
                 forbidden_values=submission_credentials.values(),
             )
         except source_bundle.SourceBundleError as exc:
-            raise MinerSubmissionError(exc.code) from exc
+            raise MinerSubmissionError(exc.code, exc.path or "") from exc
         except OSError as exc:
             raise MinerSubmissionError("source_archive_failed") from exc
         presign_body = {
@@ -404,7 +419,7 @@ def run_interactive_submission(
             credentials=credentials,
         )
     except MinerSubmissionError as exc:
-        output_fn("Submission failed: %s" % exc.format_for_cli(credentials.values() if 'credentials' in locals() else ()))
+        output_fn("Submission failed: %s" % exc.format_for_cli(forbidden_values=credentials.values() if 'credentials' in locals() else ()))
         return False
     output_fn("Submission accepted: %s" % result["submission_id"])
     output_fn("Round: %s" % result["round_id"])

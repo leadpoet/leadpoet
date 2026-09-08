@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import signal
+import subprocess
+import time
 
 import pytest
 import yaml
@@ -1017,6 +1021,7 @@ class _ExactCleanupClient:
         self.deleted: list[str] = []
         self.fail_terminate = False
         self.fail_inventory = False
+        self.drift_group_on_retry = False
 
     def describe_instances(self, **kwargs):
         requested = kwargs.get("InstanceIds")
@@ -1047,6 +1052,10 @@ class _ExactCleanupClient:
 
     def delete_security_group(self, **kwargs):
         key = kwargs["GroupId"]
+        if self.drift_group_on_retry and key == SECURITY_GROUP_ID:
+            self.groups[key] = _exact_tags(self.manual_run)
+            self.drift_group_on_retry = False
+            raise _aws_error("DependencyViolation", "DeleteSecurityGroup")
         self.groups.pop(key, None)
         self.deleted.append(key)
 
@@ -1221,6 +1230,32 @@ def test_exact_cleanup_attempts_other_resources_and_reports_residue():
     assert client.target_bucket in client.deleted
 
 
+def test_exact_cleanup_rechecks_security_group_tags_during_retry(monkeypatch):
+    client = _ExactCleanupClient()
+    client.drift_group_on_retry = True
+    monkeypatch.setattr(
+        "scripts.cleanup_production_parity_staging.time.sleep", lambda _delay: None
+    )
+
+    result = cleanup_stale(
+        ec2=client,
+        cloudfront=client,
+        secretsmanager=client,
+        s3=client,
+        now=datetime.now(timezone.utc),
+        max_age_hours=30,
+        apply=True,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+    )
+
+    assert SECURITY_GROUP_ID in client.groups
+    assert SECURITY_GROUP_ID not in client.deleted
+    assert result["errors"] == [
+        f"security-group:{SECURITY_GROUP_ID}:StagingCleanupError"
+    ]
+
+
 def test_exact_cleanup_returns_machine_readable_inventory_errors():
     client = _ExactCleanupClient()
     client.fail_inventory = True
@@ -1229,7 +1264,7 @@ def test_exact_cleanup_returns_machine_readable_inventory_errors():
     assert result["errors"] == ["exact-run-inventory:RuntimeError"]
 
 
-def test_full_cleanup_uses_exact_fallback_when_stack_state_is_missing():
+def test_full_cleanup_uses_fallback_only_after_run_identity_is_frozen():
     source = (ROOT / ".github/workflows/physical-v2-staging.yml").read_text()
     gate = source.index('if [ -s "$parity_temp/parity-stack.json" ]')
     fallback = source.index(
@@ -1237,8 +1272,82 @@ def test_full_cleanup_uses_exact_fallback_when_stack_state_is_missing():
     )
     scrub = source.index('rm -rf -- "$parity_temp"', fallback)
     assert gate < fallback < scrub
+    assert 'elif [ -n "${{ steps.inputs.outputs.run_id }}" ]; then' in source
     assert '--run-id "${{ steps.inputs.outputs.run_id }}"' in source
     assert '--candidate-sha "$CANDIDATE_SHA"' in source
+
+
+@pytest.mark.parametrize(
+    ("signum", "exit_code"),
+    ((signal.SIGINT, 130), (signal.SIGTERM, 143)),
+)
+def test_full_create_cancellation_stops_and_waits_for_exact_child(
+    tmp_path, signum, exit_code
+):
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/physical-v2-staging.yml").read_text()
+    )
+    step = next(
+        item
+        for item in workflow["jobs"]["validate"]["steps"]
+        if item.get("name") == "Create one disposable Nitro host"
+    )
+    source = step["run"]
+    start = source.index('provision_pid=""')
+    end = source.index('python3 - "$PARITY_TEMP/parity-stack.json"')
+    cancellation = source[start:end]
+    command = (
+        'python3 scripts/provision_production_parity_staging.py "${args[@]}" &'
+    )
+    assert command in cancellation
+    cancellation = cancellation.replace(
+        command,
+        'python3 -c "$TEST_CHILD" "$READY" "$STOPPED" &',
+    )
+    assert 'kill -TERM "$provision_pid"' in cancellation
+    assert 'wait "$provision_pid"' in cancellation
+
+    ready = tmp_path / "ready"
+    stopped = tmp_path / "stopped"
+    child = """
+import pathlib, signal, sys, time
+ready = pathlib.Path(sys.argv[1])
+stopped = pathlib.Path(sys.argv[2])
+def stop(_signum, _frame):
+    stopped.write_text("stopped", encoding="utf-8")
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+ready.write_text("ready", encoding="utf-8")
+while True:
+    time.sleep(0.05)
+"""
+    environment = {
+        **os.environ,
+        "TEST_CHILD": child,
+        "READY": str(ready),
+        "STOPPED": str(stopped),
+    }
+    process = subprocess.Popen(
+        ["bash", "-c", "set -Eeuo pipefail\n" + cancellation],
+        env=environment,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(0.02)
+        assert ready.exists()
+        os.kill(process.pid, signum)
+        assert process.wait(timeout=5) == exit_code
+        assert stopped.read_text(encoding="utf-8") == "stopped"
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
+            process.wait(timeout=5)
 
 
 def test_cleanup_dispatch_validates_exact_pair_before_credentials():

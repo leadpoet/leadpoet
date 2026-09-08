@@ -400,18 +400,20 @@ def cleanup_stale(
             errors.append(_error_label(f"artifact-bucket:{bucket}", exc))
     for group_id in sorted(set(security_groups)):
         try:
-            if exact:
-                groups = ec2.describe_security_groups(GroupIds=[group_id]).get(
-                    "SecurityGroups", []
-                )
-                if len(groups) != 1 or not _is_exact_owner(
-                    groups[0].get("Tags"),
-                    run_id=run_id,
-                    candidate_sha=candidate_sha,
-                ):
-                    raise StagingCleanupError("security group ownership changed")
             deadline = time.monotonic() + 300
             while True:
+                if exact:
+                    groups = ec2.describe_security_groups(
+                        GroupIds=[group_id]
+                    ).get("SecurityGroups", [])
+                    if len(groups) != 1 or not _is_exact_owner(
+                        groups[0].get("Tags"),
+                        run_id=run_id,
+                        candidate_sha=candidate_sha,
+                    ):
+                        raise StagingCleanupError(
+                            "security group ownership changed"
+                        )
                 try:
                     ec2.delete_security_group(GroupId=group_id)
                     break

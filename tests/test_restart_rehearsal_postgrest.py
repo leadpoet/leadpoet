@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.restart_rehearsal import gateway_boundary_service
 from tests.restart_rehearsal.gateway_boundary_service import (
     Handler,
     LocalPostgRESTState,
@@ -62,7 +63,7 @@ def test_migration_backed_arena_rpc_stops_postgres_when_catalog_load_fails(
 
     database = Database()
     monkeypatch.setattr(
-        DisposablePostgres,
+        gateway_boundary_service.DisposablePostgres,
         "attach",
         lambda *_args, **_kwargs: database,
     )

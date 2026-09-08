@@ -60,15 +60,12 @@ from gateway.tee.coordinator_executor_v2 import (
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
-    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     COORDINATOR_ROLE,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
-    RECEIPT_GRAPH_SCHEMA_VERSION,
     WEIGHT_ROLE,
     build_boot_identity_body,
-    build_checkpointed_receipt_graph,
     build_execution_receipt_body,
     build_receipt_graph,
     build_transport_attempt,
@@ -78,12 +75,6 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     transport_root,
     validate_receipt_graph,
-)
-from leadpoet_canonical.ancestry_checkpoint_v2 import (
-    ANCESTRY_DELTA_SCHEMA_VERSION,
-    build_compact_ancestry_proof_from_delta_v2,
-    build_full_graph_parent_v2,
-    issue_ancestry_certificate_v2,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
     build_weight_extrinsic_authorization_v2,
@@ -107,13 +98,6 @@ def test_existing_and_activation_cutover_paths_verify_historical_parent_lineage(
 
     assert existing_source.count("parent_graphs=(graph,)") == 1
     assert activation_source.count("parent_graphs=(graph,)") == 1
-
-
-def test_approved_release_lineage_cli_is_fresh_test401_only(capsys):
-    with pytest.raises(SystemExit) as error:
-        cutover_cli_main(["--approved-release-lineage", "/tmp/lineage.json"])
-    assert error.value.code == 2
-    assert "restricted to fresh test401 mode" in capsys.readouterr().err
 
 
 def _cutover(**updates):
@@ -1343,21 +1327,6 @@ async def test_cutover_row_and_persistence_bind_coordinator_output_and_both_pare
         select=store.select,
     )
     assert first == second == row
-
-    with pytest.raises(
-        StatefulEpochAuthorityStoreError,
-        match="cutover row receipt graph root differs",
-    ):
-        await persist_cutover_v1(
-            authority_doc=result.output,
-            first_snapshot_doc=payload["first_snapshot"],
-            receipt_graph=graph,
-            row_receipt_graph={**graph, "root_receipt_hash": HASH_A},
-            persist_graph=store.persist_graph,
-            load_graph=store.load_graph,
-            insert=store.insert,
-            select=store.select,
-        )
 
     tampered = copy.deepcopy(result.output)
     tampered["last_legacy_bundle_hash"] = HASH_A

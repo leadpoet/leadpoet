@@ -794,16 +794,11 @@ async def v2_authority_health():
     """Fail-closed readiness for the retained live V2 enclave authority."""
     try:
         from gateway.api.attestation import _event_signing_identity
-        from gateway.tee.research_lab_runtime_config_v2 import (
-            build_research_lab_execution_config,
-        )
         from gateway.tee.verify_v2_runtime_ready import verify_v2_runtime_ready
 
         event_identity, enclave_health = await asyncio.gather(
             _event_signing_identity(),
-            verify_v2_runtime_ready(
-                execution_config=build_research_lab_execution_config()
-            ),
+            verify_v2_runtime_ready(),
         )
     except Exception as exc:
         _record_sentry_retry(

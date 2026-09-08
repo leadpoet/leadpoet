@@ -68,6 +68,25 @@ def _independent() -> dict:
     }
 
 
+def _log_evidence() -> dict:
+    return {
+        "status": "matched",
+        "epoch_id": EPOCH_ID,
+        "process_name": "validator_application",
+        "cmdline_hash": "sha256:" + "8" * 64,
+        "block": 7_959_790,
+        "epoch_block": 65,
+        "weight_submission_event_hash_prefix": HASHES["weight_submission_event_hash"][
+            :20
+        ],
+        "weight_finalization_event_hash_prefix": HASHES[
+            "weight_finalization_event_hash"
+        ][:20],
+        "marker_line_numbers": [1, 2, 3, 4, 5, 6],
+        "raw_log_returned": False,
+    }
+
+
 def test_fixed_verifier_identity_and_stdin_command_are_bounded():
     verifier = proof._load_verifier()
     assert hashlib.sha256(verifier).hexdigest() == proof.VERIFIER_SHA256
@@ -85,6 +104,18 @@ def test_fixed_verifier_identity_and_stdin_command_are_bounded():
     assert proof.NATIVE_CONFIG in command
     assert CANDIDATE in command
     assert "status --porcelain --untracked-files=no" in command
+
+    reader = proof._load_log_reader()
+    log_command = proof.log_reader_command(
+        candidate_sha=CANDIDATE,
+        epoch_id=EPOCH_ID,
+        run_id=RUN_ID,
+        instance_id=INSTANCE_ID,
+        reader=reader,
+    )
+    assert hashlib.sha256(reader).hexdigest() == proof.LOG_READER_SHA256
+    assert log_command.count("/usr/bin/base64 --decode") == 1
+    assert "python3 -I - --run-id pp-123456-1" in log_command
 
 
 @pytest.mark.parametrize(
@@ -123,12 +154,20 @@ def test_run_requires_last_update_to_advance_and_returns_joined_proof(monkeypatc
         "run_native_stage",
         lambda **kwargs: calls.append(("status", kwargs)) or _status_result(),
     )
-    monkeypatch.setattr(
-        proof,
-        "_send_fixed_ssm",
-        lambda _ssm, **kwargs: calls.append(("proof", kwargs))
-        or ("proof-command", json.dumps(_independent(), sort_keys=True) + "\n"),
+    outputs = iter(
+        (
+            ("proof-command", json.dumps(_independent(), sort_keys=True) + "\n"),
+            ("log-command", json.dumps(_log_evidence(), sort_keys=True) + "\n"),
+            ("proof-command", json.dumps(_independent(), sort_keys=True) + "\n"),
+            ("log-command", json.dumps(_log_evidence(), sort_keys=True) + "\n"),
+        )
     )
+
+    def send(_ssm, **kwargs):
+        calls.append(("log" if "--run-id" in kwargs["command"] else "proof", kwargs))
+        return next(outputs)
+
+    monkeypatch.setattr(proof, "_send_fixed_ssm", send)
 
     result = proof.run_weight_proof(
         ec2=object(),
@@ -143,12 +182,13 @@ def test_run_requires_last_update_to_advance_and_returns_joined_proof(monkeypatc
         now=proof.datetime.now(proof.timezone.utc),
     )
 
-    assert [kind for kind, _kwargs in calls] == ["status", "proof"]
+    assert [kind for kind, _kwargs in calls] == ["status", "proof", "log"]
     assert result["status"] == "passed"
     assert result["after_last_update"] == LAST_UPDATE - 1
     assert result["independent_proof"]["revealed_last_update_block"] == LAST_UPDATE
+    assert result["automatic_validator_log_evidence"]["status"] == "matched"
     assert result["manual_submission_exclusion"] == (
-        "requires_validator_process_log_join"
+        "excluded_by_automatic_validator_log_join"
     )
 
     with pytest.raises(

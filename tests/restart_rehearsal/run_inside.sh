@@ -833,6 +833,10 @@ verify_rehearsal_lab_arena_guard_boundary() {
       'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
       <<<"$report"
   )"
+  run_rehearsal_lab_arena_guard authorize \
+    --scope gateway \
+    --generation "$generation" \
+    --phase gateway_destructive >/dev/null
   run_rehearsal_lab_arena_guard ready \
     --scope gateway \
     --generation "$generation" \

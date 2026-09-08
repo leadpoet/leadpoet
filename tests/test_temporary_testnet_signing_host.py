@@ -767,6 +767,10 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False):
     (logs / "gateway_application.log").write_text(
         canary + "\nApplication startup complete\n"
         'POST /weights/inputs/v2 HTTP/1.1" 503 private-request-body\n'
+        "research_lab_allocation_build_failed epoch=22058 "
+        "persist_snapshot=True error_type=ResearchLabV2AuthorityError "
+        "error=fresh testnet401 cutover authority is unavailable or ambiguous "
+        "raw-payload=https://private.example/secret\n"
     )
     validator = logs / "validator_application.log"
     target = tmp_path / "validator-real.log"
@@ -778,6 +782,7 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False):
         "HTTP Error 503: champion V2 cutover blocked: private counts\n"
         "chain-realized settlement activation is unavailable or ambiguous\n"
         "chain-realized settlement activation is invalid\n"
+        "fresh testnet401 allocation origin is invalid\n"
         '{"event": "automatic_weight_tick_failed", '
         '"failure_type": "RuntimeError"} secret-private-detail\n'
         'File "/private/path/validator.py", line 5557\n'
@@ -813,6 +818,8 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
     assert "private.example" not in result.stdout
     assert "secret-private-detail" not in result.stdout
     assert "secret-value" not in result.stdout
+    assert "private-request-body" not in result.stdout
+    assert "raw-payload" not in result.stdout
     value = json.loads(result.stdout)
     temporary_host._validate_runtime_log_diagnostics(value)
     gateway, validator = value["logs"]
@@ -821,6 +828,11 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
     ]
     assert gateway["http_statuses"] == [
         {"endpoint": "weight_inputs", "status": 503}
+    ]
+    assert gateway["failure_markers"] == ["allocation_build_failed"]
+    assert gateway["exception_types"] == ["ResearchLabV2AuthorityError"]
+    assert gateway["reason_codes"] == [
+        "fresh_testnet401_cutover_authority_unavailable_or_ambiguous"
     ]
     assert validator["latest_epoch_id"] == 22058
     assert validator["latest_block"] == 7961407
@@ -834,6 +846,7 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
         "champion_v2_cutover_blocked",
         "chain_realized_settlement_activation_unavailable_or_ambiguous",
         "chain_realized_settlement_activation_invalid",
+        "fresh_testnet401_allocation_origin_invalid",
     ]
     assert validator["http_statuses"] == [
         {"endpoint": "allocation_handoff", "status": 503}

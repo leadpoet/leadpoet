@@ -14,6 +14,13 @@ from urllib.request import urlopen
 
 CONFIG_PATH = Path("/run/leadpoet-testnet401/config.json")
 STATUS_PATH = Path("/run/leadpoet-testnet401/evidence/status.json")
+PRIOR_RELEASE_CHANNEL_PATH = Path(
+    "/run/leadpoet-testnet401/prior-release-channel-v2.json"
+)
+PRIOR_RELEASE_LINEAGE_PATH = Path(
+    "/run/leadpoet-testnet401/prior-release-lineage-v1.json"
+)
+PRIOR_RELEASE_COMMIT = "f92748d00ced815e710e4e42ba8f7f17207507d7"
 NETUID = 401
 NETWORK = "test"
 CHAIN_HOST = "test.finney.opentensor.ai"
@@ -45,6 +52,85 @@ def read_json(path: Path):
 
 def raw_hash(value) -> str:
     return str(value).lower().removeprefix("0x")
+
+
+def build_approved_release_lineage(
+    *,
+    candidate,
+    gateway_release,
+    validator_release,
+    runtime_lineage,
+    prior_release_channel_path=PRIOR_RELEASE_CHANNEL_PATH,
+    prior_release_lineage_path=PRIOR_RELEASE_LINEAGE_PATH,
+):
+    """Validate the exact current-only or approved two-release lineage."""
+
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+        validate_prior_release_channel_v2,
+    )
+    from gateway.tee.release_lineage_v2 import (
+        validate_compact_release_lineage_v2,
+        validate_prior_compact_release_lineage_v2,
+    )
+
+    current_channel = build_release_channel_v2(
+        gateway_release_manifest=gateway_release,
+        validator_release_manifest=validator_release,
+    )
+    require(
+        current_channel["commit_sha"] == candidate,
+        "current release channel differs",
+    )
+    normalized_runtime = validate_compact_release_lineage_v2(
+        runtime_lineage,
+        expected_current_commit=candidate,
+        expected_current_gateway_release_hash=gateway_release["release_hash"],
+    )
+
+    prior_channel_present = prior_release_channel_path.exists()
+    prior_lineage_present = prior_release_lineage_path.exists()
+    require(
+        prior_channel_present == prior_lineage_present,
+        "prior release artifacts are incomplete",
+    )
+    approved_channels = []
+    if prior_channel_present:
+        require(
+            candidate != PRIOR_RELEASE_COMMIT,
+            "current and prior release commits are identical",
+        )
+        prior_channel = validate_prior_release_channel_v2(
+            read_json(prior_release_channel_path),
+            expected_commit=PRIOR_RELEASE_COMMIT,
+        )
+        prior_lineage = validate_prior_compact_release_lineage_v2(
+            read_json(prior_release_lineage_path),
+            expected_current_commit=PRIOR_RELEASE_COMMIT,
+            expected_current_gateway_release_hash=prior_channel[
+                "gateway_release_manifest"
+            ]["release_hash"],
+        )
+        expected_prior_lineage = build_release_lineage_v2(
+            [prior_channel],
+            current_commit=PRIOR_RELEASE_COMMIT,
+        )
+        require(
+            prior_lineage == expected_prior_lineage,
+            "prior release lineage differs from its approved channel",
+        )
+        approved_channels.append(prior_channel)
+    approved_channels.append(current_channel)
+    expected_runtime = build_release_lineage_v2(
+        approved_channels,
+        current_commit=candidate,
+    )
+    require(
+        normalized_runtime == expected_runtime,
+        "runtime release lineage differs from the approved release set",
+    )
+    return normalized_runtime
 
 
 def parse_args():
@@ -112,7 +198,7 @@ def main() -> int:
 
     from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
     from gateway.tee.release_lineage_v2 import (
-        build_release_lineage_boot_verifier_v2,
+        build_compact_release_lineage_boot_verifier_v2,
     )
     from leadpoet_canonical.ancestry_checkpoint_v2 import (
         derive_ancestry_lineage_id_v2,
@@ -197,13 +283,16 @@ def main() -> int:
         validator_release["release"]["commit_sha"] == candidate,
         "validator release differs",
     )
-    boot_verifier = build_release_lineage_boot_verifier_v2(
-        {
-            candidate: {
-                "gateway_release_manifest": gateway_release,
-                "validator_release_manifest": validator_release,
-            }
-        }
+    approved_lineage = build_approved_release_lineage(
+        candidate=candidate,
+        gateway_release=gateway_release,
+        validator_release=validator_release,
+        runtime_lineage=read_json(
+            Path(config["gateway"]["release_lineage"])
+        ),
+    )
+    boot_verifier = build_compact_release_lineage_boot_verifier_v2(
+        approved_lineage
     )
 
     authority_url = (

@@ -1465,11 +1465,14 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main_ances
         '/usr/bin/python3.11 -I -m venv "$host_venv"'
         in source
     )
-    container_runtime_package = source.index(
-        "host_bootstrap_step=container-runtime-package"
+    native_build_package = source.index(
+        "host_bootstrap_step=native-build-package"
     )
-    container_runtime_identity = source.index(
-        "host_bootstrap_step=container-runtime-identity"
+    native_build_identity = source.index(
+        "host_bootstrap_step=native-build-package-identity"
+    )
+    buildx_identity = source.index(
+        "host_bootstrap_step=container-buildx-identity"
     )
     container_runtime_service = source.index(
         "host_bootstrap_step=container-runtime-service"
@@ -1478,16 +1481,27 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main_ances
     python_runtime_package = source.index("host_bootstrap_step=runtime-package")
     venv_create = source.index("host_bootstrap_step=venv-create")
     assert (
-        container_runtime_package
-        < container_runtime_identity
+        native_build_package
+        < native_build_identity
+        < buildx_identity
         < container_runtime_service
         < venv_absence
         < python_runtime_package
         < venv_create
     )
-    assert "if [ ! -x /usr/bin/docker ]; then" in source
-    assert "sudo -n /usr/bin/dnf -q -y install docker" in source
+    assert (
+        "sudo -n /usr/bin/dnf -q -y install \\\n"
+        "            aws-nitro-enclaves-cli \\\n"
+        "            aws-nitro-enclaves-cli-devel \\\n"
+        "            docker \\\n"
+        "            rsync \\\n"
+        "            jq \\\n"
+        "            tar \\\n"
+        "            gzip >/dev/null 2>&1"
+    ) in source
+    assert "/usr/bin/rpm -q \\\n            aws-nitro-enclaves-cli" in source
     assert "/usr/bin/rpm -qf /usr/bin/docker" in source
+    assert "sudo -n /usr/bin/docker buildx version" in source
     assert "sudo -n /usr/bin/systemctl start docker.service" in source
     assert "sudo -n /usr/bin/docker info" in source
     assert "python3.11-pip-wheel" not in source
@@ -1701,8 +1715,9 @@ def test_full_bootstrap_diagnostic_exposes_only_a_bounded_substage():
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
     allowed = {
-        "container-runtime-package",
-        "container-runtime-identity",
+        "native-build-package",
+        "native-build-package-identity",
+        "container-buildx-identity",
         "container-runtime-service",
         "venv-absence",
         "runtime-package",

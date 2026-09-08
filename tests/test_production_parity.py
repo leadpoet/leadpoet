@@ -2580,6 +2580,17 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
             + "\n",
             encoding="utf-8",
         )
+        if timing_record.get("stage") == "local_release_build":
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "ERROR: prepared offline scoring wheelhouse is unavailable: "
+                "/private/must-not-survive\n"
+                "GatewayPCR0BuildError: nitro-cli failed with exit code 127: "
+                "must-not-survive\n"
+                "ERROR: exact local runtime identity build failed\n",
+                encoding="utf-8",
+            )
         if restart_outcome == "timed_out":
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         if restart_outcome == "epoch_gate":
@@ -2588,6 +2599,7 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
             log_path = Path(kwargs["log_path"])
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(
+                "ERROR: rsync is required to stage attested runtime packages\n"
                 "RuntimeError: enclave relay unavailable\n"
                 "RestartEpochGateError: production restart may start only at "
                 "official subnet epoch block 300 or earlier; observed 312\n",
@@ -2685,10 +2697,123 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
     )
     if expected_timing is not None:
         expected["timing"] = expected_timing
+    if expected_timing is not None and (
+        expected_timing["final_stage"] == "local_release_build"
+    ):
+        expected["observations"] = [
+            {
+                "marker": "local_release_build_observation",
+                "identifier": "offline_wheelhouse_unavailable",
+            },
+            {
+                "marker": "local_release_build_observation",
+                "identifier": "command_failed",
+                "command": "nitro-cli",
+                "returncode": 127,
+            },
+            {
+                "marker": "local_release_build_observation",
+                "identifier": "local_runtime_identity_build_failed",
+            },
+        ]
     assert evidence["gateway_restart_diagnostic"] == expected
     assert evidence["cleanup"]["work"] == "removed"
     assert not (work_root / "pp-test-1" / "runtime").exists()
     assert "must-not-survive" not in output.read_text(encoding="utf-8")
+
+
+def test_local_release_build_observations_match_canonical_error_sources(
+    tmp_path: Path,
+):
+    stage_source = (full_host.ROOT / "gateway/tee/stage_attested_runtime.sh").read_text(
+        encoding="utf-8"
+    )
+    builder_source = (
+        full_host.ROOT / "validator_tee/host/gateway_pcr0_builder.py"
+    ).read_text(encoding="utf-8")
+    fixed_lines = [
+        "ERROR: rsync is required to stage attested runtime packages",
+        "ERROR: git is required to stage a clean attested runtime commit",
+        "ERROR: offline scoring wheelhouse contains an unexpected entry",
+        "GatewayPCR0BuildError: nitro-cli output did not contain a valid PCR0",
+    ]
+    combined_source = stage_source + builder_source
+    assert all(
+        line.replace("GatewayPCR0BuildError: ", "") in combined_source
+        for line in fixed_lines
+    )
+    assert '"%s failed with exit code %s%s"' in builder_source
+
+    log_path = tmp_path / "gateway-restart.log"
+    log_path.write_text(
+        "\n".join(
+            fixed_lines
+            + [
+                "GatewayPCR0BuildError: docker failed with exit code 125: private-output",
+                "GatewayPCR0BuildError: docker failed with exit code 256: private-output",
+                "FileNotFoundError: [Errno 2] No such file or directory: 'nitro-cli'",
+                "/private/build.sh: line 390: nitro-cli: command not found",
+                "GatewayPCR0BuildError: unknown-tool failed with exit code 1: private-output",
+                "PRIVATE_TOKEN=must-not-survive",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    observations = full_host._local_release_build_observations(log_path)
+
+    assert observations == [
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "required_executable_missing",
+            "executable": "rsync",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "required_executable_missing",
+            "executable": "git",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "offline_wheelhouse_unexpected_entry",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "nitro_measurement_missing",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "command_failed",
+            "command": "docker",
+            "returncode": 125,
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "required_executable_missing",
+            "executable": "nitro-cli",
+        },
+    ]
+    assert "must-not-survive" not in json.dumps(observations)
+
+
+def test_local_release_build_observations_reject_symlink(tmp_path: Path):
+    target = tmp_path / "private.log"
+    target.write_text(
+        "ERROR: rsync is required to stage attested runtime packages\n",
+        encoding="utf-8",
+    )
+    link = tmp_path / "gateway-restart.log"
+    link.symlink_to(target)
+
+    assert full_host._local_release_build_observations(link) == []
+
+
+def test_local_release_build_observations_do_not_block_on_fifo(tmp_path: Path):
+    fifo = tmp_path / "gateway-restart.log"
+    os.mkfifo(fifo)
+
+    assert full_host._local_release_build_observations(fifo) == []
 
 
 @pytest.mark.parametrize(

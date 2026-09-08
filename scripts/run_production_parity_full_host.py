@@ -169,6 +169,66 @@ FULL_ERROR_TYPES = frozenset(
         "ValueError",
     }
 )
+_LOCAL_RELEASE_LOG_TAIL_BYTES = 256 * 1024
+_LOCAL_RELEASE_EXACT_OBSERVATIONS = {
+    "ERROR: rsync is required to stage attested runtime packages": (
+        "required_executable_missing",
+        "rsync",
+    ),
+    "ERROR: git is required to stage a clean attested runtime commit": (
+        "required_executable_missing",
+        "git",
+    ),
+    "ERROR: offline scoring wheelhouse contains an unexpected entry": (
+        "offline_wheelhouse_unexpected_entry",
+        None,
+    ),
+    "ERROR: exact local runtime identity build failed": (
+        "local_runtime_identity_build_failed",
+        None,
+    ),
+    "GatewayPCR0BuildError: nitro-cli output did not contain a valid PCR0": (
+        "nitro_measurement_missing",
+        None,
+    ),
+    "GatewayPCR0BuildError: gateway role build identity is unavailable": (
+        "gateway_build_identity_unavailable",
+        None,
+    ),
+    "GatewayPCR0BuildError: gateway role build identity mismatch": (
+        "gateway_build_identity_mismatch",
+        None,
+    ),
+    "GatewayPCR0BuildError: gateway image ID is invalid": (
+        "gateway_image_identity_invalid",
+        None,
+    ),
+}
+_LOCAL_RELEASE_PREFIX_OBSERVATIONS = {
+    "ERROR: prepared offline scoring wheelhouse is unavailable:": (
+        "offline_wheelhouse_unavailable",
+        None,
+    ),
+    "ERROR: clean gateway source missing:": (
+        "clean_gateway_source_missing",
+        None,
+    ),
+    "ERROR: required runtime package missing:": (
+        "required_runtime_package_missing",
+        None,
+    ),
+}
+_LOCAL_RELEASE_COMMAND_FAILURE_RE = re.compile(
+    r"^GatewayPCR0BuildError: (bash|docker|nitro-cli) failed with exit code "
+    r"([1-9][0-9]{0,2})(?::.*)?$"
+)
+_LOCAL_RELEASE_MISSING_EXECUTABLE_RE = re.compile(
+    r"^FileNotFoundError: \[Errno 2\] No such file or directory: "
+    r"['\"](docker|git|gzip|jq|nitro-cli|rsync|tar)['\"]$"
+)
+_LOCAL_RELEASE_SHELL_MISSING_EXECUTABLE_RE = re.compile(
+    r"(?:^|: )(docker|git|gzip|jq|nitro-cli|rsync|tar): command not found$"
+)
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -311,6 +371,87 @@ def _write_early_failure_evidence(
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _local_release_build_observations(log_path: Path) -> list[dict[str, Any]]:
+    """Project fixed local-build failures without retaining raw log text."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(log_path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return []
+        offset = max(0, metadata.st_size - _LOCAL_RELEASE_LOG_TAIL_BYTES)
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        body = os.read(descriptor, _LOCAL_RELEASE_LOG_TAIL_BYTES)
+    except OSError:
+        return []
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if offset:
+        _partial, _separator, body = body.partition(b"\n")
+
+    observations: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, Any], ...]] = set()
+
+    def retain(value: dict[str, Any]) -> None:
+        identity = tuple(sorted(value.items()))
+        if identity not in seen and len(observations) < 8:
+            seen.add(identity)
+            observations.append(value)
+
+    for raw_line in body.decode("utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        fixed = _LOCAL_RELEASE_EXACT_OBSERVATIONS.get(line)
+        if fixed is None:
+            fixed = next(
+                (
+                    value
+                    for prefix, value in _LOCAL_RELEASE_PREFIX_OBSERVATIONS.items()
+                    if line.startswith(prefix)
+                ),
+                None,
+            )
+        if fixed is not None:
+            identifier, executable = fixed
+            observation: dict[str, Any] = {
+                "marker": "local_release_build_observation",
+                "identifier": identifier,
+            }
+            if executable is not None:
+                observation["executable"] = executable
+            retain(observation)
+            continue
+        command_failure = _LOCAL_RELEASE_COMMAND_FAILURE_RE.fullmatch(line)
+        if command_failure is not None:
+            returncode = int(command_failure.group(2))
+            if returncode <= 255:
+                retain(
+                    {
+                        "marker": "local_release_build_observation",
+                        "identifier": "command_failed",
+                        "command": command_failure.group(1),
+                        "returncode": returncode,
+                    }
+                )
+            continue
+        missing = _LOCAL_RELEASE_MISSING_EXECUTABLE_RE.fullmatch(line)
+        if missing is None:
+            missing = _LOCAL_RELEASE_SHELL_MISSING_EXECUTABLE_RE.search(line)
+        if missing is not None:
+            retain(
+                {
+                    "marker": "local_release_build_observation",
+                    "identifier": "required_executable_missing",
+                    "executable": missing.group(1),
+                }
+            )
+    return observations
 
 
 class _RejectCloneRedirects(HTTPRedirectHandler):
@@ -3809,6 +3950,7 @@ def run_full(
     finally:
         cleanup: dict[str, Any] = {}
         if gateway_restart_diagnostic is not None:
+            timing = None
             try:
                 timing = _gateway_restart_timing_diagnostic(
                     gateway_restart_timing_dir,
@@ -3818,6 +3960,25 @@ def run_full(
                     gateway_restart_diagnostic["timing"] = timing
             except Exception:  # noqa: BLE001 - diagnostics cannot suppress cleanup
                 pass
+            gateway_failed = (
+                gateway_restart_diagnostic.get("outcome") == "timed_out"
+                or (
+                    gateway_restart_diagnostic.get("outcome") == "exited"
+                    and gateway_restart_diagnostic.get("returncode") != 0
+                )
+            )
+            if (
+                gateway_failed
+                and isinstance(timing, dict)
+                and timing.get("final_stage") == "local_release_build"
+                and timing.get("final_status") == "failed"
+            ):
+                try:
+                    observations = _local_release_build_observations(gateway_log)
+                    if observations:
+                        gateway_restart_diagnostic["observations"] = observations
+                except Exception:  # noqa: BLE001 - diagnostics cannot suppress cleanup
+                    pass
             evidence["gateway_restart_diagnostic"] = gateway_restart_diagnostic
         if prefix_adapter is not None:
             try:

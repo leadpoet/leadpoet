@@ -1056,18 +1056,18 @@ record() {
   printf '%s\\n' "$1" >> "$FAKE_OPERATOR_EVENTS"
 }
 guard_state() {
-  local phase="$1" scope="$2" generation="${3:-7}"
-  "$FAKE_OPERATOR_REAL_PYTHON" - "$phase" "$scope" "$generation" <<'PY'
+  local phase="$1" scope="$2" generation="${3:-7}" document_kind="${4:-state}"
+  "$FAKE_OPERATOR_REAL_PYTHON" - "$phase" "$scope" "$generation" "$document_kind" <<'PY'
 import json, os, sys
 from datetime import datetime, timedelta, timezone
 from scripts.lab_arena_restart_claim_guard import _commitments, _identity
 
-phase, scope, raw_generation = sys.argv[1:]
+phase, scope, raw_generation, document_kind = sys.argv[1:]
 generation = int(raw_generation)
 candidate = os.environ["FAKE_OPERATOR_SELECTED_COMMIT"]
 guard, owner = _identity(candidate, "restart-fixture")
 guard_commitment, owner_commitment = _commitments(guard, owner)
-print(json.dumps({
+value = {
     "schema_version": "leadpoet.lab_arena.restart_guard_state.v1",
     "paused": True, "operator_paused": False,
     "guard_present": True, "guard_active": True,
@@ -1080,12 +1080,22 @@ print(json.dumps({
     "restart_phase": phase,
     "drain": {
         "schema_version": "leadpoet.lab_arena.restart_drain_state.v1",
-        "captured_count": 0, "accepted_receipt_count": 0,
+        "captured_count": 1, "accepted_receipt_count": 1,
         "reported_terminal_receipt_count": 0, "still_leased_count": 0,
         "lost_or_mutated_count": 0, "current_leased_count": 0,
         "pending_retry_count": 0, "preserved": True,
     },
-}, sort_keys=True))
+}
+if document_kind == "quiescence":
+    # The real drain action returns the flattened migration-190 RPC document.
+    value = {
+        **value["drain"],
+        "schema_version": "leadpoet.lab_arena.restart_quiescence.v1",
+        **{key: value[key] for key in (
+            "guard_active", "guard_generation", "restart_scope", "restart_phase"
+        )},
+    }
+print(json.dumps(value, sort_keys=True))
 PY
 }
 case "$command" in
@@ -1099,9 +1109,9 @@ case "$command" in
   *lab_arena_restart_claim_guard.py*"'drain'"*)
     record arena_guard_drained
     if [[ "$command" == *"--scope all"* ]]; then
-      guard_state gateway_ready all
+      guard_state gateway_ready all 7 "${FAKE_ARENA_DRAIN_DOCUMENT_KIND:-quiescence}"
     else
-      guard_state draining validator
+      guard_state draining validator 7 "${FAKE_ARENA_DRAIN_DOCUMENT_KIND:-quiescence}"
     fi
     ;;
   *lab_arena_restart_claim_guard.py*"'authorize'"*)
@@ -2168,6 +2178,38 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     ) < observed.index("readiness_finalized") < observed.index(
         "arena_guard_released"
     )
+
+
+def test_validator_only_operator_rejects_wrong_drain_document_before_authorization(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_ARENA_DRAIN_DOCUMENT_KIND"] = "state"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "Arena restart drain state version is invalid" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_drained" in observed
+    assert "arena_guard_validator_authorized" not in observed
+    assert "arena_guard_permit_installed" not in observed
+    assert "validator_activation" not in observed
+    assert "arena_guard_released" not in observed
 
 
 def test_validator_only_operator_rejects_changed_guard_generation_before_shutdown(

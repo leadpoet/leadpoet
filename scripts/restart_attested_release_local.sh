@@ -751,6 +751,7 @@ for function in (
     release_manifest_v2.validate_historical_release_manifest,
     arena_restart_claim_guard._commitments,
     arena_restart_claim_guard._identity,
+    arena_restart_claim_guard._require_drain,
     arena_restart_claim_guard._require_state,
     arena_restart_guard_handoff._permit,
     arena_restart_guard_handoff._validate_permit,
@@ -1632,25 +1633,26 @@ authorize_validator_lab_arena_restart() {
   chmod 600 "$drain_report_file"
   validator_arena_guard_generation="$(
     run_local_readiness_python \
-      "$drain_report_file" "$commit" "$component" <<'PY'
+      "$drain_report_file" "$component" <<'PY'
 import json
 import sys
 
-from scripts.lab_arena_restart_claim_guard import _require_state
+from scripts.lab_arena_restart_claim_guard import _require_drain
 
 with open(sys.argv[1], encoding="utf-8") as handle:
-    value = _require_state(json.load(handle))
+    value = _require_drain(
+        json.load(handle), "leadpoet.lab_arena.restart_quiescence.v1"
+    )
 generation = value.get("guard_generation")
 if (
     isinstance(generation, bool)
     or not isinstance(generation, int)
     or generation <= 0
-    or value.get("candidate_commit") != sys.argv[2]
-    or value.get("restart_scope") != sys.argv[3]
+    or value.get("restart_scope") != sys.argv[2]
     or value.get("restart_phase")
     not in {"draining", "gateway_ready", "validator_destructive"}
-    or value.get("paused") is not True
-    or value.get("drain", {}).get("preserved") is not True
+    or value.get("guard_active") is not True
+    or value.get("preserved") is not True
 ):
     raise SystemExit(1)
 print(generation)

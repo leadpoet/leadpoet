@@ -317,6 +317,7 @@ class _LocalSupabaseHTTPSConnection:
                 normalized_headers.get("authorization"),
             )
             not in {
+                ("rehearsal-public", "Bearer rehearsal-public"),
                 ("rehearsal-secret", "Bearer rehearsal-secret"),
                 (
                     "rehearsal-secret",

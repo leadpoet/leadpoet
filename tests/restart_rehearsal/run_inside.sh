@@ -825,6 +825,53 @@ release_rehearsal_lab_arena_guard() {
     --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" >/dev/null
 }
 
+verify_rehearsal_lab_arena_guard_boundary() {
+  local generation report
+  report="$(run_rehearsal_lab_arena_guard drain --scope gateway)"
+  generation="$(
+    /usr/bin/python3.11 -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$report"
+  )"
+  run_rehearsal_lab_arena_guard ready \
+    --scope gateway \
+    --generation "$generation" \
+    --phase gateway_ready >/dev/null
+  release_rehearsal_lab_arena_guard gateway
+  env \
+    PYTHONPATH=/source:/harness \
+    /usr/bin/python3.11 - <<'PY'
+import http.client
+
+body = b"{}"
+connection = http.client.HTTPSConnection(
+    "qplwoislplkcegvdmbim.supabase.co",
+    443,
+    timeout=15,
+)
+try:
+    connection.request(
+        "POST",
+        "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+        body=body,
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer rehearsal-public",
+            "apikey": "rehearsal-public",
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "Connection": "close",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+finally:
+    connection.close()
+if response.status != 400:
+    raise SystemExit("rehearsal Arena guard public role was not denied")
+PY
+}
+
 start_validator_lab_arena_guard_controller() {
   local report
   report="$(run_rehearsal_lab_arena_guard drain --scope validator)"
@@ -909,6 +956,10 @@ start_validator_lab_arena_guard_controller() {
     exit 1
   fi
 }
+
+if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+  verify_rehearsal_lab_arena_guard_boundary
+fi
 
 GATEWAY_ACTIVE_RELEASE_ENV=()
 VALIDATOR_ACTIVE_RELEASE_ENV=()

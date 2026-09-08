@@ -46,6 +46,15 @@ def test_temporary_environment_rejects_invalid_inputs_without_values(tmp_path, c
     assert content not in str(error.value)
 
 
+def test_child_launchers_use_installed_python_not_captured_production_path(tmp_path):
+    path = tmp_path / "runtime.env"
+    path.write_text("PATH=/old-host/bin:/usr/bin\nAWS_ACCESS_KEY_ID=secret-canary\n")
+    result = bootstrap._runtime_environment(
+        path, overrides={}, repo_root=tmp_path, candidate_sha="a" * 40)
+    assert result["PATH"].split(":", 1)[0] == str(Path(sys.executable).parent)
+    assert "AWS_ACCESS_KEY_ID" not in result
+
+
 class STS:
     def get_caller_identity(self):
         return {"Account": bootstrap.EXPECTED_AWS_ACCOUNT}

@@ -660,6 +660,11 @@ def _runtime_environment(
     env.update({str(name): str(value) for name, value in overrides.items()})
     for name in STATIC_AWS_CREDENTIAL_NAMES:
         env.pop(name, None)
+    # Shell launchers must use the same installed interpreter as this helper,
+    # not Python from the original production host's captured PATH.
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get(
+        "PATH", "/usr/bin:/bin"
+    )
     env.update(
         {
             "GITHUB_SHA": candidate_sha,

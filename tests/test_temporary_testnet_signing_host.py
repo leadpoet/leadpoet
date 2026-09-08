@@ -301,6 +301,9 @@ def test_source_bootstrap_is_fixed_to_exact_private_parity_prefix():
 
     assert result["status"] == "ready"
     command = ssm.sent["Parameters"]["commands"][0]
+    assert ssm.sent["Parameters"]["executionTimeout"] == [
+        str(ssm.sent["TimeoutSeconds"])
+    ]
     assert "scripts.stage_temporary_testnet_weights_host" in command
     assert f"--candidate-sha {SHA}" in command
     assert f"--run-id {RUN_ID}" in command

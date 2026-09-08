@@ -238,7 +238,10 @@ def _verify_expiry_timer(
     response = ssm.send_command(
         InstanceIds=[instance_id],
         DocumentName="AWS-RunShellScript",
-        Parameters={"commands": [command]},
+        Parameters={
+            "commands": [command],
+            "executionTimeout": ["150"],
+        },
         TimeoutSeconds=150,
     )
     command_id = str(response.get("Command", {}).get("CommandId") or "")
@@ -582,7 +585,10 @@ def _send_fixed_ssm(
     response = ssm.send_command(
         InstanceIds=[instance_id],
         DocumentName="AWS-RunShellScript",
-        Parameters={"commands": [command]},
+        Parameters={
+            "commands": [command],
+            "executionTimeout": [str(timeout_seconds)],
+        },
         TimeoutSeconds=timeout_seconds,
     )
     command_id = str(response.get("Command", {}).get("CommandId") or "")

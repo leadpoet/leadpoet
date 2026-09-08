@@ -3554,6 +3554,7 @@ def test_gateway_failure_diagnostics_survive_later_validator_output(
         stdout=(
             "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=17\n"
             "REHEARSAL_HTTP_DIAGNOSTIC endpoint=/research-lab/status status=503\n"
+            "REHEARSAL CONTRACT ERROR [docker]: launcher command failed\n"
             "ERROR: process terminated out of memory\n"
             f"ERROR: bearer token={secret} permission denied\n"
             "ERROR: exact gateway launcher failed\n"
@@ -3605,6 +3606,9 @@ def test_gateway_failure_diagnostics_survive_later_validator_output(
     assert {"marker": "error", "category": "gateway_launcher"} in diagnostics[
         "output_markers"
     ]
+    assert {"marker": "contract_error", "kind": "docker"} in diagnostics[
+        "output_markers"
+    ]
     encoded = json.dumps(diagnostics, sort_keys=True)
     assert secret not in encoded
     assert "stdout" not in diagnostics
@@ -3645,8 +3649,9 @@ def test_gateway_failure_diagnostics_survive_later_validator_output(
             "endpoint": "/research-lab/status",
             "status": "503",
         },
-        {"marker": "error", "category": "resource_oom"},
-        {"marker": "error", "category": "gateway_launcher"},
+        {"marker": "contract_error", "kind": "docker"},
+        {"marker": "error", "category_hint": "resource_oom"},
+        {"marker": "error", "category_hint": "gateway_launcher"},
     ]
     retained_encoded = json.dumps(retained, sort_keys=True)
     assert secret not in retained_encoded
@@ -4176,6 +4181,16 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
                     "category": "attacker-controlled",
                     "raw": "secret",
                 },
+                {
+                    "marker": "contract_error",
+                    "kind": "docker",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "contract_error",
+                    "kind": "attacker-controlled",
+                    "raw": "secret",
+                },
             ],
             "returncode": 1,
             "stages": [
@@ -4198,6 +4213,7 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
     assert "secret" not in encoded
     assert projection["output_markers"] == [
         "component_failure",
+        "contract_error",
         "error",
         "http",
         "stage_failure",
@@ -4210,7 +4226,8 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
             "status": 17,
         },
         {"marker": "http", "endpoint": "/attest", "status": "503"},
-        {"marker": "error", "category": "resource_oom"},
+        {"marker": "error", "category_hint": "resource_oom"},
+        {"marker": "contract_error", "kind": "docker"},
     ]
     assert projection["stages"] == [
         {

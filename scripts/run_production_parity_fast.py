@@ -168,6 +168,24 @@ SAFE_REHEARSAL_ERROR_CATEGORIES = frozenset(
         "validator_launcher",
     }
 )
+SAFE_REHEARSAL_CONTRACT_KINDS = frozenset(
+    {
+        "adapter",
+        "aws",
+        "ctr",
+        "curl",
+        "docker",
+        "getconf",
+        "nitro",
+        "nsenter",
+        "pip",
+        "python",
+        "python-inline",
+        "python-module",
+        "sudo",
+        "systemctl",
+    }
+)
 SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = SAFE_REHEARSAL_ERROR_TYPES | {
     "None",
     "OtherError",
@@ -1489,22 +1507,6 @@ def _image_build_failure_diagnostics(
 
 def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
-    contract_kinds = {
-        "adapter",
-        "aws",
-        "ctr",
-        "curl",
-        "docker",
-        "getconf",
-        "nitro",
-        "nsenter",
-        "pip",
-        "python",
-        "python-inline",
-        "python-module",
-        "sudo",
-        "systemctl",
-    }
     for raw_line in output_tail.splitlines():
         if len(diagnostics) >= 32:
             break
@@ -1652,7 +1654,7 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
                     )
         if projected is None:
             match = re.match(r"REHEARSAL CONTRACT ERROR \[([a-z-]+)\]:", line)
-            if match and match.group(1) in contract_kinds:
+            if match and match.group(1) in SAFE_REHEARSAL_CONTRACT_KINDS:
                 projected = {
                     "marker": "contract_error",
                     "kind": match.group(1),
@@ -1757,7 +1759,14 @@ def _retained_component_failure_diagnostics(
         ) in SAFE_REHEARSAL_ERROR_CATEGORIES:
             projected = {
                 "marker": marker,
-                "category": item["category"],
+                "category_hint": item["category"],
+            }
+        elif marker == "contract_error" and item.get(
+            "kind"
+        ) in SAFE_REHEARSAL_CONTRACT_KINDS:
+            projected = {
+                "marker": marker,
+                "kind": item["kind"],
             }
         if projected is not None and projected not in diagnostics:
             diagnostics.append(projected)

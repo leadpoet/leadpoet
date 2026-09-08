@@ -14,19 +14,29 @@ on:
         options:
           - production-parity
           - testnet401-create
+          - testnet401-inventory
           - testnet401-launch
           - testnet401-status
+          - testnet401-proof
           - testnet401-cleanup
       candidate_sha:
         description: Exact attested main commit to validate
         required: true
         type: string
       testnet401_run_id:
-        description: Exact retained run ID for status, launch, or cleanup
+        description: Exact retained run ID for inventory, launch, status, proof, or cleanup
         required: false
         type: string
       testnet401_instance_id:
-        description: Exact retained instance ID for status, launch, or cleanup
+        description: Exact retained instance ID for launch, status, proof, or cleanup
+        required: false
+        type: string
+      testnet401_epoch_id:
+        description: Exact settlement epoch for one independent testnet401 proof
+        required: false
+        type: string
+      testnet401_after_last_update:
+        description: Prior proof LastUpdate lower bound for consecutive proof
         required: false
         type: string
 
@@ -1244,6 +1254,8 @@ jobs:
       TESTNET401_OPERATION: ${{ inputs.operation }}
       TESTNET401_TARGET_RUN_ID: ${{ inputs.testnet401_run_id }}
       TESTNET401_TARGET_INSTANCE_ID: ${{ inputs.testnet401_instance_id }}
+      TESTNET401_EPOCH_ID: ${{ inputs.testnet401_epoch_id }}
+      TESTNET401_AFTER_LAST_UPDATE: ${{ inputs.testnet401_after_last_update }}
       RUNNER_INSTANCE_PROFILE: ${{ vars.LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE }}
       TESTNET401_HOST_TTL_HOURS: "12"
     steps:
@@ -1270,10 +1282,28 @@ jobs:
               test "$CANDIDATE_SHA" = "$(git rev-parse origin/main)"
               test -z "$TESTNET401_TARGET_RUN_ID"
               test -z "$TESTNET401_TARGET_INSTANCE_ID"
+              test -z "$TESTNET401_EPOCH_ID"
+              test -z "$TESTNET401_AFTER_LAST_UPDATE"
               ;;
             testnet401-launch|testnet401-status|testnet401-cleanup)
               [[ "$TESTNET401_TARGET_RUN_ID" =~ ^pp-[0-9]{1,20}-[0-9]{1,6}$ ]]
               [[ "$TESTNET401_TARGET_INSTANCE_ID" =~ ^i-([0-9a-f]{8}|[0-9a-f]{17})$ ]]
+              test -z "$TESTNET401_EPOCH_ID"
+              test -z "$TESTNET401_AFTER_LAST_UPDATE"
+              ;;
+            testnet401-inventory)
+              [[ "$TESTNET401_TARGET_RUN_ID" =~ ^pp-[0-9]{1,20}-[0-9]{1,6}$ ]]
+              test -z "$TESTNET401_TARGET_INSTANCE_ID"
+              test -z "$TESTNET401_EPOCH_ID"
+              test -z "$TESTNET401_AFTER_LAST_UPDATE"
+              ;;
+            testnet401-proof)
+              [[ "$TESTNET401_TARGET_RUN_ID" =~ ^pp-[0-9]{1,20}-[0-9]{1,6}$ ]]
+              [[ "$TESTNET401_TARGET_INSTANCE_ID" =~ ^i-([0-9a-f]{8}|[0-9a-f]{17})$ ]]
+              [[ "$TESTNET401_EPOCH_ID" =~ ^[0-9]{1,20}$ ]]
+              if [ -n "$TESTNET401_AFTER_LAST_UPDATE" ]; then
+                [[ "$TESTNET401_AFTER_LAST_UPDATE" =~ ^[0-9]{1,20}$ ]]
+              fi
               ;;
             *) exit 1 ;;
           esac
@@ -1462,6 +1492,35 @@ jobs:
             --instance-id "${{ steps.identity.outputs.instance_id }}" \
             --stage status \
             --state "$RUNNER_TEMP/temporary-testnet401-status.json"
+
+      - name: Read exact temporary testnet401 resource inventory
+        if: inputs.operation == 'testnet401-inventory'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" cleanup-run \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            > "$RUNNER_TEMP/temporary-testnet401-inventory.json"
+
+      - name: Prove one exact temporary testnet401 epoch
+        if: inputs.operation == 'testnet401-proof'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          args=(
+            --region "$AWS_REGION"
+            --run-id "${{ steps.identity.outputs.run_id }}"
+            --candidate-sha "$CANDIDATE_SHA"
+            --instance-id "${{ steps.identity.outputs.instance_id }}"
+            --epoch-id "$TESTNET401_EPOCH_ID"
+            --state "$RUNNER_TEMP/temporary-testnet401-proof.json"
+          )
+          if [ -n "$TESTNET401_AFTER_LAST_UPDATE" ]; then
+            args+=(--after-last-update "$TESTNET401_AFTER_LAST_UPDATE")
+          fi
+          python3 scripts/temporary_testnet401_weight_proof.py "${args[@]}"
 
       - name: Stop native runtime and remove exact temporary infrastructure
         if: inputs.operation == 'testnet401-cleanup'

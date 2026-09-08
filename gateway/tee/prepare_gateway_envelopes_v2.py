@@ -98,10 +98,6 @@ _SPECIAL_PROFILES = {
             *_BOOT_SOURCES["scrapingdog"],
         ),
     ),
-    "stale_parent_openrouter.json": (
-        "openrouter",
-        _BOOT_SOURCES["openrouter"],
-    ),
 }
 
 

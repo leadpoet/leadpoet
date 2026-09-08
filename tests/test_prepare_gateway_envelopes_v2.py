@@ -111,7 +111,8 @@ def test_prepares_boot_and_scoring_envelopes_without_autoresearch_fleet(
         for path in output.glob("*.json")
         if path.name != "gateway-v2-env-transition.json"
     ]
-    assert len(documents) == 14
+    assert len(documents) == 13
+    assert not (output / "stale_parent_openrouter.json").exists()
     assert all(validate_provider_envelope(document) for document in documents)
     assert json.loads((output / "openrouter.json").read_text())[
         "credential_ref_hash"

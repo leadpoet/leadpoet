@@ -7,17 +7,46 @@ import sys
 import pytest
 
 
-def test_validator_restart_drains_arena_claims_before_shutdown() -> None:
+def test_validator_restart_requires_controller_permit_before_shutdown() -> None:
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
-    drain = script.index("drain_lab_arena_for_restart")
-    authorize = script.index("--phase validator_destructive", drain)
-    destructive = script.index("VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1", authorize)
+    boundary = script.index('VALIDATOR_DEPLOY_STAGE="lab_arena_guard_handoff"')
+    request = script.index("write_lab_arena_restart_guard_request", boundary)
+    permit = script.index("wait_for_lab_arena_restart_guard_permit", request)
+    destructive = script.index("VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1", permit)
     process_proof = script.index('"$VALIDATOR_CONTROLLER_PROCESS_HELPER" verify', destructive)
-    ready = script.index("--phase validator_ready", process_proof)
 
-    assert drain < authorize < destructive < process_proof < ready
-    cleanup = script[script.index("cleanup() {") : script.index("trap cleanup EXIT")]
-    assert "abort_lab_arena_restart_guard_before_destructive" in cleanup
+    assert request < permit < destructive < process_proof
+    assert "lab_arena_restart_claim_guard.py' drain" not in script
+    assert "lab_arena_restart_claim_guard.py' authorize" not in script
+    assert "lab_arena_restart_claim_guard.py' ready" not in script
+    assert "LAB_ARENA_SUPABASE_URL" not in script
+
+    write_function = script[
+        script.index("write_lab_arena_restart_guard_request()"):
+        script.index("verify_lab_arena_restart_guard_handoff_sources()")
+    ]
+    permit_function = script[
+        script.index("wait_for_lab_arena_restart_guard_permit()"):
+        script.index("while [ \"$#\" -gt 0 ]")
+    ]
+    assert write_function.index("verify_lab_arena_restart_guard_handoff_sources") \
+        < write_function.index("write-request")
+    assert permit_function.index("verify_lab_arena_restart_guard_handoff_sources") \
+        < permit_function.index("validate-permit")
+
+
+def test_direct_validator_restart_requires_canonical_guard_handoff() -> None:
+    result = subprocess.run(
+        ["bash", "validator_restart.sh", "--commit", "1" * 40],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "requires the canonical controller Lab Arena guard permit" in result.stderr
+    assert "Pulling latest GitHub main" not in result.stdout
 
 
 def test_restart_preserves_all_tracked_diffs_before_pull():

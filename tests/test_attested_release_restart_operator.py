@@ -35,6 +35,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "restart_attested_release_local.sh"
 
 
+def _test_candidate_ref(suffix: str = "") -> str:
+    return os.environ.get("LEADPOET_TEST_CANDIDATE_REF", "origin/main") + suffix
+
+
 def test_arena_restart_guard_release_follows_joined_readiness() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     final_checks = source.rindex('verify_gateway_release "$gateway_evidence"')
@@ -630,7 +634,7 @@ def test_attested_release_restart_operator_requires_local_python(
     local_python_args: list[str],
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     result = subprocess.run(
@@ -902,6 +906,7 @@ def _fake_operator_commands(
     events = tmp_path / "events"
     barrier = tmp_path / "barrier"
     gateway_handoff = tmp_path / "gateway-handoff"
+    arena_permit = tmp_path / "arena-permit"
     gateway_started = tmp_path / "gateway-started"
     gateway_complete = tmp_path / "gateway-complete"
     gateway_observation, validator_observation = _fake_readiness_observations(
@@ -989,7 +994,8 @@ for arg in "$@"; do
     cat "$FAKE_OPERATOR_EXACT_HELPER"
     exit 0
   fi
-  if [[ "$arg" == *":scripts/lab_arena_restart_claim_guard.py" ]]; then
+  if [[ " $* " == *" show "* ]] \
+      && [[ "$arg" == *":scripts/lab_arena_restart_claim_guard.py" ]]; then
     cat "$FAKE_OPERATOR_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py"
     exit 0
   fi
@@ -1000,12 +1006,16 @@ if [[ " $* " == *" rev-parse "* ]]; then
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_observability/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/lab_arena_restart_claim_guard.py|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/lab_arena_restart_guard_handoff.py|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"gateway/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_observability/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/lab_arena_restart_claim_guard.py|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/lab_arena_restart_guard_handoff.py|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"validator_tee/*)
       printf '%s\\n' "$FAKE_OPERATOR_SOURCE_BLOB"
@@ -1019,6 +1029,8 @@ if [[ " $* " == *" hash-object --no-filters "* ]]; then
     "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_observability/*|\
     "$FAKE_OPERATOR_REPO_ROOT/"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_REPO_ROOT/"scripts/lab_arena_restart_claim_guard.py|\
+    "$FAKE_OPERATOR_REPO_ROOT/"scripts/lab_arena_restart_guard_handoff.py|\
     "$FAKE_OPERATOR_REPO_ROOT/"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_REPO_ROOT/"validator_tee/*)
       if [ -e "$FAKE_OPERATOR_SOURCE_DRIFT_MARKER" ]; then
@@ -1043,7 +1055,71 @@ command="${!#}"
 record() {
   printf '%s\\n' "$1" >> "$FAKE_OPERATOR_EVENTS"
 }
+guard_state() {
+  local phase="$1" scope="$2" generation="${3:-7}"
+  "$FAKE_OPERATOR_REAL_PYTHON" - "$phase" "$scope" "$generation" <<'PY'
+import json, os, sys
+from datetime import datetime, timedelta, timezone
+from scripts.lab_arena_restart_claim_guard import _commitments, _identity
+
+phase, scope, raw_generation = sys.argv[1:]
+generation = int(raw_generation)
+candidate = os.environ["FAKE_OPERATOR_SELECTED_COMMIT"]
+guard, owner = _identity(candidate, "restart-fixture")
+guard_commitment, owner_commitment = _commitments(guard, owner)
+print(json.dumps({
+    "schema_version": "leadpoet.lab_arena.restart_guard_state.v1",
+    "paused": True, "operator_paused": False,
+    "guard_present": True, "guard_active": True,
+    "guard_commitment": guard_commitment,
+    "owner_commitment": owner_commitment,
+    "guard_generation": generation,
+    "guard_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    "candidate_commit": candidate,
+    "restart_scope": scope,
+    "restart_phase": phase,
+    "drain": {
+        "schema_version": "leadpoet.lab_arena.restart_drain_state.v1",
+        "captured_count": 0, "accepted_receipt_count": 0,
+        "reported_terminal_receipt_count": 0, "still_leased_count": 0,
+        "lost_or_mutated_count": 0, "current_leased_count": 0,
+        "pending_retry_count": 0, "preserved": True,
+    },
+}, sort_keys=True))
+PY
+}
 case "$command" in
+  *lab_arena_restart_guard_handoff.py*validate-request*)
+    if [ "${FAKE_HANDOFF_SOURCE_DRIFT:-0}" = "1" ]; then
+      record arena_guard_handoff_source_drift
+      exit 74
+    fi
+    record arena_guard_request_validated
+    ;;
+  *lab_arena_restart_claim_guard.py*"'drain'"*)
+    record arena_guard_drained
+    if [[ "$command" == *"--scope all"* ]]; then
+      guard_state gateway_ready all
+    else
+      guard_state draining validator
+    fi
+    ;;
+  *lab_arena_restart_claim_guard.py*"'authorize'"*)
+    record arena_guard_validator_authorized
+    if [[ "$command" == *"--scope all"* ]]; then
+      guard_state validator_destructive all "${FAKE_ARENA_AUTHORIZATION_GENERATION:-7}"
+    else
+      guard_state validator_destructive validator "${FAKE_ARENA_AUTHORIZATION_GENERATION:-7}"
+    fi
+    ;;
+  *lab_arena_restart_claim_guard.py*"'ready'"*)
+    record arena_guard_validator_ready
+    if [[ "$command" == *"--scope all"* ]]; then
+      guard_state validator_ready all
+    else
+      guard_state validator_ready validator
+    fi
+    ;;
   *restart*claim*guard*"'discover'"*|*restart*claim*guard*"'state'"*)
     record arena_guard_discovery
     if [ "${FAKE_GUARD_DISCOVERY_FAIL:-0}" = "1" ]; then
@@ -1102,6 +1178,19 @@ case "$command" in
     record validator_captured
     if [[ "$decoded" == *"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=''"* ]]; then
       record validator_image_prepared
+      printf '%s\n' "Validator pre-shutdown checks complete; awaiting canonical Lab Arena guard permit"
+      record arena_guard_request_published
+      for _permit_wait in $(seq 1 500); do
+        if [ -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+          record arena_guard_permit_consumed
+          break
+        fi
+        sleep 0.01
+      done
+      if [ ! -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+        record arena_guard_permit_timeout
+        exit 79
+      fi
       record validator_activation
       record validator_complete
       exit 0
@@ -1122,6 +1211,19 @@ case "$command" in
       if [ -e "$FAKE_OPERATOR_BARRIER" ]; then
         marker="$(cat "$FAKE_OPERATOR_BARRIER")"
         if [ "$marker" = "$FAKE_VALIDATOR_COMMIT" ]; then
+          printf '%s\\n' "Validator pre-shutdown checks complete; awaiting canonical Lab Arena guard permit"
+          record arena_guard_request_published
+          for _permit_wait in $(seq 1 500); do
+            if [ -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+              record arena_guard_permit_consumed
+              break
+            fi
+            sleep 0.01
+          done
+          if [ ! -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+            record arena_guard_permit_timeout
+            exit 79
+          fi
           record validator_activation
           record validator_complete
           exit 0
@@ -1174,6 +1276,10 @@ case "$command" in
       record paired_gateway_handoff_released
     fi
     touch "$FAKE_OPERATOR_GATEWAY_HANDOFF"
+    ;;
+  *leadpoet-validator-arena-guard-permit*"mv -f --"*)
+    record arena_guard_permit_installed
+    touch "$FAKE_OPERATOR_ARENA_PERMIT"
     ;;
   *release_channel_v2*--ensure*)
     if [ "${FAKE_AMBIENT_LOCAL_RELEASE:-0}" = "1" ]; then
@@ -1271,7 +1377,7 @@ case "$command" in
     record gateway_active_probe
     ;;
   *"rm -f --"*)
-    rm -f "$FAKE_OPERATOR_BARRIER" "$FAKE_OPERATOR_GATEWAY_HANDOFF"
+    rm -f "$FAKE_OPERATOR_BARRIER" "$FAKE_OPERATOR_GATEWAY_HANDOFF" "$FAKE_OPERATOR_ARENA_PERMIT"
     record barrier_cleanup
     ;;
   *)
@@ -1403,6 +1509,7 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
                 f"FAKE_OPERATOR_EVENTS={events}",
                 f"FAKE_OPERATOR_BARRIER={barrier}",
                 f"FAKE_OPERATOR_GATEWAY_HANDOFF={gateway_handoff}",
+                f"FAKE_OPERATOR_ARENA_PERMIT={arena_permit}",
                 f"FAKE_OPERATOR_GATEWAY_STARTED={gateway_started}",
                 f"FAKE_OPERATOR_GATEWAY_COMPLETE={gateway_complete}",
                 f"FAKE_GATEWAY_COMMIT={commit}",
@@ -1488,7 +1595,7 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1520,11 +1627,19 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         "gateway_destructive_started",
         "gateway_complete",
         "barrier_released",
+        "arena_guard_request_published",
+        "arena_guard_request_validated",
+        "arena_guard_drained",
+        "arena_guard_validator_authorized",
+        "arena_guard_permit_installed",
+        "arena_guard_permit_consumed",
         "validator_activation",
         "validator_complete",
         "gateway_verified",
         "validator_verified",
+        "arena_guard_validator_ready",
         "readiness_finalized",
+        "arena_guard_released",
     ]
     positions = {event: observed.index(event) for event in required}
     assert (
@@ -1542,11 +1657,19 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     assert (
         positions["gateway_complete"]
         < positions["barrier_released"]
+        < positions["arena_guard_request_published"]
+        < positions["arena_guard_request_validated"]
+        < positions["arena_guard_drained"]
+        < positions["arena_guard_validator_authorized"]
+        < positions["arena_guard_permit_installed"]
+        < positions["arena_guard_permit_consumed"]
         < positions["validator_activation"]
         < positions["validator_complete"]
         < positions["gateway_verified"]
         < positions["validator_verified"]
+        < positions["arena_guard_validator_ready"]
         < positions["readiness_finalized"]
+        < positions["arena_guard_released"]
     )
     assert "barrier_before_gateway" not in observed
     assert "validator_forward_handoff" not in observed
@@ -1558,7 +1681,7 @@ def test_operator_fails_closed_when_guard_ownership_read_is_unavailable(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"], text=True
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
     ).strip()
     bin_dir, events = _fake_operator_commands(
         tmp_path, commit, dependency_complete_readiness_python
@@ -1585,7 +1708,7 @@ def test_operator_retains_owner_when_durable_guard_target_is_an_ancestor(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"], text=True
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
     ).strip()
     old_candidate = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", f"{commit}^"], text=True
@@ -1627,7 +1750,7 @@ def test_paired_operator_aborts_before_handoff_when_channel_is_not_durable(
     failure_event: str | None,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1662,7 +1785,7 @@ def test_paired_operator_accepts_existing_full_channel_only_after_role_check(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1701,7 +1824,7 @@ def test_single_component_requires_exact_immutable_channel_before_restart(
     component: str,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1731,7 +1854,7 @@ def test_operator_rejects_non_venv_local_python_before_ssh(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1768,7 +1891,7 @@ def test_operator_rejects_local_python_retarget_before_final_readiness(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1798,7 +1921,7 @@ def test_operator_rejects_candidate_source_drift_before_final_readiness(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1828,7 +1951,7 @@ def test_operator_rejects_initial_candidate_source_drift_before_ssh(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1858,7 +1981,7 @@ def test_gateway_only_operator_rejects_mismatched_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1889,7 +2012,7 @@ def test_gateway_only_operator_requires_healthy_matching_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1934,7 +2057,7 @@ def test_gateway_only_operator_rejects_unhealthy_matching_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1964,7 +2087,7 @@ def test_validator_only_operator_rejects_mismatched_gateway(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1995,7 +2118,7 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -2018,8 +2141,18 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
         "gateway_verified",
         "readiness_invalidated",
         "validator_start",
+        "arena_guard_request_published",
+        "arena_guard_request_validated",
+        "arena_guard_drained",
+        "arena_guard_validator_authorized",
+        "arena_guard_permit_installed",
+        "arena_guard_permit_consumed",
+        "validator_activation",
         "validator_complete",
         "validator_verified",
+        "arena_guard_validator_ready",
+        "readiness_finalized",
+        "arena_guard_released",
     ]
     positions = [observed.index(event) for event in required]
     assert positions == sorted(positions)
@@ -2030,11 +2163,74 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     assert observed.index("readiness_invalidated") < observed.index(
         "validator_start"
     )
-    assert len(observed) - 1 - observed[::-1].index(
-        "gateway_verified"
-    ) < observed.index(
-        "readiness_finalized"
+    assert observed.index("validator_verified") < observed.index(
+        "arena_guard_validator_ready"
+    ) < observed.index("readiness_finalized") < observed.index(
+        "arena_guard_released"
     )
+
+
+def test_validator_only_operator_rejects_changed_guard_generation_before_shutdown(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_ARENA_AUTHORIZATION_GENERATION"] = "8"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_validator_authorized" in observed
+    assert "arena_guard_permit_installed" not in observed
+    assert "validator_activation" not in observed
+    assert "arena_guard_validator_ready" not in observed
+    assert "arena_guard_released" not in observed
+
+
+def test_validator_only_operator_rejects_handoff_source_drift_before_shutdown(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_HANDOFF_SOURCE_DRIFT"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_request_published" in observed
+    assert "arena_guard_handoff_source_drift" in observed
+    assert "arena_guard_drained" not in observed
+    assert "arena_guard_validator_authorized" not in observed
+    assert "arena_guard_permit_installed" not in observed
+    assert "validator_activation" not in observed
 
 
 def test_validator_only_operator_recovers_missing_runtime_from_gateway_pair(
@@ -2042,11 +2238,11 @@ def test_validator_only_operator_recovers_missing_runtime_from_gateway_pair(
     dependency_complete_readiness_python: Path,
 ) -> None:
     controller_commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main^"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref("^")],
         text=True,
     ).strip()
     assert controller_commit != commit
@@ -2084,7 +2280,7 @@ def test_validator_only_operator_rejects_unknown_runtime_probe_failure(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -2169,7 +2365,7 @@ def test_validator_only_operator_rejects_unhealthy_matching_gateway(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -2199,7 +2395,7 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -2256,7 +2452,7 @@ def test_paired_operator_cancels_gateway_when_validator_exits_after_liveness_han
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -2309,7 +2505,7 @@ def test_paired_operator_final_probe_failure_leaves_resume_blocked(
     failed_event: str,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(

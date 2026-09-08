@@ -82,7 +82,7 @@ def test_arena_migrations_are_uniquely_numbered():
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 189
+    assert arena_frontier == 190
 
 
 def test_network_scope_migration_keeps_legacy_finney_defaults_queryable():

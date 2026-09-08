@@ -64,6 +64,11 @@ gateway_handoff_file=""
 gateway_handoff_nonce=""
 paired_gateway_handoff_file=""
 paired_gateway_handoff_nonce=""
+validator_arena_guard_request_remote=""
+validator_arena_guard_permit_remote=""
+validator_arena_guard_handoff_nonce=""
+validator_arena_guard_generation=""
+validator_arena_guard_authorized=0
 active_release_restart_invocation_id=""
 active_release_authority_commit=""
 controller_verifier_b64=""
@@ -128,6 +133,13 @@ cleanup() {
   local failure_marker_command=""
   local gateway_cancel_job=""
   set +e
+  if [ "$status" -ne 0 ] \
+      && [ "$component" = "validator" ] \
+      && [ -n "$validator_arena_guard_generation" ] \
+      && [ "$validator_arena_guard_authorized" != "1" ]; then
+    run_gateway_lab_arena_restart_guard abort \
+      --generation "$validator_arena_guard_generation" >/dev/null 2>&1 || true
+  fi
   if [ -n "$gateway_job" ]; then
     if [ -n "$gateway_job_pgid" ]; then
       kill -TERM -- "-$gateway_job_pgid" 2>/dev/null || true
@@ -236,6 +248,13 @@ cleanup() {
   if [ -n "$coordination_file" ]; then
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
       "rm -f -- '$coordination_file'" >/dev/null 2>&1 || true
+  fi
+  if [ "$component" != "gateway" ] \
+      && { [ -n "$validator_arena_guard_request_remote" ] \
+        || [ -n "$validator_arena_guard_permit_remote" ]; }; then
+    ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+      "rm -f -- '$validator_arena_guard_request_remote' '$validator_arena_guard_permit_remote' '$validator_arena_guard_permit_remote.tmp'" \
+      >/dev/null 2>&1 || true
   fi
   if [ -n "$gateway_handoff_file" ]; then
     ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
@@ -526,6 +545,8 @@ verify_local_readiness_python_binding() {
 
 LOCAL_READINESS_CANDIDATE_PATHS=(
   scripts/restart_attested_release_local.sh
+  scripts/lab_arena_restart_claim_guard.py
+  scripts/lab_arena_restart_guard_handoff.py
   gateway/__init__.py
   gateway/build_info.py
   gateway/deploy_readiness.py
@@ -688,6 +709,8 @@ import gateway.tee.release_lineage_v2 as release_lineage_v2
 import gateway.tee.release_manifest_v2 as release_manifest_v2
 import leadpoet_canonical.attested_v2 as attested_v2
 import leadpoet_canonical.nitro as nitro
+import scripts.lab_arena_restart_claim_guard as arena_restart_claim_guard
+import scripts.lab_arena_restart_guard_handoff as arena_restart_guard_handoff
 import validator_tee
 import validator_tee.host.release_v2 as validator_release_v2
 
@@ -704,6 +727,8 @@ for module in (
     release_manifest_v2,
     attested_v2,
     nitro,
+    arena_restart_claim_guard,
+    arena_restart_guard_handoff,
     validator_tee,
     validator_release_v2,
 ):
@@ -724,6 +749,13 @@ for function in (
     release_channel_v2.validate_historical_release_channel_v2,
     release_lineage_v2.validate_historical_compact_release_lineage_v2,
     release_manifest_v2.validate_historical_release_manifest,
+    arena_restart_claim_guard._commitments,
+    arena_restart_claim_guard._identity,
+    arena_restart_claim_guard._require_state,
+    arena_restart_guard_handoff._permit,
+    arena_restart_guard_handoff._validate_permit,
+    arena_restart_guard_handoff._validate_request,
+    arena_restart_guard_handoff._write_document,
     validator_release_v2.validate_validator_release_manifest,
 ):
     if not callable(function):
@@ -848,6 +880,8 @@ validator_initial_requirements_remote="/tmp/leadpoet-validator-active-release-re
 gateway_validator_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
 validator_final_requirements_remote="/tmp/leadpoet-gateway-active-release-requirements.$restart_transfer_id.json"
 validator_final_lineage_remote="/tmp/leadpoet-gateway-active-release-lineage.$restart_transfer_id.json"
+validator_arena_guard_request_remote="/tmp/leadpoet-validator-arena-guard-request.$restart_transfer_id.json"
+validator_arena_guard_permit_remote="/tmp/leadpoet-validator-arena-guard-permit.$restart_transfer_id.json"
 validator_recovery_requirements_remote="/tmp/leadpoet-validator-recovery-requirements.$restart_transfer_id.json"
 validator_recovery_lineage_remote="/tmp/leadpoet-validator-recovery-lineage.$restart_transfer_id.json"
 gateway_counterpart_lineage_remote="/tmp/leadpoet-validator-counterpart-release-lineage.$restart_transfer_id.json"
@@ -1023,6 +1057,13 @@ if [ "$component" = "all" ]; then
   paired_gateway_handoff_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   if ! [[ "$paired_gateway_handoff_nonce" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: paired gateway handoff nonce generation failed" >&2
+    exit 1
+  fi
+fi
+if [ "$component" != "gateway" ]; then
+  validator_arena_guard_handoff_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  if ! [[ "$validator_arena_guard_handoff_nonce" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: validator Arena guard handoff nonce generation failed" >&2
     exit 1
   fi
 fi
@@ -1523,6 +1564,185 @@ install_validator_final_release_authority() {
      mv -f -- '$validator_final_lineage_remote.tmp' '$validator_final_lineage_remote'"
 }
 
+run_gateway_lab_arena_restart_guard() {
+  local action="$1"
+  shift
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "set -Eeuo pipefail
+     test \"\$(git -C '$GATEWAY_REPO_ROOT' rev-parse HEAD)\" = '$commit'
+     test -f '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py'
+     test ! -L '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py'
+     test \"\$(git -C '$GATEWAY_REPO_ROOT' hash-object --no-filters '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py')\" = \"\$(git -C '$GATEWAY_REPO_ROOT' rev-parse '$commit:scripts/lab_arena_restart_claim_guard.py')\"
+     env -u LAB_ARENA_SUPABASE_URL \
+       -u LAB_ARENA_SUPABASE_ANON_KEY \
+       -u LAB_ARENA_SERVICE_KEY -u LAB_ARENA_SERVICE_JWT \
+       PYTHONPATH='$GATEWAY_REPO_ROOT' '$GATEWAY_PYTHON_BIN' \
+       '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py' \
+       '$action' \
+       --environment-file '/home/ec2-user/.config/leadpoet/gateway.env' \
+       --candidate '$commit' \
+       --invocation '$active_release_restart_invocation_id' $*"
+}
+
+authorize_validator_lab_arena_restart() {
+  local validator_log="$1"
+  local request_ready=0 request_deadline drain_report authorization_report
+  local permit_local="$temporary_root/leadpoet-validator-arena-guard-permit.json"
+  local validator_authority_commit="${active_release_authority_commit:-$branch_commit}"
+  request_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$request_deadline" ]; do
+    if grep -Fq \
+        "Validator pre-shutdown checks complete; awaiting canonical Lab Arena guard permit" \
+        "$validator_log"; then
+      request_ready=1
+      break
+    fi
+    if ! kill -0 "$validator_job" 2>/dev/null; then
+      report_restart_job_early_exit validator "$validator_job"
+      return 1
+    fi
+    sleep 1
+  done
+  if [ "$request_ready" != "1" ]; then
+    echo "ERROR: validator did not publish its Lab Arena guard request" >&2
+    return 1
+  fi
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     test \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse HEAD)\" = '$commit'
+     for source_path in scripts/lab_arena_restart_claim_guard.py scripts/lab_arena_restart_guard_handoff.py; do
+       test -f '$VALIDATOR_REPO_ROOT/'\"\$source_path\"
+       test ! -L '$VALIDATOR_REPO_ROOT/'\"\$source_path\"
+       test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters '$VALIDATOR_REPO_ROOT/'\"\$source_path\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$commit:'\"\$source_path\")\"
+     done
+     PYTHONPATH='$VALIDATOR_REPO_ROOT' '$VALIDATOR_PYTHON_BIN' \
+       '$VALIDATOR_REPO_ROOT/scripts/lab_arena_restart_guard_handoff.py' \
+       validate-request \
+       --path '$validator_arena_guard_request_remote' \
+       --candidate '$commit' \
+       --invocation '$active_release_restart_invocation_id' \
+       --scope '$component' \
+       --nonce '$validator_arena_guard_handoff_nonce' \
+       --authority-commit '$validator_authority_commit' >/dev/null"
+  drain_report="$(
+    run_gateway_lab_arena_restart_guard drain --scope "$component"
+  )" || return 1
+  local drain_report_file="$temporary_root/leadpoet-validator-arena-drain.json"
+  printf '%s' "$drain_report" > "$drain_report_file"
+  chmod 600 "$drain_report_file"
+  validator_arena_guard_generation="$(
+    run_local_readiness_python \
+      "$drain_report_file" "$commit" "$component" <<'PY'
+import json
+import sys
+
+from scripts.lab_arena_restart_claim_guard import _require_state
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = _require_state(json.load(handle))
+generation = value.get("guard_generation")
+if (
+    isinstance(generation, bool)
+    or not isinstance(generation, int)
+    or generation <= 0
+    or value.get("candidate_commit") != sys.argv[2]
+    or value.get("restart_scope") != sys.argv[3]
+    or value.get("restart_phase")
+    not in {"draining", "gateway_ready", "validator_destructive"}
+    or value.get("paused") is not True
+    or value.get("drain", {}).get("preserved") is not True
+):
+    raise SystemExit(1)
+print(generation)
+PY
+  )" || return 1
+  authorization_report="$(
+    run_gateway_lab_arena_restart_guard authorize \
+      --scope "$component" \
+      --generation "$validator_arena_guard_generation" \
+      --phase validator_destructive
+  )" || return 1
+  validator_arena_guard_authorized=1
+  local authorization_report_file="$temporary_root/leadpoet-validator-arena-authorization.json"
+  printf '%s' "$authorization_report" > "$authorization_report_file"
+  chmod 600 "$authorization_report_file"
+  rm -f -- "$permit_local"
+  run_local_readiness_python \
+    "$authorization_report_file" "$permit_local" "$commit" \
+    "$active_release_restart_invocation_id" "$component" \
+    "$validator_arena_guard_handoff_nonce" "$validator_authority_commit" \
+    "$validator_arena_guard_generation" <<'PY'
+import argparse
+import json
+from pathlib import Path
+import sys
+
+from scripts.lab_arena_restart_guard_handoff import _permit, _write_document
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    state = json.load(handle)
+args = argparse.Namespace(
+    candidate=sys.argv[3],
+    invocation=sys.argv[4],
+    scope=sys.argv[5],
+    nonce=sys.argv[6],
+    authority_commit=sys.argv[7],
+    expected_generation=int(sys.argv[8]),
+)
+_write_document(Path(sys.argv[2]), _permit(args, state))
+PY
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$permit_local" "$VALIDATOR_HOST:$validator_arena_guard_permit_remote.tmp"
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     test -s '$validator_arena_guard_permit_remote.tmp'
+     chmod 600 '$validator_arena_guard_permit_remote.tmp'
+     mv -f -- '$validator_arena_guard_permit_remote.tmp' '$validator_arena_guard_permit_remote'"
+  echo "Installed exact-generation Lab Arena validator restart permit"
+}
+
+mark_validator_lab_arena_ready() {
+  local ready_report ready_report_file
+  if [ -z "$validator_arena_guard_generation" ]; then
+    echo "ERROR: validator Lab Arena guard generation is unavailable" >&2
+    return 1
+  fi
+  ready_report="$(
+    run_gateway_lab_arena_restart_guard ready \
+      --scope "$component" \
+      --generation "$validator_arena_guard_generation" \
+      --phase validator_ready
+  )" || return 1
+  ready_report_file="$temporary_root/leadpoet-validator-arena-ready.json"
+  printf '%s' "$ready_report" > "$ready_report_file"
+  chmod 600 "$ready_report_file"
+  run_local_readiness_python \
+    "$commit" "$active_release_restart_invocation_id" "$component" \
+    "$validator_arena_guard_generation" "$ready_report_file" <<'PY'
+import json
+import sys
+
+from scripts.lab_arena_restart_claim_guard import _commitments, _identity, _require_state
+
+candidate, invocation, scope, expected_generation, report_path = sys.argv[1:]
+with open(report_path, encoding="utf-8") as handle:
+    value = _require_state(json.load(handle))
+guard, owner = _identity(candidate, invocation)
+guard_commitment, owner_commitment = _commitments(guard, owner)
+if (
+    value.get("candidate_commit") != candidate
+    or value.get("restart_scope") != scope
+    or value.get("restart_phase") != "validator_ready"
+    or value.get("guard_generation") != int(expected_generation)
+    or value.get("guard_commitment") != guard_commitment
+    or value.get("owner_commitment") != owner_commitment
+    or value.get("paused") is not True
+):
+    raise SystemExit("validator Lab Arena ready state differs")
+PY
+  echo "Recorded independently verified Lab Arena validator readiness on the gateway"
+}
+
 install_validator_missing_runtime_recovery_authority() {
   scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
     "$gateway_final_requirements_local" \
@@ -1578,6 +1798,7 @@ run_validator_restart_against_active_gateway() {
   fetch_validator_initial_release_requirements
   fetch_gateway_final_release_authority
   install_validator_final_release_authority
+  authorize_validator_lab_arena_restart "$validator_log"
   local completion_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
   while kill -0 "$validator_job" 2>/dev/null; do
     if [ "$SECONDS" -ge "$completion_deadline" ]; then
@@ -1855,13 +2076,9 @@ print(value[\"mode\"])
 release_lab_arena_restart_guard() {
   local host key repo python env_file
   case "$component" in
-    gateway)
+    gateway|validator|all)
       host="$GATEWAY_HOST"; key="$GATEWAY_KEY"; repo="$GATEWAY_REPO_ROOT"
       python="$GATEWAY_PYTHON_BIN"; env_file="/home/ec2-user/.config/leadpoet/gateway.env"
-      ;;
-    validator|all)
-      host="$VALIDATOR_HOST"; key="$VALIDATOR_KEY"; repo="$VALIDATOR_REPO_ROOT"
-      python="$VALIDATOR_PYTHON_BIN"; env_file="/home/ec2-user/.config/leadpoet/validator.env"
       ;;
   esac
   ssh "${ssh_common[@]}" -i "$key" "$host" \
@@ -2140,6 +2357,7 @@ run_validator_restart() {
     GIT_NO_REPLACE_OBJECTS=1 git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit' | tar -xf - -C \"\$authority_root\"
     test -r \"\$authority_root/validator_restart.sh\"
     test -r \"\$authority_root/gateway/tee/prepare_active_release_lineage_v2.py\"
+    test -r \"\$authority_root/scripts/lab_arena_restart_guard_handoff.py\"
     test -r \"\$authority_root/scripts/manage_owned_process_group.py\"
     test ! -L \"\$authority_root/scripts/manage_owned_process_group.py\"
     test -x '$VALIDATOR_PYTHON_BIN'
@@ -2166,6 +2384,10 @@ run_validator_restart() {
       VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT='$validator_final_lineage_remote' \\
       VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS='$recovery_requirements_environment' \\
       VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE='$recovery_lineage_environment' \\
+      VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT='$validator_arena_guard_request_remote' \\
+      VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT='$validator_arena_guard_permit_remote' \\
+      VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE='$validator_arena_guard_handoff_nonce' \\
+      VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS='$VALIDATOR_COORDINATION_TIMEOUT_SECONDS' \\
       LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \\
       VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST='$VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH' \\
       VALIDATOR_V2_RELEASE_MANIFEST='$VALIDATOR_LOCAL_RELEASE_PATH' \\
@@ -2879,6 +3101,7 @@ case "$component" in
     install_validator_final_release_authority
     publish_coordination_value "$commit"
     echo "Gateway restart completed; releasing exact-SHA validator activation"
+    authorize_validator_lab_arena_restart "$validator_log"
 
     while kill -0 "$validator_job" 2>/dev/null; do
       if [ "$SECONDS" -ge "$paired_restart_deadline" ]; then
@@ -2902,6 +3125,7 @@ verify_gateway_release "$gateway_evidence"
 verify_validator_release "$validator_evidence"
 if [ "$component" != "gateway" ]; then
   verify_validator_arena_runner_process
+  mark_validator_lab_arena_ready
 fi
 finalize_deploy_readiness
 release_lab_arena_restart_guard

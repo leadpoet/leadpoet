@@ -153,6 +153,21 @@ SAFE_REHEARSAL_ERROR_TYPES = frozenset(
         "ValueError",
     }
 )
+SAFE_REHEARSAL_ERROR_CATEGORIES = frozenset(
+    {
+        "connection_refused",
+        "database_shutting_down",
+        "docker_unavailable",
+        "gateway_launcher",
+        "permission",
+        "postgrest",
+        "resource_disk",
+        "resource_oom",
+        "schema",
+        "timeout",
+        "validator_launcher",
+    }
+)
 SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = SAFE_REHEARSAL_ERROR_TYPES | {
     "None",
     "OtherError",
@@ -1652,6 +1667,105 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
     return diagnostics
 
 
+def _rehearsal_component_failure_diagnostics(
+    *streams: str,
+) -> list[dict[str, Any]]:
+    """Retain only fixed diagnostics from complete component failure blocks."""
+
+    diagnostics: list[dict[str, Any]] = []
+    for stream in streams:
+        active_component: str | None = None
+        active_diagnostics: list[dict[str, Any]] = []
+        for raw_line in stream.splitlines():
+            line = raw_line.strip()
+            start = re.fullmatch(
+                r"REHEARSAL_FAILURE_DIAGNOSTICS "
+                r"component=(gateway|validator) status=([0-9]{1,3})",
+                line,
+            )
+            if start is not None and 1 <= int(start.group(2)) <= 255:
+                active_component = start.group(1)
+                active_diagnostics = [
+                    {
+                        "marker": "component_failure",
+                        "component": active_component,
+                        "status": int(start.group(2)),
+                    }
+                ]
+                continue
+            if active_component is None:
+                continue
+            for projected in _rehearsal_output_diagnostics(line):
+                if (
+                    projected.get("marker")
+                    in {"contract_error", "error", "http"}
+                    and projected not in active_diagnostics
+                    and len(active_diagnostics) < 16
+                ):
+                    active_diagnostics.append(projected)
+            if line != f"ERROR: exact {active_component} launcher failed":
+                continue
+            for projected in active_diagnostics:
+                if projected not in diagnostics and len(diagnostics) < 32:
+                    diagnostics.append(projected)
+            active_component = None
+            active_diagnostics = []
+    return diagnostics
+
+
+def _retained_component_failure_diagnostics(
+    markers: Any,
+) -> list[dict[str, Any]]:
+    """Sanitize component details for the durable Fast failure projection."""
+
+    if not isinstance(markers, list):
+        return []
+    diagnostics: list[dict[str, Any]] = []
+    for item in markers:
+        if not isinstance(item, Mapping):
+            continue
+        marker = item.get("marker")
+        projected: dict[str, Any] | None = None
+        if (
+            marker == "component_failure"
+            and item.get("component") in {"gateway", "validator"}
+            and type(item.get("status")) is int
+            and 1 <= item["status"] <= 255
+        ):
+            projected = {
+                "marker": marker,
+                "component": item["component"],
+                "status": item["status"],
+            }
+        elif (
+            marker == "http"
+            and item.get("endpoint") in {"/research-lab/status", "/attest"}
+            and isinstance(item.get("status"), str)
+            and re.fullmatch(
+                r"curl_failed|[1-5][0-9]{2}",
+                item["status"],
+            )
+            is not None
+        ):
+            projected = {
+                "marker": marker,
+                "endpoint": item["endpoint"],
+                "status": item["status"],
+            }
+        elif marker == "error" and item.get(
+            "category"
+        ) in SAFE_REHEARSAL_ERROR_CATEGORIES:
+            projected = {
+                "marker": marker,
+                "category": item["category"],
+            }
+        if projected is not None and projected not in diagnostics:
+            diagnostics.append(projected)
+        if len(diagnostics) >= 16:
+            break
+    return diagnostics
+
+
 def _sanitize_workflow_failure_projection(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping) or type(value.get("available")) is not bool:
         return None
@@ -1731,7 +1845,8 @@ def _rehearsal_failure_diagnostics(
         and item.get("status") == "failed"
         for item in phase_diagnostics
     )
-    output_diagnostics = [
+    output_diagnostics: list[dict[str, Any]] = []
+    for diagnostic in [
         # The controller reserves stderr for its phase lifecycle. Stdout may
         # contain arbitrary action output and is never phase authority.
         *phase_diagnostics,
@@ -1739,8 +1854,11 @@ def _rehearsal_failure_diagnostics(
             stderr_text,
             exact_image_build_failed=exact_image_build_failed,
         ),
+        *_rehearsal_component_failure_diagnostics(stdout_text, stderr_text),
         *_rehearsal_output_diagnostics(output_tail),
-    ]
+    ]:
+        if diagnostic not in output_diagnostics:
+            output_diagnostics.append(diagnostic)
     if output_diagnostics:
         projection["output_markers"] = output_diagnostics
     projection["timeout"] = any(
@@ -2005,6 +2123,7 @@ def _write_rehearsal_failure_projection(
             and re.fullmatch(r"[a-z_]{1,64}", str(item.get("marker") or ""))
         }
     )[:32] if isinstance(markers, list) else []
+    component_diagnostics = _retained_component_failure_diagnostics(markers)
     projection = {
         "candidate_sha": candidate_sha,
         "output_markers": safe_markers,
@@ -2019,11 +2138,14 @@ def _write_rehearsal_failure_projection(
         "status": "failed",
         "timeout": diagnostics.get("timeout") is True,
     }
+    if component_diagnostics:
+        projection["component_failure_diagnostics"] = component_diagnostics
     error_type = diagnostics.get("error_type")
     if isinstance(error_type, str) and error_type in SAFE_REHEARSAL_ERROR_TYPES:
         projection["error_type"] = error_type
     encoded = json.dumps(projection, sort_keys=True, indent=2) + "\n"
     if len(encoded.encode("utf-8")) > 16_384:
+        projection.pop("component_failure_diagnostics", None)
         projection["output_markers"] = []
         projection["stages"] = []
         projection["truncated"] = True

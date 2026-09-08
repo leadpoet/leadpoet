@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -17,6 +20,20 @@ GROUP_ID = "sg-0123456789abcdef0"
 VOLUME_ID = "vol-0123456789abcdef0"
 NETWORK_INTERFACE_ID = "eni-0123456789abcdef0"
 NOW = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
+
+
+def test_direct_workflow_script_can_import_repository_siblings(tmp_path):
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, "-c", (
+            "import runpy, sys; runpy.run_path(sys.argv[1]); "
+            "from scripts.provision_production_parity_staging "
+            "import _create_artifact_bucket"
+        ), str(ROOT / "scripts/temporary_testnet_signing_host.py")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 class _Waiter:

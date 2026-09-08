@@ -17,6 +17,11 @@ from typing import Any, Mapping, Sequence
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+# The workflow invokes this file directly, so sibling repository modules must
+# remain importable without a runner-specific PYTHONPATH.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 ACCOUNT_ID = "493765492819"
 REGION = "us-east-1"

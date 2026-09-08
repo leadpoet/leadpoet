@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -449,7 +451,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (190,)
+        supported_versions = (191,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
@@ -831,6 +833,8 @@ class ArenaService:
             "source_size_bytes": body["source_size_bytes"],
             "consent": dict(body["consent"]),
         }
+        if body.get("source_content_md5") is not None:
+            document["source_content_md5"] = body["source_content_md5"]
         try:
             registration = self._store.register_submission(
                 round_id,
@@ -848,6 +852,16 @@ class ArenaService:
             raise ServiceError("submission_registration_failed", 500)
         submission_id = str(registration.get("submission_id") or submission_id)
         source_ref = str(registration.get("source_ref") or source_ref)
+        if registration.get("submission_status") in ("accepted", "frozen"):
+            # Historical accepted rows predate persisted transport checksums.
+            # Verify their bytes before treating a same-size upload as a retry.
+            checksum = body.get("source_content_md5")
+            if checksum is not None:
+                self._validate_uploaded_source({
+                    "source_ref": source_ref,
+                    "source_size_bytes": body["source_size_bytes"],
+                    "submission_doc": {"source_content_md5": checksum},
+                })
         try:
             upload_arguments = {
                 "size_bytes": int(body["source_size_bytes"]),
@@ -884,6 +898,13 @@ class ArenaService:
             raise ServiceError("source_upload_unavailable", 409) from exc
         if len(payload) != expected_size:
             raise ServiceError("submission_rejected:source_size_mismatch", 400)
+        checksum = (row.get("submission_doc") or {}).get("source_content_md5")
+        if checksum is not None:
+            actual = base64.b64encode(
+                hashlib.md5(payload, usedforsecurity=False).digest()
+            ).decode("ascii")
+            if not hmac.compare_digest(actual, checksum):
+                raise ServiceError("submission_rejected:source_checksum_mismatch", 400)
         try:
             source_bundle.validate_source_archive(
                 payload, forbidden_values=forbidden_values
@@ -924,6 +945,8 @@ class ArenaService:
                 return {"status": "accepted", "submission_id": submission_id}
             raise ServiceError("submission_credentials_missing", 409)
         if row.get("status") != "uploading":
+            if row.get("rejection_rule") == "source_replaced":
+                raise ServiceError("submission_superseded", 409)
             raise ServiceError("submission_not_uploading", 409)
         self._enforce_submission_request_limit(validated["hotkey"])
         try:

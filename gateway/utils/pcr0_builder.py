@@ -1423,10 +1423,7 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
         # Step 3: Build enclave from NORMALIZED image
         logger.info("[PCR0] Building enclave with nitro-cli...")
         proc = await asyncio.create_subprocess_exec(
-            "sudo",
-            "--preserve-env=NITRO_CLI_ARTIFACTS,NITRO_CLI_BLOBS",
-            "nitro-cli",
-            "build-enclave",
+            "sudo", "nitro-cli", "build-enclave",
             "--docker-uri", normalized_image,
             "--output-file", eif_path,
             cwd=repo_dir,

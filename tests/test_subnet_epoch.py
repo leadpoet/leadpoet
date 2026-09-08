@@ -2,10 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-import os
-from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 
@@ -14,20 +10,14 @@ from Leadpoet.utils.subnet_epoch import (
     CUTOVER_PATH_ENV,
     EPOCH_SCHEME,
     OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
-    FINNEY_OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
-    TESTNET401_BITTENSOR_ARCHIVE_ENDPOINT,
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
     normalize_trusted_archive_endpoint,
-    configured_bittensor_archive_endpoint,
     validate_subnet_epoch_cutover_anchor,
 )
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 GENESIS = "0x" + "11" * 32
@@ -66,60 +56,6 @@ def _cutover(**updates) -> SubnetEpochCutover:
     }
     values.update(updates)
     return SubnetEpochCutover(**values)
-
-
-def test_archive_route_changes_only_for_exact_testnet401_process() -> None:
-    assert configured_bittensor_archive_endpoint({}) == (
-        FINNEY_OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-    )
-    assert configured_bittensor_archive_endpoint(
-        {"BITTENSOR_NETWORK": "finney", "BITTENSOR_NETUID": "71"}
-    ) == FINNEY_OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-    assert configured_bittensor_archive_endpoint(
-        {"BITTENSOR_NETWORK": "test", "BITTENSOR_NETUID": "71"}
-    ) == FINNEY_OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-    assert configured_bittensor_archive_endpoint(
-        {"BITTENSOR_NETWORK": "finney", "BITTENSOR_NETUID": "401"}
-    ) == FINNEY_OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-    assert configured_bittensor_archive_endpoint(
-        {"BITTENSOR_NETWORK": "test", "BITTENSOR_NETUID": "401"}
-    ) == TESTNET401_BITTENSOR_ARCHIVE_ENDPOINT
-
-
-def test_testnet401_import_binds_anchor_default_to_test_archive() -> None:
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "BITTENSOR_NETWORK": "test",
-            "BITTENSOR_NETUID": "401",
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
-    )
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import inspect; "
-                "from Leadpoet.utils.subnet_epoch import "
-                "OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT as endpoint, "
-                "validate_subnet_epoch_cutover_anchor as validate; "
-                "default=inspect.signature(validate).parameters"
-                "['expected_archive_endpoint'].default; "
-                "print(endpoint); print(default)"
-            ),
-        ],
-        cwd=ROOT,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert completed.stdout.splitlines() == [
-        TESTNET401_BITTENSOR_ARCHIVE_ENDPOINT,
-        TESTNET401_BITTENSOR_ARCHIVE_ENDPOINT,
-    ]
 
 
 def test_historical_sn71_vector_uses_stateful_epoch() -> None:

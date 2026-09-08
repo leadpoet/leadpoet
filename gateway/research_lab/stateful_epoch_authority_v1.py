@@ -24,15 +24,10 @@ from gateway.research_lab.store import insert_row, select_one
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     CUTOVER_AUTHORITY_SCHEMA_VERSION,
     CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION,
-    CUTOVER_FRESH_NETWORK_AUTHORITY_SCHEMA_VERSION,
     CUTOVER_PURPOSE,
     FINALIZATION_PURPOSE,
     HISTORICAL_FINALIZATION_PURPOSE,
     HISTORICAL_PREDECESSOR_KIND,
-    FRESH_NETWORK_ORIGIN_KIND,
-    FINNEY_GENESIS_HASH,
-    TESTNET_GENESIS_HASH,
-    TESTNET_NETUID,
     SNAPSHOT_PURPOSE,
 )
 from leadpoet_canonical.attested_v2 import (
@@ -113,17 +108,6 @@ _BOOTSTRAP_AUTHORITY_FIELDS = frozenset(
         "predecessor_allocation_hash",
         "predecessor_authority_hash",
         "predecessor_receipt_hash",
-        "manifest",
-    }
-)
-_FRESH_NETWORK_AUTHORITY_FIELDS = frozenset(
-    {
-        "schema_version",
-        "mapping_hash",
-        "first_epoch_ref",
-        "first_snapshot_hash",
-        "first_snapshot_receipt_hash",
-        "origin_kind",
         "manifest",
     }
 )
@@ -796,17 +780,12 @@ def build_cutover_row_v1(
         raise StatefulEpochAuthorityStoreError("cutover authority fields are invalid")
     authority_fields = set(authority_doc)
     bootstrap = authority_fields == _BOOTSTRAP_AUTHORITY_FIELDS
-    fresh_network = authority_fields == _FRESH_NETWORK_AUTHORITY_FIELDS
-    if authority_fields != _AUTHORITY_FIELDS and not bootstrap and not fresh_network:
+    if authority_fields != _AUTHORITY_FIELDS and not bootstrap:
         raise StatefulEpochAuthorityStoreError("cutover authority fields are invalid")
     expected_schema = (
-        CUTOVER_FRESH_NETWORK_AUTHORITY_SCHEMA_VERSION
-        if fresh_network
-        else (
-            CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION
-            if bootstrap
-            else CUTOVER_AUTHORITY_SCHEMA_VERSION
-        )
+        CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION
+        if bootstrap
+        else CUTOVER_AUTHORITY_SCHEMA_VERSION
     )
     if authority_doc.get("schema_version") != expected_schema:
         raise StatefulEpochAuthorityStoreError("cutover authority schema is invalid")
@@ -838,16 +817,14 @@ def build_cutover_row_v1(
         authority_doc.get("first_snapshot_receipt_hash"),
         "first snapshot receipt hash",
     )
-    predecessor_receipt_hash = None
-    if not fresh_network:
-        predecessor_receipt_hash = _hash(
-            authority_doc.get(
-                "predecessor_receipt_hash"
-                if bootstrap
-                else "last_legacy_finalization_receipt_hash"
-            ),
-            "cutover predecessor receipt hash",
-        )
+    predecessor_receipt_hash = _hash(
+        authority_doc.get(
+            "predecessor_receipt_hash"
+            if bootstrap
+            else "last_legacy_finalization_receipt_hash"
+        ),
+        "cutover predecessor receipt hash",
+    )
     snapshot_receipt = by_hash.get(snapshot_receipt_hash)
     predecessor_receipt = by_hash.get(predecessor_receipt_hash)
     authority_hash = sha256_json(dict(authority_doc))
@@ -858,11 +835,7 @@ def build_cutover_row_v1(
         or int(root.get("epoch_id", -1)) != mapping.first_settlement_epoch_id
         or root.get("output_root") != authority_hash
         or root.get("parent_receipt_hashes")
-        != (
-            [snapshot_receipt_hash]
-            if fresh_network
-            else sorted([snapshot_receipt_hash, predecessor_receipt_hash])
-        )
+        != sorted([snapshot_receipt_hash, predecessor_receipt_hash])
     ):
         raise StatefulEpochAuthorityStoreError(
             "cutover coordinator receipt is invalid"
@@ -876,27 +849,7 @@ def build_cutover_row_v1(
         != mapping.first_settlement_epoch_id
     ):
         raise StatefulEpochAuthorityStoreError("cutover snapshot receipt is invalid")
-    if fresh_network:
-        if (
-            authority_doc.get("origin_kind") != FRESH_NETWORK_ORIGIN_KIND
-            or mapping.network_genesis_hash == FINNEY_GENESIS_HASH
-            or mapping.network_genesis_hash != TESTNET_GENESIS_HASH
-            or mapping.netuid != TESTNET_NETUID
-        ):
-            raise StatefulEpochAuthorityStoreError(
-                "fresh-network cutover origin is invalid"
-            )
-        predecessor_columns = {
-            "predecessor_kind": None,
-            "predecessor_epoch_id": None,
-            "predecessor_allocation_hash": None,
-            "predecessor_authority_hash": None,
-            "predecessor_receipt_hash": None,
-            "last_legacy_bundle_hash": None,
-            "last_legacy_weight_finalization_event_hash": None,
-            "last_legacy_finalization_receipt_hash": None,
-        }
-    elif bootstrap:
+    if bootstrap:
         predecessor_epoch_id = authority_doc.get("predecessor_epoch_id")
         if (
             authority_doc.get("predecessor_kind")
@@ -961,9 +914,7 @@ def build_cutover_row_v1(
         "mapping_hash": mapping.mapping_hash,
         "manifest_schema_version": mapping.schema_version,
         "epoch_scheme": mapping.epoch_scheme,
-        "previous_epoch_scheme": (
-            "fresh_network_v1" if fresh_network else "legacy_global_360_v1"
-        ),
+        "previous_epoch_scheme": "legacy_global_360_v1",
         "network_genesis_hash": mapping.network_genesis_hash,
         "netuid": mapping.netuid,
         "cutover_block": mapping.cutover_block,
@@ -1273,23 +1224,15 @@ async def persist_cutover_v1(
     authority_doc: Mapping[str, Any],
     first_snapshot_doc: Mapping[str, Any],
     receipt_graph: Mapping[str, Any],
-    row_receipt_graph: Optional[Mapping[str, Any]] = None,
     persist_graph: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] = persist_receipt_graph_v2,
     load_graph: Callable[[str], Awaitable[Mapping[str, Any]]] = load_receipt_graph_v2,
     insert: Callable[[str, Dict[str, Any]], Awaitable[Mapping[str, Any]]] = insert_row,
     select: Callable[..., Awaitable[Optional[Mapping[str, Any]]]] = select_one,
 ) -> Dict[str, Any]:
-    row_graph = receipt_graph if row_receipt_graph is None else row_receipt_graph
-    if row_graph.get("root_receipt_hash") != receipt_graph.get(
-        "root_receipt_hash"
-    ):
-        raise StatefulEpochAuthorityStoreError(
-            "cutover row receipt graph root differs from durable graph"
-        )
     row = build_cutover_row_v1(
         authority_doc=authority_doc,
         first_snapshot_doc=first_snapshot_doc,
-        receipt_graph=row_graph,
+        receipt_graph=receipt_graph,
     )
     await _assert_graph_durable(
         receipt_graph,

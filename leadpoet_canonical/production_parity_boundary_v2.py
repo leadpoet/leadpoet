@@ -12,7 +12,7 @@ from datetime import date, datetime, timezone
 import os
 from pathlib import Path
 import re
-from typing import Any, Dict, Mapping, Optional
+from typing import Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
 
@@ -117,47 +117,11 @@ def validate_production_parity_boundary_document_v2(
     *,
     network: str,
     netuid: int,
-    chain_signing_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, object]:
     """Return every external boundary after deployment-level validation."""
 
     parity = _parity_configuration(environment)
-    chain_boundary = None
-    if chain_signing_profile is not None:
-        from leadpoet_canonical.chain_source_v2 import (
-            ChainSourceV2Error,
-            chain_source_boundary_for_profile_v2,
-        )
-        from leadpoet_canonical.hotkey_authority_v2 import (
-            validate_chain_signing_profile,
-        )
-
-        try:
-            profile = validate_chain_signing_profile(chain_signing_profile)
-            chain_boundary = chain_source_boundary_for_profile_v2(profile)
-        except (TypeError, ValueError, ChainSourceV2Error) as exc:
-            raise ProductionParityBoundaryV2Error(
-                "runtime chain signing profile is outside measured policy"
-            ) from exc
-        runtime_network = str(network or "").strip().lower()
-        runtime_netuid = int(netuid)
-        if (
-            runtime_network != str(profile["network"])
-            or (runtime_network, runtime_netuid)
-            not in {("finney", 71), ("test", 401)}
-        ):
-            raise ProductionParityBoundaryV2Error(
-                "runtime chain identity differs from the measured profile"
-            )
     if parity is None:
-        if chain_boundary is not None:
-            return {
-                "mode": "production",
-                "supabase_origin": PRODUCTION_SUPABASE_ORIGIN,
-                "benchmark_date": None,
-                "chain_host": chain_boundary["chain_host"],
-                "chain_archive_host": chain_boundary["chain_archive_host"],
-            }
         return {
             "mode": "production",
             "supabase_origin": PRODUCTION_SUPABASE_ORIGIN,
@@ -182,16 +146,12 @@ def validate_production_parity_boundary_v2(
     *,
     network: str,
     netuid: int,
-    chain_signing_profile: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Return the committed Supabase origin after deployment-level validation."""
 
     return str(
         validate_production_parity_boundary_document_v2(
-            environment,
-            network=network,
-            netuid=netuid,
-            chain_signing_profile=chain_signing_profile,
+            environment, network=network, netuid=netuid
         )["supabase_origin"]
     )
 

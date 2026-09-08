@@ -16,15 +16,6 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
 from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
-from gateway.research_lab.temporary_testnet401_first_allocation_v1 import (
-    TESTNET401_CUTOVER_AUTHORITY_HASH,
-    TESTNET401_CUTOVER_MAPPING_HASH,
-    TESTNET401_CUTOVER_RECEIPT_HASH,
-    TESTNET401_GENESIS_HASH,
-    TESTNET401_NETUID,
-    TemporaryTestnet401FirstAllocationError,
-    validate_testnet401_cutover_parent_v1,
-)
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_probe_job_envelope_v2,
     build_source_add_probe_route_v2,
@@ -999,76 +990,6 @@ async def _graphs_for_roots(
     return graphs
 
 
-async def _load_fresh_testnet401_first_allocation_parent_v1(
-    *, netuid: int
-) -> dict[str, Any] | None:
-    """Load the one durable fresh origin only while no real activation exists."""
-
-    if (
-        int(netuid) != TESTNET401_NETUID
-        or str(os.getenv("BITTENSOR_NETWORK") or "").strip().lower() != "test"
-    ):
-        return None
-    from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover
-    from gateway.research_lab.attested_v2_store import load_receipt_graph_v2
-    from gateway.research_lab.store import select_all, select_many
-
-    activation_rows = await select_many(
-        "research_lab_chain_realized_settlement_activation_v1",
-        columns="netuid",
-        filters=(("netuid", TESTNET401_NETUID),),
-        limit=2,
-    )
-    if activation_rows:
-        if len(activation_rows) != 1:
-            raise ResearchLabV2AuthorityError(
-                "testnet401 settlement activation is ambiguous"
-            )
-        return None
-    cutover = load_subnet_epoch_cutover().to_dict()
-    rows = await select_all(
-        "research_lab_stateful_subnet_epoch_cutovers_v1",
-        filters=(
-            ("mapping_hash", TESTNET401_CUTOVER_MAPPING_HASH),
-            ("network_genesis_hash", TESTNET401_GENESIS_HASH),
-            ("netuid", TESTNET401_NETUID),
-        ),
-        max_rows=2,
-        allow_partial=False,
-    )
-    if len(rows) != 1:
-        raise ResearchLabV2AuthorityError(
-            "fresh testnet401 cutover authority is unavailable or ambiguous"
-        )
-    row = rows[0]
-    if (
-        row.get("schema_version")
-        != "leadpoet.subnet_epoch_cutover_authority.v3"
-        or row.get("previous_epoch_scheme") != "fresh_network_v1"
-        or row.get("cutover_authority_hash")
-        != TESTNET401_CUTOVER_AUTHORITY_HASH
-        or row.get("cutover_receipt_hash")
-        != TESTNET401_CUTOVER_RECEIPT_HASH
-        or row.get("manifest_doc") != cutover
-    ):
-        raise ResearchLabV2AuthorityError(
-            "fresh testnet401 cutover authority differs"
-        )
-    graph = await load_receipt_graph_v2(TESTNET401_CUTOVER_RECEIPT_HASH)
-    try:
-        validate_testnet401_cutover_parent_v1(
-            graph,
-            network="test",
-            netuid=netuid,
-            cutover=cutover,
-        )
-    except (TemporaryTestnet401FirstAllocationError, TypeError, ValueError) as exc:
-        raise ResearchLabV2AuthorityError(
-            "fresh testnet401 cutover receipt differs"
-        ) from exc
-    return dict(graph)
-
-
 async def _persist_business_links(
     outcome: Mapping[str, Any],
     links: Sequence[Mapping[str, Any]],
@@ -1235,7 +1156,6 @@ async def build_allocation_v2(
     readiness_business_graphs: dict[
         tuple[str, str], dict[str, Any]
     ] = {}
-    fresh_testnet401_parent: dict[str, Any] | None = None
     if using_default_parent_loader:
         from gateway.research_lab.attested_v2_store import (
             load_allocation_settlement_frontier_context_v2,
@@ -1259,18 +1179,12 @@ async def build_allocation_v2(
             current_frontier_context = settlement_frontier_context
             settlement_frontier_context = None
         if current_frontier_context is None and execute is execute_coordinator_v2:
-            fresh_testnet401_parent = (
-                await _load_fresh_testnet401_first_allocation_parent_v1(
-                    netuid=int(netuid)
-                )
+            await ensure_chain_realized_settlements_v1(
+                epoch_id=int(epoch_id),
+                netuid=int(netuid),
+                execute=execute,
+                settlement_attempt=int(allocation_sequence),
             )
-            if fresh_testnet401_parent is None:
-                await ensure_chain_realized_settlements_v1(
-                    epoch_id=int(epoch_id),
-                    netuid=int(netuid),
-                    execute=execute,
-                    settlement_attempt=int(allocation_sequence),
-                )
         if settlement_frontier_context is None:
             if current_frontier_context is not None:
                 source = current_frontier_context.get("source")
@@ -1297,9 +1211,6 @@ async def build_allocation_v2(
             readiness = await champion_v2_cutover_readiness(
                 epoch=int(epoch_id),
                 netuid=int(netuid),
-                _fresh_testnet401_empty_origin=(
-                    fresh_testnet401_parent is not None
-                ),
                 _finalized_history_out=finalized_history,
                 _authority_graph_records_out=readiness_authority_graph_records,
                 _business_graphs_out=readiness_business_graphs,
@@ -1339,10 +1250,7 @@ async def build_allocation_v2(
                 {
                     "finalized_champion_history": (
                         finalized_history
-                        if (
-                            settlement_frontier_context is None
-                            or fresh_testnet401_parent is not None
-                        )
+                        if settlement_frontier_context is None
                         else None
                     ),
                     "preloaded_receipt_graph_records": (
@@ -1353,16 +1261,6 @@ async def build_allocation_v2(
                 }
             )
         graphs = list(await load_allocation_parent_graphs(**parent_loader_kwargs))
-        if fresh_testnet401_parent is not None:
-            if any(
-                graph.get("root_receipt_hash")
-                == TESTNET401_CUTOVER_RECEIPT_HASH
-                for graph in graphs
-            ):
-                raise ResearchLabV2AuthorityError(
-                    "fresh testnet401 cutover parent is duplicated"
-                )
-            graphs.append(fresh_testnet401_parent)
     bindings = await asyncio.to_thread(_validate_allocation_parent_graphs, graphs)
     if current_frontier_context is not None:
         outcome = _current_allocation_frontier_outcome_v2(

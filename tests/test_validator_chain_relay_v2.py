@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import errno
 import json
-from pathlib import Path
 import threading
 
 import pytest
@@ -14,7 +13,6 @@ from leadpoet_canonical.chain_source_v2 import (
 )
 from validator_tee.host import chain_relay_v2
 from validator_tee.host.chain_relay_v2 import (
-    TESTNET401_CHAIN_RELAY_VSOCK_PORT,
     ValidatorChainRelayV2,
     ValidatorChainRelayCleanupError,
     ValidatorChainRelayV2Error,
@@ -51,56 +49,6 @@ def test_validator_chain_relay_accepts_only_fixed_measured_destination():
         _validate_control(_control(policy_hash="sha256:" + "0" * 64))
     with pytest.raises(ValidatorChainRelayV2Error, match="fields"):
         _validate_control({**_control(), "extra": True})
-
-
-def test_validator_chain_relay_uses_exact_testnet401_profile_and_port():
-    profile = json.loads(
-        (
-            Path(__file__).resolve().parents[1]
-            / "validator_tee/enclave/chain_signing_profile_test_v2.json"
-        ).read_text(encoding="utf-8")
-    )
-    relay = ValidatorChainRelayV2(
-        port=TESTNET401_CHAIN_RELAY_VSOCK_PORT,
-        chain_signing_profile=profile,
-    )
-    assert relay.port == TESTNET401_CHAIN_RELAY_VSOCK_PORT
-    assert relay._chain_host == "test.finney.opentensor.ai"
-    assert relay._chain_archive_host == "test.finney.opentensor.ai"
-    assert relay._policy_hash == chain_source_policy_hash(
-        chain_host="test.finney.opentensor.ai",
-        chain_archive_host="test.finney.opentensor.ai",
-    )
-    assert relay._dependency == "testnet401"
-    assert _validate_control(
-        {
-            "schema_version": "leadpoet.validator_chain_relay.v2",
-            "host": "test.finney.opentensor.ai",
-            "port": 443,
-            "policy_hash": relay._policy_hash,
-        },
-        chain_host=relay._chain_host,
-        chain_archive_host=relay._chain_archive_host,
-        policy_hash=relay._policy_hash,
-    ) == "test.finney.opentensor.ai"
-    with pytest.raises(ValidatorChainRelayV2Error, match="measured chain"):
-        _validate_control(
-            _control(),
-            chain_host=relay._chain_host,
-            chain_archive_host=relay._chain_archive_host,
-            policy_hash=relay._policy_hash,
-        )
-
-
-def test_validator_chain_relay_keeps_finney_default_and_rejects_port_override():
-    relay = ValidatorChainRelayV2()
-    assert relay.port == 5002
-    assert relay._chain_host == CHAIN_ENDPOINT_HOST
-    assert relay._chain_archive_host == CHAIN_ARCHIVE_ENDPOINT_HOST
-    assert relay._policy_hash == chain_source_policy_hash()
-    assert relay._dependency == "finney"
-    with pytest.raises(ValidatorChainRelayV2Error, match="port differs"):
-        ValidatorChainRelayV2(port=5004)
 
 
 def test_validator_chain_relay_listener_cleanup_retains_failed_ownership():
@@ -489,9 +437,6 @@ def test_validator_chain_relay_main_exits_nonzero_when_accept_loop_dies(
     observed = []
 
     class Relay:
-        def __init__(self, **_kwargs):
-            pass
-
         def start(self):
             return {"status": "running"}
 

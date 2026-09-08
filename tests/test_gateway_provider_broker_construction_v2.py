@@ -1,46 +1,11 @@
 import importlib
-import json
 from pathlib import Path
 
-from Leadpoet.utils.subnet_epoch import CUTOVER_JSON_ENV, SubnetEpochCutover
 from gateway.tee import provider_broker_v2, rpc_authority
 from gateway.tee.research_lab_runtime_config_v2 import (
     build_research_lab_execution_config,
 )
 from tests.v2_epoch_test_utils import epoch_test_environment
-
-
-def _testnet401_environment():
-    cutover = SubnetEpochCutover(
-        network_genesis_hash=(
-            "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
-        ),
-        netuid=401,
-        cutover_block=7_700_000,
-        cutover_block_hash="0x" + "4" * 64,
-        first_subnet_epoch_index=1,
-        first_settlement_epoch_id=1,
-        last_legacy_epoch_id=0,
-    )
-    return {
-        "BITTENSOR_NETWORK": "test",
-        "BITTENSOR_NETUID": "401",
-        CUTOVER_JSON_ENV: json.dumps(cutover.to_dict()),
-    }
-
-
-def test_testnet401_expected_chain_uses_validated_runtime_profile(monkeypatch):
-    monkeypatch.syspath_prepend(
-        str(Path(__file__).resolve().parents[1] / "gateway" / "tee")
-    )
-    tee_service = importlib.import_module("gateway.tee.tee_service")
-    execution_config = build_research_lab_execution_config(
-        environment=_testnet401_environment()
-    )
-
-    assert tee_service._v2_expected_chain(
-        {"research_lab_execution_config": execution_config}
-    ) == "wss://test.finney.opentensor.ai:443"
 
 
 def test_coordinator_provider_broker_serializes_request_scoped_direct_transport(

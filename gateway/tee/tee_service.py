@@ -1499,21 +1499,6 @@ def _v2_supabase_origin(configuration: Dict[str, Any]) -> str:
     )
 
 
-def _v2_expected_chain(configuration: Dict[str, Any]) -> str:
-    from gateway.tee.research_lab_runtime_config_v2 import (
-        validate_research_lab_execution_config,
-    )
-
-    execution_config = validate_research_lab_execution_config(
-        configuration["research_lab_execution_config"]
-    )
-    return str(
-        execution_config["epoch_authority"]["chain_signing_profile"][
-            "chain_endpoint"
-        ]
-    )
-
-
 def get_v2_provider_broker():
     """Build the coordinator broker with the stable routing verifier.
 
@@ -1938,6 +1923,11 @@ def get_v2_coordinator_job_manager():
         from gateway.tee.coordinator_chain_realized_settlement_v1 import (
             CoordinatorChainRealizedSettlementV1,
         )
+        from leadpoet_canonical.chain_source_v2 import (
+            CHAIN_ENDPOINT_HOST,
+            CHAIN_ENDPOINT_PORT,
+        )
+
         chain_realized_settlement_source = (
             CoordinatorChainRealizedSettlementV1(
                 reader=source_reader,
@@ -1945,7 +1935,9 @@ def get_v2_coordinator_job_manager():
                 expected_lineage_id=_gateway_ancestry_manager_kwargs(runtime)[
                     "ancestry_lineage_id"
                 ],
-                expected_chain=_v2_expected_chain(configuration),
+                expected_chain=(
+                    f"wss://{CHAIN_ENDPOINT_HOST}:{CHAIN_ENDPOINT_PORT}"
+                ),
                 chain_signing_profile=configuration[
                     "research_lab_execution_config"
                 ]["epoch_authority"]["chain_signing_profile"],

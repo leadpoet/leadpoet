@@ -22,6 +22,8 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from leadpoet_canonical.chain_source_v2 import (
+    ChainSourceV2Error,
+    chain_source_boundary_for_profile_v2,
     last_update_storage_key,
     reveal_period_epochs_storage_key,
     ss58_encode_account_id,
@@ -36,6 +38,44 @@ from leadpoet_canonical.chain_source_v2 import (
 HASH = "sha256:" + "a" * 64
 OWNER = bytes.fromhex("924620afb270acb1ee27bd034aa9e97108ef276da5079db982883cd70294741a")
 MINER = bytes.fromhex("74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383")
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "wss://entrypoint-finney.opentensor.ai:8443",
+        "wss://entrypoint-finney.opentensor.ai:not-a-port",
+        "wss://user:password@entrypoint-finney.opentensor.ai:443",
+        "wss://entrypoint-finney.opentensor.ai:443/rpc",
+        "wss://entrypoint-finney.opentensor.ai:443?query=value",
+        "wss://entrypoint-finney.opentensor.ai:443#fragment",
+    ),
+)
+def test_chain_source_boundary_rejects_endpoint_authority_suffixes(endpoint):
+    profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    profile["chain_endpoint"] = endpoint
+
+    with pytest.raises(ChainSourceV2Error, match="outside measured policy"):
+        chain_source_boundary_for_profile_v2(profile)
+
+
+def test_chain_source_boundary_retains_measured_test_network_support():
+    profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    boundary = chain_source_boundary_for_profile_v2(profile)
+
+    assert boundary["chain_host"] == "test.finney.opentensor.ai"
+    assert boundary["chain_archive_host"] == "test.finney.opentensor.ai"
 
 
 def _selective_fixture(block, *, last_field=76):
@@ -258,118 +298,6 @@ def _stateful_cutover():
         first_settlement_epoch_id=101,
         last_legacy_epoch_id=100,
     )
-
-
-def _testnet401_cutover():
-    return SubnetEpochCutover(
-        network_genesis_hash=(
-            "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
-        ),
-        netuid=401,
-        cutover_block=7_700_000,
-        cutover_block_hash="0x" + "4" * 64,
-        first_subnet_epoch_index=1,
-        first_settlement_epoch_id=1,
-        last_legacy_epoch_id=0,
-    )
-
-
-def _testnet401_profile():
-    return json.loads(
-        (
-            Path(__file__).resolve().parents[1]
-            / "validator_tee/enclave/chain_signing_profile_test_v2.json"
-        ).read_text(encoding="utf-8")
-    )
-
-
-def test_testnet401_coordinator_uses_profile_for_live_and_archive_requests(
-    monkeypatch,
-):
-    calls = []
-
-    class ProbeComplete(RuntimeError):
-        pass
-
-    def execute(request):
-        calls.append(dict(request))
-        raise ProbeComplete
-
-    monkeypatch.setattr(
-        chain_source_module,
-        "CHAIN_ENDPOINT_URL",
-        "https://entrypoint-finney.opentensor.ai/",
-    )
-    monkeypatch.setattr(
-        chain_source_module,
-        "CHAIN_ARCHIVE_ENDPOINT_URL",
-        "https://archive.chain.opentensor.ai/",
-    )
-    source = CoordinatorChainSourceV2(
-        execute_provider=execute,
-        retry_policy_hashes={
-            "bittensor_chain": "sha256:" + "1" * 64,
-            "bittensor_archive": "sha256:" + "2" * 64,
-            "coingecko": "sha256:" + "3" * 64,
-        },
-        epoch_authority={
-            "mode": "stateful_v1",
-            "cutover": _testnet401_cutover().to_dict(),
-            "chain_signing_profile": _testnet401_profile(),
-        },
-        sleep=lambda _seconds: None,
-    )
-    context = ExecutionContextV2(
-        job_id="allocation-v2:testnet401-route",
-        purpose="research_lab.allocation.v2",
-        epoch_id=1,
-    )
-
-    with pytest.raises(ProbeComplete):
-        source._chain_call(
-            method="chain_getFinalizedHead",
-            params=(),
-            request_id=1,
-            logical_operation_id="testnet401-live",
-            attempt_number=0,
-            context=context,
-        )
-    with pytest.raises(ProbeComplete):
-        source._archive_call(
-            method="chain_getBlockHash",
-            params=(0,),
-            request_id=2,
-            logical_operation_id="testnet401-archive",
-            context=context,
-        )
-
-    assert [(call["provider_id"], call["url"]) for call in calls] == [
-        ("bittensor_chain", "https://test.finney.opentensor.ai/"),
-        ("bittensor_archive", "https://test.finney.opentensor.ai/"),
-    ]
-
-
-def test_testnet401_coordinator_rejects_unmeasured_profile_host():
-    profile = _testnet401_profile()
-    profile["chain_endpoint"] = "wss://attacker.example:443"
-
-    with pytest.raises(
-        CoordinatorChainSourceV2Error,
-        match="chain source boundary is invalid",
-    ):
-        CoordinatorChainSourceV2(
-            execute_provider=lambda _request: {},
-            retry_policy_hashes={
-                "bittensor_chain": "sha256:" + "1" * 64,
-                "bittensor_archive": "sha256:" + "2" * 64,
-                "coingecko": "sha256:" + "3" * 64,
-            },
-            epoch_authority={
-                "mode": "stateful_v1",
-                "cutover": _testnet401_cutover().to_dict(),
-                "chain_signing_profile": profile,
-            },
-        )
 
 
 def _stateful_source(broker, cutover):

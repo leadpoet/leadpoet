@@ -3915,7 +3915,6 @@ async def champion_v2_cutover_readiness(
     _business_graphs_out: dict[
         tuple[str, str], dict[str, Any]
     ] | None = None,
-    _fresh_testnet401_empty_origin: bool = False,
 ) -> dict[str, Any]:
     """Prove every positive-balance champion has one exact V2 receipt."""
 
@@ -3968,65 +3967,20 @@ async def champion_v2_cutover_readiness(
         history_kwargs["_receipt_graph_records_out"] = (
             authority_graph_records
         )
-    if _fresh_testnet401_empty_origin:
-        if int(netuid) != 401:
-            raise ChampionSettlementV2Error(
-                "fresh allocation readiness is restricted to testnet401"
-            )
-        from gateway.research_lab.temporary_testnet401_first_allocation_v1 import (
-            TESTNET401_FIRST_SETTLEMENT_EPOCH,
+    finalized = (
+        await load_settled_allocation_history_v2(**history_kwargs)
+        if starts and int(epoch) > 0
+        else []
+    )
+    nonfinalized = (
+        await load_legacy_allocation_nonfinalizations_v2(
+            netuid=int(netuid),
+            start_epoch=min(starts),
+            end_epoch=int(epoch) - 1,
         )
-
-        empty_queries = (
-            (FINALIZED_ALLOCATION_VIEW_V2, "epoch_id"),
-            (LEGACY_SETTLEMENT_TABLE_V2, "epoch_id"),
-            (LEGACY_NONFINALIZATION_TABLE_V2, "epoch_id"),
-            (CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1, "epoch_id"),
-            (CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1, None),
-            (CHAIN_REALIZED_OBLIGATION_CREDIT_TABLE_V1, "epoch_id"),
-            (COMPACT_WEIGHT_AUTHORITY_TABLE_V2, "epoch_id"),
-            ("research_lab_emission_allocation_current", "epoch"),
-            ("research_lab_emission_allocation_snapshots", "epoch"),
-            ("published_weight_bundles", "epoch_id"),
-            ("research_lab_allocation_settlement_frontier_activation_v2", None),
-            ("research_lab_allocation_settlement_frontiers_v2", "allocation_epoch"),
-        )
-        for table, epoch_field in empty_queries:
-            filters = [("netuid", int(netuid))]
-            if epoch_field is not None:
-                filters.append(
-                    (
-                        epoch_field,
-                        "gte",
-                        TESTNET401_FIRST_SETTLEMENT_EPOCH,
-                    )
-                )
-            if await select_all(
-                table,
-                filters=tuple(filters),
-                max_rows=1,
-                allow_partial=False,
-            ):
-                raise ChampionSettlementV2Error(
-                    "fresh testnet401 allocation history is not empty"
-                )
-        finalized = []
-        nonfinalized = []
-    else:
-        finalized = (
-            await load_settled_allocation_history_v2(**history_kwargs)
-            if starts and int(epoch) > 0
-            else []
-        )
-        nonfinalized = (
-            await load_legacy_allocation_nonfinalizations_v2(
-                netuid=int(netuid),
-                start_epoch=min(starts),
-                end_epoch=int(epoch) - 1,
-            )
-            if starts and int(epoch) > 0
-            else []
-        )
+        if starts and int(epoch) > 0
+        else []
+    )
     if _finalized_history_out is not None:
         _finalized_history_out.clear()
         _finalized_history_out.extend(dict(item) for item in finalized)

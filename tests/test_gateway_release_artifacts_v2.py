@@ -193,7 +193,7 @@ def test_cold_build_verifies_complete_staging_set_before_transactional_install()
     staging = script.index(
         'COLD_BUILD_ROOT="$(mktemp -d "$EIF_ROOT/.gateway-eif-cold-build.XXXXXXXX")"'
     )
-    build = script.index("build_enclave_with_nitro_cli", staging)
+    build = script.index("sudo nitro-cli build-enclave", staging)
     verify = script.index("verify_release_artifacts_v2.py", build)
     archive = script.index("--archive", verify)
     restore = script.index("--restore", archive)
@@ -216,7 +216,7 @@ def test_cold_build_publishes_root_created_eif_to_unprivileged_verifier(
     function_start = script.index("publish_built_eif_for_verification() {")
     function_end = script.index("\n}\n", function_start) + len("\n}\n")
     function_source = script[function_start:function_end]
-    build_offset = script.index("build_enclave_with_nitro_cli", function_end)
+    build_offset = script.index("sudo nitro-cli build-enclave")
     publish_offset = script.index(
         'publish_built_eif_for_verification "$output"', build_offset
     )
@@ -225,7 +225,6 @@ def test_cold_build_publishes_root_created_eif_to_unprivileged_verifier(
     )
     verify_offset = script.index("verify_release_artifacts_v2.py", describe_offset)
     assert build_offset < publish_offset < describe_offset < verify_offset
-    assert "--docker-uri" in script[build_offset:publish_offset]
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -266,50 +265,6 @@ def test_cold_build_publishes_root_created_eif_to_unprivileged_verifier(
     assert artifact.read_bytes() == b"complete-eif"
     assert sudo_log.read_text(encoding="utf-8").startswith(
         "chown --no-dereference -- "
-    )
-
-
-def test_cold_build_preserves_only_bound_nitro_environment_through_sudo(tmp_path):
-    script = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
-        encoding="utf-8"
-    )
-    function_start = script.index("build_enclave_with_nitro_cli() {")
-    function_end = script.index("\n}\n", function_start) + len("\n}\n")
-    function_source = script[function_start:function_end]
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    sudo_log = tmp_path / "sudo.log"
-    sudo = fake_bin / "sudo"
-    sudo.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" > \"$SUDO_LOG\"\n",
-        encoding="utf-8",
-    )
-    sudo.chmod(0o700)
-
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            function_source
-            + "\nbuild_enclave_with_nitro_cli --docker-uri role --output-file out.eif\n",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={
-            **os.environ,
-            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
-            "SUDO_LOG": str(sudo_log),
-            "NITRO_CLI_ARTIFACTS": "/run/leadpoet-testnet401/nitro-cli-artifacts",
-            "NITRO_CLI_BLOBS": "/usr/share/nitro_enclaves/blobs",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert sudo_log.read_text(encoding="utf-8").strip() == (
-        "--preserve-env=NITRO_CLI_ARTIFACTS,NITRO_CLI_BLOBS "
-        "nitro-cli build-enclave --docker-uri role --output-file out.eif"
     )
 
 

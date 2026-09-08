@@ -1471,7 +1471,7 @@ async def bootstrap_fresh_testnet401_cutover_v1(
         cutover=cutover,
         receipt_graph=validation_graph,
     )
-    if durable != cutover_row:
+    if any(durable.get(field) != value for field, value in cutover_row.items()):
         raise StatefulEpochCutoverActivationError(
             "fresh-network cutover durable readback differs"
         )

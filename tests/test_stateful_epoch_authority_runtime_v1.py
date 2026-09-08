@@ -891,7 +891,7 @@ async def test_fresh_testnet401_bootstrap_executes_one_parent_and_reads_back():
             assert table == CUTOVER_TABLE
             if durable is not None:
                 raise RuntimeError("23505 duplicate key unique constraint")
-            durable = copy.deepcopy(row)
+            durable = {**copy.deepcopy(row), "created_at": "2026-09-08T13:44:58Z"}
             return copy.deepcopy(row)
 
         async def select(table, *, filters):

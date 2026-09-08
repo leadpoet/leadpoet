@@ -141,7 +141,7 @@ BEGIN
            OR (result_value->>'validator_uid')::INTEGER IS DISTINCT FROM 9
            OR result_value->'chain_signing_profile'->>'genesis_hash'
               IS DISTINCT FROM
-              '0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105'
+              '8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105'
         THEN
             RAISE EXCEPTION 'temporary testnet401 chain observation is invalid';
         END IF;

@@ -19,6 +19,7 @@ SQL = (ROOT / "scripts/192-temporary-testnet401-result-epoch-scope.sql").read_te
 TEST_MAPPING = "sha256:4b3941c091d3a29daf9ea863bb6cb587bad7dfd9426cf66a56bcf7de04ce4328"
 FINNEY_MAPPING = "sha256:" + "7" * 64
 GENESIS = "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+PROFILE_GENESIS = GENESIS.removeprefix("0x")
 HOTKEY = "5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz"
 
 
@@ -49,7 +50,7 @@ def _observation(mapping: str = TEST_MAPPING) -> dict:
         "cutover_mapping_hash": mapping,
         "validator_hotkey": HOTKEY,
         "validator_uid": 9,
-        "chain_signing_profile": {"genesis_hash": GENESIS},
+        "chain_signing_profile": {"genesis_hash": PROFILE_GENESIS},
     }
 
 
@@ -347,6 +348,24 @@ FOR EACH ROW EXECUTE FUNCTION public.enforce_research_lab_stateful_epoch_fence_v
             purpose="research_lab.chain_weight_observation.v1", result=_observation(),
         )
         assert insert_result(observation).returncode == 0
+
+        prefixed_profile = _result_row(
+            receipt_hash="sha256:" + "0" * 63 + "1",
+            operation="observe_chain_realized_weights_v1",
+            purpose="research_lab.chain_weight_observation.v1", result=_observation(),
+        )
+        prefixed_profile["result_doc"]["chain_signing_profile"]["genesis_hash"] = GENESIS
+        psql(
+            "INSERT INTO public.research_lab_attested_execution_receipts_v2 SELECT * "
+            "FROM pg_catalog.jsonb_populate_record(NULL::public."
+            f"research_lab_attested_execution_receipts_v2, {_json(_receipt(prefixed_profile))});"
+        )
+        rejected(
+            "INSERT INTO public.research_lab_attested_execution_results_v2 SELECT * "
+            "FROM pg_catalog.jsonb_populate_record(NULL::public."
+            f"research_lab_attested_execution_results_v2, {_json(prefixed_profile)});",
+            "chain observation is invalid",
+        )
 
         wrong_validator = _result_row(
             receipt_hash=_hash("e"), operation="observe_chain_realized_weights_v1",

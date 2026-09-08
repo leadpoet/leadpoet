@@ -56,6 +56,11 @@ FRESH_NETWORK_SQL = (
     / "scripts"
     / "191-fresh-network-subnet-epoch-authority.sql"
 ).read_text(encoding="utf-8")
+RESULT_REPLAY_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "104-research-lab-attested-result-replay-v2.sql"
+).read_text(encoding="utf-8")
 TEMP_TESTNET401_RESULT_SCOPE_SQL = (
     Path(__file__).resolve().parents[1]
     / "scripts"
@@ -880,6 +885,7 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             "ALTER TABLE public.epoch_audit_logs DROP COLUMN other_key;"
         )
         psql(INDEX_VALIDATION_SQL)
+        psql(RESULT_REPLAY_SQL)
         psql(SQL)
         psql(TRANSPARENCY_SCOPE_REPAIR_SQL)
         psql(FENCE_REFRESH_SQL)
@@ -1985,13 +1991,25 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         psql(FRESH_NETWORK_SQL)
         psql(FRESH_NETWORK_SQL)
 
-        fresh_mapping_hash = sha(200)
-        fresh_snapshot_hash = sha(201)
-        fresh_snapshot_receipt = sha(202)
-        fresh_authority_hash = sha(203)
-        fresh_cutover_receipt = sha(204)
+        fresh_mapping_hash = (
+            "sha256:4b3941c091d3a29daf9ea863bb6cb587bad7dfd9426cf66a56bcf7de04ce4328"
+        )
+        fresh_snapshot_hash = (
+            "sha256:9e9eeaa358d0ea8325ea916bc18e7a271855878f2d352287f2e3d30509dda3b9"
+        )
+        fresh_snapshot_receipt = (
+            "sha256:66c7a0176e741a1e803539e6c50a3297aa81b74dbf44c8b8d311601f3f847a59"
+        )
+        fresh_authority_hash = (
+            "sha256:2eb438e142f4c27d5ce28b2e2c5148cc030724a38ab0bf479ce4fc0fade51bc7"
+        )
+        fresh_cutover_receipt = (
+            "sha256:4db3b2649bbd2182488b3f17cbff87abf04f96c9511055cb51efe743710b6aaa"
+        )
         fresh_epoch_ref = sha(205)
-        fresh_block_hash = raw(206)
+        fresh_block_hash = (
+            "0x08d9d41b0508e1c7dc7fffdfa5d055077e01c593b016c08d42471fecd401fa15"
+        )
         testnet_genesis = (
             "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
         )
@@ -2105,6 +2123,92 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             "FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
             f"WHERE mapping_hash = '{mapping_hash}';"
         ).stdout.strip() == finney_before
+
+        # Apply the temporary trigger split over the real migration-101 fence,
+        # not a stand-in. Normal Finney and mapping-free weight-input rows must
+        # continue through that exact function unchanged.
+        original_fence_fingerprint = psql(
+            "SELECT md5(pg_catalog.pg_get_functiondef("
+            "'public.enforce_research_lab_stateful_epoch_fence_v1()'::regprocedure));"
+        ).stdout.strip()
+        assert original_fence_fingerprint == "2ba4e9788be6473a1de22123f2b94cf0"
+        psql(TEMP_TESTNET401_RESULT_SCOPE_SQL)
+        psql(TEMP_TESTNET401_RESULT_SCOPE_SQL)
+        assert psql(
+            "SELECT md5(pg_catalog.pg_get_functiondef("
+            "'public.enforce_research_lab_stateful_epoch_fence_v1()'::regprocedure));"
+        ).stdout.strip() == original_fence_fingerprint
+
+        finney_result_receipt = sha(213)
+        finney_result_output = sha(214)
+        weight_input_receipt = sha(215)
+        weight_input_output = sha(216)
+        wrong_mapping_receipt = sha(217)
+        wrong_mapping_output = sha(218)
+        psql(
+            f"SELECT public.test_insert_epoch_receipt('{finney_result_receipt}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22061, "
+            f"'{finney_result_output}'); "
+            f"SELECT public.test_insert_epoch_receipt('{weight_input_receipt}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22061, "
+            f"'{weight_input_output}'); "
+            f"SELECT public.test_insert_epoch_receipt('{wrong_mapping_receipt}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22061, "
+            f"'{wrong_mapping_output}');"
+        )
+        psql(
+            "INSERT INTO public.research_lab_attested_execution_results_v2 ("
+            "receipt_hash, schema_version, role, operation, purpose, job_id, "
+            "epoch_id, sequence, release_hash, input_root, output_root, "
+            "artifact_root, result_hash, artifact_hashes, result_doc) VALUES ("
+            f"'{finney_result_receipt}', 'leadpoet.attested_execution_result.v2', "
+            "'gateway_coordinator', 'research_lab_allocation', "
+            f"'research_lab.allocation.v2', 'test:{finney_result_receipt}', "
+            f"22061, 0, '{sha(219)}', '{finney_result_receipt}', "
+            f"'{finney_result_output}', '{sha(77)}', '{sha(220)}', '[]'::JSONB, "
+            "pg_catalog.jsonb_build_object('source_state', "
+            "pg_catalog.jsonb_build_object('netuid', 71, "
+            f"'cutover_mapping_hash', '{mapping_hash}'))), ("
+            f"'{weight_input_receipt}', 'leadpoet.attested_execution_result.v2', "
+            "'gateway_coordinator', 'attest_weight_input', "
+            f"'research_lab.allocation.v2', 'test:{weight_input_receipt}', "
+            f"22061, 0, '{sha(221)}', '{weight_input_receipt}', "
+            f"'{weight_input_output}', '{sha(77)}', '{sha(222)}', '[]'::JSONB, "
+            "pg_catalog.jsonb_build_object("
+            "'schema_version', 'leadpoet.weight_input_value.v2', "
+            "'category', 'research_lab_allocation', 'netuid', 401, "
+            "'epoch_id', 22061, 'value', '{}'::JSONB));"
+        )
+        rejected(
+            "INSERT INTO public.research_lab_attested_execution_results_v2 ("
+            "receipt_hash, schema_version, role, operation, purpose, job_id, "
+            "epoch_id, sequence, release_hash, input_root, output_root, "
+            "artifact_root, result_hash, artifact_hashes, result_doc) VALUES ("
+            f"'{wrong_mapping_receipt}', 'leadpoet.attested_execution_result.v2', "
+            "'gateway_coordinator', 'attest_weight_input', "
+            f"'research_lab.allocation.v2', 'test:{wrong_mapping_receipt}', "
+            f"22061, 0, '{sha(223)}', '{wrong_mapping_receipt}', "
+            f"'{wrong_mapping_output}', '{sha(77)}', '{sha(224)}', '[]'::JSONB, "
+            "pg_catalog.jsonb_build_object("
+            "'schema_version', 'leadpoet.weight_input_value.v2', "
+            "'category', 'research_lab_allocation', 'netuid', 401, "
+            f"'epoch_id', 22061, 'value', pg_catalog.jsonb_build_object("
+            f"'cutover_mapping_hash', '{sha(225)}')));",
+            "stateful epoch active mapping authority differs",
+        )
+        psql(
+            "INSERT INTO public.transparency_log(event_type, payload) VALUES ("
+            "'FINNEY_SCOPE_PROBE', pg_catalog.jsonb_build_object("
+            "'epoch_id', 22061, "
+            f"'cutover_mapping_hash', '{mapping_hash}'));"
+        )
+        rejected(
+            "INSERT INTO public.transparency_log(event_type, payload) VALUES ("
+            "'FINNEY_SCOPE_WRONG_MAPPING', pg_catalog.jsonb_build_object("
+            "'epoch_id', 22061, "
+            f"'cutover_mapping_hash', '{sha(226)}'));",
+            "stateful epoch active mapping authority differs",
+        )
 
         rejected(
             "INSERT INTO public.research_lab_stateful_subnet_epoch_cutovers_v1 "

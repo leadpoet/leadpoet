@@ -56,6 +56,7 @@ fi
 LAB_ARENA_PROCESS_HELPER="$VALIDATOR_CONTROLLER_PROCESS_HELPER"
 VALIDATOR_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_RUNNER_STATE_FILE"
 VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-$VALIDATOR_RESTART_INVOCATION_ID}"
+VALIDATOR_ACTIVE_RELEASE_COMPONENT="${VALIDATOR_ACTIVE_RELEASE_COMPONENT:-validator}"
 VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="${VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}"
 VALIDATOR_RESTART_TIMING_DIR="${VALIDATOR_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
@@ -101,6 +102,13 @@ case "$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" in
   0|1) ;;
   *)
     echo "ERROR: VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+case "$VALIDATOR_ACTIVE_RELEASE_COMPONENT" in
+  validator|all) ;;
+  *)
+    echo "ERROR: VALIDATOR_ACTIVE_RELEASE_COMPONENT must be validator or all" >&2
     exit 2
     ;;
 esac
@@ -220,6 +228,41 @@ start_lab_arena_runner() {
     return 1
   fi
   echo "Lab Arena runner started"
+}
+
+LAB_ARENA_RESTART_GUARD_GENERATION=""
+
+run_lab_arena_restart_guard() {
+  if [ ! -r "$VALIDATOR_ROOT/scripts/lab_arena_restart_claim_guard.py" ]; then
+    echo "ERROR: exact Lab Arena restart guard helper is unavailable" >&2
+    return 1
+  fi
+  PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
+    "$VALIDATOR_ROOT/scripts/lab_arena_restart_claim_guard.py" "$@" \
+    --candidate "$VALIDATOR_DEPLOY_SHA" \
+    --invocation "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+}
+
+drain_lab_arena_for_restart() {
+  local report
+  report="$(run_lab_arena_restart_guard drain \
+    --scope "$VALIDATOR_ACTIVE_RELEASE_COMPONENT")" || return 1
+  LAB_ARENA_RESTART_GUARD_GENERATION="$(
+    "$VALIDATOR_PYTHON_BIN" -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$report"
+  )" || return 1
+  echo "Lab Arena claims paused and existing leases have durable completion receipts"
+}
+
+abort_lab_arena_restart_guard_before_destructive() {
+  if [ -z "$LAB_ARENA_RESTART_GUARD_GENERATION" ] \
+      || [ "$VALIDATOR_DESTRUCTIVE_PHASE_STARTED" = "1" ]; then
+    return 0
+  fi
+  run_lab_arena_restart_guard abort \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" >/dev/null 2>&1 || true
+  LAB_ARENA_RESTART_GUARD_GENERATION=""
 }
 
 while [ "$#" -gt 0 ]; do
@@ -641,6 +684,9 @@ cleanup() {
   local status="$?"
   set +e
   if [ "$status" -ne 0 ]; then
+    abort_lab_arena_restart_guard_before_destructive
+  fi
+  if [ "$status" -ne 0 ]; then
     record_validator_restart_timing "$VALIDATOR_DEPLOY_STAGE" "failed" \
       >/dev/null 2>&1 || true
   fi
@@ -779,6 +825,7 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" \
     VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
     VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    VALIDATOR_ACTIVE_RELEASE_COMPONENT="$VALIDATOR_ACTIVE_RELEASE_COMPONENT" \
     VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" \
     VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}" \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
@@ -1039,6 +1086,7 @@ cache_excluded_keys = {
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_ACTIVE_RELEASE_COMPONENT",
     "VALIDATOR_CONTROLLER_PROCESS_HELPER",
     "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
@@ -1101,6 +1149,7 @@ skip_keys = {
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_ACTIVE_RELEASE_COMPONENT",
     "VALIDATOR_CONTROLLER_PROCESS_HELPER",
     "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
@@ -1770,6 +1819,20 @@ if [ "$(
 fi
 record_validator_restart_timing "active_release_lineage_rechecked"
 
+VALIDATOR_DEPLOY_STAGE="lab_arena_claim_drain"
+if ! drain_lab_arena_for_restart; then
+  echo "ERROR: Lab Arena leases did not drain before validator shutdown" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+if ! run_lab_arena_restart_guard authorize \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+    --phase validator_destructive >/dev/null; then
+  echo "ERROR: Lab Arena drain changed before validator shutdown" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"
 record_validator_restart_timing "destructive_phase_started"
@@ -1951,6 +2014,26 @@ fi
 VALIDATOR_DEPLOY_STAGE="lab_arena_runner_start"
 start_lab_arena_runner
 record_validator_restart_timing "lab_arena_runner_ready"
+if [ "${LAB_ARENA_MODE:-off}" = "off" ]; then
+  if [ -e "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" ] \
+      || pgrep -f "^$VALIDATOR_PYTHON_BIN -u scripts/run_lab_arena_runner[.]py$" >/dev/null; then
+    echo "ERROR: disabled Lab Arena mode still has an owned or active runner" >&2
+    exit 1
+  fi
+else
+  sudo "$VALIDATOR_PYTHON_BIN" "$VALIDATOR_CONTROLLER_PROCESS_HELPER" verify \
+    --state-file "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" \
+    --cwd "$VALIDATOR_ROOT" \
+    --uid "$(sudo id -u)" \
+    -- \
+    "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py
+fi
+if ! run_lab_arena_restart_guard ready \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+    --phase validator_ready >/dev/null; then
+  echo "ERROR: Lab Arena validator readiness could not be recorded" >&2
+  exit 1
+fi
 install_validator_restart_controller
 leadpoet_release_docker_operation_lock_v2
 VALIDATOR_DOCKER_LOCK_ACQUIRED=0

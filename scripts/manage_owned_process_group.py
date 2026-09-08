@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any, Optional
 
 
 STATE_VERSION = 1
+MAX_VERIFY_STATE_BYTES = 64 * 1024
 
 
 class OwnershipError(RuntimeError):
@@ -261,11 +263,173 @@ def _stop(args: argparse.Namespace) -> None:
     _stop_state(args.state_file, state, args.term_seconds, args.kill_seconds)
 
 
+def _sha256_json(value: Any) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _require_verify_file(metadata: os.stat_result, path: Path) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OwnershipError(f"process state is not a regular file: {path}")
+    if metadata.st_uid != os.getuid():
+        raise OwnershipError("process state is not owned by the current user")
+    if metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise OwnershipError("process state is not owner-only")
+    if metadata.st_size > MAX_VERIFY_STATE_BYTES:
+        raise OwnershipError("process state exceeds the bounded read limit")
+
+
+def _parse_verify_state(
+    raw_state: bytes, path: Path, expected: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        state = json.loads(raw_state.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise OwnershipError(f"process state is invalid: {path}: {exc}") from exc
+    required = {
+        "version": int,
+        "pid": int,
+        "pgid": int,
+        "start_time_ticks": int,
+        "uid": int,
+        "cwd": str,
+        "argv": list,
+    }
+    if not isinstance(state, dict) or any(
+        type(state.get(key)) is not value_type  # noqa: E721 - reject bool identities
+        for key, value_type in required.items()
+    ):
+        raise OwnershipError(f"process state has an invalid schema: {path}")
+    if any(type(item) is not str for item in state["argv"]):
+        raise OwnershipError(f"process state has an invalid argv: {path}")
+    if any(state[key] != value for key, value in expected.items()):
+        raise OwnershipError(
+            f"process state identity differs from the requested instance: {path}"
+        )
+    if state["pid"] <= 1 or state["pgid"] <= 1 or state["start_time_ticks"] <= 0:
+        raise OwnershipError(f"process state contains an unsafe process identity: {path}")
+    return state
+
+
+def _read_verify_state(
+    path: Path, expected: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
+    try:
+        path_before = os.lstat(path)
+    except FileNotFoundError:
+        raise OwnershipError("process state is unavailable") from None
+    _require_verify_file(path_before, path)
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except (FileNotFoundError, OSError) as exc:
+        raise OwnershipError(f"process state could not be opened safely: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        _require_verify_file(opened, path)
+        if _file_identity(opened) != _file_identity(path_before):
+            raise OwnershipError("process state changed while it was opened")
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, MAX_VERIFY_STATE_BYTES + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_VERIFY_STATE_BYTES:
+                raise OwnershipError("process state exceeds the bounded read limit")
+        raw_state = b"".join(chunks)
+
+        after = os.fstat(descriptor)
+        if _file_identity(after) != _file_identity(opened):
+            raise OwnershipError("process state changed while it was read")
+        try:
+            path_after = os.lstat(path)
+        except FileNotFoundError:
+            raise OwnershipError("process state was replaced while it was read") from None
+        if _file_identity(path_after) != _file_identity(opened):
+            raise OwnershipError("process state was replaced while it was read")
+    except OSError as exc:
+        raise OwnershipError(f"process state could not be read safely: {path}") from exc
+    finally:
+        os.close(descriptor)
+    return raw_state, _parse_verify_state(raw_state, path, expected)
+
+
+def _verify(args: argparse.Namespace) -> None:
+    """Verify one recorded process group without changing local or process state."""
+    expected = _expected_identity(argv=args.process_argv, cwd=args.cwd, uid=args.uid)
+    raw_state, state = _read_verify_state(args.state_file, expected)
+    matches = _matching_processes(
+        argv=args.process_argv, cwd=args.cwd, uid=args.uid
+    )
+    if len(matches) != 1:
+        raise OwnershipError(
+            f"expected exactly one live detached process, found {len(matches)}"
+        )
+    process = matches[0]
+    if process["state"] == "Z" or not _same_process(process, state):
+        raise OwnershipError("saved process identity changed or PID was reused")
+    members = _active_group_members(state["pgid"])
+    leader = next((member for member in members if member["pid"] == state["pid"]), None)
+    if leader is None or not _same_process(leader, state):
+        raise OwnershipError("saved process group is not live")
+
+    result = {
+        "action": "verify",
+        "ok": True,
+        "state_version": state["version"],
+        "pid": state["pid"],
+        "pgid": state["pgid"],
+        "start_time_ticks": state["start_time_ticks"],
+        "uid": state["uid"],
+        "state_sha256": hashlib.sha256(raw_state).hexdigest(),
+        "cwd_sha256": hashlib.sha256(state["cwd"].encode("utf-8")).hexdigest(),
+        "argv_sha256": _sha256_json(state["argv"]),
+        "exact_match_count": len(matches),
+        "live_group": True,
+        "live_group_member_count": len(members),
+    }
+    print(json.dumps(result, sort_keys=True))
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Record, verify, or stop one exact detached process group"
+    )
     actions = parser.add_subparsers(dest="action", required=True)
-    for action in ("record", "stop"):
-        command = actions.add_parser(action)
+    for action in ("record", "stop", "verify"):
+        command = actions.add_parser(
+            action,
+            help=(
+                "read-only ownership and liveness check"
+                if action == "verify"
+                else None
+            ),
+        )
         command.add_argument("--state-file", type=Path, required=True)
         command.add_argument("--cwd", required=True)
         command.add_argument("--uid", type=int, required=True)
@@ -292,10 +456,14 @@ def main() -> int:
             if args.launch_pgid is None:
                 raise OwnershipError("record requires --launch-pgid")
             _record(args)
-        else:
+        elif args.action == "stop":
             if args.launch_pgid is not None:
                 raise OwnershipError("stop does not accept --launch-pgid")
             _stop(args)
+        else:
+            if args.launch_pgid is not None:
+                raise OwnershipError("verify does not accept --launch-pgid")
+            _verify(args)
     except (OwnershipError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

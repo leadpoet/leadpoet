@@ -101,8 +101,9 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/184-lab-arena-scoring-failure-isolation.sql`,
 `scripts/185-lab-arena-miner-credentials.sql`,
 `scripts/187-lab-arena-promotion-threshold.sql`, and
-`scripts/188-lab-arena-baseline-promotion.sql`, and
-`scripts/189-lab-arena-round-network-scope.sql` with the database owner
+`scripts/188-lab-arena-baseline-promotion.sql`,
+`scripts/189-lab-arena-round-network-scope.sql`, and
+`scripts/190-lab-arena-restart-claim-drain.sql` with the database owner
 before service startup. Then check the service wiring:
 
 ```bash
@@ -114,6 +115,38 @@ Start the service:
 ```bash
 python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8792
 ```
+
+## Canonical restart claim drain
+
+Migration 190 installs the durable claim gate used by the canonical gateway
+and validator restart. Its first installation takes the rounds and runs table
+locks with `NOWAIT`. If live Arena work holds either table, the complete
+migration transaction fails without cancelling that work. Retry the same
+idempotent migration through the repository migration helper after the writer
+finishes.
+
+An already-running schema-189 service or runner can finish its current work
+while migration 190 is applied. A new schema-189 process cannot pass startup
+after the database reports schema 190. Therefore, schema 190 and the matching
+candidate runtime form one cutover dependency. Do not use an older Arena
+process as a claim-capable rollback after this migration.
+
+The canonical restart pauses new claims after its existing release,
+attestation, and maintenance preflight. It then waits for every captured lease
+to have an accepted receipt or an authentic terminal failure receipt with
+closed accounting. A lease expiry, worker loss, changed lease generation, or
+missing receipt stops the restart before shutdown and restores the prior
+operator pause state. Reported failures keep the normal retry assignment; the
+restart does not convert them to accepted work.
+
+A failed restart keeps the guard after a destructive phase. A normal canonical
+retry by the same retained invocation repeats the complete gateway and
+validator path. If the exact candidate advances, the same owner can change the
+guard target with a generation-checked operation after the new candidate has
+passed the normal preflight. The captured leases, operator pause, and
+destructive phase stay unchanged. The controller releases claims only after
+the joined gateway and validator readiness manifest passes. There is no
+separate completion or release-only path.
 
 The service creates a daily round at 00:00 UTC by default. Set
 `LAB_ARENA_DAILY_CUTOFF_UTC` to select another hour, or create one manually:

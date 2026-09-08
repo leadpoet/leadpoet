@@ -38,6 +38,7 @@ fi
 LAB_ARENA_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
 GATEWAY_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_SERVICE_STATE_FILE"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
+GATEWAY_ACTIVE_RELEASE_COMPONENT="${GATEWAY_ACTIVE_RELEASE_COMPONENT:-gateway}"
 GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="${GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="${GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT:-standalone}"
 GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE:-}"
@@ -94,6 +95,13 @@ case "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" in
   0|1) ;;
   *)
     echo "ERROR: GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+case "$GATEWAY_ACTIVE_RELEASE_COMPONENT" in
+  gateway|all) ;;
+  *)
+    echo "ERROR: GATEWAY_ACTIVE_RELEASE_COMPONENT must be gateway or all" >&2
     exit 2
     ;;
 esac
@@ -367,6 +375,57 @@ start_lab_arena_service() {
   tail -120 "$LAB_ARENA_SERVICE_LOG_FILE" >&2 || true
   echo "ERROR: Lab Arena service did not become ready" >&2
   return 1
+}
+
+LAB_ARENA_RESTART_GUARD_GENERATION=""
+
+run_lab_arena_restart_guard() {
+  local source_root="$1"
+  shift
+  if [ ! -r "$source_root/scripts/lab_arena_restart_claim_guard.py" ]; then
+    echo "ERROR: exact Lab Arena restart guard helper is unavailable" >&2
+    return 1
+  fi
+  if [ -f "$ENV_CLONE" ]; then
+    set -a
+    . "$ENV_CLONE"
+    set +a
+  fi
+  if [ -z "${LAB_ARENA_SUPABASE_URL:-}" ] \
+      || [ -z "${LAB_ARENA_SUPABASE_ANON_KEY:-}" ] \
+      || { [ -z "${LAB_ARENA_SERVICE_KEY:-}" ] \
+        && [ -z "${LAB_ARENA_SERVICE_JWT:-}" ]; }; then
+    echo "ERROR: configured Lab Arena restart authority is unavailable" >&2
+    return 1
+  fi
+  PYTHONPATH="$source_root" "$GATEWAY_PYTHON_BIN" \
+    "$source_root/scripts/lab_arena_restart_claim_guard.py" "$@" \
+    --candidate "$PREPARED_GATEWAY_SHA" \
+    --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+}
+
+abort_lab_arena_restart_guard_before_destructive() {
+  local source_root
+  if [ -z "$LAB_ARENA_RESTART_GUARD_GENERATION" ] \
+      || [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" = "1" ]; then
+    return 0
+  fi
+  source_root="${GATEWAY_PREFLIGHT_TREE:-$LEADPOET_REPO_ROOT}"
+  run_lab_arena_restart_guard "$source_root" abort \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" >/dev/null 2>&1 || true
+  LAB_ARENA_RESTART_GUARD_GENERATION=""
+}
+
+drain_lab_arena_for_restart() {
+  local source_root="$1" report
+  report="$(run_lab_arena_restart_guard "$source_root" drain \
+    --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT")" || return 1
+  LAB_ARENA_RESTART_GUARD_GENERATION="$(
+    "$GATEWAY_PYTHON_BIN" -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$report"
+  )" || return 1
+  echo "Lab Arena claims paused and existing leases have durable completion receipts"
 }
 
 # The N-1 controller can carry a stale process environment across the exact
@@ -835,6 +894,7 @@ start_gateway_offline_artifact_prepare() {
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -982,6 +1042,7 @@ follow_superseding_gateway_release() {
     GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
     GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
     GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
     GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
     GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
     GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
@@ -1175,6 +1236,7 @@ exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -1702,6 +1764,9 @@ validate_gateway_aws_authority() {
 on_gateway_restart_exit() {
   local status="$?"
   local -a active_release_cleanup_paths=()
+  if [ "$status" -ne 0 ]; then
+    abort_lab_arena_restart_guard_before_destructive
+  fi
   if [ "$status" -ne 0 ]; then
     record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
       >/dev/null 2>&1 || true
@@ -2973,6 +3038,7 @@ restart_only_keys = {
     "GATEWAY_RESTART_AUTHORITY_ROOT",
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_ACTIVE_RELEASE_COMPONENT",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -3111,6 +3177,7 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_ROOT",
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_ACTIVE_RELEASE_COMPONENT",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -3273,6 +3340,7 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_ROOT",
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_ACTIVE_RELEASE_COMPONENT",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -3995,6 +4063,14 @@ if ! prepare_gateway_active_release_lineage; then
   exit 1
 fi
 
+GATEWAY_DEPLOY_STAGE="lab_arena_claim_drain"
+export GATEWAY_DEPLOY_STAGE
+if ! drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"; then
+  echo "ERROR: Lab Arena leases did not drain before gateway shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 echo "Rechecking guarded SOURCE_ADD quiescence at the destructive boundary"
 GATEWAY_DEPLOY_STAGE="source_add_shutdown_quiescence"
 export GATEWAY_DEPLOY_STAGE
@@ -4008,6 +4084,16 @@ if ! (
       --expected-commit "$PREPARED_GATEWAY_SHA"
   ); then
   echo "ERROR: guarded SOURCE_ADD quiescence changed before shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
+GATEWAY_DEPLOY_STAGE="lab_arena_destructive_authorization"
+export GATEWAY_DEPLOY_STAGE
+if ! run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+    --phase gateway_destructive >/dev/null; then
+  echo "ERROR: Lab Arena drain changed before gateway shutdown" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
@@ -4373,6 +4459,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -4403,6 +4490,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -4600,6 +4688,7 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_RESTART_AUTHORITY_ROOT \
   -u GATEWAY_RESTART_AUTHORITY_COMMIT \
   -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
   -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
   -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
   -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -4660,6 +4749,12 @@ GATEWAY_DEPLOY_STAGE="lab_arena_service_start"
 export GATEWAY_DEPLOY_STAGE
 start_lab_arena_service
 record_gateway_restart_timing "lab_arena_service_ready"
+if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" ready \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+    --phase gateway_ready >/dev/null; then
+  echo "ERROR: Lab Arena gateway readiness could not be recorded" >&2
+  exit 1
+fi
 echo "Verifying the exact HTTP handoff consumed by automatic validator weights"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"
 export GATEWAY_DEPLOY_STAGE

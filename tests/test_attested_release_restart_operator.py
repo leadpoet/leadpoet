@@ -35,6 +35,20 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "restart_attested_release_local.sh"
 
 
+def test_arena_restart_guard_release_follows_joined_readiness() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    final_checks = source.rindex('verify_gateway_release "$gateway_evidence"')
+    runner_proof = source.index("verify_validator_arena_runner_process", final_checks)
+    finalized = source.index("finalize_deploy_readiness", runner_proof)
+    released = source.index("release_lab_arena_restart_guard", finalized)
+    success = source.index("SUCCESS: gateway and validator are aligned", released)
+
+    assert final_checks < runner_proof < finalized < released < success
+    assert "durable exact-owner active release invocation identity" in source
+    assert '"$branch_commit:scripts/lab_arena_restart_claim_guard.py"' in source
+    assert 'guard_discovery_action="discover"' in source
+
+
 def _fake_readiness_observations(tmp_path: Path, commit: str) -> tuple[Path, Path]:
     gateway_release = _gateway_manifest(commit)
     validator_release = _validator_manifest(commit)
@@ -975,6 +989,10 @@ for arg in "$@"; do
     cat "$FAKE_OPERATOR_EXACT_HELPER"
     exit 0
   fi
+  if [[ "$arg" == *":scripts/lab_arena_restart_claim_guard.py" ]]; then
+    cat "$FAKE_OPERATOR_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py"
+    exit 0
+  fi
 done
 if [[ " $* " == *" rev-parse "* ]]; then
   case "$last_arg" in
@@ -1026,6 +1044,22 @@ record() {
   printf '%s\\n' "$1" >> "$FAKE_OPERATOR_EVENTS"
 }
 case "$command" in
+  *restart*claim*guard*"'discover'"*|*restart*claim*guard*"'state'"*)
+    record arena_guard_discovery
+    if [ "${FAKE_GUARD_DISCOVERY_FAIL:-0}" = "1" ]; then
+      exit 73
+    fi
+    printf '%s\n' "$FAKE_GUARD_DISCOVERY_JSON"
+    ;;
+  *lab_arena_restart_claim_guard.py*" mode "*)
+    record arena_mode_verified
+    ;;
+  *lab_arena_restart_claim_guard.py*" release "*)
+    record arena_guard_released
+    ;;
+  *"test -s"*gateway-v2-release-requirements.json*"cat --"*)
+    cat "$FAKE_GATEWAY_ACTIVE_RELEASE_REQUIREMENTS"
+    ;;
   *"readlink --"*restart-controller*)
     printf 'releases/%s\n' "$FAKE_OPERATOR_SELECTED_COMMIT"
     ;;
@@ -1517,6 +1551,66 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     assert "barrier_before_gateway" not in observed
     assert "validator_forward_handoff" not in observed
     assert "SUCCESS: gateway and validator are aligned" in result.stdout
+
+
+def test_operator_fails_closed_when_guard_ownership_read_is_unavailable(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment.pop("LEADPOET_ACTIVE_RELEASE_RESTART_INVOCATION_ID")
+    environment["FAKE_GUARD_DISCOVERY_FAIL"] = "1"
+    environment["FAKE_GUARD_DISCOVERY_JSON"] = "{}"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit), check=False, capture_output=True,
+        text=True, timeout=30, env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "ownership is ambiguous" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_discovery" in observed
+    assert "readiness_invalidated" not in observed
+
+
+def test_operator_retains_owner_when_durable_guard_target_is_an_ancestor(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"], text=True
+    ).strip()
+    old_candidate = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", f"{commit}^"], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment.pop("LEADPOET_ACTIVE_RELEASE_RESTART_INVOCATION_ID")
+    environment["FAKE_GUARD_DISCOVERY_JSON"] = json.dumps({
+        "schema_version": "leadpoet.lab_arena.restart_guard_state.v1",
+        "guard_present": True,
+        "candidate_commit": old_candidate,
+    })
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit), check=False, capture_output=True,
+        text=True, timeout=30, env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Reusing durable exact-owner" in result.stdout
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_discovery" in observed
+    assert observed.index("readiness_finalized") < observed.index("arena_guard_released")
 
 
 @pytest.mark.parametrize(

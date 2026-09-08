@@ -43,9 +43,10 @@ MIGRATIONS = tuple(
         (187, "promotion-threshold"),
         (188, "baseline-promotion"),
         (189, "round-network-scope"),
+        (190, "restart-claim-drain"),
     )
 )
-EXPECTED_SCHEMA_VERSION = 189
+EXPECTED_SCHEMA_VERSION = 190
 TESTNET_NETUID = 401
 TESTNET_NETWORK = "test"
 DEFAULT_DATABASE = "miner_testnet"

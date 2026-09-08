@@ -7,6 +7,19 @@ import sys
 import pytest
 
 
+def test_validator_restart_drains_arena_claims_before_shutdown() -> None:
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    drain = script.index("drain_lab_arena_for_restart")
+    authorize = script.index("--phase validator_destructive", drain)
+    destructive = script.index("VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1", authorize)
+    process_proof = script.index('"$VALIDATOR_CONTROLLER_PROCESS_HELPER" verify', destructive)
+    ready = script.index("--phase validator_ready", process_proof)
+
+    assert drain < authorize < destructive < process_proof < ready
+    cleanup = script[script.index("cleanup() {") : script.index("trap cleanup EXIT")]
+    assert "abort_lab_arena_restart_guard_before_destructive" in cleanup
+
+
 def test_restart_preserves_all_tracked_diffs_before_pull():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     preserve = script.index("preserving tracked local validator checkout changes")

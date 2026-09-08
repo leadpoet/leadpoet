@@ -34,6 +34,20 @@ def _shell_function_source(script: str, name: str) -> str:
     raise AssertionError(f"unterminated shell function: {name}")
 
 
+def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    drain = script.index('drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"')
+    authorize = script.index("--phase gateway_destructive", drain)
+    destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1", authorize)
+    ready = script.index("--phase gateway_ready", destructive)
+
+    assert drain < authorize < destructive < ready
+    assert "abort_lab_arena_restart_guard_before_destructive" in _shell_function_source(
+        script, "on_gateway_restart_exit"
+    )
+    assert "-u GATEWAY_ACTIVE_RELEASE_COMPONENT" in script
+
+
 def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 

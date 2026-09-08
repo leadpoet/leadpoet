@@ -538,7 +538,48 @@ def test_native_ssm_stage_exposes_no_arbitrary_command(stage, confirmed):
     assert f"scripts.bootstrap_temporary_testnet_weights_host {stage}" in command
     assert "--config /run/leadpoet-testnet401/config.json" in command
     assert ("--confirm-instance-id" in command) is confirmed
+    if stage == "status":
+        assert "[ ! -f /run/leadpoet-testnet401/processes.json ]" in command
     assert ssm.sent["DocumentName"] == "AWS-RunShellScript"
+
+
+def test_failed_ssm_command_reports_only_redacted_identity():
+    class FailedSSM:
+        def get_command_invocation(self, **_kwargs):
+            return {
+                "Status": "Failed",
+                "ResponseCode": 51,
+                "StandardOutputContent": (
+                    '{"status":"failed","error_type":"RuntimeError",'
+                    '"operation":"stage","code":"E51",'
+                    '"location":"scripts/stage_host.py:314",'
+                    '"secret":"secret-canary"}\n'
+                ),
+                "StandardErrorContent": (
+                    'secret-canary File "/private/secret/runtime.py", line 42\n'
+                    "build_role_enclaves.sh: line 105: unbound variable secret-canary"
+                ),
+            }
+
+    with pytest.raises(temporary_host.TemporaryHostError) as failure:
+        temporary_host._wait_ssm_command(
+            FailedSSM(), instance_id=INSTANCE_ID,
+            command_id="12345678-1234-1234-1234-123456789abc",
+            timeout_seconds=1,
+        )
+    message = str(failure.value)
+    assert "secret-canary" not in message
+    evidence = json.loads(message.split("failed ", 1)[1])
+    assert evidence["response_code"] == 51
+    assert evidence["ssm_status"] == "Failed"
+    assert evidence["native_failure"] == {
+        "code": "E51", "error_type": "RuntimeError",
+        "location": "scripts/stage_host.py:314", "operation": "stage",
+    }
+    assert evidence["source_locations"] == [{"file": "runtime.py", "line": 42}]
+    assert evidence["shell_locations"] == [
+        {"file": "build_role_enclaves.sh", "line": 105}
+    ]
 
 
 def test_native_ssm_stage_rechecks_owner_before_command():
@@ -579,6 +620,8 @@ def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     )
     (task / "source-stage.json").write_text(
         '{"stage":"native_host_dependencies","status":"running","secret":"hidden"}\n'
+        '{"status":"failed","error_type":"RuntimeError","operation":"stage",'
+        '"code":"E51","location":"scripts/stage_host.py:314","secret":"hidden"}\n'
     )
     program = program.replace(repr(temporary_host.RUNTIME_ROOT), repr(str(task)))
     result = subprocess.run([sys.executable, "-I", "-c", program],
@@ -589,6 +632,10 @@ def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     value = json.loads(result.stdout)
     assert value["status"] == "staging_incomplete"
     assert value["stage_states"] == [{"stage": "native_host_dependencies", "status": "running"}]
+    assert value["staging_failure"] == {
+        "code": "E51", "error_type": "RuntimeError",
+        "location": "scripts/stage_host.py:314", "operation": "stage",
+    }
     assert value["log_diagnostics"][0]["categories"] == ["ModuleNotFoundError", "Killed"]
     assert value["log_diagnostics"][0]["trace_locations"] == [["native.py", "42"]]
     assert value["log_diagnostics"][0]["shell_locations"] == [["build_local_release_v2.sh", "83"]]

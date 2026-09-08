@@ -571,9 +571,86 @@ def _wait_ssm_command(
             or stderr
             or len(stdout.encode("utf-8")) > 1024 * 1024
         ):
-            raise TemporaryHostError("fixed temporary SSM stage failed")
+            evidence = _redacted_ssm_failure(
+                command_id=command_id,
+                status=status,
+                response_code=result.get("ResponseCode", -1),
+                stdout=stdout,
+                stderr=stderr,
+            )
+            raise TemporaryHostError(
+                "fixed temporary SSM stage failed "
+                + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+            )
         return stdout
     raise TemporaryHostError("fixed temporary SSM stage timed out")
+
+
+def _redacted_ssm_failure(
+    *, command_id: str, status: str, response_code: Any,
+    stdout: str, stderr: str,
+) -> dict[str, Any]:
+    """Keep fixed failure identity without returning remote output."""
+    statuses = {
+        "Success", "Failed", "Cancelled", "TimedOut", "Cancelling",
+        "Undeliverable", "Terminated",
+    }
+    categories = (
+        "AccessDenied", "NoSuchKey", "ModuleNotFoundError", "ImportError",
+        "FileNotFoundError", "PermissionError", "No space left on device",
+        "AssertionError", "RuntimeError", "ValueError", "command not found",
+        "unbound variable", "Killed", "Terminated", "Segmentation fault",
+        "timed out",
+    )
+    tail = (stdout[-65536:] + "\n" + stderr[-65536:])
+    try:
+        code = int(response_code)
+    except (TypeError, ValueError):
+        code = -1
+    if code < -1 or code > 255:
+        code = -1
+    identity: dict[str, Any] = {
+        "schema_version": "leadpoet.temporary_testnet401_ssm_failure.v1",
+        "ssm_command_id": (
+            command_id if SSM_COMMAND_ID_RE.fullmatch(command_id) else "invalid"
+        ),
+        "ssm_status": status if status in statuses else "Unknown",
+        "response_code": code,
+        "error_categories": [item for item in categories if item in tail],
+        "source_locations": [
+            {"file": name, "line": int(line)}
+            for name, line in re.findall(
+                r'File "(?:[^"\n]*/)?([A-Za-z0-9_]+\.py)", line ([0-9]{1,6})',
+                tail,
+            )[-8:]
+        ],
+        "shell_locations": [
+            {"file": name, "line": int(line)}
+            for name, line in re.findall(
+                r'([A-Za-z0-9_]+\.sh): line ([0-9]{1,6}):', tail
+            )[-8:]
+        ],
+    }
+    for line in stdout[-65536:].splitlines()[-20:]:
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(value, Mapping) or value.get("status") != "failed":
+            continue
+        safe: dict[str, str] = {}
+        for name, pattern in {
+            "error_type": r"[A-Za-z_][A-Za-z0-9_]{0,79}",
+            "operation": r"[A-Za-z_][A-Za-z0-9_.:-]{0,79}",
+            "code": r"[A-Za-z][A-Za-z0-9_.:-]{0,79}",
+            "location": r"(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_]+\.py:[0-9]{1,6}",
+        }.items():
+            item = str(value.get(name) or "")
+            if re.fullmatch(pattern, item):
+                safe[name] = item
+        if safe:
+            identity["native_failure"] = safe
+    return identity
 
 
 def _send_fixed_ssm(
@@ -790,7 +867,8 @@ def run_native_stage(
         )
         command = (
             "set -Eeuo pipefail\n"
-            f"if [ ! -f {shlex.quote(NATIVE_CONFIG)} ]; then\n"
+            f"if [ ! -f {shlex.quote(NATIVE_CONFIG)} ] || "
+            f"[ ! -f {shlex.quote(RUNTIME_ROOT + '/processes.json')} ]; then\n"
             f"  exec /usr/bin/python3 -I -c {shlex.quote(probe)}\n"
             "fi\n"
         ) + command
@@ -849,9 +927,12 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "    for line in path.open().read(65536).splitlines()[-20:]:",
         "        try: value = json.loads(line)",
         "        except ValueError: continue",
-        "        if isinstance(value, dict) and value.get('status') == 'failed' and "
-        "re.fullmatch('[A-Za-z_]{1,80}', str(value.get('error_type', ''))):",
-        "            result['staging_error_type'] = value['error_type']",
+        "        if isinstance(value, dict) and value.get('status') == 'failed':",
+        "            safe = {}",
+        "            for key, pattern in {'error_type':'[A-Za-z_][A-Za-z0-9_]{0,79}', 'operation':'[A-Za-z_][A-Za-z0-9_.:-]{0,79}', 'code':'[A-Za-z][A-Za-z0-9_.:-]{0,79}', 'location':'(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_]+\\.py:[0-9]{1,6}'}.items():",
+        "                item = str(value.get(key, ''))",
+        "                if re.fullmatch(pattern, item): safe[key] = item",
+        "            if safe: result['staging_failure'] = safe",
         "        if isinstance(value, dict) and re.fullmatch('[a-z_]{1,64}', "
         "str(value.get('stage', ''))) and value.get('status') in ('running', 'passed'):",
         "            result['stage_states'].append({key: value[key] for key in ('stage', 'status')})",

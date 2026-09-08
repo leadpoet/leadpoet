@@ -4411,6 +4411,21 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         for migration in LAB_ARENA_MIGRATIONS:
             database.apply_migration(scripts / migration)
             applied.append(migration)
+        lab_arena_schema_contract_185 = json.loads(
+            database.psql(
+                """
+                SELECT public.lab_arena_schema_version_v1()::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract_185 != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 185,
+        }:
+            raise PostgresContractProbeError(
+                "post-185 Lab Arena schema contract differs"
+            )
         database.apply_migration(
             scripts / LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION
         )

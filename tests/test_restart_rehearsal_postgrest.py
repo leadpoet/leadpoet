@@ -4,16 +4,22 @@ import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tests.restart_rehearsal.gateway_boundary_service import (
     Handler,
     LocalPostgRESTState,
+    MigrationBackedLabArenaRPC,
     SOURCE_ADD_CONTROL_COLUMNS,
     _matches_filter,
     _source_add_claim_control_contract,
     _source_add_claim_control_contract_v2,
+)
+from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    DisposablePostgres,
+    PostgresContractProbeError,
 )
 from gateway.tee.supabase_schema_preflight_v2 import (
     _verify_source_add_claim_control_contract_v2,
@@ -32,6 +38,126 @@ from leadpoet_canonical.attested_v2 import sha256_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_migration_backed_arena_rpc_stops_postgres_when_catalog_load_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interrupted: bool,
+) -> None:
+    class Database:
+        stopped = False
+
+        def psql(self, *_args, **_kwargs):
+            if interrupted:
+                raise SystemExit(0)
+            return SimpleNamespace(stdout="public.unexpected()\n")
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    database = Database()
+    monkeypatch.setattr(
+        DisposablePostgres,
+        "attach",
+        lambda *_args, **_kwargs: database,
+    )
+
+    expected_error = SystemExit if interrupted else ValueError
+    with pytest.raises(expected_error):
+        MigrationBackedLabArenaRPC(
+            tmp_path / "postgres.json",
+            candidate_sha="1" * 40,
+        )
+
+    assert database.stopped is True
+
+
+def test_disposable_postgres_stop_failure_preserves_owned_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database = DisposablePostgres.__new__(DisposablePostgres)
+    database.root = tmp_path / "retained-postgres"
+    database.data = database.root / "data"
+    database.root.mkdir()
+    database.data.mkdir()
+    database.started = True
+    monkeypatch.setattr(database, "_binary", lambda name: name)
+    monkeypatch.setattr(
+        database,
+        "_as_postgres",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+
+    with pytest.raises(
+        PostgresContractProbeError,
+        match="did not stop cleanly",
+    ):
+        database.stop()
+
+    assert database.started is True
+    assert database.root.is_dir()
+    assert database.data.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("apikey", "authorization", "expected_role"),
+    [
+        (
+            "rehearsal-secret",
+            "Bearer rehearsal.header.signature",
+            "lab_arena_service",
+        ),
+        ("rehearsal-secret", "Bearer rehearsal-secret", "service_role"),
+        ("foreign", "Bearer foreign", None),
+    ],
+)
+def test_postgrest_boundary_maps_arena_credentials_to_database_role(
+    apikey: str,
+    authorization: str,
+    expected_role: str | None,
+) -> None:
+    handler = Handler.__new__(Handler)
+    handler.headers = {
+        "apikey": apikey,
+        "authorization": authorization,
+    }
+
+    assert handler._database_role() == expected_role
+
+
+def test_migration_backed_arena_rpc_executes_with_selected_role() -> None:
+    class Database:
+        statements: list[str] = []
+
+        def psql(self, sql: str, **_kwargs):
+            self.statements.append(sql)
+            return SimpleNamespace(returncode=0, stdout="{}\n")
+
+    database = Database()
+    rpc = MigrationBackedLabArenaRPC.__new__(MigrationBackedLabArenaRPC)
+    rpc.database = database
+
+    assert rpc.call(
+        "lab_arena_restart_guard_state_v1",
+        {},
+        database_role="lab_arena_service",
+    ) == {}
+    assert database.statements[-1].startswith("SET ROLE lab_arena_service;\n")
+    assert rpc.call(
+        "lab_arena_restart_guard_state_v1",
+        {},
+        database_role="service_role",
+    ) == {}
+    assert database.statements[-1].startswith("SET ROLE service_role;\n")
+    with pytest.raises(ValueError, match="database role differs"):
+        rpc.call(
+            "lab_arena_restart_guard_state_v1",
+            {},
+            database_role="postgres",
+        )
 
 
 def test_postgrest_boundary_imports_candidate_source_tree() -> None:

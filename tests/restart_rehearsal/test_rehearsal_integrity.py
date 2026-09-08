@@ -7747,6 +7747,39 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
     assert "lab_arena_restart_guard_handoff.py write-permit" in script
     assert "run_rehearsal_lab_arena_guard authorize" in script
     assert "run_rehearsal_lab_arena_guard release" in script
+    assert (
+        '"VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='
+        '$ACTIVE_RELEASE_AUTHORITY_SHA"'
+    ) in script
+    assert script.count(
+        '--authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA"'
+    ) == 3
+    assert '--authority-commit "$CANDIDATE_SHA"' not in script
+    assert "rehearsal accepted a foreign Arena guard permit" in script
+    assert "rehearsal accepted a stale Arena guard authority" in script
+    assert '"/proc/$ARENA_GUARD_CONTROLLER_PID/stat"' in script
+    validator_restart = script.index(
+        "bash /home/ec2-user/validator_restart.sh",
+        script.index('echo "REHEARSAL_START component=validator'),
+    )
+    controller_complete = script.index(
+        ': >"$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE"',
+        validator_restart,
+    )
+    validator_ready = script.index(
+        "run_rehearsal_lab_arena_guard ready",
+        controller_complete,
+    )
+    validator_release = script.index(
+        "release_rehearsal_lab_arena_guard validator",
+        validator_ready,
+    )
+    assert (
+        validator_restart
+        < controller_complete
+        < validator_ready
+        < validator_release
+    )
     assert '"${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \\' in script
     assert '"${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \\' in script
 

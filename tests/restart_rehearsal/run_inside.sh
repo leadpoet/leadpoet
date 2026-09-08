@@ -77,6 +77,8 @@ mkdir -p \
 
 BOUNDARY_SERVICE_PID=""
 ARENA_GUARD_CONTROLLER_PID=""
+ARENA_GUARD_CONTROLLER_START_TIME=""
+POSTGRES_CONNECTION=""
 GATEWAY_ENCLAVE_SERVICE_PIDS=""
 VALIDATOR_ENCLAVE_SERVICE_PID=""
 TLS_PROXY_SERVICE_PID=""
@@ -115,8 +117,20 @@ preserve_rehearsal_evidence() {
   fi
 }
 cleanup_boundary_service() {
+  local cleanup_status=0
   if [ -n "$ARENA_GUARD_CONTROLLER_PID" ]; then
-    kill "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+    local observed_start_time=""
+    observed_start_time="$(
+      awk '{print $22}' "/proc/$ARENA_GUARD_CONTROLLER_PID/stat" 2>/dev/null \
+        || true
+    )"
+    if [ -n "$observed_start_time" ] \
+        && [ "$observed_start_time" = "$ARENA_GUARD_CONTROLLER_START_TIME" ]; then
+      kill "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+    elif [ -n "$observed_start_time" ]; then
+      echo "ERROR: rehearsal Arena guard controller identity changed" >&2
+      cleanup_status=1
+    fi
     wait "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
   fi
   if [ -n "$RUNNING_VALIDATOR_FIXTURE_PID" ]; then
@@ -137,19 +151,39 @@ cleanup_boundary_service() {
   fi
   if [ -n "$BOUNDARY_SERVICE_PID" ]; then
     kill "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
-    wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
+    wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || cleanup_status=1
+  fi
+  if [ -n "$POSTGRES_CONNECTION" ] && [ -f "$POSTGRES_CONNECTION" ]; then
+    if ! /usr/bin/python3.11 - "$POSTGRES_CONNECTION" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+connection = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+root = Path(str(connection.get("root") or ""))
+if root.exists():
+    raise SystemExit("retained rehearsal PostgreSQL was not stopped")
+PY
+    then
+      cleanup_status=1
+    fi
   fi
   if [ -n "$TLS_PROXY_SERVICE_PID" ]; then
     kill "$TLS_PROXY_SERVICE_PID" 2>/dev/null || true
     wait "$TLS_PROXY_SERVICE_PID" 2>/dev/null || true
   fi
+  return "$cleanup_status"
 }
 finalize_rehearsal() {
   local status=$?
+  local cleanup_status=0
   trap - EXIT INT TERM
   set +e
   preserve_rehearsal_evidence
-  cleanup_boundary_service
+  cleanup_boundary_service || cleanup_status=$?
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
+  fi
   exit "$status"
 }
 trap finalize_rehearsal EXIT
@@ -499,6 +533,7 @@ ACTIVE_RELEASE_ARENA_GUARD_REQUEST=""
 ACTIVE_RELEASE_ARENA_GUARD_PERMIT=""
 ACTIVE_RELEASE_ARENA_GUARD_NONCE=""
 ACTIVE_RELEASE_ARENA_GUARD_GENERATION=""
+ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE=""
 LAB_ARENA_GUARD_ENV=(
   "LAB_ARENA_SUPABASE_URL=https://qplwoislplkcegvdmbim.supabase.co"
   "LAB_ARENA_SUPABASE_ANON_KEY=rehearsal-secret"
@@ -517,6 +552,7 @@ if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
   ACTIVE_RELEASE_COORDINATION_FILE="/tmp/leadpoet-coordinated-restart.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
   ACTIVE_RELEASE_ARENA_GUARD_REQUEST="/tmp/leadpoet-validator-arena-request.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
   ACTIVE_RELEASE_ARENA_GUARD_PERMIT="/tmp/leadpoet-validator-arena-permit.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE="/tmp/leadpoet-validator-arena-controller.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
   ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE="$(
     printf '%s' \
       "$FROM_SHA:$CANDIDATE_SHA:$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
@@ -538,7 +574,8 @@ if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
     "$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE" \
     "$ACTIVE_RELEASE_COORDINATION_FILE" \
     "$ACTIVE_RELEASE_ARENA_GUARD_REQUEST" \
-    "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT"
+    "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+    "$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE"
   PYTHONDONTWRITEBYTECODE=1 \
     LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json \
     PYTHONPATH=/source:/harness \
@@ -816,7 +853,7 @@ start_validator_lab_arena_guard_controller() {
       --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
       --scope validator \
       --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
-      --authority-commit "$CANDIDATE_SHA" >/dev/null
+      --authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA" >/dev/null
     authorization="$(
       run_rehearsal_lab_arena_guard authorize \
         --scope validator \
@@ -831,11 +868,46 @@ start_validator_lab_arena_guard_controller() {
         --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
         --scope validator \
         --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
-        --authority-commit "$CANDIDATE_SHA" \
+        --authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA" \
         --expected-generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \
         >/dev/null
+    if PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+        /source/scripts/lab_arena_restart_guard_handoff.py validate-permit \
+        --path "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+        --candidate "$CANDIDATE_SHA" \
+        --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --scope validator \
+        --nonce "$(printf '0%.0s' $(seq 1 64))" \
+        --authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA" \
+        >/dev/null 2>&1; then
+      echo "ERROR: rehearsal accepted a foreign Arena guard permit" >&2
+      exit 1
+    fi
+    if PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+        /source/scripts/lab_arena_restart_guard_handoff.py validate-permit \
+        --path "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+        --candidate "$CANDIDATE_SHA" \
+        --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --scope validator \
+        --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
+        --authority-commit "$(printf '0%.0s' $(seq 1 40))" \
+        >/dev/null 2>&1; then
+      echo "ERROR: rehearsal accepted a stale Arena guard authority" >&2
+      exit 1
+    fi
+    while [ ! -f "$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE" ]; do
+      /bin/sleep 0.05
+    done
   ) &
   ARENA_GUARD_CONTROLLER_PID=$!
+  if ! ARENA_GUARD_CONTROLLER_START_TIME="$(
+      awk '{print $22}' "/proc/$ARENA_GUARD_CONTROLLER_PID/stat"
+    )" \
+      || ! [[ "$ARENA_GUARD_CONTROLLER_START_TIME" =~ ^[0-9]+$ ]]; then
+    wait "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+    echo "ERROR: rehearsal Arena guard controller identity is unavailable" >&2
+    exit 1
+  fi
 }
 
 GATEWAY_ACTIVE_RELEASE_ENV=()
@@ -851,7 +923,7 @@ if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
   )
   VALIDATOR_ACTIVE_RELEASE_ENV=(
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=/home/ec2-user/leadpoet/leadpoet"
-    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT=$CANDIDATE_SHA"
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT=$ACTIVE_RELEASE_AUTHORITY_SHA"
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID=$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1"
     "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=$ACTIVE_RELEASE_VALIDATOR_OUTPUT"
@@ -1568,8 +1640,10 @@ else
   fi
 
   if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+    : >"$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE"
     wait "$ARENA_GUARD_CONTROLLER_PID"
     ARENA_GUARD_CONTROLLER_PID=""
+    ARENA_GUARD_CONTROLLER_START_TIME=""
     run_rehearsal_lab_arena_guard ready \
       --scope validator \
       --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \

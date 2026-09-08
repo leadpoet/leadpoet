@@ -176,11 +176,12 @@ class MigrationBackedLabArenaRPC:
     """Expose migration-190 SQL functions through the local HTTP boundary."""
 
     def __init__(self, path: Path, *, candidate_sha: str):
-        self.database = DisposablePostgres.attach(
-            path,
-            candidate_sha=candidate_sha,
-        )
+        self.database: DisposablePostgres | None = None
         try:
+            self.database = DisposablePostgres.attach(
+                path,
+                candidate_sha=candidate_sha,
+            )
             function_names = ",".join(
                 "'" + name + "'"
                 for name in sorted(LAB_ARENA_RESTART_RPC_PARAMETERS)
@@ -208,14 +209,25 @@ class MigrationBackedLabArenaRPC:
                 raise ValueError(
                     "migration-backed Lab Arena RPC catalog differs"
                 )
-        except Exception:
-            self.database.stop()
+        except BaseException:
+            if self.database is not None:
+                self.database.stop()
             raise
 
-    def call(self, name: str, body: Any) -> dict[str, Any]:
+    def call(
+        self,
+        name: str,
+        body: Any,
+        *,
+        database_role: str,
+    ) -> dict[str, Any]:
         parameters = LAB_ARENA_RESTART_RPC_PARAMETERS.get(name)
         if parameters is None or not isinstance(body, Mapping):
             raise ValueError("Lab Arena restart RPC differs")
+        if self.database is None:
+            raise ValueError("migration-backed Lab Arena restart RPC is unavailable")
+        if database_role not in {"lab_arena_service", "service_role"}:
+            raise ValueError("Lab Arena restart database role differs")
         expected = {field for field, _ in parameters}
         if set(body) != expected:
             raise ValueError("Lab Arena restart RPC parameters differ")
@@ -226,7 +238,7 @@ class MigrationBackedLabArenaRPC:
             f"(payload->>'{field}')::{kind}" for field, kind in parameters
         )
         sql = (
-            "SET ROLE service_role;\n"
+            f"SET ROLE {database_role};\n"
             f"WITH input AS (SELECT $leadpoet${encoded}$leadpoet$::jsonb AS payload) "
             f"SELECT public.{name}({arguments})::text FROM input;\n"
         )
@@ -242,7 +254,8 @@ class MigrationBackedLabArenaRPC:
         return dict(value)
 
     def stop(self) -> None:
-        self.database.stop()
+        if self.database is not None:
+            self.database.stop()
 
 
 def _candidate_source_add_leg1_authority(
@@ -3418,17 +3431,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self) -> bool:
+    def _database_role(self) -> str | None:
         apikey = self.headers.get("apikey", "")
         authorization = self.headers.get("authorization", "")
-        return (apikey, authorization) in {
+        if (apikey, authorization) == (
+            "rehearsal-secret",
+            "Bearer rehearsal.header.signature",
+        ):
+            return "lab_arena_service"
+        if (apikey, authorization) in {
             ("rehearsal-public", "Bearer rehearsal-public"),
             ("rehearsal-secret", "Bearer rehearsal-secret"),
-            (
-                "rehearsal-secret",
-                "Bearer rehearsal.header.signature",
-            ),
-        }
+        }:
+            return "service_role"
+        return None
+
+    def _authorized(self) -> bool:
+        return self._database_role() is not None
 
     def _body(self) -> Any:
         size = int(self.headers.get("content-length", "0") or 0)
@@ -3496,7 +3515,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError(
                         "migration-backed Lab Arena restart RPC is unavailable"
                     )
-                response = self.server.lab_arena_rpc.call(name, body)
+                database_role = self._database_role()
+                if database_role is None:
+                    raise ValueError("Lab Arena restart database role differs")
+                response = self.server.lab_arena_rpc.call(
+                    name,
+                    body,
+                    database_role=database_role,
+                )
             elif name == (
                 "research_lab_stateful_subnet_epoch_cutover_public_state_v1"
             ):
@@ -4093,23 +4119,26 @@ def main() -> int:
     tables.update(relation_columns)
     rpcs.update(migration_rpcs)
     args.state_root.mkdir(parents=True, exist_ok=True)
-    lab_arena_rpc = (
-        MigrationBackedLabArenaRPC(
-            args.postgres_connection,
-            candidate_sha=args.candidate_sha,
-        )
-        if args.postgres_connection is not None
-        else None
-    )
-    if lab_arena_rpc is not None:
-        missing_lab_arena_rpcs = (
-            set(LAB_ARENA_RESTART_RPC_PARAMETERS) - migration_rpcs
-        )
-        if missing_lab_arena_rpcs:
-            raise RuntimeError(
-                "migration-backed Lab Arena restart RPCs are incomplete"
-            )
+    lab_arena_rpc = None
+
+    def stop_server(_signal: int, _frame: Any) -> None:
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop_server)
+    signal.signal(signal.SIGINT, stop_server)
     try:
+        if args.postgres_connection is not None:
+            lab_arena_rpc = MigrationBackedLabArenaRPC(
+                args.postgres_connection,
+                candidate_sha=args.candidate_sha,
+            )
+            missing_lab_arena_rpcs = (
+                set(LAB_ARENA_RESTART_RPC_PARAMETERS) - migration_rpcs
+            )
+            if missing_lab_arena_rpcs:
+                raise RuntimeError(
+                    "migration-backed Lab Arena restart RPCs are incomplete"
+                )
         state = LocalPostgRESTState(
             state_root=args.state_root,
             fixture=fixture,
@@ -4127,11 +4156,6 @@ def main() -> int:
             state,
             lab_arena_rpc=lab_arena_rpc,
         )
-        def stop_server(_signal: int, _frame: Any) -> None:
-            raise SystemExit(0)
-
-        signal.signal(signal.SIGTERM, stop_server)
-        signal.signal(signal.SIGINT, stop_server)
         (args.state_root / "local-postgrest.ready").write_text(
             json.dumps(
                 {

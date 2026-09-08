@@ -489,6 +489,8 @@ def _git_commit_is_ancestor(
     result = subprocess.run(
         [
             REAL_GIT,
+            "-c",
+            f"safe.directory={repository}",
             "-C",
             str(repository),
             "merge-base",

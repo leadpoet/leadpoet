@@ -505,6 +505,85 @@ def test_gateway_cli_secret_matches_initial_durable_secret(
     )
 
 
+def test_gateway_lineage_uses_exact_command_local_git_trust(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    assert contract_adapter._git_commit_is_ancestor.__kwdefaults__ == {
+        "repository": Path("/source")
+    }
+    repository = tmp_path / "source"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    git = ["git", "-C", str(repository)]
+    subprocess.run([*git, "config", "user.name", "Leadpoet Rehearsal"], check=True)
+    subprocess.run(
+        [*git, "config", "user.email", "restart-rehearsal@leadpoet.invalid"],
+        check=True,
+    )
+    commits = []
+    for message in ("first", "second"):
+        subprocess.run(
+            [*git, "commit", "--allow-empty", "-q", "-m", message],
+            check=True,
+        )
+        commits.append(
+            subprocess.run(
+                [*git, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    first, second = commits
+    global_config = tmp_path / "global-git-config"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    real_run = subprocess.run
+    commands: list[list[str]] = []
+
+    def capture_run(command, **kwargs):
+        commands.append(list(command))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(contract_adapter.subprocess, "run", capture_run)
+
+    assert contract_adapter._git_commit_is_ancestor(
+        first,
+        second,
+        repository=repository,
+    )
+    assert not contract_adapter._git_commit_is_ancestor(
+        second,
+        first,
+        repository=repository,
+    )
+    with pytest.raises(
+        ValueError,
+        match="gateway miner-maintenance lineage is unavailable",
+    ):
+        contract_adapter._git_commit_is_ancestor(
+            "f" * 40,
+            second,
+            repository=repository,
+        )
+
+    assert commands
+    for command in commands:
+        assert command[:5] == [
+            contract_adapter.REAL_GIT,
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+        ]
+        assert "safe.directory=*" not in command
+        assert "--global" not in command
+    assert not global_config.exists()
+
+
 def _receipt_graph_seed_contract() -> tuple[
     dict[str, dict[str, Any]],
     dict[str, list[dict[str, Any]]],

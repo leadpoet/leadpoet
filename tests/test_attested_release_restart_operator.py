@@ -171,7 +171,7 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert 'sys.path.append(str(site_packages))' in source
     assert "leadpoet.local_readiness_python.v1" in source
     assert "pure readiness imports loaded the validator wallet dependency" in source
-    assert source.count("run_local_readiness_python ") == 11
+    assert source.count("run_local_readiness_python ") == 14
     assert 'PYTHONPATH="$ROOT" python3' not in source
     assert "/health/v2-authority" in source
     assert "attestation = get('/attest')" in source

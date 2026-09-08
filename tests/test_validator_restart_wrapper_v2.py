@@ -485,6 +485,19 @@ def _handoff_environment(prefix: str) -> dict[str, str]:
     }
 
 
+def _arena_guard_environment(prefix: str) -> dict[str, str]:
+    return {
+        "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT": (
+            f"/tmp/leadpoet-{prefix}-arena-request.json"
+        ),
+        "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT": (
+            f"/tmp/leadpoet-{prefix}-arena-permit.json"
+        ),
+        "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE": "a" * 64,
+        "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS": "30",
+    }
+
+
 def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
     tmp_path: Path,
 ) -> None:
@@ -493,9 +506,18 @@ def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
         {
             "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS",
             "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE",
+            "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT",
+            "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT",
+            "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE",
+            "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS",
         }
     )
-    clean_env = {key: value for key, value in os.environ.items() if key not in names}
+    clean_env = {
+        **{
+            key: value for key, value in os.environ.items() if key not in names
+        },
+        **_arena_guard_environment("fixture"),
+    }
     clean_env["VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED"] = "1"
     missing = subprocess.run(
         ["bash", "validator_restart.sh"],
@@ -509,7 +531,10 @@ def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
     assert "paired validator active release handoff is incomplete" in missing.stderr
     assert "Pulling latest GitHub main" not in missing.stdout
 
-    unsafe_env = _handoff_environment("fixture")
+    unsafe_env = {
+        **_arena_guard_environment("fixture"),
+        **_handoff_environment("fixture"),
+    }
     unsafe_env["VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"] = str(
         tmp_path / "outside-controller-root.json"
     )
@@ -526,6 +551,7 @@ def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
     assert "Pulling latest GitHub main" not in unsafe.stdout
 
     partial_recovery_env = {
+        **_arena_guard_environment("fixture"),
         **_handoff_environment("fixture"),
         "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS": (
             "/tmp/leadpoet-recovery-requirements.json"
@@ -849,6 +875,7 @@ def _run_forward_restart_fixture(
         "VALIDATOR_ENV_FILE": str(tmp_path / "validator.env"),
         "VALIDATOR_ENV_BACKUP_DIR": str(tmp_path / "env-backups"),
         "VALIDATOR_COORDINATED_EXPECTED_COMMIT": expected_commit,
+        **_arena_guard_environment(tmp_path.name),
     }
     if include_paired_handoff:
         environment.update(

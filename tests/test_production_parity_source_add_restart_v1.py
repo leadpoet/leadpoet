@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import http.client
 import base64
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import hmac
+import io
 import json
 import os
 from pathlib import Path
@@ -26,7 +28,14 @@ from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.production_parity_boundary_v2 import (
     PRODUCTION_SUPABASE_ORIGIN,
 )
+from lab_arena.store import ArenaStore, PsycopgTransport
+from scripts import lab_arena_restart_claim_guard as arena_guard
 from scripts import run_production_parity_full_host as full_host
+from scripts.materialize_production_parity_secrets import build_gateway_environment
+from tests.lab_arena.lab_arena_pg_harness import (
+    database_with_lab_arena_migration,
+)
+from tests.lab_arena.test_lab_arena_migration_postgres import claim, open_round
 from tests.test_source_add_end_to_end_postgres import (
     _database_with_migrations,
 )
@@ -132,11 +141,9 @@ def _postgrest_run_command(
     ]
 
 
-@pytest.fixture
-def clone_database():
-    database = _database_with_migrations(MIGRATIONS)
+def _postgrest_database(database, *, prefix: str):
     psycopg2, dsn = next(database)
-    postgrest = f"source-add-parity-{uuid4().hex[:12]}"
+    postgrest = f"{prefix}-{uuid4().hex[:12]}"
     port = _free_port()
     jwt_secret = "production-parity-source-add-jwt-secret-0123456789"
     started = False
@@ -171,6 +178,7 @@ def clone_database():
             "psycopg2": psycopg2,
             "dsn": dsn,
             "port": port,
+            "jwt_secret": jwt_secret,
             "service_role_key": _clone_service_role_token(jwt_secret),
         }
     finally:
@@ -186,6 +194,20 @@ def clone_database():
             next(database)
         except StopIteration:
             pass
+
+
+@pytest.fixture
+def clone_database():
+    yield from _postgrest_database(
+        _database_with_migrations(MIGRATIONS), prefix="source-add-parity"
+    )
+
+
+@pytest.fixture
+def arena_guard_clone_database():
+    yield from _postgrest_database(
+        database_with_lab_arena_migration(), prefix="arena-guard-parity"
+    )
 
 
 def _clone_connection_factory(port: int, observed_hosts: list[str]):
@@ -515,6 +537,225 @@ def test_full_restart_environment_selects_controller_python(
             updates={
                 "GATEWAY_PYTHON_BIN": str(tmp_path / "missing-python")
             },
+        )
+
+
+def test_full_releases_only_its_ready_arena_guard_and_preserves_operator_pause(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arena_guard_clone_database,
+):
+    clone = arena_guard_clone_database
+    artifact_bucket = "leadpoet-parity-493765492819-" + "f" * 16
+    work_root = tmp_path / "opt" / "leadpoet-production-parity"
+    gateway_environment = work_root / RUN_ID / "runtime" / "gateway.env"
+    gateway_environment.parent.mkdir(parents=True)
+    environment = build_gateway_environment(
+        {},
+        run_id=RUN_ID,
+        candidate_sha=CANDIDATE_COMMIT,
+        gateway_public_key="1" * 64,
+        supabase_origin=CLONE_ORIGIN,
+        artifact_bucket=artifact_bucket,
+        benchmark_date="2026-09-08",
+        jwt_secret=clone["jwt_secret"],
+    )
+    gateway_environment.write_text(
+        "".join(f"{key}={value}\n" for key, value in environment.items()),
+        encoding="utf-8",
+    )
+    gateway_environment.chmod(0o600)
+    monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
+
+    observed_hosts: list[str] = []
+
+    def run_guard_cli(command, **kwargs):
+        assert command[:2] == [
+            sys.executable,
+            str(ROOT / "scripts" / "lab_arena_restart_claim_guard.py"),
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch.dict(os.environ, kwargs["env"], clear=True),
+            patch.object(sys, "argv", command[1:]),
+            patch.object(
+                arena_guard.http.client,
+                "HTTPSConnection",
+                _clone_connection_factory(clone["port"], observed_hosts),
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            returncode = arena_guard.main()
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout=stdout.getvalue(),
+            stderr=stderr.getvalue(),
+        )
+
+    monkeypatch.setattr(full_host, "_run", run_guard_cli)
+    admin = clone["psycopg2"].connect(**clone["dsn"])
+    admin.autocommit = True
+    store = ArenaStore(
+        PsycopgTransport(
+            lambda: clone["psycopg2"].connect(**clone["dsn"])
+        ),
+        lease_ttl_seconds=120,
+    )
+
+    def rpc(function: str, *values):
+        with admin.cursor() as cursor:
+            cursor.execute(
+                f"SELECT public.{function}({','.join(['%s'] * len(values))})",
+                values,
+            )
+            return cursor.fetchone()[0]
+
+    def acquire(invocation: str, generation: int):
+        guard, owner = arena_guard._identity(CANDIDATE_COMMIT, invocation)
+        state = rpc(
+            "lab_arena_acquire_restart_guard_v1",
+            guard,
+            owner,
+            generation,
+            600,
+            CANDIDATE_COMMIT,
+            "gateway",
+            "full-parity-test",
+        )
+        return guard, owner, state["guard_generation"]
+
+    def full_release() -> None:
+        full_host._release_full_parity_arena_restart_guard(
+            region="us-east-1",
+            candidate_sha=CANDIDATE_COMMIT,
+            run_id=RUN_ID,
+            supabase_origin=CLONE_ORIGIN,
+            gateway_env_file=gateway_environment,
+            artifact_bucket=artifact_bucket,
+        )
+
+    try:
+        runners, _ = open_round(
+            store,
+            "arena-2099-01-10",
+            participants=1,
+            runners=2,
+            prefix="full-release",
+        )
+
+        foreign_guard, foreign_owner, generation = acquire(
+            "foreign-full-run", 0
+        )
+        rpc(
+            "lab_arena_authorize_restart_phase_v1",
+            foreign_guard,
+            foreign_owner,
+            generation,
+            "gateway_destructive",
+        )
+        rpc(
+            "lab_arena_mark_restart_ready_v1",
+            foreign_guard,
+            foreign_owner,
+            generation,
+            "gateway_ready",
+        )
+        with pytest.raises(full_host.FullParityError):
+            full_release()
+        foreign_state = rpc("lab_arena_restart_guard_state_v1")
+        assert foreign_state["guard_present"] is True
+        rpc(
+            "lab_arena_release_restart_guard_v1",
+            foreign_guard,
+            foreign_owner,
+            generation,
+            "test-release",
+        )
+
+        guard, owner, generation = acquire(RUN_ID, generation)
+        rpc(
+            "lab_arena_authorize_restart_phase_v1",
+            guard,
+            owner,
+            generation,
+            "gateway_destructive",
+        )
+        with pytest.raises(full_host.FullParityError):
+            full_release()
+        destructive_state = rpc("lab_arena_restart_guard_state_v1")
+        assert destructive_state["restart_phase"] == "gateway_destructive"
+        rpc(
+            "lab_arena_mark_restart_ready_v1",
+            guard,
+            owner,
+            generation,
+            "gateway_ready",
+        )
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_restart_claim_control "
+                "SET operator_paused = TRUE, pause_reason = 'operator' "
+                "WHERE singleton"
+            )
+        full_release()
+        operator_state = rpc("lab_arena_restart_guard_state_v1")
+        assert operator_state["guard_present"] is False
+        assert operator_state["paused"] is True
+        assert operator_state["operator_paused"] is True
+        assert claim(store, "arena-2099-01-10", runners[1])[0]["status"] == "paused"
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_restart_claim_control "
+                "SET operator_paused = FALSE, pause_reason = '' "
+                "WHERE singleton"
+            )
+        assert claim(store, "arena-2099-01-10", runners[0])[0]["status"] == "leased"
+    finally:
+        store._transport.close()
+        admin.close()
+
+    assert observed_hosts
+    assert set(observed_hosts) == {"d111111abcdef8.cloudfront.net:443"}
+    request_count = len(observed_hosts)
+    with pytest.raises(
+        full_host.FullParityError,
+        match="clone gateway boundary identity differs",
+    ):
+        full_host._release_full_parity_arena_restart_guard(
+            region="us-east-1",
+            candidate_sha=CANDIDATE_COMMIT,
+            run_id=RUN_ID,
+            supabase_origin=PRODUCTION_SUPABASE_ORIGIN,
+            gateway_env_file=gateway_environment,
+            artifact_bucket=artifact_bucket,
+        )
+    assert len(observed_hosts) == request_count
+
+
+def test_full_arena_guard_release_fails_before_http_on_invalid_clone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr(
+        full_host,
+        "_run",
+        lambda *args, **kwargs: pytest.fail("guard HTTP helper must not run"),
+    )
+
+    with pytest.raises(
+        full_host.FullParityError,
+        match="clone gateway environment is unavailable",
+    ):
+        full_host._release_full_parity_arena_restart_guard(
+            region="us-east-1",
+            candidate_sha=CANDIDATE_COMMIT,
+            run_id=RUN_ID,
+            supabase_origin=CLONE_ORIGIN,
+            gateway_env_file=tmp_path / "gateway.env",
+            artifact_bucket="parity-artifacts",
         )
 
 

@@ -1646,6 +1646,54 @@ def _validate_arena_rebenchmark_evidence(
     return dict(value)
 
 
+def _release_full_parity_arena_restart_guard(
+    *,
+    region: str,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    gateway_env_file: Path,
+    artifact_bucket: str,
+) -> None:
+    """Release the clone guard left by the successful bare gateway restart."""
+
+    _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
+    )
+    result = _run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "lab_arena_restart_claim_guard.py"),
+            "release",
+            "--environment-file",
+            str(gateway_env_file),
+            "--candidate",
+            candidate_sha,
+            "--invocation",
+            run_id,
+        ],
+        timeout=60,
+        env=_clone_child_environment(region=region),
+    )
+    released = _last_json_document(
+        _require(result, stage="clone Arena restart guard release"),
+        field="clone Arena restart guard release",
+    )
+    if (
+        released.get("schema_version")
+        != "leadpoet.lab_arena.restart_guard_state.v1"
+        or released.get("guard_present") is not False
+        or released.get("guard_active") is not False
+        or not isinstance(released.get("operator_paused"), bool)
+        or released.get("paused") is not released.get("operator_paused")
+    ):
+        raise FullParityError("clone Arena restart guard release is incomplete")
+
+
 def _run_arena_rebenchmark_path(
     *,
     region: str,
@@ -3561,6 +3609,7 @@ def run_full(
                 "GATEWAY_RESTART_TIMING_DIR": str(gateway_restart_timing_dir),
                 "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(work / "docker-operation.lock"),
                 "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "full-parity",
+                "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID": run_id,
                 "GATEWAY_DEPLOY_COMMIT": candidate_sha,
                 "GATEWAY_PYTHON_BIN": sys.executable,
                 "GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET,
@@ -3613,6 +3662,14 @@ def run_full(
             artifact_bucket=artifact_bucket,
         )
         failure_stage = "arena-rebenchmark"
+        _release_full_parity_arena_restart_guard(
+            region=region,
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+            gateway_env_file=gateway_env_file,
+            artifact_bucket=artifact_bucket,
+        )
         arena_rebenchmark = _run_arena_rebenchmark_path(
             region=region,
             candidate_sha=candidate_sha,

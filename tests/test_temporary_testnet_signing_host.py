@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -711,6 +712,310 @@ def test_native_ssm_stage_rechecks_owner_before_command():
     assert ssm.sent is None
 
 
+class _RestartNative:
+    CHAIN_ENDPOINT = "wss://test.finney.opentensor.ai:443"
+
+    def __init__(self, tmp_path, *, bad_config=False, stale_name=None, fail_ready=False):
+        self.root = tmp_path
+        (tmp_path / "gateway.env").write_text("SAFE=value\n")
+        (tmp_path / "gateway.env").chmod(0o600)
+        self.bad_config = bad_config
+        self.stale_name = stale_name
+        self.fail_ready = fail_ready
+        self.live = {10, 11, 12, 13, 14}
+        self.persisted = []
+        names = [
+            "gateway_egress_relay", "gateway_inter_enclave_relay",
+            "validator_chain_relay", "gateway_application", "validator_application",
+        ]
+        self.processes = [
+            {"name": name, "pid": 10 + index, "start_ticks": index, "cmdline_hash": "x"}
+            for index, name in enumerate(names)
+        ]
+
+    def load_config(self, _path):
+        return {
+            "run_id": "wrong" if self.bad_config else RUN_ID,
+            "candidate_sha": temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA,
+            "expected_instance_id": INSTANCE_ID,
+            "runtime_root": str(self.root),
+            "repo_root": str(ROOT),
+            "python_bin": sys.executable,
+            "gateway": {
+                "eif_root": "/task/eifs", "config_dir": "/task/config",
+                "release_manifest": "/task/release.json",
+            },
+        }
+
+    def verify_host_authority(self, _config):
+        return {"instance_id": INSTANCE_ID}
+
+    def validate_static_inputs(self, _config):
+        return {"candidate_sha": temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA}
+
+    def _load_process_state(self, _config):
+        return {"processes": self.processes}
+
+    def _same_process(self, item):
+        return item["pid"] in self.live and item["name"] != self.stale_name
+
+    def _stop_owned_processes(self, items):
+        for item in items:
+            self.live.discard(item["pid"])
+
+    def _gateway_runtime_overrides(self, _config):
+        return {"ALLOWED_NETUIDS": "401"}
+
+    def _private_regular_file(self, path, _field):
+        assert path == self.root / "gateway.env"
+
+    def _runtime_environment(self, _path, *, overrides, **_kwargs):
+        return dict(overrides)
+
+    def _process_identity(self, pid, *, name):
+        self.live.add(pid)
+        return {"name": name, "pid": pid, "start_ticks": 99, "cmdline_hash": "new"}
+
+    def _wait_gateway(self, config, _runner):
+        if self.fail_ready:
+            raise RuntimeError("not ready secret-canary")
+        return {"status": "ready", "commit_sha": config["candidate_sha"]}
+
+    def NativeRunner(self, config):
+        owner = self
+
+        class Runner:
+            processes = []
+
+            def _log_path(self, name):
+                return owner.root / f"{name}.log"
+
+            def persist(self):
+                owner.persisted.append([dict(item) for item in self.processes])
+                owner.processes = [dict(item) for item in self.processes]
+
+        return Runner()
+
+
+def _restart_enclaves():
+    return [
+        {"EnclaveCID": 16, "EnclaveID": "enc-16", "EnclaveName": "gateway-a", "State": "RUNNING"},
+        {"EnclaveCID": 17, "EnclaveID": "enc-17", "EnclaveName": "gateway-b", "State": "RUNNING"},
+        {"EnclaveCID": 18, "EnclaveID": "enc-18", "EnclaveName": "leadpoet-testnet401-validator", "State": "RUNNING"},
+    ]
+
+
+def test_fixed_gateway_restart_preserves_other_processes_enclaves_and_result(tmp_path, monkeypatch):
+    native = _RestartNative(tmp_path)
+    proc_root = tmp_path / "proc"
+    (proc_root / "222").mkdir(parents=True)
+
+    class Process:
+        pid = 222
+
+        def poll(self):
+            return None
+
+    captured = {}
+
+    def popen(_argv, **kwargs):
+        captured["env"] = kwargs["env"]
+        (proc_root / "222" / "environ").write_bytes(
+            b"BT_SUBTENSOR_NETWORK=test\0BT_SUBTENSOR_CHAIN_ENDPOINT="
+            + native.CHAIN_ENDPOINT.encode() + b"\0"
+        )
+        return Process()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps(_restart_enclaves()), ""),
+    )
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    result = temporary_host._gateway_network_restart_host(
+        repository=str(ROOT), config_path=str(tmp_path / "config.json"),
+        expected_run_id=RUN_ID,
+        expected_candidate_sha=temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA,
+        expected_instance_id=INSTANCE_ID, native_module=native, proc_root=str(proc_root),
+    )
+    assert result["status"] == "ready"
+    assert result["old_gateway_pid"] == 13
+    assert result["new_gateway_pid"] == 222
+    assert result["runtime_result_mutation_performed"] is False
+    assert set(captured["env"]) >= {
+        "BT_SUBTENSOR_NETWORK", "BT_SUBTENSOR_CHAIN_ENDPOINT",
+    }
+    assert native.persisted[-1] == [
+        item for item in native.persisted[-1]
+        if item["name"] != "gateway_application"
+    ] + [native.persisted[-1][-1]]
+    assert {item["name"] for item in native.persisted[-1]} == {
+        "gateway_egress_relay", "gateway_inter_enclave_relay",
+        "validator_chain_relay", "validator_application", "gateway_application",
+    }
+
+
+@pytest.mark.parametrize("failure", ("config", "owner", "pid"))
+def test_fixed_gateway_restart_refuses_wrong_authority_before_stop(tmp_path, monkeypatch, failure):
+    native = _RestartNative(tmp_path, bad_config=failure == "config", stale_name="validator_application" if failure == "pid" else None)
+    if failure == "owner":
+        native.verify_host_authority = lambda _config: (_ for _ in ()).throw(RuntimeError("owner differs"))
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    with pytest.raises(RuntimeError):
+        temporary_host._gateway_network_restart_host(
+            repository=str(ROOT), config_path=str(tmp_path / "config.json"),
+            expected_run_id=RUN_ID,
+            expected_candidate_sha=temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA,
+            expected_instance_id=INSTANCE_ID, native_module=native,
+        )
+    assert native.live == {10, 11, 12, 13, 14}
+
+
+def test_gateway_restart_program_is_fixed_redacted_and_retryable(tmp_path):
+    program = temporary_host.gateway_network_restart_program(
+        run_id=RUN_ID,
+        candidate_sha=temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA,
+        instance_id=INSTANCE_ID,
+    )
+    compile(program, "<gateway-network-restart>", "exec")
+    assert "BT_SUBTENSOR_NETWORK" in program
+    assert "BT_SUBTENSOR_CHAIN_ENDPOINT" in program
+    assert "secret-canary" not in program
+    assert "runner.processes = preserved" in program
+    assert "_stop_owned_processes([new_record])" in program
+
+    with pytest.raises(temporary_host.TemporaryHostError, match="frozen candidate"):
+        temporary_host.gateway_network_restart_program(
+            run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID,
+        )
+
+
+@pytest.mark.parametrize("failure", ("env", "stop"))
+def test_gateway_restart_pre_stop_failure_keeps_original_record(tmp_path, monkeypatch, failure):
+    native = _RestartNative(tmp_path)
+    original = [dict(item) for item in native.processes]
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps(_restart_enclaves()), ""),
+    )
+    if failure == "env":
+        def invalid_env(*_args, **_kwargs):
+            raise RuntimeError("invalid private environment")
+        native._runtime_environment = invalid_env
+    else:
+        native._stop_owned_processes = lambda _items: None
+    with pytest.raises(RuntimeError):
+        temporary_host._gateway_network_restart_host(
+            repository=str(ROOT), config_path=str(tmp_path / "config.json"),
+            expected_run_id=RUN_ID,
+            expected_candidate_sha=temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA,
+            expected_instance_id=INSTANCE_ID, native_module=native,
+        )
+    assert native.processes == original
+    assert not native.persisted
+    assert native.live == {10, 11, 12, 13, 14}
+
+
+def test_controller_restart_is_fixed_to_owned_b056_host():
+    candidate = temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA
+    ec2 = _EC2()
+    temporary_host.create_host(
+        ec2=ec2, ssm=_SSM(), account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION, run_id=RUN_ID, candidate_sha=candidate,
+        ttl_hours=6, now=NOW,
+    )
+    receipt = {
+        "schema_version": temporary_host.GATEWAY_NETWORK_RESTART_SCHEMA_VERSION,
+        "status": "ready", "run_id": RUN_ID, "candidate_sha": candidate,
+        "instance_id": INSTANCE_ID, "runtime_result_mutation_performed": False,
+        "old_gateway_pid": 13, "new_gateway_pid": 222,
+        "preserved_process_names": [
+            "gateway_egress_relay", "gateway_inter_enclave_relay",
+            "validator_application", "validator_chain_relay",
+        ],
+        "enclave_cids_unchanged": [16, 17, 18],
+        "network_alias_names": [
+            "BT_SUBTENSOR_CHAIN_ENDPOINT", "BT_SUBTENSOR_NETWORK",
+        ],
+        "gateway_readiness": {"status": "ready", "commit_sha": candidate},
+    }
+    ssm = _StageSSM(json.dumps(receipt) + "\n")
+    result = temporary_host.run_gateway_network_restart(
+        ec2=ec2, ssm=ssm, account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION, run_id=RUN_ID, candidate_sha=candidate,
+        instance_id=INSTANCE_ID, now=NOW,
+    )
+    command = ssm.commands[0]["Parameters"]["commands"][0]
+    assert result["candidate_sha"] == candidate
+    assert result["ssm_command_id"] == "12345678-1234-1234-1234-123456789abc"
+    assert "gateway_network_restart_host" in command
+    assert "gateway.main" in command
+    assert "terminate-enclave" not in command
+    assert "set_weights" not in command
+
+    poisoned = dict(receipt, secret="secret-canary")
+    with pytest.raises(temporary_host.TemporaryHostError, match="receipt differs") as error:
+        temporary_host.run_gateway_network_restart(
+            ec2=ec2, ssm=_StageSSM(json.dumps(poisoned) + "\n"),
+            account_id=temporary_host.ACCOUNT_ID, region=temporary_host.REGION,
+            run_id=RUN_ID, candidate_sha=candidate, instance_id=INSTANCE_ID,
+            now=NOW,
+        )
+    assert "secret-canary" not in str(error.value)
+
+
+def test_failed_gateway_readiness_leaves_exact_retry_state(tmp_path, monkeypatch):
+    native = _RestartNative(tmp_path, fail_ready=True)
+    proc_root = tmp_path / "proc"
+    (proc_root / "222").mkdir(parents=True)
+
+    class Process:
+        pid = 222
+
+        def poll(self):
+            return None
+
+    def popen(_argv, **kwargs):
+        values = {
+            "BT_SUBTENSOR_NETWORK=" + kwargs["env"]["BT_SUBTENSOR_NETWORK"],
+            "BT_SUBTENSOR_CHAIN_ENDPOINT="
+            + kwargs["env"]["BT_SUBTENSOR_CHAIN_ENDPOINT"],
+        }
+        (proc_root / "222" / "environ").write_bytes(
+            b"\0".join(value.encode() for value in values) + b"\0"
+        )
+        return Process()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps(_restart_enclaves()), ""),
+    )
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    call = dict(
+        repository=str(ROOT), config_path=str(tmp_path / "config.json"),
+        expected_run_id=RUN_ID,
+        expected_candidate_sha=temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA,
+        expected_instance_id=INSTANCE_ID, native_module=native, proc_root=str(proc_root),
+    )
+    with pytest.raises(RuntimeError, match="not ready"):
+        temporary_host._gateway_network_restart_host(**call)
+    assert {item["name"] for item in native.processes} == {
+        "gateway_egress_relay", "gateway_inter_enclave_relay",
+        "validator_chain_relay", "validator_application",
+    }
+    assert native.live == {10, 11, 12, 14}
+
+    native.fail_ready = False
+    result = temporary_host._gateway_network_restart_host(**call)
+    assert result["status"] == "ready"
+    assert result["old_gateway_pid"] is None
+    assert native.live == {10, 11, 12, 14, 222}
+
+
 def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     program = temporary_host.staging_diagnostic_program(
         run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID,
@@ -1228,6 +1533,7 @@ def test_temporary_workflow_reuses_oidc_route_and_scheduled_expiry_cleanup():
     assert "- testnet401-create" in workflow
     assert "- testnet401-launch" in workflow
     assert "- testnet401-status" in workflow
+    assert "- testnet401-restart-gateway-network" in workflow
     assert "- testnet401-cleanup" in workflow
     assert "inputs.operation != 'production-parity'" in workflow
     assert "format('testnet401-{0}'," in workflow
@@ -1240,6 +1546,8 @@ def test_temporary_workflow_reuses_oidc_route_and_scheduled_expiry_cleanup():
     assert "role-duration-seconds: 21600" in workflow
     assert "ssm-source-bootstrap" in workflow
     assert "ssm-native-stage" in workflow
+    assert "ssm-restart-testnet401-gateway-network" in workflow
+    assert temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA in workflow
     assert "for stage in preflight launch" in workflow
     assert "--stage status" in workflow
     assert "--stage cleanup" in workflow

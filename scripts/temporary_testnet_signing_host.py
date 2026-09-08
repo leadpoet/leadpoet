@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -62,6 +63,12 @@ NATIVE_RECEIPT_SCHEMA_VERSION = (
     "leadpoet.temporary_testnet401_native_bootstrap_receipt.v1"
 )
 NATIVE_STAGES = frozenset({"preflight", "launch", "status", "cleanup"})
+GATEWAY_NETWORK_RESTART_CANDIDATE_SHA = (
+    "b056b2989f019ddc373a9a8fa1ba7bb0c94feb22"
+)
+GATEWAY_NETWORK_RESTART_SCHEMA_VERSION = (
+    "leadpoet.temporary_testnet401_gateway_network_restart.v1"
+)
 NATIVE_STAGE_TIMEOUTS = {
     "preflight": 900,
     "launch": 7200,
@@ -1065,6 +1072,271 @@ def public_release_export_program(
         f"Path({channel_output!r}).write_text(canonical_json(a)+'\\n',encoding='ascii'); "
         f"Path({lineage_output!r}).write_text(canonical_json(b)+'\\n',encoding='ascii')"
     )
+
+
+def _gateway_network_restart_host(
+    *, repository, config_path, expected_run_id, expected_candidate_sha,
+    expected_instance_id, native_module=None, proc_root="/proc",
+):
+    """Replace only the exact task gateway app with the corrected SDK network."""
+
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+    import signal as _signal
+    import subprocess as _subprocess
+    import sys as _sys
+    import time as _time
+
+    if native_module is None:
+        _sys.path.insert(0, repository)
+        from scripts import bootstrap_temporary_testnet_weights_host as native_module
+    n = native_module
+    config = n.load_config(_Path(config_path))
+    if (
+        config["run_id"] != expected_run_id
+        or config["candidate_sha"] != expected_candidate_sha
+        or config["expected_instance_id"] != expected_instance_id
+        or expected_candidate_sha != GATEWAY_NETWORK_RESTART_CANDIDATE_SHA
+    ):
+        raise RuntimeError("gateway restart identity differs")
+    n.verify_host_authority(config)
+    n.validate_static_inputs(config)
+    root = _Path(config["runtime_root"])
+    lock_fd = _os.open(
+        root / "gateway-network-restart.lock",
+        _os.O_CREAT | _os.O_RDWR | getattr(_os, "O_NOFOLLOW", 0), 0o600,
+    )
+    try:
+        import fcntl as _fcntl
+        _fcntl.flock(lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        state = n._load_process_state(config)
+        processes = [dict(item) for item in state["processes"]]
+        names = [item.get("name") for item in processes]
+        preserved_names = {
+            "gateway_egress_relay", "gateway_inter_enclave_relay",
+            "validator_chain_relay", "validator_application",
+        }
+        allowed_names = preserved_names | {"gateway_application"}
+        observed_names = set(names)
+        if (
+            len(names) != len(observed_names)
+            or (observed_names != preserved_names and observed_names != allowed_names)
+        ):
+            raise RuntimeError("gateway restart process set differs")
+        preserved = [item for item in processes if item["name"] in preserved_names]
+        if {item["name"] for item in preserved} != preserved_names:
+            raise RuntimeError("gateway restart preserved process set differs")
+        if any(not n._same_process(item) for item in preserved):
+            raise RuntimeError("gateway restart process identity differs")
+        gateway_rows = [item for item in processes if item["name"] == "gateway_application"]
+        if gateway_rows:
+            gateway_pid = int(gateway_rows[0]["pid"])
+            if n._same_process(gateway_rows[0]):
+                if _os.getpgid(gateway_pid) != gateway_pid:
+                    raise RuntimeError("gateway restart process group differs")
+            else:
+                try:
+                    _os.getpgid(gateway_pid)
+                except ProcessLookupError:
+                    gateway_rows = []
+                else:
+                    raise RuntimeError("gateway restart process identity differs")
+
+        def _enclaves():
+            completed = _subprocess.run(
+                ["nitro-cli", "describe-enclaves"], check=True,
+                capture_output=True, text=True,
+            )
+            rows = _json.loads(completed.stdout)
+            selected = sorted(
+                (dict(item) for item in rows if int(item.get("EnclaveCID") or -1) in {16, 17, 18}),
+                key=lambda item: int(item["EnclaveCID"]),
+            )
+            if (
+                len(rows) != 3
+                or len(selected) != 3
+                or [int(item["EnclaveCID"]) for item in selected] != [16, 17, 18]
+                or any(item.get("State") != "RUNNING" for item in selected)
+                or selected[2].get("EnclaveName") != "leadpoet-testnet401-validator"
+            ):
+                raise RuntimeError("gateway restart enclave identity differs")
+            return selected
+
+        enclaves_before = _enclaves()
+        gateway = config["gateway"]
+        gateway_env_path = root / "gateway.env"
+        n._private_regular_file(gateway_env_path, "scrubbed gateway environment")
+        env = n._runtime_environment(
+            gateway_env_path,
+            overrides={
+                **n._gateway_runtime_overrides(config),
+                "GATEWAY_ENV_FILE": str(gateway_env_path),
+                "GATEWAY_TEE_EIF_ROOT": gateway["eif_root"],
+                "GATEWAY_V2_CONFIG_DIR": gateway["config_dir"],
+                "GATEWAY_V2_RELEASE_MANIFEST": gateway["release_manifest"],
+                "BT_SUBTENSOR_NETWORK": "test",
+                "BT_SUBTENSOR_CHAIN_ENDPOINT": n.CHAIN_ENDPOINT,
+            },
+            repo_root=_Path(config["repo_root"]),
+            candidate_sha=config["candidate_sha"],
+        )
+        runner = n.NativeRunner(config)
+        runner.processes = preserved
+        if gateway_rows:
+            n._stop_owned_processes(gateway_rows)
+            if n._same_process(gateway_rows[0]):
+                raise RuntimeError("gateway restart old process remained live")
+        runner.persist()
+        if any(not n._same_process(item) for item in preserved):
+            raise RuntimeError("gateway restart changed a preserved process")
+        process = None
+        new_record = None
+        try:
+            log_path = runner._log_path("gateway_application")
+            with log_path.open("ab") as handle:
+                process = _subprocess.Popen(
+                    [config["python_bin"], "-u", "-m", "gateway.main"],
+                    cwd=config["repo_root"], env=env, stdout=handle,
+                    stderr=_subprocess.STDOUT, stdin=_subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            _time.sleep(2)
+            if process.poll() is not None or _os.getpgid(process.pid) != process.pid:
+                raise RuntimeError("gateway restart replacement exited")
+            new_record = n._process_identity(process.pid, name="gateway_application")
+            runner.processes = preserved + [new_record]
+            runner.persist()
+            raw_environment = (_Path(proc_root) / str(process.pid) / "environ").read_bytes().split(b"\0")
+            expected_aliases = {
+                b"BT_SUBTENSOR_NETWORK=test",
+                ("BT_SUBTENSOR_CHAIN_ENDPOINT=" + n.CHAIN_ENDPOINT).encode("ascii"),
+            }
+            if not expected_aliases.issubset(set(raw_environment)):
+                raise RuntimeError("gateway restart network aliases differ")
+            readiness = n._wait_gateway(config, runner)
+            if not n._same_process(new_record):
+                raise RuntimeError("gateway restart replacement is not live")
+            if any(not n._same_process(item) for item in preserved):
+                raise RuntimeError("gateway restart changed a preserved process")
+            if _enclaves() != enclaves_before:
+                raise RuntimeError("gateway restart changed enclave identity")
+        except Exception:
+            if new_record is not None:
+                n._stop_owned_processes([new_record])
+                if n._same_process(new_record):
+                    runner.processes = preserved + [new_record]
+                    runner.persist()
+                    raise RuntimeError("gateway restart replacement remained live")
+            elif process is not None and process.poll() is None:
+                try:
+                    if _os.getpgid(process.pid) == process.pid:
+                        _os.killpg(process.pid, _signal.SIGTERM)
+                        process.wait(timeout=20)
+                except Exception:
+                    try:
+                        if _os.getpgid(process.pid) == process.pid:
+                            _os.killpg(process.pid, _signal.SIGKILL)
+                            process.wait(timeout=20)
+                    except Exception:
+                        pass
+            runner.processes = preserved
+            runner.persist()
+            raise
+        return {
+            "schema_version": GATEWAY_NETWORK_RESTART_SCHEMA_VERSION,
+            "status": "ready",
+            "run_id": config["run_id"],
+            "candidate_sha": config["candidate_sha"],
+            "instance_id": config["expected_instance_id"],
+            "old_gateway_pid": int(gateway_rows[0]["pid"]) if gateway_rows else None,
+            "new_gateway_pid": int(new_record["pid"]),
+            "preserved_process_names": sorted(preserved_names),
+            "enclave_cids_unchanged": [16, 17, 18],
+            "network_alias_names": ["BT_SUBTENSOR_CHAIN_ENDPOINT", "BT_SUBTENSOR_NETWORK"],
+            "runtime_result_mutation_performed": False,
+            "gateway_readiness": readiness,
+        }
+    finally:
+        _os.close(lock_fd)
+
+
+def gateway_network_restart_program(
+    *, run_id: str, candidate_sha: str, instance_id: str,
+) -> str:
+    if candidate_sha != GATEWAY_NETWORK_RESTART_CANDIDATE_SHA:
+        raise TemporaryHostError("gateway restart is not for the frozen candidate")
+    source = inspect.getsource(_gateway_network_restart_host)
+    return (
+        "import json\n"
+        f"GATEWAY_NETWORK_RESTART_CANDIDATE_SHA={GATEWAY_NETWORK_RESTART_CANDIDATE_SHA!r}\n"
+        f"GATEWAY_NETWORK_RESTART_SCHEMA_VERSION={GATEWAY_NETWORK_RESTART_SCHEMA_VERSION!r}\n"
+        + source
+        + "\nprint(json.dumps(_gateway_network_restart_host("
+        f"repository={SOURCE_REPOSITORY!r},config_path={NATIVE_CONFIG!r},"
+        f"expected_run_id={run_id!r},expected_candidate_sha={candidate_sha!r},"
+        f"expected_instance_id={instance_id!r}),sort_keys=True))\n"
+    )
+
+
+def run_gateway_network_restart(
+    *, ec2: Any, ssm: Any, account_id: str, region: str, run_id: str,
+    candidate_sha: str, instance_id: str, now: datetime,
+) -> dict[str, Any]:
+    if account_id != ACCOUNT_ID or region != REGION:
+        raise TemporaryHostError("gateway restart AWS scope differs")
+    _require_live_host(
+        ec2, instance_id=instance_id, run_id=run_id,
+        candidate_sha=candidate_sha, now=now,
+    )
+    program = gateway_network_restart_program(
+        run_id=run_id, candidate_sha=candidate_sha, instance_id=instance_id,
+    )
+    command_id, stdout = _send_fixed_ssm(
+        ssm, instance_id=instance_id,
+        command=(
+            "set -Eeuo pipefail\nexec "
+            f"{shlex.quote(SOURCE_VENV + '/bin/python3')} -I -c "
+            f"{shlex.quote(program)}"
+        ),
+        timeout_seconds=900,
+    )
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise TemporaryHostError("gateway restart receipt is invalid") from exc
+    expected_fields = {
+        "schema_version", "status", "run_id", "candidate_sha", "instance_id",
+        "old_gateway_pid", "new_gateway_pid", "preserved_process_names",
+        "enclave_cids_unchanged", "network_alias_names",
+        "runtime_result_mutation_performed", "gateway_readiness",
+    }
+    readiness = result.get("gateway_readiness") if isinstance(result, Mapping) else None
+    if (
+        not isinstance(result, Mapping)
+        or set(result) != expected_fields
+        or result.get("schema_version") != GATEWAY_NETWORK_RESTART_SCHEMA_VERSION
+        or result.get("status") != "ready"
+        or result.get("run_id") != run_id
+        or result.get("candidate_sha") != candidate_sha
+        or result.get("instance_id") != instance_id
+        or result.get("runtime_result_mutation_performed") is not False
+        or result.get("preserved_process_names") != [
+            "gateway_egress_relay", "gateway_inter_enclave_relay",
+            "validator_application", "validator_chain_relay",
+        ]
+        or result.get("enclave_cids_unchanged") != [16, 17, 18]
+        or result.get("network_alias_names") != [
+            "BT_SUBTENSOR_CHAIN_ENDPOINT", "BT_SUBTENSOR_NETWORK",
+        ]
+        or not isinstance(readiness, Mapping)
+        or readiness.get("status") != "ready"
+        or readiness.get("commit_sha") != candidate_sha
+    ):
+        raise TemporaryHostError("gateway restart receipt differs")
+    return {key: result[key] for key in sorted(expected_fields)} | {
+        "ssm_command_id": command_id
+    }
 
 
 def run_native_stage(
@@ -2202,6 +2474,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     native_stage.add_argument("--instance-id", required=True)
     native_stage.add_argument("--stage", choices=sorted(NATIVE_STAGES), required=True)
     native_stage.add_argument("--state", type=Path, required=True)
+    restart_gateway = commands.add_parser("ssm-restart-testnet401-gateway-network")
+    restart_gateway.add_argument("--run-id", required=True)
+    restart_gateway.add_argument("--candidate-sha", required=True)
+    restart_gateway.add_argument("--instance-id", required=True)
+    restart_gateway.add_argument("--state", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         session = boto3.session.Session(region_name=args.region)
@@ -2295,6 +2572,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_sha=candidate_sha,
                 instance_id=args.instance_id,
                 stage=args.stage,
+                now=now,
+            )
+            _write(args.state, result)
+        elif args.command == "ssm-restart-testnet401-gateway-network":
+            result = run_gateway_network_restart(
+                ec2=ec2,
+                ssm=session.client("ssm"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+                instance_id=args.instance_id,
                 now=now,
             )
             _write(args.state, result)

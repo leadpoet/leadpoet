@@ -360,6 +360,11 @@ def test_validator_runtime_is_pinned_to_cid18_and_loopback_gateway():
 def test_gateway_runtime_is_pinned_to_testnet401_validator():
     assert bootstrap.SAFE_GATEWAY_ENV["ALLOWED_NETUIDS"] == "401"
     assert bootstrap.SAFE_GATEWAY_ENV["BITTENSOR_NETWORK"] == "test"
+    assert bootstrap.SAFE_GATEWAY_ENV["BT_SUBTENSOR_NETWORK"] == "test"
+    assert (
+        bootstrap.SAFE_GATEWAY_ENV["BT_SUBTENSOR_CHAIN_ENDPOINT"]
+        == bootstrap.CHAIN_ENDPOINT
+    )
     assert bootstrap.SAFE_GATEWAY_ENV["EXPECTED_CHAIN"] == bootstrap.CHAIN_ENDPOINT
     assert (
         bootstrap.SAFE_GATEWAY_ENV["PRIMARY_VALIDATOR_HOTKEYS"]

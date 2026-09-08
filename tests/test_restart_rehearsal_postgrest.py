@@ -132,9 +132,11 @@ def test_postgrest_boundary_maps_arena_credentials_to_database_role(
 def test_migration_backed_arena_rpc_executes_with_selected_role() -> None:
     class Database:
         statements: list[str] = []
+        options: list[dict[str, object]] = []
 
-        def psql(self, sql: str, **_kwargs):
+        def psql(self, sql: str, **options):
             self.statements.append(sql)
+            self.options.append(options)
             return SimpleNamespace(returncode=0, stdout="{}\n")
 
     database = Database()
@@ -147,6 +149,11 @@ def test_migration_backed_arena_rpc_executes_with_selected_role() -> None:
         database_role="lab_arena_service",
     ) == {}
     assert database.statements[-1].startswith("SET ROLE lab_arena_service;\n")
+    assert database.options[-1] == {
+        "check": False,
+        "quiet": True,
+        "tuples_only": True,
+    }
     assert rpc.call(
         "lab_arena_restart_guard_state_v1",
         {},

@@ -719,6 +719,7 @@ class DisposablePostgres:
         *,
         database: str | None = None,
         check: bool = True,
+        quiet: bool = False,
         tuples_only: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         argv = [
@@ -737,6 +738,8 @@ class DisposablePostgres:
         ]
         if tuples_only:
             argv.extend(["--tuples-only", "--no-align"])
+        if quiet:
+            argv.append("--quiet")
         return self._as_postgres(argv, input_text=sql, check=check)
 
     def apply_migration(self, path: Path) -> None:

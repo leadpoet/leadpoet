@@ -242,7 +242,12 @@ class MigrationBackedLabArenaRPC:
             f"WITH input AS (SELECT $leadpoet${encoded}$leadpoet$::jsonb AS payload) "
             f"SELECT public.{name}({arguments})::text FROM input;\n"
         )
-        result = self.database.psql(sql, tuples_only=True, check=False)
+        result = self.database.psql(
+            sql,
+            tuples_only=True,
+            quiet=True,
+            check=False,
+        )
         if result.returncode != 0:
             raise ValueError("migration-backed Lab Arena restart RPC rejected")
         try:

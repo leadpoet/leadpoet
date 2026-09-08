@@ -91,6 +91,22 @@ def _configured_cutover_service_authority_enabled() -> bool:
     )
 
 
+def _fresh_testnet401_route_requested(
+    *,
+    network: str | None = None,
+    netuid: int | str | None = None,
+) -> bool:
+    """Return whether the caller explicitly selected the temporary test route."""
+
+    resolved_network = str(
+        network if network is not None else os.getenv("BITTENSOR_NETWORK") or ""
+    ).strip().lower()
+    resolved_netuid = str(
+        netuid if netuid is not None else os.getenv("BITTENSOR_NETUID") or ""
+    ).strip()
+    return resolved_network == "test" and resolved_netuid == str(_TESTNET401_NETUID)
+
+
 def _cutover_authority_cache_scope(
     *,
     network: str | None = None,
@@ -135,13 +151,21 @@ def _read_cutover_state_from_db_sync(
         if supabase_url and service_role_key:
             from gateway.db.client import get_write_client
 
-            client = get_write_client()
-            configured_cutover = _load_cutover()
-            fresh_testnet401_authority = (
-                configured_cutover.network_genesis_hash
-                == _TESTNET401_GENESIS_HASH
-                and configured_cutover.netuid == _TESTNET401_NETUID
+            fresh_testnet401_authority = _fresh_testnet401_route_requested(
+                network=network,
+                netuid=netuid,
             )
+            if fresh_testnet401_authority:
+                configured_cutover = _load_cutover()
+                if (
+                    configured_cutover.network_genesis_hash
+                    != _TESTNET401_GENESIS_HASH
+                    or configured_cutover.netuid != _TESTNET401_NETUID
+                ):
+                    raise SubnetEpochError(
+                        "fresh-network cutover manifest does not match testnet401"
+                    )
+            client = get_write_client()
         elif production_authority:
             # Validators and public auditors must not receive the service-role
             # secret. The cutover singleton contains no secrets and migration

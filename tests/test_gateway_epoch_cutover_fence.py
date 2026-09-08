@@ -159,7 +159,15 @@ def test_configured_non_finney_runtime_reads_keyed_fresh_authority(monkeypatch):
     assert ("eq", "netuid", cutover.netuid) in observed
 
 
-def test_configured_service_with_network_env_unset_keeps_singleton_path(monkeypatch):
+@pytest.mark.parametrize(
+    ("network", "netuid"),
+    [(None, None), ("finney", "71")],
+)
+def test_configured_service_keeps_singleton_path_without_manifest(
+    monkeypatch,
+    network,
+    netuid,
+):
     from gateway.db import client as db_client
     from gateway.utils import epoch
 
@@ -189,9 +197,17 @@ def test_configured_service_with_network_env_unset_keeps_singleton_path(monkeypa
 
     monkeypatch.setenv("SUPABASE_URL", "https://test")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role")
-    monkeypatch.delenv("BITTENSOR_NETWORK", raising=False)
-    monkeypatch.delenv("BITTENSOR_NETUID", raising=False)
-    monkeypatch.setattr(epoch, "_load_cutover", lambda: cutover)
+    if network is None:
+        monkeypatch.delenv("BITTENSOR_NETWORK", raising=False)
+        monkeypatch.delenv("BITTENSOR_NETUID", raising=False)
+    else:
+        monkeypatch.setenv("BITTENSOR_NETWORK", network)
+        monkeypatch.setenv("BITTENSOR_NETUID", netuid)
+
+    def manifest_must_not_load():
+        raise AssertionError("singleton service reads must not load a manifest")
+
+    monkeypatch.setattr(epoch, "_load_cutover", manifest_must_not_load)
     monkeypatch.setattr(db_client, "get_write_client", Query)
 
     assert epoch._read_cutover_state_from_db_sync() == _active_state(cutover)
@@ -200,6 +216,30 @@ def test_configured_service_with_network_env_unset_keeps_singleton_path(monkeypa
         "research_lab_stateful_subnet_epoch_cutover_state_v1",
     )
     assert ("eq", "singleton", True) in observed
+
+
+def test_configured_test401_service_rejects_mismatched_manifest(monkeypatch):
+    from gateway.db import client as db_client
+    from gateway.utils import epoch
+
+    monkeypatch.setenv("SUPABASE_URL", "https://test")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role")
+    monkeypatch.setenv("BITTENSOR_NETWORK", "test")
+    monkeypatch.setenv("BITTENSOR_NETUID", "401")
+    monkeypatch.setattr(epoch, "_load_cutover", _cutover)
+
+    def client_must_not_query():
+        raise AssertionError("mismatched manifest must fail before a DB query")
+
+    monkeypatch.setattr(db_client, "get_write_client", client_must_not_query)
+
+    with pytest.raises(
+        SubnetEpochError,
+        match="durable epoch namespace state database is unavailable",
+    ) as exc_info:
+        epoch._read_cutover_state_from_db_sync()
+    assert isinstance(exc_info.value.__cause__, SubnetEpochError)
+    assert "does not match testnet401" in str(exc_info.value.__cause__)
 
 
 def test_runtime_lifecycle_requires_active_exact_mapping(monkeypatch):

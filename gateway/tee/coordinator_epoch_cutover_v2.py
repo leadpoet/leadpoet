@@ -40,6 +40,9 @@ CUTOVER_AUTHORITY_SCHEMA_VERSION = (
 CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION = (
     "leadpoet.subnet_epoch_cutover_authority.v2"
 )
+CUTOVER_FRESH_NETWORK_AUTHORITY_SCHEMA_VERSION = (
+    "leadpoet.subnet_epoch_cutover_authority.v3"
+)
 CUTOVER_PURPOSE = "research_lab.subnet_epoch_cutover.v2"
 SNAPSHOT_PURPOSE = "validator.subnet_epoch_snapshot.v2"
 FINALIZATION_PURPOSE = "validator.weights.finalized.v2"
@@ -50,6 +53,14 @@ NATIVE_PREDECESSOR_KIND = "native_v2_finalization"
 HISTORICAL_PREDECESSOR_KIND = (
     "legacy_finalized_chain_migration_v2"
 )
+FRESH_NETWORK_ORIGIN_KIND = "fresh_testnet401_network"
+FINNEY_GENESIS_HASH = (
+    "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+)
+TESTNET_GENESIS_HASH = (
+    "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+)
+TESTNET_NETUID = 401
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _REQUEST_FIELDS = frozenset(
@@ -68,6 +79,14 @@ _BOOTSTRAP_REQUEST_FIELDS = frozenset(
         "first_snapshot",
         "predecessor_kind",
         "predecessor_finalization",
+    }
+)
+_FRESH_NETWORK_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "manifest",
+        "first_snapshot",
+        "origin_kind",
     }
 )
 
@@ -122,6 +141,23 @@ def _classify_parent_graphs(
         by_purpose[finalization_purpose][0],
         by_purpose[finalization_purpose][1],
     )
+
+
+def _fresh_network_snapshot_parent(
+    context: ExecutionContextV2,
+) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+    graphs = list(context.external_receipt_graphs)
+    if len(graphs) != 1 or len(context.parent_receipt_hashes) != 1:
+        raise ValueError("fresh-network cutover requires exactly one parent graph")
+    graph = graphs[0]
+    root = _root_receipt(graph)
+    if (
+        root.get("purpose") != SNAPSHOT_PURPOSE
+        or [str(root.get("receipt_hash") or "")]
+        != list(context.parent_receipt_hashes)
+    ):
+        raise ValueError("fresh-network cutover parent is invalid")
+    return graph, root
 
 
 def _validate_first_snapshot(
@@ -200,7 +236,12 @@ def attest_subnet_epoch_cutover_v2(
         raise ValueError("subnet epoch cutover request fields are invalid")
     request_fields = set(payload)
     historical_bootstrap = request_fields == _BOOTSTRAP_REQUEST_FIELDS
-    if request_fields != _REQUEST_FIELDS and not historical_bootstrap:
+    fresh_network = request_fields == _FRESH_NETWORK_REQUEST_FIELDS
+    if (
+        request_fields != _REQUEST_FIELDS
+        and not historical_bootstrap
+        and not fresh_network
+    ):
         raise ValueError("subnet epoch cutover request fields are invalid")
     if payload.get("schema_version") != CUTOVER_REQUEST_SCHEMA_VERSION:
         raise ValueError("subnet epoch cutover request schema is invalid")
@@ -218,12 +259,38 @@ def attest_subnet_epoch_cutover_v2(
         raise ValueError("subnet epoch cutover manifest is not canonical")
     if int(context.epoch_id) != cutover.first_settlement_epoch_id:
         raise ValueError("subnet epoch cutover execution epoch differs")
+    if fresh_network and (
+        payload.get("origin_kind") != FRESH_NETWORK_ORIGIN_KIND
+        or cutover.network_genesis_hash == FINNEY_GENESIS_HASH
+        or cutover.network_genesis_hash != TESTNET_GENESIS_HASH
+        or cutover.netuid != TESTNET_NETUID
+    ):
+        raise ValueError("fresh-network cutover origin is invalid")
 
     _, snapshot_doc = _validate_first_snapshot(
         payload.get("first_snapshot"),
         cutover=cutover,
     )
     first_snapshot_hash = sha256_json(snapshot_doc)
+    if fresh_network:
+        _snapshot_graph, snapshot_root = _fresh_network_snapshot_parent(context)
+        if (
+            snapshot_root.get("role") != WEIGHT_ROLE
+            or int(snapshot_root.get("epoch_id", -1))
+            != cutover.first_settlement_epoch_id
+            or snapshot_root.get("output_root") != first_snapshot_hash
+        ):
+            raise ValueError("first subnet epoch snapshot receipt is invalid")
+        return {
+            "schema_version": CUTOVER_FRESH_NETWORK_AUTHORITY_SCHEMA_VERSION,
+            "mapping_hash": str(cutover.mapping_hash),
+            "first_epoch_ref": snapshot_doc["epoch_ref"],
+            "first_snapshot_hash": first_snapshot_hash,
+            "first_snapshot_receipt_hash": snapshot_root["receipt_hash"],
+            "origin_kind": FRESH_NETWORK_ORIGIN_KIND,
+            "manifest": cutover.to_dict(),
+        }
+
     finalization_purpose = (
         HISTORICAL_FINALIZATION_PURPOSE
         if historical_bootstrap

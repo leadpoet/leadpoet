@@ -20,6 +20,20 @@ def _cutover() -> SubnetEpochCutover:
     )
 
 
+def _testnet401_cutover() -> SubnetEpochCutover:
+    return SubnetEpochCutover(
+        network_genesis_hash=(
+            "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+        ),
+        netuid=401,
+        cutover_block=36_396,
+        cutover_block_hash="0x" + "22" * 32,
+        first_subnet_epoch_index=23_928,
+        first_settlement_epoch_id=101,
+        last_legacy_epoch_id=100,
+    )
+
+
 def _active_state(cutover: SubnetEpochCutover) -> dict:
     return {
         "lifecycle_state": "stateful_active",
@@ -93,6 +107,99 @@ def test_unconfigured_nonproduction_runtime_has_no_database_fallback(
         match="durable epoch namespace state database is unavailable",
     ):
         epoch._read_cutover_state_from_db_sync()
+
+
+def test_configured_non_finney_runtime_reads_keyed_fresh_authority(monkeypatch):
+    from gateway.db import client as db_client
+    from gateway.utils import epoch
+
+    cutover = _testnet401_cutover()
+    observed = []
+
+    class Result:
+        data = [{
+            "schema_version": "leadpoet.subnet_epoch_cutover_authority.v3",
+            "mapping_hash": cutover.mapping_hash,
+            "last_legacy_epoch_id": cutover.last_legacy_epoch_id,
+            "first_settlement_epoch_id": cutover.first_settlement_epoch_id,
+            "network_genesis_hash": cutover.network_genesis_hash,
+            "netuid": cutover.netuid,
+        }]
+
+    class Query:
+        def table(self, name):
+            observed.append(("table", name))
+            return self
+
+        def select(self, columns):
+            observed.append(("select", columns))
+            return self
+
+        def eq(self, field, value):
+            observed.append(("eq", field, value))
+            return self
+
+        def limit(self, count):
+            observed.append(("limit", count))
+            return self
+
+        def execute(self):
+            return Result()
+
+    monkeypatch.setenv("SUPABASE_URL", "https://test")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role")
+    monkeypatch.setenv("BITTENSOR_NETWORK", "test")
+    monkeypatch.setenv("BITTENSOR_NETUID", str(cutover.netuid))
+    monkeypatch.setattr(epoch, "_load_cutover", lambda: cutover)
+    monkeypatch.setattr(db_client, "get_write_client", Query)
+
+    assert epoch._read_cutover_state_from_db_sync() == _active_state(cutover)
+    assert ("table", "research_lab_stateful_subnet_epoch_cutovers_v1") in observed
+    assert ("eq", "network_genesis_hash", cutover.network_genesis_hash) in observed
+    assert ("eq", "netuid", cutover.netuid) in observed
+
+
+def test_configured_service_with_network_env_unset_keeps_singleton_path(monkeypatch):
+    from gateway.db import client as db_client
+    from gateway.utils import epoch
+
+    cutover = _cutover()
+    observed = []
+
+    class Result:
+        data = [_active_state(cutover)]
+
+    class Query:
+        def table(self, name):
+            observed.append(("table", name))
+            return self
+
+        def select(self, _columns):
+            return self
+
+        def eq(self, field, value):
+            observed.append(("eq", field, value))
+            return self
+
+        def limit(self, _count):
+            return self
+
+        def execute(self):
+            return Result()
+
+    monkeypatch.setenv("SUPABASE_URL", "https://test")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role")
+    monkeypatch.delenv("BITTENSOR_NETWORK", raising=False)
+    monkeypatch.delenv("BITTENSOR_NETUID", raising=False)
+    monkeypatch.setattr(epoch, "_load_cutover", lambda: cutover)
+    monkeypatch.setattr(db_client, "get_write_client", Query)
+
+    assert epoch._read_cutover_state_from_db_sync() == _active_state(cutover)
+    assert observed[0] == (
+        "table",
+        "research_lab_stateful_subnet_epoch_cutover_state_v1",
+    )
+    assert ("eq", "singleton", True) in observed
 
 
 def test_runtime_lifecycle_requires_active_exact_mapping(monkeypatch):

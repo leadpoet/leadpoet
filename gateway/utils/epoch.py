@@ -47,6 +47,11 @@ _CUTOVER_STATE_TABLE = "research_lab_stateful_subnet_epoch_cutover_state_v1"
 _CUTOVER_PUBLIC_STATE_RPC = (
     "research_lab_stateful_subnet_epoch_cutover_public_state_v1"
 )
+_FRESH_NETWORK_CUTOVER_SCHEMA = "leadpoet.subnet_epoch_cutover_authority.v3"
+_TESTNET401_GENESIS_HASH = (
+    "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+)
+_TESTNET401_NETUID = 401
 _CUTOVER_LIFECYCLE_STATES = frozenset(
     {"legacy_open", "cutover_fenced", "stateful_staged", "stateful_active"}
 )
@@ -121,14 +126,23 @@ def _read_cutover_state_from_db_sync(
 
     rows = None
     try:
+        production_authority = _fixed_public_cutover_authority_enabled(
+            network=network,
+            netuid=netuid,
+        )
+        configured_cutover = None
+        fresh_testnet401_authority = False
         if supabase_url and service_role_key:
             from gateway.db.client import get_write_client
 
             client = get_write_client()
-        elif _fixed_public_cutover_authority_enabled(
-            network=network,
-            netuid=netuid,
-        ):
+            configured_cutover = _load_cutover()
+            fresh_testnet401_authority = (
+                configured_cutover.network_genesis_hash
+                == _TESTNET401_GENESIS_HASH
+                and configured_cutover.netuid == _TESTNET401_NETUID
+            )
+        elif production_authority:
             # Validators and public auditors must not receive the service-role
             # secret. The cutover singleton contains no secrets and migration
             # 101 grants anon read-only access under RLS specifically for this
@@ -149,17 +163,32 @@ def _read_cutover_state_from_db_sync(
             )
 
         if supabase_url and service_role_key:
-            result = (
-                client
-                .table(_CUTOVER_STATE_TABLE)
-                .select(
-                    "lifecycle_state,mapping_hash,last_legacy_epoch_id,"
-                    "first_settlement_epoch_id"
+            if not fresh_testnet401_authority:
+                result = (
+                    client
+                    .table(_CUTOVER_STATE_TABLE)
+                    .select(
+                        "lifecycle_state,mapping_hash,last_legacy_epoch_id,"
+                        "first_settlement_epoch_id"
+                    )
+                    .eq("singleton", True)
+                    .limit(2)
+                    .execute()
                 )
-                .eq("singleton", True)
-                .limit(2)
-                .execute()
-            )
+            else:
+                cutover = configured_cutover
+                result = (
+                    client
+                    .table("research_lab_stateful_subnet_epoch_cutovers_v1")
+                    .select(
+                        "schema_version,mapping_hash,last_legacy_epoch_id,"
+                        "first_settlement_epoch_id,network_genesis_hash,netuid"
+                    )
+                    .eq("network_genesis_hash", cutover.network_genesis_hash)
+                    .eq("netuid", cutover.netuid)
+                    .limit(2)
+                    .execute()
+                )
     except Exception as exc:
         raise SubnetEpochError(
             "durable epoch namespace state database is unavailable"
@@ -172,6 +201,25 @@ def _read_cutover_state_from_db_sync(
             "durable epoch namespace singleton is missing or ambiguous"
         )
     row = dict(rows[0])
+    if fresh_testnet401_authority:
+        assert configured_cutover is not None
+        cutover = configured_cutover
+        if (
+            row.get("schema_version") != _FRESH_NETWORK_CUTOVER_SCHEMA
+            or row.get("network_genesis_hash") != cutover.network_genesis_hash
+            or row.get("netuid") != cutover.netuid
+        ):
+            raise SubnetEpochError(
+                "fresh-network durable epoch authority is invalid"
+            )
+        row = {
+            "lifecycle_state": "stateful_active",
+            "mapping_hash": row.get("mapping_hash"),
+            "last_legacy_epoch_id": row.get("last_legacy_epoch_id"),
+            "first_settlement_epoch_id": row.get(
+                "first_settlement_epoch_id"
+            ),
+        }
     lifecycle = row.get("lifecycle_state")
     if lifecycle not in _CUTOVER_LIFECYCLE_STATES:
         raise SubnetEpochError("durable epoch namespace lifecycle is invalid")

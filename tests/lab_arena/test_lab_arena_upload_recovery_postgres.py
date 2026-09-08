@@ -13,7 +13,10 @@ import pytest
 
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import (
+    DEFAULT_MIGRATIONS, LAB_ARENA_UPLOAD_RECOVERY_MIGRATION,
+    database_with_lab_arena_migration,
+)
 from tests.lab_arena.test_lab_arena_source_migration_postgres import _hotkey, _round_config
 
 
@@ -214,3 +217,31 @@ def test_upload_migration_is_idempotent_under_hosted_owner(database):
             assert cursor.fetchone()[0] == before
             cursor.execute("SET ROLE lab_arena_service; SELECT public.lab_arena_schema_version_v1()")
             assert cursor.fetchone()[0]["version"] == 191
+
+
+def test_schema190_upload_reservations_survive191_upgrade():
+    migrations = DEFAULT_MIGRATIONS[:DEFAULT_MIGRATIONS.index(LAB_ARENA_UPLOAD_RECOVERY_MIGRATION)]
+    previous = database_with_lab_arena_migration(migrations)
+    psycopg2, dsn = next(previous)
+    transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    store = ArenaStore(transport)
+    try:
+        round_id, miner = _open(store, "upgrade")
+        original = _doc(round_id, "sub-before")
+        original.pop("source_content_md5")
+        store.register_submission(round_id, "sub-before", miner, original)
+        with pytest.raises(ArenaStoreError, match="submission_conflict"):
+            store.register_submission(round_id, "sub-after", miner, _doc(round_id, "sub-after", b"larger replacement source"))
+        with psycopg2.connect(**dsn) as admin:
+            admin.autocommit = True
+            with admin.cursor() as cursor:
+                cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / LAB_ARENA_UPLOAD_RECOVERY_MIGRATION).read_text())
+        recovered = store.register_submission(round_id, "sub-after", miner, _doc(round_id, "sub-after", b"larger replacement source"))
+        assert recovered["submission_id"] == "sub-after"
+        assert store.get_submission("sub-before")["submission_doc"] == original
+        assert store.get_submission("sub-before")["rejection_rule"] == "source_replaced"
+        store.accept_submission_with_credentials(round_id, "sub-after", miner, {"openrouter": "dGVzdA==", "deepline": "dGVzdA=="})
+        assert store.get_submission("sub-after")["status"] == "accepted"
+    finally:
+        transport.close()
+        previous.close()

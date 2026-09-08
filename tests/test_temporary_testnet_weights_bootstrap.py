@@ -197,6 +197,41 @@ def test_gateway_runtime_is_pinned_to_testnet401_validator():
     )
 
 
+def test_gateway_dynamic_pcr_builder_uses_only_task_owned_build_paths(monkeypatch):
+    config = {
+        "runtime_root": "/run/leadpoet-testnet401",
+        "gateway": {"artifact_policy": "/unused/artifact-policy.json"},
+        "validator": {"cutover_manifest": "/unused/cutover.json"},
+    }
+    policy = {
+        "bucket_host": (
+            "leadpoet-parity-493765492819-task.s3.us-east-1.amazonaws.com"
+        )
+    }
+    cutover = {"mapping_hash": bootstrap.EXPECTED_CUTOVER_MAPPING_HASH}
+
+    def load(path, _description):
+        return policy if "artifact-policy" in str(path) else cutover
+
+    monkeypatch.setattr(bootstrap, "_load_json", load)
+    environment = bootstrap._gateway_runtime_overrides(config)
+
+    assert environment["NITRO_CLI_ARTIFACTS"] == (
+        "/run/leadpoet-testnet401/nitro-cli-artifacts"
+    )
+    assert environment["NITRO_CLI_BLOBS"] == "/usr/share/nitro_enclaves/blobs"
+    assert environment["VALIDATOR_DRAND_CARGO_CACHE_DIR"] == (
+        "/run/leadpoet-testnet401/drand-cargo-cache"
+    )
+    assert environment["VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT"] == (
+        "/run/leadpoet-testnet401/offline-artifacts/validator-runtime"
+    )
+    assert environment["PCR0_BUILD_DIR"] == (
+        "/run/leadpoet-testnet401/pcr0-builder"
+    )
+    assert environment["PCR0_STARTUP_HISTORICAL_WARM_ENABLED"] == "false"
+
+
 def test_testnet_gateway_flags_do_not_modify_global_intake_control():
     assert bootstrap.SAFE_GATEWAY_ENV["DISABLE_BACKGROUND_TASKS"] == "true"
     assert bootstrap.SAFE_GATEWAY_ENV["ENABLE_FULFILLMENT"] == "false"

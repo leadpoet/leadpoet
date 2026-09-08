@@ -162,3 +162,70 @@ def test_pcr0_builder_compiles_drand_cabi_after_staging(monkeypatch, tmp_path):
     assert calls[1][0][3] == str(
         artifact_dir / "libbittensor_drand_v2.so"
     )
+
+
+def test_required_pcr0_nitro_build_preserves_only_task_nitro_environment(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    class _Process:
+        def __init__(self, stdout=b""):
+            self.returncode = 0
+            self._stdout = stdout
+
+        async def communicate(self):
+            return self._stdout, b""
+
+    async def create_process(*args, **kwargs):
+        calls.append((args, kwargs))
+        if "nitro-cli" in args:
+            return _Process(
+                b'{"Measurements":{"PCR0":"' + b"a" * 96 + b'"}}'
+            )
+        return _Process()
+
+    async def ready(_repo):
+        return True
+
+    async def normalized(_function, *_args):
+        return True
+
+    monkeypatch.setenv(
+        "NITRO_CLI_ARTIFACTS",
+        "/run/leadpoet-testnet401/nitro-cli-artifacts",
+    )
+    monkeypatch.setenv("NITRO_CLI_BLOBS", "/usr/share/nitro_enclaves/blobs")
+    monkeypatch.setattr(pcr0_builder, "PCR0_COPY_PATHS", [])
+    monkeypatch.setattr(pcr0_builder, "ensure_base_image_exists", ready)
+    monkeypatch.setattr(
+        pcr0_builder,
+        "validator_v2_artifacts_required",
+        lambda _repo: False,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "_run_sync_build_step_to_completion",
+        normalized,
+    )
+    monkeypatch.setattr(
+        pcr0_builder.asyncio,
+        "create_subprocess_exec",
+        create_process,
+    )
+
+    pcr0 = asyncio.run(
+        pcr0_builder.build_enclave_and_extract_pcr0(str(tmp_path))
+    )
+
+    assert pcr0 == "a" * 96
+    nitro_calls = [call for call in calls if "nitro-cli" in call[0]]
+    assert len(nitro_calls) == 1
+    assert nitro_calls[0][0][:4] == (
+        "sudo",
+        "--preserve-env=NITRO_CLI_ARTIFACTS,NITRO_CLI_BLOBS",
+        "nitro-cli",
+        "build-enclave",
+    )
+    assert "--preserve-env=VALIDATOR_DRAND_CARGO_CACHE_DIR" not in nitro_calls[0][0]

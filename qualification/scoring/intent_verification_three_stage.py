@@ -1438,8 +1438,9 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     "content": wb["content"], "error": None,
                     "stage_history": history}
 
-    # Genuine unfetchable. Caller should treat this as "verifier infrastructure
-    # could not reach the URL" — NOT as miner fabrication.
+    # A target 404 alone cannot prove semantic absence. The caller compares it
+    # with the independent Exa result before separating a missing source from
+    # verifier infrastructure failure. Neither case proves miner fabrication.
     fail_label = (
         "genuine_404" if last_verdict == "http_404"
         else f"all_tiers_exhausted:{last_verdict}"
@@ -1447,6 +1448,62 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
     return {"ok": False, "stage": fail_label,
             "content": "", "error": last_verdict,
             "stage_history": history}
+
+
+def _exa_target_absence_receipt(
+    document: Mapping[str, Any], requested_url: str
+) -> Optional[Dict[str, Any]]:
+    """Return a typed receipt only for Exa's exact-URL not-found result."""
+
+    results = document.get("results")
+    statuses = document.get("statuses")
+    if (
+        not isinstance(requested_url, str)
+        or not requested_url
+        or not isinstance(results, list)
+        or results
+        or not isinstance(statuses, list)
+        or len(statuses) != 1
+    ):
+        return None
+    status = statuses[0]
+    if not isinstance(status, Mapping) or set(status) != {
+        "id", "status", "error"
+    }:
+        return None
+    error = status.get("error")
+    http_status = (
+        error.get("httpStatusCode") if isinstance(error, Mapping) else None
+    )
+    if (
+        status.get("id") != requested_url
+        or status.get("status") != "error"
+        or not isinstance(error, Mapping)
+        or error.get("tag") != "CRAWL_NOT_FOUND"
+        or isinstance(http_status, bool)
+        or http_status != 404
+    ):
+        return None
+    return {
+        "id_matches_requested_url": True,
+        "status": "error",
+        "error_tag": "CRAWL_NOT_FOUND",
+        "error_http_status": 404,
+    }
+
+
+def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
+    expected = {
+        "id_matches_requested_url": True,
+        "status": "error",
+        "error_tag": "CRAWL_NOT_FOUND",
+        "error_http_status": 404,
+    }
+    return (
+        dict(expected)
+        if isinstance(value, Mapping) and dict(value) == expected
+        else None
+    )
 
 
 async def _scrape_exa(url: str) -> Dict[str, Any]:
@@ -1469,6 +1526,7 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                 if r.status_code == 200:
                     data = r.json()
                     results = data.get("results") or []
+                    target_absence = None
                     if results:
                         result = results[0]
                         text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
@@ -1485,21 +1543,31 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                         last_error = "<300 chars"
                         terminal_stage = "exa_thin"
                     else:
-                        last_error = json.dumps(data.get("statuses") or [])[:120]
-                        terminal_stage = "exa_no_results"
+                        target_absence = _exa_target_absence_receipt(data, url)
+                        if target_absence is not None:
+                            last_error = "target_not_found"
+                            terminal_stage = "exa_target_not_found"
+                        else:
+                            last_error = json.dumps(
+                                data.get("statuses") or []
+                            )[:120]
+                            terminal_stage = "exa_no_results"
                     # Exa can return a successful envelope before the exact
                     # URL content is available. Spend the already bounded
-                    # second attempt on that unavailable observation rather
-                    # than turning it into a persistent semantic rejection.
+                    # second attempt before accepting even its exact not-found
+                    # receipt as a persistent source-absence observation.
                     if attempt == 0:
                         await asyncio.sleep(0.25)
                         continue
-                    return {
+                    failure = {
                         "ok": False,
                         "stage": terminal_stage,
                         "content": "",
                         "error": last_error,
                     }
+                    if target_absence is not None:
+                        failure["target_absence"] = target_absence
+                    return failure
                 last_error = f"HTTP {r.status_code}"
                 # Retry only transient transport/rate-limit responses. A 4xx
                 # result remains a deterministic miss and does not consume
@@ -1908,14 +1976,56 @@ def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
     for item in (contents.get("statuses") or []):
         if not isinstance(item, Mapping):
             continue
-        statuses.append(
-            {
-                "url": _prompt_url_origin_or_empty(item.get("url")),
-                "source": _safe_prompt_status_label(item.get("source")),
-                "stage": _safe_prompt_status_label(item.get("stage")),
-            }
+        projected_status = {
+            "url": _prompt_url_origin_or_empty(item.get("url")),
+            "source": _safe_prompt_status_label(item.get("source")),
+            "stage": _safe_prompt_status_label(item.get("stage")),
+        }
+        target_absence = _canonical_target_absence_receipt(
+            item.get("exa_target_absence")
         )
+        if target_absence is not None:
+            projected_status.update({
+                "sd_stage": _safe_prompt_status_label(item.get("sd_stage")),
+                "exa_stage": _safe_prompt_status_label(
+                    item.get("exa_stage")
+                ),
+                "exa_target_absence": target_absence,
+            })
+        statuses.append(projected_status)
     return {"results": results, "statuses": statuses}
+
+
+def _confirmed_source_absence(
+    contents: Mapping[str, Any], requested_url: str
+) -> bool:
+    """Whether independent fetches agree that this exact URL is absent."""
+
+    results = contents.get("results")
+    if (
+        not isinstance(requested_url, str)
+        or not requested_url
+        or not isinstance(results, list)
+        or results
+    ):
+        return False
+    statuses = contents.get("statuses")
+    if not isinstance(statuses, list) or len(statuses) != 1:
+        return False
+    status = statuses[0]
+    return bool(
+        isinstance(status, Mapping)
+        and status.get("url") == requested_url
+        and status.get("source") == "none"
+        and status.get("sd_stage") == "genuine_404"
+        and status.get("sd_error") == "http_404"
+        and status.get("exa_stage") == "exa_target_not_found"
+        and status.get("exa_error") == "target_not_found"
+        and _canonical_target_absence_receipt(
+            status.get("exa_target_absence")
+        )
+        is not None
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2243,13 +2353,19 @@ async def _fetch_sd_then_exa(
                 "sd_stage": sd.get("stage"),
             })
         else:
-            statuses.append({
+            status = {
                 "url": url, "source": "none",
                 "sd_stage": sd.get("stage"),
                 "sd_error": sd.get("error"),
                 "exa_stage": exa.get("stage"),
                 "exa_error": exa.get("error"),
-            })
+            }
+            target_absence = _canonical_target_absence_receipt(
+                exa.get("target_absence")
+            )
+            if target_absence is not None:
+                status["exa_target_absence"] = target_absence
+            statuses.append(status)
     return {"results": results, "statuses": statuses}
 
 
@@ -3240,17 +3356,23 @@ async def verify_three_stage(
     fetched_contents = await _fetch_sd_then_exa(
         [fetch_source_url] if fetch_source_url else []
     )
+    source_absent = _confirmed_source_absence(
+        fetched_contents, fetch_source_url
+    )
     contents = _project_contents_for_prompt(fetched_contents)
     if not (contents.get("results") or []):
         return {
             "client_ready": False,
-            # No verifier-readable source is an infrastructure-unavailable
-            # observation, not evidence that the model fabricated the event.
-            # Keep the score fail-closed at zero while allowing the existing
-            # Research Lab retry path to rerun the ICP instead of persisting a
-            # false semantic rejection.
-            "decision": "unavailable",
-            "rejection_reason": "evidence_fetch_failed",
+            # Two independent fetch paths can establish that the exact source
+            # URL is absent. That is a semantic failure to prove the claim, not
+            # a shared judge outage. Every incomplete or mixed provider result
+            # remains unavailable so the existing retry path stays fail-closed.
+            "decision": "reject" if source_absent else "unavailable",
+            "rejection_reason": (
+                "evidence_not_found"
+                if source_absent
+                else "evidence_fetch_failed"
+            ),
             "stage1": stage1_info,
             "scrape": {
                 "statuses": contents.get("statuses") or [],
@@ -3262,7 +3384,13 @@ async def verify_three_stage(
                 "signal_evaluations": [{
                     "signal_status": "unable_to_verify",
                     "verification_mode": "source_grounded",
-                    "explanation": "Every bounded evidence fetch and fallback returned no usable content",
+                    "explanation": (
+                        "Independent fetches confirmed that the exact supplied "
+                        "evidence URL was not found"
+                        if source_absent
+                        else "Every bounded evidence fetch and fallback returned "
+                        "no usable content"
+                    ),
                     "confidence": "high",
                 }],
             },

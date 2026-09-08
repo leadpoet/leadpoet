@@ -196,6 +196,51 @@ def test_arena_scorer_does_not_turn_ambiguous_identity_into_fabrication(
     assert result.intent_signals_detail == details
 
 
+def test_confirmed_missing_evidence_is_a_nonretryable_zero(monkeypatch):
+    detail = _detail(
+        decision="rejected_three_stage",
+        rejection_reason="evidence_not_found",
+        status="unable_to_verify",
+        same_entity="unclear",
+    )
+    detail["judge_verdict"]["pipeline_decision"] = "reject"
+    details = [detail]
+
+    async def fit(*_args, **_kwargs):
+        return company_fit_match("fit verified")
+
+    async def score(*_args, **_kwargs):
+        return 0.0, 0.0, 0.0, 0, True, details
+
+    async def no_repair(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", fit)
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", score
+    )
+    monkeypatch.setattr(
+        lead_scorer, "_attempt_competition_evidence_repair", no_repair
+    )
+
+    result = asyncio.run(
+        lead_scorer.score_company_competition_intent(
+            _company(), _icp(), 0.0, 0.0, set()
+        )
+    )
+    breakdown = result.model_dump(mode="json")
+
+    assert result.final_score == 0.0
+    assert result.failure_reason == (
+        "Primary intent evidence unverified: verifier did not confirm the "
+        "submitted claim"
+    )
+    assert result.intent_signals_detail == details
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown
+    )
+
+
 @pytest.mark.parametrize(
     "detail",
     [

@@ -777,7 +777,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:2032db61adcb2abd699cc842e2deab1c8726b776ba77227a3029f462311ccb6d",
+      "ast_sha256": "sha256:97f98a5fda04f9c58a5baa6d05b82851ff2b8a0f4b60bc25f4ab04650b1fbc09",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -4687,7 +4687,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:af4f0db2df184ad30330077cf181fd6143d38ac5082b514010db025637075665",
-  "protected_source_commit": "642e6dea06739ed0ba242b4441679e945c0b5101",
+  "manifest_hash": "sha256:33dee38d864d1573bd68109de94577e8a8e373903e288b4499819e3ef037cf8a",
+  "protected_source_commit": "ac8a673ff67169639d4c22bc65d27fd59f3e684a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

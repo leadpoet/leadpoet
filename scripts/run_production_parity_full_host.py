@@ -178,6 +178,7 @@ FULL_FAILURE_STAGES = frozenset(
         "snapshot-capture",
         "clone-start",
         "snapshot-restore",
+        "clone-arena-normalization",
         "clone-http-origin",
         "clone-secret",
         "gateway-restart",
@@ -1377,6 +1378,112 @@ def _last_json_document(output: str, *, field: str) -> dict[str, Any]:
         if isinstance(value, Mapping):
             return dict(value)
     raise FullParityError(f"{field} did not return redacted JSON evidence")
+
+
+def _normalize_full_parity_clone_arena_restart_state(
+    database: _DockerDatabase,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    """Remove source-environment restart ownership from an exact disposable clone."""
+
+    expected_database = f"leadpoet_parity_{candidate_sha[:12]}"
+    expected_container = re.compile(
+        rf"^leadpoet-parity-postgres-{re.escape(candidate_sha[:10])}-[0-9a-f]{{6}}$"
+    )
+    try:
+        target = urlparse(database.target_dsn)
+        target_port = target.port
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise FullParityError("Full parity clone database identity is invalid") from exc
+    if (
+        SHA_RE.fullmatch(candidate_sha) is None
+        or target.scheme not in {"postgres", "postgresql"}
+        or target.hostname != "127.0.0.1"
+        or target_port is None
+        or target.path != f"/{expected_database}"
+        or database.database != expected_database
+        or expected_container.fullmatch(database.postgres) is None
+    ):
+        raise FullParityError("Full parity clone database identity is invalid")
+
+    raw = database._psql(
+        """
+WITH advisory AS MATERIALIZED (
+  SELECT pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('lab-arena-claim-control', 0)
+  )
+), control AS MATERIALIZED (
+  SELECT current.*
+  FROM public.lab_arena_restart_claim_control AS current
+  CROSS JOIN advisory
+  FOR UPDATE OF current
+), control_shape AS MATERIALIZED (
+  SELECT COUNT(*)::BIGINT AS count FROM control
+), leased AS MATERIALIZED (
+  SELECT COUNT(*)::BIGINT AS count
+  FROM public.lab_arena_runs
+  CROSS JOIN advisory
+  WHERE status = 'leased'
+), normalized AS (
+  UPDATE public.lab_arena_restart_claim_control AS current SET
+    guard_commitment = '',
+    owner_commitment = '',
+    guard_expires_at = NULL,
+    candidate_commit = '',
+    restart_scope = '',
+    restart_phase = '',
+    captured_leases = '[]'::JSONB
+  FROM control, control_shape, leased
+  WHERE current.singleton = control.singleton
+    AND control_shape.count = 1
+    AND control.operator_paused IS FALSE
+    AND leased.count = 0
+  RETURNING current.guard_generation,
+    current.guard_commitment = ''
+      AND current.owner_commitment = ''
+      AND current.guard_expires_at IS NULL
+      AND current.candidate_commit = ''
+      AND current.restart_scope = ''
+      AND current.restart_phase = ''
+      AND current.captured_leases = '[]'::JSONB AS guard_cleared
+)
+SELECT pg_catalog.json_build_object(
+  'schema_version', 'leadpoet.production_parity_clone_arena_state.v1',
+  'control_count', (SELECT count FROM control_shape),
+  'operator_paused', (SELECT operator_paused FROM control),
+  'current_leased_count', (SELECT count FROM leased),
+  'normalization_count', (SELECT COUNT(*) FROM normalized),
+  'guard_generation', (SELECT guard_generation FROM normalized),
+  'guard_cleared', (SELECT guard_cleared FROM normalized)
+)::TEXT;
+""",
+        timeout=45,
+    )
+    evidence = _last_json_document(raw, field="clone Arena restart state normalization")
+    if evidence.get("control_count") != 1:
+        raise FullParityError("Full parity clone Arena restart control is invalid")
+    if not isinstance(evidence.get("operator_paused"), bool):
+        raise FullParityError("Full parity clone Arena restart control is invalid")
+    if evidence["operator_paused"] is True:
+        raise FullParityError("Full parity clone preserves an operator Arena pause")
+    leased_count = evidence.get("current_leased_count")
+    if isinstance(leased_count, bool) or not isinstance(leased_count, int):
+        raise FullParityError("Full parity clone Arena lease state is invalid")
+    if leased_count != 0:
+        raise FullParityError("Full parity clone contains active Arena leases")
+    generation = evidence.get("guard_generation")
+    if (
+        evidence.get("schema_version")
+        != "leadpoet.production_parity_clone_arena_state.v1"
+        or evidence.get("normalization_count") != 1
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or evidence.get("guard_cleared") is not True
+    ):
+        raise FullParityError("Full parity clone Arena restart state did not normalize")
+    return evidence
 
 
 def _arena_provider_keys(values: Mapping[str, str]) -> dict[str, str]:
@@ -3536,10 +3643,16 @@ def run_full(
             postgres_image=postgres_image,
         )
         restore_contract = database.verify_snapshot_restore()
+        failure_stage = "clone-arena-normalization"
+        clone_arena_state = _normalize_full_parity_clone_arena_restart_state(
+            database,
+            candidate_sha=candidate_sha,
+        )
         restore = {
             **restore,
             "clone_prerequisites": prerequisites,
             "clone_restore_contract": restore_contract,
+            "clone_arena_restart_state": clone_arena_state,
         }
         failure_stage = "clone-http-origin"
         local_url, _ = database.start_postgrest()

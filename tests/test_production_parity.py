@@ -1726,6 +1726,29 @@ def test_disposable_clone_proves_restored_deterministic_uuid(monkeypatch):
     assert "research_lab_deterministic_uuid" in observed[0]
 
 
+def test_full_clone_arena_normalization_rejects_nonclone_before_sql(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+    database.target_dsn = "postgresql://postgres:x@db.example/leadpoet_parity_test"
+    monkeypatch.setattr(
+        database,
+        "_psql",
+        lambda *_args, **_kwargs: pytest.fail("non-clone target must fail before SQL"),
+    )
+
+    with pytest.raises(
+        FullParityError,
+        match="Full parity clone database identity is invalid",
+    ):
+        full_host._normalize_full_parity_clone_arena_restart_state(
+            database,
+            candidate_sha=SHA,
+        )
+
+
 def test_database_lane_retains_primary_failure_and_cleanup_evidence(
     monkeypatch,
     tmp_path: Path,
@@ -2609,6 +2632,11 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
         },
     )
     monkeypatch.setattr(full_host, "restore_snapshot", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        full_host,
+        "_normalize_full_parity_clone_arena_restart_state",
+        lambda *_args, **_kwargs: {"guard_cleared": True},
+    )
     monkeypatch.setattr(
         full_host,
         "_ClonePostgrestPrefixAdapter",

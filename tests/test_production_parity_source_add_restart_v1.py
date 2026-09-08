@@ -28,14 +28,14 @@ from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.production_parity_boundary_v2 import (
     PRODUCTION_SUPABASE_ORIGIN,
 )
-from lab_arena.store import ArenaStore, PsycopgTransport
+from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token
 from scripts import lab_arena_restart_claim_guard as arena_guard
 from scripts import run_production_parity_full_host as full_host
 from scripts.materialize_production_parity_secrets import build_gateway_environment
 from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
 )
-from tests.lab_arena.test_lab_arena_migration_postgres import claim, open_round
+from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete, open_round
 from tests.test_source_add_end_to_end_postgres import (
     _database_with_migrations,
 )
@@ -733,6 +733,175 @@ def test_full_releases_only_its_ready_arena_guard_and_preserves_operator_pause(
             artifact_bucket=artifact_bucket,
         )
     assert len(observed_hosts) == request_count
+
+
+def test_full_clone_normalizes_only_idle_nonpaused_migration_190_guard_state():
+    database = database_with_lab_arena_migration()
+    psycopg2, dsn = next(database)
+    admin = psycopg2.connect(**dsn)
+    admin.autocommit = True
+    store = ArenaStore(
+        PsycopgTransport(lambda: psycopg2.connect(**dsn)),
+        lease_ttl_seconds=120,
+    )
+
+    class CloneDatabase:
+        database = f"leadpoet_parity_{CANDIDATE_COMMIT[:12]}"
+        postgres = (
+            f"leadpoet-parity-postgres-{CANDIDATE_COMMIT[:10]}-abcdef"
+        )
+        target_dsn = (
+            f"postgresql://postgres@127.0.0.1:{dsn['port']}/{database}"
+        )
+
+        @staticmethod
+        def _psql(sql: str, *, timeout: int = 120) -> str:
+            assert timeout == 45
+            with admin.cursor() as cursor:
+                cursor.execute(sql)
+                return str(cursor.fetchone()[0])
+
+    def rpc(function: str, *values):
+        with admin.cursor() as cursor:
+            cursor.execute(
+                f"SELECT public.{function}({','.join(['%s'] * len(values))})",
+                values,
+            )
+            return cursor.fetchone()[0]
+
+    def state():
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_catalog.jsonb_build_object("
+                "'control', (SELECT pg_catalog.to_jsonb(control) "
+                "FROM public.lab_arena_restart_claim_control AS control), "
+                "'runs', (SELECT COALESCE(pg_catalog.jsonb_agg("
+                "pg_catalog.to_jsonb(runs) ORDER BY runs.run_id), '[]'::JSONB) "
+                "FROM public.lab_arena_runs AS runs))"
+            )
+            return cursor.fetchone()[0]
+
+    try:
+        runners, _ = open_round(
+            store,
+            "arena-2099-01-11",
+            participants=1,
+            runners=2,
+            prefix="full-clone-normalize",
+        )
+        completed, token, _request_id, _request_hash = claim(
+            store,
+            "arena-2099-01-11",
+            runners[0],
+        )
+        assert complete(
+            store,
+            completed["run_id"],
+            hash_lease_token(token),
+            "accepted",
+            output_ref="arena/full-clone-normalization/result.json",
+        )["status"] == "accepted"
+        guard, owner = arena_guard._identity(
+            CANDIDATE_COMMIT,
+            "source-environment-restart",
+        )
+        acquired = rpc(
+            "lab_arena_acquire_restart_guard_v1",
+            guard,
+            owner,
+            0,
+            600,
+            CANDIDATE_COMMIT,
+            "all",
+            "source-environment-restart",
+        )
+        generation = acquired["guard_generation"]
+        rpc(
+            "lab_arena_authorize_restart_phase_v1",
+            guard,
+            owner,
+            generation,
+            "gateway_destructive",
+        )
+
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_restart_claim_control "
+                "SET operator_paused = TRUE, pause_reason = 'operator' "
+                "WHERE singleton"
+            )
+        paused_before = state()
+        with pytest.raises(
+            full_host.FullParityError,
+            match="preserves an operator Arena pause",
+        ):
+            full_host._normalize_full_parity_clone_arena_restart_state(
+                CloneDatabase(),
+                candidate_sha=CANDIDATE_COMMIT,
+            )
+        assert state() == paused_before
+
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_restart_claim_control "
+                "SET operator_paused = FALSE, pause_reason = 'source-restart', "
+                "actor_ref = 'source-actor', "
+                "updated_at = '2099-01-10T00:00:00Z'::TIMESTAMPTZ "
+                "WHERE singleton"
+            )
+        history_before = state()
+        evidence = full_host._normalize_full_parity_clone_arena_restart_state(
+            CloneDatabase(),
+            candidate_sha=CANDIDATE_COMMIT,
+        )
+        normalized = state()
+        assert evidence == {
+            "schema_version": "leadpoet.production_parity_clone_arena_state.v1",
+            "control_count": 1,
+            "operator_paused": False,
+            "current_leased_count": 0,
+            "normalization_count": 1,
+            "guard_generation": generation,
+            "guard_cleared": True,
+        }
+        assert history_before["runs"]
+        assert normalized["runs"] == history_before["runs"]
+        assert normalized["control"]["guard_generation"] == generation
+        assert normalized["control"]["guard_commitment"] == ""
+        assert normalized["control"]["owner_commitment"] == ""
+        assert normalized["control"]["guard_expires_at"] is None
+        assert normalized["control"]["candidate_commit"] == ""
+        assert normalized["control"]["restart_scope"] == ""
+        assert normalized["control"]["restart_phase"] == ""
+        assert normalized["control"]["captured_leases"] == []
+        assert normalized["control"]["pause_reason"] == "source-restart"
+        assert normalized["control"]["actor_ref"] == "source-actor"
+        assert (
+            normalized["control"]["updated_at"]
+            == history_before["control"]["updated_at"]
+        )
+
+        assert claim(store, "arena-2099-01-11", runners[0])[0]["status"] == "leased"
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_runs "
+                "SET lease_expires_at = NOW() - INTERVAL '1 minute' "
+                "WHERE status = 'leased'"
+            )
+        leased_before = state()
+        with pytest.raises(
+            full_host.FullParityError,
+            match="contains active Arena leases",
+        ):
+            full_host._normalize_full_parity_clone_arena_restart_state(
+                CloneDatabase(),
+                candidate_sha=CANDIDATE_COMMIT,
+            )
+        assert state() == leased_before
+    finally:
+        store._transport.close()
+        admin.close()
+        database.close()
 
 
 def test_full_arena_guard_release_fails_before_http_on_invalid_clone(

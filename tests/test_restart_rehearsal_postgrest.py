@@ -111,6 +111,7 @@ def test_disposable_postgres_stop_failure_preserves_owned_data(
             "lab_arena_service",
         ),
         ("rehearsal-secret", "Bearer rehearsal-secret", "service_role"),
+        ("rehearsal-public", "Bearer rehearsal-public", "anon"),
         ("foreign", "Bearer foreign", None),
     ],
 )
@@ -157,6 +158,76 @@ def test_migration_backed_arena_rpc_executes_with_selected_role() -> None:
             "lab_arena_restart_guard_state_v1",
             {},
             database_role="postgres",
+        )
+
+
+def test_guard_https_client_allows_stdlib_generated_host_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import sitecustomize
+
+    class LocalConnection:
+        def __init__(self, host: str, port: int, *, timeout: float):
+            assert (host, port, timeout) == ("127.0.0.1", 54321, 15.0)
+            self.requests: list[tuple[str, str, bytes, dict[str, str]]] = []
+
+        def request(self, method, url, *, body, headers):
+            self.requests.append((method, url, body, dict(headers)))
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        sitecustomize,
+        "_ORIGINAL_HTTP_CONNECTION",
+        LocalConnection,
+    )
+    monkeypatch.setattr(
+        sitecustomize,
+        "_external_event",
+        lambda *_args, **_kwargs: None,
+    )
+    connection = sitecustomize._LocalSupabaseHTTPSConnection(
+        "qplwoislplkcegvdmbim.supabase.co",
+        443,
+        timeout=15.0,
+    )
+    body = b"{}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": "Bearer rehearsal.header.signature",
+        "apikey": "rehearsal-secret",
+        "Connection": "close",
+        "Content-Length": str(len(body)),
+        "Content-Type": "application/json",
+    }
+
+    connection.request(
+        "POST",
+        "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+        body=body,
+        headers=headers,
+    )
+    assert connection._connection.requests == [
+        (
+            "POST",
+            "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+            body,
+            headers,
+        )
+    ]
+
+    rejected = sitecustomize._LocalSupabaseHTTPSConnection(
+        "qplwoislplkcegvdmbim.supabase.co",
+        443,
+        timeout=15.0,
+    )
+    with pytest.raises(ValueError, match="local Supabase HTTPS request differs"):
+        rejected.request(
+            "POST",
+            "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+            body=body,
+            headers={**headers, "Host": "foreign.invalid"},
         )
 
 

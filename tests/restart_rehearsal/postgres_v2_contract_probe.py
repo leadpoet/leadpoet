@@ -4445,6 +4445,26 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-190 Lab Arena restart guard contract differs"
             )
+        arena_service_state = database.psql(
+            """
+            SET ROLE lab_arena_service;
+            SELECT public.lab_arena_restart_guard_state_v1()::text;
+            """,
+            check=False,
+            tuples_only=True,
+        )
+        arena_anon_state = database.psql(
+            """
+            SET ROLE anon;
+            SELECT public.lab_arena_restart_guard_state_v1()::text;
+            """,
+            check=False,
+            tuples_only=True,
+        )
+        if arena_service_state.returncode != 0 or arena_anon_state.returncode == 0:
+            raise PostgresContractProbeError(
+                "post-190 Lab Arena restart guard role grants differ"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,

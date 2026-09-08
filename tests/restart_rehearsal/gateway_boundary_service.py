@@ -226,7 +226,7 @@ class MigrationBackedLabArenaRPC:
             raise ValueError("Lab Arena restart RPC differs")
         if self.database is None:
             raise ValueError("migration-backed Lab Arena restart RPC is unavailable")
-        if database_role not in {"lab_arena_service", "service_role"}:
+        if database_role not in {"anon", "lab_arena_service", "service_role"}:
             raise ValueError("Lab Arena restart database role differs")
         expected = {field for field, _ in parameters}
         if set(body) != expected:
@@ -3439,10 +3439,15 @@ class Handler(BaseHTTPRequestHandler):
             "Bearer rehearsal.header.signature",
         ):
             return "lab_arena_service"
-        if (apikey, authorization) in {
-            ("rehearsal-public", "Bearer rehearsal-public"),
-            ("rehearsal-secret", "Bearer rehearsal-secret"),
-        }:
+        if (apikey, authorization) == (
+            "rehearsal-public",
+            "Bearer rehearsal-public",
+        ):
+            return "anon"
+        if (apikey, authorization) == (
+            "rehearsal-secret",
+            "Bearer rehearsal-secret",
+        ):
             return "service_role"
         return None
 

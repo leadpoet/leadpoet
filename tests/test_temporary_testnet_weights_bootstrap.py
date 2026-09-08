@@ -369,6 +369,25 @@ def test_gateway_runtime_is_pinned_to_testnet401_validator():
     assert "v(execution_config=b())" in source
 
 
+def test_live_455_selects_the_exact_approved_testnet_profile():
+    from leadpoet_canonical.attested_v2 import sha256_json
+    from leadpoet_canonical.hotkey_authority_v2 import select_chain_signing_profile
+    from validator_tee.enclave.hotkey_authority_v2 import load_chain_signing_profile
+
+    profile = load_chain_signing_profile(
+        Path(bootstrap.__file__).resolve().parents[1]
+        / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+    )
+    selected = select_chain_signing_profile(
+        profile,
+        runtime_version={"specVersion": 455, "transactionVersion": 1},
+        genesis_hash=profile["genesis_hash"],
+    )
+
+    assert selected["spec_version"] == bootstrap.EXPECTED_PROFILE_SPEC_VERSION
+    assert sha256_json(selected) == bootstrap.EXPECTED_PROFILE_HASH
+
+
 def test_gateway_dynamic_pcr_builder_uses_only_task_owned_build_paths(monkeypatch):
     config = {
         "runtime_root": "/run/leadpoet-testnet401",

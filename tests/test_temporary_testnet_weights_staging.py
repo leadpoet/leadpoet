@@ -175,6 +175,9 @@ def test_config_matches_native_shape_without_private_keyfile():
     assert value["validator"]["enclave_cid"] == 18
     assert value["validator"]["chain_profile"].endswith("chain_signing_profile_test_v2.json")
     assert value["validator"]["expected_hotkey"] == stage.native.EXPECTED_VALIDATOR_HOTKEY
+    assert value["validator"]["expected_selected_profile_hash"] == (
+        "sha256:20407ea2590f8d93be932db8dd578d2feb1ec3f1c71331495d224ef48057824f"
+    )
     assert value["gateway"]["eif_root"].startswith(value["runtime_root"] + "/")
     assert "seed" not in value["validator"]
     assert "private_key" not in value["validator"]

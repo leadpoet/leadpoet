@@ -540,6 +540,8 @@ def test_native_ssm_stage_exposes_no_arbitrary_command(stage, confirmed):
     assert ("--confirm-instance-id" in command) is confirmed
     if stage == "status":
         assert "[ ! -f /run/leadpoet-testnet401/processes.json ]" in command
+        assert "/run/leadpoet-testnet401/evidence/launch.json" in command
+        assert "v.get" in command and "failed" in command
     assert ssm.sent["DocumentName"] == "AWS-RunShellScript"
 
 
@@ -642,6 +644,43 @@ def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     assert value["log_diagnostics"][0]["build_milestones"] == ["Building one local gateway identity"]
     assert "private-arguments" not in result.stdout
     assert "private-identity" not in result.stdout
+
+
+def test_failed_launch_diagnostics_include_only_bounded_runtime_identity(tmp_path):
+    program = temporary_host.staging_diagnostic_program(
+        run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID,
+    )
+    task = tmp_path / "task"
+    (task / "logs").mkdir(parents=True)
+    (task / "evidence").mkdir()
+    (task / "processes.json").write_text('{"secret":"secret-canary"}')
+    (task / "logs" / "gateway_runtime_readiness.log").write_text(
+        "secret-canary\nV2RuntimeReadinessError: coordinator provider broker "
+        "is not ready\n"
+        'File "/private/gateway/tee/verify_v2_runtime_ready.py", line 47\n'
+    )
+    (task / "evidence" / "launch.json").write_text(json.dumps({
+        "schema_version": temporary_host.NATIVE_RECEIPT_SCHEMA_VERSION,
+        "stage": "launch", "status": "failed", "run_id": RUN_ID,
+        "candidate_sha": SHA, "instance_id": INSTANCE_ID,
+        "evidence": {"failure_type": "TemporaryTestnetBootstrapError",
+                     "secret": "secret-canary"},
+    }))
+    program = program.replace(repr(temporary_host.RUNTIME_ROOT), repr(str(task)))
+    result = subprocess.run([sys.executable, "-I", "-c", program],
+                            capture_output=True, text=True, timeout=10, check=True)
+    assert "secret-canary" not in result.stdout
+    value = json.loads(result.stdout)
+    assert value["paths_present"]["processes.json"] is True
+    assert value["launch_failure"] == {
+        "failure_type": "TemporaryTestnetBootstrapError", "status": "failed",
+    }
+    runtime = next(row for row in value["log_diagnostics"]
+                   if row["file"] == "gateway_runtime_readiness.log")
+    assert runtime["categories"] == [
+        "V2RuntimeReadinessError", "coordinator provider broker is not ready",
+    ]
+    assert runtime["trace_locations"] == [["verify_v2_runtime_ready.py", "47"]]
 
 
 def test_expired_cleanup_terminates_only_after_protected_expiry():

@@ -865,10 +865,19 @@ def run_native_stage(
         probe = staging_diagnostic_program(
             run_id=run_id, candidate_sha=candidate_sha, instance_id=instance_id
         )
+        launch_receipt = RUNTIME_ROOT + "/evidence/launch.json"
+        failed_launch_probe = (
+            "import json,sys; v=json.load(open(sys.argv[1], encoding='utf-8')); "
+            "raise SystemExit(0 if v.get('stage') == 'launch' and "
+            "v.get('status') == 'failed' else 1)"
+        )
         command = (
             "set -Eeuo pipefail\n"
             f"if [ ! -f {shlex.quote(NATIVE_CONFIG)} ] || "
-            f"[ ! -f {shlex.quote(RUNTIME_ROOT + '/processes.json')} ]; then\n"
+            f"[ ! -f {shlex.quote(RUNTIME_ROOT + '/processes.json')} ] || "
+            f"( [ -f {shlex.quote(launch_receipt)} ] && "
+            f"/usr/bin/python3 -I -c {shlex.quote(failed_launch_probe)} "
+            f"{shlex.quote(launch_receipt)} ); then\n"
             f"  exec /usr/bin/python3 -I -c {shlex.quote(probe)}\n"
             "fi\n"
         ) + command
@@ -917,7 +926,8 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         f"root = pathlib.Path({RUNTIME_ROOT!r})",
         "names = ('early-boot-isolated', 'expires-epoch', 'candidate.bundle', "
         "'candidate-bundle-binding.json', 'requirements.txt', 'source-stage.json', "
-        "'config.json', 'inputs', 'staging-logs')",
+        "'config.json', 'processes.json', 'evidence/launch.json', 'inputs', "
+        "'staging-logs', 'logs')",
         "result['paths_present'] = {name: (root / name).exists() for name in names}",
         f"result['repository_exists'] = pathlib.Path({SOURCE_REPOSITORY!r}).exists()",
         f"result['venv_exists'] = pathlib.Path({SOURCE_VENV!r}).exists()",
@@ -936,16 +946,30 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "        if isinstance(value, dict) and re.fullmatch('[a-z_]{1,64}', "
         "str(value.get('stage', ''))) and value.get('status') in ('running', 'passed'):",
         "            result['stage_states'].append({key: value[key] for key in ('stage', 'status')})",
+        "launch = root / 'evidence' / 'launch.json'",
+        "if launch.is_file() and not launch.is_symlink() and launch.stat().st_size <= 65536:",
+        "    try: value = json.loads(launch.read_text())",
+        "    except ValueError: value = {}",
+        "    expected = {'schema_version':'leadpoet.temporary_testnet401_native_bootstrap_receipt.v1', 'stage':'launch', 'status':'failed', 'run_id':result['run_id'], 'candidate_sha':result['candidate_sha'], 'instance_id':result['instance_id']}",
+        "    if isinstance(value, dict) and all(value.get(k) == v for k, v in expected.items()):",
+        "        failure_type = str((value.get('evidence') or {}).get('failure_type', '')) if isinstance(value.get('evidence'), dict) else ''",
+        "        if re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,79}', failure_type): result['launch_failure'] = {'status':'failed', 'failure_type':failure_type}",
         "patterns = ('AccessDenied', 'ModuleNotFoundError', 'ImportError', "
         "'PermissionError', 'NoSuchKey', 'No space left on device', 'AssertionError', "
         "'RuntimeError', 'ValueError', 'command not found', 'not found', 'fatal:', "
         "'ResolutionImpossible', 'No matching distribution', 'FileExistsError', "
         "'unbound variable', 'Killed', 'Terminated', 'Segmentation fault', "
-        "'invalid PCR0', 'no live lock owner', 'protected workflow', 'timed out')",
+        "'invalid PCR0', 'no live lock owner', 'protected workflow', 'timed out', "
+        "'V2RuntimeReadinessError', 'runtime clients do not cover every role', "
+        "'coordinator provider broker is not ready', "
+        "'coordinator provider semantics authority is not ready', "
+        "'gateway_coordinator execution manager is not ready', "
+        "'gateway_scoring execution manager is not ready', 'workers_alive')",
         "result['log_diagnostics'] = []",
         f"ssm = pathlib.Path('/var/lib/amazon/ssm/{instance_id}/document/orchestration')",
         "paths = list(ssm.glob('*/awsrunShellScript/0.awsrunShellScript/stderr'))[-12:]",
         "paths += list((root / 'staging-logs').glob('*.log'))[:16]",
+        "paths += list((root / 'logs').glob('*.log'))[:24]",
         "for path in paths:",
         "    if path.is_symlink() or not path.is_file(): continue",
         "    with path.open('rb') as stream:",

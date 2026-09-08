@@ -481,6 +481,53 @@ def build_release_lineage_v2(
     )
 
 
+def release_channel_role_identities_v2(
+    channel: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Return the exact compact role identities from one full channel."""
+
+    normalized = validate_release_channel_v2(channel)
+    commit = normalized["commit_sha"]
+    return dict(
+        build_release_lineage_v2(
+            (normalized,), current_commit=commit
+        )["releases"][commit]["roles"]
+    )
+
+
+def build_paired_local_release_channel_v2(
+    *,
+    gateway_host_gateway_manifest: Mapping[str, Any],
+    gateway_host_validator_manifest: Mapping[str, Any],
+    validator_host_gateway_manifest: Mapping[str, Any],
+    validator_host_validator_manifest: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Select a paired channel only after both hosts prove identical roles."""
+
+    gateway_host = build_release_channel_v2(
+        gateway_release_manifest=gateway_host_gateway_manifest,
+        validator_release_manifest=gateway_host_validator_manifest,
+    )
+    validator_host = build_release_channel_v2(
+        gateway_release_manifest=validator_host_gateway_manifest,
+        validator_release_manifest=validator_host_validator_manifest,
+    )
+    paired = build_release_channel_v2(
+        gateway_release_manifest=gateway_host_gateway_manifest,
+        validator_release_manifest=validator_host_validator_manifest,
+    )
+    expected_roles = release_channel_role_identities_v2(gateway_host)
+    if release_channel_role_identities_v2(validator_host) != expected_roles:
+        raise ReleaseChannelV2Error(
+            "independent host release role identities differ"
+        )
+    if release_channel_role_identities_v2(paired) != expected_roles:
+        raise ReleaseChannelV2Error(
+            "paired release role identities differ from independent hosts"
+        )
+    return paired
+
+
 def build_historical_release_lineage_v2(
     channels: Sequence[Mapping[str, Any]],
     *,
@@ -896,11 +943,25 @@ def publish_release_channel_v2(
     except Exception:
         existing = None
     if existing is not None:
-        if existing != payload:
-            raise ReleaseChannelV2Error(
-                "immutable release channel already contains different bytes"
-            )
-        return {"bucket": str(bucket), "key": key, **normalized}
+        if existing == payload:
+            observed = normalized
+        else:
+            try:
+                value = json.loads(existing)
+                observed = validate_release_channel_v2(
+                    value, expected_commit=normalized["commit_sha"]
+                )
+            except Exception as exc:
+                raise ReleaseChannelV2Error(
+                    "immutable release channel already contains different bytes"
+                ) from exc
+            if release_channel_role_identities_v2(
+                observed
+            ) != release_channel_role_identities_v2(normalized):
+                raise ReleaseChannelV2Error(
+                    "immutable release channel already contains different roles"
+                )
+        return {"bucket": str(bucket), "key": key, **observed}
     retain_until = datetime.now(timezone.utc) + timedelta(days=int(retention_days))
     try:
         s3_client.put_object(

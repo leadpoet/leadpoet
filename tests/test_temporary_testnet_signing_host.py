@@ -322,6 +322,152 @@ def test_source_bootstrap_is_fixed_to_exact_private_parity_prefix():
         )
 
 
+def test_asset_bucket_reuses_locked_parity_bucket_and_exact_prefix(
+    monkeypatch, tmp_path
+):
+    bundle = tmp_path / "candidate.bundle"
+    binding = tmp_path / "candidate-bundle-binding.json"
+    bundle.write_bytes(b"bounded candidate bundle")
+    digest = __import__("hashlib").sha256(bundle.read_bytes()).hexdigest()
+    binding.write_text(
+        json.dumps({
+            "candidate-sha": SHA,
+            "bundle-sha256": digest,
+            "bundle-size-bytes": str(bundle.stat().st_size),
+        }),
+        encoding="utf-8",
+    )
+    uploads = []
+
+    class S3:
+        def upload_file(self, *args, **kwargs):
+            uploads.append((args, kwargs))
+
+    expected_bucket = temporary_host._artifact_bucket_name(
+        run_id=RUN_ID, candidate_sha=SHA
+    )
+    calls = []
+
+    def create_bucket(s3, **kwargs):
+        calls.append((s3, kwargs))
+        return expected_bucket
+
+    from scripts import provision_production_parity_staging as parity_provision
+
+    monkeypatch.setattr(parity_provision, "_create_artifact_bucket", create_bucket)
+    s3 = S3()
+    result = temporary_host.create_asset_bucket(
+        s3=s3,
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+        bundle_path=bundle,
+        binding_path=binding,
+    )
+
+    assert calls == [(s3, {
+        "region": temporary_host.REGION,
+        "account_id": temporary_host.ACCOUNT_ID,
+        "run_id": RUN_ID,
+        "candidate_sha": SHA,
+    })]
+    assert result["bucket"] == expected_bucket
+    assert result["prefix"] == f"production-parity/runs/{RUN_ID}/testnet401"
+    assert result["compliance_retention_days"] == 1
+    assert [item[0][2] for item in uploads] == result["source_objects"]
+    assert all(item[1] == {"ExtraArgs": {"ServerSideEncryption": "AES256"}} for item in uploads)
+
+
+def test_private_asset_wait_is_exact_bounded_and_requires_locked_objects():
+    calls = []
+
+    class S3:
+        def get_bucket_tagging(self, **_kwargs):
+            return {"TagSet": [
+                {"Key": "leadpoet:parity-run", "Value": RUN_ID},
+                {"Key": "leadpoet:candidate-sha", "Value": SHA},
+                {"Key": "leadpoet:ephemeral", "Value": "true"},
+                {"Key": "Name", "Value": f"leadpoet-parity-{RUN_ID}"},
+            ]}
+
+        def get_bucket_versioning(self, **_kwargs):
+            return {"Status": "Enabled"}
+
+        def get_object_lock_configuration(self, **_kwargs):
+            return {"ObjectLockConfiguration": {
+                "ObjectLockEnabled": "Enabled",
+                "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Days": 1}},
+            }}
+
+        def get_public_access_block(self, **_kwargs):
+            return {"PublicAccessBlockConfiguration": {
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            }}
+
+        def get_bucket_encryption(self, **_kwargs):
+            return {"ServerSideEncryptionConfiguration": {"Rules": [{
+                "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}
+            }]}}
+
+        def head_object(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ContentLength": 123,
+                "ServerSideEncryption": "AES256",
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": NOW + timedelta(days=1),
+            }
+
+    result = temporary_host.wait_for_private_assets(
+        s3=S3(),
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+        timeout_seconds=1800,
+    )
+    prefix = f"production-parity/runs/{RUN_ID}/testnet401"
+    assert result["status"] == "ready"
+    assert [item["Key"] for item in calls] == [
+        f"{prefix}/{name}" for name in temporary_host.PRIVATE_ASSET_NAMES
+    ]
+
+
+def test_asset_cleanup_removes_only_staging_heads_and_preserves_proof_prefix():
+    deleted = []
+
+    class S3:
+        def get_bucket_tagging(self, **_kwargs):
+            return {"TagSet": [
+                {"Key": "leadpoet:parity-run", "Value": RUN_ID},
+                {"Key": "leadpoet:candidate-sha", "Value": SHA},
+                {"Key": "leadpoet:ephemeral", "Value": "true"},
+                {"Key": "Name", "Value": f"leadpoet-parity-{RUN_ID}"},
+            ]}
+
+        def delete_object(self, **kwargs):
+            deleted.append(kwargs)
+
+    result = temporary_host.remove_staging_asset_heads(
+        s3=S3(),
+        account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+    )
+    expected = [
+        f"production-parity/runs/{RUN_ID}/testnet401/{name}"
+        for name in (*temporary_host.SOURCE_ASSET_NAMES, *temporary_host.PRIVATE_ASSET_NAMES)
+    ]
+    assert [item["Key"] for item in deleted] == expected
+    assert result["staging_object_heads_removed"] == expected
+    assert result["proof_prefix_preserved"].endswith("/evidence/")
+
+
 @pytest.mark.parametrize(
     ("stage", "confirmed"),
     (("preflight", False), ("launch", True), ("status", False), ("cleanup", True)),
@@ -651,10 +797,26 @@ def test_temporary_workflow_reuses_oidc_route_and_scheduled_expiry_cleanup():
     ).read_text(encoding="utf-8")
     assert "name: Production Parity Full" in workflow
     assert "inputs.operation == 'production-parity'" in workflow
-    assert "inputs.operation == 'temporary-testnet401'" in workflow
-    assert "format('testnet401-{0}', inputs.candidate_sha)" in workflow
+    assert "- testnet401-create" in workflow
+    assert "- testnet401-launch" in workflow
+    assert "- testnet401-status" in workflow
+    assert "- testnet401-cleanup" in workflow
+    assert "inputs.operation != 'production-parity'" in workflow
+    assert "format('testnet401-{0}'," in workflow
     assert "cancel-in-progress: >-" in workflow
     assert "scripts/temporary_testnet_signing_host.py" in workflow
+    assert "create-assets" in workflow
+    assert "--timeout-seconds 1800" in workflow
+    assert 'TESTNET401_HOST_TTL_HOURS: "12"' in workflow
+    assert "timeout-minutes: 660" in workflow
+    assert "role-duration-seconds: 21600" in workflow
+    assert "ssm-source-bootstrap" in workflow
+    assert "ssm-native-stage" in workflow
+    assert "for stage in preflight launch" in workflow
+    assert "--stage status" in workflow
+    assert "--stage cleanup" in workflow
+    assert "cleanup-assets" in workflow
+    assert "cleanup_production_parity_staging.py" in workflow
     assert "leadpoet-production-parity-runner" in workflow
     assert "cleanup-run" in workflow
     assert "KeyName" not in workflow

@@ -67,6 +67,14 @@ RUNTIME_ROOT = "/run/leadpoet-testnet401"
 SOURCE_REPOSITORY = "/home/ec2-user/leadpoet/leadpoet"
 SOURCE_VENV = "/home/ec2-user/venv311"
 NATIVE_CONFIG = f"{RUNTIME_ROOT}/config.json"
+PRIVATE_ASSET_NAMES = (
+    "validator.env",
+    "testnet-hotkey-config.json",
+    "testnet-hotkey-envelope.json",
+    "testnet401-epoch-cutover.json",
+)
+SOURCE_ASSET_NAMES = ("candidate.bundle", "candidate-bundle-binding.json")
+MAX_CANDIDATE_BUNDLE_BYTES = 512 * 1024 * 1024
 EARLY_BOOT_ISOLATION = """#cloud-boothook
 #!/bin/bash
 set -eu
@@ -75,7 +83,7 @@ for unit in $(systemctl list-unit-files --no-legend 2>/dev/null \
   systemctl mask --now "$unit" >/dev/null 2>&1 || true
 done
 install -d -m 0700 /run/leadpoet-testnet401
-printf '%s\n' isolated >/run/leadpoet-testnet401/early-isolation
+printf '%s\n' isolated >/run/leadpoet-testnet401/early-boot-isolated
 printf '%s\n' '{expiry_epoch}' >/run/leadpoet-testnet401/expires-epoch
 chmod 600 /run/leadpoet-testnet401/expires-epoch
 cat >/etc/systemd/system/leadpoet-testnet401-expiry.service <<'EOF'
@@ -274,6 +282,225 @@ def _artifact_bucket_name(*, run_id: str, candidate_sha: str) -> str:
     return f"leadpoet-parity-{ACCOUNT_ID}-{suffix}"
 
 
+def create_asset_bucket(
+    *,
+    s3: Any,
+    account_id: str,
+    region: str,
+    run_id: str,
+    candidate_sha: str,
+    bundle_path: Path,
+    binding_path: Path,
+) -> dict[str, Any]:
+    if (
+        account_id != ACCOUNT_ID
+        or region != REGION
+        or RUN_RE.fullmatch(run_id) is None
+        or SHA_RE.fullmatch(candidate_sha) is None
+    ):
+        raise TemporaryHostError("temporary asset-bucket AWS identity differs")
+    try:
+        bundle_metadata = bundle_path.lstat()
+        binding_metadata = binding_path.lstat()
+        if (
+            not bundle_path.is_file()
+            or bundle_path.is_symlink()
+            or not 0 < bundle_metadata.st_size <= MAX_CANDIDATE_BUNDLE_BYTES
+            or not binding_path.is_file()
+            or binding_path.is_symlink()
+            or not 0 < binding_metadata.st_size <= 4096
+        ):
+            raise TemporaryHostError("temporary candidate bundle is unavailable")
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        digest = hashlib.sha256()
+        with bundle_path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        bundle_size = bundle_metadata.st_size
+        bundle_hash = digest.hexdigest()
+    except TemporaryHostError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise TemporaryHostError("temporary candidate bundle is unavailable") from exc
+    if (
+        not isinstance(binding, Mapping)
+        or set(binding) != {"candidate-sha", "bundle-sha256", "bundle-size-bytes"}
+        or binding.get("candidate-sha") != candidate_sha
+        or binding.get("bundle-sha256") != bundle_hash
+        or str(binding.get("bundle-size-bytes")) != str(bundle_size)
+        or bundle_size <= 0
+    ):
+        raise TemporaryHostError("temporary candidate bundle identity differs")
+    from scripts.provision_production_parity_staging import _create_artifact_bucket
+
+    bucket = _create_artifact_bucket(
+        s3,
+        region=region,
+        account_id=account_id,
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+    )
+    prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
+    try:
+        for path, name in (
+            (bundle_path, SOURCE_ASSET_NAMES[0]),
+            (binding_path, SOURCE_ASSET_NAMES[1]),
+        ):
+            s3.upload_file(
+                str(path),
+                bucket,
+                f"{prefix}/{name}",
+                ExtraArgs={"ServerSideEncryption": "AES256"},
+            )
+    except Exception as exc:
+        raise TemporaryHostError(
+            "temporary asset bucket created but source upload failed"
+        ) from exc
+    return {
+        "schema_version": "leadpoet.temporary_testnet401_asset_bucket.v1",
+        "status": "source_ready",
+        "run_id": run_id,
+        "candidate_sha": candidate_sha,
+        "bucket": bucket,
+        "prefix": prefix,
+        "source_objects": [f"{prefix}/{name}" for name in SOURCE_ASSET_NAMES],
+        "private_inputs_pending": [
+            f"{prefix}/{name}" for name in PRIVATE_ASSET_NAMES
+        ],
+        "compliance_retention_days": 1,
+    }
+
+
+def wait_for_private_assets(
+    *,
+    s3: Any,
+    account_id: str,
+    region: str,
+    run_id: str,
+    candidate_sha: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    if (
+        account_id != ACCOUNT_ID
+        or region != REGION
+        or timeout_seconds not in range(1, 1801)
+    ):
+        raise TemporaryHostError("temporary private-asset wait inputs differ")
+    bucket = _artifact_bucket_name(run_id=run_id, candidate_sha=candidate_sha)
+    prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
+    tags = _tag_map(s3.get_bucket_tagging(Bucket=bucket).get("TagSet", []))
+    versioning = s3.get_bucket_versioning(Bucket=bucket)
+    object_lock = s3.get_object_lock_configuration(Bucket=bucket).get(
+        "ObjectLockConfiguration", {}
+    )
+    retention = object_lock.get("Rule", {}).get("DefaultRetention", {})
+    public_access = s3.get_public_access_block(Bucket=bucket).get(
+        "PublicAccessBlockConfiguration", {}
+    )
+    encryption = s3.get_bucket_encryption(Bucket=bucket).get(
+        "ServerSideEncryptionConfiguration", {}
+    )
+    rules = encryption.get("Rules", [])
+    if (
+        tags
+        != {
+            TAG_RUN: run_id,
+            TAG_SHA: candidate_sha,
+            TAG_EPHEMERAL: "true",
+            "Name": f"leadpoet-parity-{run_id}",
+        }
+        or versioning.get("Status") != "Enabled"
+        or object_lock.get("ObjectLockEnabled") != "Enabled"
+        or retention != {"Mode": "COMPLIANCE", "Days": 1}
+        or set(public_access.values()) != {True}
+        or len(public_access) != 4
+        or len(rules) != 1
+        or rules[0].get("ApplyServerSideEncryptionByDefault", {}).get(
+            "SSEAlgorithm"
+        )
+        != "AES256"
+    ):
+        raise TemporaryHostError("temporary private asset bucket differs")
+    deadline = time.monotonic() + timeout_seconds
+    observed: dict[str, int] = {}
+    while time.monotonic() < deadline:
+        observed = {}
+        for name in PRIVATE_ASSET_NAMES:
+            try:
+                value = s3.head_object(Bucket=bucket, Key=f"{prefix}/{name}")
+            except ClientError as exc:
+                if str(exc.response.get("Error", {}).get("Code") or "") in {
+                    "404",
+                    "NoSuchKey",
+                    "NotFound",
+                }:
+                    continue
+                raise
+            size = int(value.get("ContentLength") or 0)
+            retain_until = value.get("ObjectLockRetainUntilDate")
+            if (
+                not 0 < size <= 32 * 1024 * 1024
+                or value.get("ServerSideEncryption") != "AES256"
+                or value.get("ObjectLockMode") != "COMPLIANCE"
+                or not isinstance(retain_until, datetime)
+                or _utc(retain_until) <= datetime.now(timezone.utc)
+            ):
+                raise TemporaryHostError("temporary private asset metadata differs")
+            observed[name] = size
+        if set(observed) == set(PRIVATE_ASSET_NAMES):
+            return {
+                "schema_version": "leadpoet.temporary_testnet401_private_assets.v1",
+                "status": "ready",
+                "run_id": run_id,
+                "candidate_sha": candidate_sha,
+                "bucket": bucket,
+                "prefix": prefix,
+                "objects": {
+                    name: observed[name] for name in PRIVATE_ASSET_NAMES
+                },
+            }
+        time.sleep(min(15, max(1, timeout_seconds)))
+    raise TemporaryHostError("temporary private assets did not arrive before timeout")
+
+
+def remove_staging_asset_heads(
+    *,
+    s3: Any,
+    account_id: str,
+    region: str,
+    run_id: str,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    if account_id != ACCOUNT_ID or region != REGION:
+        raise TemporaryHostError("temporary staging cleanup AWS identity differs")
+    bucket = _artifact_bucket_name(run_id=run_id, candidate_sha=candidate_sha)
+    tags = s3.get_bucket_tagging(Bucket=bucket).get("TagSet", [])
+    values = _tag_map(tags)
+    if values != {
+        TAG_RUN: run_id,
+        TAG_SHA: candidate_sha,
+        TAG_EPHEMERAL: "true",
+        "Name": f"leadpoet-parity-{run_id}",
+    }:
+        raise TemporaryHostError("temporary asset-bucket ownership differs")
+    prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
+    deleted: list[str] = []
+    for name in (*SOURCE_ASSET_NAMES, *PRIVATE_ASSET_NAMES):
+        key = f"{prefix}/{name}"
+        s3.delete_object(Bucket=bucket, Key=key)
+        deleted.append(key)
+    return {
+        "schema_version": "leadpoet.temporary_testnet401_staging_cleanup.v1",
+        "status": "delete_markers_created",
+        "run_id": run_id,
+        "candidate_sha": candidate_sha,
+        "bucket": bucket,
+        "staging_object_heads_removed": deleted,
+        "locked_versions_retained_until_compliance_expiry": True,
+        "proof_prefix_preserved": f"{prefix}/evidence/",
+    }
+
+
 def _require_live_host(
     ec2: Any,
     *,
@@ -410,8 +637,8 @@ def source_bootstrap_command(
     lines = [
         "set -Eeuo pipefail",
         "umask 077",
-        f"test -f {q(RUNTIME_ROOT + '/early-isolation')}",
-        f"test \"$(cat {q(RUNTIME_ROOT + '/early-isolation')})\" = isolated",
+        f"test -f {q(RUNTIME_ROOT + '/early-boot-isolated')}",
+        f"test \"$(cat {q(RUNTIME_ROOT + '/early-boot-isolated')})\" = isolated",
         f"test ! -e {q(SOURCE_REPOSITORY)}",
         f"test ! -e {q(SOURCE_VENV)}",
         f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
@@ -1212,6 +1439,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     cleanup_run.add_argument("--apply", action="store_true")
     cleanup_expired = commands.add_parser("cleanup-expired")
     cleanup_expired.add_argument("--apply", action="store_true")
+    create_assets = commands.add_parser("create-assets")
+    create_assets.add_argument("--run-id", required=True)
+    create_assets.add_argument("--candidate-sha", required=True)
+    create_assets.add_argument("--bundle", type=Path, required=True)
+    create_assets.add_argument("--binding", type=Path, required=True)
+    create_assets.add_argument("--state", type=Path, required=True)
+    wait_assets = commands.add_parser("wait-assets")
+    wait_assets.add_argument("--run-id", required=True)
+    wait_assets.add_argument("--candidate-sha", required=True)
+    wait_assets.add_argument("--timeout-seconds", type=int, default=1800)
+    wait_assets.add_argument("--state", type=Path, required=True)
+    cleanup_assets = commands.add_parser("cleanup-assets")
+    cleanup_assets.add_argument("--run-id", required=True)
+    cleanup_assets.add_argument("--candidate-sha", required=True)
+    cleanup_assets.add_argument("--state", type=Path, required=True)
     source_bootstrap = commands.add_parser("ssm-source-bootstrap")
     source_bootstrap.add_argument("--run-id", required=True)
     source_bootstrap.add_argument("--candidate-sha", required=True)
@@ -1236,7 +1478,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             if hasattr(args, "candidate_sha")
             else None
         )
-        if args.command == "create":
+        if args.command == "create-assets":
+            result = create_asset_bucket(
+                s3=session.client("s3"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+                bundle_path=args.bundle,
+                binding_path=args.binding,
+            )
+            _write(args.state, result)
+        elif args.command == "wait-assets":
+            result = wait_for_private_assets(
+                s3=session.client("s3"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+                timeout_seconds=args.timeout_seconds,
+            )
+            _write(args.state, result)
+        elif args.command == "cleanup-assets":
+            result = remove_staging_asset_heads(
+                s3=session.client("s3"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+            )
+            _write(args.state, result)
+        elif args.command == "create":
             result = create_host(
                 ec2=ec2,
                 ssm=session.client("ssm"),

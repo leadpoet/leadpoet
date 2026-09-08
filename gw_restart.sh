@@ -384,15 +384,19 @@ start_lab_arena_service() {
 run_lab_arena_restart_guard() {
   local source_root="$1"
   shift
-  local guard_args=("$@")
+  local guard_args=("$@" --environment-file "$GATEWAY_ENV_FILE")
+  local -a guard_environment=(
+    env
+    -u LAB_ARENA_SUPABASE_URL
+    -u LAB_ARENA_SUPABASE_ANON_KEY
+    -u LAB_ARENA_SERVICE_KEY
+    -u LAB_ARENA_SERVICE_JWT
+  )
   if [ ! -r "$source_root/scripts/lab_arena_restart_claim_guard.py" ]; then
     echo "ERROR: exact Lab Arena restart guard helper is unavailable" >&2
     return 1
   fi
-  if [ -f "$ENV_CLONE" ]; then
-    guard_args+=(--environment-file "$ENV_CLONE")
-  fi
-  PYTHONPATH="$source_root" "$GATEWAY_PYTHON_BIN" \
+  "${guard_environment[@]}" PYTHONPATH="$source_root" "$GATEWAY_PYTHON_BIN" \
     "$source_root/scripts/lab_arena_restart_claim_guard.py" "${guard_args[@]}" \
     --candidate "$PREPARED_GATEWAY_SHA" \
     --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"

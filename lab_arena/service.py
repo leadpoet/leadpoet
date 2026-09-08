@@ -51,10 +51,11 @@ CANCEL_REASONS = {
 class ServiceError(RuntimeError):
     """A request or transition failed closed."""
 
-    def __init__(self, code: str, status: int = 400) -> None:
+    def __init__(self, code: str, status: int = 400, *, source_path: str = "") -> None:
         super().__init__(code)
         self.code = code
         self.status = status
+        self.source_path = source_path
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +911,14 @@ class ArenaService:
                 payload, forbidden_values=forbidden_values
             )
         except source_bundle.SourceBundleError as exc:
-            raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
+            path = exc.path or ""
+            for value in forbidden_values:
+                if value:
+                    path = path.replace(value, "[REDACTED]")
+            raise ServiceError(
+                "submission_rejected:%s" % exc.code, 400,
+                source_path=path[:source_bundle.MAX_SOURCE_PATH_BYTES],
+            ) from exc
 
     def handle_submission_finalize(
         self, submission_id: str, envelope: Any

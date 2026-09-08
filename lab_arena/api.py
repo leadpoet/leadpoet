@@ -75,7 +75,10 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.exception_handler(ServiceError)
     async def _service_error(request: Request, exc: ServiceError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status, content={"status": "rejected", "code": exc.code})
+        content = {"status": "rejected", "code": exc.code}
+        if exc.code == "submission_rejected:source_contains_credentials" and exc.source_path:
+            content["source_path"] = exc.source_path
+        return JSONResponse(status_code=exc.status, content=content)
 
     @app.exception_handler(ArenaContractError)
     async def _contract_error(request: Request, exc: ArenaContractError) -> JSONResponse:

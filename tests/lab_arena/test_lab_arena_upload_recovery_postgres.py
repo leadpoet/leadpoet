@@ -2,8 +2,12 @@
 
 import base64
 import hashlib
+import io
+import tarfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -97,6 +101,63 @@ def test_concurrent_retries_share_one_reservation(store, database):
     assert len(store.list_submissions(round_id, status="uploading")) == 1
 
 
+@pytest.mark.parametrize("finalize_first", [True, False])
+def test_replacement_and_finalize_serialize_without_replacing_accepted_source(store, database, finalize_first):
+    round_id, miner = _open(store, "race" + str(int(finalize_first)))
+    old_id, new_id = "sub-old-" + str(int(finalize_first)), "sub-next-" + str(int(finalize_first))
+    store.register_submission(round_id, old_id, miner, _doc(round_id, old_id))
+    psycopg2, dsn = database
+    blocker = psycopg2.connect(**dsn)
+    observer = psycopg2.connect(**dsn)
+    observer.autocommit = True
+    def operation(finalize):
+        label = "upload-race-finalize" if finalize else "upload-race-replace"
+        transport = PsycopgTransport(lambda: psycopg2.connect(**dsn, application_name=label))
+        contender = ArenaStore(transport)
+        try:
+            if finalize:
+                return contender.accept_submission_with_credentials(round_id, old_id, miner, {"openrouter": "dGVzdA==", "deepline": "dGVzdA=="})
+            return contender.register_submission(round_id, new_id, miner, _doc(round_id, new_id, b"other source"))
+        except ArenaStoreError as exc:
+            return {"error": str(exc)}
+        finally:
+            transport.close()
+    def wait_for_lock(finalize):
+        label = "upload-race-finalize" if finalize else "upload-race-replace"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with observer.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE application_name=%s AND wait_event_type='Lock'", (label,))
+                if cursor.fetchone()[0]:
+                    return
+            time.sleep(0.01)
+        raise AssertionError("contender did not enter the round lock queue")
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute("SELECT round_id FROM public.lab_arena_rounds WHERE round_id=%s FOR UPDATE", (round_id,))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(operation, finalize_first)
+            try:
+                wait_for_lock(finalize_first)
+                second = pool.submit(operation, not finalize_first)
+                wait_for_lock(not finalize_first)
+            finally:
+                blocker.commit()
+            first_result, second_result = first.result(timeout=10), second.result(timeout=10)
+        assert "error" not in first_result
+        assert "error" in second_result
+        old = store.get_submission(old_id)
+        assert old["status"] == ("accepted" if finalize_first else "rejected")
+        assert len([s for s in store.list_submissions(round_id) if s["status"] in ("accepted", "uploading")]) == 1
+        if finalize_first:
+            assert store.get_submission(new_id) is None
+        else:
+            assert store.get_submission(new_id)["status"] == "uploading"
+    finally:
+        blocker.close()
+        observer.close()
+
+
 def test_same_size_stale_object_fails_checksum_before_archive_or_credentials():
     service = object.__new__(ArenaService)
     service._objects = SimpleNamespace(get_bounded=lambda *_args: b"other source")
@@ -104,3 +165,52 @@ def test_same_size_stale_object_fails_checksum_before_archive_or_credentials():
     with pytest.raises(ServiceError) as caught:
         service._validate_uploaded_source(row)
     assert caught.value.code == "submission_rejected:source_checksum_mismatch"
+
+
+def test_gateway_source_error_names_file_without_returning_credentials():
+    from fastapi.testclient import TestClient
+    from lab_arena.api import create_app
+
+    secret = "synthetic-private-api-key"
+    name = ".env." + secret
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+        member = tarfile.TarInfo(name)
+        member.size = 4
+        archive.addfile(member, io.BytesIO(b"test"))
+    payload = raw.getvalue()
+    service = object.__new__(ArenaService)
+    service._objects = SimpleNamespace(get_bounded=lambda *_args: payload)
+    def finalize(_submission_id, _envelope):
+        service._validate_uploaded_source(
+            {"source_ref": "arena/source", "source_size_bytes": len(payload)},
+            forbidden_values=(secret,),
+        )
+    service.handle_submission_finalize = finalize
+    with TestClient(create_app(service)) as client:
+        response = client.post(
+            "/arena/v1/submissions/sub-path/finalize",
+            json={"body": {"submission_id": "sub-path"}},
+        )
+    assert response.status_code == 400
+    assert response.json()["code"] == "submission_rejected:source_contains_credentials"
+    assert response.json()["source_path"] == ".env.[REDACTED]"
+    assert secret not in response.text
+
+
+def test_upload_migration_is_idempotent_under_hosted_owner(database):
+    psycopg2, dsn = database
+    migration = (Path(__file__).resolve().parents[2] / "scripts/191-lab-arena-upload-recovery.sql").read_text()
+    with psycopg2.connect(**dsn) as connection:
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE ROLE upload_migrator LOGIN CREATEROLE INHERIT; GRANT lab_arena_owner TO upload_migrator; ALTER SCHEMA public OWNER TO upload_migrator")
+            cursor.execute("SELECT count(*) FROM public.lab_arena_submissions")
+            before = cursor.fetchone()[0]
+            cursor.execute("SET ROLE upload_migrator")
+            cursor.execute(migration)
+            cursor.execute(migration)
+            cursor.execute("RESET ROLE; SELECT count(*) FROM public.lab_arena_submissions")
+            assert cursor.fetchone()[0] == before
+            cursor.execute("SET ROLE lab_arena_service; SELECT public.lab_arena_schema_version_v1()")
+            assert cursor.fetchone()[0]["version"] == 191

@@ -29,14 +29,25 @@ the masked prompts:
 The gateway checks the keys without changing the OpenRouter account. It
 discards the management key after the check. It stores only encrypted runtime
 keys. The OpenRouter runtime key must be usable and non-management. If
-OpenRouter reports `limit_remaining`, it must be above zero. The management key must control that exact runtime key; the
-gateway proves this through the runtime key's SHA256 hash. A runtime-only key,
+OpenRouter reports a numeric `limit_remaining`, it must be above zero. The
+management key must control that exact runtime key; the gateway checks
+`/api/v1/keys/{hash}` using the runtime key's SHA256 hash. A runtime-only key,
 a management key in the runtime slot, a disabled key, or a key with no
 reported credit is rejected. The gateway reports safe error codes and never
-includes key values in them. Neither the validator sandbox nor the submitted code receives
-real keys; the gateway adds them to approved provider calls for that
+includes key values in them. Neither the validator sandbox nor the submitted
+code receives real keys; the gateway adds them to approved provider calls for that
 submission.
 The miner pays those upstream charges. There is no organizer-key fallback.
+
+| Error | Action |
+|---|---|
+| `openrouter_api_key_invalid` | Supply an enabled runtime key, not a management key. |
+| `openrouter_api_key_no_credit` | Add credit or increase the runtime key's exhausted limit. |
+| `openrouter_management_key_invalid` | Supply the management key that controls this exact runtime key. |
+| `deepline_api_key_invalid` | Check that the Deepline key is active and correct. |
+| `credential_validation_unavailable` / `credential_kms_unavailable` | Retry later; a dependency could not complete the check. |
+
+Rejected admission codes can have the prefix `submission_rejected:`.
 
 For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and
 `DEEPLINE_API_KEY` through your secret manager, then run:
@@ -58,11 +69,18 @@ Admission requires a registered miner hotkey and an open submission window.
 If the chain no longer registers the selected hotkey, presign returns
 `hotkey_unregistered`. Check registration before submitting and update the
 wallet or miner configuration to a currently registered hotkey. Do not rotate
-a registered key just because an older key was pruned; preserve the key that
-owns existing submissions and use the signed owner for status and results.
+a registered key just because an older key was pruned. Keep the signing key
+that owns an unfinished submission; published and cancelled results are public.
 The archive limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 entries.
 The result gives a submission ID and round ID. **Accepted means admitted, not
 scored.** Validator execution and scoring follow through that round's queue.
+
+Retry an unchanged archive with the same hotkey. The gateway reuses its upload
+reservation. If an unfinished archive changes, the gateway keeps the old row
+and bytes and assigns a new upload target. A late finalize for the replaced
+reservation returns `submission_superseded`. An accepted submission cannot be
+replaced during that round. The existing MD5 transport checksum prevents a
+same-size changed archive from silently finalizing older bytes.
 
 Use the returned IDs to read the result after the round publishes:
 

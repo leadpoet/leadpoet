@@ -34,6 +34,11 @@ publish_built_eif_for_verification() {
   }
 }
 
+build_enclave_with_nitro_cli() {
+  sudo --preserve-env=NITRO_CLI_ARTIFACTS,NITRO_CLI_BLOBS \
+    nitro-cli build-enclave "$@"
+}
+
 . "$REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 leadpoet_acquire_docker_operation_lock_v2
 
@@ -136,7 +141,7 @@ if [ "$RESTORED_EXACT_RELEASE" != "1" ]; then
       --normalized-image "$image"
     sudo docker image inspect -f '{{.Id}}' "$image" \
       > "$BUILD_EIF_ROOT/enclave-image-${role}.txt"
-    sudo nitro-cli build-enclave \
+    build_enclave_with_nitro_cli \
       --docker-uri "$image" \
       --output-file "$output" \
       | tee "$measurements"

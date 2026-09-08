@@ -34,6 +34,16 @@ INPUT_NAMES = (
 MAX_PRIVATE_INPUT_BYTES = 262_144
 DIAGNOSTIC_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 DIAGNOSTIC_LOCATION_RE = re.compile(r"^[A-Za-z0-9_./-]{1,220}:[0-9]{1,6}$")
+NITRO_CLI_ARTIFACTS = ROOT / "nitro-cli-artifacts"
+NITRO_CLI_BLOBS = Path("/usr/share/nitro_enclaves/blobs")
+NITRO_CLI_BLOB_NAMES = (
+    "bzImage",
+    "bzImage.config",
+    "cmdline",
+    "init",
+    "linuxkit",
+    "nsm.ko",
+)
 
 
 def read_locked_private_input(
@@ -113,6 +123,23 @@ def failure_receipt(exc: BaseException) -> dict[str, str]:
     if DIAGNOSTIC_LOCATION_RE.fullmatch(location):
         result["location"] = location
     return result
+
+
+def prepare_nitro_cli_environment(
+    *, artifacts: Path = NITRO_CLI_ARTIFACTS, blobs: Path = NITRO_CLI_BLOBS
+) -> dict[str, str]:
+    """Bind non-login Nitro builds to task-owned artifacts and RPM blobs."""
+    if blobs.is_symlink() or not blobs.is_dir():
+        raise ValueError("Nitro CLI blobs directory is unavailable")
+    for name in NITRO_CLI_BLOB_NAMES:
+        native._regular_file(blobs / name, f"Nitro CLI blob {name}")
+    artifacts.mkdir(mode=0o700, exist_ok=False)
+    if artifacts.is_symlink() or not artifacts.is_dir():
+        raise ValueError("Nitro CLI artifacts directory is unavailable")
+    return {
+        "NITRO_CLI_ARTIFACTS": str(artifacts),
+        "NITRO_CLI_BLOBS": str(blobs),
+    }
 
 
 def build_config(*, repository: Path, candidate: str, run_id: str,
@@ -219,6 +246,7 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
         "minimum_retention_days": 1,
     }
     private_write(ROOT / "artifact-policy.json", json.dumps(policy).encode())
+    nitro_environment = prepare_nitro_cli_environment()
     env = {
         key: value for key, value in os.environ.items()
         if key not in native.STATIC_AWS_CREDENTIAL_NAMES
@@ -242,6 +270,7 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
         "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(ROOT / "offline-artifacts/validator-runtime"),
         "VALIDATOR_V2_BUILD_COMMIT": candidate,
         "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(ROOT / "docker.lock"),
+        **nitro_environment,
     })
 
     def run(name: str, command: list[str], *, timeout: int = 3600) -> None:

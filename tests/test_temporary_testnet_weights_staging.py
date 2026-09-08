@@ -153,6 +153,45 @@ def test_failure_receipt_reports_only_bounded_identity():
     assert "/private/nitro-cli" not in encoded
 
 
+def test_nitro_cli_environment_uses_bound_artifacts_and_rpm_blobs(tmp_path):
+    assert stage.NITRO_CLI_ARTIFACTS == Path(
+        "/run/leadpoet-testnet401/nitro-cli-artifacts"
+    )
+    assert stage.NITRO_CLI_BLOBS == Path("/usr/share/nitro_enclaves/blobs")
+    blobs = tmp_path / "rpm-blobs"
+    blobs.mkdir()
+    for name in stage.NITRO_CLI_BLOB_NAMES:
+        (blobs / name).write_bytes(b"rpm-owned")
+    artifacts = tmp_path / "task" / "nitro-cli-artifacts"
+    artifacts.parent.mkdir()
+
+    result = stage.prepare_nitro_cli_environment(
+        artifacts=artifacts,
+        blobs=blobs,
+    )
+
+    assert result == {
+        "NITRO_CLI_ARTIFACTS": str(artifacts),
+        "NITRO_CLI_BLOBS": str(blobs),
+    }
+    assert stat.S_IMODE(artifacts.stat().st_mode) == 0o700
+    assert "HOME" not in result
+    with pytest.raises(FileExistsError):
+        stage.prepare_nitro_cli_environment(artifacts=artifacts, blobs=blobs)
+
+
+def test_nitro_cli_environment_rejects_non_rpm_blob_shape(tmp_path):
+    blobs = tmp_path / "rpm-blobs"
+    blobs.mkdir()
+    (blobs / "cmdline").write_bytes(b"incomplete")
+
+    with pytest.raises(stage.native.TemporaryTestnetBootstrapError):
+        stage.prepare_nitro_cli_environment(
+            artifacts=tmp_path / "nitro-cli-artifacts",
+            blobs=blobs,
+        )
+
+
 @pytest.mark.parametrize("field,value", [
     ("candidate", "main"),
     ("run_id", "../../another-run"),

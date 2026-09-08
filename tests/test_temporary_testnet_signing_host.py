@@ -574,6 +574,8 @@ def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     (logs / "native_host_dependencies.log").write_text(
         "secret-value-never-print\nModuleNotFoundError: hidden module\n"
         'File "/private/path/native.py", line 42\n'
+        '/private/build_local_release_v2.sh: line 83: Killed private-arguments\n'
+        'Building one local gateway identity for private-identity\n'
     )
     (task / "source-stage.json").write_text(
         '{"stage":"native_host_dependencies","status":"running","secret":"hidden"}\n'
@@ -587,8 +589,12 @@ def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     value = json.loads(result.stdout)
     assert value["status"] == "staging_incomplete"
     assert value["stage_states"] == [{"stage": "native_host_dependencies", "status": "running"}]
-    assert value["log_diagnostics"][0]["categories"] == ["ModuleNotFoundError"]
+    assert value["log_diagnostics"][0]["categories"] == ["ModuleNotFoundError", "Killed"]
     assert value["log_diagnostics"][0]["trace_locations"] == [["native.py", "42"]]
+    assert value["log_diagnostics"][0]["shell_locations"] == [["build_local_release_v2.sh", "83"]]
+    assert value["log_diagnostics"][0]["build_milestones"] == ["Building one local gateway identity"]
+    assert "private-arguments" not in result.stdout
+    assert "private-identity" not in result.stdout
 
 
 def test_expired_cleanup_terminates_only_after_protected_expiry():

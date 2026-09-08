@@ -858,7 +858,9 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "patterns = ('AccessDenied', 'ModuleNotFoundError', 'ImportError', "
         "'PermissionError', 'NoSuchKey', 'No space left on device', 'AssertionError', "
         "'RuntimeError', 'ValueError', 'command not found', 'not found', 'fatal:', "
-        "'ResolutionImpossible', 'No matching distribution', 'FileExistsError')",
+        "'ResolutionImpossible', 'No matching distribution', 'FileExistsError', "
+        "'unbound variable', 'Killed', 'Terminated', 'Segmentation fault', "
+        "'invalid PCR0', 'no live lock owner', 'protected workflow', 'timed out')",
         "result['log_diagnostics'] = []",
         f"ssm = pathlib.Path('/var/lib/amazon/ssm/{instance_id}/document/orchestration')",
         "paths = list(ssm.glob('*/awsrunShellScript/0.awsrunShellScript/stderr'))[-12:]",
@@ -873,6 +875,8 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "'trace_locations': re.findall(r'File \"[^\"\\n]*/([a-zA-Z0-9_]+\\.py)\", line ([0-9]{1,6})', data)[-8:], "
         "'nitro_error_codes': sorted(set(re.findall(r'\\[\\s*(E[0-9]{1,3})\\s*\\]', data))), "
         "'child_exit_codes': re.findall(r'failed with exit code ([0-9]{1,3})', data)[-4:], "
+        "'shell_locations': re.findall(r'([a-zA-Z0-9_]+\\.sh): line ([0-9]{1,6}):', data)[-8:], "
+        "'build_milestones': [p for p in ('Building one local gateway identity', 'gateway_reproducible_pcr0_build', 'Building one local validator identity', 'Building Validator Nitro Enclave Image', 'Cleaning PCR0 Docker context', 'Verifying protected validator', 'Building pinned bittensor-drand', 'Writing validator V2 release metadata') if p in data], "
         "'system_error_categories': [p for p in ('Permission denied', 'No such file or directory', 'Cannot allocate memory', 'Invalid argument', 'Read-only file system', 'File exists', 'Out of memory') if p in data]})",
         "probe = " + repr("\n".join([
             "import json,sys,traceback",

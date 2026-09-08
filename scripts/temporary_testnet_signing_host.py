@@ -826,7 +826,7 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "instance_id": instance_id,
     }
     return "\n".join([
-        "import json, pathlib, re",
+        "import json, pathlib, re, subprocess",
         f"result = {identity!r}",
         f"root = pathlib.Path({RUNTIME_ROOT!r})",
         "names = ('early-boot-isolated', 'expires-epoch', 'candidate.bundle', "
@@ -841,6 +841,9 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "    for line in path.open().read(65536).splitlines()[-20:]:",
         "        try: value = json.loads(line)",
         "        except ValueError: continue",
+        "        if isinstance(value, dict) and value.get('status') == 'failed' and "
+        "re.fullmatch('[A-Za-z_]{1,80}', str(value.get('error_type', ''))):",
+        "            result['staging_error_type'] = value['error_type']",
         "        if isinstance(value, dict) and re.fullmatch('[a-z_]{1,64}', "
         "str(value.get('stage', ''))) and value.get('status') in ('running', 'passed'):",
         "            result['stage_states'].append({key: value[key] for key in ('stage', 'status')})",
@@ -860,6 +863,29 @@ def staging_diagnostic_program(*, run_id: str, candidate_sha: str,
         "    result['log_diagnostics'].append({'file': path.name, "
         "'bytes': path.stat().st_size, 'categories': [p for p in patterns if p in data], "
         "'trace_locations': re.findall(r'File \"[^\"\\n]*/([a-zA-Z0-9_]+\\.py)\", line ([0-9]{1,6})', data)[-8:]})",
+        "probe = " + repr("\n".join([
+            "import json,sys,traceback",
+            f"sys.path.insert(0, {SOURCE_REPOSITORY!r})",
+            "from pathlib import Path",
+            "from scripts import stage_temporary_testnet_weights_host as stage",
+            "from scripts import bootstrap_temporary_testnet_weights_host as native",
+            f"config = stage.build_config(repository=Path({SOURCE_REPOSITORY!r}), candidate={candidate_sha!r}, run_id={run_id!r}, instance_id={instance_id!r}, expiry=int(Path({(RUNTIME_ROOT + '/expires-epoch')!r}).read_text()))",
+            "result = {}",
+            "for name in ('verify_host_authority', 'verify_host_is_empty'):",
+            "    try:",
+            "        getattr(native, name)(config)",
+            "        result[name] = {'status': 'passed'}",
+            "    except Exception as exc:",
+            "        response = getattr(exc, 'response', {})",
+            "        result[name] = {'status': 'failed', 'type': type(exc).__name__, 'operation': getattr(exc, 'operation_name', ''), 'code': response.get('Error', {}).get('Code', ''), 'line': traceback.extract_tb(exc.__traceback__)[-1].lineno}",
+            "print(json.dumps(result, sort_keys=True))",
+        ])),
+        f"if pathlib.Path({(SOURCE_VENV + '/bin/python3')!r}).is_file():",
+        f"    checked = subprocess.run([{(SOURCE_VENV + '/bin/python3')!r}, '-I', '-c', probe], capture_output=True, text=True, timeout=90)",
+        "    if checked.returncode == 0:",
+        "        try: result['pre_input_checks'] = json.loads(checked.stdout)",
+        "        except ValueError: result['pre_input_checks'] = {'output': 'invalid'}",
+        "    else: result['pre_input_checks'] = {'process_exit': checked.returncode}",
         "print(json.dumps(result, sort_keys=True))",
     ])
 

@@ -2711,6 +2711,7 @@ def _exercise_settlement_frontier_terminal_retirement() -> dict[str, Any]:
         reward_checkpoints=(champion_checkpoint, source_add_checkpoint),
     )
     resolver = object.__new__(CoordinatorAllocationSourceV2)
+    resolver._network_supplier = lambda: "finney"
     try:
         resolver._build_settlement_frontier(
             epoch=121,

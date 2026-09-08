@@ -36,6 +36,10 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
 )
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
+from leadpoet_canonical.attested_v2 import merkle_root
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    frontier_artifact_hashes_v2,
+)
 from leadpoet_canonical.chain_source_v2 import last_update_storage_key
 
 
@@ -548,12 +552,14 @@ async def test_host_loads_only_exact_durable_cutover_without_activation(
     assert loaded == graph
 
 
-def _allocation_outcome(*, epoch: int) -> dict:
+def _allocation_outcome(*, epoch: int, predecessor: dict | None = None) -> dict:
     frontier = build_allocation_settlement_frontier_v2(
-        mode="legacy_full_history_bootstrap",
+        mode="bounded_delta_v1" if predecessor else "legacy_full_history_bootstrap",
         netuid=401,
         allocation_epoch=epoch,
-        predecessor_frontier_hash=None,
+        predecessor_frontier_hash=(
+            predecessor["frontier_hash"] if predecessor else None
+        ),
         reward_checkpoints=[],
     )
     allocation = {"allocation_hash": "sha256:" + "a" * 64}
@@ -658,6 +664,337 @@ async def test_host_build_attaches_fresh_parent_and_skips_missing_activation(
     assert result["status"] == "matched"
     assert captured["parents"] == [graph]
     assert captured["frontier"]["allocation_epoch"] == 22_058
+
+
+@pytest.mark.asyncio
+async def test_host_build_attaches_cutover_to_unfinalized_frontier_successor(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    cutover_graph = _cutover_graph()
+    frontier_graph = {"root_receipt_hash": "sha256:" + "b" * 64}
+    prior = _allocation_outcome(epoch=22_062)["result"]["source_state"][
+        "settlement_frontier"
+    ]
+    context = {
+        "frontier": prior,
+        "source": {"receipt": {"parent_receipt_hashes": []}},
+    }
+    captured = {}
+
+    async def load_context(**_kwargs):
+        return context
+
+    async def load_parents(**kwargs):
+        assert kwargs["settlement_frontier_context"] is context
+        return [frontier_graph]
+
+    async def execute(**kwargs):
+        captured["parents"] = kwargs["parent_graphs"]
+        return _allocation_outcome(epoch=22_063, predecessor=prior)
+
+    async def forbidden(**_kwargs):
+        raise AssertionError("settlement activation must not run")
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_allocation_settlement_frontier_context_v2",
+        load_context,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "_load_fresh_testnet401_first_allocation_parent_v1",
+        lambda **_kwargs: None,
+    )
+
+    async def fresh(**_kwargs):
+        return cutover_graph
+
+    monkeypatch.setattr(
+        v2_authority,
+        "_load_fresh_testnet401_first_allocation_parent_v1",
+        fresh,
+    )
+    monkeypatch.setattr(v2_authority, "_load_allocation_parent_graphs_v2", load_parents)
+    monkeypatch.setattr(v2_authority, "ensure_chain_realized_settlements_v1", forbidden)
+    monkeypatch.setattr(v2_authority, "execute_coordinator_v2", execute)
+    monkeypatch.setitem(v2_authority.build_allocation_v2.__kwdefaults__, "execute", execute)
+    monkeypatch.setattr(v2_authority, "_validate_allocation_parent_graphs", lambda _graphs: [])
+    monkeypatch.setattr(attested_v2_store, "persist_allocation_settlement_frontier_v2", lambda **_kwargs: None)
+
+    async def persist_frontier(**_kwargs):
+        return {}
+
+    async def persist_links(*_args, **_kwargs):
+        return {"status": "persisted"}
+
+    monkeypatch.setattr(attested_v2_store, "persist_allocation_settlement_frontier_v2", persist_frontier)
+    monkeypatch.setattr(v2_authority, "_persist_business_links", persist_links)
+    result = await v2_authority.build_allocation_v2(
+        epoch_id=22_063, netuid=401, policy={},
+    )
+    assert result["status"] == "matched"
+    assert captured["parents"] == [frontier_graph, cutover_graph]
+
+
+class _RecoveryMeasuredChain(_MeasuredChain):
+    def read_finalized_metagraph(self, *, netuid, context, attempt_number=0):
+        result = super().read_finalized_metagraph(
+            netuid=netuid, context=context, attempt_number=attempt_number,
+        )
+        result["header"]["block"] = 22_063 * 360 + 1
+        result["workflow_epoch_id"] = 22_063
+        return result
+
+
+def _unfinalized_frontier_rows():
+    from tests.test_coordinator_allocation_source_v2 import (
+        _signed_coordinator_receipt,
+    )
+
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap", netuid=401,
+        allocation_epoch=22_062, predecessor_frontier_hash=None,
+        reward_checkpoints=[],
+    )
+    allocation = {"allocation_hash": "sha256:" + "a" * 64}
+    source_state = {
+        "settlement_frontier": frontier,
+        "fresh_network_origin": {
+            "schema_version": "leadpoet.temporary_testnet401_first_allocation_origin.v1",
+            "network_genesis_hash": origin.TESTNET401_GENESIS_HASH,
+            "netuid": 401,
+            "cutover_block": origin.TESTNET401_CUTOVER_BLOCK,
+            "cutover_mapping_hash": origin.TESTNET401_CUTOVER_MAPPING_HASH,
+            "cutover_authority_hash": origin.TESTNET401_CUTOVER_AUTHORITY_HASH,
+            "cutover_receipt_hash": origin.TESTNET401_CUTOVER_RECEIPT_HASH,
+            "snapshot_receipt_hash": origin.TESTNET401_SNAPSHOT_RECEIPT_HASH,
+        },
+    }
+    source_state_hash = sha256_json(source_state)
+    artifacts = sorted(
+        set(frontier_artifact_hashes_v2(frontier)) | {source_state_hash}
+    )
+    receipt = _signed_coordinator_receipt(
+        purpose="research_lab.allocation.v2", job_id="allocation:22062",
+        epoch_id=22_062, input_root="sha256:" + "6" * 64,
+        output_root=sha256_json({"allocation": allocation}),
+        artifact_root=merkle_root(artifacts, domain="leadpoet-artifact-v2"),
+        parents=(origin.TESTNET401_CUTOVER_RECEIPT_HASH,),
+    )
+    execution = {
+        "schema_version": "leadpoet.attested_execution_result.v2",
+        "receipt_hash": receipt["receipt_hash"],
+        "role": "gateway_coordinator", "operation": "research_lab_allocation",
+        "purpose": "research_lab.allocation.v2", "job_id": receipt["job_id"],
+        "sequence": receipt["sequence"], "epoch_id": 22_062,
+        "release_hash": "sha256:" + "7" * 64,
+        "result_doc": {
+            "allocation": allocation, "source_state": source_state,
+            "source_state_hash": source_state_hash,
+        },
+        "result_hash": sha256_json({
+            "allocation": allocation, "source_state": source_state,
+            "source_state_hash": source_state_hash,
+        }),
+        "artifact_hashes": artifacts, "artifact_root": receipt["artifact_root"],
+        "input_root": receipt["input_root"], "output_root": receipt["output_root"],
+    }
+    row = {
+        "schema_version": frontier["schema_version"], "netuid": 401,
+        "allocation_epoch": 22_062,
+        "settled_through_epoch": frontier["settled_through_epoch"],
+        "frontier_hash": frontier["frontier_hash"],
+        "predecessor_frontier_hash": None,
+        "source_receipt_hash": receipt["receipt_hash"],
+        "source_state_hash": source_state_hash, "frontier_doc": frontier,
+    }
+    return frontier, allocation, receipt, execution, row
+
+
+def test_full_coordinator_load_recovers_exact_unfinalized_frontier(monkeypatch):
+    from tests.test_coordinator_allocation_source_v2 import (
+        _config as standard_config,
+    )
+
+    frontier, allocation, receipt, execution, row = _unfinalized_frontier_rows()
+    activation = {
+        "schema_version": "leadpoet.research_lab_allocation_settlement_frontier_activation.v2",
+        "netuid": 401, "first_allocation_epoch": 22_062,
+        "first_frontier_hash": frontier["frontier_hash"],
+        "source_receipt_hash": receipt["receipt_hash"],
+    }
+
+    class RecoveryReader(_Reader):
+        def read(self, *, policy_id, parameters, **_kwargs):
+            self.calls.append((policy_id, dict(parameters)))
+            values = {
+                "allocation_settlement_frontier_activation": [activation],
+                "allocation_settlement_frontiers": [row],
+                "allocation_settlement_frontier_by_epoch": [row],
+                "attested_execution_result_by_receipt": [execution],
+                "attested_receipt_by_hash": [{
+                    "receipt_hash": receipt["receipt_hash"],
+                    "receipt_doc": receipt,
+                }],
+                "allocation_history": [{
+                    "epoch": 22_062, "netuid": 401,
+                    "allocation_hash": allocation["allocation_hash"],
+                    "allocation_doc": allocation,
+                }],
+            }
+            return [dict(item) for item in values.get(policy_id, [])]
+
+    graph_roots = {
+        origin.TESTNET401_CUTOVER_RECEIPT_HASH: _cutover_graph(),
+        receipt["receipt_hash"]: {"root_receipt_hash": receipt["receipt_hash"]},
+    }
+    monkeypatch.setattr(
+        allocation_source, "_receipt_graphs_by_declared_root",
+        lambda _graphs, roots: {root: graph_roots[root] for root in roots},
+    )
+    monkeypatch.setattr(origin, "validate_receipt_graph", lambda _graph: None)
+    monkeypatch.setattr(allocation_source, "validate_signed_execution_receipt", lambda _receipt: None)
+    context = ExecutionContextV2(
+        job_id="allocation-v2:testnet401-recovery",
+        purpose="research_lab.allocation.v2", epoch_id=22_063,
+        parent_receipt_hashes=(
+            origin.TESTNET401_CUTOVER_RECEIPT_HASH, receipt["receipt_hash"],
+        ),
+        external_receipt_graphs=list(graph_roots.values()),
+    )
+    reader = RecoveryReader()
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader, chain_source=_RecoveryMeasuredChain(),
+        config_supplier=standard_config,
+        network_supplier=lambda: "test",
+    )
+    result = resolver.resolve(
+        payload={"epoch": 22_063, "netuid": 401}, context=context,
+    )
+    assert result["source_state"]["settlement_frontier"][
+        "predecessor_frontier_hash"
+    ] == frontier["frontier_hash"]
+    assert "fresh_network_origin" not in result["source_state"]
+    assert set(context.parent_receipt_hashes) == {
+        origin.TESTNET401_CUTOVER_RECEIPT_HASH, receipt["receipt_hash"],
+    }
+    assert reader.calls.count((
+        "chain_realized_settlement_activation", {"netuid": 401},
+    )) == 1
+    assert sum(
+        policy == "allocation_settlement_frontier_activation"
+        for policy, _parameters in reader.calls
+    ) == 1
+
+
+def test_unfinalized_recovery_advances_across_two_missed_epochs(monkeypatch):
+    graph = _cutover_graph()
+    monkeypatch.setattr(
+        allocation_source, "_receipt_graphs_by_declared_root",
+        lambda _graphs, _roots: {origin.TESTNET401_CUTOVER_RECEIPT_HASH: graph},
+    )
+    monkeypatch.setattr(origin, "validate_receipt_graph", lambda _graph: None)
+
+    for epoch, source_epoch, digit in ((22_063, 22_062, "a"), (22_064, 22_063, "b")):
+        allocation = {"allocation_hash": "sha256:" + digit * 64}
+        receipt_hash = "sha256:" + ("c" if digit == "a" else "d") * 64
+        reader = _Reader({
+            "allocation_history": [{
+                "epoch": source_epoch, "netuid": 401,
+                "allocation_hash": allocation["allocation_hash"],
+                "allocation_doc": allocation,
+            }],
+        })
+        required = {receipt_hash}
+        CoordinatorAllocationSourceV2(
+            reader=reader, chain_source=_RecoveryMeasuredChain(),
+            config_supplier=lambda: None, network_supplier=lambda: "test",
+        )._validate_fresh_testnet401_unfinalized_frontier(
+            epoch=epoch, netuid=401,
+            chain_state={"finalized_block_hash": "b" * 64},
+            context=ExecutionContextV2(
+                job_id="recovery:%d" % epoch,
+                purpose="research_lab.allocation.v2", epoch_id=epoch,
+                parent_receipt_hashes=(
+                    origin.TESTNET401_CUTOVER_RECEIPT_HASH, receipt_hash,
+                ),
+            ),
+            required_parents=required,
+            frontier_source={
+                "epoch": source_epoch, "netuid": 401,
+                "receipt_hash": receipt_hash, "allocation": allocation,
+            },
+        )
+        assert ("allocation_history", {
+            "netuid": 401, "start_epoch": source_epoch,
+            "end_epoch": epoch - 1,
+        }) in reader.calls
+        assert ("finalized_allocation_authorities", {
+            "netuid": 401, "start_epoch": 22_042,
+            "end_epoch": epoch - 1,
+        }) in reader.calls
+        assert required == {
+            receipt_hash, origin.TESTNET401_CUTOVER_RECEIPT_HASH,
+        }
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ({"allocation_history": []}, "allocation history"),
+        ({"allocation_history": [
+            {"epoch": 22_062, "netuid": 401,
+             "allocation_hash": "sha256:" + "f" * 64,
+             "allocation_doc": {"allocation_hash": "sha256:" + "f" * 64}},
+        ]}, "allocation history"),
+        ({"compact_finalized_authority_cutover": [{"epoch_id": 22_062}]},
+         "authority is not empty"),
+        ({"finalized_allocation_authorities": [{"epoch_id": 22_062}]},
+         "authority is not empty"),
+    ],
+)
+def test_unfinalized_recovery_rejects_nonmatching_or_finalized_history(
+    monkeypatch, rows, message,
+):
+    graph = _cutover_graph()
+    monkeypatch.setattr(
+        allocation_source, "_receipt_graphs_by_declared_root",
+        lambda _graphs, _roots: {origin.TESTNET401_CUTOVER_RECEIPT_HASH: graph},
+    )
+    monkeypatch.setattr(origin, "validate_receipt_graph", lambda _graph: None)
+    allocation = {"allocation_hash": "sha256:" + "a" * 64}
+    defaults = {
+        "allocation_history": [{
+            "epoch": 22_062, "netuid": 401,
+            "allocation_hash": allocation["allocation_hash"],
+            "allocation_doc": allocation,
+        }],
+    }
+    defaults.update(rows)
+    receipt_hash = "sha256:" + "c" * 64
+    resolver = CoordinatorAllocationSourceV2(
+        reader=_Reader(defaults), chain_source=_RecoveryMeasuredChain(),
+        config_supplier=lambda: None, network_supplier=lambda: "test",
+    )
+    with pytest.raises(CoordinatorAllocationSourceV2Error, match=message):
+        resolver._validate_fresh_testnet401_unfinalized_frontier(
+            epoch=22_063, netuid=401,
+            chain_state={"finalized_block_hash": "b" * 64},
+            context=ExecutionContextV2(
+                job_id="recovery:negative", purpose="research_lab.allocation.v2",
+                epoch_id=22_063,
+                parent_receipt_hashes=(
+                    origin.TESTNET401_CUTOVER_RECEIPT_HASH, receipt_hash,
+                ),
+            ),
+            required_parents={receipt_hash},
+            frontier_source={
+                "epoch": 22_062, "netuid": 401,
+                "receipt_hash": receipt_hash, "allocation": allocation,
+            },
+        )
 
 
 @pytest.mark.asyncio

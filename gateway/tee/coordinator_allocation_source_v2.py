@@ -380,6 +380,13 @@ class CoordinatorAllocationSourceV2:
             )
             is True
         )
+        unfinalized_frontier_source = (
+            prior_frontier_context.get(
+                "fresh_testnet401_unfinalized_frontier_source"
+            )
+            if prior_frontier_context is not None
+            else None
+        )
         prior_reward_checkpoints = (
             reward_checkpoint_index_v2(prior_frontier["reward_checkpoints"])
             if prior_frontier is not None
@@ -401,6 +408,9 @@ class CoordinatorAllocationSourceV2:
             fresh_network_origin_out=fresh_network_origin,
             fresh_frontier_activation_absence_observed=(
                 fresh_frontier_activation_absence_observed
+            ),
+            fresh_testnet401_unfinalized_frontier_source=(
+                unfinalized_frontier_source
             ),
         )
         settlement_frontier_retirements = (
@@ -717,6 +727,9 @@ class CoordinatorAllocationSourceV2:
             _receipt_authority_graphs_from_context(context),
             context.parent_receipt_hashes,
         )
+        validated_frontier_allocations: Dict[str, Dict[str, Any]] = {}
+        validated_frontier_states: Dict[str, Dict[str, Any]] = {}
+        validated_frontier_parents: Dict[str, list[str]] = {}
 
         def validate_frontier_authority(
             *,
@@ -790,6 +803,8 @@ class CoordinatorAllocationSourceV2:
                 expected_output_root = sha256_json(
                     {"allocation": dict(allocation)}
                 )
+                validated_state = dict(source_state)
+                validated_parents = list(receipt.get("parent_receipt_hashes") or ())
             elif (
                 operation
                 == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION
@@ -948,6 +963,10 @@ class CoordinatorAllocationSourceV2:
                     raise CoordinatorAllocationSourceV2Error(
                         "allocation frontier bootstrap source differs"
                     )
+                validated_state = dict(allocation_state)
+                validated_parents = list(
+                    allocation_receipt.get("parent_receipt_hashes") or ()
+                )
             else:
                 raise CoordinatorAllocationSourceV2Error(
                     "allocation frontier execution operation differs"
@@ -1003,6 +1022,11 @@ class CoordinatorAllocationSourceV2:
                     "allocation frontier receipt is not a declared source"
                 )
             required_parents.add(authority_receipt_hash)
+            validated_frontier_allocations[authority_receipt_hash] = dict(
+                allocation
+            )
+            validated_frontier_states[authority_receipt_hash] = validated_state
+            validated_frontier_parents[authority_receipt_hash] = validated_parents
             return authority_receipt_hash
 
         first_rows = self._read(
@@ -1054,7 +1078,50 @@ class CoordinatorAllocationSourceV2:
                 authority_row=row,
                 authority_frontier=frontier,
             )
-        return {"frontier": frontier, "receipt_hash": source_receipt_hash}
+        result = {"frontier": frontier, "receipt_hash": source_receipt_hash}
+        if (
+            str(self._network_supplier() or "").strip().lower() == "test"
+            and int(netuid) == TESTNET401_NETUID
+            and TESTNET401_CUTOVER_RECEIPT_HASH
+            in set(context.parent_receipt_hashes)
+        ):
+            try:
+                expected_origin = validate_testnet401_cutover_parent_v1(
+                    graphs[TESTNET401_CUTOVER_RECEIPT_HASH],
+                    network="test",
+                    netuid=TESTNET401_NETUID,
+                    cutover=self._chain_source.fresh_testnet401_cutover_scope(
+                        netuid=TESTNET401_NETUID
+                    ),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CoordinatorAllocationSourceV2Error(
+                    "fresh testnet401 frontier origin is invalid"
+                ) from exc
+            first_origin = validated_frontier_states[first_receipt_hash].get(
+                "fresh_network_origin"
+            )
+            if (
+                not isinstance(first_origin, Mapping)
+                or TESTNET401_CUTOVER_RECEIPT_HASH
+                not in validated_frontier_parents[first_receipt_hash]
+                or any(
+                    first_origin.get(name) != value
+                    for name, value in expected_origin.items()
+                )
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "fresh testnet401 frontier origin differs"
+                )
+            result["fresh_testnet401_unfinalized_frontier_source"] = {
+                "epoch": int(frontier["allocation_epoch"]),
+                "netuid": int(frontier["netuid"]),
+                "receipt_hash": source_receipt_hash,
+                "allocation": validated_frontier_allocations[
+                    source_receipt_hash
+                ],
+            }
+        return result
 
     @staticmethod
     def _settlement_retirement_evidence(
@@ -1823,6 +1890,9 @@ class CoordinatorAllocationSourceV2:
         chain_state: Optional[Mapping[str, Any]] = None,
         fresh_network_origin_out: Optional[Dict[str, Any]] = None,
         fresh_frontier_activation_absence_observed: bool = False,
+        fresh_testnet401_unfinalized_frontier_source: (
+            Optional[Mapping[str, Any]]
+        ) = None,
     ) -> list[Dict[str, Any]]:
         starts = [
             int(row.get("start_epoch") or 0)
@@ -1874,6 +1944,20 @@ class CoordinatorAllocationSourceV2:
                 and int(netuid) == 401
                 and isinstance(chain_state, Mapping)
             ):
+                if isinstance(
+                    fresh_testnet401_unfinalized_frontier_source, Mapping
+                ):
+                    self._validate_fresh_testnet401_unfinalized_frontier(
+                        epoch=epoch,
+                        netuid=netuid,
+                        chain_state=chain_state,
+                        context=context,
+                        required_parents=required_parents,
+                        frontier_source=(
+                            fresh_testnet401_unfinalized_frontier_source
+                        ),
+                    )
+                    return []
                 origin = self._validate_fresh_testnet401_first_allocation(
                     epoch=epoch,
                     netuid=netuid,
@@ -2094,6 +2178,122 @@ class CoordinatorAllocationSourceV2:
                 )
             required_parents.add(root)
         return finalized
+
+    def _validate_fresh_testnet401_unfinalized_frontier(
+        self,
+        *,
+        epoch: int,
+        netuid: int,
+        chain_state: Mapping[str, Any],
+        context: ExecutionContextV2,
+        required_parents: Set[str],
+        frontier_source: Mapping[str, Any],
+    ) -> None:
+        """Allow one measured successor while the first bundle is unfinalized."""
+
+        try:
+            cutover = self._chain_source.fresh_testnet401_cutover_scope(
+                netuid=netuid
+            )
+            graphs = _receipt_graphs_by_declared_root(
+                _receipt_authority_graphs_from_context(context),
+                context.parent_receipt_hashes,
+            )
+            cutover_graph = graphs.get(TESTNET401_CUTOVER_RECEIPT_HASH)
+            if not isinstance(cutover_graph, Mapping):
+                raise TemporaryTestnet401FirstAllocationError(
+                    "temporary unfinalized recovery cutover parent is absent"
+                )
+            validate_testnet401_cutover_parent_v1(
+                cutover_graph,
+                network=str(self._network_supplier() or ""),
+                netuid=netuid,
+                cutover=cutover,
+            )
+        except (TemporaryTestnet401FirstAllocationError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "fresh testnet401 unfinalized frontier origin is invalid"
+            ) from exc
+        allocation = frontier_source.get("allocation")
+        try:
+            source_epoch = int(frontier_source["epoch"])
+            source_netuid = int(frontier_source["netuid"])
+            source_receipt_hash = str(frontier_source["receipt_hash"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "fresh testnet401 unfinalized frontier source is invalid"
+            ) from exc
+        if (
+            set(frontier_source)
+            != {"epoch", "netuid", "receipt_hash", "allocation"}
+            or source_netuid != int(netuid)
+            or source_epoch < TESTNET401_FIRST_SETTLEMENT_EPOCH
+            or source_epoch >= int(epoch)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_receipt_hash)
+            or source_receipt_hash not in required_parents
+            or not isinstance(allocation, Mapping)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(allocation.get("allocation_hash") or ""),
+            )
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "fresh testnet401 unfinalized frontier source differs"
+            )
+        authority_parameters = {
+            "netuid": int(netuid),
+            "start_epoch": TESTNET401_FIRST_SETTLEMENT_EPOCH,
+            "end_epoch": int(epoch) - 1,
+        }
+        allocation_rows = self._read(
+            "allocation_history",
+            {
+                "netuid": int(netuid),
+                "start_epoch": source_epoch,
+                "end_epoch": int(epoch) - 1,
+            },
+            context,
+        )
+        try:
+            allocation_row_epoch = int(allocation_rows[0].get("epoch", -1))
+            allocation_row_netuid = int(allocation_rows[0].get("netuid", -1))
+        except (IndexError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "fresh testnet401 unfinalized allocation history is invalid"
+            ) from exc
+        if (
+            len(allocation_rows) != 1
+            or allocation_row_epoch != source_epoch
+            or allocation_row_netuid != source_netuid
+            or allocation_rows[0].get("allocation_hash")
+            != allocation.get("allocation_hash")
+            or allocation_rows[0].get("allocation_doc") != allocation
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "fresh testnet401 unfinalized allocation history differs"
+            )
+        for policy_id in (
+            "finalized_allocation_authorities",
+            "legacy_finalized_allocation_migrations",
+            "chain_realized_epoch_settlements",
+            "chain_realized_obligation_credits",
+            "compact_finalized_authority_cutover",
+        ):
+            policy_parameters = (
+                {"netuid": int(netuid)}
+                if policy_id == "compact_finalized_authority_cutover"
+                else authority_parameters
+            )
+            if self._read(policy_id, policy_parameters, context):
+                raise CoordinatorAllocationSourceV2Error(
+                    "fresh testnet401 unfinalized authority is not empty"
+                )
+        self._chain_source.prove_fresh_testnet401_allocation_origin(
+            netuid=netuid,
+            snapshot=chain_state,
+            context=context,
+        )
+        required_parents.add(TESTNET401_CUTOVER_RECEIPT_HASH)
 
     def _validate_fresh_testnet401_first_allocation(
         self,

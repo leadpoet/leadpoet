@@ -1259,12 +1259,11 @@ async def build_allocation_v2(
             current_frontier_context = settlement_frontier_context
             settlement_frontier_context = None
         if current_frontier_context is None and execute is execute_coordinator_v2:
-            if settlement_frontier_context is None:
-                fresh_testnet401_parent = (
-                    await _load_fresh_testnet401_first_allocation_parent_v1(
-                        netuid=int(netuid)
-                    )
+            fresh_testnet401_parent = (
+                await _load_fresh_testnet401_first_allocation_parent_v1(
+                    netuid=int(netuid)
                 )
+            )
             if fresh_testnet401_parent is None:
                 await ensure_chain_realized_settlements_v1(
                     epoch_id=int(epoch_id),

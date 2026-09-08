@@ -21,6 +21,9 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     DisposablePostgres,
     PostgresContractProbeError,
 )
+from tests.restart_rehearsal.verify_evidence import (
+    verify_lab_arena_guard_boundary_denial,
+)
 from gateway.tee.supabase_schema_preflight_v2 import (
     _verify_source_add_claim_control_contract_v2,
 )
@@ -127,6 +130,23 @@ def test_postgrest_boundary_maps_arena_credentials_to_database_role(
     }
 
     assert handler._database_role() == expected_role
+
+
+def test_expected_arena_public_denial_is_exact_and_unexpected_rejection_remains_fatal() -> None:
+    expected = {
+        "status": "expected_denial",
+        "operation": "authorization",
+        "method": "POST",
+        "path": "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+        "error_type": "ValueError",
+        "error": "migration-backed Lab Arena restart RPC rejected",
+    }
+    verify_lab_arena_guard_boundary_denial([expected])
+
+    with pytest.raises(SystemExit, match="public denial evidence differs"):
+        verify_lab_arena_guard_boundary_denial(
+            [{**expected, "path": "/rest/v1/rpc/arbitrary"}]
+        )
 
 
 def test_migration_backed_arena_rpc_executes_with_selected_role() -> None:

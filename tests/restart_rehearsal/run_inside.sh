@@ -78,6 +78,8 @@ mkdir -p \
 BOUNDARY_SERVICE_PID=""
 ARENA_GUARD_CONTROLLER_PID=""
 ARENA_GUARD_CONTROLLER_START_TIME=""
+VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT=""
+VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=""
 POSTGRES_CONNECTION=""
 GATEWAY_ENCLAVE_SERVICE_PIDS=""
 VALIDATOR_ENCLAVE_SERVICE_PID=""
@@ -132,6 +134,22 @@ cleanup_boundary_service() {
       cleanup_status=1
     fi
     wait "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" ]; then
+    if ! [[ "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" =~ ^/tmp/validator-restart-controller-bootstrap\.[A-Za-z0-9]+$ ]]; then
+      echo "ERROR: rehearsal validator authority cleanup root is invalid" >&2
+      cleanup_status=1
+    fi
+    if [ "$cleanup_status" = "0" ]; then
+      chmod -R u+w "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" 2>/dev/null \
+        || cleanup_status=1
+      rm -rf -- "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" \
+        || cleanup_status=1
+      if [ -e "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" ]; then
+        echo "ERROR: rehearsal validator authority cleanup failed" >&2
+        cleanup_status=1
+      fi
+    fi
   fi
   if [ -n "$RUNNING_VALIDATOR_FIXTURE_PID" ]; then
     kill "$RUNNING_VALIDATOR_FIXTURE_PID" 2>/dev/null || true
@@ -566,6 +584,38 @@ if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
   ACTIVE_RELEASE_AUTHORITY_SHA="$(
     git --git-dir=/srv/origin.git rev-parse --verify refs/heads/main
   )"
+  if [ "$COMPONENT" = "validator" ]; then
+    VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT="$(
+      mktemp -d /tmp/validator-restart-controller-bootstrap.XXXXXXXX
+    )"
+    chmod 700 "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT"
+    VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT/authority"
+    mkdir -m 700 "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"
+    GIT_NO_REPLACE_OBJECTS=1 git --git-dir=/srv/origin.git \
+      archive "$ACTIVE_RELEASE_AUTHORITY_SHA" \
+      | tar -xf - -C "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/validator_restart.sh"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/gateway/tee/prepare_active_release_lineage_v2.py"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/lab_arena_restart_guard_handoff.py"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+    test ! -L "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+    test "$(
+      git --git-dir=/srv/origin.git hash-object --no-filters \
+        "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/validator_restart.sh"
+    )" = "$(
+      git --git-dir=/srv/origin.git rev-parse \
+        "$ACTIVE_RELEASE_AUTHORITY_SHA:validator_restart.sh"
+    )"
+    find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type f -exec chmod 400 {} +
+    find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type d -exec chmod 500 {} +
+    test "$(
+      git --git-dir=/srv/origin.git hash-object --no-filters \
+        "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+    )" = "$(
+      git --git-dir=/srv/origin.git rev-parse \
+        "$ACTIVE_RELEASE_AUTHORITY_SHA:scripts/manage_owned_process_group.py"
+    )"
+  fi
   rm -f -- \
     "$ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS" \
     "$ACTIVE_RELEASE_VALIDATOR_OUTPUT" \
@@ -826,7 +876,9 @@ release_rehearsal_lab_arena_guard() {
 }
 
 verify_rehearsal_lab_arena_guard_boundary() {
-  local generation report
+  local generation report started_at
+  started_at="$SECONDS"
+  echo "REHEARSAL_ARENA_GUARD_BOUNDARY_PROBE status=started"
   report="$(run_rehearsal_lab_arena_guard drain --scope gateway)"
   generation="$(
     /usr/bin/python3.11 -c \
@@ -874,6 +926,7 @@ finally:
 if response.status != 400:
     raise SystemExit("rehearsal Arena guard public role was not denied")
 PY
+  echo "REHEARSAL_ARENA_GUARD_BOUNDARY_PROBE status=passed elapsed_seconds=$((SECONDS - started_at))"
 }
 
 start_validator_lab_arena_guard_controller() {
@@ -977,7 +1030,7 @@ if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS=30"
   )
   VALIDATOR_ACTIVE_RELEASE_ENV=(
-    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=/home/ec2-user/leadpoet/leadpoet"
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT=$ACTIVE_RELEASE_AUTHORITY_SHA"
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID=$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1"

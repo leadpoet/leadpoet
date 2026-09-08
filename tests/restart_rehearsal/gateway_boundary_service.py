@@ -4071,9 +4071,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._dispatch()
         except (KeyError, TypeError, ValueError) as exc:
+            expected_denial = (
+                self.command == "POST"
+                and urlparse(self.path).path
+                == "/rest/v1/rpc/lab_arena_restart_guard_state_v1"
+                and self._database_role() == "anon"
+                and str(exc)
+                == "migration-backed Lab Arena restart RPC rejected"
+            )
             self.server.state.record(
-                status="rejected",
-                operation="request_validation",
+                status="expected_denial" if expected_denial else "rejected",
+                operation="authorization" if expected_denial else "request_validation",
                 method=self.command,
                 path=self.path,
                 error_type=type(exc).__name__,

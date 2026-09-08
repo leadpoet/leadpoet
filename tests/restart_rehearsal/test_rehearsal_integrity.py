@@ -7751,6 +7751,27 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
         '"VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='
         '$ACTIVE_RELEASE_AUTHORITY_SHA"'
     ) in script
+    assert (
+        '"VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT='
+        '$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"'
+    ) in script
+    assert "mktemp -d /tmp/validator-restart-controller-bootstrap.XXXXXXXX" in script
+    assert (
+        "^/tmp/validator-restart-controller-bootstrap\\.[A-Za-z0-9]+$"
+        in script
+    )
+    assert (
+        'archive "$ACTIVE_RELEASE_AUTHORITY_SHA"'
+        in script
+    )
+    assert (
+        'find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type f -exec chmod 400'
+        in script
+    )
+    assert (
+        'find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type d -exec chmod 500'
+        in script
+    )
     assert script.count(
         '--authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA"'
     ) == 3

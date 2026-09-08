@@ -1055,7 +1055,7 @@ def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     assert "private-identity" not in result.stdout
 
 
-def _runtime_log_probe(tmp_path, *, symlink_validator=False):
+def _runtime_log_probe(tmp_path, *, symlink_validator=False, gateway_stopped=False):
     repository = tmp_path / "repository"
     scripts = repository / "scripts"
     scripts.mkdir(parents=True)
@@ -1117,7 +1117,7 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False):
         "run_id": RUN_ID, "candidate_sha": SHA,
         "expected_instance_id": INSTANCE_ID, "runtime_root": str(runtime),
         "process_state": {"processes": [
-            {"name": "gateway_application", "live": True},
+            *([] if gateway_stopped else [{"name": "gateway_application", "live": True}]),
             {"name": "validator_application", "live": True},
         ]},
     }
@@ -1203,6 +1203,17 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
     assert validator["source_locations"] == [
         {"file": "validator.py", "line": 5557}
     ]
+
+
+def test_stopped_gateway_log_remains_available_without_claiming_live_process(tmp_path):
+    result = _runtime_log_probe(tmp_path, gateway_stopped=True)
+    assert result.returncode == 0, result.stderr
+    value = json.loads(result.stdout)
+    temporary_host._validate_runtime_log_diagnostics(value)
+    assert value["logs"][0]["process_live"] is False
+    assert value["logs"][1]["process_live"] is True
+    assert "provider-secret-canary" not in result.stdout
+    assert "private.example" not in result.stdout
 
 
 def test_runtime_log_diagnostics_reject_symlink_and_arbitrary_remote_fields(tmp_path):

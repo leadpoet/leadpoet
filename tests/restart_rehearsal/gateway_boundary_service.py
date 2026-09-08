@@ -769,7 +769,7 @@ def _migration_schema_contract(
         "184-lab-arena-scoring-failure-isolation.sql",
         "185-lab-arena-miner-credentials.sql",
         "190-lab-arena-restart-claim-drain.sql",
-        "191-lab-arena-upload-recovery.sql",
+        "193-lab-arena-upload-recovery.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (

@@ -111,14 +111,14 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/188-lab-arena-baseline-promotion.sql`,
 `scripts/189-lab-arena-round-network-scope.sql`, and
 `scripts/190-lab-arena-restart-claim-drain.sql`, and
-`scripts/191-lab-arena-upload-recovery.sql` with the database owner
+`scripts/193-lab-arena-upload-recovery.sql` with the database owner
 before service startup. Then check the service wiring:
 
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only
 ```
 
-Migration 191 adds safe replacement of unfinished uploads and accurate
+Migration 193 adds safe replacement of unfinished uploads and accurate
 `execution_incomplete:stageN:count` / `scoring_incomplete:stageN:count`
 cancellation labels. It preserves historical results and source objects.
 Deploy its matching service after applying the migration. Source admission

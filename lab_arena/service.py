@@ -452,7 +452,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (191,)
+        supported_versions = (193,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema

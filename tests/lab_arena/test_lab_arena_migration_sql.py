@@ -78,11 +78,14 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[187] == ["187-lab-arena-promotion-threshold.sql"]
     assert numbered[188] == ["188-lab-arena-baseline-promotion.sql"]
     assert numbered[189] == ["189-lab-arena-round-network-scope.sql"]
+    assert numbered[190] == ["190-lab-arena-restart-claim-drain.sql"]
+    assert numbered[191] == ["191-fresh-network-subnet-epoch-authority.sql"]
+    assert numbered[193] == ["193-lab-arena-upload-recovery.sql"]
     arena_frontier = max(
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 190
+    assert arena_frontier == 193
 
 
 def test_network_scope_migration_keeps_legacy_finney_defaults_queryable():

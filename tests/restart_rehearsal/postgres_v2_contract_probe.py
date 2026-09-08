@@ -314,7 +314,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_PROVISIONED_STATUS_MIGRATION,
     *LAB_ARENA_MIGRATIONS,
     LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION,
-    "191-lab-arena-upload-recovery.sql",
+    "193-lab-arena-upload-recovery.sql",
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -4469,7 +4469,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-190 Lab Arena restart guard role grants differ"
             )
-        upload_migration = "191-lab-arena-upload-recovery.sql"
+        upload_migration = "193-lab-arena-upload-recovery.sql"
         database.apply_migration(scripts / upload_migration)
         applied.append(upload_migration)
         lab_arena_schema_contract = json.loads(
@@ -4480,10 +4480,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         if lab_arena_schema_contract != {
             "schema_version": "leadpoet.lab_arena.schema_version.v1",
-            "version": 191,
+            "version": 193,
         }:
             raise PostgresContractProbeError(
-                "post-191 Lab Arena upload recovery contract differs"
+                "post-193 Lab Arena upload recovery contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

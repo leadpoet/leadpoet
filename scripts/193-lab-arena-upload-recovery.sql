@@ -319,7 +319,7 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $lab_arena_schema_version$
   SELECT pg_catalog.jsonb_build_object(
-    'schema_version', 'leadpoet.lab_arena.schema_version.v1', 'version', 191
+    'schema_version', 'leadpoet.lab_arena.schema_version.v1', 'version', 193
   );
 $lab_arena_schema_version$;
 ALTER FUNCTION public.lab_arena_schema_version_v1() OWNER TO lab_arena_owner;

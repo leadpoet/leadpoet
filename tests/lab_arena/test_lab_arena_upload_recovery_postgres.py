@@ -201,9 +201,9 @@ def test_gateway_source_error_names_file_without_returning_credentials():
     assert secret not in response.text
 
 
-def test_upload_migration_is_idempotent_under_hosted_owner(database):
+def test_upload_migration_193_is_idempotent_under_hosted_owner(database):
     psycopg2, dsn = database
-    migration = (Path(__file__).resolve().parents[2] / "scripts/191-lab-arena-upload-recovery.sql").read_text()
+    migration = (Path(__file__).resolve().parents[2] / "scripts/193-lab-arena-upload-recovery.sql").read_text()
     with psycopg2.connect(**dsn) as connection:
         connection.autocommit = True
         with connection.cursor() as cursor:
@@ -216,10 +216,10 @@ def test_upload_migration_is_idempotent_under_hosted_owner(database):
             cursor.execute("RESET ROLE; SELECT count(*) FROM public.lab_arena_submissions")
             assert cursor.fetchone()[0] == before
             cursor.execute("SET ROLE lab_arena_service; SELECT public.lab_arena_schema_version_v1()")
-            assert cursor.fetchone()[0]["version"] == 191
+            assert cursor.fetchone()[0]["version"] == 193
 
 
-def test_schema190_upload_reservations_survive191_upgrade():
+def test_schema190_upload_reservations_survive193_upgrade():
     migrations = DEFAULT_MIGRATIONS[:DEFAULT_MIGRATIONS.index(LAB_ARENA_UPLOAD_RECOVERY_MIGRATION)]
     previous = database_with_lab_arena_migration(migrations)
     psycopg2, dsn = next(previous)

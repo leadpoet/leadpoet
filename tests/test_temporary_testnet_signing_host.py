@@ -333,6 +333,10 @@ def test_source_bootstrap_is_fixed_to_exact_private_parity_prefix():
     assert f"update-ref refs/remotes/origin/main {SHA}" in command
     assert f'rev-parse origin/main)" = {SHA}' in command
     assert "--requirement /run/leadpoet-testnet401/requirements.txt" in command
+    terminal = subprocess.run(["bash", "-c", command.splitlines()[-1]],
+                              capture_output=True, text=True, timeout=5, check=True)
+    assert terminal.stdout == "temporary_testnet401_source_ready\n"
+    assert not terminal.stderr
     host_dependencies = command.index(
         "aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker rsync jq tar gzip"
     )

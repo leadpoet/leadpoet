@@ -165,7 +165,26 @@ SOURCE_ASSET_NAMES = ("candidate.bundle", "candidate-bundle-binding.json")
 PUBLIC_RELEASE_ASSET_NAMES = (
     "prior-release-channel-v2.json",
     "prior-release-lineage-v1.json",
+    "prior-release-channels-v2.json",
 )
+TEMPORARY_TESTNET401_RECOVERY_RELEASE_SOURCES = {
+    "f92748d00ced815e710e4e42ba8f7f17207507d7": (
+        "leadpoet-parity-493765492819-880be82085a01367",
+        "pp-34227587131-1",
+    ),
+    "b056b2989f019ddc373a9a8fa1ba7bb0c94feb22": (
+        "leadpoet-parity-493765492819-bcaa5d9dbe8a99bc",
+        "pp-34257145122-1",
+    ),
+    "d2d82773815b32e66410428cbec6b0c72514307c": (
+        "leadpoet-parity-493765492819-25ed272de7addf14",
+        "pp-34275942256-1",
+    ),
+    "11e4e824f8400bcef728dd76c3fabb6264ce498b": (
+        "leadpoet-parity-493765492819-ac34db86a1deb0a8",
+        "pp-34279790175-1",
+    ),
+}
 MAX_CANDIDATE_BUNDLE_BYTES = 512 * 1024 * 1024
 EARLY_BOOT_ISOLATION = """#cloud-boothook
 #!/bin/bash
@@ -377,6 +396,73 @@ def _artifact_bucket_name(*, run_id: str, candidate_sha: str) -> str:
     return f"leadpoet-parity-{ACCOUNT_ID}-{suffix}"
 
 
+def _read_public_release_object(s3: Any, *, bucket: str, key: str) -> Any:
+    response = s3.get_object(Bucket=bucket, Key=key)
+    payload = response["Body"].read(4 * 1024 * 1024 + 1)
+    if not 0 < len(payload) <= 4 * 1024 * 1024:
+        raise TemporaryHostError("prior release document is unbounded")
+    return json.loads(payload)
+
+
+def _recover_fixed_public_release_object(
+    s3: Any, *, bucket: str, key: str,
+) -> Any:
+    """Read behind the exact latest delete marker, then immediately re-hide it."""
+
+    page = s3.list_object_versions(Bucket=bucket, Prefix=key, MaxKeys=32)
+    if page.get("IsTruncated"):
+        raise TemporaryHostError("release recovery versions are unbounded")
+    if any(item.get("Key") != key for name in ("Versions", "DeleteMarkers")
+           for item in page.get(name, [])):
+        raise TemporaryHostError("release recovery object scope differs")
+    latest = [
+        item for item in page.get("DeleteMarkers", [])
+        if item.get("Key") == key and item.get("IsLatest") is True
+    ]
+    if len(latest) != 1 or any(
+        item.get("Key") == key and item.get("IsLatest") is True
+        for item in page.get("Versions", [])
+    ):
+        raise TemporaryHostError("release recovery delete marker differs")
+    version_id = str(latest[0].get("VersionId") or "")
+    if not 0 < len(version_id.encode("utf-8")) <= 1024:
+        raise TemporaryHostError("release recovery delete marker differs")
+    s3.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+    try:
+        return _read_public_release_object(s3, bucket=bucket, key=key)
+    finally:
+        hidden = s3.delete_object(Bucket=bucket, Key=key)
+        if hidden.get("DeleteMarker") is not True or not str(
+            hidden.get("VersionId") or ""
+        ):
+            raise TemporaryHostError("release recovery re-hide differs")
+
+
+def _validated_release_channel_store(
+    *, value: Any, lineage: Mapping[str, Any], current_channel: Mapping[str, Any],
+    current_commit: str,
+) -> dict[str, dict[str, Any]]:
+    from gateway.tee.release_channel_v2 import (
+        build_release_lineage_v2,
+        validate_prior_release_channel_v2,
+    )
+
+    if not isinstance(value, Mapping) or set(value) != set(lineage["releases"]):
+        raise TemporaryHostError("prior release channel set differs")
+    channels = {
+        commit: validate_prior_release_channel_v2(channel, expected_commit=commit)
+        for commit, channel in sorted(value.items())
+    }
+    if channels.get(current_commit) != current_channel:
+        raise TemporaryHostError("prior current release channel differs")
+    expected = build_release_lineage_v2(
+        list(channels.values()), current_commit=current_commit
+    )
+    if lineage != expected:
+        raise TemporaryHostError("prior release documents differ")
+    return channels
+
+
 def create_asset_bucket(
     *,
     s3: Any,
@@ -439,6 +525,7 @@ def create_asset_bucket(
     )
     prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
     public_release_objects: list[str] = []
+    recovered_release_commits: list[str] = []
     try:
         for path, name in (
             (bundle_path, SOURCE_ASSET_NAMES[0]),
@@ -458,17 +545,13 @@ def create_asset_bucket(
                 candidate_sha=str(prior_release_commit),
             )
             prior_prefix = ASSET_PREFIX_TEMPLATE.format(run_id=prior_release_run_id)
-            values = []
-            for name in PUBLIC_RELEASE_ASSET_NAMES:
-                response = s3.get_object(
-                    Bucket=prior_bucket, Key=f"{prior_prefix}/{name}"
+            values = [
+                _read_public_release_object(
+                    s3, bucket=prior_bucket, key=f"{prior_prefix}/{name}"
                 )
-                payload = response["Body"].read(4 * 1024 * 1024 + 1)
-                if not 0 < len(payload) <= 4 * 1024 * 1024:
-                    raise TemporaryHostError("prior release document is unbounded")
-                values.append(json.loads(payload))
+                for name in PUBLIC_RELEASE_ASSET_NAMES[:2]
+            ]
             from gateway.tee.release_channel_v2 import (
-                build_release_lineage_v2,
                 validate_prior_release_channel_v2,
             )
             from gateway.tee.release_lineage_v2 import (
@@ -481,13 +564,50 @@ def create_asset_bucket(
             prior_lineage = validate_prior_compact_release_lineage_v2(
                 values[1], expected_current_commit=str(prior_release_commit)
             )
-            expected = build_release_lineage_v2(
-                [prior_channel], current_commit=str(prior_release_commit)
+            try:
+                channel_store = _read_public_release_object(
+                    s3,
+                    bucket=prior_bucket,
+                    key=f"{prior_prefix}/{PUBLIC_RELEASE_ASSET_NAMES[2]}",
+                )
+            except ClientError as exc:
+                if str(exc.response.get("Error", {}).get("Code") or "") not in {
+                    "404", "NoSuchKey",
+                }:
+                    raise
+                channel_store = {str(prior_release_commit): prior_channel}
+                for commit in sorted(set(prior_lineage["releases"]) - set(channel_store)):
+                    source = TEMPORARY_TESTNET401_RECOVERY_RELEASE_SOURCES.get(commit)
+                    if source is None:
+                        raise TemporaryHostError(
+                            "prior release channel recovery source is unavailable"
+                        )
+                    source_bucket, source_run = source
+                    source_key = (
+                        f"production-parity/runs/{source_run}/testnet401/"
+                        "prior-release-channel-v2.json"
+                    )
+                    try:
+                        recovered = _read_public_release_object(
+                            s3, bucket=source_bucket, key=source_key
+                        )
+                    except ClientError as exc:
+                        if str(exc.response.get("Error", {}).get("Code") or "") not in {
+                            "404", "NoSuchKey",
+                        }:
+                            raise
+                        recovered = _recover_fixed_public_release_object(
+                            s3, bucket=source_bucket, key=source_key
+                        )
+                        recovered_release_commits.append(commit)
+                    channel_store[commit] = recovered
+            channel_store = _validated_release_channel_store(
+                value=channel_store,
+                lineage=prior_lineage,
+                current_channel=prior_channel,
+                current_commit=str(prior_release_commit),
             )
-            if prior_lineage["releases"].get(str(prior_release_commit)) != expected[
-                "releases"
-            ][str(prior_release_commit)]:
-                raise TemporaryHostError("prior release documents differ")
+            values.append(channel_store)
             for name, value in zip(PUBLIC_RELEASE_ASSET_NAMES, values):
                 key = f"{prefix}/{name}"
                 s3.put_object(
@@ -510,6 +630,9 @@ def create_asset_bucket(
         "prefix": prefix,
         "source_objects": [f"{prefix}/{name}" for name in SOURCE_ASSET_NAMES],
         "public_release_objects": public_release_objects,
+        "temporarily_recovered_release_commits": sorted(
+            recovered_release_commits
+        ),
         "private_inputs_pending": [
             f"{prefix}/{name}" for name in PRIVATE_ASSET_NAMES
         ],
@@ -917,11 +1040,13 @@ def source_bootstrap_command(
         channel = f"{RUNTIME_ROOT}/{PUBLIC_RELEASE_ASSET_NAMES[0]}"
         lineage = f"{RUNTIME_ROOT}/{PUBLIC_RELEASE_ASSET_NAMES[1]}"
         insertion = 8
+        channels = f"{RUNTIME_ROOT}/{PUBLIC_RELEASE_ASSET_NAMES[2]}"
         lines[insertion:insertion] = [
             f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
-            f"--key {q(assets_prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[0])} {q(channel)} >/dev/null 2>&1",
-            f"aws s3api get-object --region {q(REGION)} --bucket {q(assets_bucket)} "
-            f"--key {q(assets_prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[1])} {q(lineage)} >/dev/null 2>&1",
+            f"--key {q(assets_prefix + '/' + name)} {q(path)} >/dev/null 2>&1"
+            for name, path in zip(
+                PUBLIC_RELEASE_ASSET_NAMES, (channel, lineage, channels)
+            )
         ]
         stage_index = next(
             index for index, line in enumerate(lines)
@@ -999,23 +1124,27 @@ def export_public_release_documents(
     q = shlex.quote
     channel_file = f"{RUNTIME_ROOT}/export-{PUBLIC_RELEASE_ASSET_NAMES[0]}"
     lineage_file = f"{RUNTIME_ROOT}/export-{PUBLIC_RELEASE_ASSET_NAMES[1]}"
+    channels_file = f"{RUNTIME_ROOT}/export-{PUBLIC_RELEASE_ASSET_NAMES[2]}"
     program = public_release_export_program(
         candidate_sha=candidate_sha,
         repository=SOURCE_REPOSITORY,
         config_path=NATIVE_CONFIG,
         channel_output=channel_file,
         lineage_output=lineage_file,
+        channels_output=channels_file,
+        channels_path=f"{RUNTIME_ROOT}/release-channels-v2.json",
     )
     command = "\n".join((
         "set -Eeuo pipefail", "umask 077",
-        f"test ! -e {q(channel_file)} && test ! -e {q(lineage_file)}",
-        f"cleanup_public_release_export() {{ rm -f -- {q(channel_file)} {q(lineage_file)}; }}",
+        f"test ! -e {q(channel_file)} && test ! -e {q(lineage_file)} && test ! -e {q(channels_file)}",
+        f"cleanup_public_release_export() {{ rm -f -- {q(channel_file)} {q(lineage_file)} {q(channels_file)}; }}",
         "trap cleanup_public_release_export EXIT",
         f"test \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} rev-parse HEAD)\" = {q(candidate_sha)}",
         f"test -z \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} status --porcelain --untracked-files=no)\"",
         f"{q(SOURCE_VENV + '/bin/python3')} -I -c {q(program)}",
         f"aws s3api put-object --region {q(REGION)} --bucket {q(bucket)} --key {q(prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[0])} --server-side-encryption AES256 --body {q(channel_file)} >/dev/null",
         f"aws s3api put-object --region {q(REGION)} --bucket {q(bucket)} --key {q(prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[1])} --server-side-encryption AES256 --body {q(lineage_file)} >/dev/null",
+        f"aws s3api put-object --region {q(REGION)} --bucket {q(bucket)} --key {q(prefix + '/' + PUBLIC_RELEASE_ASSET_NAMES[2])} --server-side-encryption AES256 --body {q(channels_file)} >/dev/null",
         "printf '%s\\n' temporary_public_release_export_ready",
     ))
     command_id, stdout = _send_fixed_ssm(
@@ -1030,18 +1159,16 @@ def export_public_release_documents(
         if not 0 < len(payload) <= 4 * 1024 * 1024:
             raise TemporaryHostError("exported public release document is unbounded")
         values.append(json.loads(payload))
-    from gateway.tee.release_channel_v2 import (
-        build_release_lineage_v2,
-        validate_release_channel_v2,
-    )
+    from gateway.tee.release_channel_v2 import validate_release_channel_v2
     from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
     channel = validate_release_channel_v2(values[0], expected_commit=candidate_sha)
     lineage = validate_compact_release_lineage_v2(
         values[1], expected_current_commit=candidate_sha
     )
-    expected = build_release_lineage_v2([channel], current_commit=candidate_sha)
-    if lineage["releases"].get(candidate_sha) != expected["releases"][candidate_sha]:
-        raise TemporaryHostError("exported public release documents differ")
+    _validated_release_channel_store(
+        value=values[2], lineage=lineage, current_channel=channel,
+        current_commit=candidate_sha,
+    )
     return {
         "status": "ready", "run_id": run_id, "candidate_sha": candidate_sha,
         "instance_id": instance_id, "bucket": bucket,
@@ -1054,7 +1181,8 @@ def export_public_release_documents(
 
 def public_release_export_program(
     *, candidate_sha: str, repository: str, config_path: str,
-    channel_output: str, lineage_output: str,
+    channel_output: str, lineage_output: str, channels_output: str,
+    channels_path: str,
 ) -> str:
     """Build the fixed old-host reader from APIs already present at f927."""
 
@@ -1072,10 +1200,14 @@ def public_release_export_program(
         "v=json.loads(Path(c['validator']['release_manifest']).read_text()); "
         f"a=vc(bc(gateway_release_manifest=g,validator_release_manifest=v),expected_commit={candidate_sha!r}); "
         f"b=vl(json.loads(Path(c['gateway']['release_lineage']).read_text()),expected_current_commit={candidate_sha!r}); "
-        f"e=bl([a],current_commit={candidate_sha!r}); "
-        f"assert b['releases'].get({candidate_sha!r})==e['releases'][{candidate_sha!r}]; "
+        f"d=json.loads(Path({channels_path!r}).read_text()); "
+        "assert isinstance(d,dict) and set(d)==set(b['releases']); "
+        "d={k:vc(v,expected_commit=k) for k,v in sorted(d.items())}; "
+        f"assert d.get({candidate_sha!r})==a; "
+        f"assert b==bl(list(d.values()),current_commit={candidate_sha!r}); "
         f"Path({channel_output!r}).write_text(canonical_json(a)+'\\n',encoding='ascii'); "
-        f"Path({lineage_output!r}).write_text(canonical_json(b)+'\\n',encoding='ascii')"
+        f"Path({lineage_output!r}).write_text(canonical_json(b)+'\\n',encoding='ascii'); "
+        f"Path({channels_output!r}).write_text(canonical_json(d)+'\\n',encoding='ascii')"
     )
 
 

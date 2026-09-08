@@ -50,6 +50,7 @@ NITRO_CLI_BLOB_NAMES = (
 )
 PRIOR_RELEASE_CHANNEL = ROOT / "prior-release-channel-v2.json"
 PRIOR_RELEASE_LINEAGE = ROOT / "prior-release-lineage-v1.json"
+PRIOR_RELEASE_CHANNELS = ROOT / "prior-release-channels-v2.json"
 
 
 def read_locked_private_input(
@@ -254,9 +255,10 @@ def validated_public_release_documents(
 
 
 def load_prior_release_documents(
-    *, channel_path: Path, lineage_path: Path, expected_commit: str
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load one fixed prior pair through the existing strict validators."""
+    *, channel_path: Path, lineage_path: Path, channels_path: Path,
+    expected_commit: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
+    """Load one inherited lineage and every full channel that authorizes it."""
 
     from gateway.tee.release_channel_v2 import (
         build_release_lineage_v2,
@@ -270,10 +272,21 @@ def load_prior_release_documents(
     lineage = validate_prior_compact_release_lineage_v2(
         json.loads(lineage_path.read_text()), expected_current_commit=expected_commit
     )
-    expected = build_release_lineage_v2([channel], current_commit=expected_commit)
-    if lineage["releases"].get(expected_commit) != expected["releases"][expected_commit]:
+    raw_channels = json.loads(channels_path.read_text())
+    if not isinstance(raw_channels, dict) or set(raw_channels) != set(lineage["releases"]):
+        raise ValueError("prior release channel set differs")
+    channels = {
+        commit: validate_prior_release_channel_v2(value, expected_commit=commit)
+        for commit, value in sorted(raw_channels.items())
+    }
+    if channels.get(expected_commit) != channel:
+        raise ValueError("prior current release channel differs")
+    expected = build_release_lineage_v2(
+        list(channels.values()), current_commit=expected_commit
+    )
+    if lineage != expected:
         raise ValueError("prior release documents differ")
-    return channel, lineage
+    return channel, lineage, channels
 
 
 def extend_release_lineage(
@@ -436,9 +449,10 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
     if prior_commit is not None:
         if not re.fullmatch(r"[0-9a-f]{40}", prior_commit) or prior_commit == candidate:
             raise ValueError("prior release commit is invalid")
-        _prior_channel, prior_lineage = load_prior_release_documents(
+        _prior_channel, prior_lineage, prior_channels = load_prior_release_documents(
             channel_path=PRIOR_RELEASE_CHANNEL,
             lineage_path=PRIOR_RELEASE_LINEAGE,
+            channels_path=PRIOR_RELEASE_CHANNELS,
             expected_commit=prior_commit,
         )
         lineage = extend_release_lineage(
@@ -447,6 +461,16 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
             current_commit=candidate,
         )
         config["resume_existing_epoch_authority"] = True
+        prior_channels[candidate] = channel
+        private_write(
+            ROOT / "release-channels-v2.json",
+            json.dumps(prior_channels).encode(),
+        )
+    else:
+        private_write(
+            ROOT / "release-channels-v2.json",
+            json.dumps({candidate: channel}).encode(),
+        )
     private_write(ROOT / "gateway-lineage.json", json.dumps(lineage).encode())
     private_write(ROOT / "config.json", json.dumps(config).encode())
     checked = native.load_config(ROOT / "config.json")

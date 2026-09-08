@@ -98,6 +98,7 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
     monkeypatch, tmp_path
 ):
     prior_commit = "1" * 40
+    middle_commits = ("3" * 40, "4" * 40)
     current_commit = "2" * 40
     prior = build_release_channel_v2(
         gateway_release_manifest=_local_gateway_manifest(prior_commit),
@@ -109,17 +110,27 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
         gateway_release_manifest=current_gateway,
         validator_release_manifest=current_validator,
     )
+    middle = [
+        build_release_channel_v2(
+            gateway_release_manifest=_local_gateway_manifest(commit),
+            validator_release_manifest=_local_validator_manifest(commit),
+        )
+        for commit in middle_commits
+    ]
     lineage = build_release_lineage_v2(
-        [prior, current], current_commit=current_commit
+        [prior, *middle, current], current_commit=current_commit
     )
     staged_gateway = tmp_path / "gateway-release.json"
     canonical_gateway = tmp_path / "tee" / "gateway-v2-release-manifest.json"
-    prior_path = tmp_path / "prior-release-channel-v2.json"
+    channels_path = tmp_path / "release-channels-v2.json"
     validator_path = tmp_path / "validator-release.json"
     lineage_path = tmp_path / "gateway-lineage.json"
     for path, value in (
         (staged_gateway, current_gateway),
-        (prior_path, prior),
+        (channels_path, {
+            channel["commit_sha"]: channel
+            for channel in (prior, *middle, current)
+        }),
         (validator_path, current_validator),
         (lineage_path, lineage),
     ):
@@ -145,8 +156,8 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
     )
     monkeypatch.setattr(
         attested_coordinator_v2,
-        "_TEMPORARY_TESTNET401_PRIOR_CHANNEL",
-        prior_path,
+        "_TEMPORARY_TESTNET401_RELEASE_CHANNELS",
+        channels_path,
     )
     monkeypatch.setattr(
         attested_coordinator_v2,
@@ -178,9 +189,10 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
         loader = kwargs["release_channel_loader"]
         observed["loader"] = loader
         assert loader(prior_commit) == prior
+        assert [loader(commit) for commit in middle_commits] == middle
         assert loader(current_commit) == current
         with pytest.raises(RuntimeError, match="not approved"):
-            loader("3" * 40)
+            loader("5" * 40)
         return {"status": "succeeded"}
 
     monkeypatch.setattr(attested_coordinator_v2, "execute_scoring_v2", execute)
@@ -216,6 +228,16 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
         "validator_release_manifest": current["validator_release_manifest"],
     }
 
+    _private_json(channels_path, {
+        channel["commit_sha"]: channel for channel in (prior, *middle)
+    })
+    with pytest.raises(RuntimeError, match="channel set differs"):
+        attested_coordinator_v2._temporary_testnet401_release_channel_loader(
+            current_release_path=canonical_gateway
+        )
+    _private_json(channels_path, {
+        channel["commit_sha"]: channel for channel in (prior, *middle, current)
+    })
     tampered_lineage = {**lineage, "lineage_hash": "sha256:" + "0" * 64}
     _private_json(lineage_path, tampered_lineage)
     with pytest.raises(ReleaseLineageV2Error):
@@ -223,7 +245,7 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
             current_release_path=canonical_gateway
         )
     _private_json(lineage_path, lineage)
-    _private_json(validator_path, _local_validator_manifest("3" * 40))
+    _private_json(validator_path, _local_validator_manifest("5" * 40))
     with pytest.raises(ReleaseChannelV2Error):
         attested_coordinator_v2._temporary_testnet401_release_channel_loader(
             current_release_path=canonical_gateway

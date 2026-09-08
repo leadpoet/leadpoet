@@ -24,14 +24,14 @@ from gateway.utils.tee_client import coordinator_tee_client
 _TEMPORARY_TESTNET401_LOCAL_RELEASE_CHANNELS = (
     "LEADPOET_TEMPORARY_TESTNET401_LOCAL_RELEASE_CHANNELS"
 )
-_TEMPORARY_TESTNET401_PRIOR_CHANNEL = Path(
-    "/run/leadpoet-testnet401/prior-release-channel-v2.json"
-)
 _TEMPORARY_TESTNET401_CURRENT_VALIDATOR_RELEASE = Path(
     "/run/leadpoet-testnet401/validator-release.json"
 )
 _TEMPORARY_TESTNET401_RELEASE_LINEAGE = Path(
     "/run/leadpoet-testnet401/gateway-lineage.json"
+)
+_TEMPORARY_TESTNET401_RELEASE_CHANNELS = Path(
+    "/run/leadpoet-testnet401/release-channels-v2.json"
 )
 
 
@@ -74,7 +74,6 @@ def _temporary_testnet401_release_channel_loader(
     from gateway.tee.release_channel_v2 import (
         build_release_channel_v2,
         build_release_lineage_v2,
-        validate_prior_release_channel_v2,
         validate_release_channel_v2,
     )
     from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
@@ -97,17 +96,6 @@ def _temporary_testnet401_release_channel_loader(
         ),
         expected_commit=current_commit,
     )
-    prior_raw = _bounded_json(
-        _TEMPORARY_TESTNET401_PRIOR_CHANNEL,
-        "prior release channel",
-    )
-    prior_commit = str(prior_raw.get("commit_sha") or "").lower()
-    prior_channel = validate_prior_release_channel_v2(
-        prior_raw,
-        expected_commit=prior_commit,
-    )
-    if not prior_commit or prior_commit == current_commit:
-        raise RuntimeError("temporary testnet401 prior release identity differs")
     lineage = validate_compact_release_lineage_v2(
         _bounded_json(
             _TEMPORARY_TESTNET401_RELEASE_LINEAGE,
@@ -115,13 +103,23 @@ def _temporary_testnet401_release_channel_loader(
         ),
         expected_current_commit=current_commit,
     )
+    raw_channels = _bounded_json(
+        _TEMPORARY_TESTNET401_RELEASE_CHANNELS,
+        "temporary release channels",
+    )
+    if set(raw_channels) != set(lineage["releases"]):
+        raise RuntimeError("temporary testnet401 release channel set differs")
+    channels = {
+        commit: validate_release_channel_v2(value, expected_commit=commit)
+        for commit, value in sorted(raw_channels.items())
+    }
+    if channels.get(current_commit) != current_channel:
+        raise RuntimeError("temporary testnet401 current release channel differs")
     expected_lineage = build_release_lineage_v2(
-        [prior_channel, current_channel],
-        current_commit=current_commit,
+        list(channels.values()), current_commit=current_commit
     )
     if lineage != expected_lineage:
         raise RuntimeError("temporary testnet401 release lineage differs")
-    channels = {prior_commit: prior_channel, current_commit: current_channel}
 
     def load(commit: str) -> dict[str, Any]:
         channel = channels.get(str(commit or "").lower())

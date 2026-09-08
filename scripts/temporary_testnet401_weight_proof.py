@@ -39,7 +39,7 @@ SCHEMA_VERSION = "leadpoet.temporary_testnet401_weight_proof_ssm.v1"
 LOG_READER_SHA256 = "14c53ff6be8e26e617b8e6f5e6196c0055f21852981d4ca9227c745b981372cd"
 VERIFIER_PATH = Path(__file__).with_name("verify_temporary_testnet_weights.py")
 VERIFIER_SHA256 = (
-    "0e1d4f6be3f556101cc87675928a400ef959f05748c346c82eb5ebed1c38cf6e"
+    "f1e20a37b86be973be8ee048d5772c3a5a3a2f37b8e46d3a5f37dd3a43b6ba00"
 )
 MAX_VERIFIER_BYTES = 32 * 1024
 FIRST_SETTLEMENT_EPOCH_ID = 22_042

@@ -112,6 +112,52 @@ def test_unapproved_historical_commit_fails_closed(weights_module, monkeypatch):
         weights_module._verify_authoritative_v2_boot(dict(_identity(historical)))
 
 
+def test_temporary_testnet401_full_channel_loader_covers_historical_validator(
+    weights_module, monkeypatch,
+):
+    from gateway.tee import release_lineage_v2
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+    )
+    from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
+    commits = tuple(str(index) * 40 for index in range(1, 5))
+    channels = [
+        build_release_channel_v2(
+            gateway_release_manifest=_gateway_manifest(commit),
+            validator_release_manifest=_validator_manifest(commit),
+        )
+        for commit in commits
+    ]
+    compact = build_release_lineage_v2(channels, current_commit=commits[-1])
+    store = {channel["commit_sha"]: channel for channel in channels}
+    monkeypatch.setattr(
+        weights_module,
+        "_temporary_testnet401_release_channel_loader",
+        lambda: lambda commit: store[commit],
+    )
+    monkeypatch.setattr(
+        weights_module,
+        "_gateway_v2_release_manifest",
+        lambda: channels[-1]["gateway_release_manifest"],
+    )
+    monkeypatch.setattr(
+        release_lineage_v2, "verify_boot_identity_nitro", _stub_nitro([])
+    )
+    identity = {
+        "role": "validator_weights",
+        "physical_role": "validator_weights",
+        **compact["releases"][commits[0]]["roles"]["validator_weights"],
+    }
+
+    assert weights_module._verify_authoritative_v2_boot(identity)["verified"] is True
+    graph = {"boot_identities": [identity]}
+    assert weights_module._build_authoritative_v2_receipt_boot_verifier(graph)(
+        identity
+    )["verified"] is True
+
+
 def test_lineage_rejects_role_drift_against_its_own_release(
     weights_module, monkeypatch
 ):

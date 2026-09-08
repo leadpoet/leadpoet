@@ -33,53 +33,25 @@ def _write_json(path, value):
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def _approved_lineage(tmp_path, *, with_prior):
-    current = _channel(CURRENT_COMMIT)
-    prior_channel_path = tmp_path / "prior-channel.json"
-    prior_lineage_path = tmp_path / "prior-lineage.json"
-    channels = []
-    if with_prior:
-        prior = _channel(verifier.PRIOR_RELEASE_COMMIT)
-        _write_json(prior_channel_path, prior)
-        _write_json(
-            prior_lineage_path,
-            build_release_lineage_v2(
-                [prior], current_commit=verifier.PRIOR_RELEASE_COMMIT
-            ),
-        )
-        channels.append(prior)
-    channels.append(current)
-    runtime_lineage = build_release_lineage_v2(
-        channels, current_commit=CURRENT_COMMIT
-    )
+def _approved_lineage(tmp_path, commits=("1" * 40, "2" * 40, "3" * 40, CURRENT_COMMIT)):
+    channels = [_channel(commit) for commit in commits]
+    runtime_lineage = build_release_lineage_v2(channels, current_commit=CURRENT_COMMIT)
+    channel_store = tmp_path / "release-channels-v2.json"
+    _write_json(channel_store, {item["commit_sha"]: item for item in channels})
     approved = verifier.build_approved_release_lineage(
         candidate=CURRENT_COMMIT,
-        gateway_release=current["gateway_release_manifest"],
-        validator_release=current["validator_release_manifest"],
+        gateway_release=channels[-1]["gateway_release_manifest"],
+        validator_release=channels[-1]["validator_release_manifest"],
         runtime_lineage=runtime_lineage,
-        prior_release_channel_path=prior_channel_path,
-        prior_release_lineage_path=prior_lineage_path,
+        release_channels_path=channel_store,
     )
-    return current, approved, prior_channel_path, prior_lineage_path
+    return channels, approved, channel_store
 
 
-def test_current_only_lineage_is_accepted_when_prior_artifacts_are_absent(
-    tmp_path,
-):
-    _current, approved, _prior_channel, _prior_lineage = _approved_lineage(
-        tmp_path, with_prior=False
-    )
-
-    assert set(approved["releases"]) == {CURRENT_COMMIT}
-
-
-def test_exact_prior_and_current_lineage_verifies_a_prior_boot(tmp_path):
-    _current, approved, _prior_channel, _prior_lineage = _approved_lineage(
-        tmp_path, with_prior=True
-    )
-    prior_role = approved["releases"][verifier.PRIOR_RELEASE_COMMIT][
-        "roles"
-    ]["gateway_scoring"]
+def test_four_release_lineage_verifies_old_gateway_boot(tmp_path):
+    channels, approved, _store = _approved_lineage(tmp_path)
+    prior_commit = channels[0]["commit_sha"]
+    prior_role = approved["releases"][prior_commit]["roles"]["gateway_scoring"]
     prior_boot = {
         "physical_role": "gateway_scoring",
         **prior_role,
@@ -99,118 +71,26 @@ def test_exact_prior_and_current_lineage_verifies_a_prior_boot(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("missing_name", ("channel", "lineage"))
-def test_partial_prior_artifacts_are_rejected(tmp_path, missing_name):
-    current = _channel(CURRENT_COMMIT)
-    prior = _channel(verifier.PRIOR_RELEASE_COMMIT)
-    prior_channel_path = tmp_path / "prior-channel.json"
-    prior_lineage_path = tmp_path / "prior-lineage.json"
-    if missing_name != "channel":
-        _write_json(prior_channel_path, prior)
-    if missing_name != "lineage":
-        _write_json(
-            prior_lineage_path,
-            build_release_lineage_v2(
-                [prior], current_commit=verifier.PRIOR_RELEASE_COMMIT
-            ),
-        )
-
-    with pytest.raises(RuntimeError, match="prior release artifacts are incomplete"):
+@pytest.mark.parametrize("mutation", ("missing", "foreign", "tampered"))
+def test_release_channel_store_must_match_runtime_exactly(tmp_path, mutation):
+    channels = [_channel(commit) for commit in ("1" * 40, "2" * 40, "3" * 40, CURRENT_COMMIT)]
+    lineage = build_release_lineage_v2(channels, current_commit=CURRENT_COMMIT)
+    store = {item["commit_sha"]: item for item in channels}
+    if mutation == "missing":
+        store.pop(channels[0]["commit_sha"])
+    elif mutation == "foreign":
+        store[EXTRA_COMMIT] = _channel(EXTRA_COMMIT)
+    else:
+        store[channels[0]["commit_sha"]]["channel_hash"] = "sha256:" + "0" * 64
+    path = tmp_path / "release-channels-v2.json"
+    _write_json(path, store)
+    with pytest.raises((RuntimeError, ValueError), match="channel|hash"):
         verifier.build_approved_release_lineage(
             candidate=CURRENT_COMMIT,
-            gateway_release=current["gateway_release_manifest"],
-            validator_release=current["validator_release_manifest"],
-            runtime_lineage=build_release_lineage_v2(
-                [current], current_commit=CURRENT_COMMIT
-            ),
-            prior_release_channel_path=prior_channel_path,
-            prior_release_lineage_path=prior_lineage_path,
-        )
-
-
-def test_prior_lineage_with_an_unapproved_extra_release_is_rejected(tmp_path):
-    current = _channel(CURRENT_COMMIT)
-    prior = _channel(verifier.PRIOR_RELEASE_COMMIT)
-    extra = _channel(EXTRA_COMMIT)
-    prior_channel_path = tmp_path / "prior-channel.json"
-    prior_lineage_path = tmp_path / "prior-lineage.json"
-    _write_json(prior_channel_path, prior)
-    _write_json(
-        prior_lineage_path,
-        build_release_lineage_v2(
-            [extra, prior], current_commit=verifier.PRIOR_RELEASE_COMMIT
-        ),
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="prior release lineage differs from its approved channel",
-    ):
-        verifier.build_approved_release_lineage(
-            candidate=CURRENT_COMMIT,
-            gateway_release=current["gateway_release_manifest"],
-            validator_release=current["validator_release_manifest"],
-            runtime_lineage=build_release_lineage_v2(
-                [prior, current], current_commit=CURRENT_COMMIT
-            ),
-            prior_release_channel_path=prior_channel_path,
-            prior_release_lineage_path=prior_lineage_path,
-        )
-
-
-def test_prior_channel_for_an_unapproved_commit_is_rejected(tmp_path):
-    current = _channel(CURRENT_COMMIT)
-    wrong_prior = _channel(EXTRA_COMMIT)
-    prior_channel_path = tmp_path / "prior-channel.json"
-    prior_lineage_path = tmp_path / "prior-lineage.json"
-    _write_json(prior_channel_path, wrong_prior)
-    _write_json(
-        prior_lineage_path,
-        build_release_lineage_v2(
-            [wrong_prior], current_commit=EXTRA_COMMIT
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="release channel is for another commit"):
-        verifier.build_approved_release_lineage(
-            candidate=CURRENT_COMMIT,
-            gateway_release=current["gateway_release_manifest"],
-            validator_release=current["validator_release_manifest"],
-            runtime_lineage=build_release_lineage_v2(
-                [current], current_commit=CURRENT_COMMIT
-            ),
-            prior_release_channel_path=prior_channel_path,
-            prior_release_lineage_path=prior_lineage_path,
-        )
-
-
-def test_runtime_lineage_with_an_unapproved_extra_release_is_rejected(tmp_path):
-    current = _channel(CURRENT_COMMIT)
-    prior = _channel(verifier.PRIOR_RELEASE_COMMIT)
-    extra = _channel(EXTRA_COMMIT)
-    prior_channel_path = tmp_path / "prior-channel.json"
-    prior_lineage_path = tmp_path / "prior-lineage.json"
-    _write_json(prior_channel_path, prior)
-    _write_json(
-        prior_lineage_path,
-        build_release_lineage_v2(
-            [prior], current_commit=verifier.PRIOR_RELEASE_COMMIT
-        ),
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="runtime release lineage differs from the approved release set",
-    ):
-        verifier.build_approved_release_lineage(
-            candidate=CURRENT_COMMIT,
-            gateway_release=current["gateway_release_manifest"],
-            validator_release=current["validator_release_manifest"],
-            runtime_lineage=build_release_lineage_v2(
-                [prior, extra, current], current_commit=CURRENT_COMMIT
-            ),
-            prior_release_channel_path=prior_channel_path,
-            prior_release_lineage_path=prior_lineage_path,
+            gateway_release=channels[-1]["gateway_release_manifest"],
+            validator_release=channels[-1]["validator_release_manifest"],
+            runtime_lineage=lineage,
+            release_channels_path=path,
         )
 
 

@@ -78,6 +78,8 @@ def test_fixed_public_release_reader_executes_locally_and_writes_canonical_pair(
     config["gateway"]["release_manifest"] = str(gateway_path)
     config["gateway"]["release_lineage"] = str(lineage_path)
     config["validator"]["release_manifest"] = str(validator_path)
+    channel_store = {item["commit_sha"]: item for item in (*prior_channels, channel)}
+    (tmp_path / "release-channels-v2.json").write_text(json.dumps(channel_store))
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config))
     config_path.chmod(0o600)
@@ -88,12 +90,15 @@ def test_fixed_public_release_reader_executes_locally_and_writes_canonical_pair(
     ) == (channel, lineage)
     channel_output = tmp_path / "channel-output.json"
     lineage_output = tmp_path / "lineage-output.json"
+    channels_output = tmp_path / "channels-output.json"
     program = temporary_host.public_release_export_program(
         candidate_sha=SHA,
         repository=str(ROOT),
         config_path=str(config_path),
         channel_output=str(channel_output),
         lineage_output=str(lineage_output),
+        channels_output=str(channels_output),
+        channels_path=str(tmp_path / "release-channels-v2.json"),
     )
 
     subprocess.run([sys.executable, "-I", "-c", program], check=True, timeout=30)
@@ -102,6 +107,7 @@ def test_fixed_public_release_reader_executes_locally_and_writes_canonical_pair(
     assert lineage_output.read_text().endswith("\n")
     assert json.loads(channel_output.read_text()) == channel
     assert json.loads(lineage_output.read_text()) == lineage
+    assert json.loads(channels_output.read_text()) == channel_store
     assert "secret" not in channel_output.read_text().lower()
 
 
@@ -132,15 +138,19 @@ def test_stage_retains_validated_release_lineage_across_three_hosts(tmp_path):
 
     channel_path = tmp_path / "prior-channel.json"
     lineage_path = tmp_path / "prior-lineage.json"
+    channels_path = tmp_path / "prior-channels.json"
     channel_path.write_text(json.dumps(channels[1]))
     lineage_path.write_text(json.dumps(lineage))
-    prior_channel, prior_lineage = stage_host.load_prior_release_documents(
+    channels_path.write_text(json.dumps({item["commit_sha"]: item for item in channels[:2]}))
+    prior_channel, prior_lineage, prior_channels = stage_host.load_prior_release_documents(
         channel_path=channel_path,
         lineage_path=lineage_path,
+        channels_path=channels_path,
         expected_commit=commits[1],
     )
     assert prior_channel == channels[1]
     assert set(prior_lineage["releases"]) == set(commits[:2])
+    assert set(prior_channels) == set(commits[:2])
 
     mismatched = json.loads(json.dumps(prior_lineage))
     mismatched["releases"][commits[1]]["channel_hash"] = "sha256:" + "d" * 64
@@ -153,6 +163,7 @@ def test_stage_retains_validated_release_lineage_across_three_hosts(tmp_path):
         stage_host.load_prior_release_documents(
             channel_path=channel_path,
             lineage_path=lineage_path,
+            channels_path=channels_path,
             expected_commit=commits[1],
         )
 
@@ -162,6 +173,7 @@ def test_stage_retains_validated_release_lineage_across_three_hosts(tmp_path):
         stage_host.load_prior_release_documents(
             channel_path=channel_path,
             lineage_path=lineage_path,
+            channels_path=channels_path,
             expected_commit=commits[1],
         )
 
@@ -202,6 +214,9 @@ def test_controller_accepts_exported_inherited_release_lineage(monkeypatch):
     documents = {
         temporary_host.PUBLIC_RELEASE_ASSET_NAMES[0]: channels[-1],
         temporary_host.PUBLIC_RELEASE_ASSET_NAMES[1]: lineage,
+        temporary_host.PUBLIC_RELEASE_ASSET_NAMES[2]: {
+            item["commit_sha"]: item for item in channels
+        },
     }
 
     class S3:
@@ -652,7 +667,7 @@ def test_asset_bucket_copies_validated_inherited_release_lineage(monkeypatch, tm
     lineage = build_release_lineage_v2(channels, current_commit=commits[-1])
     documents = dict(zip(
         temporary_host.PUBLIC_RELEASE_ASSET_NAMES,
-        (channels[-1], lineage),
+        (channels[-1], lineage, {item["commit_sha"]: item for item in channels}),
     ))
     copied = {}
 
@@ -697,7 +712,44 @@ def test_asset_bucket_copies_validated_inherited_release_lineage(monkeypatch, tm
 
     assert copied[temporary_host.PUBLIC_RELEASE_ASSET_NAMES[0]] == channels[-1]
     assert copied[temporary_host.PUBLIC_RELEASE_ASSET_NAMES[1]] == lineage
-    assert len(result["public_release_objects"]) == 2
+    assert copied[temporary_host.PUBLIC_RELEASE_ASSET_NAMES[2]] == {
+        item["commit_sha"]: item for item in channels
+    }
+    assert len(result["public_release_objects"]) == 3
+
+
+def test_public_channel_recovery_rehides_head_when_read_fails():
+    calls = []
+
+    class S3:
+        def list_object_versions(self, **kwargs):
+            calls.append(("list", kwargs))
+            return {
+                "IsTruncated": False,
+                "Versions": [{"Key": "fixed", "IsLatest": False}],
+                "DeleteMarkers": [{
+                    "Key": "fixed", "IsLatest": True, "VersionId": "marker-1",
+                }],
+            }
+
+        def delete_object(self, **kwargs):
+            calls.append(("delete", kwargs))
+            if "VersionId" in kwargs:
+                return {}
+            return {"DeleteMarker": True, "VersionId": "marker-2"}
+
+        def get_object(self, **kwargs):
+            calls.append(("get", kwargs))
+            raise RuntimeError("secret-canary read failure")
+
+    with pytest.raises(RuntimeError, match="secret-canary"):
+        temporary_host._recover_fixed_public_release_object(
+            S3(), bucket="fixed-bucket", key="fixed"
+        )
+
+    assert calls[-1] == (
+        "delete", {"Bucket": "fixed-bucket", "Key": "fixed"}
+    )
 
 
 def test_controller_wait_uses_locked_bucket_when_object_retention_is_hidden():

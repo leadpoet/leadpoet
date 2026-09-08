@@ -989,8 +989,38 @@ def _gateway_v2_release_manifest() -> Dict[str, Any]:
     return validate_release_manifest(value)
 
 
+def _temporary_testnet401_release_channel_loader():
+    """Use the fixed local full-channel store only in the exact task scope."""
+
+    from gateway.research_lab.attested_coordinator_v2 import (
+        _temporary_testnet401_release_channel_loader,
+    )
+    from gateway.research_lab.attested_scoring_v2 import (
+        DEFAULT_RELEASE_MANIFEST_PATH,
+    )
+
+    return _temporary_testnet401_release_channel_loader(
+        current_release_path=DEFAULT_RELEASE_MANIFEST_PATH
+    )
+
+
 def _verify_authoritative_v2_boot(identity: Dict[str, Any]) -> Dict[str, Any]:
     """Verify one boot via a six-build gateway release or dynamic validator build."""
+
+    local_loader = _temporary_testnet401_release_channel_loader()
+    if local_loader is not None:
+        from gateway.tee.release_lineage_v2 import (
+            build_release_lineage_boot_verifier_v2,
+            load_approved_release_lineage_v2,
+        )
+
+        release = _gateway_v2_release_manifest()
+        lineage = load_approved_release_lineage_v2(
+            current_release=release,
+            parent_graphs=({"boot_identities": (dict(identity),)},),
+            release_channel_loader=local_loader,
+        )
+        return build_release_lineage_boot_verifier_v2(lineage)(identity)
 
     physical_role = str(identity.get("physical_role") or "")
     if physical_role == "validator_weights":
@@ -1065,9 +1095,11 @@ def _build_authoritative_v2_receipt_boot_verifier(
     )
 
     release = _gateway_v2_release_manifest()
+    local_loader = _temporary_testnet401_release_channel_loader()
     lineage = load_approved_release_lineage_v2(
         current_release=release,
         parent_graphs=(receipt_graph,),
+        release_channel_loader=local_loader,
     )
     return build_release_lineage_boot_verifier_v2(lineage)
 

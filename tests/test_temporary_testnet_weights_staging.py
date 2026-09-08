@@ -29,12 +29,15 @@ def test_prior_public_pair_validates_and_public_builder_accepts_next_release(tmp
     prior_lineage = build_release_lineage_v2([prior_channel], current_commit=prior)
     channel_path = tmp_path / "prior-release-channel-v2.json"
     lineage_path = tmp_path / "prior-release-lineage-v1.json"
+    channels_path = tmp_path / "prior-release-channels-v2.json"
     channel_path.write_text(json.dumps(prior_channel))
     lineage_path.write_text(json.dumps(prior_lineage))
+    channels_path.write_text(json.dumps({prior: prior_channel}))
 
-    loaded, loaded_lineage = stage.load_prior_release_documents(
+    loaded, loaded_lineage, loaded_channels = stage.load_prior_release_documents(
         channel_path=channel_path,
         lineage_path=lineage_path,
+        channels_path=channels_path,
         expected_commit=prior,
     )
     current_channel = build_release_channel_v2(
@@ -46,6 +49,7 @@ def test_prior_public_pair_validates_and_public_builder_accepts_next_release(tmp
     )
 
     assert loaded_lineage == prior_lineage
+    assert loaded_channels == {prior: prior_channel}
     assert set(merged["releases"]) == {prior, current}
     assert merged["current_commit_sha"] == current
 

@@ -16,6 +16,8 @@ from qualification.scoring.company_fit_decision import (
 from qualification.scoring.competition import (
     competition_score_from_breakdowns,
     count_penalizable_false_positives,
+    has_verified_primary_intent,
+    intent_unavailability_requires_retry,
     scorer_breakdown_has_retryable_infrastructure_failure,
 )
 
@@ -46,6 +48,49 @@ def _detail(
             },
         },
     }
+
+
+def _verified_detail(*, matched: int = 0, after_decay: float = 60.0) -> dict:
+    return {
+        "raw": after_decay,
+        "after_decay": after_decay,
+        "matched_icp_signal": matched,
+        "judge_verdict": {
+            "decision": "verified",
+            "pipeline_decision": "accept",
+            "client_ready": True,
+            "verification_trace": {
+                "intent_verdict": {
+                    "signal_evaluations": [
+                        {
+                            "signal_status": "supported",
+                            "same_entity_check": "pass",
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+
+def _unavailable_detail(*, matched: int = 0) -> dict:
+    detail = _detail(matched=matched)
+    detail["judge_verdict"] = {
+        "decision": "rejected_verifier_error",
+        "pipeline_decision": "unavailable",
+        "error_class": "ProviderTimeout",
+        "verification_trace": {
+            "intent_verdict": {
+                "signal_evaluations": [
+                    {
+                        "signal_status": "unable_to_verify",
+                        "same_entity_check": "unclear",
+                    }
+                ]
+            }
+        },
+    }
+    return detail
 
 
 @pytest.mark.parametrize(
@@ -454,3 +499,144 @@ def test_intent_provider_outage_is_retryable_and_never_penalized():
     assert count_penalizable_false_positives(
         [breakdown], icp_has_intent_signals=True
     ) == (0, 0)
+
+
+def test_mixed_verified_primary_and_unavailable_signal_keeps_score(monkeypatch):
+    details = [_verified_detail(), _unavailable_detail(matched=1)]
+
+    async def fit(*_args, **_kwargs):
+        return company_fit_match("fit verified")
+
+    async def score(*_args, **_kwargs):
+        return 60.0, 60.0, 1.0, 90, False, details
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", fit)
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", score
+    )
+
+    result = asyncio.run(
+        lead_scorer.score_company_competition_intent(
+            _company(), _icp(), 0.0, 0.0, set()
+        )
+    )
+    breakdown = result.model_dump(mode="json")
+
+    assert result.final_score == result.intent_signal_final == 60.0
+    assert result.failure_reason is None
+    assert result.intent_signals_detail == details
+    assert not intent_unavailability_requires_retry(details)
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+    assert count_penalizable_false_positives(
+        [breakdown], icp_has_intent_signals=True
+    ) == (0, 0)
+
+
+def test_scorer_keeps_retryable_zero_without_verified_primary(monkeypatch):
+    details = [_unavailable_detail(), _verified_detail(matched=1)]
+
+    async def fit(*_args, **_kwargs):
+        return company_fit_match("fit verified")
+
+    async def score(*_args, **_kwargs):
+        return 25.0, 25.0, 1.0, 90, False, details
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", fit)
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", score
+    )
+
+    result = asyncio.run(
+        lead_scorer.score_company_competition_intent(
+            _company(), _icp(), 0.0, 0.0, set()
+        )
+    )
+    breakdown = result.model_dump(mode="json")
+
+    assert result.final_score == 0.0
+    assert result.failure_reason == (
+        "Intent verification unavailable: verifier provider error"
+    )
+    assert result.intent_signals_detail == details
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        [_unavailable_detail(), _verified_detail(matched=1)],
+        [_unavailable_detail(), _unavailable_detail(matched=1)],
+    ],
+)
+def test_unavailable_intent_without_verified_primary_remains_retryable(details):
+    assert not has_verified_primary_intent(details)
+    assert intent_unavailability_requires_retry(details)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("after_decay", float("nan")),
+        ("after_decay", float("inf")),
+        ("after_decay", "60"),
+        ("after_decay", True),
+        ("matched_icp_signal", "0"),
+    ],
+)
+def test_malformed_positive_primary_cannot_suppress_retry(field, value):
+    primary = _verified_detail()
+    primary[field] = value
+    details = [primary, _unavailable_detail(matched=1)]
+
+    assert not has_verified_primary_intent(details)
+    assert intent_unavailability_requires_retry(details)
+
+
+def test_contradicted_positive_primary_cannot_suppress_retry():
+    primary = _verified_detail()
+    primary["judge_verdict"]["verification_trace"]["intent_verdict"][
+        "signal_evaluations"
+    ][0]["signal_status"] = "contradicted"
+    details = [primary, _unavailable_detail(matched=1)]
+
+    assert not has_verified_primary_intent(details)
+    assert intent_unavailability_requires_retry(details)
+
+
+def test_fit_unavailable_still_retries_with_positive_primary():
+    details = [_verified_detail(), _unavailable_detail(matched=1)]
+    breakdown = {
+        "final_score": 60.0,
+        "failure_reason": None,
+        "intent_signals_detail": details,
+        "verifier_gate_receipts": [
+            company_fit_unavailable("provider HTTP 503").receipt("company_fit")
+        ],
+    }
+
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+def test_historical_unavailable_zero_stays_retryable_with_positive_detail():
+    breakdown = {
+        "final_score": 0.0,
+        "failure_reason": "Intent verification unavailable: verifier provider error",
+        "intent_signals_detail": [_verified_detail(), _unavailable_detail(matched=1)],
+        "verifier_gate_receipts": [company_fit_match().receipt("company_fit")],
+    }
+
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+def test_all_verified_details_keep_existing_nonretryable_result():
+    details = [_verified_detail(), _verified_detail(matched=1, after_decay=25.0)]
+    breakdown = {
+        "final_score": 85.0,
+        "failure_reason": None,
+        "intent_signals_detail": details,
+        "verifier_gate_receipts": [company_fit_match().receipt("company_fit")],
+    }
+
+    assert has_verified_primary_intent(details)
+    assert not intent_unavailability_requires_retry(details)
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)

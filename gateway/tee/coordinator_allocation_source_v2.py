@@ -32,6 +32,12 @@ from gateway.research_lab.alpha_pricing import (
     static_alpha_price_fallback,
 )
 from gateway.research_lab.bundles import contains_secret_material
+from gateway.research_lab.temporary_testnet401_first_allocation_v1 import (
+    TESTNET401_CUTOVER_RECEIPT_HASH,
+    TESTNET401_FIRST_SETTLEMENT_EPOCH,
+    TemporaryTestnet401FirstAllocationError,
+    validate_testnet401_cutover_parent_v1,
+)
 from gateway.tee.coordinator_chain_source_v2 import CoordinatorChainSourceV2
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
@@ -371,6 +377,7 @@ class CoordinatorAllocationSourceV2:
             if prior_frontier is not None
             else {}
         )
+        fresh_network_origin: Dict[str, Any] = {}
         finalized_reward_history = self._finalized_champion_history(
             epoch=epoch,
             netuid=netuid,
@@ -382,6 +389,8 @@ class CoordinatorAllocationSourceV2:
             ),
             context=context,
             required_parents=required_parent_hashes,
+            chain_state=chain_state,
+            fresh_network_origin_out=fresh_network_origin,
         )
         settlement_frontier_retirements = (
             self._resolve_settlement_frontier_retirements(
@@ -534,6 +543,8 @@ class CoordinatorAllocationSourceV2:
                 "champions": champion_skipped,
             },
         }
+        if fresh_network_origin:
+            source_state["fresh_network_origin"] = fresh_network_origin
         if source_add_present:
             source_state["source_add_obligation_count"] = len(
                 source_add_obligations
@@ -1788,6 +1799,8 @@ class CoordinatorAllocationSourceV2:
         history_start: Any = None,
         context: ExecutionContextV2,
         required_parents: Set[str],
+        chain_state: Optional[Mapping[str, Any]] = None,
+        fresh_network_origin_out: Optional[Dict[str, Any]] = None,
     ) -> list[Dict[str, Any]]:
         starts = [
             int(row.get("start_epoch") or 0)
@@ -1810,6 +1823,24 @@ class CoordinatorAllocationSourceV2:
             context,
         )
         if len(activation_rows) != 1:
+            if (
+                not activation_rows
+                and str(self._network_supplier() or "").strip().lower()
+                == "test"
+                and int(netuid) == 401
+                and isinstance(chain_state, Mapping)
+            ):
+                origin = self._validate_fresh_testnet401_first_allocation(
+                    epoch=epoch,
+                    netuid=netuid,
+                    chain_state=chain_state,
+                    context=context,
+                    required_parents=required_parents,
+                )
+                if fresh_network_origin_out is not None:
+                    fresh_network_origin_out.clear()
+                    fresh_network_origin_out.update(origin)
+                return []
             raise CoordinatorAllocationSourceV2Error(
                 "chain realized settlement activation is unavailable or ambiguous"
             )
@@ -2016,6 +2047,80 @@ class CoordinatorAllocationSourceV2:
                 )
             required_parents.add(root)
         return finalized
+
+    def _validate_fresh_testnet401_first_allocation(
+        self,
+        *,
+        epoch: int,
+        netuid: int,
+        chain_state: Mapping[str, Any],
+        context: ExecutionContextV2,
+        required_parents: Set[str],
+    ) -> Dict[str, Any]:
+        """Validate the measured empty origin used for one first allocation."""
+
+        try:
+            cutover = self._chain_source.fresh_testnet401_cutover_scope(
+                netuid=netuid
+            )
+            graphs = _receipt_graphs_by_declared_root(
+                _receipt_authority_graphs_from_context(context),
+                context.parent_receipt_hashes,
+            )
+            cutover_graph = graphs.get(TESTNET401_CUTOVER_RECEIPT_HASH)
+            if not isinstance(cutover_graph, Mapping):
+                raise TemporaryTestnet401FirstAllocationError(
+                    "temporary first allocation cutover parent is absent"
+                )
+            origin = validate_testnet401_cutover_parent_v1(
+                cutover_graph,
+                network=str(self._network_supplier() or ""),
+                netuid=netuid,
+                cutover=cutover,
+            )
+        except (TemporaryTestnet401FirstAllocationError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "fresh testnet401 allocation origin is invalid"
+            ) from exc
+
+        history_end = max(0, int(epoch) - 1)
+        range_parameters = {
+            "netuid": int(netuid),
+            "start_epoch": TESTNET401_FIRST_SETTLEMENT_EPOCH,
+            "end_epoch": history_end,
+        }
+        history_reads = (
+            ("allocation_history", range_parameters),
+            ("finalized_allocation_authorities", range_parameters),
+            ("legacy_finalized_allocation_migrations", range_parameters),
+            ("chain_realized_epoch_settlements", range_parameters),
+            ("chain_realized_obligation_credits", range_parameters),
+            (
+                "allocation_settlement_frontier_activation",
+                {"netuid": int(netuid)},
+            ),
+            (
+                "allocation_settlement_frontiers",
+                {"netuid": int(netuid), "before_epoch": int(epoch) + 1},
+            ),
+            ("compact_finalized_authority_cutover", {"netuid": int(netuid)}),
+        )
+        for policy_id, parameters in history_reads:
+            if self._read(policy_id, parameters, context):
+                raise CoordinatorAllocationSourceV2Error(
+                    "fresh testnet401 allocation history is not empty"
+                )
+        chain_origin = self._chain_source.prove_fresh_testnet401_allocation_origin(
+            netuid=netuid,
+            snapshot=chain_state,
+            context=context,
+        )
+        required_parents.add(TESTNET401_CUTOVER_RECEIPT_HASH)
+        return {
+            **origin,
+            "history_through_epoch": history_end,
+            "chain_origin": chain_origin,
+        }
 
     def _source_add(
         self,

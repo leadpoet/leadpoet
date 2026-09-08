@@ -144,6 +144,8 @@ def verifier_command(*, candidate_sha: str, epoch_id: int, verifier: bytes) -> s
             f"test -f {q(NATIVE_CONFIG)}",
             f"test -x {q(SOURCE_VENV + '/bin/python3')}",
             f"test \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} rev-parse HEAD)\" = {q(candidate_sha)}",
+            f"test -z \"$(/usr/bin/git -C {q(SOURCE_REPOSITORY)} "
+            "status --porcelain --untracked-files=no)\"",
             f"cd {q(SOURCE_REPOSITORY)}",
             f"printf '%s' {q(encoded)} | /usr/bin/base64 --decode | "
             "BITTENSOR_NETWORK=test BITTENSOR_NETUID=401 "

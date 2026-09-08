@@ -84,6 +84,7 @@ def test_fixed_verifier_identity_and_stdin_command_are_bounded():
     assert proof.SOURCE_REPOSITORY in command
     assert proof.NATIVE_CONFIG in command
     assert CANDIDATE in command
+    assert "status --porcelain --untracked-files=no" in command
 
 
 @pytest.mark.parametrize(

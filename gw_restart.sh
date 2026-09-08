@@ -336,6 +336,8 @@ start_lab_arena_service() {
     -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    -u PREPARED_GATEWAY_SHA \
+    -u LAB_ARENA_RESTART_GUARD_GENERATION \
     setsid "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
       --environment-file "$GATEWAY_ENV_FILE" \
       --host 127.0.0.1 --port 8792 \
@@ -382,24 +384,16 @@ start_lab_arena_service() {
 run_lab_arena_restart_guard() {
   local source_root="$1"
   shift
+  local guard_args=("$@")
   if [ ! -r "$source_root/scripts/lab_arena_restart_claim_guard.py" ]; then
     echo "ERROR: exact Lab Arena restart guard helper is unavailable" >&2
     return 1
   fi
   if [ -f "$ENV_CLONE" ]; then
-    set -a
-    . "$ENV_CLONE"
-    set +a
-  fi
-  if [ -z "${LAB_ARENA_SUPABASE_URL:-}" ] \
-      || [ -z "${LAB_ARENA_SUPABASE_ANON_KEY:-}" ] \
-      || { [ -z "${LAB_ARENA_SERVICE_KEY:-}" ] \
-        && [ -z "${LAB_ARENA_SERVICE_JWT:-}" ]; }; then
-    echo "ERROR: configured Lab Arena restart authority is unavailable" >&2
-    return 1
+    guard_args+=(--environment-file "$ENV_CLONE")
   fi
   PYTHONPATH="$source_root" "$GATEWAY_PYTHON_BIN" \
-    "$source_root/scripts/lab_arena_restart_claim_guard.py" "$@" \
+    "$source_root/scripts/lab_arena_restart_claim_guard.py" "${guard_args[@]}" \
     --candidate "$PREPARED_GATEWAY_SHA" \
     --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"
 }
@@ -3068,6 +3062,8 @@ restart_only_keys = {
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "PREPARED_GATEWAY_SHA",
+    "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -3207,6 +3203,8 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "PREPARED_GATEWAY_SHA",
+    "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -3370,6 +3368,8 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "PREPARED_GATEWAY_SHA",
+    "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -4714,7 +4714,9 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_RESTART_AUTHORITY_ROOT \
   -u GATEWAY_RESTART_AUTHORITY_COMMIT \
   -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
-    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
+  -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
+  -u PREPARED_GATEWAY_SHA \
+  -u LAB_ARENA_RESTART_GUARD_GENERATION \
   -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
   -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
   -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \

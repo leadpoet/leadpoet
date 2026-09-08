@@ -118,6 +118,26 @@ preserve_rehearsal_evidence() {
       2>/dev/null || true
   fi
 }
+wait_for_local_postgrest_startup() {
+  local child_status=0
+  local _attempt=""
+  for _attempt in $(seq 1 100); do
+    [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && return 0
+    if ! kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null; then
+      wait "$BOUNDARY_SERVICE_PID" || child_status=$?
+      BOUNDARY_SERVICE_PID=""
+      echo "REHEARSAL_POSTGREST_STARTUP component=$COMPONENT outcome=process_exit returncode=$child_status" >&2
+      echo "ERROR: strict local PostgREST service exited during startup" >&2
+      return 1
+    fi
+    /bin/sleep 0.05
+  done
+  if [ ! -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ]; then
+    echo "REHEARSAL_POSTGREST_STARTUP component=$COMPONENT outcome=readiness_timeout" >&2
+    echo "ERROR: strict local PostgREST service did not become ready" >&2
+    return 1
+  fi
+}
 cleanup_boundary_service() {
   local cleanup_status=0
   if [ -n "$ARENA_GUARD_CONTROLLER_PID" ]; then
@@ -369,16 +389,7 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --durable-state \
       "$REHEARSAL_DURABLE_STATE_ROOT/postgrest-state.json" &
   BOUNDARY_SERVICE_PID=$!
-  for _attempt in $(seq 1 100); do
-    [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && break
-    kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null || {
-      echo "ERROR: strict local PostgREST service exited during startup" >&2
-      exit 1
-    }
-    /bin/sleep 0.05
-  done
-  if [ ! -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ]; then
-    echo "ERROR: strict local PostgREST service did not become ready" >&2
+  if ! wait_for_local_postgrest_startup; then
     exit 1
   fi
 fi

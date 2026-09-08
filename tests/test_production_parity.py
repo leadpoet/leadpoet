@@ -3831,6 +3831,100 @@ def test_gateway_failure_diagnostics_survive_later_validator_output(
     assert "validator output" not in retained_encoded
 
 
+@pytest.mark.parametrize(
+    ("component", "outcome", "returncode"),
+    [
+        ("gateway", "process_exit", 23),
+        ("gateway", "readiness_timeout", None),
+        ("validator", "process_exit", 42),
+        ("validator", "readiness_timeout", None),
+    ],
+)
+def test_postgrest_startup_diagnostic_survives_beyond_output_tail(
+    component: str,
+    outcome: str,
+    returncode: int | None,
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "e" * 40
+    marker = (
+        "REHEARSAL_POSTGREST_STARTUP "
+        f"component={component} outcome={outcome}"
+    )
+    expected = {
+        "marker": "postgrest_startup",
+        "component": component,
+        "outcome": outcome,
+    }
+    if returncode is not None:
+        marker += f" returncode={returncode}"
+        expected["returncode"] = returncode
+    secret = "must-not-escape-postgrest-startup"
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=marker + "\n" + (f"later output {secret}\n" * 1024),
+        stderr="",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert expected in diagnostics["output_markers"]
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert secret not in encoded
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert expected in retained["component_failure_diagnostics"]
+    assert secret not in json.dumps(retained, sort_keys=True)
+
+
+def test_postgrest_startup_diagnostic_rejects_noncanonical_fields() -> None:
+    secret = "must-not-escape-postgrest-marker"
+    diagnostics = fast_parity._rehearsal_output_diagnostics(
+        "\n".join(
+            [
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=process_exit returncode=23",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=validator outcome=readiness_timeout",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=workflow outcome=process_exit returncode=23",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=process_exit returncode=256",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=process_exit",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=readiness_timeout returncode=1",
+                "REHEARSAL_POSTGREST_STARTUP "
+                f"component=gateway outcome=process_exit returncode=1 raw={secret}",
+            ]
+        )
+    )
+
+    assert diagnostics == [
+        {
+            "marker": "postgrest_startup",
+            "component": "gateway",
+            "outcome": "process_exit",
+            "returncode": 23,
+        },
+        {
+            "marker": "postgrest_startup",
+            "component": "validator",
+            "outcome": "readiness_timeout",
+        },
+    ]
+    assert secret not in json.dumps(diagnostics, sort_keys=True)
+
+
 def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
     secret = "must-not-escape-fixed-marker"
     stage_hash = "a" * 64
@@ -4364,6 +4458,33 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
                     "kind": "attacker-controlled",
                     "raw": "secret",
                 },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "gateway",
+                    "outcome": "process_exit",
+                    "returncode": 23,
+                    "raw": "secret",
+                },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "validator",
+                    "outcome": "readiness_timeout",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "gateway",
+                    "outcome": "readiness_timeout",
+                    "returncode": 1,
+                    "raw": "secret",
+                },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "gateway",
+                    "outcome": "attacker-controlled",
+                    "returncode": 1,
+                    "raw": "secret",
+                },
             ],
             "returncode": 1,
             "stages": [
@@ -4389,6 +4510,7 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
         "contract_error",
         "error",
         "http",
+        "postgrest_startup",
         "stage_failure",
         "time_budget",
     ]
@@ -4401,6 +4523,17 @@ def test_rehearsal_failure_projection_drops_raw_diagnostics(
         {"marker": "http", "endpoint": "/attest", "status": "503"},
         {"marker": "error", "category_hint": "resource_oom"},
         {"marker": "contract_error", "kind": "docker"},
+        {
+            "marker": "postgrest_startup",
+            "component": "gateway",
+            "outcome": "process_exit",
+            "returncode": 23,
+        },
+        {
+            "marker": "postgrest_startup",
+            "component": "validator",
+            "outcome": "readiness_timeout",
+        },
     ]
     assert projection["stages"] == [
         {

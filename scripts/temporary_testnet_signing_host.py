@@ -1622,7 +1622,10 @@ def _repair_testnet401_host_profile(
         ["nitro-cli", "describe-enclaves"], check=True,
         capture_output=True, text=True,
     )
-    if _json.loads(after.stdout) != _json.loads(described.stdout):
+    after_enclaves = sorted(
+        _json.loads(after.stdout), key=lambda item: int(item["EnclaveCID"])
+    )
+    if after_enclaves != enclaves:
         raise RuntimeError("host profile repair changed enclave identity")
     return {
         "schema_version": HOST_PROFILE_REPAIR_SCHEMA_VERSION,

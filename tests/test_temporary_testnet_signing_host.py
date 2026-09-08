@@ -1281,6 +1281,36 @@ def test_fixed_host_profile_repair_installs_public_profile_without_runtime_mutat
         temporary_host._repair_testnet401_host_profile(**call)
 
 
+@pytest.mark.parametrize("changed_identity", [False, True])
+def test_host_profile_repair_ignores_list_order_but_rejects_identity_change(
+    tmp_path, monkeypatch, changed_identity,
+):
+    native = _ProfileRepairNative(tmp_path)
+    before = _restart_enclaves()
+    after = [dict(item) for item in reversed(before)]
+    if changed_identity:
+        after[0]["EnclaveID"] = "different-enclave"
+    responses = iter((before, after))
+
+    def describe(*_args, **_kwargs):
+        return subprocess.CompletedProcess([], 0, json.dumps(next(responses)), "")
+
+    monkeypatch.setattr(subprocess, "run", describe)
+    call = dict(
+        repository=str(ROOT), config_path=str(tmp_path / "config.json"),
+        expected_run_id=RUN_ID,
+        expected_candidate_sha=temporary_host.HOST_PROFILE_REPAIR_CANDIDATE_SHA,
+        expected_instance_id=INSTANCE_ID, native_module=native,
+        target_path=str(tmp_path / "app/profile.json"),
+        expected_owner_uid=os.getuid(), expected_owner_gid=os.getgid(),
+    )
+    if changed_identity:
+        with pytest.raises(RuntimeError, match="changed enclave identity"):
+            temporary_host._repair_testnet401_host_profile(**call)
+    else:
+        assert temporary_host._repair_testnet401_host_profile(**call)["status"] == "ready"
+
+
 def test_host_profile_repair_program_is_fixed_redacted_and_locates_failure(capsys):
     program = temporary_host.host_profile_repair_program(
         run_id=RUN_ID,

@@ -248,7 +248,7 @@ def validated_public_release_documents(
         expected_current_commit=expected_commit,
     )
     expected = build_release_lineage_v2([channel], current_commit=expected_commit)
-    if lineage != expected:
+    if lineage["releases"].get(expected_commit) != expected["releases"][expected_commit]:
         raise ValueError("release lineage differs from the exact public channel")
     return channel, lineage
 
@@ -271,9 +271,43 @@ def load_prior_release_documents(
         json.loads(lineage_path.read_text()), expected_current_commit=expected_commit
     )
     expected = build_release_lineage_v2([channel], current_commit=expected_commit)
-    if lineage != expected:
+    if lineage["releases"].get(expected_commit) != expected["releases"][expected_commit]:
         raise ValueError("prior release documents differ")
     return channel, lineage
+
+
+def extend_release_lineage(
+    *, prior_lineage: Mapping[str, Any], channel: Mapping[str, Any],
+    current_commit: str,
+) -> dict[str, Any]:
+    """Append one current channel without replacing validated inherited entries."""
+
+    from gateway.tee.release_channel_v2 import build_release_lineage_v2
+    from gateway.tee.release_lineage_v2 import (
+        validate_compact_release_lineage_v2,
+        validate_prior_compact_release_lineage_v2,
+    )
+    from leadpoet_canonical.attested_v2 import sha256_json
+
+    prior = validate_prior_compact_release_lineage_v2(
+        prior_lineage,
+        expected_current_commit=str(prior_lineage.get("current_commit_sha") or ""),
+    )
+    current = build_release_lineage_v2([channel], current_commit=current_commit)
+    releases = dict(prior["releases"])
+    if current_commit in releases:
+        raise ValueError("current release conflicts with inherited lineage")
+    releases[current_commit] = current["releases"][current_commit]
+    body = {
+        "schema_version": current["schema_version"],
+        "current_commit_sha": current_commit,
+        "current_gateway_release_hash": current["current_gateway_release_hash"],
+        "releases": {commit: releases[commit] for commit in sorted(releases)},
+    }
+    return validate_compact_release_lineage_v2(
+        {**body, "lineage_hash": sha256_json(body)},
+        expected_current_commit=current_commit,
+    )
 
 
 def stage(*, candidate: str, run_id: str, instance_id: str,
@@ -398,18 +432,21 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
     validator_release = json.loads(Path(config["validator"]["release_manifest"]).read_text())
     channel = build_release_channel_v2(gateway_release_manifest=gateway_release,
                                       validator_release_manifest=validator_release)
-    channels = [channel]
+    lineage = build_release_lineage_v2([channel], current_commit=candidate)
     if prior_commit is not None:
         if not re.fullmatch(r"[0-9a-f]{40}", prior_commit) or prior_commit == candidate:
             raise ValueError("prior release commit is invalid")
-        prior_channel, _prior_lineage = load_prior_release_documents(
+        _prior_channel, prior_lineage = load_prior_release_documents(
             channel_path=PRIOR_RELEASE_CHANNEL,
             lineage_path=PRIOR_RELEASE_LINEAGE,
             expected_commit=prior_commit,
         )
-        channels.insert(0, prior_channel)
+        lineage = extend_release_lineage(
+            prior_lineage=prior_lineage,
+            channel=channel,
+            current_commit=candidate,
+        )
         config["resume_existing_epoch_authority"] = True
-    lineage = build_release_lineage_v2(channels, current_commit=candidate)
     private_write(ROOT / "gateway-lineage.json", json.dumps(lineage).encode())
     private_write(ROOT / "config.json", json.dumps(config).encode())
     checked = native.load_config(ROOT / "config.json")

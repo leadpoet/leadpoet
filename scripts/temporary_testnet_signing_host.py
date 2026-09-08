@@ -481,9 +481,12 @@ def create_asset_bucket(
             prior_lineage = validate_prior_compact_release_lineage_v2(
                 values[1], expected_current_commit=str(prior_release_commit)
             )
-            if prior_lineage != build_release_lineage_v2(
+            expected = build_release_lineage_v2(
                 [prior_channel], current_commit=str(prior_release_commit)
-            ):
+            )
+            if prior_lineage["releases"].get(str(prior_release_commit)) != expected[
+                "releases"
+            ][str(prior_release_commit)]:
                 raise TemporaryHostError("prior release documents differ")
             for name, value in zip(PUBLIC_RELEASE_ASSET_NAMES, values):
                 key = f"{prefix}/{name}"
@@ -1036,7 +1039,8 @@ def export_public_release_documents(
     lineage = validate_compact_release_lineage_v2(
         values[1], expected_current_commit=candidate_sha
     )
-    if lineage != build_release_lineage_v2([channel], current_commit=candidate_sha):
+    expected = build_release_lineage_v2([channel], current_commit=candidate_sha)
+    if lineage["releases"].get(candidate_sha) != expected["releases"][candidate_sha]:
         raise TemporaryHostError("exported public release documents differ")
     return {
         "status": "ready", "run_id": run_id, "candidate_sha": candidate_sha,
@@ -1068,7 +1072,8 @@ def public_release_export_program(
         "v=json.loads(Path(c['validator']['release_manifest']).read_text()); "
         f"a=vc(bc(gateway_release_manifest=g,validator_release_manifest=v),expected_commit={candidate_sha!r}); "
         f"b=vl(json.loads(Path(c['gateway']['release_lineage']).read_text()),expected_current_commit={candidate_sha!r}); "
-        f"assert b==bl([a],current_commit={candidate_sha!r}); "
+        f"e=bl([a],current_commit={candidate_sha!r}); "
+        f"assert b['releases'].get({candidate_sha!r})==e['releases'][{candidate_sha!r}]; "
         f"Path({channel_output!r}).write_text(canonical_json(a)+'\\n',encoding='ascii'); "
         f"Path({lineage_output!r}).write_text(canonical_json(b)+'\\n',encoding='ascii')"
     )

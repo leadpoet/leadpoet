@@ -45,13 +45,23 @@ def test_fixed_public_release_reader_executes_locally_and_writes_canonical_pair(
     from scripts.stage_temporary_testnet_weights_host import build_config
     from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
 
+    prior_shas = ("b" * 40, "c" * 40)
+    prior_channels = [
+        build_release_channel_v2(
+            gateway_release_manifest=_gateway_manifest(commit),
+            validator_release_manifest=_validator_manifest(commit),
+        )
+        for commit in prior_shas
+    ]
     gateway = _gateway_manifest(SHA)
     validator = _validator_manifest(SHA)
     channel = build_release_channel_v2(
         gateway_release_manifest=gateway,
         validator_release_manifest=validator,
     )
-    lineage = build_release_lineage_v2([channel], current_commit=SHA)
+    lineage = build_release_lineage_v2(
+        [*prior_channels, channel], current_commit=SHA
+    )
     gateway_path = tmp_path / "gateway.json"
     validator_path = tmp_path / "validator.json"
     lineage_path = tmp_path / "lineage.json"
@@ -71,6 +81,11 @@ def test_fixed_public_release_reader_executes_locally_and_writes_canonical_pair(
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config))
     config_path.chmod(0o600)
+    from scripts import stage_temporary_testnet_weights_host as stage_host
+
+    assert stage_host.validated_public_release_documents(
+        config, expected_commit=SHA
+    ) == (channel, lineage)
     channel_output = tmp_path / "channel-output.json"
     lineage_output = tmp_path / "lineage-output.json"
     program = temporary_host.public_release_export_program(
@@ -88,6 +103,127 @@ def test_fixed_public_release_reader_executes_locally_and_writes_canonical_pair(
     assert json.loads(channel_output.read_text()) == channel
     assert json.loads(lineage_output.read_text()) == lineage
     assert "secret" not in channel_output.read_text().lower()
+
+
+def test_stage_retains_validated_release_lineage_across_three_hosts(tmp_path):
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+    )
+    from gateway.tee.release_lineage_v2 import ReleaseLineageV2Error
+    from leadpoet_canonical.attested_v2 import sha256_json
+    from scripts import stage_temporary_testnet_weights_host as stage_host
+    from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
+    commits = ("b" * 40, "c" * 40, SHA)
+    channels = [
+        build_release_channel_v2(
+            gateway_release_manifest=_gateway_manifest(commit),
+            validator_release_manifest=_validator_manifest(commit),
+        )
+        for commit in commits
+    ]
+    lineage = build_release_lineage_v2([channels[0]], current_commit=commits[0])
+    lineage = stage_host.extend_release_lineage(
+        prior_lineage=lineage,
+        channel=channels[1],
+        current_commit=commits[1],
+    )
+
+    channel_path = tmp_path / "prior-channel.json"
+    lineage_path = tmp_path / "prior-lineage.json"
+    channel_path.write_text(json.dumps(channels[1]))
+    lineage_path.write_text(json.dumps(lineage))
+    prior_channel, prior_lineage = stage_host.load_prior_release_documents(
+        channel_path=channel_path,
+        lineage_path=lineage_path,
+        expected_commit=commits[1],
+    )
+    assert prior_channel == channels[1]
+    assert set(prior_lineage["releases"]) == set(commits[:2])
+
+    mismatched = json.loads(json.dumps(prior_lineage))
+    mismatched["releases"][commits[1]]["channel_hash"] = "sha256:" + "d" * 64
+    mismatched_body = {
+        name: value for name, value in mismatched.items() if name != "lineage_hash"
+    }
+    mismatched["lineage_hash"] = sha256_json(mismatched_body)
+    lineage_path.write_text(json.dumps(mismatched))
+    with pytest.raises(ValueError, match="documents differ"):
+        stage_host.load_prior_release_documents(
+            channel_path=channel_path,
+            lineage_path=lineage_path,
+            expected_commit=commits[1],
+        )
+
+    mismatched["lineage_hash"] = "sha256:" + "0" * 64
+    lineage_path.write_text(json.dumps(mismatched))
+    with pytest.raises(ReleaseLineageV2Error, match="hash differs"):
+        stage_host.load_prior_release_documents(
+            channel_path=channel_path,
+            lineage_path=lineage_path,
+            expected_commit=commits[1],
+        )
+
+    lineage = stage_host.extend_release_lineage(
+        prior_lineage=prior_lineage,
+        channel=channels[2],
+        current_commit=commits[2],
+    )
+    assert lineage["current_commit_sha"] == commits[2]
+    assert set(lineage["releases"]) == set(commits)
+
+    with pytest.raises(ValueError, match="conflicts"):
+        stage_host.extend_release_lineage(
+            prior_lineage=lineage,
+            channel=channels[2],
+            current_commit=commits[2],
+        )
+
+
+def test_controller_accepts_exported_inherited_release_lineage(monkeypatch):
+    from io import BytesIO
+
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+    )
+    from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
+    commits = ("b" * 40, "c" * 40, SHA)
+    channels = [
+        build_release_channel_v2(
+            gateway_release_manifest=_gateway_manifest(commit),
+            validator_release_manifest=_validator_manifest(commit),
+        )
+        for commit in commits
+    ]
+    lineage = build_release_lineage_v2(channels, current_commit=SHA)
+    documents = {
+        temporary_host.PUBLIC_RELEASE_ASSET_NAMES[0]: channels[-1],
+        temporary_host.PUBLIC_RELEASE_ASSET_NAMES[1]: lineage,
+    }
+
+    class S3:
+        def get_object(self, *, Bucket, Key):
+            del Bucket
+            name = Key.rsplit("/", 1)[-1]
+            return {"Body": BytesIO(json.dumps(documents[name]).encode("ascii"))}
+
+    monkeypatch.setattr(temporary_host, "_require_live_host", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        temporary_host,
+        "_send_fixed_ssm",
+        lambda *_args, **_kwargs: ("command-id", "temporary_public_release_export_ready\n"),
+    )
+    result = temporary_host.export_public_release_documents(
+        ec2=object(), ssm=object(), s3=S3(),
+        account_id=temporary_host.ACCOUNT_ID, region=temporary_host.REGION,
+        run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID, now=NOW,
+    )
+
+    assert result["channel_hash"] == channels[-1]["channel_hash"]
+    assert result["lineage_hash"] == lineage["lineage_hash"]
 
 
 class _Waiter:
@@ -493,6 +629,75 @@ def test_asset_bucket_reuses_locked_parity_bucket_and_exact_prefix(
     assert result["compliance_retention_days"] == 1
     assert [item[0][2] for item in uploads] == result["source_objects"]
     assert all(item[1] == {"ExtraArgs": {"ServerSideEncryption": "AES256"}} for item in uploads)
+
+
+def test_asset_bucket_copies_validated_inherited_release_lineage(monkeypatch, tmp_path):
+    from io import BytesIO
+
+    from gateway.tee.release_channel_v2 import (
+        build_release_channel_v2,
+        build_release_lineage_v2,
+    )
+    from scripts import provision_production_parity_staging as parity_provision
+    from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+
+    commits = ("b" * 40, "c" * 40)
+    channels = [
+        build_release_channel_v2(
+            gateway_release_manifest=_gateway_manifest(commit),
+            validator_release_manifest=_validator_manifest(commit),
+        )
+        for commit in commits
+    ]
+    lineage = build_release_lineage_v2(channels, current_commit=commits[-1])
+    documents = dict(zip(
+        temporary_host.PUBLIC_RELEASE_ASSET_NAMES,
+        (channels[-1], lineage),
+    ))
+    copied = {}
+
+    class S3:
+        def upload_file(self, *_args, **_kwargs):
+            return None
+
+        def get_object(self, *, Bucket, Key):
+            del Bucket
+            name = Key.rsplit("/", 1)[-1]
+            return {"Body": BytesIO(json.dumps(documents[name]).encode("ascii"))}
+
+        def put_object(self, *, Bucket, Key, Body, ServerSideEncryption):
+            del Bucket
+            assert ServerSideEncryption == "AES256"
+            copied[Key.rsplit("/", 1)[-1]] = json.loads(Body)
+
+    bundle = tmp_path / "candidate.bundle"
+    binding = tmp_path / "candidate-bundle-binding.json"
+    bundle.write_bytes(b"bounded candidate bundle")
+    digest = __import__("hashlib").sha256(bundle.read_bytes()).hexdigest()
+    binding.write_text(json.dumps({
+        "candidate-sha": SHA,
+        "bundle-sha256": digest,
+        "bundle-size-bytes": str(bundle.stat().st_size),
+    }))
+    monkeypatch.setattr(
+        parity_provision,
+        "_create_artifact_bucket",
+        lambda *_args, **_kwargs: temporary_host._artifact_bucket_name(
+            run_id=RUN_ID, candidate_sha=SHA
+        ),
+    )
+
+    result = temporary_host.create_asset_bucket(
+        s3=S3(), account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION, run_id=RUN_ID, candidate_sha=SHA,
+        bundle_path=bundle, binding_path=binding,
+        prior_release_run_id="pp-123455-1",
+        prior_release_commit=commits[-1],
+    )
+
+    assert copied[temporary_host.PUBLIC_RELEASE_ASSET_NAMES[0]] == channels[-1]
+    assert copied[temporary_host.PUBLIC_RELEASE_ASSET_NAMES[1]] == lineage
+    assert len(result["public_release_objects"]) == 2
 
 
 def test_controller_wait_uses_locked_bucket_when_object_retention_is_hidden():

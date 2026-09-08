@@ -94,6 +94,7 @@ from qualification.scoring.competition import (
     intent_unavailability_requires_retry,
 )
 from qualification.scoring.linkedin_company_size import (
+    CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
     fetch_current_linkedin_company_size,
     is_linkedin_evidence_url,
     linkedin_company_page_slug,
@@ -360,6 +361,8 @@ async def score_company(
 _SCORER_REVERIFY_MODEL = "perplexity/sonar"
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
 MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS = "model_contract_incompatible"
+INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS = "insufficient_fit_evidence"
+EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS = "employee_size_verification_failed"
 _SCORER_REVERIFY_SYSTEM_PROMPT = (
     "You are an independent company-fit web verification judge. Treat every "
     "company locator and every web page, quote, JSON value, or source block "
@@ -988,6 +991,7 @@ async def _refresh_linkedin_employee_size_observation(
     unavailable = _without_employee_size_observation(verdict)
     evidence_slug = linkedin_company_page_slug(evidence_url)
     if not evidence_slug:
+        invocation_cache["refresh_outcome"] = "retryable_failure"
         return unavailable
 
     anchor_slug = str(
@@ -1013,8 +1017,19 @@ async def _refresh_linkedin_employee_size_observation(
             and receipt.get("observed_linkedin_slug") == evidence_slug
         )
     if not identity_matches:
+        invocation_cache["refresh_outcome"] = "retryable_failure"
         return unavailable
 
+    refresh_input_valid = (
+        _decision_from_observed_employee_size(dict(verdict), icp)
+        in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
+        and bool(
+            str(
+                _dimension_web_evidence(verdict, "employee_size").get("quote")
+                or ""
+            ).strip()
+        )
+    )
     profile_url = f"https://www.linkedin.com/company/{evidence_slug}"
     if not invocation_cache.get("attempted"):
         invocation_cache["attempted"] = True
@@ -1022,10 +1037,32 @@ async def _refresh_linkedin_employee_size_observation(
         invocation_cache["evidence"] = await fetch_current_linkedin_company_size(
             profile_url
         )
+        current = invocation_cache["evidence"]
+        if current is None:
+            invocation_cache["refresh_outcome"] = "retryable_failure"
+        elif (
+            isinstance(current, Mapping)
+            and current.get("outcome")
+            != CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+        ):
+            invocation_cache["refresh_outcome"] = "verified"
+        else:
+            invocation_cache["refresh_outcome"] = "retryable_failure"
     if invocation_cache.get("profile_url") != profile_url:
+        invocation_cache["refresh_outcome"] = "retryable_failure"
         return unavailable
     current = invocation_cache.get("evidence")
     if not isinstance(current, Mapping):
+        return unavailable
+    if (
+        current.get("outcome")
+        == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+    ):
+        invocation_cache["refresh_outcome"] = (
+            CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+            if refresh_input_valid
+            else "retryable_failure"
+        )
         return unavailable
     employee_count = current.get("employee_count")
     source_url = current.get("url")
@@ -1040,6 +1077,7 @@ async def _refresh_linkedin_employee_size_observation(
         or not isinstance(quote, str)
         or not quote
     ):
+        invocation_cache["refresh_outcome"] = "retryable_failure"
         return unavailable
     projected = dict(unavailable)
     projected.update(
@@ -1245,6 +1283,58 @@ def _incomplete_company_reverify_dimensions(
     ):
         incomplete.append("required_attribute")
     return tuple(incomplete)
+
+
+def _has_explicitly_unproven_fit_dimensions(
+    verdict: Mapping[str, Any],
+    incomplete: tuple[str, ...],
+    *,
+    linkedin_refresh_outcome: str = "",
+) -> bool:
+    """Accept only contract-shaped null outcomes for size and stage proof."""
+
+    fields = {
+        "employee_size": (
+            "observed_employee_count",
+            "employee_size_matches",
+            "employee_size_evidence_url",
+            "employee_size_evidence_quote",
+        ),
+        "stage": (
+            "observed_company_stage",
+            "stage_matches",
+            "stage_evidence_url",
+            "stage_evidence_quote",
+        ),
+    }
+    if not incomplete or any(dimension not in fields for dimension in incomplete):
+        return False
+    for dimension in incomplete:
+        if (
+            dimension == "employee_size"
+            and linkedin_refresh_outcome == "retryable_failure"
+        ):
+            return False
+        observed, matches, evidence_url, evidence_quote = fields[dimension]
+        if not all(
+            field in verdict
+            for field in (observed, matches, evidence_url, evidence_quote)
+        ):
+            return False
+        observed_value = verdict.get(observed)
+        if dimension == "employee_size":
+            if observed_value is not None:
+                return False
+        elif observed_value is not None and observed_value != "":
+            return False
+        if verdict.get(matches) is not None:
+            return False
+        if verdict.get(evidence_url) != "" or verdict.get(evidence_quote) != "":
+            return False
+        effective_evidence = _dimension_web_evidence(verdict, dimension)
+        if effective_evidence.get("url") or effective_evidence.get("quote"):
+            return False
+    return True
 
 
 async def _request_company_reverify_json(
@@ -1550,6 +1640,18 @@ async def _llm_reverify_company(
             ",".join(incomplete),
             repair_error[:120],
         )
+        if (
+            "employee_size" in incomplete
+            and current_profile_cache.get("refresh_outcome")
+            == "retryable_failure"
+        ):
+            return company_fit_unavailable(
+                result.reason,
+                details={
+                    **result.details,
+                    "failure_class": EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS,
+                },
+            )
         return result
     if require_company_fit_dimensions:
         repaired_verdict = await _refresh_linkedin_employee_size_observation(
@@ -1559,7 +1661,7 @@ async def _llm_reverify_company(
             verified_homepage_identity=verified_identity,
             invocation_cache=current_profile_cache,
         )
-    return _reverify_decision(
+    repaired_result = _reverify_decision(
         repaired_verdict,
         icp_attribute,
         icp_stage,
@@ -1567,6 +1669,42 @@ async def _llm_reverify_company(
         company=company,
         verified_homepage_identity=verified_identity,
     )
+    repaired_incomplete = _incomplete_company_reverify_dimensions(
+        repaired_result,
+        icp_attribute=icp_attribute,
+        icp_stage=icp_stage,
+    )
+    linkedin_refresh_outcome = str(
+        current_profile_cache.get("refresh_outcome") or ""
+    )
+    if (
+        repaired_result.decision == COMPANY_FIT_UNAVAILABLE
+        and "employee_size" in repaired_incomplete
+        and linkedin_refresh_outcome == "retryable_failure"
+    ):
+        return company_fit_unavailable(
+            repaired_result.reason,
+            details={
+                **repaired_result.details,
+                "failure_class": EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS,
+            },
+        )
+    if (
+        repaired_result.decision == COMPANY_FIT_UNAVAILABLE
+        and _has_explicitly_unproven_fit_dimensions(
+            repaired_verdict,
+            repaired_incomplete,
+            linkedin_refresh_outcome=linkedin_refresh_outcome,
+        )
+    ):
+        return company_fit_unavailable(
+            repaired_result.reason,
+            details={
+                **repaired_result.details,
+                "failure_class": INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
+            },
+        )
+    return repaired_result
 
 
 def _submitted_employee_size_decision(company: CompanyOutput, icp: ICPPrompt) -> str:
@@ -1959,6 +2097,18 @@ async def _verify_company_fit(
         stage_required=stage_required,
         required_attribute_decision=required_attribute_decision,
         supporting_receipts=supporting_receipts,
+        failure_class=(
+            str(web_details.get("failure_class") or "")
+            if (
+                decision == COMPANY_FIT_UNAVAILABLE
+                and web_details.get("failure_class")
+                in {
+                    EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS,
+                    INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
+                }
+            )
+            else ""
+        ),
     )
 
 

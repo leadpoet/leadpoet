@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional, TypedDict, Union
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -18,6 +18,26 @@ logger = logging.getLogger(__name__)
 
 PROFILE_MAX_CHARACTERS = 4_000
 PROFILE_TIMEOUT_SECONDS = 30.0
+CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
+    "insufficient_evidence"
+] = "insufficient_evidence"
+
+
+class CurrentLinkedInCompanySizeEvidence(TypedDict):
+    employee_count: str
+    quote: str
+    url: str
+
+
+class CurrentLinkedInCompanySizeInsufficientEvidence(TypedDict):
+    outcome: Literal["insufficient_evidence"]
+    url: str
+
+
+CurrentLinkedInCompanySizeResult = Union[
+    CurrentLinkedInCompanySizeEvidence,
+    CurrentLinkedInCompanySizeInsufficientEvidence,
+]
 
 
 def linkedin_company_page_slug(value: Any) -> str:
@@ -122,8 +142,14 @@ def extract_linkedin_company_size(text: Any) -> Optional[dict[str, str]]:
 
 async def fetch_current_linkedin_company_size(
     profile_url: str,
-) -> Optional[dict[str, str]]:
-    """Make one uncached Exa Contents request for an exact profile URL."""
+) -> Optional[CurrentLinkedInCompanySizeResult]:
+    """Return exact size proof, explicit no-size content, or retryable failure.
+
+    A successful exact-profile result with no canonical Company size, or the
+    provider's exact-profile ``CRAWL_NOT_FOUND`` result, returns the explicit
+    insufficient-evidence outcome. Transport, other status, and malformed-result
+    failures return ``None``.
+    """
 
     requested_slug = linkedin_company_page_slug(profile_url)
     key = str(os.environ.get("EXA_API_KEY") or "").strip()
@@ -164,6 +190,32 @@ async def fetch_current_linkedin_company_size(
     ):
         return None
     statuses = body.get("statuses")
+    results = body.get("results")
+    if isinstance(statuses, list) and len(statuses) == 1:
+        status_item = statuses[0]
+        status_error = (
+            status_item.get("error")
+            if isinstance(status_item, Mapping)
+            and isinstance(status_item.get("error"), Mapping)
+            else {}
+        )
+        status_slug = (
+            linkedin_company_page_slug(status_item.get("id"))
+            if isinstance(status_item, Mapping)
+            else ""
+        )
+        if (
+            isinstance(status_item, Mapping)
+            and str(status_item.get("status") or "").casefold() == "error"
+            and status_error.get("httpStatusCode") == 404
+            and status_error.get("tag") == "CRAWL_NOT_FOUND"
+            and status_slug == requested_slug
+            and results == []
+        ):
+            return {
+                "outcome": CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
+                "url": str(status_item["id"]),
+            }
     if statuses is not None and (
         not isinstance(statuses, list)
         or not statuses
@@ -174,7 +226,6 @@ async def fetch_current_linkedin_company_size(
         )
     ):
         return None
-    results = body.get("results")
     result = results[0] if isinstance(results, list) and len(results) == 1 else None
     if (
         not isinstance(result, Mapping)
@@ -190,7 +241,13 @@ async def fetch_current_linkedin_company_size(
         return None
     if returned_slug != requested_slug:
         return None
-    extracted = extract_linkedin_company_size(result.get("text"))
-    if extracted is None:
+    text = result.get("text")
+    if not isinstance(text, str):
         return None
+    extracted = extract_linkedin_company_size(text)
+    if extracted is None:
+        return {
+            "outcome": CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
+            "url": returned_url,
+        }
     return {**extracted, "url": returned_url}

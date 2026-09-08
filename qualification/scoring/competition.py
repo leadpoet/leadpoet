@@ -37,6 +37,7 @@ _PENALIZABLE_FAILURE_MARKERS = (
 )
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
 _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
+    "insufficient_fit_evidence",
     "model_contract_incompatible",
 })
 

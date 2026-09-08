@@ -498,7 +498,10 @@ def test_linkedin_refresh_timeout_keeps_arena_retry(monkeypatch):
     )
 
     companies = [_company().model_dump(mode="json")]
-    with pytest.raises(arena_scoring.ScoringError):
+    with pytest.raises(
+        arena_scoring.ScoringError,
+        match="independent employee-size verification failed",
+    ):
         arena_scoring.score_work_item(
             {"scored_run_id": "linkedin-timeout"},
             icp=_icp().model_dump(mode="json"),

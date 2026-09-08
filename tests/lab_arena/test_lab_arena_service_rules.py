@@ -1772,6 +1772,8 @@ def _daily_source_icps():
 
 
 def _daily_source_service(source):
+    from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
+
     class Objects:
         def __init__(self):
             self.values = {}
@@ -1794,9 +1796,18 @@ def _daily_source_service(source):
     service = object.__new__(ArenaService)
     service._store = Store()
     service._objects = Objects()
-    service._config = SimpleNamespace(daily_icp_source=source)
+    configuration = base_round_configuration()
+    service._config = SimpleNamespace(
+        daily_icp_source=source,
+        defaults=SimpleNamespace(
+            scorer_image_digest=configuration["scorer_image_digest"],
+            scorer_image_reference=configuration["scorer_image_reference"],
+        ),
+    )
     service._clock = lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc)
-    service._round = lambda _round_id: {"status": "open"}
+    service._round = lambda _round_id: {
+        "status": "open", "configuration_doc": configuration
+    }
     service.freeze_participants = lambda _round_id: [{"submission_id": "baseline"}]
     return service
 

@@ -151,6 +151,11 @@ def _company_fit_failure_reason(
 ) -> str:
     detail = str(result.reason or "no verified decision")
     if result.decision == COMPANY_FIT_UNAVAILABLE:
+        if (
+            result.details.get("failure_class")
+            == EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS
+        ):
+            detail = "independent employee-size verification failed; " + detail
         return f"{gate} unavailable: {detail}"
     return f"{gate} failed: {detail}"
 

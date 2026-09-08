@@ -427,7 +427,7 @@
       "symbol": "build_unattributed_chain_realized_settlement_package_v2"
     },
     {
-      "ast_sha256": "sha256:c91e27adbd817823f83e16a22c2e47bf938ec786a7dbc718f534d22eb9e5f7b3",
+      "ast_sha256": "sha256:5368082ffbcb6fd16be373861bb803acab474f4f650355e5d832f21608a011b9",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "champion_v2_cutover_readiness"
     },
@@ -777,7 +777,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:aa22c5c8ae0d7c36d5221ead789aa7027dcc2502658467a526db88397539841d",
+      "ast_sha256": "sha256:2032db61adcb2abd699cc842e2deab1c8726b776ba77227a3029f462311ccb6d",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -1057,7 +1057,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:5e331e07d7426c3f90404af188564625d1310ebd84fa2f52c726cec9f921e9ed",
+      "ast_sha256": "sha256:df76e279147a3f7339a63efaf53cb60963981124a87371a4b46acc02e592d7bb",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -1067,7 +1067,7 @@
       "symbol": "CoordinatorChainRealizedSettlementV1"
     },
     {
-      "ast_sha256": "sha256:aac33f5d9651220d1cb4ffa5c7f0687c22542ca2a694818aa88b42efc5849c40",
+      "ast_sha256": "sha256:7c2687560e8cc6b7a44fde2cfedc2efe43055011de9eeed81a4a0e0c34e04026",
       "path": "gateway/tee/coordinator_chain_source_v2.py",
       "symbol": "CoordinatorChainSourceV2"
     },
@@ -3877,7 +3877,7 @@
       "symbol": "_REVEAL_PERIOD_METADATA_DEFAULTS_V2"
     },
     {
-      "ast_sha256": "sha256:6ee33a1eeaa8f1caee2c81862db72870578c2ec43ef02559154e4abb297ac656",
+      "ast_sha256": "sha256:626a02f67f85d200b0911b30f623eb31d54874d7f262b8d3c186799cdc8eced1",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "chain_source_boundary_for_profile_v2"
     },
@@ -4687,7 +4687,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:37d7740ce1dbbb61120c4b1b32b226ca78da1486538d7efa333fb331d77c4be7",
-  "protected_source_commit": "67eae3e7059cf57437074890001c5addee4926f7",
+  "manifest_hash": "sha256:af4f0db2df184ad30330077cf181fd6143d38ac5082b514010db025637075665",
+  "protected_source_commit": "642e6dea06739ed0ba242b4441679e945c0b5101",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

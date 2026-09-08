@@ -485,6 +485,17 @@ def _handoff_environment(prefix: str) -> dict[str, str]:
     }
 
 
+def _arena_guard_environment(tmp_path: Path) -> dict[str, str]:
+    # These tests stop before reading a permit. Supply only the controller
+    # metadata needed to reach the specific handoff or re-exec boundary.
+    prefix = f"/tmp/leadpoet-{tmp_path.parent.name}-{tmp_path.name}"
+    return {
+        "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT": prefix + "-guard-request.json",
+        "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT": prefix + "-guard-permit.json",
+        "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE": "a" * 64,
+    }
+
+
 def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
     tmp_path: Path,
 ) -> None:
@@ -496,6 +507,7 @@ def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
         }
     )
     clean_env = {key: value for key, value in os.environ.items() if key not in names}
+    clean_env.update(_arena_guard_environment(tmp_path))
     clean_env["VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED"] = "1"
     missing = subprocess.run(
         ["bash", "validator_restart.sh"],
@@ -842,6 +854,7 @@ def _run_forward_restart_fixture(
     handoff_prefix = f"/tmp/leadpoet-{tmp_path.name}"
     environment = {
         **os.environ,
+        **_arena_guard_environment(tmp_path),
         "PATH": str(tmp_path / "bin") + os.pathsep + os.environ["PATH"],
         "VALIDATOR_ROOT": str(repo),
         "VALIDATOR_RESTART_CONTROLLER_ROOT": str(tmp_path / "controller"),

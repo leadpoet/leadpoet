@@ -129,6 +129,7 @@ runs:
           scripts/run_production_parity_fast.py
           scripts/run_production_parity_full_host.py
           scripts/setup_production_parity_staging.py
+          scripts/temporary_testnet_signing_host.py
         )
         for script in "${scripts[@]}"; do
           "$venv_python" "$script" --help >/dev/null

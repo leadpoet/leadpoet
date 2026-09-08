@@ -38,6 +38,7 @@ from gateway.research_lab.stateful_epoch_authority_v1 import (
     CANDIDATE_TABLE,
     CUTOVER_TABLE,
     build_cutover_row_v1,
+    persist_cutover_v1,
     validate_stored_pre_cutover_candidate_row_v1,
 )
 from gateway.research_lab.champion_settlement_v2 import (
@@ -47,9 +48,13 @@ from gateway.research_lab.store import call_rpc, select_all
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     CUTOVER_PURPOSE,
     CUTOVER_REQUEST_SCHEMA_VERSION,
+    FINNEY_GENESIS_HASH,
+    FRESH_NETWORK_ORIGIN_KIND,
     HISTORICAL_PREDECESSOR_KIND,
     NATIVE_PREDECESSOR_KIND,
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
+    TESTNET_GENESIS_HASH,
+    TESTNET_NETUID,
     attest_subnet_epoch_cutover_v2,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
@@ -1041,6 +1046,278 @@ def _assert_existing_cutover(
     return dict(row)
 
 
+async def bootstrap_fresh_testnet401_cutover_v1(
+    *,
+    cutover: SubnetEpochCutover,
+    apply: bool = False,
+    select_rows: Callable[..., Awaitable[Sequence[Mapping[str, Any]]]] = select_all,
+    load_graph: Callable[[str], Awaitable[Mapping[str, Any]]] = load_receipt_graph_v2,
+    execute: Callable[..., Awaitable[Mapping[str, Any]]] = execute_coordinator_v2,
+    persist_graph: Callable[..., Awaitable[Mapping[str, Any]]] = persist_receipt_graph_v2,
+    persist_cutover: Callable[..., Awaitable[Mapping[str, Any]]] = persist_cutover_v1,
+    boot_verifier: Optional[
+        Callable[[Mapping[str, Any]], Mapping[str, Any]]
+    ] = None,
+    release_manifest_path: Optional[Path] = None,
+    validator_release_manifest_path: Optional[Path] = None,
+    validate_anchor: Callable[[SubnetEpochCutover], Awaitable[None]] = (
+        _validate_official_archive_anchor
+    ),
+) -> Dict[str, Any]:
+    """Persist the exact measured origin for the temporary test401 network."""
+
+    if (
+        cutover.network_genesis_hash == FINNEY_GENESIS_HASH
+        or cutover.network_genesis_hash != TESTNET_GENESIS_HASH
+        or cutover.netuid != TESTNET_NETUID
+    ):
+        raise StatefulEpochCutoverActivationError(
+            "fresh-network bootstrap is restricted to the exact test401 origin"
+        )
+    try:
+        await validate_anchor(cutover)
+    except Exception as exc:
+        raise StatefulEpochCutoverActivationError(
+            "official archive rejected the fresh-network cutover anchor"
+        ) from exc
+
+    resolved_boot_verifier = boot_verifier
+    release = None
+
+    def resolve_boot_verifier() -> Callable[
+        [Mapping[str, Any]], Mapping[str, Any]
+    ]:
+        nonlocal release, resolved_boot_verifier
+        if resolved_boot_verifier is None:
+            release = _load_gateway_release(release_manifest_path)
+            resolved_boot_verifier = build_cutover_mixed_boot_verifier_v1(
+                release,
+                validator_release_manifest=_load_validator_release(
+                    validator_release_manifest_path
+                ),
+            )
+        return resolved_boot_verifier
+
+    existing_rows = await select_rows(
+        CUTOVER_TABLE,
+        filters=(("mapping_hash", cutover.mapping_hash),),
+        batch_size=2,
+        max_rows=2,
+    )
+    if existing_rows:
+        if len(existing_rows) != 1 or not isinstance(existing_rows[0], Mapping):
+            raise StatefulEpochCutoverActivationError(
+                "existing fresh-network cutover mapping is ambiguous"
+            )
+        graph = await load_graph(
+            str(existing_rows[0].get("cutover_receipt_hash") or "")
+        )
+        durable = _assert_existing_cutover(
+            existing_rows[0],
+            cutover=cutover,
+            receipt_graph=graph,
+        )
+        validate_receipt_graph(
+            graph,
+            required_purposes={CUTOVER_PURPOSE},
+            boot_attestation_verifier=resolve_boot_verifier(),
+            require_boot_attestation_verification=True,
+        )
+        return {
+            "schema_version": ACTIVATION_REPORT_SCHEMA_VERSION,
+            "mode": "apply" if apply else "dry_run",
+            "status": "fresh_network_already_durable",
+            "mapping_hash": cutover.mapping_hash,
+            "candidate_snapshot_hash": durable["first_snapshot_hash"],
+            "origin_kind": FRESH_NETWORK_ORIGIN_KIND,
+            "cutover_authority_hash": durable["cutover_authority_hash"],
+            "cutover_receipt_hash": durable["cutover_receipt_hash"],
+            "durable_readback_hash": sha256_json(durable),
+            "would_write": False,
+        }
+
+    candidate = await _select_exactly_one(
+        select_rows,
+        CANDIDATE_TABLE,
+        filters=(
+            ("mapping_hash", cutover.mapping_hash),
+            ("network_genesis_hash", cutover.network_genesis_hash),
+            ("netuid", cutover.netuid),
+            ("current_block", cutover.cutover_block),
+            ("block_hash", cutover.cutover_block_hash),
+            ("subnet_epoch_index", cutover.first_subnet_epoch_index),
+            (
+                "proposed_settlement_epoch_id",
+                cutover.first_settlement_epoch_id,
+            ),
+        ),
+        label="fresh-network stateful subnet epoch candidate",
+    )
+    snapshot_graph = await load_graph(
+        str(candidate.get("chain_state_receipt_hash") or "")
+    )
+    candidate = validate_stored_pre_cutover_candidate_row_v1(
+        candidate,
+        cutover=cutover.to_dict(),
+        receipt_graph=snapshot_graph,
+    )
+    payload = {
+        "schema_version": CUTOVER_REQUEST_SCHEMA_VERSION,
+        "manifest": cutover.to_dict(),
+        "first_snapshot": candidate["snapshot_doc"],
+        "origin_kind": FRESH_NETWORK_ORIGIN_KIND,
+    }
+    parent_roots = (str(snapshot_graph["root_receipt_hash"]),)
+    predicted_authority = attest_subnet_epoch_cutover_v2(
+        payload,
+        ExecutionContextV2(
+            job_id="fresh-testnet401-cutover-preflight:%s"
+            % cutover.mapping_hash,
+            purpose=CUTOVER_PURPOSE,
+            epoch_id=cutover.first_settlement_epoch_id,
+            parent_receipt_hashes=parent_roots,
+            external_receipt_graphs=[snapshot_graph],
+        ),
+    )
+    authority_hash = sha256_json(predicted_authority)
+    coordinator_rows = await select_rows(
+        RECEIPT_TABLE,
+        filters=(
+            ("role", COORDINATOR_ROLE),
+            ("purpose", CUTOVER_PURPOSE),
+            ("epoch_id", cutover.first_settlement_epoch_id),
+            ("receipt_status", "succeeded"),
+            ("output_root", authority_hash),
+        ),
+        batch_size=2,
+        max_rows=2,
+    )
+    if not isinstance(coordinator_rows, list) or len(coordinator_rows) > 1:
+        raise StatefulEpochCutoverActivationError(
+            "existing fresh-network coordinator receipt is ambiguous"
+        )
+    coordinator_graph = None
+    if coordinator_rows:
+        if not isinstance(coordinator_rows[0], Mapping):
+            raise StatefulEpochCutoverActivationError(
+                "existing fresh-network coordinator receipt is invalid"
+            )
+        coordinator_graph = await load_graph(
+            str(coordinator_rows[0].get("receipt_hash") or "")
+        )
+        validate_receipt_graph(
+            coordinator_graph,
+            required_purposes={CUTOVER_PURPOSE},
+            boot_attestation_verifier=resolve_boot_verifier(),
+            require_boot_attestation_verification=True,
+        )
+        resumed_row = build_cutover_row_v1(
+            authority_doc=predicted_authority,
+            first_snapshot_doc=candidate["snapshot_doc"],
+            receipt_graph=coordinator_graph,
+        )
+        if resumed_row["cutover_receipt_hash"] != str(
+            coordinator_rows[0].get("receipt_hash") or ""
+        ):
+            raise StatefulEpochCutoverActivationError(
+                "existing fresh-network coordinator graph differs"
+            )
+
+    if not apply:
+        return {
+            "schema_version": ACTIVATION_REPORT_SCHEMA_VERSION,
+            "mode": "dry_run",
+            "status": "fresh_network_eligible",
+            "mapping_hash": cutover.mapping_hash,
+            "candidate_snapshot_hash": candidate["snapshot_hash"],
+            "origin_kind": FRESH_NETWORK_ORIGIN_KIND,
+            "predicted_cutover_authority_hash": authority_hash,
+            "coordinator_receipt_exists": coordinator_graph is not None,
+            "would_write": False,
+        }
+
+    if coordinator_graph is None:
+        resolve_boot_verifier()
+        execute_kwargs: Dict[str, Any] = {
+            "operation": OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
+            "purpose": CUTOVER_PURPOSE,
+            "epoch_id": cutover.first_settlement_epoch_id,
+            "sequence": 0,
+            "payload": payload,
+            "parent_graphs": (snapshot_graph,),
+            "input_artifact_hashes": (
+                cutover.mapping_hash,
+                candidate["snapshot_hash"],
+            ),
+            "persist_graph": persist_graph,
+            "boot_verifier": resolved_boot_verifier,
+        }
+        if release is not None:
+            execute_kwargs["release_manifest"] = release
+        elif release_manifest_path is not None:
+            execute_kwargs["release_manifest_path"] = Path(
+                release_manifest_path
+            )
+        outcome = await execute(**execute_kwargs)
+        if (
+            not isinstance(outcome, Mapping)
+            or outcome.get("status") != "succeeded"
+            or outcome.get("result") != predicted_authority
+            or not isinstance(outcome.get("receipt_graph"), Mapping)
+        ):
+            raise StatefulEpochCutoverActivationError(
+                "fresh-network coordinator attestation differs from preflight"
+            )
+        coordinator_graph = outcome["receipt_graph"]
+
+    cutover_row = build_cutover_row_v1(
+        authority_doc=predicted_authority,
+        first_snapshot_doc=candidate["snapshot_doc"],
+        receipt_graph=coordinator_graph,
+    )
+    if (
+        cutover_row.get("cutover_authority_hash") != authority_hash
+        or cutover_row.get("mapping_hash") != cutover.mapping_hash
+    ):
+        raise StatefulEpochCutoverActivationError(
+            "fresh-network cutover row differs from coordinator authority"
+        )
+    await persist_cutover(
+        authority_doc=predicted_authority,
+        first_snapshot_doc=candidate["snapshot_doc"],
+        receipt_graph=coordinator_graph,
+        persist_graph=persist_graph,
+        load_graph=load_graph,
+    )
+    durable = await _select_exactly_one(
+        select_rows,
+        CUTOVER_TABLE,
+        filters=(("mapping_hash", cutover.mapping_hash),),
+        label="fresh-network subnet epoch cutover readback",
+    )
+    durable = _assert_existing_cutover(
+        durable,
+        cutover=cutover,
+        receipt_graph=coordinator_graph,
+    )
+    if durable != cutover_row:
+        raise StatefulEpochCutoverActivationError(
+            "fresh-network cutover durable readback differs"
+        )
+    return {
+        "schema_version": ACTIVATION_REPORT_SCHEMA_VERSION,
+        "mode": "apply",
+        "status": "fresh_network_durable",
+        "mapping_hash": cutover.mapping_hash,
+        "candidate_snapshot_hash": candidate["snapshot_hash"],
+        "origin_kind": FRESH_NETWORK_ORIGIN_KIND,
+        "cutover_authority_hash": authority_hash,
+        "cutover_receipt_hash": durable["cutover_receipt_hash"],
+        "durable_readback_hash": sha256_json(durable),
+        "would_write": True,
+    }
+
+
 async def activate_subnet_epoch_cutover_v1(
     *,
     cutover: SubnetEpochCutover,
@@ -1833,6 +2110,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--confirm-all-writers-stopped", action="store_true")
     parser.add_argument("--confirm-stateful-release-prepared", action="store_true")
     parser.add_argument(
+        "--fresh-testnet401-network",
+        action="store_true",
+        help=(
+            "use the exact one-parent measured origin ceremony for testnet netuid 401"
+        ),
+    )
+    parser.add_argument(
         "--use-attested-historical-predecessor",
         action="store_true",
         help=(
@@ -1841,6 +2125,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if args.fresh_testnet401_network and (
+        args.fence_before_boundary
+        or args.propose_manifest
+        or args.activate_staged
+        or args.use_attested_historical_predecessor
+    ):
+        parser.error(
+            "--fresh-testnet401-network is incompatible with legacy cutover modes"
+        )
 
     if (args.apply or args.activate_staged) and args.release_manifest is None:
         parser.error(
@@ -1853,7 +2147,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "mutating cutover modes require an explicit "
             "--validator-release-manifest"
         )
-    if (args.apply or args.activate_staged) and not args.confirm_all_writers_stopped:
+    if (
+        (args.apply or args.activate_staged)
+        and not args.fresh_testnet401_network
+        and not args.confirm_all_writers_stopped
+    ):
         parser.error(
             "mutating cutover modes require --confirm-all-writers-stopped"
         )
@@ -1913,6 +2211,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error(
             "mutating cutover modes require --confirm-mapping-hash equal to the canonical manifest"
         )
+    if (
+        args.apply
+        and args.fresh_testnet401_network
+        and args.confirm_first_settlement_epoch_id
+        != cutover.first_settlement_epoch_id
+    ):
+        parser.error(
+            "fresh test401 apply requires an exact first-settlement confirmation"
+        )
     if args.activate_staged:
         if not args.confirm_stateful_release_prepared:
             parser.error(
@@ -1933,6 +2240,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
         return 0
     try:
+        if args.fresh_testnet401_network:
+            report = asyncio.run(
+                bootstrap_fresh_testnet401_cutover_v1(
+                    cutover=cutover,
+                    apply=bool(args.apply),
+                    release_manifest_path=args.release_manifest,
+                    validator_release_manifest_path=(
+                        args.validator_release_manifest
+                    ),
+                )
+            )
+            print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+            return 0
         activation_kwargs = {
             "cutover": cutover,
             "apply": bool(args.apply),

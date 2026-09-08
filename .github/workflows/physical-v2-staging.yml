@@ -6,15 +6,42 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      operation:
+        description: Exact manual operation
+        required: true
+        default: production-parity
+        type: choice
+        options:
+          - production-parity
+          - testnet401-create
+          - testnet401-launch
+          - testnet401-status
+          - testnet401-cleanup
       candidate_sha:
         description: Exact attested main commit to validate
         required: true
         type: string
+      testnet401_run_id:
+        description: Exact retained run ID for status, launch, or cleanup
+        required: false
+        type: string
+      testnet401_instance_id:
+        description: Exact retained instance ID for status, launch, or cleanup
+        required: false
+        type: string
 
 concurrency:
   # Release admission can preempt automatic runs; explicit diagnostics survive.
-  group: production-parity-full-${{ github.event_name }}
-  cancel-in-progress: true
+  group: >-
+    production-parity-full-${{
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation != 'production-parity' &&
+      format('testnet401-{0}',
+        inputs.operation == 'testnet401-create' && inputs.candidate_sha ||
+        inputs.testnet401_run_id) || github.event_name }}
+  cancel-in-progress: >-
+    ${{ !(github.event_name == 'workflow_dispatch' &&
+          inputs.operation != 'production-parity') }}
 
 permissions:
   actions: read
@@ -25,7 +52,8 @@ jobs:
   validate:
     if: >-
       vars.LEADPOET_PARITY_ENABLED == 'true' &&
-      (github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'workflow_dispatch' &&
+        inputs.operation == 'production-parity') ||
        (github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'))
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
@@ -1202,3 +1230,278 @@ jobs:
             if [ "$cleanup_status" -eq 0 ]; then cleanup_status=$status; fi
           }
           exit "$cleanup_status"
+
+  temporary_testnet401:
+    if: >-
+      vars.LEADPOET_PARITY_ENABLED == 'true' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation != 'production-parity'
+    runs-on: ubuntu-latest
+    timeout-minutes: 660
+    env:
+      AWS_REGION: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      TESTNET401_OPERATION: ${{ inputs.operation }}
+      TESTNET401_TARGET_RUN_ID: ${{ inputs.testnet401_run_id }}
+      TESTNET401_TARGET_INSTANCE_ID: ${{ inputs.testnet401_instance_id }}
+      RUNNER_INSTANCE_PROFILE: ${{ vars.LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE }}
+      TESTNET401_HOST_TTL_HOURS: "12"
+    steps:
+      - name: Check out trusted workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.operation == 'testnet401-create' && inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Require bounded lifecycle inputs before credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$AWS_REGION" = "us-east-1"
+          test "$RUNNER_INSTANCE_PROFILE" = \
+            "leadpoet-production-parity-runner"
+          test "$TESTNET401_HOST_TTL_HOURS" = "12"
+          case "$TESTNET401_OPERATION" in
+            testnet401-create)
+              test "$CANDIDATE_SHA" = "$(git rev-parse origin/main)"
+              test -z "$TESTNET401_TARGET_RUN_ID"
+              test -z "$TESTNET401_TARGET_INSTANCE_ID"
+              ;;
+            testnet401-launch|testnet401-status|testnet401-cleanup)
+              [[ "$TESTNET401_TARGET_RUN_ID" =~ ^pp-[0-9]{1,20}-[0-9]{1,6}$ ]]
+              [[ "$TESTNET401_TARGET_INSTANCE_ID" =~ ^i-([0-9a-f]{8}|[0-9a-f]{17})$ ]]
+              ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Set up trusted controller Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: ./.github/actions/setup-production-parity-controller
+        with:
+          python-executable: ${{ env.pythonLocation }}/bin/python3
+
+      - name: Configure bounded parity controller role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+          unset-current-credentials: true
+
+      - name: Require exact parity AWS account
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "493765492819"
+
+      - name: Resolve exact retained lifecycle identity
+        id: identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ "$TESTNET401_OPERATION" = testnet401-create ]; then
+            run_id="pp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            instance_id=""
+          else
+            run_id="$TESTNET401_TARGET_RUN_ID"
+            instance_id="$TESTNET401_TARGET_INSTANCE_ID"
+          fi
+          python3 - "$run_id" "$CANDIDATE_SHA" "$GITHUB_OUTPUT" <<'PY'
+          import sys
+          from scripts.temporary_testnet_signing_host import (
+              ASSET_PREFIX_TEMPLATE, _artifact_bucket_name,
+          )
+          run_id, candidate, output = sys.argv[1:]
+          bucket = _artifact_bucket_name(run_id=run_id, candidate_sha=candidate)
+          prefix = ASSET_PREFIX_TEMPLATE.format(run_id=run_id)
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"bucket={bucket}\nprefix={prefix}\n")
+          PY
+          {
+            printf 'run_id=%s\n' "$run_id"
+            printf 'instance_id=%s\n' "$instance_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create locked private task bucket and upload exact source
+        if: inputs.operation == 'testnet401-create'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          bundle="$RUNNER_TEMP/candidate.bundle"
+          binding="$RUNNER_TEMP/candidate-bundle-binding.json"
+          git bundle create "$bundle" HEAD
+          test "$(git bundle list-heads "$bundle")" = "$CANDIDATE_SHA HEAD"
+          git bundle verify "$bundle" >/dev/null
+          python3 - "$bundle" "$binding" "$CANDIDATE_SHA" <<'PY'
+          import hashlib, json, os, sys
+          bundle, output, candidate = sys.argv[1:]
+          value = {
+              "candidate-sha": candidate,
+              "bundle-sha256": hashlib.sha256(open(bundle, "rb").read()).hexdigest(),
+              "bundle-size-bytes": str(os.path.getsize(bundle)),
+          }
+          with open(output, "x", encoding="utf-8") as handle:
+              json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+              handle.write("\n")
+          os.chmod(output, 0o600)
+          PY
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" create-assets \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --bundle "$bundle" \
+            --binding "$binding" \
+            --state "$RUNNER_TEMP/temporary-testnet401-assets.json"
+          shred -u "$bundle" "$binding" 2>/dev/null || \
+            rm -f "$bundle" "$binding"
+
+      - name: Provision one isolated temporary Nitro host
+        if: inputs.operation == 'testnet401-create'
+        id: provision
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          run_id="${{ steps.identity.outputs.run_id }}"
+          state="$RUNNER_TEMP/temporary-testnet401-host.json"
+          provision_pid=""
+          cleanup_signal() {
+            signal_status="$1"
+            trap - INT TERM
+            if [ -n "$provision_pid" ]; then
+              kill -TERM "$provision_pid" 2>/dev/null || true
+              wait "$provision_pid" 2>/dev/null || true
+            fi
+            python3 scripts/temporary_testnet_signing_host.py \
+              --region "$AWS_REGION" cleanup-run \
+              --run-id "$run_id" \
+              --candidate-sha "$CANDIDATE_SHA" \
+              --apply || true
+            exit "$signal_status"
+          }
+          trap 'cleanup_signal 130' INT
+          trap 'cleanup_signal 143' TERM
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" create \
+            --run-id "$run_id" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --ttl-hours "$TESTNET401_HOST_TTL_HOURS" \
+            --state "$state" &
+          provision_pid=$!
+          wait "$provision_pid"
+          provision_pid=""
+          trap - INT TERM
+          test -s "$state"
+          instance_id="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1]))["instance_id"])' \
+            "$state")"
+          [[ "$instance_id" =~ ^i-([0-9a-f]{8}|[0-9a-f]{17})$ ]]
+          printf 'instance_id=%s\n' "$instance_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for four fixed private authority inputs
+        if: inputs.operation == 'testnet401-create'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" wait-assets \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --timeout-seconds 1800 \
+            --state "$RUNNER_TEMP/temporary-testnet401-private-assets.json"
+
+      - name: Bootstrap exact source and native inputs over fixed SSM
+        if: inputs.operation == 'testnet401-create'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" ssm-source-bootstrap \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --instance-id "${{ steps.provision.outputs.instance_id }}" \
+            --assets-bucket "${{ steps.identity.outputs.bucket }}" \
+            --assets-prefix "${{ steps.identity.outputs.prefix }}" \
+            --state "$RUNNER_TEMP/temporary-testnet401-source.json"
+
+      - name: Run fixed native preflight and launch
+        if: >-
+          inputs.operation == 'testnet401-create' ||
+          inputs.operation == 'testnet401-launch'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for stage in preflight launch; do
+            python3 scripts/temporary_testnet_signing_host.py \
+              --region "$AWS_REGION" ssm-native-stage \
+              --run-id "${{ steps.identity.outputs.run_id }}" \
+              --candidate-sha "$CANDIDATE_SHA" \
+              --instance-id "${{ inputs.operation == 'testnet401-create' && steps.provision.outputs.instance_id || steps.identity.outputs.instance_id }}" \
+              --stage "$stage" \
+              --state "$RUNNER_TEMP/temporary-testnet401-$stage.json"
+          done
+
+      - name: Read retained native host status
+        if: inputs.operation == 'testnet401-status'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" ssm-native-stage \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --instance-id "${{ steps.identity.outputs.instance_id }}" \
+            --stage status \
+            --state "$RUNNER_TEMP/temporary-testnet401-status.json"
+
+      - name: Stop native runtime and remove exact temporary infrastructure
+        if: inputs.operation == 'testnet401-cleanup'
+        shell: bash
+        run: |
+          set +e
+          cleanup_status=0
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" ssm-native-stage \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --instance-id "${{ steps.identity.outputs.instance_id }}" \
+            --stage cleanup \
+            --state "$RUNNER_TEMP/temporary-testnet401-native-cleanup.json" || \
+            cleanup_status=$?
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" cleanup-assets \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --state "$RUNNER_TEMP/temporary-testnet401-assets-cleanup.json" || \
+            { status=$?; if [ "$cleanup_status" -eq 0 ]; then cleanup_status=$status; fi; }
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" cleanup-run \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --apply > "$RUNNER_TEMP/temporary-testnet401-host-cleanup.json" || \
+            { status=$?; if [ "$cleanup_status" -eq 0 ]; then cleanup_status=$status; fi; }
+          python3 scripts/cleanup_production_parity_staging.py \
+            --region "$AWS_REGION" \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --apply > "$RUNNER_TEMP/temporary-testnet401-bucket-cleanup.json" || \
+            { status=$?; if [ "$cleanup_status" -eq 0 ]; then cleanup_status=$status; fi; }
+          exit "$cleanup_status"
+
+      - name: Upload public temporary lifecycle receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: temporary-testnet401-${{ inputs.operation }}-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/temporary-testnet401-*.json

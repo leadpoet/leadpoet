@@ -21,11 +21,21 @@ from gateway.tee.coordinator_chain_source_v2 import (
     CoordinatorChainSourceV2,
     CoordinatorChainSourceV2Error,
 )
-from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.execution_job_manager_v2 import (
+    ExecutionContextV2,
+    ExecutionJobV2Error,
+)
+from gateway.tee.provider_broker_v2 import (
+    ProviderBrokerV2,
+    credential_reference_hash,
+    expected_provider_credential_slots,
+    measured_retry_policy_hashes,
+)
+from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
 )
-from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from leadpoet_canonical.chain_source_v2 import last_update_storage_key
 
 
@@ -310,6 +320,98 @@ def test_measured_full_first_allocation_accepts_empty_legacy_reward_sources(
     assert result["source_state"]["settlement_frontier"]["mode"] == (
         "legacy_full_history_bootstrap"
     )
+
+
+def test_measured_full_first_allocation_does_not_record_replayed_activation(
+    monkeypatch,
+):
+    graph = _cutover_graph()
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, _roots: {origin.TESTNET401_CUTOVER_RECEIPT_HASH: graph},
+    )
+    monkeypatch.setattr(origin, "validate_receipt_graph", lambda _graph: None)
+    credentials = {
+        slot: "%s-secret" % slot
+        for slot in expected_provider_credential_slots()
+    }
+    retries = measured_retry_policy_hashes("sha256:" + "9" * 64)
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            slot: credential_reference_hash(value)
+            for slot, value in credentials.items()
+        },
+        retry_policy_hashes=retries,
+        transport=lambda **_kwargs: {
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": b"[]",
+            "tls_peer_chain_hash": "sha256:" + "8" * 64,
+            "tls_protocol": "TLSv1.3",
+        },
+        artifact_sink=lambda body, **_kwargs: {
+            "artifact_id": "sha256:" + "7" * 64,
+            "plaintext_hash": sha256_bytes(body),
+        },
+        clock=lambda: "2026-09-08T17:01:48Z",
+    )
+    broker.provision_credentials(credentials)
+    reader = SupabaseSourceReaderV2(
+        execute_provider=broker.execute,
+        retry_policy_hash=retries["supabase"],
+        sleep=lambda _seconds: None,
+    )
+    config = SimpleNamespace(
+        reimbursement_dynamic_alpha_price_enabled=False,
+        reimbursement_require_live_alpha_price=False,
+        reimbursement_miner_alpha_per_epoch=100.0,
+        reimbursement_usd_per_0_1_percent_epoch=0.666667,
+        reimbursement_policy_doc=lambda enabled: {
+            "policy_id": "policy:testnet401",
+            "enabled": bool(enabled),
+            "research_lab_emission_percent": 20.0,
+            "reward_epochs": 20,
+            "reimbursement_epochs": 20,
+            "reimbursement_max_cost_multiplier_with_champions": 1.0,
+            "champion_placeholder_alpha_percent": 0.0001,
+            "champion_queue_trigger_ratio": 0.5,
+            "usd_per_0_1_percent_epoch": 0.666667,
+        },
+    )
+    context = ExecutionContextV2(
+        job_id="allocation-v2:testnet401:strict-replay",
+        purpose="research_lab.allocation.v2",
+        epoch_id=22_058,
+        parent_receipt_hashes=(origin.TESTNET401_CUTOVER_RECEIPT_HASH,),
+        external_receipt_graphs=[graph],
+    )
+
+    result = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=_MeasuredChain(),
+        config_supplier=lambda: config,
+        network_supplier=lambda: "test",
+    ).resolve(payload={"epoch": 22_058, "netuid": 401}, context=context)
+
+    assert result["source_state"]["fresh_network_origin"]
+    activation_attempts = [
+        attempt
+        for attempt in context.transport_attempts
+        if ":allocation_settlement_frontier_activation:" in str(
+            attempt["logical_operation_id"]
+        )
+    ]
+    assert len(activation_attempts) == 1
+    with pytest.raises(ExecutionJobV2Error, match="transport attempt is duplicated"):
+        reader.read(
+            policy_id="allocation_settlement_frontier_activation",
+            parameters={"netuid": 401},
+            job_id=context.job_id,
+            purpose=context.purpose,
+            record_transport=context.record_transport,
+            record_artifact=context.record_artifact,
+        )
 
 
 def test_measured_first_allocation_rejects_existing_history(monkeypatch):

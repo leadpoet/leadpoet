@@ -35,6 +35,7 @@ from gateway.research_lab.bundles import contains_secret_material
 from gateway.research_lab.temporary_testnet401_first_allocation_v1 import (
     TESTNET401_CUTOVER_RECEIPT_HASH,
     TESTNET401_FIRST_SETTLEMENT_EPOCH,
+    TESTNET401_NETUID,
     TemporaryTestnet401FirstAllocationError,
     validate_testnet401_cutover_parent_v1,
 )
@@ -372,6 +373,13 @@ class CoordinatorAllocationSourceV2:
             if prior_frontier_context is not None
             else None
         )
+        fresh_frontier_activation_absence_observed = bool(
+            prior_frontier_context is not None
+            and prior_frontier_context.get(
+                "fresh_testnet401_activation_absence_observed"
+            )
+            is True
+        )
         prior_reward_checkpoints = (
             reward_checkpoint_index_v2(prior_frontier["reward_checkpoints"])
             if prior_frontier is not None
@@ -391,6 +399,9 @@ class CoordinatorAllocationSourceV2:
             required_parents=required_parent_hashes,
             chain_state=chain_state,
             fresh_network_origin_out=fresh_network_origin,
+            fresh_frontier_activation_absence_observed=(
+                fresh_frontier_activation_absence_observed
+            ),
         )
         settlement_frontier_retirements = (
             self._resolve_settlement_frontier_retirements(
@@ -604,6 +615,16 @@ class CoordinatorAllocationSourceV2:
                 raise CoordinatorAllocationSourceV2Error(
                     "allocation settlement frontier exists without activation"
                 )
+            if (
+                str(self._network_supplier() or "").strip().lower() == "test"
+                and int(netuid) == TESTNET401_NETUID
+                and TESTNET401_CUTOVER_RECEIPT_HASH
+                in set(context.parent_receipt_hashes)
+            ):
+                return {
+                    "frontier": None,
+                    "fresh_testnet401_activation_absence_observed": True,
+                }
             return None
         if len(activation_rows) != 1:
             raise CoordinatorAllocationSourceV2Error(
@@ -1801,6 +1822,7 @@ class CoordinatorAllocationSourceV2:
         required_parents: Set[str],
         chain_state: Optional[Mapping[str, Any]] = None,
         fresh_network_origin_out: Optional[Dict[str, Any]] = None,
+        fresh_frontier_activation_absence_observed: bool = False,
     ) -> list[Dict[str, Any]]:
         starts = [
             int(row.get("start_epoch") or 0)
@@ -1823,6 +1845,9 @@ class CoordinatorAllocationSourceV2:
                     chain_state=chain_state,
                     context=context,
                     required_parents=required_parents,
+                    frontier_activation_absence_observed=(
+                        fresh_frontier_activation_absence_observed
+                    ),
                 )
                 if fresh_network_origin_out is not None:
                     fresh_network_origin_out.clear()
@@ -1855,6 +1880,9 @@ class CoordinatorAllocationSourceV2:
                     chain_state=chain_state,
                     context=context,
                     required_parents=required_parents,
+                    frontier_activation_absence_observed=(
+                        fresh_frontier_activation_absence_observed
+                    ),
                 )
                 if fresh_network_origin_out is not None:
                     fresh_network_origin_out.clear()
@@ -2075,6 +2103,7 @@ class CoordinatorAllocationSourceV2:
         chain_state: Mapping[str, Any],
         context: ExecutionContextV2,
         required_parents: Set[str],
+        frontier_activation_absence_observed: bool = False,
     ) -> Dict[str, Any]:
         """Validate the measured empty origin used for one first allocation."""
 
@@ -2108,21 +2137,34 @@ class CoordinatorAllocationSourceV2:
             "start_epoch": TESTNET401_FIRST_SETTLEMENT_EPOCH,
             "end_epoch": history_end,
         }
-        history_reads = (
+        history_reads = [
             ("allocation_history", range_parameters),
             ("finalized_allocation_authorities", range_parameters),
             ("legacy_finalized_allocation_migrations", range_parameters),
             ("chain_realized_epoch_settlements", range_parameters),
             ("chain_realized_obligation_credits", range_parameters),
+        ]
+        # The exact fresh path already measured this policy while resolving
+        # the absent prior frontier. Reissuing it makes the broker replay the
+        # same terminal attempt, which the execution context correctly rejects.
+        if not frontier_activation_absence_observed:
+            history_reads.append(
+                (
+                    "allocation_settlement_frontier_activation",
+                    {"netuid": int(netuid)},
+                )
+            )
+        history_reads.extend(
             (
-                "allocation_settlement_frontier_activation",
-                {"netuid": int(netuid)},
-            ),
-            (
-                "allocation_settlement_frontiers",
-                {"netuid": int(netuid), "before_epoch": int(epoch) + 1},
-            ),
-            ("compact_finalized_authority_cutover", {"netuid": int(netuid)}),
+                (
+                    "allocation_settlement_frontiers",
+                    {"netuid": int(netuid), "before_epoch": int(epoch) + 1},
+                ),
+                (
+                    "compact_finalized_authority_cutover",
+                    {"netuid": int(netuid)},
+                ),
+            )
         )
         for policy_id, parameters in history_reads:
             if self._read(policy_id, parameters, context):

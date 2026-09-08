@@ -62,6 +62,11 @@ def _independent() -> dict:
         "revealed_last_update_block": LAST_UPDATE,
         "finalized_readback_block": 7_959_910,
         "finalized_readback_block_hash": "0x" + "7" * 64,
+        "reveal_event": "SubtensorModule.TimelockedWeightsRevealed",
+        "reveal_event_block": 7_959_900,
+        "reveal_event_block_hash": "0x" + "a" * 64,
+        "reveal_event_record_index": 12,
+        "reveal_event_subnet_epoch_index": 22_061,
         "revealed_weights": proof.EXPECTED_REVEALED_WEIGHTS,
         "champion_uid": 11,
         "champion_share_exact": "1/4",
@@ -156,6 +161,21 @@ def test_independent_proof_rejects_the_retired_live_profile_identity():
     with pytest.raises(
         proof.TemporaryWeightProofError,
         match="independent proof identity differs",
+    ):
+        proof._independent_proof(
+            json.dumps(value, sort_keys=True) + "\n",
+            candidate_sha=CANDIDATE,
+            epoch_id=EPOCH_ID,
+        )
+
+
+def test_independent_proof_rejects_reveal_before_commit():
+    value = _independent()
+    value["reveal_event_block"] = value["commit_inclusion_block"]
+
+    with pytest.raises(
+        proof.TemporaryWeightProofError,
+        match="independent reveal event bounds differ",
     ):
         proof._independent_proof(
             json.dumps(value, sort_keys=True) + "\n",

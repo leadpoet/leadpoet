@@ -39,7 +39,7 @@ SCHEMA_VERSION = "leadpoet.temporary_testnet401_weight_proof_ssm.v1"
 LOG_READER_SHA256 = "14c53ff6be8e26e617b8e6f5e6196c0055f21852981d4ca9227c745b981372cd"
 VERIFIER_PATH = Path(__file__).with_name("verify_temporary_testnet_weights.py")
 VERIFIER_SHA256 = (
-    "05d9472549d9f5b8788a6b57f636ca05ca6e037560bc3daacc93c8586eecf6a1"
+    "0e1d4f6be3f556101cc87675928a400ef959f05748c346c82eb5ebed1c38cf6e"
 )
 MAX_VERIFIER_BYTES = 32 * 1024
 FIRST_SETTLEMENT_EPOCH_ID = 22_042
@@ -69,6 +69,11 @@ RESULT_FIELDS = frozenset(
         "revealed_last_update_block",
         "finalized_readback_block",
         "finalized_readback_block_hash",
+        "reveal_event",
+        "reveal_event_block",
+        "reveal_event_block_hash",
+        "reveal_event_record_index",
+        "reveal_event_subnet_epoch_index",
         "revealed_weights",
         "champion_uid",
         "champion_share_exact",
@@ -268,9 +273,27 @@ def _independent_proof(
         "commit_inclusion_block",
         "revealed_last_update_block",
         "finalized_readback_block",
+        "reveal_event_block",
+        "reveal_event_record_index",
+        "reveal_event_subnet_epoch_index",
     ):
         if not isinstance(value.get(name), int) or isinstance(value.get(name), bool):
             raise TemporaryWeightProofError("independent proof blocks are invalid")
+    if (
+        value.get("reveal_event")
+        != "SubtensorModule.TimelockedWeightsRevealed"
+        or re.fullmatch(
+            r"0x[0-9a-f]{64}", str(value.get("reveal_event_block_hash") or "")
+        )
+        is None
+    ):
+        raise TemporaryWeightProofError("independent reveal event is invalid")
+    if not (
+        0 <= value["reveal_event_record_index"]
+        and value["commit_inclusion_block"] < value["reveal_event_block"]
+        <= value["finalized_readback_block"]
+    ):
+        raise TemporaryWeightProofError("independent reveal event bounds differ")
     return dict(value)
 
 

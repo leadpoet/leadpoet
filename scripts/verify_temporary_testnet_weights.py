@@ -40,6 +40,7 @@ EXPECTED_MINER = "5FEtvBzsh5Zc8nDyq4Jb2nZ7o6ZD2homYsKjbZtFj5tybqth"
 EXPECTED_BURN = "5E6zy3Dt8BrwsSKbocSF2uxjpMAbr4EksVzxgPJiXh8jq4vf"
 BASELINE_LAST_UPDATE = 7_431_466
 MAX_AUTHORITY_BYTES = 8 * 1024 * 1024
+MAX_REVEAL_SCAN_BLOCKS = 512
 
 
 def require(condition: bool, message: str) -> None:
@@ -53,6 +54,118 @@ def read_json(path: Path):
 
 def raw_hash(value) -> str:
     return str(value).lower().removeprefix("0x")
+
+
+def prove_finalized_reveal_event(
+    substrate,
+    *,
+    query,
+    validator_uid: int,
+    commit_block: int,
+    target_subnet_epoch_index: int,
+    reveal_period_epochs: int,
+    finalized_head_block: int,
+    finalized_head_hash: str,
+    expected_pairs,
+):
+    """Find the one canonical CRv4 reveal and verify its event-block vector."""
+
+    expected_reveal_epoch = target_subnet_epoch_index + reveal_period_epochs
+    cache = {}
+
+    def query_value(result):
+        return getattr(result, "value", result)
+
+    def block_state(block):
+        if block not in cache:
+            block_hash = str(substrate.get_block_hash(block))
+            require(
+                bool(re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash)),
+                "canonical reveal block hash is invalid",
+            )
+            epoch = int(
+                query_value(
+                    query(
+                        "SubtensorModule",
+                        "SubnetEpochIndex",
+                        [NETUID],
+                        block_hash=block_hash,
+                    )
+                )
+            )
+            cache[block] = (block_hash, epoch)
+        return cache[block]
+
+    canonical_head_hash, head_epoch = block_state(finalized_head_block)
+    require(
+        raw_hash(canonical_head_hash) == raw_hash(finalized_head_hash),
+        "finalized reveal scan head differs",
+    )
+    _commit_hash, commit_epoch = block_state(commit_block)
+    require(
+        commit_epoch == target_subnet_epoch_index,
+        "commit block subnet epoch differs",
+    )
+    require(head_epoch == expected_reveal_epoch, "reveal epoch is not finalized")
+
+    low, high = commit_block + 1, finalized_head_block
+    while low < high:
+        middle = (low + high) // 2
+        if block_state(middle)[1] < expected_reveal_epoch:
+            low = middle + 1
+        else:
+            high = middle
+    first_reveal_block = low
+    require(
+        block_state(first_reveal_block)[1] == expected_reveal_epoch,
+        "reveal epoch boundary is unavailable",
+    )
+    reveal_block_count = finalized_head_block - first_reveal_block + 1
+    require(
+        0 < reveal_block_count <= MAX_REVEAL_SCAN_BLOCKS,
+        "reveal epoch event scan exceeds bound",
+    )
+
+    matches = []
+    for block in range(first_reveal_block, finalized_head_block + 1):
+        block_hash, block_epoch = block_state(block)
+        require(block_epoch == expected_reveal_epoch, "reveal scan crossed an epoch")
+        events = substrate.get_events(block_hash=block_hash)
+        require(isinstance(events, list), "canonical reveal events are invalid")
+        for record_index, record in enumerate(events):
+            event = record.get("event") if isinstance(record, dict) else None
+            if not isinstance(event, dict) or (
+                event.get("module_id"), event.get("event_id")
+            ) != ("SubtensorModule", "TimelockedWeightsRevealed"):
+                continue
+            attributes = event.get("attributes")
+            if (
+                record.get("phase") == "Initialization"
+                and isinstance(attributes, (list, tuple))
+                and tuple(attributes) == (NETUID, EXPECTED_VALIDATOR)
+            ):
+                matches.append((block, block_hash, record_index))
+    require(len(matches) == 1, "finalized reveal event is absent or ambiguous")
+    reveal_block, reveal_hash, record_index = matches[0]
+    revealed_pairs = sorted(
+        (int(uid), int(weight))
+        for uid, weight in query_value(
+            query(
+                "SubtensorModule",
+                "Weights",
+                [NETUID, validator_uid],
+                block_hash=reveal_hash,
+            )
+        )
+    )
+    require(revealed_pairs == expected_pairs, "reveal event block vector differs")
+    return {
+        "reveal_event": "SubtensorModule.TimelockedWeightsRevealed",
+        "reveal_event_block": reveal_block,
+        "reveal_event_block_hash": reveal_hash,
+        "reveal_event_record_index": record_index,
+        "reveal_event_subnet_epoch_index": expected_reveal_epoch,
+    }
 
 
 def build_approved_release_lineage(
@@ -436,6 +549,19 @@ def main() -> int:
         canonical_commit_hash = str(
             subtensor.substrate.get_block_hash(commit_inclusion_block)
         )
+        reveal_proof = prove_finalized_reveal_event(
+            subtensor.substrate,
+            query=query,
+            validator_uid=validator_uid,
+            commit_block=commit_inclusion_block,
+            target_subnet_epoch_index=target_subnet_epoch_index,
+            reveal_period_epochs=int(
+                selected_profile["subnet_reveal_period_epochs"]
+            ),
+            finalized_head_block=finalized_head_block,
+            finalized_head_hash=finalized_head_hash,
+            expected_pairs=expected_pairs,
+        )
     finally:
         close = getattr(getattr(subtensor, "substrate", None), "close", None)
         if callable(close):
@@ -464,7 +590,7 @@ def main() -> int:
         + int(selected_profile["subnet_reveal_period_epochs"]),
         "reveal is pending",
     )
-    # The authority block is commit inclusion. LastUpdate is reveal readback.
+    # CRv4 LastUpdate records the commit. The event proof above records reveal.
     require(
         BASELINE_LAST_UPDATE < last_update <= finalized_head_block,
         "LastUpdate did not advance on finalized chain",
@@ -503,6 +629,7 @@ def main() -> int:
                 "revealed_last_update_block": last_update,
                 "finalized_readback_block": finalized_head_block,
                 "finalized_readback_block_hash": finalized_head_hash,
+                **reveal_proof,
                 "revealed_weights": expected_pairs,
                 "champion_uid": miner_uid,
                 "champion_share_exact": "1/4",

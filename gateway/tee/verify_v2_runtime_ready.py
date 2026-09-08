@@ -28,10 +28,15 @@ def _clients() -> Dict[str, Any]:
 
 async def verify_v2_runtime_ready(
     clients: Optional[Mapping[str, Any]] = None,
+    *,
+    execution_config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     role_clients = dict(clients or _clients())
     if set(role_clients) != set(ROLE_SPECS):
         raise V2RuntimeReadinessError("runtime clients do not cover every role")
+    expected_registry_hash = provider_registry_hash(
+        execution_config=execution_config
+    )
     provider = await role_clients[
         "gateway_coordinator"
     ].v2_provider_broker_health()
@@ -40,7 +45,7 @@ async def verify_v2_runtime_ready(
         or set(provider.get("credential_slots") or ())
         != set(expected_provider_credential_slots())
         or provider.get("missing_credential_slots")
-        or provider.get("registry_hash") != provider_registry_hash()
+        or provider.get("registry_hash") != expected_registry_hash
         or provider.get("job_credential_slot_ref_hashes")
         != expected_job_credential_slot_ref_hashes()
     ):
@@ -50,7 +55,7 @@ async def verify_v2_runtime_ready(
     ].v2_provider_semantics_health()
     if (
         semantics.get("status") != "ready"
-        or semantics.get("broker_registry_hash") != provider_registry_hash()
+        or semantics.get("broker_registry_hash") != expected_registry_hash
         or not isinstance(semantics.get("memory_cache_entry_count"), int)
         or not isinstance(semantics.get("inflight_count"), int)
         or not isinstance(semantics.get("cost_scope_count"), int)
@@ -105,7 +110,7 @@ async def verify_v2_runtime_ready(
     return {
         "schema_version": "leadpoet.gateway_v2_runtime_readiness.v2",
         "status": "ready",
-        "provider_registry_hash": provider_registry_hash(),
+        "provider_registry_hash": expected_registry_hash,
         "roles": health_rows,
     }
 

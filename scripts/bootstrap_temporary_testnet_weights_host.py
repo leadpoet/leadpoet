@@ -1443,7 +1443,17 @@ def run_launch(config: Mapping[str, Any], *, confirm_instance_id: str) -> Dict[s
         )
         runner.run(
             "gateway_runtime_readiness",
-            [config["python_bin"], "-m", "gateway.tee.verify_v2_runtime_ready"],
+            [
+                config["python_bin"],
+                "-c",
+                (
+                    "import asyncio,json; from gateway.tee.research_lab_runtime_config_v2 "
+                    "import build_research_lab_execution_config as b; from "
+                    "gateway.tee.verify_v2_runtime_ready import "
+                    "verify_v2_runtime_ready as v; print(json.dumps(asyncio.run("
+                    "v(execution_config=b())),sort_keys=True))"
+                ),
+            ],
             env=gateway_env,
             cwd=repo_root,
         )

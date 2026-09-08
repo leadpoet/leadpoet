@@ -231,6 +231,8 @@ def test_gateway_runtime_is_pinned_to_testnet401_validator():
         bootstrap.SAFE_GATEWAY_ENV["PRIMARY_VALIDATOR_HOTKEYS"]
         == bootstrap.EXPECTED_VALIDATOR_HOTKEY
     )
+    source = Path(bootstrap.__file__).read_text(encoding="utf-8")
+    assert "v(execution_config=b())" in source
 
 
 def test_gateway_dynamic_pcr_builder_uses_only_task_owned_build_paths(monkeypatch):

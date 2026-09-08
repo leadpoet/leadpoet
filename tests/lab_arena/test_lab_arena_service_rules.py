@@ -1116,7 +1116,8 @@ def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evide
         assert unpublished_field not in result
 
 
-def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_failure():
+@pytest.mark.parametrize("cause", ["judge_timeout", "lease_expired", "stage_closed"])
+def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_failure(cause):
     round_id = "arena-2026-09-07-partial"
     execute_runs = [
         {
@@ -1151,7 +1152,7 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
         "icp_position": 0,
         "attempt": 2,
         "status": "failed",
-        "terminal_cause": "judge_timeout",
+        "terminal_cause": cause,
         "output_ref": None,
         "result_doc": {"unsafe_detail": "must stay private"},
     }
@@ -1166,6 +1167,10 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
         "round_id": round_id,
         "status": "cancelled",
         "cancel_reason": "scoring_incomplete",
+        "publication_doc": {
+            "stage1_ranking": [{"submission_id": "sub-partial", "stage1_score": 80}],
+            "final_ranking": [{"submission_id": "sub-partial", "final_score": 90}],
+        },
         "participants": [
             {
                 "submission_id": "sub-partial",
@@ -1190,6 +1195,7 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
         "unavailable",
     ]
     assert result["scores"] == {"stage_1": [], "stage_2": []}
+    assert result["submission_scores"] == {"stage_1": None, "final": None}
     assert result["judge_evidence"] == []
     assert result["judge_jobs"] == [
         {
@@ -1198,7 +1204,7 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
             "stage": 1,
             "icp_position": 0,
             "status": "failed",
-            "terminal_cause": "judge_timeout",
+            "terminal_cause": cause,
             "evidence_status": "unavailable",
         }
     ]

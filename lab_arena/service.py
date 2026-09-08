@@ -2364,6 +2364,7 @@ class ArenaService:
                     "round_status": "cancelled",
                     "cancel_reason": row.get("cancel_reason"),
                     "incomplete": True,
+                    "submission_scores": {"stage_1": None, "final": None},
                     "execution_jobs": execution_jobs,
                     "judge_jobs": judge["jobs"],
                     "judge_evidence": judge["evidence"],
@@ -2418,7 +2419,7 @@ class ArenaService:
                 "icp_position": int(run["icp_position"]),
                 "status": run["status"],
                 "terminal_cause": (
-                    cause if cause in contracts.SCORE_TERMINAL_CAUSES else None
+                    cause if cause in contracts.TERMINAL_CAUSES else None
                 ),
                 "evidence_status": "unavailable",
             }

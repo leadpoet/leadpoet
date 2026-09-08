@@ -222,6 +222,27 @@ def test_goldman_homepage_legal_name_binds_exact_web_observation(monkeypatch):
     assert receipt["decision"] == COMPANY_FIT_MATCH
     assert receipt["observed_name"] == "thegoldmansachs"
 
+    for wrong_company in (
+        company.model_copy(update={"company_name": "Unrelated Bank"}),
+        company.model_copy(update={"company_website": "https://wrong.example"}),
+        company.model_copy(
+            update={
+                "company_linkedin": "https://www.linkedin.com/company/wrong"
+            }
+        ),
+    ):
+        assert _web_identity_receipt(
+            wrong_company,
+            {
+                "observed_company_name": "The Goldman Sachs Group, Inc.",
+                "observed_company_website": "https://www.goldmansachs.com/about-us",
+                "observed_company_linkedin": (
+                    "https://www.linkedin.com/company/goldman-sachs"
+                ),
+            },
+            verified_homepage_identity=anchor,
+        )["decision"] != COMPANY_FIT_MATCH
+
 
 def test_homepage_identity_can_follow_large_bounded_style_prefix(monkeypatch):
     import asyncio
@@ -325,6 +346,30 @@ def test_homepage_legal_alias_requires_bound_root_organization(monkeypatch):
     assert _web_identity_receipt(
         company, verdict, verified_homepage_identity=base
     )["decision"] == COMPANY_FIT_MISMATCH
+
+
+def test_nested_publisher_linkedin_is_retained_but_legal_alias_is_not(monkeypatch):
+    import asyncio
+
+    nested_publisher = (
+        b"<title>Example Company</title>"
+        b'<script type="application/ld+json">'
+        b'{"@type":"WebSite","publisher":{"@type":"Organization",'
+        b'"name":"Example Company","legalName":"Unbound Legal Alias, Inc.",'
+        b'"url":"https://www.example.co.uk","sameAs":'
+        b'"https://www.linkedin.com/company/example-company"}}</script>'
+    )
+
+    result = asyncio.run(
+        _verify_with_response(monkeypatch, 200, nested_publisher)
+    )
+    anchor = _verified_homepage_identity_anchor(result)
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity"]["observed_linkedin_slug"] == (
+        "example-company"
+    )
+    assert "verified_legal_name_aliases" not in anchor
 
 
 def test_https_mode_rejects_final_http_redirect(monkeypatch):

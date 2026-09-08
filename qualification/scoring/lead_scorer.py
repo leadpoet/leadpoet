@@ -789,7 +789,7 @@ def _web_identity_receipt(
     verdict: Mapping[str, Any],
     *,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Bind the independently observed web identity to the submitted company."""
 
     observed_values = {
@@ -817,9 +817,39 @@ def _web_identity_receipt(
         observed_linkedin=observed_values["linkedin"],
         evidence_source="company_web_reverification",
     )
+    verified_anchor_receipt: Mapping[str, str] = {}
+    if isinstance(verified_homepage_identity, Mapping):
+        anchor_name = verified_homepage_identity.get("normalized_name")
+        anchor_domain = verified_homepage_identity.get(
+            "registrable_dns_domain"
+        )
+        anchor_linkedin_slug = verified_homepage_identity.get(
+            "linkedin_company_slug"
+        )
+        if all(
+            isinstance(value, str) and value.strip() and len(value) <= limit
+            for value, limit in (
+                (anchor_name, 200),
+                (anchor_domain, 253),
+                (anchor_linkedin_slug, 200),
+            )
+        ):
+            verified_anchor_receipt = evaluate_company_identity(
+                submitted_name=company.company_name,
+                submitted_website=company.company_website,
+                submitted_linkedin=company.company_linkedin,
+                observed_name=anchor_name,
+                observed_website=f"https://{anchor_domain}",
+                observed_linkedin=(
+                    "https://www.linkedin.com/company/"
+                    f"{anchor_linkedin_slug}"
+                ),
+                evidence_source="company_homepage",
+            )
     if (
         receipt.get("decision") == COMPANY_FIT_MISMATCH
         and receipt.get("reason_code") == "identity_mismatch"
+        and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and isinstance(verified_homepage_identity, Mapping)
         and receipt.get("observed_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
@@ -857,35 +887,6 @@ def _web_identity_receipt(
                     reason_code="verifier_accepted",
                 )
                 return receipt
-    verified_anchor_receipt: Mapping[str, str] = {}
-    if isinstance(verified_homepage_identity, Mapping):
-        anchor_name = verified_homepage_identity.get("normalized_name")
-        anchor_domain = verified_homepage_identity.get(
-            "registrable_dns_domain"
-        )
-        anchor_linkedin_slug = verified_homepage_identity.get(
-            "linkedin_company_slug"
-        )
-        if all(
-            isinstance(value, str) and value.strip() and len(value) <= limit
-            for value, limit in (
-                (anchor_name, 200),
-                (anchor_domain, 253),
-                (anchor_linkedin_slug, 200),
-            )
-        ):
-            verified_anchor_receipt = evaluate_company_identity(
-                submitted_name=company.company_name,
-                submitted_website=company.company_website,
-                submitted_linkedin=company.company_linkedin,
-                observed_name=anchor_name,
-                observed_website=f"https://{anchor_domain}",
-                observed_linkedin=(
-                    "https://www.linkedin.com/company/"
-                    f"{anchor_linkedin_slug}"
-                ),
-                evidence_source="company_homepage",
-            )
     if (
         receipt.get("decision") == COMPANY_FIT_MISMATCH
         and receipt.get("reason_code") == "identity_mismatch"

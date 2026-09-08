@@ -37,6 +37,7 @@ from html.parser import HTMLParser
 import json
 import logging
 import re
+from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -280,13 +281,38 @@ def _organization_identity_records(value) -> list[dict[str, object]]:
 
 
 def _organization_same_as_urls(value) -> list[str]:
-    """Extract LinkedIn URLs only from bounded Organization JSON-LD records."""
+    """Extract LinkedIn URLs from nested JSON-LD Organization ``sameAs`` data."""
 
     urls: list[str] = []
-    for record in _organization_identity_records(value):
-        linkedins = record.get("linkedin_urls")
-        if isinstance(linkedins, list):
-            urls.extend(url for url in linkedins if isinstance(url, str))
+
+    try:
+        document = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+    def visit(node) -> None:
+        if isinstance(node, dict):
+            raw_type = node.get("@type", "")
+            types = raw_type if isinstance(raw_type, list) else [raw_type]
+            is_organization = any(
+                str(item or "").casefold() == "organization" for item in types
+            )
+            if is_organization:
+                raw_same_as = node.get("sameAs", [])
+                candidates = (
+                    raw_same_as if isinstance(raw_same_as, list) else [raw_same_as]
+                )
+                for candidate in candidates:
+                    canonical = _canonical_linkedin_company_url(candidate)
+                    if canonical:
+                        urls.append(canonical)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(document)
     return list(dict.fromkeys(urls))[:10]
 
 
@@ -369,14 +395,10 @@ class _HomepageIdentityParser(HTMLParser):
         if tag_name == "title":
             self._in_title = False
         elif tag_name == "script" and self._json_ld_parts is not None:
-            records = _organization_identity_records("".join(self._json_ld_parts))
+            json_ld = "".join(self._json_ld_parts)
+            records = _organization_identity_records(json_ld)
             self.organization_records.extend(records)
-            for record in records:
-                linkedins = record.get("linkedin_urls")
-                if isinstance(linkedins, list):
-                    self.linkedin_urls.extend(
-                        url for url in linkedins if isinstance(url, str)
-                    )
+            self.linkedin_urls.extend(_organization_same_as_urls(json_ld))
             self._json_ld_parts = None
         if tag_name in {"script", "style", "template"}:
             self._nonvisible_depth = max(0, self._nonvisible_depth - 1)
@@ -483,7 +505,7 @@ def _verified_organization_legal_name_aliases(
 
 
 def _identity_result(
-    receipt: dict[str, str],
+    receipt: Mapping[str, object],
     reason: str,
     *,
     actual_final_url: str = "",
@@ -675,6 +697,7 @@ async def verify_company_exists(
         None,
     )
     if matched is not None:
+        matched_receipt: dict[str, object] = dict(matched)
         matched_linkedin = (
             "https://www.linkedin.com/company/"
             f"{matched['observed_linkedin_slug']}"
@@ -686,9 +709,9 @@ async def verify_company_exists(
             observed_linkedin=matched_linkedin,
         )
         if legal_name_aliases:
-            matched["verified_legal_name_aliases"] = legal_name_aliases
+            matched_receipt["verified_legal_name_aliases"] = legal_name_aliases
         return _identity_result(
-            matched,
+            matched_receipt,
             "verified: independently observed homepage name, final domain, "
             "and exact LinkedIn company identity",
             actual_final_url=observed_url,

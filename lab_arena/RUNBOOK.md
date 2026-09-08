@@ -125,11 +125,14 @@ migration transaction fails without cancelling that work. Retry the same
 idempotent migration through the repository migration helper after the writer
 finishes.
 
-An already-running schema-189 service or runner can finish its current work
-while migration 190 is applied. A new schema-189 process cannot pass startup
-after the database reports schema 190. Therefore, schema 190 and the matching
-candidate runtime form one cutover dependency. Do not use an older Arena
-process as a claim-capable rollback after this migration.
+An already-running schema-189 Arena service can finish its current work while
+migration 190 is applied. A runner can continue against the replacement
+service, but canonical paired authority still requires both components at the
+exact release. After the database reports schema 190, an older schema-189 Arena
+service cannot newly start because its startup schema check rejects the
+mismatch. Therefore, schema 190 and the matching candidate runtime form one
+cutover dependency. Do not use an older Arena service as a claim-capable
+rollback after this migration.
 
 The canonical restart pauses new claims after its existing release,
 attestation, and maintenance preflight. It then waits for every captured lease

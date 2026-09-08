@@ -15,7 +15,11 @@ from tests.test_source_add_end_to_end_postgres import SCRIPTS
 
 
 def test_network_scope_migration_is_idempotent_and_keeps_legacy_rows_on_finney():
-    generator = database_with_lab_arena_migration(DEFAULT_MIGRATIONS[:-1])
+    generator = database_with_lab_arena_migration(
+        DEFAULT_MIGRATIONS[
+            : DEFAULT_MIGRATIONS.index(LAB_ARENA_NETWORK_SCOPE_MIGRATION)
+        ]
+    )
     psycopg2, dsn = next(generator)
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True

@@ -208,7 +208,11 @@ def test_reward_activation_waits_for_new_crowned_promotion_but_not_no_king(conne
 
 
 def test_migration_preserves_historical_round_and_applies_twice():
-    generator = database_with_lab_arena_migration(DEFAULT_MIGRATIONS[:-2])
+    generator = database_with_lab_arena_migration(
+        DEFAULT_MIGRATIONS[
+            : DEFAULT_MIGRATIONS.index(LAB_ARENA_BASELINE_PROMOTION_MIGRATION)
+        ]
+    )
     psycopg2, dsn = next(generator)
     control = psycopg2.connect(**dsn)
     control.autocommit = True

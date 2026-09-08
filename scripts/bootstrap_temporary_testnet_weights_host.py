@@ -635,32 +635,17 @@ def _environment_file(path: Path) -> Dict[str, str]:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise TemporaryTestnetBootstrapError("runtime environment is unavailable") from exc
+    # Use the existing production parser for JSON, shell assignments and raw
+    # env dumps. Unquoted spaces in values are valid in the latter format.
+    from scripts.materialize_production_parity_secrets import (
+        SecretMaterializationError,
+        _parse_environment_document,
+    )
+
     try:
-        decoded = json.loads(raw)
-    except json.JSONDecodeError:
-        decoded = None
-    if decoded is not None:
-        if not isinstance(decoded, Mapping):
-            raise TemporaryTestnetBootstrapError("runtime environment JSON is invalid")
-        return {str(name): str(value) for name, value in decoded.items()}
-    result: Dict[str, str] = {}
-    for raw_line in raw.replace("\0", "\n").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].strip()
-        try:
-            parts = shlex.split(line, posix=True)
-        except ValueError as exc:
-            raise TemporaryTestnetBootstrapError("runtime environment is malformed") from exc
-        if len(parts) != 1 or "=" not in parts[0]:
-            raise TemporaryTestnetBootstrapError("runtime environment is malformed")
-        name, value = parts[0].split("=", 1)
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            raise TemporaryTestnetBootstrapError("runtime environment name is invalid")
-        result[name] = value
-    return result
+        return _parse_environment_document(raw, field="runtime environment")
+    except SecretMaterializationError as exc:
+        raise TemporaryTestnetBootstrapError("runtime environment is malformed") from exc
 
 
 def _runtime_environment(

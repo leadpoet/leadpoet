@@ -13,6 +13,39 @@ import pytest
 from scripts import stage_temporary_testnet_weights_host as stage
 
 
+def test_gateway_env_dump_roundtrips_through_native_load_and_scrub(tmp_path):
+    from gateway.tee import prepare_gateway_envelopes_v2 as envelopes
+    from scripts.materialize_production_parity_secrets import _parse_environment_document
+
+    raw = ('GIT_SSH_COMMAND=ssh -i /task/key -o IdentitiesOnly=yes\n'
+           'SSH_CLIENT=192.0.2.1 12000 22\n'
+           'QUOTED="two words"\nOPENROUTER_API_KEY=secret-canary\n')
+    path = tmp_path / "gateway.env"
+    stage.private_write(path, stage.normalized_gateway_environment(raw))
+    expected = _parse_environment_document(raw, field="test")
+    assert envelopes.load_environment_file(path) == expected
+    report = tmp_path / "transition.json"
+    report.write_text(json.dumps({
+        "plaintext_environment_names_to_remove": ["OPENROUTER_API_KEY"],
+        "plaintext_credential_ref_hashes_to_remove": [
+            envelopes.credential_reference_hash("secret-canary")],
+        "required_count_environment": {"RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "1"},
+        "scoring_worker_count": 1,
+    }))
+    envelopes.scrub_parent_environment_file_v2(
+        environment_path=path, transition_report_path=report)
+    expected.pop("OPENROUTER_API_KEY")
+    expected["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"] = "1"
+    assert envelopes.load_environment_file(path) == expected
+    assert "secret-canary" not in path.read_text()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_gateway_env_normalization_rejects_multiline_before_native_consumers():
+    with pytest.raises(ValueError, match="multiline"):
+        stage.normalized_gateway_environment(json.dumps({"KEY": "one\ntwo"}))
+
+
 class _Body(BytesIO):
     def close(self):
         self.was_closed = True

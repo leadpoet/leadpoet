@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import traceback
@@ -98,6 +99,18 @@ def private_write(path: Path, data: bytes) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as stream:
         stream.write(data)
+
+
+def normalized_gateway_environment(raw: str) -> bytes:
+    """Keep secret values exact in the shell format native consumers accept."""
+    from scripts.materialize_production_parity_secrets import _parse_environment_document
+
+    values = _parse_environment_document(raw, field="gateway environment")
+    if any("\n" in value or "\r" in value or "\0" in value for value in values.values()):
+        raise ValueError("gateway environment has unsupported multiline values")
+    return ("\n".join(
+        f"export {name}={shlex.quote(value)}" for name, value in values.items()
+    ) + "\n").encode()
 
 
 def failure_receipt(exc: BaseException) -> dict[str, str]:
@@ -247,7 +260,7 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
     raw = secrets.get_secret_value(SecretId="leadpoet/prod/gateway/env")["SecretString"]
     if not isinstance(raw, str) or not 0 < len(raw.encode()) <= 262144:
         raise ValueError("gateway secret is outside size limit")
-    private_write(inputs / "gateway.env", raw.encode())
+    private_write(inputs / "gateway.env", normalized_gateway_environment(raw))
     del raw
     policy = {
         "schema_version": "leadpoet.encrypted_artifact_policy.v2",

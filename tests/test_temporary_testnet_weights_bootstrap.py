@@ -24,6 +24,28 @@ def _config():
     }
 
 
+@pytest.mark.parametrize("content,expected", [
+    ('GIT_SSH_COMMAND=ssh -i /task/key -o IdentitiesOnly=yes\n'
+     'SSH_CLIENT=192.0.2.1 12000 22\nQUOTED="two words"\n',
+     {"GIT_SSH_COMMAND": "ssh -i /task/key -o IdentitiesOnly=yes",
+      "SSH_CLIENT": "192.0.2.1 12000 22", "QUOTED": "two words"}),
+    ('{"KEY":"two words","EMPTY":null}', {"KEY": "two words", "EMPTY": ""}),
+])
+def test_temporary_environment_uses_production_secret_formats(tmp_path, content, expected):
+    path = tmp_path / "runtime.env"
+    path.write_text(content)
+    assert bootstrap._environment_file(path) == expected
+
+
+@pytest.mark.parametrize("content", ["INVALID-KEY=hidden", "KEY=one\nKEY=two", "not an assignment"])
+def test_temporary_environment_rejects_invalid_inputs_without_values(tmp_path, content):
+    path = tmp_path / "runtime.env"
+    path.write_text(content)
+    with pytest.raises(bootstrap.TemporaryTestnetBootstrapError, match="malformed") as error:
+        bootstrap._environment_file(path)
+    assert content not in str(error.value)
+
+
 class STS:
     def get_caller_identity(self):
         return {"Account": bootstrap.EXPECTED_AWS_ACCOUNT}

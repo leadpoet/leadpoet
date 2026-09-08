@@ -1196,6 +1196,154 @@ def _restart_enclaves():
     ]
 
 
+class _ProfileRepairNative:
+    NETWORK = "test"
+    CHAIN_ENDPOINT = "wss://test.finney.opentensor.ai:443"
+
+    def __init__(self, tmp_path):
+        from leadpoet_canonical.attested_v2 import sha256_json
+        from validator_tee.enclave.hotkey_authority_v2 import load_chain_signing_profile
+
+        source = ROOT / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+        profile = load_chain_signing_profile(source)
+        hotkey = tmp_path / "hotkey.json"
+        hotkey.write_text(json.dumps({
+            "schema_version": "leadpoet.validator_hotkey_config.v2",
+            "validator_hotkey": "5CJyMxw6YJJvLhPf58gSpMB7mvSKSCMx9RXhXJum6cNfqMEz",
+            "hotkey_public_key": "4" * 64,
+            "chain_signing_profile_hash": sha256_json(profile),
+            "drand_library_path": "/app/validator_tee/enclave/libbittensor_drand_v2.so",
+            "drand_library_sha256": "5" * 64,
+        }), encoding="utf-8")
+        self.profile_hash = sha256_json(profile)
+        self.processes = [
+            {"name": name, "pid": index, "start_ticks": index, "cmdline_hash": "x"}
+            for index, name in enumerate((
+                "gateway_application", "gateway_egress_relay",
+                "gateway_inter_enclave_relay", "validator_application",
+                "validator_chain_relay",
+            ), 10)
+        ]
+        self.config = {
+            "run_id": RUN_ID,
+            "candidate_sha": temporary_host.HOST_PROFILE_REPAIR_CANDIDATE_SHA,
+            "expected_instance_id": INSTANCE_ID,
+            "validator": {
+                "chain_profile": str(source), "hotkey_config": str(hotkey),
+            },
+        }
+
+    def load_config(self, _path):
+        return self.config
+
+    def verify_host_authority(self, _config):
+        return {"instance_id": INSTANCE_ID}
+
+    def validate_static_inputs(self, _config):
+        return {"chain_profile_hash": self.profile_hash}
+
+    def _load_process_state(self, _config):
+        return {"processes": self.processes}
+
+    def _same_process(self, item):
+        return item in self.processes
+
+
+def test_fixed_host_profile_repair_installs_public_profile_without_runtime_mutation(
+    tmp_path, monkeypatch,
+):
+    native = _ProfileRepairNative(tmp_path)
+    target = tmp_path / "app/validator_tee/enclave/chain_signing_profile_v2.json"
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, json.dumps(_restart_enclaves()), ""
+        ),
+    )
+    call = dict(
+        repository=str(ROOT), config_path=str(tmp_path / "config.json"),
+        expected_run_id=RUN_ID,
+        expected_candidate_sha=temporary_host.HOST_PROFILE_REPAIR_CANDIDATE_SHA,
+        expected_instance_id=INSTANCE_ID, native_module=native,
+        target_path=str(target), expected_owner_uid=os.getuid(),
+        expected_owner_gid=os.getgid(),
+    )
+    result = temporary_host._repair_testnet401_host_profile(**call)
+    second = temporary_host._repair_testnet401_host_profile(**call)
+    assert result == second
+    assert result["chain_profile_hash"] == native.profile_hash
+    assert result["process_mutation_performed"] is False
+    assert result["enclave_mutation_performed"] is False
+    assert target.stat().st_mode & 0o777 == 0o644
+    target.write_text("different\n", encoding="ascii")
+    with pytest.raises(RuntimeError, match="target differs"):
+        temporary_host._repair_testnet401_host_profile(**call)
+
+
+def test_host_profile_repair_program_is_fixed_to_9ce2_and_has_no_restart():
+    program = temporary_host.host_profile_repair_program(
+        run_id=RUN_ID,
+        candidate_sha=temporary_host.HOST_PROFILE_REPAIR_CANDIDATE_SHA,
+        instance_id=INSTANCE_ID,
+    )
+    compile(program, "<host-profile-repair>", "exec")
+    assert "/app/validator_tee/enclave/chain_signing_profile_v2.json" in program
+    assert "kill" not in program
+    assert "terminate-enclave" not in program
+    assert "set_weights" not in program
+    assert "secret-canary" not in program
+    with pytest.raises(temporary_host.TemporaryHostError, match="frozen candidate"):
+        temporary_host.host_profile_repair_program(
+            run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID,
+        )
+
+
+def test_controller_host_profile_repair_requires_exact_bounded_receipt():
+    candidate = temporary_host.HOST_PROFILE_REPAIR_CANDIDATE_SHA
+    ec2 = _EC2()
+    temporary_host.create_host(
+        ec2=ec2, ssm=_SSM(), account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION, run_id=RUN_ID, candidate_sha=candidate,
+        ttl_hours=6, now=NOW,
+    )
+    receipt = {
+        "schema_version": temporary_host.HOST_PROFILE_REPAIR_SCHEMA_VERSION,
+        "status": "ready", "run_id": RUN_ID, "candidate_sha": candidate,
+        "instance_id": INSTANCE_ID,
+        "chain_profile_hash": "sha256:" + "1" * 64,
+        "target": "/app/validator_tee/enclave/chain_signing_profile_v2.json",
+        "preserved_process_names": [
+            "gateway_application", "gateway_egress_relay",
+            "gateway_inter_enclave_relay", "validator_application",
+            "validator_chain_relay",
+        ],
+        "enclave_cids_unchanged": [16, 17, 18],
+        "process_mutation_performed": False,
+        "enclave_mutation_performed": False,
+    }
+    ssm = _StageSSM(json.dumps(receipt) + "\n")
+    result = temporary_host.run_host_profile_repair(
+        ec2=ec2, ssm=ssm, account_id=temporary_host.ACCOUNT_ID,
+        region=temporary_host.REGION, run_id=RUN_ID, candidate_sha=candidate,
+        instance_id=INSTANCE_ID, now=NOW,
+    )
+    command = ssm.commands[0]["Parameters"]["commands"][0]
+    assert result["ssm_command_id"] == "12345678-1234-1234-1234-123456789abc"
+    assert "repair_testnet401_host_profile" in command
+    assert "terminate-enclave" not in command
+    assert "set_weights" not in command
+
+    poisoned = dict(receipt, private_value="secret-canary")
+    with pytest.raises(temporary_host.TemporaryHostError, match="receipt differs") as error:
+        temporary_host.run_host_profile_repair(
+            ec2=ec2, ssm=_StageSSM(json.dumps(poisoned) + "\n"),
+            account_id=temporary_host.ACCOUNT_ID,
+            region=temporary_host.REGION, run_id=RUN_ID,
+            candidate_sha=candidate, instance_id=INSTANCE_ID, now=NOW,
+        )
+    assert "secret-canary" not in str(error.value)
+
+
 def test_fixed_gateway_restart_preserves_other_processes_enclaves_and_result(tmp_path, monkeypatch):
     native = _RestartNative(tmp_path)
     proc_root = tmp_path / "proc"
@@ -1940,6 +2088,7 @@ def test_temporary_workflow_reuses_oidc_route_and_scheduled_expiry_cleanup():
     assert "- testnet401-launch" in workflow
     assert "- testnet401-status" in workflow
     assert "- testnet401-restart-gateway-network" in workflow
+    assert "- testnet401-repair-host-profile" in workflow
     assert "- testnet401-cleanup" in workflow
     assert "inputs.operation != 'production-parity'" in workflow
     assert "format('testnet401-{0}'," in workflow
@@ -1953,7 +2102,9 @@ def test_temporary_workflow_reuses_oidc_route_and_scheduled_expiry_cleanup():
     assert "ssm-source-bootstrap" in workflow
     assert "ssm-native-stage" in workflow
     assert "ssm-restart-testnet401-gateway-network" in workflow
+    assert "ssm-repair-testnet401-host-profile" in workflow
     assert temporary_host.GATEWAY_NETWORK_RESTART_CANDIDATE_SHA in workflow
+    assert temporary_host.HOST_PROFILE_REPAIR_CANDIDATE_SHA in workflow
     assert "for stage in preflight launch" in workflow
     assert "--stage status" in workflow
     assert "--stage cleanup" in workflow

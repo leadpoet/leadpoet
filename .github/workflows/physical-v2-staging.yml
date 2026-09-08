@@ -20,6 +20,7 @@ on:
           - testnet401-proof
           - testnet401-export-public-release
           - testnet401-restart-gateway-network
+          - testnet401-repair-host-profile
           - testnet401-cleanup
       candidate_sha:
         description: Exact attested main commit to validate
@@ -1344,6 +1345,15 @@ jobs:
               test -z "$TESTNET401_PRIOR_RELEASE_RUN_ID"
               test -z "$TESTNET401_PRIOR_RELEASE_COMMIT"
               ;;
+            testnet401-repair-host-profile)
+              test "$CANDIDATE_SHA" = "9ce2cceb9f75947198b807634d3442cf81341b2a"
+              [[ "$TESTNET401_TARGET_RUN_ID" =~ ^pp-[0-9]{1,20}-[0-9]{1,6}$ ]]
+              [[ "$TESTNET401_TARGET_INSTANCE_ID" =~ ^i-([0-9a-f]{8}|[0-9a-f]{17})$ ]]
+              test -z "$TESTNET401_EPOCH_ID"
+              test -z "$TESTNET401_AFTER_LAST_UPDATE"
+              test -z "$TESTNET401_PRIOR_RELEASE_RUN_ID"
+              test -z "$TESTNET401_PRIOR_RELEASE_COMMIT"
+              ;;
             testnet401-inventory)
               [[ "$TESTNET401_TARGET_RUN_ID" =~ ^pp-[0-9]{1,20}-[0-9]{1,6}$ ]]
               test -z "$TESTNET401_TARGET_INSTANCE_ID"
@@ -1586,6 +1596,18 @@ jobs:
             --candidate-sha "$CANDIDATE_SHA" \
             --instance-id "${{ steps.identity.outputs.instance_id }}" \
             --state "$RUNNER_TEMP/temporary-testnet401-gateway-network-restart.json"
+
+      - name: Install the validated public testnet401 journal profile
+        if: inputs.operation == 'testnet401-repair-host-profile'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/temporary_testnet_signing_host.py \
+            --region "$AWS_REGION" ssm-repair-testnet401-host-profile \
+            --run-id "${{ steps.identity.outputs.run_id }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --instance-id "${{ steps.identity.outputs.instance_id }}" \
+            --state "$RUNNER_TEMP/temporary-testnet401-host-profile-repair.json"
 
       - name: Read exact temporary testnet401 resource inventory
         if: inputs.operation == 'testnet401-inventory'

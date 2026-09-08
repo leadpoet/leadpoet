@@ -38,6 +38,7 @@ COMBINED_ALLOCATOR_MEMORY_MIB = 66_560
 SCHEMA_VERSION = "leadpoet.temporary_testnet_signing_host.v1"
 RUN_RE = re.compile(r"^pp-[0-9]{1,20}-[0-9]{1,6}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 INSTANCE_ID_RE = re.compile(r"^i-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
 SECURITY_GROUP_ID_RE = re.compile(r"^sg-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
 VOLUME_ID_RE = re.compile(r"^vol-(?:[0-9a-f]{8}|[0-9a-f]{17})$")
@@ -68,6 +69,12 @@ GATEWAY_NETWORK_RESTART_CANDIDATE_SHA = (
 )
 GATEWAY_NETWORK_RESTART_SCHEMA_VERSION = (
     "leadpoet.temporary_testnet401_gateway_network_restart.v1"
+)
+HOST_PROFILE_REPAIR_CANDIDATE_SHA = (
+    "9ce2cceb9f75947198b807634d3442cf81341b2a"
+)
+HOST_PROFILE_REPAIR_SCHEMA_VERSION = (
+    "leadpoet.temporary_testnet401_host_profile_repair.v1"
 )
 NATIVE_STAGE_TIMEOUTS = {
     "preflight": 900,
@@ -1476,6 +1483,236 @@ def run_gateway_network_restart(
     }
 
 
+def _repair_testnet401_host_profile(
+    *, repository, config_path, expected_run_id, expected_candidate_sha,
+    expected_instance_id, native_module=None,
+    target_path="/app/validator_tee/enclave/chain_signing_profile_v2.json",
+    expected_owner_uid=0, expected_owner_gid=0,
+):
+    """Install only the validated public profile on the exact task host."""
+
+    import hashlib as _hashlib
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+    import stat as _stat
+    import subprocess as _subprocess
+    import sys as _sys
+
+    if native_module is None:
+        _sys.path.insert(0, repository)
+        from scripts import bootstrap_temporary_testnet_weights_host as native_module
+    n = native_module
+    config = n.load_config(_Path(config_path))
+    if (
+        config["run_id"] != expected_run_id
+        or config["candidate_sha"] != expected_candidate_sha
+        or config["expected_instance_id"] != expected_instance_id
+        or expected_candidate_sha != HOST_PROFILE_REPAIR_CANDIDATE_SHA
+    ):
+        raise RuntimeError("host profile repair identity differs")
+    n.verify_host_authority(config)
+    static = n.validate_static_inputs(config)
+    state = n._load_process_state(config)
+    expected_processes = {
+        "gateway_application", "gateway_egress_relay",
+        "gateway_inter_enclave_relay", "validator_application",
+        "validator_chain_relay",
+    }
+    processes = [dict(item) for item in state["processes"]]
+    if (
+        len(processes) != len(expected_processes)
+        or {item.get("name") for item in processes} != expected_processes
+        or any(not n._same_process(item) for item in processes)
+    ):
+        raise RuntimeError("host profile repair process identity differs")
+
+    described = _subprocess.run(
+        ["nitro-cli", "describe-enclaves"], check=True,
+        capture_output=True, text=True,
+    )
+    enclaves = sorted(
+        _json.loads(described.stdout), key=lambda item: int(item["EnclaveCID"])
+    )
+    if (
+        len(enclaves) != 3
+        or [int(item.get("EnclaveCID") or -1) for item in enclaves] != [16, 17, 18]
+        or any(item.get("State") != "RUNNING" for item in enclaves)
+        or enclaves[2].get("EnclaveName") != "leadpoet-testnet401-validator"
+    ):
+        raise RuntimeError("host profile repair enclave identity differs")
+
+    from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+    from validator_tee.enclave.hotkey_authority_v2 import (
+        load_chain_signing_profile,
+        validate_hotkey_authority_configuration,
+    )
+    validator = config["validator"]
+    profile = load_chain_signing_profile(_Path(validator["chain_profile"]))
+    hotkey = validate_hotkey_authority_configuration(
+        _json.loads(_Path(validator["hotkey_config"]).read_text(encoding="utf-8"))
+    )
+    profile_hash = sha256_json(profile)
+    if (
+        profile_hash != static["chain_profile_hash"]
+        or hotkey.get("chain_signing_profile_hash") != profile_hash
+        or profile.get("network") != n.NETWORK
+        or profile.get("chain_endpoint") != n.CHAIN_ENDPOINT
+    ):
+        raise RuntimeError("host profile repair profile identity differs")
+    content = (canonical_json(profile) + "\n").encode("ascii")
+    if "sha256:" + _hashlib.sha256(content.rstrip(b"\n")).hexdigest() != profile_hash:
+        raise RuntimeError("host profile repair profile hash differs")
+    target = _Path(target_path)
+    if not target.is_absolute() or target == _Path("/") or ".." in target.parts:
+        raise RuntimeError("host profile repair target path differs")
+    current = _Path("/")
+    for part in target.parent.parts[1:]:
+        current = current / part
+        try:
+            current.mkdir(mode=0o755)
+        except FileExistsError:
+            pass
+        metadata = current.lstat()
+        if not _stat.S_ISDIR(metadata.st_mode) or _stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError("host profile repair directory differs")
+    try:
+        descriptor = _os.open(
+            target,
+            _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL
+            | getattr(_os, "O_NOFOLLOW", 0),
+            0o644,
+        )
+    except FileExistsError:
+        metadata = target.lstat()
+        if (
+            not _stat.S_ISREG(metadata.st_mode)
+            or _stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != expected_owner_uid
+            or metadata.st_gid != expected_owner_gid
+            or _stat.S_IMODE(metadata.st_mode) != 0o644
+            or target.read_bytes() != content
+        ):
+            raise RuntimeError("host profile repair target differs")
+    else:
+        with _os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            _os.fsync(stream.fileno())
+        directory = _os.open(
+            target.parent, _os.O_RDONLY | getattr(_os, "O_DIRECTORY", 0)
+        )
+        try:
+            _os.fsync(directory)
+        finally:
+            _os.close(directory)
+    metadata = target.lstat()
+    if (
+        not _stat.S_ISREG(metadata.st_mode)
+        or _stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != expected_owner_uid
+        or metadata.st_gid != expected_owner_gid
+        or _stat.S_IMODE(metadata.st_mode) != 0o644
+        or load_chain_signing_profile(target, expected_hash=profile_hash) != profile
+    ):
+        raise RuntimeError("host profile repair readback differs")
+    if any(not n._same_process(item) for item in processes):
+        raise RuntimeError("host profile repair changed process identity")
+    after = _subprocess.run(
+        ["nitro-cli", "describe-enclaves"], check=True,
+        capture_output=True, text=True,
+    )
+    if _json.loads(after.stdout) != _json.loads(described.stdout):
+        raise RuntimeError("host profile repair changed enclave identity")
+    return {
+        "schema_version": HOST_PROFILE_REPAIR_SCHEMA_VERSION,
+        "status": "ready",
+        "run_id": config["run_id"],
+        "candidate_sha": config["candidate_sha"],
+        "instance_id": config["expected_instance_id"],
+        "chain_profile_hash": profile_hash,
+        "target": str(target),
+        "preserved_process_names": sorted(expected_processes),
+        "enclave_cids_unchanged": [16, 17, 18],
+        "process_mutation_performed": False,
+        "enclave_mutation_performed": False,
+    }
+
+
+def host_profile_repair_program(
+    *, run_id: str, candidate_sha: str, instance_id: str,
+) -> str:
+    if candidate_sha != HOST_PROFILE_REPAIR_CANDIDATE_SHA:
+        raise TemporaryHostError("host profile repair is not for the frozen candidate")
+    return (
+        "import json\n"
+        f"HOST_PROFILE_REPAIR_CANDIDATE_SHA={HOST_PROFILE_REPAIR_CANDIDATE_SHA!r}\n"
+        f"HOST_PROFILE_REPAIR_SCHEMA_VERSION={HOST_PROFILE_REPAIR_SCHEMA_VERSION!r}\n"
+        + inspect.getsource(_repair_testnet401_host_profile)
+        + "\nprint(json.dumps(_repair_testnet401_host_profile("
+        f"repository={SOURCE_REPOSITORY!r},config_path={NATIVE_CONFIG!r},"
+        f"expected_run_id={run_id!r},expected_candidate_sha={candidate_sha!r},"
+        f"expected_instance_id={instance_id!r}),sort_keys=True))\n"
+    )
+
+
+def run_host_profile_repair(
+    *, ec2: Any, ssm: Any, account_id: str, region: str, run_id: str,
+    candidate_sha: str, instance_id: str, now: datetime,
+) -> dict[str, Any]:
+    if account_id != ACCOUNT_ID or region != REGION:
+        raise TemporaryHostError("host profile repair AWS scope differs")
+    _require_live_host(
+        ec2, instance_id=instance_id, run_id=run_id,
+        candidate_sha=candidate_sha, now=now,
+    )
+    program = host_profile_repair_program(
+        run_id=run_id, candidate_sha=candidate_sha, instance_id=instance_id,
+    )
+    command_id, stdout = _send_fixed_ssm(
+        ssm, instance_id=instance_id,
+        command=(
+            "set -Eeuo pipefail\nexec "
+            f"{shlex.quote(SOURCE_VENV + '/bin/python3')} -I -c "
+            f"{shlex.quote(program)}"
+        ),
+        timeout_seconds=900,
+    )
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise TemporaryHostError("host profile repair receipt is invalid") from exc
+    expected = {
+        "schema_version", "status", "run_id", "candidate_sha", "instance_id",
+        "chain_profile_hash", "target", "preserved_process_names",
+        "enclave_cids_unchanged", "process_mutation_performed",
+        "enclave_mutation_performed",
+    }
+    if (
+        not isinstance(result, Mapping)
+        or set(result) != expected
+        or result.get("schema_version") != HOST_PROFILE_REPAIR_SCHEMA_VERSION
+        or result.get("status") != "ready"
+        or result.get("run_id") != run_id
+        or result.get("candidate_sha") != candidate_sha
+        or result.get("instance_id") != instance_id
+        or result.get("target") != "/app/validator_tee/enclave/chain_signing_profile_v2.json"
+        or result.get("preserved_process_names") != [
+            "gateway_application", "gateway_egress_relay",
+            "gateway_inter_enclave_relay", "validator_application",
+            "validator_chain_relay",
+        ]
+        or result.get("enclave_cids_unchanged") != [16, 17, 18]
+        or result.get("process_mutation_performed") is not False
+        or result.get("enclave_mutation_performed") is not False
+        or HASH_RE.fullmatch(str(result.get("chain_profile_hash") or "")) is None
+    ):
+        raise TemporaryHostError("host profile repair receipt differs")
+    return {key: result[key] for key in sorted(expected)} | {
+        "ssm_command_id": command_id
+    }
+
+
 def run_native_stage(
     *,
     ec2: Any,
@@ -2620,6 +2857,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     restart_gateway.add_argument("--candidate-sha", required=True)
     restart_gateway.add_argument("--instance-id", required=True)
     restart_gateway.add_argument("--state", type=Path, required=True)
+    repair_profile = commands.add_parser("ssm-repair-testnet401-host-profile")
+    repair_profile.add_argument("--run-id", required=True)
+    repair_profile.add_argument("--candidate-sha", required=True)
+    repair_profile.add_argument("--instance-id", required=True)
+    repair_profile.add_argument("--state", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         session = boto3.session.Session(region_name=args.region)
@@ -2718,6 +2960,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write(args.state, result)
         elif args.command == "ssm-restart-testnet401-gateway-network":
             result = run_gateway_network_restart(
+                ec2=ec2,
+                ssm=session.client("ssm"),
+                account_id=account_id,
+                region=args.region,
+                run_id=args.run_id,
+                candidate_sha=candidate_sha,
+                instance_id=args.instance_id,
+                now=now,
+            )
+            _write(args.state, result)
+        elif args.command == "ssm-repair-testnet401-host-profile":
+            result = run_host_profile_repair(
                 ec2=ec2,
                 ssm=session.client("ssm"),
                 account_id=account_id,

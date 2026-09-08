@@ -10,11 +10,20 @@ from gateway.tee.coordinator_executor_v2 import (
     coordinator_receipt_output_v2,
 )
 from gateway.tee.release_channel_v2 import (
+    ReleaseChannelV2Error,
     build_release_channel_v2,
     build_release_lineage_v2,
 )
+from gateway.tee.release_lineage_v2 import (
+    ReleaseLineageV2Error,
+    load_approved_release_lineage_v2,
+)
 from scripts import bootstrap_temporary_testnet_weights_host as bootstrap
-from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+from tests.test_release_channel_v2 import (
+    _gateway_manifest,
+    _local_gateway_manifest,
+    _local_validator_manifest,
+)
 
 
 def _private_json(path: Path, value):
@@ -91,11 +100,11 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
     prior_commit = "1" * 40
     current_commit = "2" * 40
     prior = build_release_channel_v2(
-        gateway_release_manifest=_gateway_manifest(prior_commit),
-        validator_release_manifest=_validator_manifest(prior_commit),
+        gateway_release_manifest=_local_gateway_manifest(prior_commit),
+        validator_release_manifest=_local_validator_manifest(prior_commit),
     )
-    current_gateway = _gateway_manifest(current_commit)
-    current_validator = _validator_manifest(current_commit)
+    current_gateway = _local_gateway_manifest(current_commit)
+    current_validator = _local_validator_manifest(current_commit)
     current = build_release_channel_v2(
         gateway_release_manifest=current_gateway,
         validator_release_manifest=current_validator,
@@ -115,13 +124,20 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
         (lineage_path, lineage),
     ):
         _private_json(path, value)
-    bootstrap._install_canonical_gateway_release(
+    installed = bootstrap._install_canonical_gateway_release(
         {
             "candidate_sha": current_commit,
             "gateway": {"release_manifest": str(staged_gateway)},
         },
         destination=canonical_gateway,
     )
+    assert bootstrap._install_canonical_gateway_release(
+        {
+            "candidate_sha": current_commit,
+            "gateway": {"release_manifest": str(staged_gateway)},
+        },
+        destination=canonical_gateway,
+    ) == installed
     monkeypatch.setattr(
         attested_coordinator_v2,
         "DEFAULT_RELEASE_MANIFEST_PATH",
@@ -154,10 +170,13 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
     monkeypatch.setenv("BITTENSOR_NETUID", "401")
     monkeypatch.setenv("ALLOWED_NETUIDS", "401")
 
+    observed = {}
+
     async def execute(**kwargs):
         assert kwargs["release_manifest"] is None
         assert kwargs["release_manifest_path"] == canonical_gateway
         loader = kwargs["release_channel_loader"]
+        observed["loader"] = loader
         assert loader(prior_commit) == prior
         assert loader(current_commit) == current
         with pytest.raises(RuntimeError, match="not approved"):
@@ -175,6 +194,40 @@ async def test_normal_testnet401_coordinator_uses_installed_release_and_local_li
     )
     assert result == {"status": "succeeded"}
     assert canonical_gateway.stat().st_mode & 0o777 == 0o600
+    approved = load_approved_release_lineage_v2(
+        current_release=current_gateway,
+        parent_graphs=[
+            {
+                "boot_identities": [
+                    {"commit_sha": prior_commit, "physical_role": "gateway_coordinator"},
+                    {"commit_sha": prior_commit, "physical_role": "validator_weights"},
+                    {"commit_sha": current_commit, "physical_role": "validator_weights"},
+                ]
+            }
+        ],
+        release_channel_loader=observed["loader"],
+    )
+    assert approved[prior_commit] == {
+        "gateway_release_manifest": prior["gateway_release_manifest"],
+        "validator_release_manifest": prior["validator_release_manifest"],
+    }
+    assert approved[current_commit] == {
+        "gateway_release_manifest": current["gateway_release_manifest"],
+        "validator_release_manifest": current["validator_release_manifest"],
+    }
+
+    tampered_lineage = {**lineage, "lineage_hash": "sha256:" + "0" * 64}
+    _private_json(lineage_path, tampered_lineage)
+    with pytest.raises(ReleaseLineageV2Error):
+        attested_coordinator_v2._temporary_testnet401_release_channel_loader(
+            current_release_path=canonical_gateway
+        )
+    _private_json(lineage_path, lineage)
+    _private_json(validator_path, _local_validator_manifest("3" * 40))
+    with pytest.raises(ReleaseChannelV2Error):
+        attested_coordinator_v2._temporary_testnet401_release_channel_loader(
+            current_release_path=canonical_gateway
+        )
 
 
 @pytest.mark.asyncio

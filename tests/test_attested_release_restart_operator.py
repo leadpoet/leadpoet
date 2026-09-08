@@ -294,6 +294,8 @@ gateway_handoff_file='/tmp/handoff'
 gateway_handoff_nonce='{'2' * 64}'
 gateway_validator_requirements_remote='/tmp/validator-requirements.json'
 gateway_counterpart_lineage_remote='/tmp/counterpart-lineage.json'
+gateway_local_gateway_release_remote='/tmp/gateway-local-gateway-release.json'
+gateway_local_validator_release_remote='/tmp/gateway-local-validator-release.json'
 active_release_restart_invocation_id='restart-fixture'
 paired_gateway_handoff_file='/tmp/leadpoet-gateway-paired-restart.fixture.ready'
 paired_gateway_handoff_nonce='{'4' * 64}'
@@ -510,6 +512,8 @@ gateway_handoff_file=''
 gateway_handoff_nonce=''
 gateway_validator_requirements_remote='/tmp/validator-requirements.json'
 gateway_counterpart_lineage_remote='/tmp/counterpart-lineage.json'
+gateway_local_gateway_release_remote='/tmp/gateway-local-gateway-release.json'
+gateway_local_validator_release_remote='/tmp/gateway-local-validator-release.json'
 active_release_restart_invocation_id='restart-fixture'
 paired_gateway_handoff_file='/tmp/leadpoet-gateway-paired-restart.fixture.ready'
 paired_gateway_handoff_nonce='{'4' * 64}'
@@ -1138,6 +1142,31 @@ case "$command" in
     touch "$FAKE_OPERATOR_GATEWAY_HANDOFF"
     ;;
   *release_channel_v2*--ensure*)
+    if [ "${FAKE_AMBIENT_LOCAL_RELEASE:-0}" = "1" ]; then
+      for name in \
+        LEADPOET_LOCAL_RELEASE_COMMIT_SHA \
+        LEADPOET_LOCAL_GATEWAY_RELEASE \
+        LEADPOET_LOCAL_VALIDATOR_RELEASE \
+        LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE; do
+        if [[ "$command" != *"-u $name"* ]]; then
+          record ambient_release_override_not_cleared
+          exit 80
+        fi
+        export "$name=ambient-short-circuit"
+      done
+      env \
+        -u LEADPOET_LOCAL_RELEASE_COMMIT_SHA \
+        -u LEADPOET_LOCAL_GATEWAY_RELEASE \
+        -u LEADPOET_LOCAL_VALIDATOR_RELEASE \
+        -u LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE \
+        bash -c '
+          test -z "${LEADPOET_LOCAL_RELEASE_COMMIT_SHA+x}"
+          test -z "${LEADPOET_LOCAL_GATEWAY_RELEASE+x}"
+          test -z "${LEADPOET_LOCAL_VALIDATOR_RELEASE+x}"
+          test -z "${LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE+x}"
+        '
+      record ambient_release_overrides_cleared
+    fi
     if [ "${FAKE_EXISTING_RELEASE_CHANNEL:-0}" = "1" ]; then
       record existing_release_channel_fetched
       printf '%s\n' present
@@ -1547,6 +1576,7 @@ def test_paired_operator_accepts_existing_full_channel_only_after_role_check(
     )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_EXISTING_RELEASE_CHANNEL"] = "1"
+    environment["FAKE_AMBIENT_LOCAL_RELEASE"] = "1"
 
     result = subprocess.run(
         _operator_argv(bin_dir, commit),
@@ -1560,6 +1590,8 @@ def test_paired_operator_accepts_existing_full_channel_only_after_role_check(
     assert result.returncode == 0, result.stderr
     observed = events.read_text(encoding="utf-8").splitlines()
     assert "existing_release_channel_fetched" in observed
+    assert "ambient_release_overrides_cleared" in observed
+    assert "ambient_release_override_not_cleared" not in observed
     assert "paired_release_published" not in observed
     assert "paired_gateway_handoff_released" in observed
     assert observed.index("existing_release_channel_fetched") < observed.index(

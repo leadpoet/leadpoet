@@ -3956,6 +3956,226 @@ def test_gateway_failure_retains_candidate_bound_timing_from_real_emitter(
     } in retained["component_failure_diagnostics"]
 
 
+def _gateway_aws_authority_source_error() -> str:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function_start = restart.index("validate_gateway_aws_authority() {")
+    function_end = restart.index("\non_gateway_restart_exit()", function_start)
+    emitted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            restart[function_start:function_end]
+            + "\nAWS_PROFILE=must-not-survive\nvalidate_gateway_aws_authority",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert emitted.returncode == 1
+    assert emitted.stdout == ""
+    return emitted.stderr.strip()
+
+
+def _gateway_bootstrap_failure_stream(
+    observation: str,
+    *,
+    start_candidate: str = "c" * 40,
+    timing: str | None = None,
+    before_start: str = "",
+    after_observation: str = "",
+) -> str:
+    candidate_sha = "c" * 40
+    timing = timing or (
+        "REHEARSAL_GATEWAY_RESTART_TIMING "
+        f"candidate={candidate_sha} stage=bootstrap status=failed "
+        "elapsed_seconds=7.454"
+    )
+    return (
+        before_start
+        + f"REHEARSAL_START component=gateway from={'b' * 40} "
+        + f"candidate={start_candidate} transition=forward "
+        + "scenario=production_success scope=exact\n"
+        + observation
+        + "\n"
+        + after_observation
+        + "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=1\n"
+        + timing
+        + "\nERROR: exact gateway launcher failed\n"
+    )
+
+
+def test_gateway_bootstrap_observation_survives_interleaving_and_full_tail(
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "c" * 40
+    source_error = _gateway_aws_authority_source_error()
+    stream = _gateway_bootstrap_failure_stream(
+        source_error,
+        after_observation=(
+            f"REHEARSAL_START component=validator from={'b' * 40} "
+            f"candidate={candidate_sha} transition=forward\n"
+        ),
+    )
+    stream += ("later validator output must not survive\n" * 512)
+    stream += "REHEARSAL_TIME_BUDGET_EXCEEDED profile=prepush elapsed_seconds=608\n"
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        subprocess.CompletedProcess(["rehearsal"], 1, stdout=stream, stderr=""),
+        candidate_sha=candidate_sha,
+    )
+
+    observation = {
+        "marker": "gateway_bootstrap_observation",
+        "identifier": "delegated_aws_authority",
+        "source_scope": "gateway_source",
+    }
+    assert observation in diagnostics["output_markers"]
+    assert {"marker": "time_budget", "profile": "prepush"} in diagnostics[
+        "output_markers"
+    ]
+    projection_path = tmp_path / "failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert observation in retained["component_failure_diagnostics"]
+    encoded = json.dumps(retained, sort_keys=True)
+    assert "must-not-survive" not in encoded
+    assert "AWS_PROFILE" not in encoded
+    assert "later validator output" not in encoded
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        _gateway_bootstrap_failure_stream(
+            "ERROR: gateway restart AWS region differs from us-east-1",
+            start_candidate="d" * 40,
+        ),
+        (
+            f"REHEARSAL_START component=validator from={'b' * 40} "
+            f"candidate={'c' * 40} transition=forward\n"
+            + _gateway_bootstrap_failure_stream("").split("\n", 1)[1]
+        ),
+        _gateway_bootstrap_failure_stream(
+            "",
+            before_start="ERROR: gateway restart AWS region differs from us-east-1\n",
+        ),
+        _gateway_bootstrap_failure_stream(
+            "ERROR: gateway restart AWS region differs from us-east-1",
+            after_observation=(
+                f"REHEARSAL_SUCCESS component=gateway candidate={'c' * 40}\n"
+            ),
+        ),
+        _gateway_bootstrap_failure_stream(
+            "ERROR: gateway restart AWS region differs from us-east-1 trailing-data"
+        ),
+    ],
+)
+def test_gateway_bootstrap_observation_requires_exact_terminal_failure(
+    stream: str,
+) -> None:
+    observations = fast_parity._rehearsal_gateway_bootstrap_observations(
+        stream,
+        candidate_sha="c" * 40,
+    )
+    assert observations == []
+
+
+@pytest.mark.parametrize(
+    "timing",
+    [
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'d' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds=7.454",
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=git_prepare status=failed elapsed_seconds=7.454",
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds="
+        f"{fast_parity.GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS + 1}",
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds=7.454\n"
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds=8.000",
+    ],
+)
+def test_gateway_bootstrap_observation_requires_one_valid_timing(
+    timing: str,
+) -> None:
+    stream = _gateway_bootstrap_failure_stream(
+        "ERROR: gateway restart AWS region differs from us-east-1",
+        timing=timing,
+    )
+    assert fast_parity._rehearsal_gateway_bootstrap_observations(
+        stream,
+        candidate_sha="c" * 40,
+    ) == []
+
+
+def test_gateway_bootstrap_observation_projects_safe_interleaved_kinds() -> None:
+    secret = "must-not-survive-bootstrap-observation"
+    stream = _gateway_bootstrap_failure_stream(
+        f"REHEARSAL CONTRACT ERROR [aws]: {secret}\nRuntimeError: {secret}"
+    )
+    observations = fast_parity._rehearsal_gateway_bootstrap_observations(
+        stream,
+        candidate_sha="c" * 40,
+    )
+
+    assert observations == [
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "contract_error",
+            "kind": "aws",
+            "source_scope": "interleaved_component_stream",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "exception",
+            "error_type": "RuntimeError",
+            "source_scope": "interleaved_component_stream",
+        },
+    ]
+    assert secret not in json.dumps(observations, sort_keys=True)
+
+
+def test_gateway_bootstrap_observation_allowlist_matches_restart_source() -> None:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    for prefix, _identifier in fast_parity.GATEWAY_BOOTSTRAP_ERROR_PREFIXES:
+        assert prefix in restart
+
+
+def test_retained_gateway_bootstrap_observation_rejects_malformed_fields() -> None:
+    markers = [
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": ["aws_region"],
+            "source_scope": "gateway_source",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "contract_error",
+            "kind": {"aws": True},
+            "source_scope": "interleaved_component_stream",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "exception",
+            "error_type": ["RuntimeError"],
+            "source_scope": "interleaved_component_stream",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "attacker_controlled",
+            "source_scope": "gateway_source",
+        },
+    ]
+
+    assert fast_parity._retained_component_failure_diagnostics(markers) == []
+
+
 @pytest.mark.parametrize(
     "timing_marker",
     [

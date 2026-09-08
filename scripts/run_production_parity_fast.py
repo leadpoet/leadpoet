@@ -190,6 +190,53 @@ SAFE_REHEARSAL_CONTRACT_KINDS = frozenset(
         "systemctl",
     }
 )
+GATEWAY_BOOTSTRAP_ERROR_PREFIXES = (
+    ("ERROR: gateway restart authority controller is invalid", "controller_authority"),
+    ("ERROR: paired gateway destructive handoff authority is incomplete", "paired_handoff_incomplete"),
+    ("ERROR: paired gateway destructive handoff authority is invalid", "paired_handoff_invalid"),
+    ("ERROR: paired gateway restart requires a destructive handoff", "paired_handoff_missing"),
+    ("ERROR: gateway restart timing ledger must not be a symlink", "timing_ledger_symlink"),
+    ("ERROR: gateway restart timing ledger is unavailable", "timing_ledger_unavailable"),
+    ("ERROR: gateway restart timing ledger is empty", "timing_ledger_empty"),
+    ("ERROR: gateway restart timing ledger name is invalid", "timing_ledger_name"),
+    ("ERROR: gateway restart timing ledger epoch differs from active restart", "timing_ledger_epoch"),
+    ("ERROR: gateway restart timing ledger PID differs from active restart", "timing_ledger_pid"),
+    ("ERROR: gateway restart timing ledger is outside the canonical directory", "timing_ledger_directory"),
+    ("ERROR: gateway release supersession counters are invalid", "release_supersession"),
+    ("ERROR: another gateway restart is already running", "restart_lock_held"),
+    ("ERROR: gateway restart lock recovery lost a concurrency race", "restart_lock_race"),
+    ("ERROR: flock is required for gateway Git deployments", "flock_unavailable"),
+    ("ERROR: re-executed gateway restart lost the deployment lock", "deployment_lock_lost"),
+    ("ERROR: gateway restart inherited delegated AWS authority:", "delegated_aws_authority"),
+    ("ERROR: gateway restart AWS region differs from us-east-1", "aws_region"),
+    ("ERROR: gateway restart instance-role-only authority differs", "instance_role_authority"),
+    ("ERROR: emergency Docker lock helper is unavailable", "emergency_lock_helper"),
+    ("ERROR: emergency Docker cleanup could not acquire its operation lock", "emergency_cleanup_lock"),
+    ("ERROR: guarded emergency Docker cleanup failed closed", "emergency_cleanup"),
+    ("ERROR: hydrated/cloned env missing SUPABASE_SERVICE_ROLE_KEY", "service_role_missing"),
+    ("ERROR: configured gateway Python is unavailable:", "python_unavailable"),
+    ("ERROR: gateway V2 requires Python 3.11 or newer; observed", "python_version"),
+    ("ERROR: one-time cutover restart-start capture is missing", "cutover_capture_missing"),
+    ("ERROR: GATEWAY_STATEFUL_CUTOVER_CEREMONY must be 0 or 1", "cutover_flag"),
+    ("ERROR: RESEARCH_LAB_TEE_PROTOCOL must be v2; V1 authority is retired", "tee_protocol"),
+    ("ERROR: gateway Git deployment helper is missing:", "git_helper_missing"),
+)
+GATEWAY_BOOTSTRAP_ERROR_WITH_DETAIL_IDENTIFIERS = frozenset(
+    {
+        "delegated_aws_authority",
+        "git_helper_missing",
+        "python_unavailable",
+        "python_version",
+    }
+)
+SAFE_GATEWAY_BOOTSTRAP_OBSERVATION_IDENTIFIERS = frozenset(
+    identifier for _, identifier in GATEWAY_BOOTSTRAP_ERROR_PREFIXES
+) | {
+    "contract_error",
+    "exception",
+    "secret_path_missing",
+    "secret_path_not_absolute",
+}
 SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = SAFE_REHEARSAL_ERROR_TYPES | {
     "None",
     "OtherError",
@@ -1717,6 +1764,153 @@ def _rehearsal_postgrest_startup_diagnostics(
     return diagnostics
 
 
+def _gateway_bootstrap_line_observation(line: str) -> dict[str, Any] | None:
+    """Project one source-reviewed bootstrap line without its free text."""
+
+    if not line or len(line) > 2048:
+        return None
+    for prefix, identifier in GATEWAY_BOOTSTRAP_ERROR_PREFIXES:
+        if line == prefix or (
+            identifier in GATEWAY_BOOTSTRAP_ERROR_WITH_DETAIL_IDENTIFIERS
+            and line.startswith(prefix + " ")
+        ):
+            return {
+                "marker": "gateway_bootstrap_observation",
+                "identifier": identifier,
+                "source_scope": "gateway_source",
+            }
+    secret_path = re.fullmatch(
+        r"ERROR: (?:GATEWAY_PRIVATE_KEY_PATH|ARWEAVE_KEYFILE_PATH) "
+        r"must be configured as an absolute path for Git-checkout deployment",
+        line,
+    )
+    if secret_path is not None:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "secret_path_not_absolute",
+            "source_scope": "gateway_source",
+        }
+    missing_secret = re.fullmatch(
+        r"ERROR: configured (?:GATEWAY_PRIVATE_KEY_PATH|ARWEAVE_KEYFILE_PATH) "
+        r"file does not exist",
+        line,
+    )
+    if missing_secret is not None:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "secret_path_missing",
+            "source_scope": "gateway_source",
+        }
+    contract_error = re.match(r"REHEARSAL CONTRACT ERROR \[([a-z-]+)\]:", line)
+    if contract_error and contract_error.group(1) in SAFE_REHEARSAL_CONTRACT_KINDS:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "contract_error",
+            "kind": contract_error.group(1),
+            "source_scope": "interleaved_component_stream",
+        }
+    exception = re.match(r"([A-Za-z][A-Za-z0-9_]*):", line)
+    if exception and exception.group(1) in SAFE_REHEARSAL_ERROR_TYPES:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "exception",
+            "error_type": exception.group(1),
+            "source_scope": "interleaved_component_stream",
+        }
+    return None
+
+
+def _rehearsal_gateway_bootstrap_observations(
+    *streams: str,
+    candidate_sha: str,
+) -> list[dict[str, Any]]:
+    """Retain fixed observations from one exact terminal bootstrap failure."""
+
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+        return []
+    for stream in streams:
+        active = False
+        invalid = False
+        terminal_failure = False
+        bootstrap_failure = False
+        timing_diagnostic_count = 0
+        observations: list[dict[str, Any]] = []
+        for raw_line in stream.splitlines():
+            line = raw_line.strip()
+            start = re.fullmatch(
+                r"REHEARSAL_START component=gateway from=([0-9a-f]{40}) "
+                r"candidate=([0-9a-f]{40}) transition=(forward|rollback) "
+                r"scenario=([a-z0-9_]{1,64}) scope=exact",
+                line,
+            )
+            if start is not None:
+                if active or invalid or start.group(2) != candidate_sha:
+                    invalid = True
+                    active = False
+                else:
+                    active = True
+                    invalid = False
+                    terminal_failure = False
+                    bootstrap_failure = False
+                    timing_diagnostic_count = 0
+                    observations = []
+                continue
+            if not active:
+                continue
+            if line == f"REHEARSAL_SUCCESS component=gateway candidate={candidate_sha}":
+                active = False
+                invalid = False
+                observations = []
+                continue
+            failure = re.fullmatch(
+                r"REHEARSAL_FAILURE_DIAGNOSTICS component=gateway "
+                r"status=([1-9][0-9]{0,2})",
+                line,
+            )
+            if failure is not None and int(failure.group(1)) <= 255:
+                terminal_failure = True
+                continue
+            if terminal_failure and line.startswith(
+                "REHEARSAL_GATEWAY_RESTART_TIMING "
+            ):
+                timing_diagnostic_count += 1
+                timing = re.fullmatch(
+                    r"REHEARSAL_GATEWAY_RESTART_TIMING "
+                    r"candidate=([0-9a-f]{40}) stage=([a-z0-9_]{1,64}) "
+                    r"status=([a-z]{1,16}) "
+                    r"elapsed_seconds=([0-9]+(?:\.[0-9]{1,3})?)",
+                    line,
+                )
+                elapsed = float(timing.group(4)) if timing is not None else -1
+                bootstrap_failure = (
+                    timing is not None
+                    and timing_diagnostic_count == 1
+                    and timing.group(1) == candidate_sha
+                    and timing.group(2) == "bootstrap"
+                    and timing.group(3) == "failed"
+                    and 0
+                    <= elapsed
+                    <= GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS
+                )
+                continue
+            if line == "ERROR: exact gateway launcher failed":
+                if (
+                    not invalid
+                    and terminal_failure
+                    and bootstrap_failure
+                    and observations
+                ):
+                    return observations[:8]
+                active = False
+                observations = []
+                continue
+            if not terminal_failure:
+                observation = _gateway_bootstrap_line_observation(line)
+                if observation is not None and observation not in observations:
+                    observations.append(observation)
+    return []
+
+
 def _rehearsal_component_failure_diagnostics(
     *streams: str,
     candidate_sha: str,
@@ -1825,6 +2019,40 @@ def _retained_component_failure_diagnostics(
                 "component": item["component"],
                 "status": item["status"],
             }
+        elif (
+            marker == "gateway_bootstrap_observation"
+            and isinstance(item.get("identifier"), str)
+            and item["identifier"] in SAFE_GATEWAY_BOOTSTRAP_OBSERVATION_IDENTIFIERS
+        ):
+            projected = {
+                "marker": marker,
+                "identifier": item["identifier"],
+            }
+            expected_scope = (
+                "interleaved_component_stream"
+                if item["identifier"] in {"contract_error", "exception"}
+                else "gateway_source"
+            )
+            if item.get("source_scope") != expected_scope:
+                projected = None
+            else:
+                projected["source_scope"] = expected_scope
+            if projected is not None and item["identifier"] == "contract_error":
+                if (
+                    not isinstance(item.get("kind"), str)
+                    or item["kind"] not in SAFE_REHEARSAL_CONTRACT_KINDS
+                ):
+                    projected = None
+                else:
+                    projected["kind"] = item["kind"]
+            elif projected is not None and item["identifier"] == "exception":
+                if (
+                    not isinstance(item.get("error_type"), str)
+                    or item["error_type"] not in SAFE_REHEARSAL_ERROR_TYPES
+                ):
+                    projected = None
+                else:
+                    projected["error_type"] = item["error_type"]
         elif (
             marker == "gateway_restart_timing"
             and isinstance(item.get("final_stage"), str)
@@ -1984,6 +2212,11 @@ def _rehearsal_failure_diagnostics(
             exact_image_build_failed=exact_image_build_failed,
         ),
         *_rehearsal_postgrest_startup_diagnostics(stdout_text, stderr_text),
+        *_rehearsal_gateway_bootstrap_observations(
+            stdout_text,
+            stderr_text,
+            candidate_sha=candidate_sha,
+        ),
         *_rehearsal_component_failure_diagnostics(
             stdout_text,
             stderr_text,

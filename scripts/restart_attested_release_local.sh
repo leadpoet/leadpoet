@@ -83,6 +83,13 @@ validator_final_lineage_remote=""
 validator_recovery_requirements_remote=""
 validator_recovery_lineage_remote=""
 validator_missing_runtime_recovery=0
+gateway_counterpart_lineage_remote=""
+gateway_local_gateway_release_remote=""
+gateway_local_validator_release_remote=""
+paired_release_channel_local=""
+paired_release_channel_remote=""
+gateway_existing_gateway_release_remote=""
+gateway_existing_validator_release_remote=""
 validator_initial_requirements_local=""
 gateway_final_requirements_local=""
 gateway_final_lineage_local=""
@@ -245,7 +252,7 @@ cleanup() {
   fi
   if [ -n "${gateway_validator_requirements_remote:-}" ]; then
     ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
-      "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp' '$gateway_counterpart_lineage_remote' '$gateway_counterpart_lineage_remote.tmp'" \
+      "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp' '$gateway_counterpart_lineage_remote' '$gateway_counterpart_lineage_remote.tmp' '$gateway_local_gateway_release_remote' '$gateway_local_validator_release_remote' '$paired_release_channel_remote' '$paired_release_channel_remote.tmp' '$gateway_existing_gateway_release_remote' '$gateway_existing_validator_release_remote'" \
       >/dev/null 2>&1 || true
   fi
   if [ -n "$gateway_validator_requirements_remote" ]; then
@@ -839,6 +846,12 @@ validator_final_lineage_remote="/tmp/leadpoet-gateway-active-release-lineage.$re
 validator_recovery_requirements_remote="/tmp/leadpoet-validator-recovery-requirements.$restart_transfer_id.json"
 validator_recovery_lineage_remote="/tmp/leadpoet-validator-recovery-lineage.$restart_transfer_id.json"
 gateway_counterpart_lineage_remote="/tmp/leadpoet-validator-counterpart-release-lineage.$restart_transfer_id.json"
+gateway_local_gateway_release_remote="/tmp/leadpoet-gateway-host-gateway-release.$restart_transfer_id.json"
+gateway_local_validator_release_remote="/tmp/leadpoet-gateway-host-validator-release.$restart_transfer_id.json"
+paired_release_channel_local="$temporary_root/paired-local-release-channel.json"
+paired_release_channel_remote="/tmp/leadpoet-paired-local-release-channel.$restart_transfer_id.json"
+gateway_existing_gateway_release_remote="/tmp/leadpoet-existing-gateway-release.$restart_transfer_id.json"
+gateway_existing_validator_release_remote="/tmp/leadpoet-existing-validator-release.$restart_transfer_id.json"
 ssh_common=(
   -n
   -o BatchMode=yes
@@ -1531,6 +1544,152 @@ publish_paired_gateway_handoff_value() {
     "$remote_command"
 }
 
+prepare_and_publish_paired_local_release_channel() {
+  local gateway_gateway_local="$temporary_root/gateway-host-gateway-release.json"
+  local gateway_validator_local="$temporary_root/gateway-host-validator-release.json"
+  local validator_gateway_local="$temporary_root/validator-host-gateway-release.json"
+  local validator_validator_local="$temporary_root/validator-host-validator-release.json"
+  local existing_channel_state=""
+  local existing_gateway_local=""
+  local existing_validator_local=""
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$gateway_local_gateway_release_remote" \
+    "$gateway_gateway_local"
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$gateway_local_validator_release_remote" \
+    "$gateway_validator_local"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$VALIDATOR_HOST:$VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH" \
+    "$validator_gateway_local"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$VALIDATOR_HOST:$VALIDATOR_LOCAL_RELEASE_PATH" \
+    "$validator_validator_local"
+  chmod 600 \
+    "$gateway_gateway_local" "$gateway_validator_local" \
+    "$validator_gateway_local" "$validator_validator_local"
+  run_local_readiness_python \
+    "$commit" "$gateway_gateway_local" "$gateway_validator_local" \
+    "$validator_gateway_local" "$validator_validator_local" \
+    "$paired_release_channel_local" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from gateway.tee.release_channel_v2 import (
+    build_paired_local_release_channel_v2,
+)
+from leadpoet_canonical.attested_v2 import canonical_json
+
+expected = sys.argv[1]
+inputs = [
+    json.loads(Path(path).read_text(encoding='utf-8'))
+    for path in sys.argv[2:6]
+]
+channel = build_paired_local_release_channel_v2(
+    gateway_host_gateway_manifest=inputs[0],
+    gateway_host_validator_manifest=inputs[1],
+    validator_host_gateway_manifest=inputs[2],
+    validator_host_validator_manifest=inputs[3],
+)
+if channel['commit_sha'] != expected:
+    raise SystemExit('paired local release channel commit differs')
+Path(sys.argv[6]).write_text(
+    canonical_json(channel) + '\n', encoding='ascii'
+)
+PY
+  chmod 600 "$paired_release_channel_local"
+  echo "Verified identical exact role identities from both local release builds"
+  existing_channel_state="$(
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "set -Eeuo pipefail
+     umask 077
+     rm -f -- '$gateway_existing_gateway_release_remote' '$gateway_existing_validator_release_remote'
+     cd '$GATEWAY_REPO_ROOT'
+     if env \
+       -u LEADPOET_LOCAL_RELEASE_COMMIT_SHA \
+       -u LEADPOET_LOCAL_GATEWAY_RELEASE \
+       -u LEADPOET_LOCAL_VALIDATOR_RELEASE \
+       -u LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE \
+       PYTHONPATH='$GATEWAY_REPO_ROOT' '$GATEWAY_PYTHON_BIN' \
+       -m gateway.tee.release_channel_v2 \
+       --ensure --expected-commit '$commit' \
+       --bucket 'leadpoet-attested-v2-artifacts-493765492819' \
+       --prefix '$RELEASE_PREFIX' \
+       --gateway-output '$gateway_existing_gateway_release_remote' \
+       --validator-output '$gateway_existing_validator_release_remote' \
+       >/dev/null; then
+       printf '%s\n' present
+     else
+       status=\$?
+       rm -f -- '$gateway_existing_gateway_release_remote' '$gateway_existing_validator_release_remote'
+       test "\$status" = 75
+       printf '%s\n' absent
+     fi"
+  )"
+  if [ "$existing_channel_state" = "present" ]; then
+    existing_gateway_local="$temporary_root/existing-gateway-release.json"
+    existing_validator_local="$temporary_root/existing-validator-release.json"
+    scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+      "$GATEWAY_HOST:$gateway_existing_gateway_release_remote" \
+      "$existing_gateway_local"
+    scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+      "$GATEWAY_HOST:$gateway_existing_validator_release_remote" \
+      "$existing_validator_local"
+    chmod 600 "$existing_gateway_local" "$existing_validator_local"
+    run_local_readiness_python \
+      "$commit" "$paired_release_channel_local" \
+      "$existing_gateway_local" "$existing_validator_local" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from gateway.tee.release_channel_v2 import (
+    build_release_channel_v2,
+    release_channel_role_identities_v2,
+    validate_release_channel_v2,
+)
+
+expected = sys.argv[1]
+paired = validate_release_channel_v2(
+    json.loads(Path(sys.argv[2]).read_text(encoding='utf-8')),
+    expected_commit=expected,
+)
+existing = build_release_channel_v2(
+    gateway_release_manifest=json.loads(
+        Path(sys.argv[3]).read_text(encoding='utf-8')
+    ),
+    validator_release_manifest=json.loads(
+        Path(sys.argv[4]).read_text(encoding='utf-8')
+    ),
+)
+if release_channel_role_identities_v2(existing) != (
+    release_channel_role_identities_v2(paired)
+):
+    raise SystemExit('existing immutable release channel roles differ')
+PY
+    echo "Accepted existing immutable full release channel with identical roles"
+  elif [ "$existing_channel_state" = "absent" ]; then
+    scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+      "$paired_release_channel_local" \
+      "$GATEWAY_HOST:$paired_release_channel_remote.tmp"
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "set -Eeuo pipefail
+       umask 077
+       chmod 600 '$paired_release_channel_remote.tmp'
+       mv -f -- '$paired_release_channel_remote.tmp' '$paired_release_channel_remote'
+       cd '$GATEWAY_REPO_ROOT'
+       PYTHONPATH='$GATEWAY_REPO_ROOT' '$GATEWAY_PYTHON_BIN' \
+         -m gateway.tee.release_channel_v2 \
+         --publish '$paired_release_channel_remote' \
+         --bucket 'leadpoet-attested-v2-artifacts-493765492819' \
+         --prefix '$RELEASE_PREFIX' >/dev/null"
+    echo "Published paired full release channel before destructive handoff"
+  else
+    echo "ERROR: immutable release channel probe returned invalid state" >&2
+    return 1
+  fi
+}
+
 gateway_active_commit() {
   ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
     "curl -fsS --connect-timeout 5 --max-time 15 \
@@ -1697,6 +1856,8 @@ $miner_candidate_prepare
         GATEWAY_V2_RELEASE_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
         RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
         GATEWAY_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
+        GATEWAY_PREPARED_V2_RELEASE_MANIFEST='$gateway_local_gateway_release_remote' \\
+        GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST='$gateway_local_validator_release_remote' \\
         GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS='$gateway_validator_requirements_remote' \\
         GATEWAY_COUNTERPART_RELEASE_LINEAGE='$gateway_counterpart_path' \\
         GATEWAY_V2_RELEASE_REQUIREMENTS='$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH' \\
@@ -1846,6 +2007,8 @@ run_validator_restart() {
       VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS='$recovery_requirements_environment' \\
       VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE='$recovery_lineage_environment' \\
       LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \\
+      VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST='$VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH' \\
+      VALIDATOR_V2_RELEASE_MANIFEST='$VALIDATOR_LOCAL_RELEASE_PATH' \\
       VALIDATOR_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
       bash \"\$authority_root/validator_restart.sh\" --commit '$commit'"
   bootstrap_command_b64="$(
@@ -2020,6 +2183,40 @@ else:
     )
     if gateway_release != channel['gateway_release_manifest']:
         raise SystemExit('active gateway release differs from the verified runtime identity')
+from gateway.tee.release_channel_v2 import (
+    build_historical_release_lineage_v2,
+    build_release_lineage_v2,
+    fetch_prior_release_channel_v2,
+)
+published_channel = fetch_prior_release_channel_v2(
+    bucket=(
+        runtime_environment.get('GATEWAY_V2_RELEASE_BUCKET')
+        or 'leadpoet-attested-v2-artifacts-493765492819'
+    ),
+    commit_sha=expected,
+    prefix=(
+        runtime_environment.get('GATEWAY_V2_RELEASE_PREFIX')
+        or 'attested-v2/releases'
+    ),
+)
+if historical_topology_hash is None:
+    active_roles = build_release_lineage_v2(
+        (channel,), current_commit=expected
+    )['releases'][expected]['roles']
+    published_roles = build_release_lineage_v2(
+        (published_channel,), current_commit=expected
+    )['releases'][expected]['roles']
+else:
+    active_roles = build_historical_release_lineage_v2(
+        (channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+    published_roles = build_historical_release_lineage_v2(
+        (published_channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+if published_roles != active_roles:
+    raise SystemExit('active gateway release differs from immutable channel roles')
 if identity_cache_from_release_channel(channel) != fetch_locked_release_identity_cache(
     release
 ):
@@ -2142,7 +2339,7 @@ verify_validator_release() {
   local output="$1"
   ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
     "cd '$VALIDATOR_REPO_ROOT' && PYTHONPATH='$VALIDATOR_REPO_ROOT' \
-      python3 - '$commit' <<'PY'
+      python3 - '$commit' '$historical_topology_hash' <<'PY'
 import json
 import os
 from pathlib import Path
@@ -2150,6 +2347,7 @@ import subprocess
 import sys
 
 expected = sys.argv[1]
+historical_topology_hash = sys.argv[2] or None
 # validator_exact_release_ready: retained as the operator/fault-injection probe label.
 running = subprocess.check_output(
     ['docker', 'inspect', '-f', '{{.State.Running}}', 'leadpoet-validator-main'],
@@ -2204,6 +2402,53 @@ validator_release = json.loads(
         encoding='utf-8'
     )
 )
+from gateway.tee.release_channel_v2 import (
+    build_historical_release_channel_v2,
+    build_historical_release_lineage_v2,
+    build_release_channel_v2,
+    build_release_lineage_v2,
+    fetch_prior_release_channel_v2,
+)
+if historical_topology_hash is None:
+    active_channel = build_release_channel_v2(
+        gateway_release_manifest=gateway_release,
+        validator_release_manifest=validator_release,
+    )
+    active_roles = build_release_lineage_v2(
+        (active_channel,), current_commit=expected
+    )['releases'][expected]['roles']
+else:
+    active_channel = build_historical_release_channel_v2(
+        gateway_release_manifest=gateway_release,
+        validator_release_manifest=validator_release,
+        expected_topology_hash=historical_topology_hash,
+    )
+    active_roles = build_historical_release_lineage_v2(
+        (active_channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+published_channel = fetch_prior_release_channel_v2(
+    bucket=(
+        runtime_environment.get('VALIDATOR_V2_RELEASE_BUCKET')
+        or 'leadpoet-attested-v2-artifacts-493765492819'
+    ),
+    commit_sha=expected,
+    prefix=(
+        runtime_environment.get('VALIDATOR_V2_RELEASE_PREFIX')
+        or 'attested-v2/releases'
+    ),
+)
+if historical_topology_hash is None:
+    published_roles = build_release_lineage_v2(
+        (published_channel,), current_commit=expected
+    )['releases'][expected]['roles']
+else:
+    published_roles = build_historical_release_lineage_v2(
+        (published_channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+if published_roles != active_roles:
+    raise SystemExit('active validator release differs from immutable channel roles')
 lineage = json.loads(
     Path('/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json').read_text(
         encoding='utf-8'
@@ -2440,6 +2685,9 @@ case "$component" in
     if [ "$gateway_handoff_ready" != "1" ]; then
       echo "ERROR: gateway did not reach its paired pre-shutdown handoff" >&2
       exit 1
+    fi
+    if [ -z "$historical_topology_hash" ]; then
+      prepare_and_publish_paired_local_release_channel
     fi
     publish_paired_gateway_handoff_value "$commit"
 

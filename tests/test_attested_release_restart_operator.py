@@ -23,7 +23,12 @@ from gateway.tee.active_release_requirements_v2 import (
     build_active_release_requirements_v2,
 )
 from gateway.tee.topology import ROLE_SPECS
-from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+from tests.test_release_channel_v2 import (
+    _gateway_manifest,
+    _local_gateway_manifest,
+    _local_validator_manifest,
+    _validator_manifest,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,13 +153,21 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert 'sys.path.append(str(site_packages))' in source
     assert "leadpoet.local_readiness_python.v1" in source
     assert "pure readiness imports loaded the validator wallet dependency" in source
-    assert source.count("run_local_readiness_python ") == 9
+    assert source.count("run_local_readiness_python ") == 11
     assert 'PYTHONPATH="$ROOT" python3' not in source
     assert "/health/v2-authority" in source
     assert "attestation = get('/attest')" in source
     assert "/weights/v2/release-evidence/" in source
     assert "fetch_locked_release_identity_cache" in source
     assert "identity_cache_from_release_channel" in source
+    assert "fetch_prior_release_channel_v2" in source
+    for name in (
+        "LEADPOET_LOCAL_RELEASE_COMMIT_SHA",
+        "LEADPOET_LOCAL_GATEWAY_RELEASE",
+        "LEADPOET_LOCAL_VALIDATOR_RELEASE",
+        "LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE",
+    ):
+        assert f"-u {name}" in source
     assert "active gateway release differs from auditor release evidence" in source
     assert "verify_v2_runtime_ready(clients)" in source
     assert "processes[0].joinpath('environ')" in source
@@ -880,6 +893,22 @@ def _fake_operator_commands(
         gateway_release_manifest=_gateway_manifest(commit),
         validator_release_manifest=_validator_manifest(commit),
     )
+    gateway_host_gateway_release = tmp_path / "gateway-host-gateway-release.json"
+    gateway_host_validator_release = tmp_path / "gateway-host-validator-release.json"
+    validator_host_gateway_release = tmp_path / "validator-host-gateway-release.json"
+    validator_host_validator_release = tmp_path / "validator-host-validator-release.json"
+    validator_host_divergent_release = tmp_path / "validator-host-divergent-release.json"
+    for path, value in (
+        (gateway_host_gateway_release, _local_gateway_manifest(commit, observation="a")),
+        (gateway_host_validator_release, _local_validator_manifest(commit, observation="b")),
+        (validator_host_gateway_release, _local_gateway_manifest(commit, observation="c")),
+        (validator_host_validator_release, _local_validator_manifest(commit, observation="d")),
+        (
+            validator_host_divergent_release,
+            _local_validator_manifest(commit, observation="d", pcr0="9" * 96),
+        ),
+    ):
+        path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="ascii")
     active_requirements = build_active_release_requirements_v2(
         candidate_commit_sha=commit,
         authority_commit_sha=commit,
@@ -1108,6 +1137,21 @@ case "$command" in
     fi
     touch "$FAKE_OPERATOR_GATEWAY_HANDOFF"
     ;;
+  *release_channel_v2*--ensure*)
+    if [ "${FAKE_EXISTING_RELEASE_CHANNEL:-0}" = "1" ]; then
+      record existing_release_channel_fetched
+      printf '%s\n' present
+    else
+      printf '%s\n' absent
+    fi
+    ;;
+  *release_channel_v2*--publish*)
+    if [ "${FAKE_RELEASE_CHANNEL_PUBLISH_FAIL:-0}" = "1" ]; then
+      record paired_release_publication_failed
+      exit 79
+    fi
+    record paired_release_published
+    ;;
   *leadpoet-validator-active-release-requirements*|*leadpoet-gateway-active-release*|*leadpoet-validator-counterpart-release-lineage*|*leadpoet-validator-recovery-*)
     record active_release_authority_installed
     ;;
@@ -1129,6 +1173,9 @@ case "$command" in
     ;;
   *gateway_exact_release_ready*)
     record gateway_verified
+    if [ "${FAKE_PUBLISHED_CHANNEL_MISSING:-0}" = "1" ]; then
+      exit 76
+    fi
     if [ "${FAKE_GATEWAY_VERIFY_FAIL:-0}" = "1" ]; then
       exit 74
     fi
@@ -1136,6 +1183,9 @@ case "$command" in
     ;;
   *validator_exact_release_ready*)
     record validator_verified
+    if [ "${FAKE_PUBLISHED_CHANNEL_MISSING:-0}" = "1" ]; then
+      exit 76
+    fi
     if [ "${FAKE_VALIDATOR_VERIFY_FAIL:-0}" = "1" ]; then
       exit 75
     fi
@@ -1177,9 +1227,35 @@ set -euo pipefail
 source_path="${@: -2:1}"
 destination_path="${@: -1}"
 case "$destination_path" in
-  *:*) ;;
+  *:*)
+    if [[ "$destination_path" == *leadpoet-paired-local-release-channel* ]]; then
+      printf '%s\n' paired_release_verified >> "$FAKE_OPERATOR_EVENTS"
+    fi
+    ;;
   *)
     case "$source_path" in
+      *leadpoet-gateway-host-gateway-release*)
+        cp "$FAKE_GATEWAY_HOST_GATEWAY_RELEASE" "$destination_path"
+        ;;
+      *leadpoet-gateway-host-validator-release*)
+        cp "$FAKE_GATEWAY_HOST_VALIDATOR_RELEASE" "$destination_path"
+        ;;
+      *leadpoet-existing-gateway-release*)
+        cp "$FAKE_EXISTING_GATEWAY_RELEASE" "$destination_path"
+        ;;
+      *leadpoet-existing-validator-release*)
+        cp "$FAKE_EXISTING_VALIDATOR_RELEASE" "$destination_path"
+        ;;
+      *gateway-v2-release-manifest.json*)
+        cp "$FAKE_VALIDATOR_HOST_GATEWAY_RELEASE" "$destination_path"
+        ;;
+      *validator-v2-release-manifest.json*)
+        if [ "${FAKE_PAIRED_RELEASE_MANIFEST_MISMATCH:-0}" = "1" ]; then
+          cp "$FAKE_VALIDATOR_HOST_DIVERGENT_RELEASE" "$destination_path"
+        else
+          cp "$FAKE_VALIDATOR_HOST_VALIDATOR_RELEASE" "$destination_path"
+        fi
+        ;;
       *leadpoet-validator-active-release-requirements*)
         cp "$FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS" "$destination_path"
         ;;
@@ -1275,6 +1351,13 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
                 f"FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS={initial_requirements}",
                 f"FAKE_GATEWAY_ACTIVE_RELEASE_REQUIREMENTS={final_requirements}",
                 f"FAKE_GATEWAY_ACTIVE_RELEASE_LINEAGE={final_lineage}",
+                f"FAKE_GATEWAY_HOST_GATEWAY_RELEASE={gateway_host_gateway_release}",
+                f"FAKE_GATEWAY_HOST_VALIDATOR_RELEASE={gateway_host_validator_release}",
+                f"FAKE_EXISTING_GATEWAY_RELEASE={gateway_host_gateway_release}",
+                f"FAKE_EXISTING_VALIDATOR_RELEASE={gateway_host_validator_release}",
+                f"FAKE_VALIDATOR_HOST_GATEWAY_RELEASE={validator_host_gateway_release}",
+                f"FAKE_VALIDATOR_HOST_VALIDATOR_RELEASE={validator_host_validator_release}",
+                f"FAKE_VALIDATOR_HOST_DIVERGENT_RELEASE={validator_host_divergent_release}",
                 f"FAKE_OPERATOR_SITE_ROOT={tmp_path}",
                 f"FAKE_OPERATOR_REAL_PYTHON={real_python}",
                 f"FAKE_OPERATOR_REAL_VENV={real_venv}",
@@ -1368,6 +1451,10 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         "validator_captured",
         "gateway_start",
         "validator_image_prepared",
+        "paired_release_verified",
+        "paired_release_published",
+        "paired_gateway_handoff_released",
+        "gateway_destructive_started",
         "gateway_complete",
         "barrier_released",
         "validator_activation",
@@ -1383,6 +1470,10 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         < positions["validator_captured"]
         < positions["gateway_start"]
         < positions["validator_image_prepared"]
+        < positions["paired_release_verified"]
+        < positions["paired_release_published"]
+        < positions["paired_gateway_handoff_released"]
+        < positions["gateway_destructive_started"]
         < positions["gateway_complete"]
     )
     assert (
@@ -1397,6 +1488,116 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     assert "barrier_before_gateway" not in observed
     assert "validator_forward_handoff" not in observed
     assert "SUCCESS: gateway and validator are aligned" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("failure_flag", "failure_event"),
+    [
+        ("FAKE_RELEASE_CHANNEL_PUBLISH_FAIL", "paired_release_publication_failed"),
+        ("FAKE_PAIRED_RELEASE_MANIFEST_MISMATCH", None),
+    ],
+)
+def test_paired_operator_aborts_before_handoff_when_channel_is_not_durable(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+    failure_flag: str,
+    failure_event: str | None,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment[failure_flag] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    observed = events.read_text(encoding="utf-8").splitlines()
+    if failure_event is not None:
+        assert failure_event in observed
+    assert "paired_gateway_handoff_released" not in observed
+    assert "gateway_destructive_started" not in observed
+    assert "gateway_complete" not in observed
+    assert "validator_activation" not in observed
+    assert "validator_cancelled" in observed
+    assert "gateway_cancelled" in observed
+
+
+def test_paired_operator_accepts_existing_full_channel_only_after_role_check(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_EXISTING_RELEASE_CHANNEL"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "existing_release_channel_fetched" in observed
+    assert "paired_release_published" not in observed
+    assert "paired_gateway_handoff_released" in observed
+    assert observed.index("existing_release_channel_fetched") < observed.index(
+        "paired_gateway_handoff_released"
+    )
+    assert "Accepted existing immutable full release channel" in result.stdout
+
+
+@pytest.mark.parametrize("component", ["gateway", "validator"])
+def test_single_component_requires_exact_immutable_channel_before_restart(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+    component: str,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_PUBLISHED_CHANNEL_MISSING"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", component),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode == 76
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "readiness_invalidated" not in observed
+    assert "gateway_start" not in observed
+    assert "validator_start" not in observed
 
 
 def test_operator_rejects_non_venv_local_python_before_ssh(

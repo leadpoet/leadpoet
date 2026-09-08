@@ -29,10 +29,7 @@ from Leadpoet.utils.subnet_epoch import (
     read_subnet_epoch_snapshot,
 )
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
-from gateway.research_lab.attested_scoring_v2 import (
-    DEFAULT_RELEASE_MANIFEST_PATH,
-    _merge_graphs,
-)
+from gateway.research_lab.attested_scoring_v2 import DEFAULT_RELEASE_MANIFEST_PATH
 from gateway.research_lab.attested_v2_store import (
     load_receipt_graph_v2,
     persist_receipt_graph_v2,

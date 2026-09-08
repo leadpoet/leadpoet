@@ -85,11 +85,12 @@ class FakeProcess:
 class FakeRunner:
     """Records every argv and builds processes per subcommand."""
 
-    def __init__(self, clock, *, run_process=None, fail=()):
+    def __init__(self, clock, *, run_process=None, fail=(), sandbox_created=True):
         self.clock = clock
         self.calls: list = []
         self.run_process = run_process
         self.fail = set(fail)
+        self.sandbox_created = sandbox_created
 
     def __call__(self, argv, **kwargs):
         argv = list(argv)
@@ -102,6 +103,9 @@ class FakeRunner:
             assert kwargs["stdin"] is subprocess.DEVNULL
             assert kwargs["start_new_session"] is True
             assert kwargs["env"] == {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+            if self.sandbox_created:
+                pid_argument = next(token for token in argv if token.startswith("--pid-file="))
+                Path(pid_argument.split("=", 1)[1]).write_text("4242", encoding="ascii")
             if self.run_process is None:
                 return FakeProcess(argv, clock=self.clock, finish_at=self.clock() + 1.0)
             return self.run_process(argv)
@@ -306,7 +310,10 @@ def test_command_construction(tmp_path):
     config = make_config(tmp_path)
     root = tmp_path / "root"
     bundle = tmp_path / "bundle"
-    assert rt.runsc_run_command(config, root, bundle, "arena-1") == [
+    pid_file = bundle / "sandbox.pid"
+    assert rt.runsc_run_command(
+        config, root, bundle, "arena-1", pid_file=pid_file
+    ) == [
         "/usr/local/bin/runsc",
         "--root=%s" % root,
         "--rootless=false",
@@ -315,6 +322,7 @@ def test_command_construction(tmp_path):
         "--platform=systrap",
         "run",
         "--bundle=%s" % bundle,
+        "--pid-file=%s" % pid_file,
         "arena-1",
     ]
     assert rt.runsc_kill_command(config, root, "arena-1") == ["/usr/local/bin/runsc", "--root=%s" % root, "kill", "arena-1", "KILL"]
@@ -481,7 +489,7 @@ def test_normal_exit_collects_output_logs_and_cleans_everything(tmp_path):
     assert runner.kinds() == ["mount", "run", "delete", "umount"]
     run_argv = runner.calls[1][0]
     assert run_argv[0] == "/usr/local/bin/runsc" and "--network=none" in run_argv and run_argv[-1] == "arena-icp-7"
-    bundle = Path(run_argv[-2].split("=", 1)[1])
+    bundle = Path(next(token for token in run_argv if token.startswith("--bundle=")).split("=", 1)[1])
     assert runner.calls[1][1]["cwd"] == str(bundle)
     # The bundle, its runsc root, and the output directory are gone.
     assert not bundle.exists() and not spec.output_dir.exists()
@@ -495,7 +503,7 @@ def test_config_json_is_written_into_the_bundle_before_run(tmp_path):
     seen = {}
 
     def run_process(argv):
-        bundle = Path(argv[-2].split("=", 1)[1])
+        bundle = Path(next(token for token in argv if token.startswith("--bundle=")).split("=", 1)[1])
         seen["config"] = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
         seen["mode"] = oct((bundle / "config.json").stat().st_mode & 0o777)
         seen["root"] = argv[1] == "--root=%s" % (bundle / "runsc")
@@ -504,6 +512,68 @@ def test_config_json_is_written_into_the_bundle_before_run(tmp_path):
     rt.run_sandbox(config, spec, process_runner=FakeRunner(clock, run_process=run_process), clock=clock, sleep=clock.sleep, rusage=lambda: (0.0, 0))
     assert seen["config"] == rt.oci_spec(spec)
     assert seen["mode"] == "0o600" and seen["root"] is True
+
+
+def test_runsc_exit_before_sandbox_creation_is_a_host_error(tmp_path):
+    config = make_config(tmp_path)
+    spec = make_spec(tmp_path)
+    clock = FakeClock()
+
+    def run_process(argv):
+        return FakeProcess(
+            argv,
+            clock=clock,
+            finish_at=clock(),
+            returncode=128,
+            stderr=b"runsc create failed",
+        )
+
+    runner = FakeRunner(
+        clock,
+        run_process=run_process,
+        sandbox_created=False,
+    )
+    with pytest.raises(
+        rt.RuntimeHostError,
+        match="runsc exited before sandbox creation completed",
+    ):
+        rt.run_sandbox(
+            config,
+            spec,
+            process_runner=runner,
+            clock=clock,
+            sleep=clock.sleep,
+            rusage=lambda: (0.0, 0),
+        )
+    assert runner.kinds() == ["mount", "run", "delete", "umount"]
+    assert not spec.output_dir.exists()
+    assert list(config.work_dir.iterdir()) == []
+
+
+def test_nonzero_exit_after_sandbox_creation_remains_a_sandbox_result(tmp_path):
+    config = make_config(tmp_path)
+    spec = make_spec(tmp_path)
+    clock = FakeClock()
+
+    def run_process(argv):
+        return FakeProcess(
+            argv,
+            clock=clock,
+            finish_at=clock(),
+            returncode=3,
+        )
+
+    result = rt.run_sandbox(
+        config,
+        spec,
+        process_runner=FakeRunner(clock, run_process=run_process),
+        clock=clock,
+        sleep=clock.sleep,
+        rusage=lambda: (0.0, 0),
+    )
+    assert result.exit_code == 3
+    assert result.output_bytes is None
+    assert result.output_error is None
 
 
 def test_timeout_kills_deletes_and_never_keeps_output(tmp_path):

@@ -347,6 +347,24 @@ def test_model_failures_map_to_terminal_causes_with_no_output_hash(tmp_path, kin
     assert api.completions[0]["body"]["output"] is None
 
 
+def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path):
+    class HostFailureRuntime:
+        @staticmethod
+        def run_icp(_spec, **_kwargs):
+            raise runtime.RuntimeHostError(
+                "runsc exited before sandbox creation completed"
+            )
+
+    api = FakeApi([lease()])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, HostFailureRuntime()))
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 1
+    assert api.completions == []
+    assert runner_.completed[0]["error"] == "RuntimeHostError"
+
+
 def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_error(tmp_path):
     """Regression boundary only: this in-process test is not an end-to-end provider run."""
 

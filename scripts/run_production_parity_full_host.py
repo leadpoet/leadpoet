@@ -1106,11 +1106,18 @@ def _full_restart_environment(
         or shared_aws_path_present
     ):
         raise FullParityError("gateway restart home is not isolated")
+    if (
+        "HOME" in updates
+        and Path(str(updates["HOME"])) != restart_home
+    ):
+        raise FullParityError("gateway restart home override differs")
+    if (
+        "LEADPOET_AWS_INSTANCE_ROLE_ONLY" in updates
+        and str(updates["LEADPOET_AWS_INSTANCE_ROLE_ONLY"]).lower()
+        != "true"
+    ):
+        raise FullParityError("gateway restart AWS authority override differs")
     return {
-        "AWS_REGION": region,
-        "AWS_DEFAULT_REGION": region,
-        "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
-        "HOME": str(restart_home),
         "LANG": "C.UTF-8",
         "LOGNAME": "root",
         "PATH": (
@@ -1120,6 +1127,10 @@ def _full_restart_environment(
         "SHELL": "/bin/bash",
         "USER": "root",
         **dict(updates),
+        "AWS_REGION": region,
+        "AWS_DEFAULT_REGION": region,
+        "HOME": str(restart_home),
+        "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
     }
 
 

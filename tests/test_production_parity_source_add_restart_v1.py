@@ -19,6 +19,8 @@ from uuid import uuid4
 import pytest
 
 from gateway.tee import gateway_miner_maintenance_restart_v1 as maintenance
+from gateway.tee.release_manifest_v2 import build_local_release_identity
+from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.production_parity_boundary_v2 import (
     PRODUCTION_SUPABASE_ORIGIN,
 )
@@ -219,6 +221,7 @@ def _parity_environment(
     monkeypatch: pytest.MonkeyPatch,
     *,
     service_role_key: str,
+    candidate_commit: str = CANDIDATE_COMMIT,
 ) -> dict[str, str]:
     work_root = tmp_path / "opt" / "leadpoet-production-parity"
     marker = tmp_path / "run" / "early-boot-isolated"
@@ -232,7 +235,7 @@ def _parity_environment(
         "BITTENSOR_NETWORK": "finney",
         "BITTENSOR_NETUID": "71",
         "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
-        "LEADPOET_PARITY_CANDIDATE_SHA": CANDIDATE_COMMIT,
+        "LEADPOET_PARITY_CANDIDATE_SHA": candidate_commit,
         "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE": "2026-09-07",
         "LEADPOET_PRODUCTION_PARITY_MODE": "enabled",
         "LEADPOET_PRODUCTION_PARITY_RUN_ID": RUN_ID,
@@ -302,6 +305,12 @@ def test_full_restart_environment_scrubs_before_first_aws_command(
         check=False,
     )
     assert child.returncode == 0
+    with pytest.raises(full_host.FullParityError, match="home override differs"):
+        full_host._full_restart_environment(
+            region="us-east-1",
+            home=restart_home,
+            updates={"HOME": str(tmp_path / "poison-home")},
+        )
     source = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     validation_definition = source.index("validate_gateway_aws_authority()")
     scrub = source.index(
@@ -319,6 +328,41 @@ def test_full_restart_environment_scrubs_before_first_aws_command(
         "export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true"
         in source[scrub:first_aws_command]
     )
+    boundary_functions = source[
+        source.index("scrub_gateway_bootstrap_aws_environment()") : source.index(
+            "on_gateway_restart_exit()", validation_definition
+        )
+    ]
+    accepted = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            boundary_functions
+            + "\nvalidate_gateway_aws_authority"
+            + "\ntest \"$LEADPOET_AWS_INSTANCE_ROLE_ONLY\" = true"
+            + "\ntest -z \"${AWS_CONFIG_FILE:-}\"",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert accepted.returncode == 0
+    rejected = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            boundary_functions
+            + "\nif validate_gateway_aws_authority; then exit 9; fi",
+        ],
+        env={**environment, "AWS_CONFIG_FILE": "/dev/null"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert rejected.returncode == 0
     clone_child = full_host._clone_child_environment(region="us-east-1")
     assert {
         name: clone_child[name]
@@ -422,10 +466,19 @@ def test_full_cli_quiesces_real_clone_and_runtime_restores_control(
     capsys: pytest.CaptureFixture[str],
 ):
     _set_active(clone_database)
+    candidate_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout.strip()
     environment = _parity_environment(
         tmp_path,
         monkeypatch,
         service_role_key=clone_database["service_role_key"],
+        candidate_commit=candidate_commit,
     )
     observed_hosts: list[str] = []
     connection_factory = _clone_connection_factory(
@@ -440,7 +493,7 @@ def test_full_cli_quiesces_real_clone_and_runtime_restores_control(
                 [
                     "--verify-shutdown-quiescence",
                     "--expected-commit",
-                    CANDIDATE_COMMIT,
+                    candidate_commit,
                 ]
             )
             == 0
@@ -451,16 +504,52 @@ def test_full_cli_quiesces_real_clone_and_runtime_restores_control(
     assert _control_paused(clone_database) is True
     assert set(observed_hosts) == {"d111111abcdef8.cloudfront.net:443"}
 
-    runtime = maintenance.verify_gateway_miner_maintenance_runtime_state(
-        deploy_commit=CANDIDATE_COMMIT,
-        candidate_tree_hash=CANDIDATE_TREE,
-        runtime_environment=environment,
-        runtime_status=_runtime_status(True),
-        connection_factory=connection_factory,
-        runtime_status_provider=lambda: _runtime_status(
-            _control_paused(clone_database)
-        ),
+    release_manifest = build_local_release_identity(
+        [
+            {
+                "build_identity_hash": "sha256:" + "1" * 64,
+                "commit_sha": candidate_commit,
+                "dependency_lock_hash": "sha256:" + "2" * 64,
+                "dockerfile_hash": "sha256:" + "3" * 64,
+                "execution_manifest_hash": "sha256:" + "4" * 64,
+                "image_id": "sha256:" + "5" * 64,
+                "pcr0": "6" * 96,
+                "role": role,
+                "source_manifest_hash": "sha256:" + "7" * 64,
+                "topology_hash": topology_hash(),
+            }
+            for role in ROLE_SPECS
+        ]
     )
+    release_path = tmp_path / "release.json"
+    release_path.write_text(
+        json.dumps(release_manifest, sort_keys=True), encoding="utf-8"
+    )
+    status_reads = iter(
+        [
+            _runtime_status(True),
+            _runtime_status(False),
+        ]
+    )
+    monkeypatch.setattr(
+        maintenance, "_fetch_runtime_status", lambda: next(status_reads)
+    )
+    with patch.dict(os.environ, environment, clear=True):
+        assert (
+            maintenance.main(
+                [
+                    "--verify-runtime",
+                    "--expected-commit",
+                    candidate_commit,
+                    "--repo-root",
+                    str(ROOT),
+                    "--release-manifest",
+                    str(release_path),
+                ]
+            )
+            == 0
+        )
+    runtime = json.loads(capsys.readouterr().out)
     assert runtime["authority"] == "production_parity_clone"
     assert runtime["source_add_restart_guard_status"] == (
         "released_restored_active"

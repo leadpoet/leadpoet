@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -15,7 +17,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Proto
 
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, submission_rate_limit, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
-from lab_arena.output import OutputInvalid, validate_output_document
+from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 
 logger = logging.getLogger(__name__)
@@ -49,10 +51,11 @@ CANCEL_REASONS = {
 class ServiceError(RuntimeError):
     """A request or transition failed closed."""
 
-    def __init__(self, code: str, status: int = 400) -> None:
+    def __init__(self, code: str, status: int = 400, *, source_path: str = "") -> None:
         super().__init__(code)
         self.code = code
         self.status = status
+        self.source_path = source_path
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +452,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (190,)
+        supported_versions = (191,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
@@ -831,6 +834,8 @@ class ArenaService:
             "source_size_bytes": body["source_size_bytes"],
             "consent": dict(body["consent"]),
         }
+        if body.get("source_content_md5") is not None:
+            document["source_content_md5"] = body["source_content_md5"]
         try:
             registration = self._store.register_submission(
                 round_id,
@@ -848,6 +853,16 @@ class ArenaService:
             raise ServiceError("submission_registration_failed", 500)
         submission_id = str(registration.get("submission_id") or submission_id)
         source_ref = str(registration.get("source_ref") or source_ref)
+        if registration.get("submission_status") in ("accepted", "frozen"):
+            # Historical accepted rows predate persisted transport checksums.
+            # Verify their bytes before treating a same-size upload as a retry.
+            checksum = body.get("source_content_md5")
+            if checksum is not None:
+                self._validate_uploaded_source({
+                    "source_ref": source_ref,
+                    "source_size_bytes": body["source_size_bytes"],
+                    "submission_doc": {"source_content_md5": checksum},
+                })
         try:
             upload_arguments = {
                 "size_bytes": int(body["source_size_bytes"]),
@@ -884,12 +899,26 @@ class ArenaService:
             raise ServiceError("source_upload_unavailable", 409) from exc
         if len(payload) != expected_size:
             raise ServiceError("submission_rejected:source_size_mismatch", 400)
+        checksum = (row.get("submission_doc") or {}).get("source_content_md5")
+        if checksum is not None:
+            actual = base64.b64encode(
+                hashlib.md5(payload, usedforsecurity=False).digest()
+            ).decode("ascii")
+            if not hmac.compare_digest(actual, checksum):
+                raise ServiceError("submission_rejected:source_checksum_mismatch", 400)
         try:
             source_bundle.validate_source_archive(
                 payload, forbidden_values=forbidden_values
             )
         except source_bundle.SourceBundleError as exc:
-            raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
+            path = exc.path or ""
+            for value in forbidden_values:
+                if value:
+                    path = path.replace(value, "[REDACTED]")
+            raise ServiceError(
+                "submission_rejected:%s" % exc.code, 400,
+                source_path=path[:source_bundle.MAX_SOURCE_PATH_BYTES],
+            ) from exc
 
     def handle_submission_finalize(
         self, submission_id: str, envelope: Any
@@ -924,6 +953,8 @@ class ArenaService:
                 return {"status": "accepted", "submission_id": submission_id}
             raise ServiceError("submission_credentials_missing", 409)
         if row.get("status") != "uploading":
+            if row.get("rejection_rule") == "source_replaced":
+                raise ServiceError("submission_superseded", 409)
             raise ServiceError("submission_not_uploading", 409)
         self._enforce_submission_request_limit(validated["hotkey"])
         try:
@@ -2219,13 +2250,26 @@ class ArenaService:
         if not submission_id or not isinstance(submission_id, str):
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
         row = self._round(round_id)
-        if row["status"] != "published":
+        round_status = str(row["status"])
+        if round_status not in ("published", "cancelled"):
             raise ServiceError("results_not_public", 403)
         publication = row.get("publication_doc") or {}
+        participants = (
+            publication.get("participants") or []
+            if round_status == "published"
+            else [
+                {
+                    "submission_id": item.get("submission_id"),
+                    "miner_hotkey": item.get("miner_hotkey"),
+                    "is_baseline": bool(item.get("is_king")),
+                }
+                for item in (row.get("participants") or [])
+            ]
+        )
         participant = next(
             (
                 item
-                for item in publication.get("participants") or []
+                for item in participants
                 if item.get("submission_id") == submission_id
             ),
             None,
@@ -2234,9 +2278,43 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         runs = [run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")]
         outputs = {}
+        execution_jobs = []
         for run in runs:
+            job = None
+            if round_status == "cancelled":
+                cause = str(run.get("terminal_cause") or "")
+                status = str(run.get("status") or "")
+                job = {
+                    "run_id": run["run_id"],
+                    "stage": int(run["stage"]),
+                    "icp_position": int(run["icp_position"]),
+                    "status": status if status in contracts.ATTEMPT_STATUSES else None,
+                    "terminal_cause": (
+                        cause if cause in contracts.TERMINAL_CAUSES else None
+                    ),
+                    "output_status": "unavailable",
+                }
+                execution_jobs.append(job)
             if run.get("output_ref"):
-                outputs[run["run_id"]] = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+                if round_status == "published":
+                    outputs[run["run_id"]] = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+                    continue
+                try:
+                    raw = self._objects.get_bounded(
+                        str(run["output_ref"]), MAX_OUTPUT_BYTES
+                    )
+                except ArenaContractError:
+                    job["output_status"] = "invalid"
+                    continue
+                except Exception:
+                    continue
+                try:
+                    document = json.loads(raw.decode("utf-8"))
+                    outputs[run["run_id"]] = validate_output_document(document)
+                except (AttributeError, UnicodeDecodeError, ValueError, OutputInvalid):
+                    job["output_status"] = "invalid"
+                    continue
+                job["output_status"] = "available"
         scores = {
             "stage_1": [
                 {"run_id": run["run_id"], "icp_position": run["icp_position"], "per_icp_score": run["per_icp_score"]}
@@ -2251,15 +2329,135 @@ class ArenaService:
         }
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
-        return {
+        run_results = [run["result_doc"] for run in runs if run.get("result_doc")]
+        if round_status == "cancelled":
+            validated_results = []
+            for document in run_results:
+                try:
+                    validated_results.append(contracts.validate_run_result(document))
+                except ArenaContractError:
+                    continue
+            run_results = validated_results
+        result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),
                 "is_baseline": bool(participant.get("is_baseline")),
             },
-            "outputs": outputs, "run_results": [run["result_doc"] for run in runs if run.get("result_doc")],
+            "outputs": outputs, "run_results": run_results,
             "scores": scores,
             "submission_scores": {
                 "stage_1": None if stage1_entry is None else stage1_entry.get("stage1_score"),
                 "final": None if final_entry is None else final_entry.get("final_score"),
             },
         }
+        if round_status == "cancelled":
+            judge = self._cancelled_judge_results(
+                runs,
+                self._store.list_runs(
+                    round_id,
+                    submission_id=submission_id,
+                    kind="score",
+                ),
+            )
+            result.update(
+                {
+                    "round_status": "cancelled",
+                    "cancel_reason": row.get("cancel_reason"),
+                    "incomplete": True,
+                    "submission_scores": {"stage_1": None, "final": None},
+                    "execution_jobs": execution_jobs,
+                    "judge_jobs": judge["jobs"],
+                    "judge_evidence": judge["evidence"],
+                }
+            )
+        return result
+
+    def _cancelled_judge_results(
+        self,
+        execute_runs: Sequence[Mapping[str, Any]],
+        score_runs: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Return safe terminal judge facts without assembling a score."""
+
+        executions = {str(run["run_id"]): run for run in execute_runs}
+        selected: Dict[str, Mapping[str, Any]] = {}
+        for run in score_runs:
+            scored_run_id = str(run.get("scored_run_id") or "")
+            execution = executions.get(scored_run_id)
+            if (
+                run.get("status") not in ("accepted", "failed")
+                or execution is None
+                or int(run.get("stage") or 0) != int(execution.get("stage") or 0)
+                or int(run.get("icp_position") or 0)
+                != int(execution.get("icp_position") or 0)
+            ):
+                continue
+            current = selected.get(scored_run_id)
+            if current is None or (
+                run["status"] == "accepted" and current["status"] != "accepted"
+            ) or (
+                run["status"] == current["status"]
+                and int(run.get("attempt") or 0) > int(current.get("attempt") or 0)
+            ):
+                selected[scored_run_id] = run
+
+        jobs = []
+        evidence = []
+        for scored_run_id, run in sorted(
+            selected.items(),
+            key=lambda item: (
+                int(item[1].get("stage") or 0),
+                int(item[1].get("icp_position") or 0),
+                str(item[1].get("run_id") or ""),
+            ),
+        ):
+            cause = str(run.get("terminal_cause") or "")
+            job = {
+                "run_id": run["run_id"],
+                "scored_run_id": scored_run_id,
+                "stage": int(run["stage"]),
+                "icp_position": int(run["icp_position"]),
+                "status": run["status"],
+                "terminal_cause": (
+                    cause if cause in contracts.TERMINAL_CAUSES else None
+                ),
+                "evidence_status": "unavailable",
+            }
+            jobs.append(job)
+            if run["status"] != "accepted" or not run.get("output_ref"):
+                continue
+            try:
+                raw = self._objects.get_bounded(
+                    str(run["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES
+                )
+            except ArenaContractError:
+                job["evidence_status"] = "invalid"
+                continue
+            except Exception:
+                continue
+            try:
+                document = scoring.scoring_output_from_bytes(raw)
+                if (
+                    document.get("scored_run_id") != scored_run_id
+                    or "breakdowns" not in document
+                ):
+                    raise scoring.ScoringError("judge evidence does not match its run")
+                redacted = [
+                    verify.redact_breakdown(item) for item in document["breakdowns"]
+                ]
+            except (scoring.ScoringError, ArenaContractError):
+                job["evidence_status"] = "invalid"
+                continue
+            execution = executions[scored_run_id]
+            job["evidence_status"] = "available"
+            evidence.append(
+                {
+                    "run_id": run["run_id"],
+                    "scored_run_id": scored_run_id,
+                    "stage": int(run["stage"]),
+                    "icp_position": int(run["icp_position"]),
+                    "per_icp_score": execution.get("per_icp_score"),
+                    "breakdowns": redacted,
+                }
+            )
+        return {"jobs": jobs, "evidence": evidence}

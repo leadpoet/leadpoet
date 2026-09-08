@@ -29,8 +29,9 @@ GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 class SourceBundleError(ValueError):
     """The submitted source does not meet the small public boundary."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, path: str | None = None) -> None:
         self.code = code
+        self.path = path
         super().__init__(code)
 
 
@@ -118,7 +119,7 @@ def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
         if not name or len(encoded_name) > MAX_SOURCE_PATH_BYTES:
             raise SourceBundleError("source_path_invalid")
         if _environment_file_forbidden(name):
-            raise SourceBundleError("source_contains_credentials")
+            raise SourceBundleError("source_contains_credentials", path=name)
         total += int(details.st_size)
         if total > MAX_SOURCE_UNPACKED_BYTES:
             raise SourceBundleError("source_unpacked_too_large")
@@ -202,7 +203,7 @@ def _read_member_for_validation(
         if forbidden_values:
             window = overlap + chunk
             if any(value in window for value in forbidden_values):
-                raise SourceBundleError("source_contains_credentials")
+                raise SourceBundleError("source_contains_credentials", path=member.name)
             overlap = window[-overlap_size:] if overlap_size else b""
     if handle.read(1):
         raise SourceBundleError("source_archive_invalid")
@@ -238,7 +239,7 @@ def _safe_members(
         if not member.isfile():
             raise SourceBundleError("source_entry_type_invalid")
         if _environment_file_forbidden(member.name):
-            raise SourceBundleError("source_contains_credentials")
+            raise SourceBundleError("source_contains_credentials", path=member.name)
         total += int(member.size)
         if total > MAX_SOURCE_UNPACKED_BYTES:
             raise SourceBundleError("source_unpacked_too_large")

@@ -1620,7 +1620,7 @@ def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_r
     # Closing with pending scoring work is an infrastructure gap: the round cancels, no miner gets a zero.
     closed = store.close_scoring(round_id, 1)
     assert closed["status"] == "cancelled" and closed["incomplete_assignments"] == 10
-    assert store.get_round(round_id)["cancel_reason"] == "capacity:scoring1:10"
+    assert store.get_round(round_id)["cancel_reason"] == "scoring_incomplete:stage1:10"
 
 
 def test_service_role_statements_locks_and_idle_transactions_are_bounded(superuser, store):

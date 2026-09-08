@@ -4468,6 +4468,22 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-190 Lab Arena restart guard role grants differ"
             )
+        upload_migration = "191-lab-arena-upload-recovery.sql"
+        database.apply_migration(scripts / upload_migration)
+        applied.append(upload_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 191,
+        }:
+            raise PostgresContractProbeError(
+                "post-191 Lab Arena upload recovery contract differs"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,

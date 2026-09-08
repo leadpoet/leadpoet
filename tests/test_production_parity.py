@@ -684,6 +684,151 @@ def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(
     assert archive.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_category", "expected_error_type"),
+    [
+        (
+            subprocess.CompletedProcess(
+                ["pg_dump"], 1, stdout=b"", stderr=b"database unavailable"
+            ),
+            parity_snapshot.SnapshotFailureCategory.DUMP_FAILED,
+            "ProductionParityError",
+        ),
+        (
+            subprocess.TimeoutExpired(["pg_dump"], 3600),
+            parity_snapshot.SnapshotFailureCategory.DUMP_TIMED_OUT,
+            "TimeoutExpired",
+        ),
+    ],
+)
+def test_snapshot_dump_retains_fixed_failure_category_and_cause(
+    monkeypatch,
+    failure: subprocess.CompletedProcess | subprocess.TimeoutExpired,
+    expected_category: parity_snapshot.SnapshotFailureCategory,
+    expected_error_type: str,
+):
+    if isinstance(failure, subprocess.TimeoutExpired):
+        def fail_dump(*_args, **_kwargs):
+            raise failure
+
+        monkeypatch.setattr(parity_snapshot, "_run_postgres", fail_dump)
+    else:
+        monkeypatch.setattr(
+            parity_snapshot,
+            "_run_postgres",
+            lambda *_args, **_kwargs: failure,
+        )
+
+    with pytest.raises(parity_snapshot.SnapshotCaptureFailure) as raised:
+        parity_snapshot._capture_dump(
+            ["pg_dump"],
+            env={},
+            timeout=3600,
+            postgres_image=None,
+            mounts=(),
+        )
+
+    assert raised.value.category is expected_category
+    assert raised.value.__cause__ is not None
+    assert full_host._failure_identity("snapshot-capture", raised.value) == (
+        "snapshot-capture",
+        expected_error_type,
+    )
+
+
+def test_snapshot_postcheck_retains_fixed_failure_category_and_cause(monkeypatch):
+    original = ProductionParityError("secret-bearing database diagnostic")
+
+    def fail_stats(*_args, **_kwargs):
+        raise original
+
+    monkeypatch.setattr(parity_snapshot, "_database_stats", fail_stats)
+
+    with pytest.raises(parity_snapshot.SnapshotCaptureFailure) as raised:
+        parity_snapshot._snapshot_postcheck(
+            env={},
+            postgres_image=None,
+            initial_stats={"capture_utc_date": "2026-09-07"},
+            target_rebenchmark_date=datetime(2026, 9, 8).date(),
+            archive_path=Path("unused.dump"),
+        )
+
+    assert (
+        raised.value.category
+        is parity_snapshot.SnapshotFailureCategory.POSTCHECK_FAILED
+    )
+    assert raised.value.__cause__ is original
+
+
+def test_snapshot_postcheck_removes_archive_when_successful_dump_crosses_utc_day(
+    monkeypatch,
+    tmp_path: Path,
+):
+    archive = tmp_path / "production.dump"
+    archive.write_bytes(b"complete dump")
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_database_stats",
+        lambda *_args, **_kwargs: {
+            "capture_utc_timestamp": "2026-09-08T00:01:00+00:00",
+            "capture_utc_date": "2026-09-08",
+        },
+    )
+
+    with pytest.raises(parity_snapshot.SnapshotCaptureFailure) as raised:
+        parity_snapshot._snapshot_postcheck(
+            env={},
+            postgres_image=None,
+            initial_stats={"capture_utc_date": "2026-09-07"},
+            target_rebenchmark_date=datetime(2026, 9, 8).date(),
+            archive_path=archive,
+        )
+
+    assert (
+        raised.value.category
+        is parity_snapshot.SnapshotFailureCategory.TARGET_DAY_BOUNDARY
+    )
+    assert raised.value.__cause__ is None
+    assert not archive.exists()
+
+
+def test_full_failure_document_projects_only_typed_allowlisted_snapshot_category():
+    secret = "must-not-escape-snapshot-failure"
+    typed = parity_snapshot.SnapshotCaptureFailure(
+        parity_snapshot.SnapshotFailureCategory.DUMP_FAILED,
+        secret,
+    )
+    evidence: dict[str, object] = {}
+
+    full_host._record_failure_identity(evidence, "snapshot-capture", typed)
+
+    assert evidence == {
+        "status": "failed",
+        "failure_stage": "snapshot-capture",
+        "error_type": "ProductionParityError",
+        "failure_category": "snapshot_dump_failed",
+    }
+    assert secret not in json.dumps(evidence)
+
+    untyped: dict[str, object] = {}
+    full_host._record_failure_identity(
+        untyped,
+        "snapshot-capture",
+        ProductionParityError(secret),
+    )
+    assert "failure_category" not in untyped
+
+    unallowlisted = parity_snapshot.SnapshotCaptureFailure.__new__(
+        parity_snapshot.SnapshotCaptureFailure
+    )
+    ProductionParityError.__init__(unallowlisted, secret)
+    unallowlisted.category = "secret-bearing-category"
+    forged: dict[str, object] = {}
+    full_host._record_failure_identity(forged, "snapshot-capture", unallowlisted)
+    assert "failure_category" not in forged
+    assert secret not in json.dumps(forged)
+
+
 def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
     observed = {}
     value = {

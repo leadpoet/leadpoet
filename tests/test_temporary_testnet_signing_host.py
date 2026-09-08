@@ -333,15 +333,20 @@ def test_create_rejects_unbounded_ttl_before_aws_writes(ttl):
 
 
 class _StageSSM(_SSM):
-    def __init__(self, stdout: str):
+    def __init__(self, stdout: str | list[str]):
         super().__init__()
-        self.stdout = stdout
+        self.stdout = [stdout] if isinstance(stdout, str) else list(stdout)
+        self.commands = []
+
+    def send_command(self, **kwargs):
+        self.commands.append(kwargs)
+        return super().send_command(**kwargs)
 
     def get_command_invocation(self, **_kwargs):
         return {
             "Status": "Success",
             "ResponseCode": 0,
-            "StandardOutputContent": self.stdout,
+            "StandardOutputContent": self.stdout.pop(0),
             "StandardErrorContent": "",
         }
 
@@ -597,7 +602,22 @@ def test_native_ssm_stage_exposes_no_arbitrary_command(stage, confirmed):
         "recorded_at_unix": int(NOW.timestamp()),
         "evidence": {},
     }
-    ssm = _StageSSM(json.dumps(receipt, sort_keys=True) + "\n")
+    outputs = [json.dumps(receipt, sort_keys=True) + "\n"]
+    if stage == "status":
+        outputs.append(json.dumps({
+            "status": "ready",
+            "logs": [
+                {
+                    "process_name": name, "process_live": True,
+                    "log_size_bytes": 10, "tail_bytes_read": 10,
+                    "progress_markers": [], "failure_markers": [],
+                    "exception_types": [], "reason_codes": [],
+                    "http_statuses": [], "source_locations": [],
+                }
+                for name in ("gateway_application", "validator_application")
+            ],
+        }))
+    ssm = _StageSSM(outputs)
 
     result = temporary_host.run_native_stage(
         ec2=ec2,
@@ -611,7 +631,7 @@ def test_native_ssm_stage_exposes_no_arbitrary_command(stage, confirmed):
         now=NOW,
     )
 
-    command = ssm.sent["Parameters"]["commands"][0]
+    command = ssm.commands[0]["Parameters"]["commands"][0]
     assert result["receipt"] == receipt
     assert f"scripts.bootstrap_temporary_testnet_weights_host {stage}" in command
     assert "--config /run/leadpoet-testnet401/config.json" in command
@@ -620,6 +640,11 @@ def test_native_ssm_stage_exposes_no_arbitrary_command(stage, confirmed):
         assert "[ ! -f /run/leadpoet-testnet401/processes.json ]" in command
         assert "/run/leadpoet-testnet401/evidence/launch.json" in command
         assert "v.get" in command and "failed" in command
+        diagnostic = ssm.commands[1]["Parameters"]["commands"][0]
+        assert "gateway_application" in diagnostic
+        assert "validator_application" in diagnostic
+        assert "logs" in diagnostic
+        assert result["runtime_log_diagnostics"]["status"] == "ready"
     assert ssm.sent["DocumentName"] == "AWS-RunShellScript"
 
 
@@ -722,6 +747,121 @@ def test_staging_diagnostics_execute_without_runtime_and_redact_logs(tmp_path):
     assert value["log_diagnostics"][0]["build_milestones"] == ["Building one local gateway identity"]
     assert "private-arguments" not in result.stdout
     assert "private-identity" not in result.stdout
+
+
+def _runtime_log_probe(tmp_path, *, symlink_validator=False):
+    repository = tmp_path / "repository"
+    scripts = repository / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "__init__.py").write_text("")
+    (scripts / "bootstrap_temporary_testnet_weights_host.py").write_text(
+        "import json\n"
+        "def load_config(path): return json.loads(path.read_text())\n"
+        "def _load_process_state(config): return config['process_state']\n"
+        "def _same_process(record): return record.get('live') is True\n"
+    )
+    runtime = tmp_path / "runtime"
+    logs = runtime / "logs"
+    logs.mkdir(parents=True)
+    canary = "provider-secret-canary=https://private.example/token-value"
+    (logs / "gateway_application.log").write_text(
+        canary + "\nApplication startup complete\n"
+        'POST /weights/inputs/v2 HTTP/1.1" 503 private-request-body\n'
+    )
+    validator = logs / "validator_application.log"
+    target = tmp_path / "validator-real.log"
+    target.write_text(
+        canary + "\nSUBMITTING WEIGHTS FOR EPOCH 22058\n"
+        "Block: 7961407 (block 10/360, 350 remaining)\n"
+        "Authoritative V2 gateway bundle persisted: sha256:secret-value\n"
+        "Authoritative V2 Research Lab allocation failed closed: HTTPError: "
+        "HTTP Error 503: champion V2 cutover blocked: private counts\n"
+        "chain-realized settlement activation is unavailable or ambiguous\n"
+        "chain-realized settlement activation is invalid\n"
+        '{"event": "automatic_weight_tick_failed", '
+        '"failure_type": "RuntimeError"} secret-private-detail\n'
+        'File "/private/path/validator.py", line 5557\n'
+    )
+    if symlink_validator:
+        validator.symlink_to(target)
+    else:
+        validator.write_bytes(target.read_bytes())
+    config = {
+        "run_id": RUN_ID, "candidate_sha": SHA,
+        "expected_instance_id": INSTANCE_ID, "runtime_root": str(runtime),
+        "process_state": {"processes": [
+            {"name": "gateway_application", "live": True},
+            {"name": "validator_application", "live": True},
+        ]},
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+    program = temporary_host.runtime_log_diagnostic_program(
+        run_id=RUN_ID, candidate_sha=SHA, instance_id=INSTANCE_ID,
+        repository=str(repository), config_path=str(config_path),
+    )
+    return subprocess.run(
+        [sys.executable, "-I", "-c", program], capture_output=True,
+        text=True, timeout=10,
+    )
+
+
+def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_path):
+    result = _runtime_log_probe(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "provider-secret-canary" not in result.stdout
+    assert "private.example" not in result.stdout
+    assert "secret-private-detail" not in result.stdout
+    assert "secret-value" not in result.stdout
+    value = json.loads(result.stdout)
+    temporary_host._validate_runtime_log_diagnostics(value)
+    gateway, validator = value["logs"]
+    assert gateway["progress_markers"] == [
+        "application_ready", "weight_inputs_request",
+    ]
+    assert gateway["http_statuses"] == [
+        {"endpoint": "weight_inputs", "status": 503}
+    ]
+    assert validator["latest_epoch_id"] == 22058
+    assert validator["latest_block"] == 7961407
+    assert validator["progress_markers"] == [
+        "epoch_submission_started", "gateway_bundle_persisted",
+    ]
+    assert validator["failure_markers"] == [
+        "automatic_weight_tick_failed", "allocation_failed_closed",
+    ]
+    assert validator["reason_codes"] == [
+        "champion_v2_cutover_blocked",
+        "chain_realized_settlement_activation_unavailable_or_ambiguous",
+        "chain_realized_settlement_activation_invalid",
+    ]
+    assert validator["http_statuses"] == [
+        {"endpoint": "allocation_handoff", "status": 503}
+    ]
+    assert validator["exception_types"] == ["HTTPError", "RuntimeError"]
+    assert validator["source_locations"] == [
+        {"file": "validator.py", "line": 5557}
+    ]
+
+
+def test_runtime_log_diagnostics_reject_symlink_and_arbitrary_remote_fields(tmp_path):
+    result = _runtime_log_probe(tmp_path, symlink_validator=True)
+    assert result.returncode != 0
+    assert "provider-secret-canary" not in result.stdout + result.stderr
+    with pytest.raises(temporary_host.TemporaryHostError, match="differ"):
+        temporary_host._validate_runtime_log_diagnostics({
+            "status": "ready", "logs": [
+                {
+                    "process_name": name, "process_live": True,
+                    "log_size_bytes": 1, "tail_bytes_read": 1,
+                    "progress_markers": [], "failure_markers": [],
+                    "exception_types": [], "reason_codes": [],
+                    "http_statuses": [], "source_locations": [],
+                    "raw_line": "provider-secret-canary",
+                }
+                for name in ("gateway_application", "validator_application")
+            ],
+        })
 
 
 def test_failed_launch_diagnostics_include_only_bounded_runtime_identity(tmp_path):

@@ -1071,7 +1071,7 @@ def run_native_stage(
         or receipt.get("instance_id") != instance_id
     ):
         raise TemporaryHostError("temporary native-stage receipt differs")
-    return {
+    result = {
         "schema_version": "leadpoet.temporary_testnet401_native_ssm.v1",
         "stage": stage,
         "run_id": run_id,
@@ -1080,6 +1080,199 @@ def run_native_stage(
         "ssm_command_id": command_id,
         "receipt": dict(receipt),
     }
+    if stage == "status" and receipt.get("status") != "staging_incomplete":
+        probe = runtime_log_diagnostic_program(
+            run_id=run_id, candidate_sha=candidate_sha, instance_id=instance_id,
+        )
+        diagnostic_id, diagnostic_stdout = _send_fixed_ssm(
+            ssm, instance_id=instance_id,
+            command=(
+                "set -Eeuo pipefail\nexec "
+                f"{shlex.quote(SOURCE_VENV + '/bin/python3')} -I -c "
+                f"{shlex.quote(probe)}"
+            ),
+            timeout_seconds=120,
+        )
+        try:
+            diagnostics = json.loads(diagnostic_stdout)
+        except json.JSONDecodeError as exc:
+            raise TemporaryHostError("runtime log diagnostics are invalid") from exc
+        _validate_runtime_log_diagnostics(diagnostics)
+        result["runtime_log_ssm_command_id"] = diagnostic_id
+        result["runtime_log_diagnostics"] = diagnostics
+    return result
+
+
+def _validate_runtime_log_diagnostics(value: Any) -> None:
+    """Reject any remote projection that could carry arbitrary log content."""
+    if not isinstance(value, Mapping) or set(value) != {"status", "logs"}:
+        raise TemporaryHostError("runtime log diagnostics differ")
+    if value["status"] != "ready" or not isinstance(value["logs"], list):
+        raise TemporaryHostError("runtime log diagnostics differ")
+    expected = ("gateway_application", "validator_application")
+    if [item.get("process_name") for item in value["logs"]] != list(expected):
+        raise TemporaryHostError("runtime log diagnostics differ")
+    allowed = {
+        "process_name", "process_live", "log_size_bytes", "tail_bytes_read",
+        "progress_markers", "failure_markers", "exception_types",
+        "source_locations", "latest_epoch_id", "latest_block",
+        "reason_codes", "http_statuses",
+    }
+    progress_allowed = {
+        "gateway_application": {
+            "application_ready", "allocation_handoff_request", "weight_inputs_request",
+            "compact_submission_request", "compact_finalization_request",
+            "authority_health_request",
+        },
+        "validator_application": {
+            "epoch_submission_started", "gateway_bundle_persisted",
+            "finalized_state_persisted", "chain_submission_succeeded",
+            "automatic_weight_tick",
+        },
+    }
+    failure_allowed = {
+        "automatic_weight_tick_failed", "pre_submission_guard_blocked",
+        "submission_guard_blocked", "allocation_failed_closed",
+        "leaderboard_snapshot_failed", "burn_submission_failed",
+    }
+    exception_allowed = {
+        "AssertionError", "AuthoritativeWeightFlowV2Error", "ConnectionError",
+        "FileNotFoundError", "HTTPError", "PermissionError", "RuntimeError",
+        "TimeoutError", "ValueError",
+    }
+    reason_allowed = {
+        "allocation_response_gzip_invalid", "allocation_response_gzip_truncated",
+        "allocation_response_gzip_size_limit", "allocation_response_wire_size_limit",
+        "allocation_response_encoding_unsupported", "allocation_fetch_exhausted",
+        "allocation_policy_verification_failed", "weight_input_reconstruction_failed",
+        "request_shape_invalid", "primary_validator_configuration_missing",
+        "validator_hotkey_unauthorized", "netuid_unauthorized",
+        "calculation_snapshot_hash_mismatch", "calculation_scope_mismatch",
+        "allocation_hash_mismatch", "validator_signature_invalid",
+        "epoch_authority_rejected", "compact_ancestry_unavailable",
+        "champion_v2_cutover_blocked",
+        "chain_realized_settlement_activation_unavailable_or_ambiguous",
+        "chain_realized_settlement_activation_invalid",
+    }
+    endpoint_allowed = {
+        "allocation_handoff", "weight_inputs", "compact_submission",
+        "compact_finalization", "authority_health",
+    }
+    for item in value["logs"]:
+        if not isinstance(item, Mapping) or not set(item) <= allowed:
+            raise TemporaryHostError("runtime log diagnostics differ")
+        if item.get("process_live") is not True:
+            raise TemporaryHostError("runtime log diagnostics differ")
+        for name in ("log_size_bytes", "tail_bytes_read"):
+            if not isinstance(item.get(name), int) or not 0 <= item[name] <= 2**31:
+                raise TemporaryHostError("runtime log diagnostics differ")
+        progress_values = item.get("progress_markers")
+        failure_values = item.get("failure_markers")
+        if (
+            not isinstance(progress_values, list)
+            or len(progress_values) > len(progress_allowed[item["process_name"]])
+            or any(not isinstance(value, str)
+                   or value not in progress_allowed[item["process_name"]]
+                   for value in progress_values)
+            or not isinstance(failure_values, list)
+            or len(failure_values) > len(failure_allowed)
+            or any(not isinstance(value, str) or value not in failure_allowed
+                   for value in failure_values)
+        ):
+            raise TemporaryHostError("runtime log diagnostics differ")
+        reasons = item.get("reason_codes")
+        if (
+            not isinstance(reasons, list) or len(reasons) > len(reason_allowed)
+            or any(not isinstance(value, str) or value not in reason_allowed
+                   for value in reasons)
+        ):
+            raise TemporaryHostError("runtime log diagnostics differ")
+        statuses = item.get("http_statuses")
+        if not isinstance(statuses, list) or len(statuses) > 8 or any(
+            not isinstance(entry, Mapping)
+            or set(entry) != {"endpoint", "status"}
+            or entry["endpoint"] not in endpoint_allowed
+            or not isinstance(entry["status"], int)
+            or not 100 <= entry["status"] <= 599
+            for entry in statuses
+        ):
+            raise TemporaryHostError("runtime log diagnostics differ")
+        exceptions = item.get("exception_types")
+        if (
+            not isinstance(exceptions, list)
+            or len(exceptions) > len(exception_allowed)
+            or any(not isinstance(value, str) or value not in exception_allowed
+                   for value in exceptions)
+        ):
+            raise TemporaryHostError("runtime log diagnostics differ")
+        locations = item.get("source_locations")
+        if not isinstance(locations, list) or len(locations) > 8:
+            raise TemporaryHostError("runtime log diagnostics differ")
+        if any(
+            not isinstance(entry, Mapping)
+            or set(entry) != {"file", "line"}
+            or re.fullmatch(r"[A-Za-z0-9_]+\.py", str(entry["file"])) is None
+            or not isinstance(entry["line"], int)
+            or not 1 <= entry["line"] <= 999999
+            for entry in locations
+        ):
+            raise TemporaryHostError("runtime log diagnostics differ")
+        for name in ("latest_epoch_id", "latest_block"):
+            if name in item and (
+                not isinstance(item[name], int) or not 0 <= item[name] <= 10**20 - 1
+            ):
+                raise TemporaryHostError("runtime log diagnostics differ")
+
+
+def runtime_log_diagnostic_program(
+    *, run_id: str, candidate_sha: str, instance_id: str,
+    repository: str = SOURCE_REPOSITORY, config_path: str = NATIVE_CONFIG,
+) -> str:
+    """Build a fixed, bounded reader for the two live application logs."""
+    identity = (run_id, candidate_sha, instance_id)
+    return "\n".join([
+        "import json,re,stat,sys",
+        "from pathlib import Path",
+        f"sys.path.insert(0, {repository!r})",
+        "from scripts import bootstrap_temporary_testnet_weights_host as native",
+        f"config = native.load_config(Path({config_path!r}))",
+        f"expected = {identity!r}",
+        "actual = (config['run_id'], config['candidate_sha'], config['expected_instance_id'])",
+        "assert actual == expected, 'host identity differs'",
+        "state = native._load_process_state(config)",
+        "names = ('gateway_application', 'validator_application')",
+        "progress = {'gateway_application': ((b'Application startup complete', 'application_ready'), (b'/research-lab/allocations/attested/', 'allocation_handoff_request'), (b'/weights/inputs/v2', 'weight_inputs_request'), (b'/weights/submit/compact/v2', 'compact_submission_request'), (b'/weights/finalize/compact/v2', 'compact_finalization_request'), (b'/health/v2-authority', 'authority_health_request')), 'validator_application': ((b'SUBMITTING WEIGHTS FOR EPOCH', 'epoch_submission_started'), (b'Authoritative V2 gateway bundle persisted:', 'gateway_bundle_persisted'), (b'Authoritative V2 finalized chain state persisted:', 'finalized_state_persisted'), (b'Successfully submitted weights to Bittensor chain', 'chain_submission_succeeded'), (b'\"event\": \"automatic_weight_tick\"', 'automatic_weight_tick'))}",
+        "failures = ((b'\"event\": \"automatic_weight_tick_failed\"', 'automatic_weight_tick_failed'), (b'Research Lab pre-submission guard blocked weights', 'pre_submission_guard_blocked'), (b'weight_submission_blocked_by_guard', 'submission_guard_blocked'), (b'Authoritative V2 Research Lab allocation failed closed', 'allocation_failed_closed'), (b'leaderboard snapshot failed', 'leaderboard_snapshot_failed'), (b'Failed to submit burn weights', 'burn_submission_failed'))",
+        "exceptions = tuple(name.encode() for name in ('AssertionError', 'AuthoritativeWeightFlowV2Error', 'ConnectionError', 'FileNotFoundError', 'HTTPError', 'PermissionError', 'RuntimeError', 'TimeoutError', 'ValueError'))",
+        "reasons = ((b'allocation response gzip is invalid', 'allocation_response_gzip_invalid'), (b'allocation response gzip is truncated', 'allocation_response_gzip_truncated'), (b'allocation response gzip exceeds size limit', 'allocation_response_gzip_size_limit'), (b'allocation response exceeds wire size limit', 'allocation_response_wire_size_limit'), (b'unsupported allocation response encoding', 'allocation_response_encoding_unsupported'), (b'allocation fetch exhausted without a response', 'allocation_fetch_exhausted'), (b'Research Lab allocation arithmetic or policy verification failed', 'allocation_policy_verification_failed'), (b'Authoritative V2 weight input reconstruction failed closed', 'weight_input_reconstruction_failed'), (b'champion V2 cutover blocked:', 'champion_v2_cutover_blocked'), (b'chain-realized settlement activation is unavailable or ambiguous', 'chain_realized_settlement_activation_unavailable_or_ambiguous'), (b'chain-realized settlement activation is invalid', 'chain_realized_settlement_activation_invalid'), (b'request_shape_invalid', 'request_shape_invalid'), (b'primary_validator_configuration_missing', 'primary_validator_configuration_missing'), (b'validator_hotkey_unauthorized', 'validator_hotkey_unauthorized'), (b'netuid_unauthorized', 'netuid_unauthorized'), (b'calculation_snapshot_hash_mismatch', 'calculation_snapshot_hash_mismatch'), (b'calculation_scope_mismatch', 'calculation_scope_mismatch'), (b'allocation_hash_mismatch', 'allocation_hash_mismatch'), (b'validator_signature_invalid', 'validator_signature_invalid'), (b'epoch_authority_rejected', 'epoch_authority_rejected'), (b'compact_ancestry_unavailable', 'compact_ancestry_unavailable'))",
+        "rows = []",
+        "for name in names:",
+        "    records = [p for p in state['processes'] if p.get('name') == name]",
+        "    assert len(records) == 1 and native._same_process(records[0]), 'process differs'",
+        "    path = Path(config['runtime_root']) / 'logs' / (name + '.log')",
+        "    meta = path.lstat()",
+        "    assert stat.S_ISREG(meta.st_mode) and not stat.S_ISLNK(meta.st_mode), 'log differs'",
+        "    size = meta.st_size; assert 0 <= size <= 2**31, 'log size differs'",
+        "    with path.open('rb') as stream:",
+        "        stream.seek(max(0, size - 262144)); data = stream.read(262144)",
+        "    row = {'process_name': name, 'process_live': True, 'log_size_bytes': size, 'tail_bytes_read': len(data), 'progress_markers': [label for token,label in progress[name] if token in data], 'failure_markers': [label for token,label in failures if token in data], 'exception_types': [token.decode() for token in exceptions if token in data], 'reason_codes': [label for token,label in reasons if token in data], 'source_locations': [{'file': f.decode(), 'line': int(line)} for f,line in re.findall(rb'File \"(?:[^\"\\n]*/)?([A-Za-z0-9_]+\\.py)\", line ([0-9]{1,6})', data)[-8:]]}",
+        "    endpoints = ((b'/research-lab/allocations/attested/', 'allocation_handoff'), (b'/weights/inputs/v2', 'weight_inputs'), (b'/weights/submit/compact/v2', 'compact_submission'), (b'/weights/finalize/compact/v2', 'compact_finalization'), (b'/health/v2-authority', 'authority_health'))",
+        "    found_statuses = []",
+        "    for line in data.splitlines():",
+        "        status = re.search(rb'HTTP/[0-9.]+[\\\" ]+([1-5][0-9]{2})(?: |$)', line) or re.search(rb'HTTP Error ([1-5][0-9]{2})(?::| |$)', line)",
+        "        if status:",
+        "            for token,label in endpoints:",
+        "                if token in line: found_statuses.append({'endpoint': label, 'status': int(status.group(1))}); break",
+        "            else:",
+        "                if name == 'validator_application' and b'Authoritative V2 Research Lab allocation failed closed' in line: found_statuses.append({'endpoint': 'allocation_handoff', 'status': int(status.group(1))})",
+        "    row['http_statuses'] = found_statuses[-8:]",
+        "    epochs = re.findall(rb'SUBMITTING WEIGHTS FOR EPOCH ([0-9]{1,20})', data)",
+        "    blocks = re.findall(rb'Block: ([0-9]{1,20}) \\(block ', data)",
+        "    if epochs: row['latest_epoch_id'] = int(epochs[-1])",
+        "    if blocks: row['latest_block'] = int(blocks[-1])",
+        "    rows.append(row)",
+        "print(json.dumps({'status': 'ready', 'logs': rows}, sort_keys=True, separators=(',', ':')))",
+    ])
 
 
 def staging_diagnostic_program(*, run_id: str, candidate_sha: str,

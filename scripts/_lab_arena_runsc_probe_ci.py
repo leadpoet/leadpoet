@@ -150,8 +150,19 @@ def run_probe(*, dry_run: bool) -> int:
             assert document["root"]["readonly"] is True and document["process"]["user"]["uid"] == runtime.SANDBOX_UID
             assert "network" not in json.dumps(document.get("linux", {}).get("namespaces", []))
             config = runtime.RuntimeConfig(runsc_path=work / "runsc", work_dir=work / "sandboxes")
-            command = runtime.runsc_run_command(config, work / "runsc-root", work / ("bundle-" + name), spec.sandbox_id)
-            assert "--network=none" in command and "--rootless=false" in command
+            bundle = work / ("bundle-" + name)
+            command = runtime.runsc_run_command(
+                config,
+                work / "runsc-root",
+                bundle,
+                spec.sandbox_id,
+                pid_file=bundle / "sandbox.pid",
+            )
+            assert (
+                "--network=none" in command
+                and "--rootless=false" in command
+                and "--pid-file=%s" % (bundle / "sandbox.pid") in command
+            )
             print("PLAN", name, json.dumps({"command": command, "wall_clock_seconds": spec.wall_clock_seconds, "entry": list(spec.argv)}))
         if dry_run:
             print("LAB_ARENA_RUNSC_PROBE_DRY_RUN_OK")

@@ -445,13 +445,9 @@ def wait_for_private_assets(
                     continue
                 raise
             size = int(value.get("ContentLength") or 0)
-            retain_until = value.get("ObjectLockRetainUntilDate")
             if (
                 not 0 < size <= 32 * 1024 * 1024
                 or value.get("ServerSideEncryption") != "AES256"
-                or value.get("ObjectLockMode") != "COMPLIANCE"
-                or not isinstance(retain_until, datetime)
-                or _utc(retain_until) <= datetime.now(timezone.utc)
             ):
                 raise TemporaryHostError("temporary private asset metadata differs")
             observed[name] = size

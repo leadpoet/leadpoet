@@ -1,5 +1,7 @@
 """Bounded staging contract checks; these do not count as live chain proof."""
 
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
 import os
 from pathlib import Path
 import stat
@@ -7,6 +9,83 @@ import stat
 import pytest
 
 from scripts import stage_temporary_testnet_weights_host as stage
+
+
+class _Body(BytesIO):
+    def close(self):
+        self.was_closed = True
+        super().close()
+
+
+def test_runner_pins_and_reads_only_unexpired_compliance_version():
+    now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    body = _Body(b"encrypted-input")
+
+    class S3:
+        def head_object(self, **kwargs):
+            assert kwargs == {"Bucket": "task-bucket", "Key": "fixed/input"}
+            return {
+                "ContentLength": 15,
+                "ServerSideEncryption": "AES256",
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": now + timedelta(days=1),
+                "VersionId": "exact-locked-version",
+            }
+
+        def get_object(self, **kwargs):
+            assert kwargs == {
+                "Bucket": "task-bucket",
+                "Key": "fixed/input",
+                "VersionId": "exact-locked-version",
+            }
+            return {
+                "Body": body,
+                "ContentLength": 15,
+                "ServerSideEncryption": "AES256",
+                "VersionId": "exact-locked-version",
+            }
+
+    assert stage.read_locked_private_input(
+        S3(), bucket="task-bucket", key="fixed/input", now=now
+    ) == b"encrypted-input"
+    assert body.was_closed is True
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"ObjectLockMode": None},
+        {"ObjectLockRetainUntilDate": datetime(2026, 9, 7, tzinfo=timezone.utc)},
+        {"VersionId": ""},
+        {"ServerSideEncryption": "aws:kms"},
+    ),
+)
+def test_runner_rejects_unlocked_or_unpinned_private_input_before_read(override):
+    now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+
+    class S3:
+        get_called = False
+
+        def head_object(self, **_kwargs):
+            return {
+                "ContentLength": 15,
+                "ServerSideEncryption": "AES256",
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": now + timedelta(days=1),
+                "VersionId": "exact-locked-version",
+                **override,
+            }
+
+        def get_object(self, **_kwargs):
+            self.get_called = True
+            raise AssertionError("untrusted object must not be read")
+
+    s3 = S3()
+    with pytest.raises(ValueError, match="retention metadata"):
+        stage.read_locked_private_input(
+            s3, bucket="task-bucket", key="fixed/input", now=now
+        )
+    assert s3.get_called is False
 
 
 def test_config_matches_native_shape_without_private_keyfile():

@@ -8,6 +8,7 @@ This helper is temporary and is removed after the live signing proof.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,49 @@ INPUT_NAMES = (
     "testnet-hotkey-envelope.json",
     "testnet401-epoch-cutover.json",
 )
+MAX_PRIVATE_INPUT_BYTES = 262_144
+
+
+def read_locked_private_input(
+    s3: Any,
+    *,
+    bucket: str,
+    key: str,
+    now: datetime | None = None,
+) -> bytes:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError("private input clock is invalid")
+    head = s3.head_object(Bucket=bucket, Key=key)
+    size = int(head.get("ContentLength", 0))
+    retain_until = head.get("ObjectLockRetainUntilDate")
+    version_id = str(head.get("VersionId") or "")
+    if (
+        size not in range(1, MAX_PRIVATE_INPUT_BYTES + 1)
+        or head.get("ServerSideEncryption") != "AES256"
+        or head.get("ObjectLockMode") != "COMPLIANCE"
+        or not isinstance(retain_until, datetime)
+        or retain_until.tzinfo is None
+        or retain_until.astimezone(timezone.utc)
+        <= current.astimezone(timezone.utc)
+        or not 0 < len(version_id.encode("utf-8")) <= 1024
+    ):
+        raise ValueError("private input retention metadata differs")
+    response = s3.get_object(Bucket=bucket, Key=key, VersionId=version_id)
+    if (
+        int(response.get("ContentLength", 0)) != size
+        or str(response.get("VersionId") or "") != version_id
+        or response.get("ServerSideEncryption") != "AES256"
+    ):
+        raise ValueError("private input version differs")
+    body = response["Body"]
+    try:
+        payload = body.read(MAX_PRIVATE_INPUT_BYTES + 1)
+    finally:
+        body.close()
+    if len(payload) != size:
+        raise ValueError("private input is outside size limit")
+    return payload
 
 
 def private_write(path: Path, data: bytes) -> None:
@@ -121,16 +165,11 @@ def stage(*, candidate: str, run_id: str, instance_id: str,
     logs.mkdir(mode=0o700, exist_ok=False)
     s3 = boto3.client("s3", region_name=native.EXPECTED_AWS_REGION)
     for name in INPUT_NAMES:
-        response = s3.get_object(Bucket=assets_bucket, Key=f"{assets_prefix}/{name}")
-        if int(response.get("ContentLength", 0)) not in range(1, 262145):
-            raise ValueError("private input is outside size limit")
-        body = response["Body"]
-        try:
-            payload = body.read(262145)
-        finally:
-            body.close()
-        if not 0 < len(payload) <= 262144:
-            raise ValueError("private input is outside size limit")
+        payload = read_locked_private_input(
+            s3,
+            bucket=assets_bucket,
+            key=f"{assets_prefix}/{name}",
+        )
         private_write(inputs / name, payload)
         del payload
     secrets = boto3.client("secretsmanager", region_name=native.EXPECTED_AWS_REGION)

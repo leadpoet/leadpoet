@@ -399,7 +399,7 @@ def test_asset_bucket_reuses_locked_parity_bucket_and_exact_prefix(
     assert all(item[1] == {"ExtraArgs": {"ServerSideEncryption": "AES256"}} for item in uploads)
 
 
-def test_private_asset_wait_is_exact_bounded_and_requires_locked_objects():
+def test_controller_wait_uses_locked_bucket_when_object_retention_is_hidden():
     calls = []
 
     class S3:
@@ -438,8 +438,6 @@ def test_private_asset_wait_is_exact_bounded_and_requires_locked_objects():
             return {
                 "ContentLength": 123,
                 "ServerSideEncryption": "AES256",
-                "ObjectLockMode": "COMPLIANCE",
-                "ObjectLockRetainUntilDate": NOW + timedelta(days=1),
             }
 
     result = temporary_host.wait_for_private_assets(

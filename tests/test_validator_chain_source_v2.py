@@ -22,11 +22,9 @@ from validator_tee.enclave import chain_source_v2
 from validator_tee.enclave.chain_source_v2 import (
     EnclaveChainRpcTransportV2,
     FINALIZATION_RPC_PACING_SECONDS,
-    TESTNET401_CHAIN_RELAY_VSOCK_PORT,
     ValidatorChainSourceV2,
     ValidatorChainSourceV2Error,
     ValidatorChainTransportCleanupError,
-    _chain_relay_vsock_port,
 )
 
 
@@ -46,24 +44,6 @@ CUTOVER_HASH = "0x" + "22" * 32
 PREDECESSOR_HASH = "0x" + "21" * 32
 FINALIZED_HASH = "0x" + "ab" * 32
 TIMESTAMP_MS = 1_752_710_400_123
-
-
-def test_chain_relay_port_tracks_the_measured_chain_boundary(monkeypatch):
-    assert _chain_relay_vsock_port() == 5002
-    monkeypatch.setattr(
-        chain_source_v2,
-        "CHAIN_ENDPOINT_HOST",
-        "test.finney.opentensor.ai",
-    )
-    monkeypatch.setattr(
-        chain_source_v2,
-        "CHAIN_ARCHIVE_ENDPOINT_HOST",
-        "test.finney.opentensor.ai",
-    )
-    assert _chain_relay_vsock_port() == TESTNET401_CHAIN_RELAY_VSOCK_PORT
-    monkeypatch.setattr(chain_source_v2, "CHAIN_ENDPOINT_HOST", "attacker.example")
-    with pytest.raises(ValidatorChainSourceV2Error, match="no measured port"):
-        _chain_relay_vsock_port()
 
 
 def _selective_result(block: int = BLOCK) -> str:

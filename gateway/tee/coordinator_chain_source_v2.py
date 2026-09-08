@@ -13,14 +13,6 @@ from Leadpoet.utils.subnet_epoch import (
     SubnetEpochCutover,
     SubnetEpochError,
 )
-from gateway.research_lab.temporary_testnet401_first_allocation_v1 import (
-    TESTNET401_BURN_HOTKEY,
-    TESTNET401_BURN_UID,
-    TESTNET401_PRE_CUTOVER_LAST_UPDATE,
-    TESTNET401_VALIDATOR_HOTKEY,
-    TESTNET401_VALIDATOR_UID,
-    validate_testnet401_cutover_scope_v1,
-)
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from leadpoet_canonical.hotkey_authority_v2 import (
@@ -28,14 +20,15 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     validate_chain_signing_profile,
 )
 from leadpoet_canonical.chain_source_v2 import (
+    CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_FINALIZATION_EPOCH_BLOCKS,
     CHAIN_SUBTENSOR_MAX_TEMPO,
+    CHAIN_ENDPOINT_HOST,
     CHAIN_RPC_METHOD,
     CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS,
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
     ChainSourceV2Error,
-    chain_source_boundary_for_profile_v2,
     decode_last_update_storage,
     decode_reveal_period_epochs_storage,
     decode_runtime_metadata_commitment,
@@ -59,9 +52,6 @@ from leadpoet_canonical.chain_source_v2 import (
     timelocked_weight_commits_storage_key,
     weights_storage_key,
 )
-from leadpoet_canonical.production_parity_boundary_v2 import (
-    configured_chain_source_boundary_v2,
-)
 from leadpoet_canonical.subtensor_events_v2 import (
     RUNTIME_CODE_STORAGE_KEY,
     SubtensorEventsV2Error,
@@ -71,6 +61,8 @@ from leadpoet_canonical.subtensor_events_v2 import (
 )
 
 
+CHAIN_ENDPOINT_URL = "https://%s/" % CHAIN_ENDPOINT_HOST
+CHAIN_ARCHIVE_ENDPOINT_URL = "https://%s/" % CHAIN_ARCHIVE_ENDPOINT_HOST
 COINGECKO_TAO_USD_URL = (
     "https://api.coingecko.com/api/v3/simple/price"
     "?ids=bittensor&vs_currencies=usd"
@@ -80,14 +72,6 @@ ALPHA_PRICE_TIMEOUT_MS = 8_000
 ALPHA_PRICE_MAX_ATTEMPTS = 3
 ALPHA_PRICE_RETRY_BACKOFF_SECONDS = (0.25, 0.5)
 logger = logging.getLogger(__name__)
-
-# Compatibility exports for offline rehearsal callers. Coordinator instances
-# do not use these process-global defaults for provider requests.
-_DEFAULT_CHAIN_BOUNDARY = configured_chain_source_boundary_v2()
-CHAIN_ENDPOINT_HOST = _DEFAULT_CHAIN_BOUNDARY["chain_host"]
-CHAIN_ARCHIVE_ENDPOINT_HOST = _DEFAULT_CHAIN_BOUNDARY["chain_archive_host"]
-CHAIN_ENDPOINT_URL = "https://%s/" % CHAIN_ENDPOINT_HOST
-CHAIN_ARCHIVE_ENDPOINT_URL = "https://%s/" % CHAIN_ARCHIVE_ENDPOINT_HOST
 
 
 class CoordinatorChainSourceV2Error(RuntimeError):
@@ -168,20 +152,6 @@ class CoordinatorChainSourceV2:
                 raise CoordinatorChainSourceV2Error(
                     "coordinator epoch and signing genesis differ"
                 )
-        try:
-            chain_boundary = (
-                chain_source_boundary_for_profile_v2(self._chain_signing_profile)
-                if self._chain_signing_profile is not None
-                else configured_chain_source_boundary_v2()
-            )
-        except (TypeError, ValueError, ChainSourceV2Error) as exc:
-            raise CoordinatorChainSourceV2Error(
-                "coordinator chain source boundary is invalid"
-            ) from exc
-        self._chain_endpoint_url = "https://%s/" % chain_boundary["chain_host"]
-        self._chain_archive_endpoint_url = (
-            "https://%s/" % chain_boundary["chain_archive_host"]
-        )
         for provider_id in ("bittensor_chain", "coingecko"):
             if not self._retry_policy_hashes.get(provider_id):
                 raise CoordinatorChainSourceV2Error(
@@ -453,107 +423,6 @@ class CoordinatorChainSourceV2:
             ],
             "epoch_authority": epoch_authority,
         }
-
-    def prove_fresh_testnet401_allocation_origin(
-        self,
-        *,
-        netuid: int,
-        snapshot: Mapping[str, Any],
-        context: Any,
-    ) -> Dict[str, Any]:
-        """Prove the exact inherited chain state before the first allocation."""
-
-        try:
-            self.fresh_testnet401_cutover_scope(netuid=netuid)
-            finalized_hash = normalize_raw_hash(
-                snapshot.get("finalized_block_hash"),
-                "fresh testnet401 finalized head",
-            )
-            header = snapshot["header"]
-            metagraph = snapshot["metagraph"]
-            hotkeys = list(metagraph["hotkeys"])
-            if (
-                int(header["block"]) != int(metagraph["block"])
-                or hotkeys.count(TESTNET401_VALIDATOR_HOTKEY) != 1
-                or hotkeys.index(TESTNET401_VALIDATOR_HOTKEY)
-                != TESTNET401_VALIDATOR_UID
-                or len(hotkeys) <= TESTNET401_BURN_UID
-                or hotkeys[TESTNET401_BURN_UID] != TESTNET401_BURN_HOTKEY
-            ):
-                raise CoordinatorChainSourceV2Error(
-                    "fresh testnet401 finalized identities differ"
-                )
-            last_update_key = last_update_storage_key(netuid=netuid)
-            last_updates = decode_last_update_storage(
-                self._chain_call(
-                    method="state_getStorage",
-                    params=(last_update_key, "0x" + finalized_hash),
-                    request_id=51,
-                    logical_operation_id=(
-                        "%s:fresh-testnet401:last-update" % context.job_id
-                    ),
-                    attempt_number=0,
-                    context=context,
-                )
-            )
-            if TESTNET401_VALIDATOR_UID >= len(last_updates):
-                raise CoordinatorChainSourceV2Error(
-                    "fresh testnet401 validator LastUpdate is absent"
-                )
-            last_update = int(last_updates[TESTNET401_VALIDATOR_UID])
-            weights_key = weights_storage_key(
-                netuid=netuid,
-                validator_uid=TESTNET401_VALIDATOR_UID,
-            )
-            weights = [
-                [int(uid), int(weight)]
-                for uid, weight in decode_weights_storage(
-                    self._chain_call(
-                        method="state_getStorage",
-                        params=(weights_key, "0x" + finalized_hash),
-                        request_id=52,
-                        logical_operation_id=(
-                            "%s:fresh-testnet401:weights" % context.job_id
-                        ),
-                        attempt_number=0,
-                        context=context,
-                    )
-                )
-            ]
-        except CoordinatorChainSourceV2Error:
-            raise
-        except (ChainSourceV2Error, KeyError, TypeError, ValueError) as exc:
-            raise CoordinatorChainSourceV2Error(
-                "fresh testnet401 finalized origin is invalid"
-            ) from exc
-        if (
-            last_update != TESTNET401_PRE_CUTOVER_LAST_UPDATE
-            or last_update >= self._epoch_cutover.cutover_block
-            or weights != [[TESTNET401_BURN_UID, 65_535]]
-        ):
-            raise CoordinatorChainSourceV2Error(
-                "fresh testnet401 finalized origin is not empty"
-            )
-        return {
-            "schema_version": "leadpoet.temporary_testnet401_chain_origin.v1",
-            "finalized_block": int(header["block"]),
-            "finalized_block_hash": finalized_hash,
-            "validator_hotkey": TESTNET401_VALIDATOR_HOTKEY,
-            "validator_uid": TESTNET401_VALIDATOR_UID,
-            "last_update_block": last_update,
-            "weights": weights,
-        }
-
-    def fresh_testnet401_cutover_scope(self, *, netuid: int) -> Dict[str, Any]:
-        """Return the exact temporary cutover only after strict validation."""
-
-        return validate_testnet401_cutover_scope_v1(
-            network=str(
-                (self._chain_signing_profile or {}).get("network") or ""
-            ),
-            netuid=netuid,
-            cutover=self._epoch_cutover.to_dict(),
-        )
 
     def read_tao_per_alpha(
         self,
@@ -1753,7 +1622,7 @@ class CoordinatorChainSourceV2:
             logical_operation_id=logical_operation_id,
             attempt_number=attempt_number,
             method="POST",
-            url=self._chain_endpoint_url,
+            url=CHAIN_ENDPOINT_URL,
             headers={"accept": "application/json", "content-type": "application/json"},
             body=body,
             timeout_ms=CHAIN_RPC_TIMEOUT_MS,
@@ -1784,7 +1653,7 @@ class CoordinatorChainSourceV2:
                     logical_operation_id=logical_operation_id,
                     attempt_number=attempt_number,
                     method="POST",
-                    url=self._chain_archive_endpoint_url,
+                    url=CHAIN_ARCHIVE_ENDPOINT_URL,
                     headers={
                         "accept": "application/json",
                         "content-type": "application/json",

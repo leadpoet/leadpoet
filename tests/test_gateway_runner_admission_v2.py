@@ -258,19 +258,10 @@ def test_attested_workflow_scopes_mutation_and_gates_only_gateway_parent():
 def test_full_workflow_keeps_manual_diagnostics_outside_automatic_cancellation(status):
     with open(".github/workflows/physical-v2-staging.yml", encoding="utf-8") as source:
         workflow = yaml.safe_load(source)
-    concurrency_group = " ".join(workflow["concurrency"]["group"].split())
-    cancellation = " ".join(
-        str(workflow["concurrency"]["cancel-in-progress"]).split()
-    )
-    assert "inputs.operation != 'production-parity'" in concurrency_group
-    assert "format('testnet401-{0}'" in concurrency_group
-    assert "inputs.candidate_sha" in concurrency_group
-    assert "inputs.testnet401_run_id" in concurrency_group
-    assert concurrency_group.endswith("|| github.event_name }}")
-    assert cancellation == (
-        "${{ !(github.event_name == 'workflow_dispatch' && "
-        "inputs.operation != 'production-parity') }}"
-    )
+    assert workflow["concurrency"] == {
+        "group": "production-parity-full-${{ github.event_name }}",
+        "cancel-in-progress": True,
+    }
     assert select_superseded_runs(
         [_run(9, status=status), _run(8, event="workflow_dispatch", status=status)],
         current_sha=CURRENT,

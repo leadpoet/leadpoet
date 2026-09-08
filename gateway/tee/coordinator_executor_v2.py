@@ -509,7 +509,7 @@ class CoordinatorExecutorV2:
                     str(document["predecessor_allocation_hash"]),
                     str(document["predecessor_authority_hash"]),
                 )
-            elif "last_legacy_bundle_hash" in document:
+            else:
                 predecessor_artifacts = (
                     str(document["last_legacy_bundle_hash"]),
                     str(
@@ -518,8 +518,6 @@ class CoordinatorExecutorV2:
                         ]
                     ),
                 )
-            else:
-                predecessor_artifacts = ()
             return ExecutionResultV2(
                 output=document,
                 artifact_hashes=(

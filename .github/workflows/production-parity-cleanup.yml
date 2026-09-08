@@ -101,27 +101,9 @@ jobs:
           cat "$RUNNER_TEMP/production-parity-cleanup.json"
           exit "$cleanup_status"
 
-      - name: Remove expired temporary testnet signing hosts
-        if: always()
-        run: |
-          set -Eeuo pipefail
-          python3 scripts/temporary_testnet_signing_host.py \
-            --region "${{ vars.LEADPOET_PARITY_AWS_REGION }}" \
-            cleanup-expired --apply \
-            > "$RUNNER_TEMP/temporary-testnet-signing-cleanup.json"
-          cat "$RUNNER_TEMP/temporary-testnet-signing-cleanup.json"
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: production-parity-cleanup-${{ github.run_id }}
           retention-days: 14
           path: ${{ runner.temp }}/production-parity-cleanup.json
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: temporary-testnet-signing-cleanup-${{ github.run_id }}
-          retention-days: 1
-          if-no-files-found: ignore
-          path: ${{ runner.temp }}/temporary-testnet-signing-cleanup.json

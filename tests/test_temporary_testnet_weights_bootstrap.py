@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import subprocess
 import sys
 import time
@@ -27,6 +28,90 @@ def _config():
         "expected_instance_id": "i-0123456789abcdef0",
         "expires_at_epoch": EXPIRY_EPOCH,
     }
+
+
+def _profile_install_config(tmp_path):
+    from leadpoet_canonical.attested_v2 import sha256_json
+    from validator_tee.enclave.hotkey_authority_v2 import load_chain_signing_profile
+
+    profile_path = (
+        Path(__file__).resolve().parents[1]
+        / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+    )
+    profile = load_chain_signing_profile(profile_path)
+    hotkey_path = tmp_path / "validator-hotkey-config.json"
+    hotkey_path.write_text(json.dumps({
+        "schema_version": "leadpoet.validator_hotkey_config.v2",
+        "validator_hotkey": bootstrap.EXPECTED_VALIDATOR_HOTKEY,
+        "hotkey_public_key": "4" * 64,
+        "chain_signing_profile_hash": sha256_json(profile),
+        "drand_library_path": "/app/validator_tee/enclave/libbittensor_drand_v2.so",
+        "drand_library_sha256": "5" * 64,
+    }), encoding="utf-8")
+    return {
+        "validator": {
+            "chain_profile": str(profile_path),
+            "hotkey_config": str(hotkey_path),
+        }
+    }, profile
+
+
+def test_canonical_validator_profile_installer_is_exact_repeatable_and_default_readable(
+    tmp_path, monkeypatch,
+):
+    from validator_tee.enclave import hotkey_authority_v2
+    from validator_tee.host import publication_journal_v2
+
+    config, profile = _profile_install_config(tmp_path)
+    target = tmp_path / "app/validator_tee/enclave/chain_signing_profile_v2.json"
+    first = bootstrap._install_canonical_validator_chain_profile(
+        config, destination=target, privileged=False,
+    )
+    second = bootstrap._install_canonical_validator_chain_profile(
+        config, destination=target, privileged=False,
+    )
+    assert first == second == profile
+    assert target.stat().st_mode & 0o777 == 0o644
+
+    original_defaults = hotkey_authority_v2.load_chain_signing_profile.__defaults__
+    monkeypatch.setattr(
+        hotkey_authority_v2.load_chain_signing_profile,
+        "__defaults__",
+        (target,),
+    )
+    assert publication_journal_v2.load_chain_signing_profile() == profile
+    assert original_defaults != hotkey_authority_v2.load_chain_signing_profile.__defaults__
+
+
+def test_canonical_validator_profile_installer_refuses_existing_difference(tmp_path):
+    config, _profile = _profile_install_config(tmp_path)
+    target = tmp_path / "app/validator_tee/enclave/chain_signing_profile_v2.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("different-public-profile\n", encoding="ascii")
+    before = target.read_bytes()
+    with pytest.raises(
+        bootstrap.TemporaryTestnetBootstrapError, match="installation failed"
+    ):
+        bootstrap._install_canonical_validator_chain_profile(
+            config, destination=target, privileged=False,
+        )
+    assert target.read_bytes() == before
+
+
+def test_canonical_validator_profile_installer_rejects_hotkey_profile_mismatch(tmp_path):
+    config, _profile = _profile_install_config(tmp_path)
+    hotkey_path = Path(config["validator"]["hotkey_config"])
+    hotkey = json.loads(hotkey_path.read_text(encoding="utf-8"))
+    hotkey["chain_signing_profile_hash"] = "sha256:" + "0" * 64
+    hotkey_path.write_text(json.dumps(hotkey), encoding="utf-8")
+    with pytest.raises(
+        bootstrap.TemporaryTestnetBootstrapError, match="identity differs"
+    ):
+        bootstrap._install_canonical_validator_chain_profile(
+            config,
+            destination=tmp_path / "app/profile.json",
+            privileged=False,
+        )
 
 
 @pytest.mark.parametrize("content,expected", [

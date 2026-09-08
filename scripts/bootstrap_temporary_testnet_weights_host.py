@@ -87,6 +87,9 @@ EXPECTED_RUNTIME_ROOT = Path("/run/leadpoet-testnet401")
 CANONICAL_GATEWAY_RELEASE_MANIFEST = Path(
     "/home/ec2-user/tee/gateway-v2-release-manifest.json"
 )
+CANONICAL_VALIDATOR_CHAIN_PROFILE = Path(
+    "/app/validator_tee/enclave/chain_signing_profile_v2.json"
+)
 KNOWN_FINNEY_ADDRESSES = frozenset({"52.91.135.79", "100.59.201.156"})
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
@@ -559,6 +562,113 @@ def _install_canonical_gateway_release(
     if installed != release:
         raise TemporaryTestnetBootstrapError(
             "canonical gateway release manifest readback differs"
+        )
+    return installed
+
+
+def _install_canonical_validator_chain_profile(
+    config: Mapping[str, Any],
+    *,
+    destination: Path = CANONICAL_VALIDATOR_CHAIN_PROFILE,
+    privileged: bool = True,
+) -> Dict[str, Any]:
+    """Install the validated public test profile at the journal default path."""
+
+    from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+    from validator_tee.enclave.hotkey_authority_v2 import (
+        load_chain_signing_profile,
+        validate_hotkey_authority_configuration,
+    )
+
+    validator = config["validator"]
+    source = Path(validator["chain_profile"])
+    profile = load_chain_signing_profile(source)
+    hotkey_config = validate_hotkey_authority_configuration(
+        _load_json(Path(validator["hotkey_config"]), "validator hotkey config")
+    )
+    profile_hash = sha256_json(profile)
+    if (
+        profile.get("network") != NETWORK
+        or profile.get("chain_endpoint") != CHAIN_ENDPOINT
+        or hotkey_config.get("validator_hotkey") != EXPECTED_VALIDATOR_HOTKEY
+        or hotkey_config.get("chain_signing_profile_hash") != profile_hash
+    ):
+        raise TemporaryTestnetBootstrapError(
+            "canonical validator chain profile identity differs"
+        )
+    content = (canonical_json(profile) + "\n").encode("ascii")
+    content_hash = hashlib.sha256(content.rstrip(b"\n")).hexdigest()
+    if profile_hash != "sha256:" + content_hash:
+        raise TemporaryTestnetBootstrapError(
+            "canonical validator chain profile hash differs"
+        )
+    target = Path(destination)
+    if not target.is_absolute() or target == Path("/") or ".." in target.parts:
+        raise TemporaryTestnetBootstrapError(
+            "canonical validator chain profile path is invalid"
+        )
+    installer = r'''import hashlib,os,stat,sys
+source,target,expected=sys.argv[1:]
+data=open(source,"rb").read()
+if hashlib.sha256(data.rstrip(b"\n")).hexdigest()!=expected:
+    raise SystemExit("profile source hash differs")
+parent=os.path.dirname(target)
+current="/"
+for part in [item for item in parent.split("/") if item]:
+    current=os.path.join(current,part)
+    try:
+        os.mkdir(current,0o755)
+    except FileExistsError:
+        pass
+    metadata=os.lstat(current)
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit("profile directory is invalid")
+try:
+    descriptor=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o644)
+except FileExistsError:
+    metadata=os.lstat(target)
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit("profile target is invalid")
+    if open(target,"rb").read()!=data:
+        raise SystemExit("profile target differs")
+else:
+    with os.fdopen(descriptor,"wb") as stream:
+        stream.write(data); stream.flush(); os.fsync(stream.fileno())
+    directory=os.open(parent,os.O_RDONLY|getattr(os,"O_DIRECTORY",0))
+    try: os.fsync(directory)
+    finally: os.close(directory)
+metadata=os.lstat(target)
+if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o644:
+    raise SystemExit("profile target metadata differs")
+if open(target,"rb").read()!=data:
+    raise SystemExit("profile target readback differs")
+'''
+    with tempfile.NamedTemporaryFile(
+        mode="wb", prefix="testnet401-chain-profile-", delete=False
+    ) as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+        temporary_source = Path(stream.name)
+    os.chmod(temporary_source, 0o600)
+    command = [sys.executable, "-I", "-c", installer]
+    if privileged:
+        command = ["sudo", sys.executable, "-I", "-c", installer]
+    try:
+        subprocess.run(
+            command + [str(temporary_source), str(target), content_hash],
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise TemporaryTestnetBootstrapError(
+            "canonical validator chain profile installation failed"
+        ) from exc
+    finally:
+        temporary_source.unlink(missing_ok=True)
+    installed = load_chain_signing_profile(target, expected_hash=profile_hash)
+    if installed != profile:
+        raise TemporaryTestnetBootstrapError(
+            "canonical validator chain profile readback differs"
         )
     return installed
 
@@ -1428,6 +1538,7 @@ def run_launch(config: Mapping[str, Any], *, confirm_instance_id: str) -> Dict[s
     if live.get("selected_profile_hash") != EXPECTED_PROFILE_HASH:
         raise TemporaryTestnetBootstrapError("live profile changed after preflight")
     _install_canonical_gateway_release(config)
+    _install_canonical_validator_chain_profile(config)
     root = Path(config["runtime_root"])
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     gateway = config["gateway"]

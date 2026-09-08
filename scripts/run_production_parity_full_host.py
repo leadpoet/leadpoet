@@ -1086,6 +1086,15 @@ def _full_restart_environment(
     if region != "us-east-1":
         raise FullParityError("gateway restart region is invalid")
     restart_home = Path(home)
+    gateway_python_bin = Path(
+        str(updates.get("GATEWAY_PYTHON_BIN", sys.executable))
+    )
+    if (
+        not gateway_python_bin.is_absolute()
+        or not gateway_python_bin.is_file()
+        or not os.access(gateway_python_bin, os.X_OK)
+    ):
+        raise FullParityError("gateway restart Python runtime is unavailable")
     try:
         home_metadata = restart_home.lstat()
     except OSError as exc:
@@ -1120,10 +1129,6 @@ def _full_restart_environment(
     return {
         "LANG": "C.UTF-8",
         "LOGNAME": "root",
-        "PATH": (
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        ),
-        "PYTHONNOUSERSITE": "1",
         "SHELL": "/bin/bash",
         "USER": "root",
         **dict(updates),
@@ -1131,6 +1136,11 @@ def _full_restart_environment(
         "AWS_DEFAULT_REGION": region,
         "HOME": str(restart_home),
         "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
+        "PATH": (
+            f"{gateway_python_bin.parent}:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        "PYTHONNOUSERSITE": "1",
     }
 
 

@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import time
+import venv
 from unittest.mock import patch
 from urllib.request import urlopen
 from uuid import uuid4
@@ -451,6 +452,69 @@ def test_full_restart_environment_scrubs_before_first_aws_command(
     with pytest.raises(full_host.FullParityError, match="home is not isolated"):
         full_host._full_restart_environment(
             region="us-east-1", home=restart_home, updates={}
+        )
+
+
+def test_full_restart_environment_selects_controller_python(
+    tmp_path: Path,
+):
+    controller_venv = tmp_path / "controller-venv"
+    venv.EnvBuilder(with_pip=True).create(controller_venv)
+    controller_python = controller_venv / "bin" / "python3"
+    restart_home = tmp_path / "restart-home"
+    restart_home.mkdir(mode=0o700)
+
+    environment = full_host._full_restart_environment(
+        region="us-east-1",
+        home=restart_home,
+        updates={
+            "GATEWAY_PYTHON_BIN": str(controller_python),
+            "PATH": "/untrusted/bin",
+            "PYTHONNOUSERSITE": "0",
+        },
+    )
+    unqualified = subprocess.run(
+        ["python3", "-c", "import sys;print(sys.prefix)"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    pip = subprocess.run(
+        ["python3", "-m", "pip", "--version"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert unqualified.returncode == 0
+    assert unqualified.stdout.strip() == str(controller_venv)
+    assert pip.returncode == 0
+    assert environment["GATEWAY_PYTHON_BIN"] == str(controller_python)
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    assert environment["PATH"].split(":") == [
+        str(controller_python.parent),
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    ]
+
+    with pytest.raises(
+        full_host.FullParityError,
+        match="Python runtime is unavailable",
+    ):
+        full_host._full_restart_environment(
+            region="us-east-1",
+            home=restart_home,
+            updates={
+                "GATEWAY_PYTHON_BIN": str(tmp_path / "missing-python")
+            },
         )
 
 

@@ -1273,15 +1273,23 @@ async def persist_cutover_v1(
     authority_doc: Mapping[str, Any],
     first_snapshot_doc: Mapping[str, Any],
     receipt_graph: Mapping[str, Any],
+    row_receipt_graph: Optional[Mapping[str, Any]] = None,
     persist_graph: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] = persist_receipt_graph_v2,
     load_graph: Callable[[str], Awaitable[Mapping[str, Any]]] = load_receipt_graph_v2,
     insert: Callable[[str, Dict[str, Any]], Awaitable[Mapping[str, Any]]] = insert_row,
     select: Callable[..., Awaitable[Optional[Mapping[str, Any]]]] = select_one,
 ) -> Dict[str, Any]:
+    row_graph = receipt_graph if row_receipt_graph is None else row_receipt_graph
+    if row_graph.get("root_receipt_hash") != receipt_graph.get(
+        "root_receipt_hash"
+    ):
+        raise StatefulEpochAuthorityStoreError(
+            "cutover row receipt graph root differs from durable graph"
+        )
     row = build_cutover_row_v1(
         authority_doc=authority_doc,
         first_snapshot_doc=first_snapshot_doc,
-        receipt_graph=receipt_graph,
+        receipt_graph=row_graph,
     )
     await _assert_graph_durable(
         receipt_graph,

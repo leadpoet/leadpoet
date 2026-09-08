@@ -29,7 +29,10 @@ from Leadpoet.utils.subnet_epoch import (
     read_subnet_epoch_snapshot,
 )
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
-from gateway.research_lab.attested_scoring_v2 import DEFAULT_RELEASE_MANIFEST_PATH
+from gateway.research_lab.attested_scoring_v2 import (
+    DEFAULT_RELEASE_MANIFEST_PATH,
+    _merge_graphs,
+)
 from gateway.research_lab.attested_v2_store import (
     load_receipt_graph_v2,
     persist_receipt_graph_v2,
@@ -53,6 +56,7 @@ from gateway.tee.coordinator_epoch_cutover_v2 import (
     HISTORICAL_PREDECESSOR_KIND,
     NATIVE_PREDECESSOR_KIND,
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
+    SNAPSHOT_PURPOSE,
     TESTNET_GENESIS_HASH,
     TESTNET_NETUID,
     attest_subnet_epoch_cutover_v2,
@@ -1046,6 +1050,84 @@ def _assert_existing_cutover(
     return dict(row)
 
 
+def _materialize_fresh_cutover_validation_graph_v1(
+    *,
+    coordinator_graph: Mapping[str, Any],
+    snapshot_graph: Mapping[str, Any],
+    boot_verifier: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Join one bounded coordinator checkpoint to its exact snapshot parent."""
+
+    validate_receipt_graph(
+        snapshot_graph,
+        required_purposes={SNAPSHOT_PURPOSE},
+        boot_attestation_verifier=boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    validate_receipt_graph(
+        coordinator_graph,
+        required_purposes={CUTOVER_PURPOSE},
+        boot_attestation_verifier=boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    coordinator_root_hash = str(
+        coordinator_graph.get("root_receipt_hash") or ""
+    )
+    snapshot_root_hash = str(snapshot_graph.get("root_receipt_hash") or "")
+    coordinator_receipts = {
+        str(receipt.get("receipt_hash") or ""): receipt
+        for receipt in coordinator_graph.get("receipts") or ()
+        if isinstance(receipt, Mapping)
+    }
+    coordinator_root = coordinator_receipts.get(coordinator_root_hash)
+    if (
+        not isinstance(coordinator_root, Mapping)
+        or coordinator_root.get("parent_receipt_hashes")
+        != [snapshot_root_hash]
+    ):
+        raise StatefulEpochCutoverActivationError(
+            "fresh-network coordinator parent differs from snapshot graph"
+        )
+    if snapshot_root_hash in coordinator_receipts:
+        expanded = dict(coordinator_graph)
+    else:
+        boot_hash = str(coordinator_root.get("boot_identity_hash") or "")
+        boot_by_hash = {
+            str(identity.get("boot_identity_hash") or ""): identity
+            for identity in coordinator_graph.get("boot_identities") or ()
+            if isinstance(identity, Mapping)
+        }
+        boot_identity = boot_by_hash.get(boot_hash)
+        if not isinstance(boot_identity, Mapping):
+            raise StatefulEpochCutoverActivationError(
+                "fresh-network coordinator boot identity is absent"
+            )
+        try:
+            expanded = _merge_graphs(
+                root_receipt=coordinator_root,
+                boot_identity=boot_identity,
+                local_receipts=coordinator_graph.get("receipts") or (),
+                transport_attempts=(
+                    coordinator_graph.get("transport_attempts") or ()
+                ),
+                host_operations=(
+                    coordinator_graph.get("host_operations") or ()
+                ),
+                parent_graphs=(snapshot_graph,),
+            )
+        except Exception as exc:
+            raise StatefulEpochCutoverActivationError(
+                "fresh-network coordinator checkpoint cannot be joined"
+            ) from exc
+    validate_receipt_graph(
+        expanded,
+        required_purposes={CUTOVER_PURPOSE, SNAPSHOT_PURPOSE},
+        boot_attestation_verifier=boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    return expanded
+
+
 async def bootstrap_fresh_testnet401_cutover_v1(
     *,
     cutover: SubnetEpochCutover,
@@ -1109,19 +1191,21 @@ async def bootstrap_fresh_testnet401_cutover_v1(
             raise StatefulEpochCutoverActivationError(
                 "existing fresh-network cutover mapping is ambiguous"
             )
-        graph = await load_graph(
+        coordinator_graph = await load_graph(
             str(existing_rows[0].get("cutover_receipt_hash") or "")
+        )
+        snapshot_graph = await load_graph(
+            str(existing_rows[0].get("first_snapshot_receipt_hash") or "")
+        )
+        graph = _materialize_fresh_cutover_validation_graph_v1(
+            coordinator_graph=coordinator_graph,
+            snapshot_graph=snapshot_graph,
+            boot_verifier=resolve_boot_verifier(),
         )
         durable = _assert_existing_cutover(
             existing_rows[0],
             cutover=cutover,
             receipt_graph=graph,
-        )
-        validate_receipt_graph(
-            graph,
-            required_purposes={CUTOVER_PURPOSE},
-            boot_attestation_verifier=resolve_boot_verifier(),
-            require_boot_attestation_verification=True,
         )
         return {
             "schema_version": ACTIVATION_REPORT_SCHEMA_VERSION,
@@ -1205,16 +1289,15 @@ async def bootstrap_fresh_testnet401_cutover_v1(
         coordinator_graph = await load_graph(
             str(coordinator_rows[0].get("receipt_hash") or "")
         )
-        validate_receipt_graph(
-            coordinator_graph,
-            required_purposes={CUTOVER_PURPOSE},
-            boot_attestation_verifier=resolve_boot_verifier(),
-            require_boot_attestation_verification=True,
+        validation_graph = _materialize_fresh_cutover_validation_graph_v1(
+            coordinator_graph=coordinator_graph,
+            snapshot_graph=snapshot_graph,
+            boot_verifier=resolve_boot_verifier(),
         )
         resumed_row = build_cutover_row_v1(
             authority_doc=predicted_authority,
             first_snapshot_doc=candidate["snapshot_doc"],
-            receipt_graph=coordinator_graph,
+            receipt_graph=validation_graph,
         )
         if resumed_row["cutover_receipt_hash"] != str(
             coordinator_rows[0].get("receipt_hash") or ""
@@ -1270,10 +1353,16 @@ async def bootstrap_fresh_testnet401_cutover_v1(
             )
         coordinator_graph = outcome["receipt_graph"]
 
+    validation_graph = _materialize_fresh_cutover_validation_graph_v1(
+        coordinator_graph=coordinator_graph,
+        snapshot_graph=snapshot_graph,
+        boot_verifier=resolve_boot_verifier(),
+    )
+
     cutover_row = build_cutover_row_v1(
         authority_doc=predicted_authority,
         first_snapshot_doc=candidate["snapshot_doc"],
-        receipt_graph=coordinator_graph,
+        receipt_graph=validation_graph,
     )
     if (
         cutover_row.get("cutover_authority_hash") != authority_hash
@@ -1286,6 +1375,7 @@ async def bootstrap_fresh_testnet401_cutover_v1(
         authority_doc=predicted_authority,
         first_snapshot_doc=candidate["snapshot_doc"],
         receipt_graph=coordinator_graph,
+        row_receipt_graph=validation_graph,
         persist_graph=persist_graph,
         load_graph=load_graph,
     )
@@ -1298,7 +1388,7 @@ async def bootstrap_fresh_testnet401_cutover_v1(
     durable = _assert_existing_cutover(
         durable,
         cutover=cutover,
-        receipt_graph=coordinator_graph,
+        receipt_graph=validation_graph,
     )
     if durable != cutover_row:
         raise StatefulEpochCutoverActivationError(

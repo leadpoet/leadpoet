@@ -63,12 +63,15 @@ from gateway.tee.coordinator_executor_v2 import (
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     COORDINATOR_ROLE,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
+    RECEIPT_GRAPH_SCHEMA_VERSION,
     WEIGHT_ROLE,
     build_boot_identity_body,
+    build_checkpointed_receipt_graph,
     build_execution_receipt_body,
     build_receipt_graph,
     build_transport_attempt,
@@ -78,6 +81,12 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     transport_root,
     validate_receipt_graph,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
+    build_compact_ancestry_proof_from_delta_v2,
+    build_full_graph_parent_v2,
+    issue_ancestry_certificate_v2,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
     build_weight_extrinsic_authorization_v2,
@@ -741,6 +750,7 @@ async def test_fresh_testnet401_bootstrap_executes_one_parent_and_reads_back():
     durable = None
     execute_calls = 0
     persist_calls = 0
+    coordinator_rows = []
 
     async def select_rows(table, **kwargs):
         assert kwargs["max_rows"] == 2
@@ -749,7 +759,7 @@ async def test_fresh_testnet401_bootstrap_executes_one_parent_and_reads_back():
         if table == CANDIDATE_TABLE:
             return [copy.deepcopy(candidate)]
         if table == RECEIPT_TABLE:
-            return []
+            return copy.deepcopy(coordinator_rows)
         raise AssertionError(table)
 
     async def load_graph(root):
@@ -789,13 +799,62 @@ async def test_fresh_testnet401_bootstrap_executes_one_parent_and_reads_back():
             output_root=sha256_json(measured.output),
             parents=[snapshot_receipt["receipt_hash"]],
         )
-        graph = build_receipt_graph(
-            root_receipt_hash=receipt["receipt_hash"],
-            boot_identities=snapshot_graph["boot_identities"] + [boot],
-            receipts=snapshot_graph["receipts"] + [receipt],
-            transport_attempts=snapshot_graph["transport_attempts"],
+        local_delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": receipt["receipt_hash"],
+            "boot_identities": [boot],
+            "receipts": [receipt],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        lineage_id = "sha256:" + "9" * 64
+        certificate = issue_ancestry_certificate_v2(
+            local_delta=local_delta,
+            lineage_id=lineage_id,
+            certificate_sequence=0,
+            issuer_boot_identity=boot,
+            issued_at=NOW,
+            sign_digest=private_key.sign,
+            boot_attestation_verifier=lambda identity: identity,
+            allowed_issuer_roles=(COORDINATOR_ROLE,),
+            parent_full_graphs=(
+                build_full_graph_parent_v2(
+                    snapshot_graph,
+                    required_purposes=(SNAPSHOT_PURPOSE,),
+                ),
+            ),
+            required_purposes=(CUTOVER_PURPOSE,),
         )
+        proof = build_compact_ancestry_proof_from_delta_v2(
+            local_delta,
+            certificate,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=lambda identity: identity,
+            allowed_issuer_roles=(COORDINATOR_ROLE,),
+        )
+        graph = build_checkpointed_receipt_graph(
+            root_receipt_hash=receipt["receipt_hash"],
+            boot_identities=[boot],
+            receipts=[receipt],
+            transport_attempts=[],
+            host_operations=[],
+            ancestry_lineage_id=lineage_id,
+            ancestry_proof=proof,
+            boot_attestation_verifier=lambda identity: identity,
+            require_boot_attestation_verification=True,
+        )
+        assert graph["schema_version"] == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
         stored_graphs[receipt["receipt_hash"]] = graph
+        coordinator_rows.append(
+            {
+                "receipt_hash": receipt["receipt_hash"],
+                "role": COORDINATOR_ROLE,
+                "purpose": CUTOVER_PURPOSE,
+                "epoch_id": cutover.first_settlement_epoch_id,
+                "receipt_status": "succeeded",
+                "output_root": receipt["output_root"],
+            }
+        )
         return {
             "status": "succeeded",
             "result": measured.output,
@@ -805,12 +864,45 @@ async def test_fresh_testnet401_bootstrap_executes_one_parent_and_reads_back():
     async def persist_cutover(**kwargs):
         nonlocal durable, persist_calls
         persist_calls += 1
-        durable = build_cutover_row_v1(
+        assert kwargs["receipt_graph"]["schema_version"] == (
+            CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        )
+        assert kwargs["row_receipt_graph"]["schema_version"] == (
+            RECEIPT_GRAPH_SCHEMA_VERSION
+        )
+
+        async def persist_graph(graph):
+            stored_graphs[graph["root_receipt_hash"]] = copy.deepcopy(graph)
+            return {
+                "root_receipt_hash": graph["root_receipt_hash"],
+                "graph_hash": sha256_json(graph),
+            }
+
+        async def insert(table, row):
+            nonlocal durable
+            assert table == CUTOVER_TABLE
+            if durable is not None:
+                raise RuntimeError("23505 duplicate key unique constraint")
+            durable = copy.deepcopy(row)
+            return copy.deepcopy(row)
+
+        async def select(table, *, filters):
+            assert table == CUTOVER_TABLE
+            field, value = filters[0]
+            if durable is not None and durable.get(field) == value:
+                return copy.deepcopy(durable)
+            return None
+
+        return await persist_cutover_v1(
             authority_doc=kwargs["authority_doc"],
             first_snapshot_doc=kwargs["first_snapshot_doc"],
             receipt_graph=kwargs["receipt_graph"],
+            row_receipt_graph=kwargs["row_receipt_graph"],
+            persist_graph=persist_graph,
+            load_graph=load_graph,
+            insert=insert,
+            select=select,
         )
-        return copy.deepcopy(durable)
 
     async def validate_anchor(_cutover):
         assert _cutover == cutover
@@ -841,6 +933,39 @@ async def test_fresh_testnet401_bootstrap_executes_one_parent_and_reads_back():
     assert durable["previous_epoch_scheme"] == "fresh_network_v1"
     assert durable["predecessor_receipt_hash"] is None
     assert execute_calls == persist_calls == 1
+
+    first_durable = copy.deepcopy(durable)
+    durable = None
+    resumed = await bootstrap_fresh_testnet401_cutover_v1(
+        cutover=cutover,
+        apply=True,
+        select_rows=select_rows,
+        load_graph=load_graph,
+        execute=execute,
+        persist_graph=lambda graph: graph,
+        persist_cutover=persist_cutover,
+        boot_verifier=lambda identity: identity,
+        validate_anchor=validate_anchor,
+    )
+    assert resumed["status"] == "fresh_network_durable"
+    assert durable == first_durable
+    assert execute_calls == 1
+    assert persist_calls == 2
+
+    already_durable = await bootstrap_fresh_testnet401_cutover_v1(
+        cutover=cutover,
+        apply=True,
+        select_rows=select_rows,
+        load_graph=load_graph,
+        execute=execute,
+        persist_cutover=persist_cutover,
+        boot_verifier=lambda identity: identity,
+        validate_anchor=validate_anchor,
+    )
+    assert already_durable["status"] == "fresh_network_already_durable"
+    assert already_durable["would_write"] is False
+    assert execute_calls == 1
+    assert persist_calls == 2
 
 
 @pytest.mark.asyncio
@@ -1584,6 +1709,21 @@ async def test_cutover_row_and_persistence_bind_coordinator_output_and_both_pare
         select=store.select,
     )
     assert first == second == row
+
+    with pytest.raises(
+        StatefulEpochAuthorityStoreError,
+        match="cutover row receipt graph root differs",
+    ):
+        await persist_cutover_v1(
+            authority_doc=result.output,
+            first_snapshot_doc=payload["first_snapshot"],
+            receipt_graph=graph,
+            row_receipt_graph={**graph, "root_receipt_hash": HASH_A},
+            persist_graph=store.persist_graph,
+            load_graph=store.load_graph,
+            insert=store.insert,
+            select=store.select,
+        )
 
     tampered = copy.deepcopy(result.output)
     tampered["last_legacy_bundle_hash"] = HASH_A

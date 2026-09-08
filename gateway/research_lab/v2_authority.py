@@ -39,6 +39,7 @@ from gateway.tee.scoring_executor_v2 import (
 )
 from gateway.tee.reward_executor_v2 import (
     OP_RESEARCH_LAB_REWARD_DECISION,
+    champion_reward_row_projection_v2,
     reward_receipt_projection_v2,
     source_add_reward_row_projection_v2,
 )
@@ -2344,6 +2345,15 @@ async def _load_allocation_parent_graphs_v2(
         validate_receipt_graph(activation_graph)
         graphs[activation_receipt_hash] = dict(activation_graph)
 
+    prior_reward_checkpoints = {
+        (str(checkpoint["reward_kind"]), str(checkpoint["source_id"])): str(
+            checkpoint["obligation_hash"]
+        )
+        for checkpoint in (
+            prior_frontier.get("reward_checkpoints") if prior_frontier else ()
+        )
+    }
+
     def add_preloaded_receipt_record(
         declared_root: str,
         raw_record: Mapping[str, Any],
@@ -2592,10 +2602,14 @@ async def _load_allocation_parent_graphs_v2(
                     "allocation finalized history netuid differs"
                 )
     for row in champion_rows:
-        add(
-            "champion_reward_decision",
-            str(row.get("champion_reward_id") or ""),
+        reward_id = str(row.get("champion_reward_id") or "")
+        prior_obligation_hash = prior_reward_checkpoints.get(
+            ("champion", reward_id)
         )
+        if prior_obligation_hash is None or prior_obligation_hash != sha256_json(
+            champion_reward_row_projection_v2(row)
+        ):
+            add("champion_reward_decision", reward_id)
     for row in normalized_finalized_history:
         authority_types = set(row.get("authority_types") or ())
         if "native_v2_finalization" in authority_types:
@@ -2632,7 +2646,11 @@ async def _load_allocation_parent_graphs_v2(
             raise ResearchLabV2AuthorityError(
                 "allocation SOURCE_ADD reward identity is invalid"
             ) from exc
-        add_exact("source_add_reward_decision", reward_ref, decision_hash)
+        if (
+            prior_reward_checkpoints.get(("source_add", reward_ref))
+            != decision_hash
+        ):
+            add_exact("source_add_reward_decision", reward_ref, decision_hash)
 
     exact_items = sorted(
         (kind, ref, digest)

@@ -66,6 +66,8 @@ from scripts.materialize_production_parity_secrets import (  # noqa: E402
     production_parity_trace_prefixes,
 )
 from scripts.production_parity_snapshot import (  # noqa: E402
+    SnapshotCaptureFailure,
+    SnapshotFailureCategory,
     capture_snapshot,
     restore_snapshot,
 )
@@ -261,9 +263,38 @@ def _validated_public_origin(origin: str) -> str:
 
 def _failure_identity(stage: str, exc: BaseException) -> tuple[str, str]:
     bounded_stage = stage if stage in FULL_FAILURE_STAGES else "unknown"
-    raw_type = type(exc).__name__
+    if isinstance(exc, SnapshotCaptureFailure):
+        original = exc.__cause__
+        raw_type = (
+            type(original).__name__
+            if original is not None
+            else "ProductionParityError"
+        )
+    else:
+        raw_type = type(exc).__name__
     bounded_type = raw_type if raw_type in FULL_ERROR_TYPES else "UnexpectedError"
     return bounded_stage, bounded_type
+
+
+def _snapshot_failure_category(stage: str, exc: BaseException) -> str | None:
+    if stage != "snapshot-capture" or not isinstance(exc, SnapshotCaptureFailure):
+        return None
+    category = getattr(exc, "category", None)
+    if not isinstance(category, SnapshotFailureCategory):
+        return None
+    return category.value
+
+
+def _record_failure_identity(
+    evidence: dict[str, Any], stage: str, exc: BaseException
+) -> None:
+    bounded_stage, bounded_type = _failure_identity(stage, exc)
+    evidence["status"] = "failed"
+    evidence["failure_stage"] = bounded_stage
+    evidence["error_type"] = bounded_type
+    failure_category = _snapshot_failure_category(stage, exc)
+    if failure_category is not None:
+        evidence["failure_category"] = failure_category
 
 
 def _gateway_restart_timing_diagnostic(timing_dir: Path) -> dict[str, Any] | None:
@@ -3662,10 +3693,7 @@ def run_full(
             }
         )
     except Exception as exc:
-        bounded_stage, bounded_type = _failure_identity(failure_stage, exc)
-        evidence["status"] = "failed"
-        evidence["failure_stage"] = bounded_stage
-        evidence["error_type"] = bounded_type
+        _record_failure_identity(evidence, failure_stage, exc)
         raise
     finally:
         cleanup: dict[str, Any] = {}

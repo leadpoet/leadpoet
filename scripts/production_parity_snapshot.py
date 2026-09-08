@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum
 import json
 import os
 from pathlib import Path
@@ -340,6 +341,29 @@ class _PostgresClientMount:
     source: Path
     target: str
     read_only: bool
+
+
+class SnapshotFailureCategory(str, Enum):
+    """Fixed, secret-free identities for long-running snapshot phases."""
+
+    DUMP_FAILED = "snapshot_dump_failed"
+    DUMP_TIMED_OUT = "snapshot_dump_timed_out"
+    POSTCHECK_FAILED = "snapshot_postcheck_failed"
+    TARGET_DAY_BOUNDARY = "snapshot_target_day_boundary"
+
+
+class SnapshotCaptureFailure(ProductionParityError):
+    """A snapshot phase failed with a fixed category and its original detail."""
+
+    def __init__(
+        self,
+        category: SnapshotFailureCategory,
+        message: str,
+    ) -> None:
+        if not isinstance(category, SnapshotFailureCategory):
+            raise ValueError("snapshot failure category is invalid")
+        super().__init__(message)
+        self.category = category
 
 
 def _snapshot_io_timeout_seconds(value: int) -> int:
@@ -1527,6 +1551,63 @@ def _target_rebenchmark_date(stats: Mapping[str, Any]) -> date:
     return captured.date() + timedelta(days=1)
 
 
+def _capture_dump(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    timeout: int,
+    postgres_image: str | None,
+    mounts: Sequence[_PostgresClientMount],
+) -> None:
+    try:
+        result = _run_postgres(
+            command,
+            env=env,
+            timeout=timeout,
+            postgres_image=postgres_image,
+            mounts=mounts,
+        )
+        _require_success(result, stage="read-only production snapshot capture")
+    except subprocess.TimeoutExpired as exc:
+        raise SnapshotCaptureFailure(
+            SnapshotFailureCategory.DUMP_TIMED_OUT,
+            str(exc),
+        ) from exc
+    except ProductionParityError as exc:
+        raise SnapshotCaptureFailure(
+            SnapshotFailureCategory.DUMP_FAILED,
+            str(exc),
+        ) from exc
+
+
+def _snapshot_postcheck(
+    *,
+    env: Mapping[str, str],
+    postgres_image: str | None,
+    initial_stats: Mapping[str, Any],
+    target_rebenchmark_date: date,
+    archive_path: Path,
+) -> None:
+    try:
+        post_stats = _database_stats(env, postgres_image=postgres_image)
+        crossed_target_day = (
+            str(post_stats.get("capture_utc_date") or "")
+            != str(initial_stats.get("capture_utc_date") or "")
+            or _target_rebenchmark_date(post_stats) != target_rebenchmark_date
+        )
+    except (ProductionParityError, subprocess.TimeoutExpired) as exc:
+        raise SnapshotCaptureFailure(
+            SnapshotFailureCategory.POSTCHECK_FAILED,
+            str(exc),
+        ) from exc
+    if crossed_target_day:
+        archive_path.unlink(missing_ok=True)
+        raise SnapshotCaptureFailure(
+            SnapshotFailureCategory.TARGET_DAY_BOUNDARY,
+            "production snapshot crossed its target-day consistency boundary",
+        )
+
+
 def _git(
     root: Path,
     *args: str,
@@ -1688,24 +1769,20 @@ def capture_snapshot(
         f"-c statement_timeout={timeout_seconds * 1000} "
         "-c lock_timeout=5000"
     )
-    result = _run_postgres(
+    _capture_dump(
         dump_command,
         env=dump_env,
         timeout=timeout_seconds,
         postgres_image=postgres_image,
         mounts=dump_mounts,
     )
-    _require_success(result, stage="read-only production snapshot capture")
-    post_stats = _database_stats(env, postgres_image=postgres_image)
-    if (
-        str(post_stats.get("capture_utc_date") or "")
-        != str(stats.get("capture_utc_date") or "")
-        or _target_rebenchmark_date(post_stats) != target_rebenchmark_date
-    ):
-        archive_path.unlink(missing_ok=True)
-        raise ProductionParityError(
-            "production snapshot crossed its target-day consistency boundary"
-        )
+    _snapshot_postcheck(
+        env=env,
+        postgres_image=postgres_image,
+        initial_stats=stats,
+        target_rebenchmark_date=target_rebenchmark_date,
+        archive_path=archive_path,
+    )
     captured_at = datetime.fromisoformat(
         str(stats.get("capture_utc_timestamp") or "")
     ).astimezone(timezone.utc)

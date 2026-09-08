@@ -78,6 +78,24 @@ itself. Operationally the collector token should be ingest-only and
 rotated, repository access stays scoped, and the telemetry vendor's
 retention / no-training / deletion terms should be agreed in writing.
 
+## Related: gateway restart markers
+
+`gw_restart.sh` publishes two zero-duration spans per restart to the same
+endpoint and token as the request spans above, under the separate service name
+`leadpoet-gateway-restart`: `started` when the script is invoked and `finished`
+when it exits, sharing one trace id derived from the restart invocation id. A
+failed restart is recorded with span status ERROR. Attributes are
+`restart.event`, `restart.component`, `restart.status`, `restart.stage`,
+`restart.invocation_id`, `restart.candidate_sha`, `restart.elapsed_seconds` and
+`schema.version` — operational fields only, no host, path, or credential data.
+
+Without these, a gap in gateway spans is ambiguous: a planned restart and an
+unplanned process death look identical. The host-local restart ledger and the
+Sentry restart summary both answer the question, but neither is visible where
+the spans are. See `gateway/observability/emit_restart_marker.py`; the emitter
+is bounded by `timeout`, discards its output, and can never fail or delay a
+restart. No host provisioning step is required.
+
 ## Related: error monitoring (Sentry)
 
 Error capture (crashes and ERROR-level logs) is a separate, equally

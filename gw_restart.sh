@@ -784,6 +784,29 @@ emit_gateway_restart_sentry_summary() {
   return 0
 }
 
+emit_gateway_restart_marker() {
+  # Publish one restart boundary to the gateway's own telemetry destination, so
+  # a gap in gateway traffic can be told apart from an unplanned process death.
+  # The host ledger and the Sentry summary are not visible there.  Best effort:
+  # bounded, output discarded, and never able to fail or delay the restart.
+  local event="$1" status="${2:-}" now elapsed
+  command -v timeout >/dev/null 2>&1 || return 0
+  [ -x "$GATEWAY_PYTHON_BIN" ] || return 0
+  [ -r "$LEADPOET_REPO_ROOT/gateway/observability/emit_restart_marker.py" ] || return 0
+  now="$(date -u +%s)"
+  elapsed="$((now - GATEWAY_RESTART_STARTED_EPOCH))"
+  timeout 3 "$GATEWAY_PYTHON_BIN" \
+    "$LEADPOET_REPO_ROOT/gateway/observability/emit_restart_marker.py" \
+    --event "$event" \
+    --status "$status" \
+    --stage "${GATEWAY_DEPLOY_STAGE:-unknown}" \
+    --invocation-id "$GATEWAY_RESTART_INVOCATION_ID" \
+    --candidate-sha "${GATEWAY_DEPLOY_SHA:-${PREPARED_GATEWAY_SHA:-}}" \
+    --elapsed-seconds "$elapsed" \
+    --env-file "$GATEWAY_ENV_FILE" >/dev/null 2>&1 || true
+  return 0
+}
+
 wait_for_gateway_owned_process_group() {
   local process_pid="$1" ready_marker="$2" label="$3"
   local observed_pid=""
@@ -1453,6 +1476,7 @@ if [ "$GATEWAY_RESTART_TIMING_INITIALIZED" = "1" ]; then
   record_gateway_restart_timing "controller_reexec"
 else
   record_gateway_restart_timing "invoked"
+  emit_gateway_restart_marker "started"
   GATEWAY_RESTART_TIMING_INITIALIZED=1
   export GATEWAY_RESTART_TIMING_INITIALIZED
 fi
@@ -1794,6 +1818,11 @@ on_gateway_restart_exit() {
       >/dev/null 2>&1 || true
   fi
   emit_gateway_restart_sentry_summary "$status"
+  if [ "$status" -eq 0 ]; then
+    emit_gateway_restart_marker "finished" "passed"
+  else
+    emit_gateway_restart_marker "finished" "failed"
+  fi
   cancel_gateway_offline_artifact_prepare
   cancel_gateway_ancestry_checkpoint_bootstrap
   cleanup_gateway_miner_maintenance_bootstrap

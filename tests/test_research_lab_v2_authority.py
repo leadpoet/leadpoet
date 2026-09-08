@@ -10,6 +10,7 @@ from gateway.research_lab.attested_scoring_v2 import (
 )
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
+    build_reward_settlement_checkpoint_v2,
 )
 
 
@@ -981,6 +982,130 @@ async def test_allocation_parent_loader_selects_exact_source_add_retry_hash(
 
 
 @pytest.mark.asyncio
+async def test_allocation_parent_loader_reuses_only_matching_frontier_rewards(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, store
+
+    rows = []
+    checkpoints = []
+    for index in range(302):
+        row = {
+            "reward_ref": "source_add_reward:%016x" % index,
+            "adapter_id": "adapter:%016x" % index,
+            "miner_hotkey": "miner",
+            "leg": 1,
+            "reward_kind": "source_acceptance",
+            "alpha_percent": 1.0,
+            "reward_epochs": 20,
+            "start_epoch": 100 if index < 252 else 101,
+            "current_reward_status": "active",
+            "desired_alpha_percent": 1.0,
+            "epoch_count": 20,
+            "created_at": "2026-08-01T00:00:00.000000Z",
+        }
+        rows.append(row)
+        if index < 252:
+            checkpoints.append(
+                build_reward_settlement_checkpoint_v2(
+                    reward_kind="source_add",
+                    source_id=row["reward_ref"],
+                    obligation_hash=v2_authority.sha256_json(
+                        v2_authority.source_add_reward_row_projection_v2(
+                            "source_add_leg1",
+                            {**row, "initial_reward_status": "active"},
+                        )
+                    ),
+                    start_epoch=100,
+                    epoch_count=20,
+                    desired_alpha_percent=1,
+                    applied_alpha_percent=0,
+                    realized_alpha_percent=0,
+                    excess_alpha_percent=0,
+                )
+            )
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=checkpoints,
+    )
+    frontier_receipt = "sha256:" + "7" * 64
+    frontier_graph = {
+        "root_receipt_hash": frontier_receipt,
+        "receipts": [{"receipt_hash": frontier_receipt}],
+    }
+    exact_requests = []
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_source_add_reward_current":
+            status = next(
+                (value for field, value in filters if field == "current_reward_status"),
+                "",
+            )
+            return rows if status == "active" else []
+        return []
+
+    async def load_exact(values):
+        requested = list(values)
+        exact_requests.extend(requested)
+        return {
+            (kind, ref): {
+                "root_receipt_hash": v2_authority.sha256_json(
+                    {"kind": kind, "ref": ref}
+                ),
+                "receipts": [],
+            }
+            for kind, ref, _digest in requested
+        }
+
+    async def load_empty(values):
+        assert not list(values)
+        return {}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(v2_authority, "validate_receipt_graph", lambda _graph: None)
+    monkeypatch.setattr(
+        attested_v2_store, "load_business_artifact_graphs_v2", load_exact
+    )
+    monkeypatch.setattr(
+        attested_v2_store, "load_business_artifact_graphs_by_ref_v2", load_empty
+    )
+    monkeypatch.setattr(attested_v2_store, "load_receipt_graphs_v2", load_empty)
+    frontier_context = {
+        "frontier": frontier,
+        "row": {"source_receipt_hash": frontier_receipt},
+        "activation": {"source_receipt_hash": frontier_receipt},
+        "source": {"receipt_graph": frontier_graph},
+        "activation_source": {"receipt_graph": frontier_graph},
+    }
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=101,
+        netuid=71,
+        policy={},
+        finalized_champion_history=(),
+        settlement_frontier_context=frontier_context,
+    )
+
+    assert len(exact_requests) == 50
+    assert len(graphs) == 51
+    assert frontier_receipt in {graph["root_receipt_hash"] for graph in graphs}
+
+    rows[0] = {**rows[0], "miner_hotkey": "changed-miner"}
+    exact_requests.clear()
+    await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=101,
+        netuid=71,
+        policy={},
+        finalized_champion_history=(),
+        settlement_frontier_context=frontier_context,
+    )
+    assert len(exact_requests) == 51
+
+
+@pytest.mark.asyncio
 async def test_allocation_parent_loader_reuses_raw_authority_graphs(
     monkeypatch,
 ):
@@ -1279,7 +1404,9 @@ async def test_default_allocation_uses_frontier_without_legacy_readiness(
 @pytest.mark.asyncio
 async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
     frontier = _frontier(epoch=100)
-    parent_root = "sha256:" + "6" * 64
+    parent_roots = [
+        "sha256:" + "%064x" % index for index in range(1, 258)
+    ]
     receipt_hash = "sha256:" + "7" * 64
     source_state = {
         "epoch": 100,
@@ -1307,7 +1434,7 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
     }
     source_receipt = {
         "receipt_hash": receipt_hash,
-        "parent_receipt_hashes": [parent_root],
+        "parent_receipt_hashes": parent_roots,
         "role": "gateway_coordinator",
         "purpose": "research_lab.allocation.v2",
         "status": "succeeded",
@@ -1339,14 +1466,17 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
             "artifact_hashes": [],
         },
     }
-    parent_graph = {"root_receipt_hash": parent_root, "receipts": []}
+    parent_graphs = [
+        {"root_receipt_hash": root, "receipts": []}
+        for root in parent_roots
+    ]
     async def load_frontier(**kwargs):
         assert kwargs == {"netuid": 71, "before_epoch": 101}
         return context
 
     async def load_graphs(roots, **_kwargs):
-        assert roots == [parent_root]
-        return [parent_graph]
+        assert roots == parent_roots
+        return parent_graphs
 
     async def parent_loader(**_kwargs):
         raise AssertionError("current frontier recovery rebuilt allocation inputs")
@@ -1373,10 +1503,11 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
         "_validate_allocation_parent_graphs",
         lambda graphs: [
             {
-                "receipt_hash": graphs[0]["root_receipt_hash"],
+                "receipt_hash": graph["root_receipt_hash"],
                 "receipt_purpose": "research_lab.reward_decision.v2",
                 "receipt_role": "gateway_coordinator",
             }
+            for graph in graphs
         ],
     )
     monkeypatch.setattr(

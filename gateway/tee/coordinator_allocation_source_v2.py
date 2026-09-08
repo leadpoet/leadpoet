@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import re
-from typing import Any, Callable, Dict, Mapping, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Set, Tuple
 
 from gateway.research_lab.allocations import (
     ACTIVE_CHAMPION_STATUSES,
@@ -366,6 +366,11 @@ class CoordinatorAllocationSourceV2:
             if prior_frontier_context is not None
             else None
         )
+        prior_reward_checkpoints = (
+            reward_checkpoint_index_v2(prior_frontier["reward_checkpoints"])
+            if prior_frontier is not None
+            else {}
+        )
         finalized_reward_history = self._finalized_champion_history(
             epoch=epoch,
             netuid=netuid,
@@ -404,6 +409,7 @@ class CoordinatorAllocationSourceV2:
             enable_champ_cap=bool(policy.get("enable_champ_cap", True)),
             context=context,
             required_parents=required_parent_hashes,
+            prior_reward_checkpoints=prior_reward_checkpoints,
         )
         source_add_obligations, source_add_skipped = self._source_add(
             epoch=epoch,
@@ -412,6 +418,7 @@ class CoordinatorAllocationSourceV2:
             hotkey_uids=hotkey_uids,
             context=context,
             required_parents=required_parent_hashes,
+            prior_reward_checkpoints=prior_reward_checkpoints,
         )
         fallback_reimbursement_rows: list[Dict[str, Any]] = []
         fallback_reimbursement_skipped: list[Dict[str, Any]] = []
@@ -1706,6 +1713,9 @@ class CoordinatorAllocationSourceV2:
         enable_champ_cap: bool,
         context: ExecutionContextV2,
         required_parents: Set[str],
+        prior_reward_checkpoints: Optional[Mapping[
+            Tuple[str, str], Mapping[str, Any]
+        ]] = None,
     ) -> Tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
         obligations = []
         skipped = []
@@ -1719,15 +1729,20 @@ class CoordinatorAllocationSourceV2:
             if status not in accepted_statuses:
                 continue
             reward_id = str(row.get("champion_reward_id") or "")
-            self._require_reward_receipt(
-                artifact_kind="champion_reward_decision",
-                artifact_ref=reward_id,
-                expected_output_root=sha256_json(
-                    champion_reward_row_projection_v2(row)
-                ),
-                context=context,
-                required_parents=required_parents,
-            )
+            decision_hash = sha256_json(champion_reward_row_projection_v2(row))
+            if not self._prior_frontier_binds_reward_decision(
+                reward_kind="champion",
+                source_id=reward_id,
+                decision_hash=decision_hash,
+                prior_reward_checkpoints=prior_reward_checkpoints or {},
+            ):
+                self._require_reward_receipt(
+                    artifact_kind="champion_reward_decision",
+                    artifact_ref=reward_id,
+                    expected_output_root=decision_hash,
+                    context=context,
+                    required_parents=required_parents,
+                )
             replay = _champion_replay_obligation(
                 row,
                 paid_by_reward=paid_by_reward,
@@ -2011,6 +2026,9 @@ class CoordinatorAllocationSourceV2:
         hotkey_uids: Mapping[str, int],
         context: ExecutionContextV2,
         required_parents: Set[str],
+        prior_reward_checkpoints: Optional[Mapping[
+            Tuple[str, str], Mapping[str, Any]
+        ]] = None,
     ) -> Tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
         obligations = []
         skipped = []
@@ -2019,21 +2037,25 @@ class CoordinatorAllocationSourceV2:
             if status not in ACTIVE_CHAMPION_STATUSES:
                 continue
             reward_ref = str(row.get("reward_ref") or "")
-            self._require_reward_receipt(
-                artifact_kind="source_add_reward_decision",
-                artifact_ref=reward_ref,
-                expected_output_root=sha256_json(
-                    source_add_reward_row_projection_v2(
-                        "source_add_leg%d" % int(row.get("leg") or 0),
-                        {
-                            **dict(row),
-                            "initial_reward_status": "active",
-                        },
-                    )
-                ),
-                context=context,
-                required_parents=required_parents,
+            decision_hash = sha256_json(
+                source_add_reward_row_projection_v2(
+                    "source_add_leg%d" % int(row.get("leg") or 0),
+                    {**dict(row), "initial_reward_status": "active"},
+                )
             )
+            if not self._prior_frontier_binds_reward_decision(
+                reward_kind="source_add",
+                source_id=reward_ref,
+                decision_hash=decision_hash,
+                prior_reward_checkpoints=prior_reward_checkpoints or {},
+            ):
+                self._require_reward_receipt(
+                    artifact_kind="source_add_reward_decision",
+                    artifact_ref=reward_ref,
+                    expected_output_root=decision_hash,
+                    context=context,
+                    required_parents=required_parents,
+                )
             replay = _champion_replay_obligation(
                 {
                     "champion_reward_id": reward_ref,
@@ -2157,6 +2179,22 @@ class CoordinatorAllocationSourceV2:
                 "%s receipt does not bind its decision" % artifact_kind
             )
         required_parents.add(str(receipt["receipt_hash"]))
+
+    @staticmethod
+    def _prior_frontier_binds_reward_decision(
+        *,
+        reward_kind: str,
+        source_id: str,
+        decision_hash: str,
+        prior_reward_checkpoints: Mapping[
+            Tuple[str, str], Mapping[str, Any]
+        ],
+    ) -> bool:
+        checkpoint = prior_reward_checkpoints.get((reward_kind, source_id))
+        return (
+            isinstance(checkpoint, Mapping)
+            and checkpoint.get("obligation_hash") == decision_hash
+        )
 
     def _require_allocation_receipt(
         self,

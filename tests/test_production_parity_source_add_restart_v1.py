@@ -96,6 +96,8 @@ def _postgrest_run_command(
             "host",
             "--env",
             f"PGRST_SERVER_PORT={postgrest_port}",
+            "--env",
+            "PGRST_SERVER_HOST=127.0.0.1",
         ]
         if native_linux
         else [
@@ -315,6 +317,7 @@ def test_postgrest_command_keeps_postgres_on_platform_loopback():
     ]
     assert "--publish" not in linux
     assert "PGRST_SERVER_PORT=30001" in linux
+    assert "PGRST_SERVER_HOST=127.0.0.1" in linux
     assert (
         "PGRST_DB_URI=postgres://postgres:postgres@127.0.0.1:54321/postgres"
         in linux

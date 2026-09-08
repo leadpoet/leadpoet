@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, rewards, signing, source_bundle
+from lab_arena import contracts, rewards, scoring, signing, source_bundle
 from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
 from lab_arena.store import hash_lease_token
 
@@ -938,7 +938,277 @@ def test_public_results_take_valid_identity_from_the_round_publication():
     service._round = lambda _round_id: published
 
     result = service.public_results(published["round_id"], "sub-published")
-    assert result["submission"] == {"miner_hotkey": hotkey, "is_baseline": True}
+    assert result == {
+        "round_id": published["round_id"],
+        "submission_id": "sub-published",
+        "submission": {"miner_hotkey": hotkey, "is_baseline": True},
+        "outputs": {},
+        "run_results": [],
+        "scores": {"stage_1": [], "stage_2": []},
+        "submission_scores": {"stage_1": None, "final": None},
+    }
+
+
+def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evidence():
+    hotkey = "5" + "D" * 47
+    round_id = "arena-2026-09-07"
+    execute = {
+        "run_id": "execute-target-0",
+        "submission_id": "sub-target",
+        "kind": "execute",
+        "stage": 1,
+        "icp_position": 0,
+        "status": "accepted",
+        "terminal_cause": "accepted",
+        "output_ref": "arena/target-output.json",
+        "per_icp_score": 72.5,
+        "result_doc": {"terminal_status": "accepted"},
+    }
+    score = {
+        "run_id": "score-target-0",
+        "scored_run_id": execute["run_id"],
+        "submission_id": "sub-target",
+        "kind": "score",
+        "stage": 1,
+        "icp_position": 0,
+        "attempt": 1,
+        "status": "accepted",
+        "terminal_cause": "accepted",
+        "output_ref": "arena/target-score.json",
+    }
+    round_row = {
+        "round_id": round_id,
+        "status": "cancelled",
+        "cancel_reason": "scoring_incomplete",
+        "participants": [
+            {
+                "submission_id": "sub-target",
+                "miner_hotkey": hotkey,
+                "is_king": False,
+                "source_ref": "private-target-source",
+            },
+            {
+                "submission_id": "sub-other",
+                "miner_hotkey": "5" + "E" * 47,
+                "is_king": False,
+                "source_ref": "private-other-source",
+            },
+        ],
+        "publication_doc": None,
+    }
+
+    class Store:
+        @staticmethod
+        def list_runs(requested_round, **filters):
+            assert requested_round == round_id
+            assert filters["submission_id"] == "sub-target"
+            return [execute] if filters["kind"] == "execute" else [score]
+
+    judge_document = scoring.build_scoring_output(
+        execute["run_id"],
+        [
+            {
+                "final_score": 72.5,
+                "failure_reason": "",
+                "proof_quote": "private judge payload",
+                "intent_signals_detail": [],
+                "verifier_gate_receipts": [],
+            }
+        ],
+    )
+    service = object.__new__(ArenaService)
+    service._round = lambda _round_id: round_row
+    service._store = Store()
+    service._objects = SimpleNamespace(
+        get=lambda ref: json.dumps(
+            {"companies": [{"company_name": "Visible Company"}]}
+        ).encode(),
+        get_bounded=lambda ref, limit: json.dumps(judge_document).encode(),
+    )
+
+    result = service.public_results(round_id, "sub-target")
+
+    assert result["round_status"] == "cancelled"
+    assert result["cancel_reason"] == "scoring_incomplete"
+    assert result["incomplete"] is True
+    assert result["outputs"] == {
+        execute["run_id"]: {"companies": [{"company_name": "Visible Company"}]}
+    }
+    assert result["scores"]["stage_1"] == [
+        {
+            "run_id": execute["run_id"],
+            "icp_position": 0,
+            "per_icp_score": 72.5,
+        }
+    ]
+    assert result["submission_scores"] == {"stage_1": None, "final": None}
+    assert result["judge_jobs"] == [
+        {
+            "run_id": score["run_id"],
+            "scored_run_id": execute["run_id"],
+            "stage": 1,
+            "icp_position": 0,
+            "status": "accepted",
+            "terminal_cause": "accepted",
+        }
+    ]
+    assert result["judge_evidence"][0]["per_icp_score"] == 72.5
+    assert result["judge_evidence"][0]["breakdowns"] == [
+        {
+            "final_score": 72.5,
+            "failure_reason": "",
+            "intent_signals_detail": [],
+            "verifier_gate_receipts": [],
+        }
+    ]
+    serialized = json.dumps(result, sort_keys=True)
+    for private_value in (
+        "private-target-source",
+        "private-other-source",
+        "private judge payload",
+        "sub-other",
+    ):
+        assert private_value not in serialized
+    for unpublished_field in ("final_ranking", "king_decision", "reward_basis"):
+        assert unpublished_field not in result
+
+
+def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_failure():
+    round_id = "arena-2026-09-07-partial"
+    execute_runs = [
+        {
+            "run_id": "execute-complete",
+            "submission_id": "sub-partial",
+            "kind": "execute",
+            "stage": 1,
+            "icp_position": 0,
+            "status": "accepted",
+            "output_ref": "arena/complete.json",
+            "per_icp_score": None,
+            "result_doc": {"terminal_status": "accepted"},
+        },
+        {
+            "run_id": "execute-pending",
+            "submission_id": "sub-partial",
+            "kind": "execute",
+            "stage": 1,
+            "icp_position": 1,
+            "status": "pending",
+            "output_ref": None,
+            "per_icp_score": None,
+            "result_doc": None,
+        },
+    ]
+    failed_score = {
+        "run_id": "score-failed",
+        "scored_run_id": "execute-complete",
+        "submission_id": "sub-partial",
+        "kind": "score",
+        "stage": 1,
+        "icp_position": 0,
+        "attempt": 2,
+        "status": "failed",
+        "terminal_cause": "judge_timeout",
+        "output_ref": None,
+        "result_doc": {"unsafe_detail": "must stay private"},
+    }
+
+    class Store:
+        @staticmethod
+        def list_runs(_round_id, **filters):
+            return execute_runs if filters["kind"] == "execute" else [failed_score]
+
+    service = object.__new__(ArenaService)
+    service._round = lambda _round_id: {
+        "round_id": round_id,
+        "status": "cancelled",
+        "cancel_reason": "scoring_incomplete",
+        "participants": [
+            {
+                "submission_id": "sub-partial",
+                "miner_hotkey": "5" + "F" * 47,
+                "is_king": False,
+            }
+        ],
+    }
+    service._store = Store()
+    service._objects = SimpleNamespace(
+        get=lambda _ref: b'{"companies": [{"company_name": "Partial"}]}',
+        get_bounded=lambda *_args: pytest.fail("failed judge has no public artifact"),
+    )
+
+    result = service.public_results(round_id, "sub-partial")
+
+    assert result["incomplete"] is True
+    assert list(result["outputs"]) == ["execute-complete"]
+    assert result["scores"] == {"stage_1": [], "stage_2": []}
+    assert result["judge_evidence"] == []
+    assert result["judge_jobs"] == [
+        {
+            "run_id": "score-failed",
+            "scored_run_id": "execute-complete",
+            "stage": 1,
+            "icp_position": 0,
+            "status": "failed",
+            "terminal_cause": "judge_timeout",
+        }
+    ]
+    assert "unsafe_detail" not in json.dumps(result)
+
+
+def test_cancelled_results_refuse_an_unrelated_submission_before_run_lookup():
+    class Store:
+        @staticmethod
+        def list_runs(*_args, **_kwargs):
+            pytest.fail("an unrelated submission must not reach run lookup")
+
+        @staticmethod
+        def get_submission(_submission_id):
+            pytest.fail("global submission identity must not authorize results")
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._round = lambda _round_id: {
+        "round_id": "arena-2026-09-07",
+        "status": "cancelled",
+        "cancel_reason": "operator",
+        "participants": [
+            {
+                "submission_id": "sub-frozen",
+                "miner_hotkey": "5" + "G" * 47,
+                "is_king": False,
+            }
+        ],
+    }
+
+    with pytest.raises(ServiceError) as caught:
+        service.public_results("arena-2026-09-07", "sub-other-round")
+    assert caught.value.status == 404 and caught.value.code == "submission_missing"
+
+
+@pytest.mark.parametrize("status", ["open", "stage1", "stage2_judged", "scored"])
+def test_public_results_keep_nonterminal_rounds_private(status):
+    service = object.__new__(ArenaService)
+    service._round = lambda _round_id: {
+        "round_id": "arena-2026-09-08",
+        "status": status,
+        "participants": [
+            {
+                "submission_id": "sub-live",
+                "miner_hotkey": "5" + "H" * 47,
+                "is_king": False,
+            }
+        ],
+    }
+    service._store = SimpleNamespace(
+        list_runs=lambda *_args, **_kwargs: pytest.fail(
+            "live round must be rejected before run lookup"
+        )
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        service.public_results("arena-2026-09-08", "sub-live")
+    assert caught.value.status == 403 and caught.value.code == "results_not_public"
 
 
 def test_source_download_requires_the_active_execute_lease():

@@ -70,10 +70,21 @@ Use the returned IDs to read the result after the round publishes:
 curl "$GATEWAY_URL/arena/v1/rounds/ROUND_ID/results/SUBMISSION_ID"
 ```
 
-The result includes companies, per-ICP scores, and the aggregate score.
-Before publication, this endpoint returns HTTP 403 with `results_not_public`.
-That response does not mean the submission failed. Check the round status at
-`/arena/v1/rounds/ROUND_ID`; do not submit again just to check progress.
+The result includes companies, per-ICP scores, and the aggregate score. While a
+round is nonterminal, this endpoint returns HTTP 403 with
+`results_not_public`. That response does not mean the submission failed. Check
+the round status at `/arena/v1/rounds/ROUND_ID`; do not submit again just to
+check progress.
+
+If a round is cancelled after work has completed, the same result endpoint
+returns the completed data for participants frozen into that round. The response
+sets `round_status` to `cancelled`, includes `cancel_reason`, and sets
+`incomplete` to `true`. `judge_jobs` reports only terminal status and a safe
+cause. `judge_evidence` contains validated, redacted evidence for accepted judge
+jobs. Missing outputs and scores remain missing, and aggregate scores, ranking,
+king decisions, and rewards are not created for a cancelled round. Results stay
+private for every nonterminal round, and another round's submission ID does not
+grant access.
 
 Provider calls made while a round is running can incur the miner's upstream
 charges even if a later infrastructure failure cancels the round. A cancelled

@@ -2242,13 +2242,26 @@ class ArenaService:
         if not submission_id or not isinstance(submission_id, str):
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
         row = self._round(round_id)
-        if row["status"] != "published":
+        round_status = str(row["status"])
+        if round_status not in ("published", "cancelled"):
             raise ServiceError("results_not_public", 403)
         publication = row.get("publication_doc") or {}
+        participants = (
+            publication.get("participants") or []
+            if round_status == "published"
+            else [
+                {
+                    "submission_id": item.get("submission_id"),
+                    "miner_hotkey": item.get("miner_hotkey"),
+                    "is_baseline": bool(item.get("is_king")),
+                }
+                for item in (row.get("participants") or [])
+            ]
+        )
         participant = next(
             (
                 item
-                for item in publication.get("participants") or []
+                for item in participants
                 if item.get("submission_id") == submission_id
             ),
             None,
@@ -2274,7 +2287,7 @@ class ArenaService:
         }
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
-        return {
+        result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),
                 "is_baseline": bool(participant.get("is_baseline")),
@@ -2286,3 +2299,102 @@ class ArenaService:
                 "final": None if final_entry is None else final_entry.get("final_score"),
             },
         }
+        if round_status == "cancelled":
+            judge = self._cancelled_judge_results(
+                runs,
+                self._store.list_runs(
+                    round_id,
+                    submission_id=submission_id,
+                    kind="score",
+                ),
+            )
+            result.update(
+                {
+                    "round_status": "cancelled",
+                    "cancel_reason": row.get("cancel_reason"),
+                    "incomplete": True,
+                    "judge_jobs": judge["jobs"],
+                    "judge_evidence": judge["evidence"],
+                }
+            )
+        return result
+
+    def _cancelled_judge_results(
+        self,
+        execute_runs: Sequence[Mapping[str, Any]],
+        score_runs: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Return safe terminal judge facts without assembling a score."""
+
+        executions = {str(run["run_id"]): run for run in execute_runs}
+        selected: Dict[str, Mapping[str, Any]] = {}
+        for run in score_runs:
+            scored_run_id = str(run.get("scored_run_id") or "")
+            execution = executions.get(scored_run_id)
+            if (
+                run.get("status") not in ("accepted", "failed")
+                or execution is None
+                or int(run.get("stage") or 0) != int(execution.get("stage") or 0)
+                or int(run.get("icp_position") or 0)
+                != int(execution.get("icp_position") or 0)
+            ):
+                continue
+            current = selected.get(scored_run_id)
+            if current is None or (
+                run["status"] == "accepted" and current["status"] != "accepted"
+            ) or (
+                run["status"] == current["status"]
+                and int(run.get("attempt") or 0) > int(current.get("attempt") or 0)
+            ):
+                selected[scored_run_id] = run
+
+        jobs = []
+        evidence = []
+        for scored_run_id, run in sorted(
+            selected.items(),
+            key=lambda item: (
+                int(item[1].get("stage") or 0),
+                int(item[1].get("icp_position") or 0),
+                str(item[1].get("run_id") or ""),
+            ),
+        ):
+            cause = str(run.get("terminal_cause") or "")
+            jobs.append(
+                {
+                    "run_id": run["run_id"],
+                    "scored_run_id": scored_run_id,
+                    "stage": int(run["stage"]),
+                    "icp_position": int(run["icp_position"]),
+                    "status": run["status"],
+                    "terminal_cause": (
+                        cause if cause in contracts.SCORE_TERMINAL_CAUSES else None
+                    ),
+                }
+            )
+            if run["status"] != "accepted" or not run.get("output_ref"):
+                continue
+            try:
+                document = scoring.scoring_output_from_bytes(
+                    self._objects.get_bounded(
+                        str(run["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES
+                    )
+                )
+            except scoring.ScoringError:
+                continue
+            if document.get("scored_run_id") != scored_run_id or "breakdowns" not in document:
+                continue
+            execution = executions[scored_run_id]
+            evidence.append(
+                {
+                    "run_id": run["run_id"],
+                    "scored_run_id": scored_run_id,
+                    "stage": int(run["stage"]),
+                    "icp_position": int(run["icp_position"]),
+                    "per_icp_score": execution.get("per_icp_score"),
+                    "breakdowns": [
+                        verify.redact_breakdown(item)
+                        for item in document["breakdowns"]
+                    ],
+                }
+            )
+        return {"jobs": jobs, "evidence": evidence}

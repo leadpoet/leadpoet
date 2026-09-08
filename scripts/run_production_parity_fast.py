@@ -1536,6 +1536,31 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
                 "status": int(match.group(2)),
             }
         if projected is None:
+            process_exit = re.fullmatch(
+                r"REHEARSAL_POSTGREST_STARTUP "
+                r"component=(gateway|validator) outcome=process_exit "
+                r"returncode=([0-9]{1,3})",
+                line,
+            )
+            readiness_timeout = re.fullmatch(
+                r"REHEARSAL_POSTGREST_STARTUP "
+                r"component=(gateway|validator) outcome=readiness_timeout",
+                line,
+            )
+            if process_exit and 0 <= int(process_exit.group(2)) <= 255:
+                projected = {
+                    "marker": "postgrest_startup",
+                    "component": process_exit.group(1),
+                    "outcome": "process_exit",
+                    "returncode": int(process_exit.group(2)),
+                }
+            elif readiness_timeout:
+                projected = {
+                    "marker": "postgrest_startup",
+                    "component": readiness_timeout.group(1),
+                    "outcome": "readiness_timeout",
+                }
+        if projected is None:
             match = re.fullmatch(
                 r"REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
                 r"phase=(container|host) "
@@ -1669,6 +1694,25 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
     return diagnostics
 
 
+def _rehearsal_postgrest_startup_diagnostics(
+    *streams: str,
+) -> list[dict[str, Any]]:
+    """Retain fixed startup outcomes even when later output exceeds the tail."""
+
+    diagnostics: list[dict[str, Any]] = []
+    for stream in streams:
+        for raw_line in stream.splitlines():
+            for projected in _rehearsal_output_diagnostics(raw_line):
+                if (
+                    projected.get("marker") == "postgrest_startup"
+                    and projected not in diagnostics
+                ):
+                    diagnostics.append(projected)
+            if len(diagnostics) >= 4:
+                return diagnostics
+    return diagnostics
+
+
 def _rehearsal_component_failure_diagnostics(
     *streams: str,
 ) -> list[dict[str, Any]]:
@@ -1768,6 +1812,24 @@ def _retained_component_failure_diagnostics(
                 "marker": marker,
                 "kind": item["kind"],
             }
+        elif (
+            marker == "postgrest_startup"
+            and item.get("component") in {"gateway", "validator"}
+            and item.get("outcome") in {"process_exit", "readiness_timeout"}
+        ):
+            projected = {
+                "marker": marker,
+                "component": item["component"],
+                "outcome": item["outcome"],
+            }
+            returncode = item.get("returncode")
+            if item["outcome"] == "process_exit":
+                if type(returncode) is not int or not 0 <= returncode <= 255:
+                    projected = None
+                else:
+                    projected["returncode"] = returncode
+            elif returncode is not None:
+                projected = None
         if projected is not None and projected not in diagnostics:
             diagnostics.append(projected)
         if len(diagnostics) >= 16:
@@ -1863,6 +1925,7 @@ def _rehearsal_failure_diagnostics(
             stderr_text,
             exact_image_build_failed=exact_image_build_failed,
         ),
+        *_rehearsal_postgrest_startup_diagnostics(stdout_text, stderr_text),
         *_rehearsal_component_failure_diagnostics(stdout_text, stderr_text),
         *_rehearsal_output_diagnostics(output_tail),
     ]:

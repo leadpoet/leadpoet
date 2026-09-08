@@ -5869,6 +5869,107 @@ def test_workflow_runs_before_command_adapters_are_installed() -> None:
     assert "/harness/production_workflow_runner.py" in script[workflow:adapters]
 
 
+def _local_postgrest_startup_function() -> str:
+    script = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    start = script.index("wait_for_local_postgrest_startup() {")
+    end = script.index("\n}\ncleanup_boundary_service() {", start) + 2
+    return script[start:end]
+
+
+@pytest.mark.parametrize("component", ["gateway", "validator"])
+@pytest.mark.parametrize(
+    ("scenario", "expected_status", "expected_marker"),
+    [
+        (
+            "process_exit",
+            1,
+            "outcome=process_exit returncode=23",
+        ),
+        ("readiness_timeout", 1, "outcome=readiness_timeout"),
+        ("ready", 0, None),
+    ],
+)
+def test_local_postgrest_startup_gate_executes_bounded_outcomes(
+    component: str,
+    scenario: str,
+    expected_status: int,
+    expected_marker: str | None,
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    runner = tmp_path / "startup-gate.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/bin/bash",
+                "set -u",
+                _local_postgrest_startup_function(),
+                'COMPONENT="$1"',
+                'REHEARSAL_STATE_ROOT="$2"',
+                'scenario="$3"',
+                'BOUNDARY_SERVICE_PID=""',
+                'case "$scenario" in',
+                "  process_exit)",
+                "    (exit 23) &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    for _attempt in $(seq 1 100); do",
+                '      kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null || break',
+                "      /bin/sleep 0.01",
+                "    done",
+                "    ;;",
+                "  readiness_timeout)",
+                "    /bin/sleep 10 &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    ;;",
+                "  ready)",
+                '    : >"$REHEARSAL_STATE_ROOT/local-postgrest.ready"',
+                "    /bin/sleep 10 &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    ;;",
+                "esac",
+                "gate_status=0",
+                "wait_for_local_postgrest_startup || gate_status=$?",
+                'if [ -n "$BOUNDARY_SERVICE_PID" ]; then',
+                '  kill "$BOUNDARY_SERVICE_PID" 2>/dev/null || true',
+                '  wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || true',
+                "fi",
+                'exit "$gate_status"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner.chmod(0o700)
+
+    result = subprocess.run(
+        ["/bin/bash", str(runner), component, str(state_root), scenario],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        check=False,
+    )
+
+    assert result.returncode == expected_status
+    if expected_marker is None:
+        assert "REHEARSAL_POSTGREST_STARTUP" not in result.stderr
+        assert "ERROR: strict local PostgREST" not in result.stderr
+    else:
+        assert (
+            f"REHEARSAL_POSTGREST_STARTUP component={component} "
+            f"{expected_marker}"
+        ) in result.stderr
+        if scenario == "readiness_timeout":
+            marker_line = next(
+                line
+                for line in result.stderr.splitlines()
+                if line.startswith("REHEARSAL_POSTGREST_STARTUP")
+            )
+            assert "returncode=" not in marker_line
+
+
 def test_workflow_uses_the_strict_exact_external_boundaries(
     tmp_path,
     monkeypatch,

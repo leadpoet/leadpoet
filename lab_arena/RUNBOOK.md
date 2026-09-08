@@ -115,6 +115,10 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/194-lab-arena-open-scorer-refresh.sql` with the database owner
 before service startup. Then check the service wiring:
 
+`scripts/191-lab-arena-upload-recovery.sql` remains byte-identical only because
+an earlier production snapshot records that applied path. Do not apply it to a
+new database. Migration 193 is the current forward upload-recovery migration.
+
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only
 ```

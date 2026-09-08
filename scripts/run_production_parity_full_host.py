@@ -1080,17 +1080,37 @@ def _clone_runtime_environment(
 def _full_restart_environment(
     *,
     region: str,
+    home: Path,
     updates: Mapping[str, str],
 ) -> dict[str, str]:
     if region != "us-east-1":
         raise FullParityError("gateway restart region is invalid")
+    restart_home = Path(home)
+    try:
+        home_metadata = restart_home.lstat()
+    except OSError as exc:
+        raise FullParityError("gateway restart home is unavailable") from exc
+    try:
+        (restart_home / ".aws").lstat()
+        shared_aws_path_present = True
+    except FileNotFoundError:
+        shared_aws_path_present = False
+    except OSError as exc:
+        raise FullParityError("gateway restart home is unavailable") from exc
+    if (
+        not restart_home.is_absolute()
+        or restart_home.is_symlink()
+        or not restart_home.is_dir()
+        or home_metadata.st_uid != os.getuid()
+        or home_metadata.st_mode & 0o777 != 0o700
+        or shared_aws_path_present
+    ):
+        raise FullParityError("gateway restart home is not isolated")
     return {
-        "AWS_CONFIG_FILE": "/dev/null",
-        "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
-        "BOTO_CONFIG": "/dev/null",
         "AWS_REGION": region,
         "AWS_DEFAULT_REGION": region,
-        "HOME": str(Path.home()),
+        "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
+        "HOME": str(restart_home),
         "LANG": "C.UTF-8",
         "LOGNAME": "root",
         "PATH": (
@@ -3499,6 +3519,7 @@ def run_full(
         artifact_policy.chmod(0o600)
         env = _full_restart_environment(
             region=region,
+            home=work,
             updates={
                 "LEADPOET_REPO_ROOT": str(ROOT),
                 "GATEWAY_ROOT": str(ROOT / "gateway"),

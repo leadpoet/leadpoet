@@ -58,6 +58,13 @@ def test_guard_helper_ignores_stale_cloned_restart_authority(tmp_path: Path) -> 
         + "\n",
         encoding="utf-8",
     )
+    canonical_env = tmp_path / "gateway.env"
+    canonical_env.write_text(
+        "LAB_ARENA_SUPABASE_URL=https://fresh.invalid\n"
+        "LAB_ARENA_SUPABASE_ANON_KEY=fresh-anon\n"
+        "LAB_ARENA_SERVICE_KEY=sb_secret_fresh\n",
+        encoding="utf-8",
+    )
 
     capture = tmp_path / "helper-capture.json"
     python = tmp_path / "record-python"
@@ -76,6 +83,7 @@ def test_guard_helper_ignores_stale_cloned_restart_authority(tmp_path: Path) -> 
         + run_guard
         + "\n"
         + f"ENV_CLONE={shlex.quote(str(stale_clone))}\n"
+        + f"GATEWAY_ENV_FILE={shlex.quote(str(canonical_env))}\n"
         + f"GATEWAY_PYTHON_BIN={shlex.quote(str(python))}\n"
         + f"PREPARED_GATEWAY_SHA={current_candidate}\n"
         + "LAB_ARENA_RESTART_GUARD_GENERATION=202\n"
@@ -114,7 +122,7 @@ def test_guard_helper_ignores_stale_cloned_restart_authority(tmp_path: Path) -> 
         "--phase",
         "gateway_destructive",
         "--environment-file",
-        str(stale_clone),
+        str(canonical_env),
         "--candidate",
         current_candidate,
         "--invocation",

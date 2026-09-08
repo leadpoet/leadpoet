@@ -83,10 +83,18 @@ def _run_post_activate_guard_reexec(
         encoding="utf-8",
     )
     python.chmod(0o755)
+    canonical_env = tmp_path / "gateway.env"
+    canonical_env.write_text(
+        "LAB_ARENA_SUPABASE_URL=https://arena.invalid\n"
+        "LAB_ARENA_SUPABASE_ANON_KEY=test-anon\n"
+        "LAB_ARENA_SERVICE_KEY=sb_secret_test\n",
+        encoding="utf-8",
+    )
     target = tmp_path / "post-activate-target.sh"
     target.write_text(
         "#!/bin/bash\nset -euo pipefail\n"
         + f"ENV_CLONE={shlex.quote(str(tmp_path / 'missing-env-clone'))}\n"
+        + f"GATEWAY_ENV_FILE={shlex.quote(str(canonical_env))}\n"
         + initialization
         + "\n"
         + validate

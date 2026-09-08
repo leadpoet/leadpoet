@@ -76,6 +76,7 @@ mkdir -p \
   /evidence
 
 BOUNDARY_SERVICE_PID=""
+ARENA_GUARD_CONTROLLER_PID=""
 GATEWAY_ENCLAVE_SERVICE_PIDS=""
 VALIDATOR_ENCLAVE_SERVICE_PID=""
 TLS_PROXY_SERVICE_PID=""
@@ -114,6 +115,10 @@ preserve_rehearsal_evidence() {
   fi
 }
 cleanup_boundary_service() {
+  if [ -n "$ARENA_GUARD_CONTROLLER_PID" ]; then
+    kill "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+    wait "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+  fi
   if [ -n "$RUNNING_VALIDATOR_FIXTURE_PID" ]; then
     kill "$RUNNING_VALIDATOR_FIXTURE_PID" 2>/dev/null || true
     wait "$RUNNING_VALIDATOR_FIXTURE_PID" 2>/dev/null || true
@@ -283,6 +288,8 @@ PY
 
 if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
   echo "Validating migration-backed V2 settlement persistence"
+  POSTGRES_CONNECTION="$REHEARSAL_STATE_ROOT/postgres-connection.json"
+  rm -f -- "$POSTGRES_CONNECTION"
   SUPABASE_URL="http://127.0.0.1:54321" \
   SUPABASE_SERVICE_ROLE_KEY="rehearsal-secret" \
   AWS_ACCESS_KEY_ID="rehearsal-access" \
@@ -294,6 +301,7 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --candidate-sha "$DURABLE_SCHEMA_SHA" \
     --release-build-input \
       "$DURABLE_SCHEMA_SEED_ROOT/release-build-input.json" \
+    --postgres-connection-output "$POSTGRES_CONNECTION" \
     --output "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json"
   PYTHONPATH="/source:/harness" /usr/bin/python3.11 \
     /harness/gateway_boundary_service.py \
@@ -305,6 +313,7 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --schema-contract \
       "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json" \
     --candidate-sha "$DURABLE_SCHEMA_SHA" \
+    --postgres-connection "$POSTGRES_CONNECTION" \
     --durable-state \
       "$REHEARSAL_DURABLE_STATE_ROOT/postgrest-state.json" &
   BOUNDARY_SERVICE_PID=$!
@@ -486,6 +495,15 @@ ACTIVE_RELEASE_GATEWAY_LINEAGE=""
 ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE=""
 ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE=""
 ACTIVE_RELEASE_COORDINATION_FILE=""
+ACTIVE_RELEASE_ARENA_GUARD_REQUEST=""
+ACTIVE_RELEASE_ARENA_GUARD_PERMIT=""
+ACTIVE_RELEASE_ARENA_GUARD_NONCE=""
+ACTIVE_RELEASE_ARENA_GUARD_GENERATION=""
+LAB_ARENA_GUARD_ENV=(
+  "LAB_ARENA_SUPABASE_URL=https://qplwoislplkcegvdmbim.supabase.co"
+  "LAB_ARENA_SUPABASE_ANON_KEY=rehearsal-secret"
+  "LAB_ARENA_SERVICE_JWT=rehearsal.header.signature"
+)
 if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
     && [ "$WEIGHT_READINESS_SCENARIO" = "production_success" ]; then
   PAIRED_ACTIVE_RELEASE_FIXTURE=1
@@ -497,9 +515,16 @@ if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
   ACTIVE_RELEASE_GATEWAY_LINEAGE="/tmp/leadpoet-gateway-active-release-lineage.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
   ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE="/tmp/leadpoet-gateway-paired-restart.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
   ACTIVE_RELEASE_COORDINATION_FILE="/tmp/leadpoet-coordinated-restart.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
+  ACTIVE_RELEASE_ARENA_GUARD_REQUEST="/tmp/leadpoet-validator-arena-request.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_ARENA_GUARD_PERMIT="/tmp/leadpoet-validator-arena-permit.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
   ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE="$(
     printf '%s' \
       "$FROM_SHA:$CANDIDATE_SHA:$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+      | sha256sum | cut -d' ' -f1
+  )"
+  ACTIVE_RELEASE_ARENA_GUARD_NONCE="$(
+    printf '%s' \
+      "lab-arena:$FROM_SHA:$CANDIDATE_SHA:$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
       | sha256sum | cut -d' ' -f1
   )"
   ACTIVE_RELEASE_AUTHORITY_SHA="$(
@@ -511,7 +536,9 @@ if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
     "$ACTIVE_RELEASE_GATEWAY_REQUIREMENTS" \
     "$ACTIVE_RELEASE_GATEWAY_LINEAGE" \
     "$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE" \
-    "$ACTIVE_RELEASE_COORDINATION_FILE"
+    "$ACTIVE_RELEASE_COORDINATION_FILE" \
+    "$ACTIVE_RELEASE_ARENA_GUARD_REQUEST" \
+    "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT"
   PYTHONDONTWRITEBYTECODE=1 \
     LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json \
     PYTHONPATH=/source:/harness \
@@ -739,6 +766,78 @@ PY
   fi
 fi
 
+run_rehearsal_lab_arena_guard() {
+  env "${LAB_ARENA_GUARD_ENV[@]}" \
+    PYTHONPATH=/source:/harness \
+    /usr/bin/python3.11 \
+    /source/scripts/lab_arena_restart_claim_guard.py "$@" \
+    --candidate "$CANDIDATE_SHA" \
+    --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+}
+
+release_rehearsal_lab_arena_guard() {
+  local scope="$1" state
+  state="$(run_rehearsal_lab_arena_guard state)"
+  ACTIVE_RELEASE_ARENA_GUARD_GENERATION="$(
+    /usr/bin/python3.11 -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$state"
+  )"
+  run_rehearsal_lab_arena_guard release \
+    --scope "$scope" \
+    --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" >/dev/null
+}
+
+start_validator_lab_arena_guard_controller() {
+  local report
+  report="$(run_rehearsal_lab_arena_guard drain --scope validator)"
+  ACTIVE_RELEASE_ARENA_GUARD_GENERATION="$(
+    /usr/bin/python3.11 -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$report"
+  )"
+  (
+    request_ready=0
+    for _attempt in $(seq 1 10000); do
+      if [ -s "$ACTIVE_RELEASE_ARENA_GUARD_REQUEST" ]; then
+        request_ready=1
+        break
+      fi
+      /bin/sleep 0.05
+    done
+    if [ "$request_ready" != "1" ]; then
+      echo "ERROR: rehearsal validator did not publish its Arena guard request" >&2
+      exit 1
+    fi
+    PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+      /source/scripts/lab_arena_restart_guard_handoff.py validate-request \
+      --path "$ACTIVE_RELEASE_ARENA_GUARD_REQUEST" \
+      --candidate "$CANDIDATE_SHA" \
+      --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+      --scope validator \
+      --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
+      --authority-commit "$CANDIDATE_SHA" >/dev/null
+    authorization="$(
+      run_rehearsal_lab_arena_guard authorize \
+        --scope validator \
+        --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \
+        --phase validator_destructive
+    )"
+    printf '%s' "$authorization" \
+      | PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+        /source/scripts/lab_arena_restart_guard_handoff.py write-permit \
+        --path "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+        --candidate "$CANDIDATE_SHA" \
+        --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --scope validator \
+        --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
+        --authority-commit "$CANDIDATE_SHA" \
+        --expected-generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \
+        >/dev/null
+  ) &
+  ARENA_GUARD_CONTROLLER_PID=$!
+}
+
 GATEWAY_ACTIVE_RELEASE_ENV=()
 VALIDATOR_ACTIVE_RELEASE_ENV=()
 if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
@@ -751,12 +850,18 @@ if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS=30"
   )
   VALIDATOR_ACTIVE_RELEASE_ENV=(
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=/home/ec2-user/leadpoet/leadpoet"
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT=$CANDIDATE_SHA"
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID=$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1"
     "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=$ACTIVE_RELEASE_VALIDATOR_OUTPUT"
     "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=$ACTIVE_RELEASE_GATEWAY_REQUIREMENTS"
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=$ACTIVE_RELEASE_GATEWAY_LINEAGE"
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=$ACTIVE_RELEASE_COORDINATION_FILE"
+    "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT=$ACTIVE_RELEASE_ARENA_GUARD_REQUEST"
+    "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT=$ACTIVE_RELEASE_ARENA_GUARD_PERMIT"
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE=$ACTIVE_RELEASE_ARENA_GUARD_NONCE"
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS=30"
   )
 fi
 
@@ -1248,6 +1353,9 @@ PY
     echo "ERROR: exact gateway launcher failed" >&2
     exit "$RESTART_STATUS"
   fi
+  if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+    release_rehearsal_lab_arena_guard gateway
+  fi
 
   if [ "$MINER_FIRST_ROLLOUT" = "1" ]; then
     test ! -e "$MINER_HANDOFF_FILE"
@@ -1436,6 +1544,9 @@ else
     '{"ss58Address":"5CUxhqZ2ewLA61PtdKYzdnLXq1jyFxsvjMg8mRsim4Ni8T3p"}' \
     >/home/ec2-user/.bittensor/wallets/validator_72/coldkeypub.txt
 
+  if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+    start_validator_lab_arena_guard_controller
+  fi
   echo "REHEARSAL_START component=validator from=$FROM_SHA candidate=$CANDIDATE_SHA transition=$TRANSITION"
   if [ "$TRANSITION" = "rollback" ]; then
     env \
@@ -1454,6 +1565,16 @@ else
       VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
       "${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \
       bash /home/ec2-user/validator_restart.sh
+  fi
+
+  if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+    wait "$ARENA_GUARD_CONTROLLER_PID"
+    ARENA_GUARD_CONTROLLER_PID=""
+    run_rehearsal_lab_arena_guard ready \
+      --scope validator \
+      --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \
+      --phase validator_ready >/dev/null
+    release_rehearsal_lab_arena_guard validator
   fi
 
   test "$(git -C /home/ec2-user/leadpoet/leadpoet rev-parse HEAD)" = "$CANDIDATE_SHA"

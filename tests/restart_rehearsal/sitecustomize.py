@@ -312,9 +312,17 @@ class _LocalSupabaseHTTPSConnection:
             or set(normalized_headers) != expected_headers
             or normalized_headers.get("host") != _PRODUCTION_SUPABASE_HOST
             or normalized_headers.get("accept") != "application/json"
-            or normalized_headers.get("apikey") != "rehearsal-secret"
-            or normalized_headers.get("authorization")
-            != "Bearer rehearsal-secret"
+            or (
+                normalized_headers.get("apikey"),
+                normalized_headers.get("authorization"),
+            )
+            not in {
+                ("rehearsal-secret", "Bearer rehearsal-secret"),
+                (
+                    "rehearsal-secret",
+                    "Bearer rehearsal.header.signature",
+                ),
+            }
             or normalized_headers.get("connection") != "close"
             or (normalized_method == "GET" and body is not None)
             or (normalized_method == "POST" and not isinstance(body, bytes))

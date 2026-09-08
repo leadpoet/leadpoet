@@ -7740,8 +7740,29 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
     assert '"VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=' in script
     assert '"VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=' in script
     assert '"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE=' in script
+    assert "lab_arena_restart_guard_handoff.py validate-request" in script
+    assert "lab_arena_restart_guard_handoff.py write-permit" in script
+    assert "run_rehearsal_lab_arena_guard authorize" in script
+    assert "run_rehearsal_lab_arena_guard release" in script
     assert '"${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \\' in script
     assert '"${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \\' in script
+
+
+def test_exact_rehearsal_gateway_secret_uses_local_arena_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    secret = contract_adapter._gateway_secret()
+    assert secret["LAB_ARENA_SUPABASE_URL"] == (
+        contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    assert secret["LAB_ARENA_SUPABASE_ANON_KEY"] == "rehearsal-secret"
+    assert secret["LAB_ARENA_SERVICE_JWT"] == "rehearsal.header.signature"
 
 
 def test_rehearsal_inherits_the_installed_cutover_manifest() -> None:

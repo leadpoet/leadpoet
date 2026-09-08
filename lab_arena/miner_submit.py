@@ -10,6 +10,7 @@ import os
 import tempfile
 import time
 import warnings
+import re
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -24,7 +25,22 @@ class MinerSubmissionError(RuntimeError):
 
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
+        self.detail = detail
         super().__init__(detail or code)
+
+    def format_for_cli(self, *, forbidden_values: Any = ()) -> str:
+        """Return bounded diagnostic text with secrets and controls removed."""
+        detail = str(self.detail or "")
+        for value in forbidden_values or ():
+            if isinstance(value, str) and value:
+                detail = detail.replace(value, "[REDACTED]")
+        detail = re.sub(
+            r"[\x00-\x1f\x7f]",
+            lambda match: "\\x%02x" % ord(match.group(0)),
+            detail,
+        )
+        detail = detail[:240]
+        return self.code if not detail else "%s (%s)" % (self.code, detail)
 
 
 SUBMISSION_CREDENTIAL_ENV_VARS = {
@@ -102,13 +118,25 @@ def prompt_submission_credentials(
     return validate_submission_credentials(credentials)
 
 
-def validate_agent_source(source_dir: str | Path) -> Path:
+def validate_agent_source(
+    source_dir: str | Path, *, forbidden_values: Any = ()
+) -> Path:
     """Validate the bounded source shape and Python syntax without importing it."""
 
     try:
-        return source_bundle.validate_source_directory(source_dir)
+        source = source_bundle.validate_source_directory(source_dir)
+        files = source_bundle._source_files(source)
+        secret_names = tuple(
+            value for value in forbidden_values or () if isinstance(value, str) and value
+        )
+        for _candidate, relative_name, _details in files:
+            if any(secret in relative_name for secret in secret_names):
+                raise source_bundle.SourceBundleError(
+                    "source_contains_credentials", path=relative_name
+                )
+        return source
     except source_bundle.SourceBundleError as exc:
-        raise MinerSubmissionError(exc.code) from exc
+        raise MinerSubmissionError(exc.code, exc.path or "") from exc
 
 
 def _api_base_url(value: str) -> str:
@@ -206,6 +234,7 @@ def _upload_source(
                 data=handle,
                 headers=dict(upload_headers),
                 timeout=300,
+                allow_redirects=False,
             )
     except (OSError, requests.RequestException) as exc:
         raise MinerSubmissionError("source_upload_failed", type(exc).__name__) from exc
@@ -214,7 +243,28 @@ def _upload_source(
     if int(response.status_code) == 412:
         return
     if not 200 <= int(response.status_code) < 300:
-        raise MinerSubmissionError("source_upload_failed", "http_%d" % int(response.status_code))
+        detail = "http_%d" % int(response.status_code)
+        known_codes = {
+            "AccessDenied", "BadDigest", "EntityTooLarge", "ExpiredToken",
+            "InvalidAccessKeyId", "InvalidDigest", "InvalidRequest",
+            "NoSuchBucket", "PreconditionFailed", "RequestTimeout", "SlowDown",
+            "SignatureDoesNotMatch",
+        }
+        try:
+            match = re.search(r"<Code>\s*([^<\s]{1,80})\s*</Code>", response.text)
+        except (AttributeError, TypeError):
+            match = None
+        if match and match.group(1) in known_codes:
+            detail += " code=%s" % match.group(1)
+        request_id = ""
+        for header in ("x-amz-request-id", "x-amz-id-2"):
+            value = response.headers.get(header, "") if hasattr(response, "headers") else ""
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", value):
+                request_id = value
+                break
+        if request_id:
+            detail += " request_id=%s" % request_id
+        raise MinerSubmissionError("source_upload_failed", detail)
 
 
 def submit_agent_source(
@@ -229,7 +279,7 @@ def submit_agent_source(
     """Archive, upload, and finalize one local agent fork."""
 
     submission_credentials = validate_submission_credentials(credentials)
-    source = validate_agent_source(source_dir)
+    source = validate_agent_source(source_dir, forbidden_values=submission_credentials.values())
     base = _api_base_url(api_base_url)
     round_id = find_open_round(base, session=session)
     fd, raw_path = tempfile.mkstemp(prefix="lab-arena-source-", suffix=".tar.gz")
@@ -354,7 +404,7 @@ def run_interactive_submission(
             credentials=credentials,
         )
     except MinerSubmissionError as exc:
-        output_fn("Submission failed: %s" % exc.code)
+        output_fn("Submission failed: %s" % exc.format_for_cli(credentials.values() if 'credentials' in locals() else ()))
         return False
     output_fn("Submission accepted: %s" % result["submission_id"])
     output_fn("Round: %s" % result["round_id"])

@@ -88,7 +88,8 @@ class _Session:
             },
         )
 
-    def put(self, url, data, headers, timeout):
+    def put(self, url, data, headers, timeout, allow_redirects):
+        assert allow_redirects is False
         self.uploads.append((url, data.read(), dict(headers), timeout))
         return _Response(self.upload_status)
 
@@ -131,6 +132,17 @@ def test_source_validation_checks_syntax_without_importing_code(tmp_path):
     (source / "harness.py").write_text("def run_icp(:\n", encoding="utf-8")
     with pytest.raises(MinerSubmissionError, match="harness_invalid"):
         validate_agent_source(source)
+
+
+def test_local_source_error_path_redacts_submitted_credentials(tmp_path):
+    source = _agent_source(tmp_path)
+    secret = CREDENTIALS["openrouter_api_key"]
+    (source / secret).write_text("loader\n", encoding="utf-8")
+    with pytest.raises(MinerSubmissionError) as caught:
+        validate_agent_source(source, forbidden_values=CREDENTIALS.values())
+    rendered = caught.value.format_for_cli(forbidden_values=CREDENTIALS.values())
+    assert secret not in rendered
+    assert "source_contains_credentials" in rendered
 
 
 def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path):
@@ -319,6 +331,38 @@ def test_unknown_error_code_is_never_echoed():
         miner_submit._json_response(response, "submission_finalize")
     assert caught.value.code == "arena_request_failed"
     assert "server-echoed-secret" not in str(caught.value)
+
+
+def test_upload_error_reports_status_known_code_and_bounded_request_id_without_xml(tmp_path):
+    class Response:
+        status_code = 403
+        text = "<Error><Code>AccessDenied</Code><Message>secret-value</Message></Error>"
+        headers = {"x-amz-request-id": "req-123"}
+
+    class Session:
+        def put(self, *_args, **_kwargs):
+            return Response()
+
+    archive = tmp_path / "upload-fixture"
+    archive.write_bytes(b"fixture")
+    with pytest.raises(MinerSubmissionError) as caught:
+        miner_submit._upload_source(
+            Session(), archive, "https://uploads.example/private", {},
+        )
+    assert caught.value.code == "source_upload_failed"
+    assert str(caught.value) == "http_403 code=AccessDenied request_id=req-123"
+    assert "secret-value" not in str(caught.value)
+    assert "Message" not in str(caught.value)
+
+
+def test_error_formatter_redacts_controls_and_credentials():
+    error = MinerSubmissionError(
+        "source_upload_failed",
+        "http_403 code=AccessDenied\nsecret-value",
+    )
+    rendered = error.format_for_cli(forbidden_values=("secret-value",))
+    assert "secret-value" not in rendered
+    assert "\\x0a" in rendered
 
 
 def test_cli_rejects_submitted_credentials_embedded_in_source_before_upload(tmp_path):

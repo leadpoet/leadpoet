@@ -247,3 +247,17 @@ def test_archive_scan_checks_allowed_environment_templates_for_exact_values():
             payload,
             forbidden_values=(secret,),
         )
+
+
+def test_source_errors_carry_relative_path_without_file_contents():
+    payload = _archive_members(
+        (
+            ("harness.py", b"def run_icp(icp): return []\n"),
+            ("nested/.env.local.sh", b"loader-without-secrets\n"),
+        )
+    )
+    with pytest.raises(source_bundle.SourceBundleError) as caught:
+        source_bundle.validate_source_archive(payload)
+    assert caught.value.code == "source_contains_credentials"
+    assert caught.value.path == "nested/.env.local.sh"
+    assert "loader-without-secrets" not in str(caught.value)

@@ -88,7 +88,7 @@ def submit_source(args) -> int:
             credentials=credentials,
         )
     except MinerSubmissionError as exc:
-        print("submission failed: %s" % exc.code, file=sys.stderr)
+        print("submission failed: %s" % exc.format_for_cli(credentials.values() if 'credentials' in locals() else ()), file=sys.stderr)
         return 2
     print(json.dumps(dict(result), sort_keys=True))
     return 0

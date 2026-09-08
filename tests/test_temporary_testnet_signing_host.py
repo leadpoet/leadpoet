@@ -776,6 +776,8 @@ def _runtime_log_probe(tmp_path, *, symlink_validator=False):
         "Authoritative V2 gateway bundle persisted: sha256:secret-value\n"
         "Authoritative V2 Research Lab allocation failed closed: HTTPError: "
         "HTTP Error 503: champion V2 cutover blocked: private counts\n"
+        "chain-realized settlement activation is unavailable or ambiguous\n"
+        "chain-realized settlement activation is invalid\n"
         '{"event": "automatic_weight_tick_failed", '
         '"failure_type": "RuntimeError"} secret-private-detail\n'
         'File "/private/path/validator.py", line 5557\n'
@@ -828,7 +830,11 @@ def test_runtime_log_diagnostics_execute_and_return_only_allowlisted_fields(tmp_
     assert validator["failure_markers"] == [
         "automatic_weight_tick_failed", "allocation_failed_closed",
     ]
-    assert validator["reason_codes"] == ["champion_v2_cutover_blocked"]
+    assert validator["reason_codes"] == [
+        "champion_v2_cutover_blocked",
+        "chain_realized_settlement_activation_unavailable_or_ambiguous",
+        "chain_realized_settlement_activation_invalid",
+    ]
     assert validator["http_statuses"] == [
         {"endpoint": "allocation_handoff", "status": 503}
     ]

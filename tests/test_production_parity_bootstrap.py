@@ -2217,8 +2217,12 @@ def test_full_workflow_uses_self_hosted_bounded_windows_and_exact_volume():
     source = workflow_path.read_text(encoding="utf-8")
     workflow = yaml.safe_load(source)
     job = workflow["jobs"]["validate"]
-    assert "leadpoet-gateway-v2-builder" in source
-    assert "runs-on: ubuntu-latest" not in source
+    assert job["runs-on"] == [
+        "self-hosted",
+        "linux",
+        "x64",
+        "leadpoet-gateway-v2-builder",
+    ]
     assert job["timeout-minutes"] == 1430
     assert "PARITY_TEMP" not in job["env"]
     assert not any(
@@ -2283,6 +2287,8 @@ def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
     full = (
         root / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
+    full_workflow = yaml.safe_load(full)
+    full_validate_steps = full_workflow["jobs"]["validate"]["steps"]
     fast = (
         root / ".github/workflows/production-parity-fast.yml"
     ).read_text(encoding="utf-8")
@@ -2315,8 +2321,17 @@ def test_controller_dependencies_use_a_scrubbed_per_run_virtualenv():
     assert 'printf \'VIRTUAL_ENV=%s\\n\' "$venv_root"' in action
     assert 'test "$(command -v python3)" = "$VIRTUAL_ENV/bin/python3"' in action
     assert '"$venv_python" "$script" --help' in action
-    assert "uses: actions/setup-python@v5" not in full
-    assert "python-executable: /usr/bin/python3.11" in full
+    assert all(
+        step.get("uses") != "actions/setup-python@v5"
+        for step in full_validate_steps
+    )
+    controller = next(
+        step
+        for step in full_validate_steps
+        if step.get("uses")
+        == "./.github/actions/setup-production-parity-controller"
+    )
+    assert controller["with"]["python-executable"] == "/usr/bin/python3.11"
     for github_hosted in (fast, cleanup):
         assert "uses: actions/setup-python@v5" in github_hosted
         assert "python-version: \"3.11\"" in github_hosted

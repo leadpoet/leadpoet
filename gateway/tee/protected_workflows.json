@@ -3382,7 +3382,7 @@
       "symbol": "execute_v2_provider_request"
     },
     {
-      "ast_sha256": "sha256:b09ba6687469b0d96da7dd1aaaa00d7368ca85453d53cd57c306fa2b47ea7480",
+      "ast_sha256": "sha256:c22d99436c3f3ba0cf04f4a419c5503b219679c06bd44eebf616582c73c60517",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_coordinator_job_manager"
     },
@@ -4687,7 +4687,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:87e212f50d3126e140260996e5fa91093b855f1b634abffc4e52d50a71f51c6b",
-  "protected_source_commit": "5f8d39f6cc42c686de2c9527867756951c2d78d5",
+  "manifest_hash": "sha256:a6eda6f39acd4da445124c287788db991378131370fa212d1ee69dfff2d7e89b",
+  "protected_source_commit": "075e4b1f2ddb3ff955b76bfd1c72218ec5b89f15",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

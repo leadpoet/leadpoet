@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
+from pydantic import ValidationError
 from qualification.competition_models import CompetitionCompany
 from qualification.employee_buckets import (
     normalize_employee_count_bucket,
@@ -36,14 +37,40 @@ _PENALIZABLE_FAILURE_MARKERS = (
     "company verification failed",
 )
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
+_MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS = "model_contract_incompatible"
 _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
     "insufficient_fit_evidence",
-    "model_contract_incompatible",
+    _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS,
 })
 
 
 class CompetitionScorerInputError(ValueError):
     """A company or ICP does not satisfy the public competition boundary."""
+
+
+def _model_contract_incompatible_breakdown() -> dict[str, Any]:
+    """Return a safe zero when one public company cannot enter the judge model."""
+
+    return {
+        "icp_fit": 0.0,
+        "decision_maker": 0.0,
+        "intent_signal_raw": 0.0,
+        "time_decay_multiplier": 1.0,
+        "intent_signal_final": 0.0,
+        "cost_penalty": 0.0,
+        "time_penalty": 0.0,
+        "final_score": 0.0,
+        "failure_reason": "company model contract incompatible",
+        "intent_signals_detail": None,
+        "verifier_gate_receipts": [
+            {
+                "gate": "company_fit",
+                "decision": "unavailable",
+                "reason": "company_model_contract_incompatible",
+                "failure_class": _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS,
+            }
+        ],
+    }
 
 
 def _text(value: Any) -> str:
@@ -276,7 +303,12 @@ class CompetitionCompanyScorer:
             ) or normalize_observed_employee_count_bucket(observed, default=None)
             if not bucket or bucket not in allowed_buckets:
                 continue
-            company_model = company_type(**_normalized_company(company))
+            normalized_company = _normalized_company(company)
+            try:
+                company_model = company_type(**normalized_company)
+            except ValidationError:
+                breakdowns.append(_model_contract_incompatible_breakdown())
+                continue
             result = await score_company(
                 company=company_model,
                 icp=icp_model,

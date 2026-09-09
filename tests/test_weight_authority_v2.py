@@ -50,6 +50,7 @@ from leadpoet_canonical.weight_authority_v2 import (
     WEIGHT_INPUT_PURPOSES,
     WeightAuthorityV2Error,
     build_weight_snapshot_v2,
+    validate_weight_snapshot_v2,
     validate_weight_input_source_evidence_v2,
     validate_weight_finalization_submission_v2,
     validate_published_weight_bundle_v2,
@@ -288,10 +289,20 @@ def test_gateway_weight_inputs_are_epoch_scoped_and_finalized_block_invariant():
     )
 
 
-def _bundle(*, category_purpose_override=None, category_output_override=None):
+def _bundle(
+    *,
+    category_purpose_override=None,
+    category_output_override=None,
+    historical_source_allocations=None,
+):
     coordinator_key, coordinator_pub = _keypair()
     weight_key, weight_pub = _keypair()
     preliminary = _calculation_snapshot([], "")
+    historical = historical_source_allocations is not None
+    if historical:
+        preliminary["research_lab_allocation_doc"][
+            "source_add_allocations"
+        ] = historical_source_allocations
     weight_config = preliminary["config_hash"]
     coordinator_boot = _boot(COORDINATOR_ROLE, coordinator_key, coordinator_pub, HASH)
     weight_boot = _boot(WEIGHT_ROLE, weight_key, weight_pub, weight_config)
@@ -303,16 +314,24 @@ def _bundle(*, category_purpose_override=None, category_output_override=None):
         calculation_snapshot=preliminary,
         finalized_chain_state_root=finalized_chain_state_root,
         gateway_authority_event_hash=gateway_authority_event_hash,
+        include_historical_source_add=historical,
     )
 
     source_receipts = []
     source_attempts = []
     input_hashes = {}
+    all_categories = set(WEIGHT_INPUT_PURPOSES)
+    if historical:
+        all_categories.add("source_add_rewards")
     ordered_categories = ["chain_state", "metagraph_state", "burn_ownership"] + sorted(
-        set(WEIGHT_INPUT_PURPOSES) - {"chain_state", "metagraph_state", "burn_ownership"}
+        all_categories - {"chain_state", "metagraph_state", "burn_ownership"}
     )
     for index, category in enumerate(ordered_categories):
-        role, purpose = WEIGHT_INPUT_PURPOSES[category]
+        role, purpose = (
+            (COORDINATOR_ROLE, "research_lab.source_add_reward_input.v2")
+            if category == "source_add_rewards"
+            else WEIGHT_INPUT_PURPOSES[category]
+        )
         if category_purpose_override and category in category_purpose_override:
             role, purpose = category_purpose_override[category]
         if role == COORDINATOR_ROLE:
@@ -352,6 +371,7 @@ def _bundle(*, category_purpose_override=None, category_output_override=None):
                     calculation_snapshot=preliminary,
                     finalized_chain_state_root=finalized_chain_state_root,
                     gateway_authority_event_hash=gateway_authority_event_hash,
+                    include_historical_source_add=historical,
                 )[category]["value"]
             )
         ]
@@ -406,12 +426,17 @@ def _bundle(*, category_purpose_override=None, category_output_override=None):
         list(input_hashes.values()),
         input_hashes["research_lab_allocation"],
     )
+    if historical:
+        calculation["research_lab_allocation_doc"][
+            "source_add_allocations"
+        ] = historical_source_allocations
     snapshot = build_weight_snapshot_v2(
         validator_hotkey=VALIDATOR_HOTKEY,
         calculation_snapshot=calculation,
         input_receipt_hashes=input_hashes,
         finalized_chain_state_root=finalized_chain_state_root,
         gateway_authority_event_hash=gateway_authority_event_hash,
+        _allow_historical_source_add=historical,
     )
     snapshot_receipt = _receipt(
         role=WEIGHT_ROLE,
@@ -505,6 +530,40 @@ def test_complete_v2_weight_authority_graph_validates():
     assert verified["snapshot_receipt_hash"]
 
 
+@pytest.mark.parametrize("source_allocations", [[], [{"hotkey": "source", "share": 0.01}]])
+def test_historical_source_add_signed_weight_bundle_validates(source_allocations):
+    bundle = _bundle(historical_source_allocations=source_allocations)
+
+    verified = validate_published_weight_bundle_v2(bundle)
+
+    source_hash = bundle["weight_snapshot"]["input_receipt_hashes"][
+        "source_add_rewards"
+    ]
+    source_receipt = next(
+        receipt
+        for receipt in bundle["receipt_graph"]["receipts"]
+        if receipt["receipt_hash"] == source_hash
+    )
+    assert source_receipt["purpose"] == "research_lab.source_add_reward_input.v2"
+    assert verified["weights_hash"] == bundle["weight_result"]["weights_hash"]
+
+
+def test_historical_source_add_signed_weight_bundle_rejects_receipt_tampering():
+    bundle = _bundle(historical_source_allocations=[])
+    source_hash = bundle["weight_snapshot"]["input_receipt_hashes"][
+        "source_add_rewards"
+    ]
+    source_receipt = next(
+        receipt
+        for receipt in bundle["receipt_graph"]["receipts"]
+        if receipt["receipt_hash"] == source_hash
+    )
+    source_receipt["purpose"] = "research_lab.fulfillment_input.v2"
+
+    with pytest.raises(WeightAuthorityV2Error):
+        validate_published_weight_bundle_v2(bundle)
+
+
 def test_host_composes_binding_receipt_as_authoritative_graph_root():
     expected = _bundle()
     bound_graph = expected["receipt_graph"]
@@ -576,6 +635,54 @@ def test_v2_weight_snapshot_requires_every_input_category():
             finalized_chain_state_root=snapshot["finalized_chain_state_root"],
             gateway_authority_event_hash=snapshot["gateway_authority_event_hash"],
         )
+
+
+@pytest.mark.parametrize("source_allocations", [[], [{
+    "uid": 3,
+    "miner_hotkey": "source-hotkey",
+    "paid_alpha_percent": 1.0,
+}]])
+def test_historical_source_add_snapshot_verification_is_read_only_and_exact(
+    source_allocations,
+):
+    current = _bundle()["weight_snapshot"]
+    inputs = dict(current["input_receipt_hashes"])
+    inputs["source_add_rewards"] = "sha256:" + "a" * 64
+    calculation = copy.deepcopy(current["calculation_snapshot"])
+    calculation["research_lab_allocation_doc"][
+        "source_add_allocations"
+    ] = source_allocations
+    calculation["parent_receipt_hashes"] = sorted(inputs.values())
+
+    with pytest.raises(WeightAuthorityV2Error, match="categories are incomplete"):
+        build_weight_snapshot_v2(
+            validator_hotkey=current["validator_hotkey"],
+            calculation_snapshot=calculation,
+            input_receipt_hashes=inputs,
+            finalized_chain_state_root=current["finalized_chain_state_root"],
+            gateway_authority_event_hash=current["gateway_authority_event_hash"],
+        )
+
+    historical = build_weight_snapshot_v2(
+        validator_hotkey=current["validator_hotkey"],
+        calculation_snapshot=calculation,
+        input_receipt_hashes=inputs,
+        finalized_chain_state_root=current["finalized_chain_state_root"],
+        gateway_authority_event_hash=current["gateway_authority_event_hash"],
+        _allow_historical_source_add=True,
+    )
+    verified = validate_weight_snapshot_v2(historical)
+    assert verified["sparse_uids"] == ([0, 1, 2, 3] if source_allocations else [0, 1, 2])
+
+    omitted = copy.deepcopy(historical)
+    del omitted["input_receipt_hashes"]["source_add_rewards"]
+    with pytest.raises(WeightAuthorityV2Error, match="must be paired"):
+        validate_weight_snapshot_v2(omitted)
+
+    tampered = copy.deepcopy(historical)
+    tampered["input_receipt_hashes"]["source_add_rewards"] = "sha256:" + "b" * 64
+    with pytest.raises(WeightAuthorityV2Error, match="parents differ|not canonical"):
+        validate_weight_snapshot_v2(tampered)
 
 
 def test_v2_weight_bundle_recomputes_instead_of_trusting_claimed_result():

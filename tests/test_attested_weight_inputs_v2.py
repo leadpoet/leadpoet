@@ -48,7 +48,6 @@ def _snapshot():
             "champion_allocations": [],
             "queued_champion_allocations": [],
             "reimbursement_allocations": [],
-            "source_add_allocations": [],
         },
         "leaderboard_bonus_share": 0.095,
         "leaderboard_rank_shares": [0.05, 0.03, 0.015],

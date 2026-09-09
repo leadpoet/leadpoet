@@ -1,7 +1,6 @@
 # Submit a competing model
 
-The miner menu has two actions: **Submit SOURCE_ADD** and **Submit Model**.
-SOURCE_ADD status is available in the SOURCE_ADD submenu.
+The miner menu opens the **Submit Model** flow.
 
 ## Source and credentials
 

@@ -22,7 +22,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     LAB_ARENA_SOURCE_SUBMISSIONS_MIGRATION,
     database_with_lab_arena_migration,
 )
-from tests.test_source_add_end_to_end_postgres import SCRIPTS
+from tests.postgres_migration_harness import SCRIPTS
 
 MIGRATIONS = (
     LAB_ARENA_MIGRATION,

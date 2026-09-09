@@ -765,7 +765,6 @@ def _research_lab_allocation_has_live_payments(allocation_doc: Any) -> bool:
     if not isinstance(allocation_doc, dict):
         return False
     for section in (
-        "source_add_allocations",
         "reimbursement_allocations",
         "champion_allocations",
         "queued_champion_allocations",
@@ -4117,8 +4116,7 @@ class Validator(BaseValidatorNeuron):
             print(
                 "   ✅ Authoritative V2 Research Lab allocation verified: "
                 f"{component.get('allocation_hash')} "
-                f"(source_add={float(allocation_doc.get('source_add_alpha_percent') or 0):.4f}%, "
-                f"reimbursements={float(allocation_doc.get('reimbursement_alpha_percent') or 0):.4f}%, "
+                f"(reimbursements={float(allocation_doc.get('reimbursement_alpha_percent') or 0):.4f}%, "
                 f"champions={float(allocation_doc.get('champion_alpha_percent') or 0):.4f}%, "
                 f"queued={float(allocation_doc.get('queued_champion_alpha_percent') or 0):.4f}%)"
             )

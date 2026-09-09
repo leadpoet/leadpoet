@@ -555,35 +555,7 @@ class TEEClient:
             },
         )
 
-    async def v2_get_source_add_ingress_recipient(
-        self,
-        *,
-        miner_hotkey: str,
-        adapter_ref: str,
-        credential_ref: str,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_get_source_add_ingress_recipient",
-            {
-                "miner_hotkey": miner_hotkey,
-                "adapter_ref": adapter_ref,
-                "credential_ref": credential_ref,
-            },
-        )
 
-    async def v2_seal_source_add_ingress_credential(
-        self,
-        *,
-        request_id: str,
-        ciphertext_b64: str,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_seal_source_add_ingress_credential",
-            {
-                "request_id": request_id,
-                "ciphertext_b64": ciphertext_b64,
-            },
-        )
 
     async def v2_provision_encrypted_secret(
         self,
@@ -631,15 +603,6 @@ class TEEClient:
             },
         )
 
-    async def v2_provision_job_sealed_source_add_secret(
-        self,
-        *,
-        envelope: Dict,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_provision_job_sealed_source_add_secret",
-            {"envelope": envelope},
-        )
 
     async def v2_release_job_credentials(self, job_id: str) -> Dict:
         return await self._send_rpc(

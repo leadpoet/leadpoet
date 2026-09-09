@@ -65,7 +65,6 @@ RUNTIME_TABLES = frozenset(
         "qualification_private_icp_sets",
         "research_lab_champion_reward_current",
         "research_lab_gateway_control_current",
-        "research_lab_source_add_reward_current",
         "research_lab_stateful_subnet_epoch_cutover_state_v1",
         "research_lab_stateful_subnet_epoch_cutovers_v1",
         "lab_arena_reward_basis_v1",
@@ -75,7 +74,6 @@ RUNTIME_TABLES = frozenset(
 )
 RUNTIME_RPCS = frozenset(
     {
-        "research_lab_source_add_claim_work",
         "research_lab_stateful_subnet_epoch_cutover_public_state_v1",
     }
 )
@@ -89,28 +87,6 @@ JSON_FILTER_TOKEN_RE = re.compile(
 )
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-SOURCE_ADD_GUARD_ID_RE = re.compile(
-    r"^source_add_restart_guard:[0-9a-f]{64}$"
-)
-SOURCE_ADD_OWNER_ID_RE = re.compile(
-    r"^source_add_restart_owner:[0-9a-f]{64}$"
-)
-SOURCE_ADD_CONTROL_COLUMNS = frozenset(
-    {
-        "singleton",
-        "paused",
-        "reason",
-        "actor_ref",
-        "updated_at",
-        "restart_guard_commitment",
-        "restart_guard_owner_commitment",
-        "restart_guard_generation",
-        "restart_guard_expires_at",
-        "restart_guard_acquired_at",
-        "restart_guard_actor_ref",
-        "restart_guard_restore_paused",
-    }
-)
 SENSITIVE_DOCUMENT_RE = re.compile(
     r"(sk-or-|sb_secret|service_role|openrouter_api_key|raw_secret|"
     r"authorization|proxy-authorization|://[^/]+:[^/@]+@)",
@@ -263,115 +239,18 @@ class MigrationBackedLabArenaRPC:
             self.database.stop()
 
 
-def _candidate_source_add_leg1_authority(
-    source_root: Path,
-    constant_name: str,
-) -> str:
-    path = source_root / "gateway/tee/supabase_schema_preflight_v2.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    values = [
-        ast.literal_eval(node.value)
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name)
-            and target.id == constant_name
-            for target in node.targets
-        )
-    ]
-    if (
-        len(values) != 1
-        or not isinstance(values[0], str)
-        or not HASH_RE.fullmatch(values[0])
-    ):
-        raise ValueError("candidate SOURCE_ADD Leg 1 authority is invalid")
-    return values[0]
 
 
-def _candidate_post_accept_leg1_function_authority(
-    source_root: Path,
-) -> str:
-    return _candidate_source_add_leg1_authority(
-        source_root,
-        "SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256",
-    )
 
 
-def _candidate_provenance_leg1_trigger_authority(
-    source_root: Path,
-) -> str:
-    return _candidate_source_add_leg1_authority(
-        source_root,
-        "SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256",
-    )
 
 
-def _candidate_provenance_leg1_view_authority(
-    source_root: Path,
-) -> str:
-    return _candidate_source_add_leg1_authority(
-        source_root,
-        "SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256",
-    )
 
 
-def _candidate_provenance_origin_repair_function_authority(
-    source_root: Path,
-) -> str:
-    return _candidate_source_add_leg1_authority(
-        source_root,
-        "SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256",
-    )
 
 
-def _candidate_source_add_claim_control_v2_function_authority(
-    source_root: Path,
-) -> str:
-    path = source_root / "gateway/tee/supabase_schema_preflight_v2.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    values = [
-        ast.literal_eval(node.value)
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name)
-            and target.id
-            == "SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256"
-            for target in node.targets
-        )
-    ]
-    if (
-        len(values) != 1
-        or not isinstance(values[0], str)
-        or not HASH_RE.fullmatch(values[0])
-    ):
-        raise ValueError("candidate SOURCE_ADD restart-state authority is invalid")
-    return values[0]
 
 
-def _candidate_source_add_claim_control_v1_contract_authority(
-    source_root: Path,
-) -> str:
-    path = source_root / "gateway/tee/supabase_schema_preflight_v2.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    values = [
-        ast.literal_eval(node.value)
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name)
-            and target.id
-            == "SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256"
-            for target in node.targets
-        )
-    ]
-    if (
-        len(values) != 1
-        or not isinstance(values[0], str)
-        or not HASH_RE.fullmatch(values[0])
-    ):
-        raise ValueError("candidate SOURCE_ADD rollback authority is invalid")
-    return values[0]
 
 
 def _filter_scalar(raw: str, existing: Any) -> Any:
@@ -719,6 +598,14 @@ def _schema_contract(source_root: Path) -> tuple[set[str], set[str]]:
     )
 
 
+
+
+
+
+
+
+
+
 def _migration_schema_contract(
     path: Path,
     *,
@@ -775,6 +662,7 @@ def _migration_schema_contract(
         "193-lab-arena-upload-recovery.sql",
         "194-lab-arena-open-scorer-refresh.sql",
         "197-lab-arena-reward-chain-scope.sql",
+        "198-retire-research-lab-source-add-schema.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -844,14 +732,22 @@ def _migration_schema_contract(
         "research_lab_allocation_settlement_frontiers_v2",
         "research_lab_allocation_settlement_frontier_activation_v2",
         "research_lab_compact_weight_authorities_v2",
-        "research_lab_source_add_provenance_leg1_authority_v1",
-        "research_lab_source_add_miner_status_v1",
         "lab_arena_rounds",
         "lab_arena_submissions",
         "lab_arena_runs",
         "lab_arena_ledger",
         "lab_arena_reward_basis_v1",
     }
+    retired_relations = {
+        name for name in relations
+        if name.startswith("research_lab_source_add")
+        or name == "research_lab_source_catalog"
+    }
+    if retired_relations:
+        raise RuntimeError(
+            "migration-backed SOURCE_ADD relations remain: %s"
+            % ",".join(sorted(retired_relations))
+        )
     if not required_relations <= set(relations):
         raise RuntimeError(
             "migration-backed settlement relations are incomplete: %s"
@@ -873,25 +769,6 @@ def _migration_schema_contract(
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
         "research_lab_allocation_frontier_bootstrap_contract_v2",
         "research_lab_compact_weight_settlement_contract_v1",
-        "research_lab_source_add_provider_origin_contract_v1",
-        "research_lab_source_add_duplicate_privacy_contract_v1",
-        "research_lab_source_add_post_accept_leg1_contract_v1",
-        "research_lab_source_add_post_accept_leg1_contract_v2",
-        "research_lab_source_add_post_accept_leg1_contract_v3",
-        "research_lab_source_add_post_accept_leg1_contract_v4",
-        "research_lab_source_add_miner_status_contract_v1",
-        "research_lab_source_add_miner_status_page_v1",
-        "research_lab_source_add_configure_probe_v3",
-        "research_lab_source_add_enqueue_leg1_after_provenance_v1",
-        "research_lab_source_add_enqueue_provision_smoke_v2",
-        "research_lab_source_add_finalize_leg1_v4",
-        "research_lab_source_add_finalize_provision_smoke_v3",
-        "research_lab_source_add_finalize_provision_v3",
-        "research_lab_source_add_reject_current_builtin_v3",
-        "research_lab_source_add_reconcile_provenance_leg1_v1",
-        "research_lab_source_add_reserve_leg1_slot_v4",
-        "research_lab_source_add_reserve_leg1_slot_v3",
-        "research_lab_source_add_finalize_leg1_v3",
         "lab_arena_current_daily_icp_set",
         "lab_arena_register_submission",
         "lab_arena_update_submission",
@@ -899,236 +776,22 @@ def _migration_schema_contract(
         "lab_arena_activate_reward",
         "lab_arena_schema_version_v1",
     }
+    retired_rpcs = {
+        name for name in raw_rpcs
+        if name.startswith("research_lab_source_add")
+        or name.startswith("research_lab_source_catalog")
+    }
+    if retired_rpcs:
+        raise RuntimeError(
+            "migration-backed SOURCE_ADD RPCs remain: %s"
+            % ",".join(sorted(retired_rpcs))
+        )
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
             "migration-backed transport contract RPCs are unavailable: %s"
             % ",".join(sorted(required_rpcs - set(raw_rpcs)))
         )
     return relations, set(raw_rpcs)
-
-
-
-
-def _source_add_claim_control_contract() -> dict[str, Any]:
-    return {
-        "schema_version": "leadpoet.source_add_claim_control_contract.v1",
-        "control_lock": "source-add-control",
-        "pause_rpc": "research_lab_source_add_set_paused",
-        "pause_signature": "boolean,text,text",
-        "claim_rpc": "research_lab_source_add_claim_work",
-        "claim_signature": "text,integer",
-        "acquire_guard_rpc": (
-            "research_lab_source_add_acquire_restart_guard_v1"
-        ),
-        "acquire_guard_signature": "text,text,bigint,integer,text",
-        "guard_state_rpc": (
-            "research_lab_source_add_restart_guard_state_v1"
-        ),
-        "guard_state_signature": "",
-        "release_guard_rpc": (
-            "research_lab_source_add_release_restart_guard_v1"
-        ),
-        "release_guard_signature": "text,text,bigint,text",
-        "guard_state_result_fields": [
-            "schema_version",
-            "paused",
-            "guard_active",
-            "guard_commitment",
-            "owner_commitment",
-            "guard_generation",
-            "owner_generation_commitment",
-            "guard_expires_at",
-        ],
-        "acquire_guard_result_fields": [
-            "schema_version",
-            "paused",
-            "guard_active",
-            "guard_commitment",
-            "owner_commitment",
-            "guard_generation",
-            "owner_generation_commitment",
-            "guard_expires_at",
-        ],
-        "release_guard_result_fields": [
-            "schema_version",
-            "released",
-            "paused",
-            "guard_active",
-            "guard_generation",
-            "owner_generation_commitment",
-        ],
-        "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
-        "guard_commitment": "sha256_utf8_guard_id",
-        "owner_id_format": "^source_add_restart_owner:[0-9a-f]{64}$",
-        "owner_commitment": "sha256_utf8_owner_id",
-        "owner_generation_commitment": (
-            "sha256_utf8_owner_commitment_colon_decimal_generation"
-        ),
-        "guard_lease_min_seconds": 60,
-        "guard_lease_max_seconds": 14400,
-        "active_guard_replay_extends_lease": True,
-        "acquire_compare_and_swap": "expected_generation",
-        "different_owner_takeover_increments_generation": True,
-        "expired_reacquire_increments_generation": True,
-        "generation_retained_after_release": True,
-        "resume_requires_guard_clear": True,
-        "expired_guard_recovery": "explicit_reacquire_then_exact_release",
-        "release_keeps_paused": True,
-        "restart_quiescence_rpc": (
-            "research_lab_source_add_restart_quiescence_v1"
-        ),
-        "restart_quiescence_signature": "text,text,bigint",
-        "restart_quiescence_schema_version": (
-            "leadpoet.source_add_restart_quiescence.v1"
-        ),
-        "restart_quiescence_result_fields": [
-            "schema_version",
-            "paused",
-            "guard_active",
-            "guard_matches",
-            "owner_matches",
-            "generation_matches",
-            "guard_commitment",
-            "owner_commitment",
-            "guard_generation",
-            "owner_generation_commitment",
-            "guard_expires_at",
-            "leased_work_count",
-            "quiescent",
-        ],
-        "lock_before_paused_read": True,
-        "leased_scope": "all_leased_regardless_of_expiry",
-        "migration_requires_paused": True,
-        "migration_requires_zero_leased": True,
-        "function_authority_sha256": (
-            "sha256:890a1e42b6dd28eb1c8515c3b8c33d31"
-            "a9974058fbd2c43393bb0880c0ca21e6"
-        ),
-        "functions": {
-            "admission_guard": True,
-            "acquire_restart_guard_v1": True,
-            "claim_work": True,
-            "pause": True,
-            "release_restart_guard_v1": True,
-            "restart_guard_state_v1": True,
-            "restart_quiescence_v1": True,
-        },
-        "permissions": {
-            "service_role_exists": True,
-            "acquire_guard_service_role_callable": True,
-            "claim_service_role_callable": True,
-            "pause_service_role_callable": True,
-            "quiescence_service_role_callable": True,
-            "release_guard_service_role_callable": True,
-            "guard_state_service_role_callable": True,
-            "contract_service_role_callable": True,
-            "anon_callable": False,
-            "authenticated_callable": False,
-        },
-    }
-
-
-def _source_add_claim_control_contract_v2(
-    source_root: Path,
-) -> dict[str, Any]:
-    return {
-        "schema_version": "leadpoet.source_add_claim_control_contract.v2",
-        "control_lock": "source-add-control",
-        "pause_rpc": "research_lab_source_add_set_paused",
-        "pause_signature": "boolean,text,text",
-        "claim_rpc": "research_lab_source_add_claim_work",
-        "claim_signature": "text,integer",
-        "acquire_guard_rpc": (
-            "research_lab_source_add_acquire_restart_guard_v2"
-        ),
-        "acquire_guard_signature": "text,text,bigint,integer,text",
-        "guard_state_rpc": (
-            "research_lab_source_add_restart_guard_state_v2"
-        ),
-        "guard_state_signature": "",
-        "release_guard_rpc": (
-            "research_lab_source_add_release_restart_guard_v2"
-        ),
-        "release_guard_signature": "text,text,bigint,text",
-        "restart_quiescence_rpc": (
-            "research_lab_source_add_restart_quiescence_v1"
-        ),
-        "restart_quiescence_signature": "text,text,bigint",
-        "guard_state_result_fields": [
-            "schema_version",
-            "paused",
-            "guard_active",
-            "guard_commitment",
-            "owner_commitment",
-            "guard_generation",
-            "owner_generation_commitment",
-            "guard_expires_at",
-            "restore_paused",
-        ],
-        "acquire_guard_result_fields": [
-            "schema_version",
-            "paused",
-            "guard_active",
-            "guard_commitment",
-            "owner_commitment",
-            "guard_generation",
-            "owner_generation_commitment",
-            "guard_expires_at",
-            "restore_paused",
-        ],
-        "release_guard_result_fields": [
-            "schema_version",
-            "released",
-            "paused",
-            "guard_active",
-            "guard_generation",
-            "owner_generation_commitment",
-            "restored_pre_restart_state",
-        ],
-        "restore_state_column": "restart_guard_restore_paused",
-        "acquire_captures_pre_restart_paused": True,
-        "renewal_preserves_restore_state": True,
-        "expired_takeover_preserves_restore_state": True,
-        "operator_pause_wins": True,
-        "release_restores_pre_restart_state": True,
-        "failed_restart_keeps_paused": True,
-        "rollback_v1_contract_schema_version": (
-            "leadpoet.source_add_claim_control_contract.v1"
-        ),
-        "rollback_v1_contract_sha256": (
-            _candidate_source_add_claim_control_v1_contract_authority(
-                source_root
-            )
-        ),
-        "migration_requires_paused": True,
-        "migration_requires_zero_leased": True,
-        "migration_requires_guard_clear": True,
-        "function_authority_sha256": (
-            _candidate_source_add_claim_control_v2_function_authority(
-                source_root
-            )
-        ),
-        "functions": {
-            "admission_guard": True,
-            "acquire_restart_guard_v1": True,
-            "acquire_restart_guard_v2": True,
-            "claim_work": True,
-            "pause": True,
-            "release_restart_guard_v1": True,
-            "release_restart_guard_v2": True,
-            "restart_guard_state_v1": True,
-            "restart_guard_state_v2": True,
-            "restart_quiescence_v1": True,
-            "restore_trigger_v2": True,
-        },
-        "permissions": {
-            "service_role_exists": True,
-            "service_role_callable": True,
-            "anon_callable": False,
-            "authenticated_callable": False,
-        },
-    }
-
 
 def _migration_seed_rows(
     path: Path,
@@ -1325,38 +988,6 @@ class LocalPostgRESTState:
         self.lock = threading.Lock()
         self.durable_state_path = durable_state_path
         self.durable_schema_sha = durable_schema_sha
-        self.source_add_post_accept_leg1_function_authority = (
-            _candidate_post_accept_leg1_function_authority(source_root)
-        )
-        self.source_add_provenance_leg1_trigger_authority = (
-            _candidate_provenance_leg1_trigger_authority(source_root)
-        )
-        self.source_add_provenance_leg1_view_authority = (
-            _candidate_provenance_leg1_view_authority(source_root)
-        )
-        self.source_add_provenance_origin_repair_function_authority = (
-            _candidate_provenance_origin_repair_function_authority(
-                source_root
-            )
-        )
-        self.source_add_miner_status_view_authority = (
-            _candidate_source_add_leg1_authority(
-                source_root,
-                "SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256",
-            )
-        )
-        self.source_add_miner_status_page_authority = (
-            _candidate_source_add_leg1_authority(
-                source_root,
-                "SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256",
-            )
-        )
-        self.source_add_miner_status_contract_authority = (
-            _candidate_source_add_leg1_authority(
-                source_root,
-                "SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256",
-            )
-        )
         self.durable_revision = 0
         self.rows: dict[str, list[dict[str, Any]]] = {
             name: [] for name in tables
@@ -1453,548 +1084,11 @@ class LocalPostgRESTState:
                     "source_finalized_block": source_finalized_block,
                 }
             ]
-        durable_state_existed = bool(
-            self.durable_state_path is not None
-            and self.durable_state_path.exists()
-        )
         self._restore_durable_state()
-        source_add_control_initialized = self._initialize_source_add_control()
-        self._validate_source_add_control()
         self.cutover_state = list(self.rows.get(state_table, []))
         self.events = state_root / "local-postgrest-events.jsonl"
         with self.lock:
-            self._write_durable_state_locked(
-                mutated=(
-                    durable_state_existed and source_add_control_initialized
-                )
-            )
-
-    def _initialize_source_add_control(self) -> bool:
-        table = "research_lab_source_add_control"
-        if table not in self.rows or self.rows[table]:
-            return False
-        if set(self.relation_columns.get(table, ())) != set(
-            SOURCE_ADD_CONTROL_COLUMNS
-        ):
-            raise ValueError("SOURCE_ADD control migration contract differs")
-        self.rows[table] = [
-            {
-                "singleton": True,
-                "paused": True,
-                "reason": "migration_96_disabled_by_default",
-                "actor_ref": "operator:migration",
-                "updated_at": "1970-01-01T00:00:00+00:00",
-                "restart_guard_commitment": "",
-                "restart_guard_owner_commitment": "",
-                "restart_guard_generation": 0,
-                "restart_guard_expires_at": None,
-                "restart_guard_acquired_at": None,
-                "restart_guard_actor_ref": "",
-                "restart_guard_restore_paused": None,
-            }
-        ]
-        return True
-
-    @staticmethod
-    def _source_add_timestamp(value: Any, *, label: str) -> datetime:
-        try:
-            parsed = datetime.fromisoformat(
-                str(value or "").replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise ValueError(label) from exc
-        if parsed.tzinfo is None:
-            raise ValueError(label)
-        return parsed.astimezone(timezone.utc)
-
-    def _validate_source_add_control(self) -> None:
-        table = "research_lab_source_add_control"
-        if table not in self.rows:
-            return
-        rows = self.rows[table]
-        if (
-            set(self.relation_columns.get(table, ()))
-            != set(SOURCE_ADD_CONTROL_COLUMNS)
-            or len(rows) != 1
-            or set(rows[0]) != set(SOURCE_ADD_CONTROL_COLUMNS)
-        ):
-            raise ValueError("SOURCE_ADD control migration contract differs")
-        row = rows[0]
-        generation = row["restart_guard_generation"]
-        commitment = row["restart_guard_commitment"]
-        owner_commitment = row["restart_guard_owner_commitment"]
-        expires_at = row["restart_guard_expires_at"]
-        acquired_at = row["restart_guard_acquired_at"]
-        guard_actor = row["restart_guard_actor_ref"]
-        restore_paused = row["restart_guard_restore_paused"]
-        if (
-            row["singleton"] is not True
-            or not isinstance(row["paused"], bool)
-            or not isinstance(row["reason"], str)
-            or not isinstance(row["actor_ref"], str)
-            or not isinstance(generation, int)
-            or isinstance(generation, bool)
-            or generation < 0
-            or not isinstance(commitment, str)
-            or not isinstance(owner_commitment, str)
-            or not isinstance(guard_actor, str)
-            or (
-                restore_paused is not None
-                and not isinstance(restore_paused, bool)
-            )
-        ):
-            raise ValueError("SOURCE_ADD control row is invalid")
-        self._source_add_timestamp(
-            row["updated_at"], label="SOURCE_ADD control timestamp is invalid"
-        )
-        inactive = (
-            commitment == ""
-            and owner_commitment == ""
-            and expires_at is None
-            and acquired_at is None
-            and guard_actor == ""
-            and restore_paused is None
-        )
-        active_shape = (
-            HASH_RE.fullmatch(commitment) is not None
-            and HASH_RE.fullmatch(owner_commitment) is not None
-            and generation > 0
-            and expires_at is not None
-            and acquired_at is not None
-            and guard_actor != ""
-            and isinstance(restore_paused, bool)
-        )
-        if not (inactive or active_shape):
-            raise ValueError("SOURCE_ADD restart guard row is invalid")
-        if active_shape:
-            self._source_add_timestamp(
-                expires_at, label="SOURCE_ADD guard expiry is invalid"
-            )
-            self._source_add_timestamp(
-                acquired_at, label="SOURCE_ADD guard acquisition is invalid"
-            )
-
-    @staticmethod
-    def _source_add_commitment(value: str) -> str:
-        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-    @classmethod
-    def _source_add_owner_generation_commitment(
-        cls, owner_commitment: str, generation: int
-    ) -> str:
-        if not owner_commitment:
-            return ""
-        return cls._source_add_commitment(
-            f"{owner_commitment}:{generation}"
-        )
-
-    def source_add_restart_guard_state(
-        self,
-        body: Any,
-        *,
-        now: datetime | None = None,
-        version: int = 1,
-    ) -> dict[str, Any]:
-        if body not in ({}, None):
-            raise ValueError("SOURCE_ADD restart guard state body is invalid")
-        if version not in {1, 2}:
-            raise ValueError("SOURCE_ADD restart guard state version is invalid")
-        observed_now = (now or datetime.now(timezone.utc)).astimezone(
-            timezone.utc
-        )
-        with self.lock:
-            self._validate_source_add_control()
-            row = self.rows["research_lab_source_add_control"][0]
-            expires_at = row["restart_guard_expires_at"]
-            guard_active = bool(
-                row["restart_guard_commitment"]
-                and expires_at is not None
-                and self._source_add_timestamp(
-                    expires_at, label="SOURCE_ADD guard expiry is invalid"
-                )
-                > observed_now
-            )
-            result = {
-                "schema_version": (
-                    f"leadpoet.source_add_restart_guard_state.v{version}"
-                ),
-                "paused": row["paused"],
-                "guard_active": guard_active,
-                "guard_commitment": row["restart_guard_commitment"],
-                "owner_commitment": row[
-                    "restart_guard_owner_commitment"
-                ],
-                "guard_generation": row["restart_guard_generation"],
-                "owner_generation_commitment": (
-                    self._source_add_owner_generation_commitment(
-                        row["restart_guard_owner_commitment"],
-                        row["restart_guard_generation"],
-                    )
-                ),
-                "guard_expires_at": expires_at,
-            }
-            if version == 2:
-                result["restore_paused"] = row[
-                    "restart_guard_restore_paused"
-                ]
-            return result
-
-    def acquire_source_add_restart_guard(
-        self,
-        body: Any,
-        *,
-        now: datetime | None = None,
-        version: int = 1,
-    ) -> dict[str, Any]:
-        if version not in {1, 2}:
-            raise ValueError("SOURCE_ADD restart guard version is invalid")
-        expected_keys = {
-            "p_actor_ref",
-            "p_expected_generation",
-            "p_guard_id",
-            "p_lease_seconds",
-            "p_owner_id",
-        }
-        if not isinstance(body, dict) or set(body) != expected_keys:
-            raise ValueError("SOURCE_ADD restart guard input is invalid")
-        guard_id = body["p_guard_id"]
-        owner_id = body["p_owner_id"]
-        expected_generation = body["p_expected_generation"]
-        lease_seconds = body["p_lease_seconds"]
-        actor_ref = body["p_actor_ref"]
-        if (
-            not isinstance(guard_id, str)
-            or SOURCE_ADD_GUARD_ID_RE.fullmatch(guard_id) is None
-            or not isinstance(owner_id, str)
-            or SOURCE_ADD_OWNER_ID_RE.fullmatch(owner_id) is None
-            or not isinstance(expected_generation, int)
-            or isinstance(expected_generation, bool)
-            or expected_generation < 0
-            or not isinstance(lease_seconds, int)
-            or isinstance(lease_seconds, bool)
-            or not 60 <= lease_seconds <= 14400
-            or not isinstance(actor_ref, str)
-            or not actor_ref.strip()
-        ):
-            raise ValueError("SOURCE_ADD restart guard input is invalid")
-        observed_now = (now or datetime.now(timezone.utc)).astimezone(
-            timezone.utc
-        )
-        guard_commitment = self._source_add_commitment(guard_id)
-        owner_commitment = self._source_add_commitment(owner_id)
-        with self.lock:
-            self._validate_source_add_control()
-            row = self.rows["research_lab_source_add_control"][0]
-            generation = row["restart_guard_generation"]
-            if generation != expected_generation:
-                raise ValueError("SOURCE_ADD restart guard generation differs")
-            current_expiry = (
-                self._source_add_timestamp(
-                    row["restart_guard_expires_at"],
-                    label="SOURCE_ADD guard expiry is invalid",
-                )
-                if row["restart_guard_expires_at"] is not None
-                else None
-            )
-            currently_active = bool(
-                row["restart_guard_commitment"]
-                and current_expiry is not None
-                and current_expiry > observed_now
-            )
-            if (
-                currently_active
-                and row["restart_guard_commitment"] != guard_commitment
-            ):
-                raise ValueError("SOURCE_ADD restart guard is already active")
-            replay = bool(
-                currently_active
-                and row["restart_guard_commitment"] == guard_commitment
-                and row["restart_guard_owner_commitment"] == owner_commitment
-            )
-            requested_expiry = observed_now + timedelta(seconds=lease_seconds)
-            if replay:
-                expires_at = max(current_expiry, requested_expiry)
-                row["restart_guard_expires_at"] = expires_at.isoformat()
-            else:
-                if generation == 9223372036854775807:
-                    raise ValueError(
-                        "SOURCE_ADD restart guard generation is exhausted"
-                    )
-                generation += 1
-                expires_at = requested_expiry
-                encoded_now = observed_now.isoformat()
-                restore_paused = row["restart_guard_restore_paused"]
-                if not row["restart_guard_commitment"]:
-                    restore_paused = row["paused"]
-                elif restore_paused is None:
-                    restore_paused = True
-                row.update(
-                    {
-                        "paused": True,
-                        "reason": "canonical_restart_guard",
-                        "actor_ref": actor_ref[:200],
-                        "updated_at": encoded_now,
-                        "restart_guard_commitment": guard_commitment,
-                        "restart_guard_owner_commitment": owner_commitment,
-                        "restart_guard_generation": generation,
-                        "restart_guard_expires_at": expires_at.isoformat(),
-                        "restart_guard_acquired_at": encoded_now,
-                        "restart_guard_actor_ref": actor_ref[:200],
-                        "restart_guard_restore_paused": restore_paused,
-                    }
-                )
-            self._write_durable_state_locked(mutated=True)
-            result = {
-                "schema_version": f"leadpoet.source_add_restart_guard.v{version}",
-                "paused": True,
-                "guard_active": True,
-                "guard_commitment": guard_commitment,
-                "owner_commitment": owner_commitment,
-                "guard_generation": generation,
-                "owner_generation_commitment": (
-                    self._source_add_owner_generation_commitment(
-                        owner_commitment, generation
-                    )
-                ),
-                "guard_expires_at": expires_at.isoformat(),
-            }
-            if version == 2:
-                result["restore_paused"] = row[
-                    "restart_guard_restore_paused"
-                ]
-            return result
-
-    def source_add_restart_quiescence(
-        self, body: Any, *, now: datetime | None = None
-    ) -> dict[str, Any]:
-        expected_keys = {"p_guard_generation", "p_guard_id", "p_owner_id"}
-        if not isinstance(body, dict) or set(body) != expected_keys:
-            raise ValueError(
-                "SOURCE_ADD restart quiescence guard input is invalid"
-            )
-        guard_id = body["p_guard_id"]
-        owner_id = body["p_owner_id"]
-        generation = body["p_guard_generation"]
-        if (
-            not isinstance(guard_id, str)
-            or SOURCE_ADD_GUARD_ID_RE.fullmatch(guard_id) is None
-            or not isinstance(owner_id, str)
-            or SOURCE_ADD_OWNER_ID_RE.fullmatch(owner_id) is None
-            or not isinstance(generation, int)
-            or isinstance(generation, bool)
-            or generation <= 0
-        ):
-            raise ValueError(
-                "SOURCE_ADD restart quiescence guard input is invalid"
-            )
-        observed_now = (now or datetime.now(timezone.utc)).astimezone(
-            timezone.utc
-        )
-        expected_guard = self._source_add_commitment(guard_id)
-        expected_owner = self._source_add_commitment(owner_id)
-        with self.lock:
-            self._validate_source_add_control()
-            row = self.rows["research_lab_source_add_control"][0]
-            if "research_lab_source_add_work_items" not in self.rows:
-                raise ValueError("SOURCE_ADD work migration contract differs")
-            expires_at = row["restart_guard_expires_at"]
-            guard_active = bool(
-                row["restart_guard_commitment"]
-                and expires_at is not None
-                and self._source_add_timestamp(
-                    expires_at, label="SOURCE_ADD guard expiry is invalid"
-                )
-                > observed_now
-            )
-            guard_matches = row["restart_guard_commitment"] == expected_guard
-            owner_matches = (
-                row["restart_guard_owner_commitment"] == expected_owner
-            )
-            generation_matches = row["restart_guard_generation"] == generation
-            leased = sum(
-                1
-                for work in self.rows["research_lab_source_add_work_items"]
-                if work.get("work_status") == "leased"
-            )
-            owner_generation = self._source_add_owner_generation_commitment(
-                row["restart_guard_owner_commitment"],
-                row["restart_guard_generation"],
-            )
-            return {
-                "schema_version": "leadpoet.source_add_restart_quiescence.v1",
-                "paused": row["paused"],
-                "guard_active": guard_active,
-                "guard_matches": guard_matches,
-                "owner_matches": owner_matches,
-                "generation_matches": generation_matches,
-                "guard_commitment": row["restart_guard_commitment"],
-                "owner_commitment": row[
-                    "restart_guard_owner_commitment"
-                ],
-                "guard_generation": row["restart_guard_generation"],
-                "owner_generation_commitment": owner_generation,
-                "guard_expires_at": expires_at,
-                "leased_work_count": leased,
-                "quiescent": bool(
-                    row["paused"]
-                    and guard_active
-                    and guard_matches
-                    and owner_matches
-                    and generation_matches
-                    and leased == 0
-                ),
-            }
-
-    def set_source_add_paused(
-        self, body: Any, *, now: datetime | None = None
-    ) -> dict[str, Any]:
-        expected_keys = {"p_actor_ref", "p_paused", "p_reason"}
-        if not isinstance(body, dict) or set(body) != expected_keys:
-            raise ValueError("SOURCE_ADD pause input is invalid")
-        paused = body["p_paused"]
-        reason = body["p_reason"]
-        actor_ref = body["p_actor_ref"]
-        if (
-            not isinstance(paused, bool)
-            or not isinstance(reason, str)
-            or not reason.strip()
-            or not isinstance(actor_ref, str)
-            or not actor_ref.strip()
-        ):
-            raise ValueError("SOURCE_ADD pause input is invalid")
-        observed_now = (now or datetime.now(timezone.utc)).astimezone(
-            timezone.utc
-        )
-        with self.lock:
-            self._validate_source_add_control()
-            row = self.rows["research_lab_source_add_control"][0]
-            if not paused and row["restart_guard_commitment"]:
-                raise ValueError(
-                    "SOURCE_ADD restart guard must be explicitly reacquired "
-                    "and released before resume"
-                )
-            if (
-                paused
-                and row["restart_guard_commitment"]
-                and (
-                    reason[:500] != row["reason"]
-                    or actor_ref[:200] != row["actor_ref"]
-                )
-            ):
-                row["restart_guard_restore_paused"] = True
-            row.update(
-                {
-                    "paused": paused,
-                    "reason": reason[:500],
-                    "actor_ref": actor_ref[:200],
-                    "updated_at": observed_now.isoformat(),
-                }
-            )
-            self._write_durable_state_locked(mutated=True)
-            return dict(row)
-
-    def release_source_add_restart_guard(
-        self,
-        body: Any,
-        *,
-        now: datetime | None = None,
-        version: int = 1,
-    ) -> dict[str, Any]:
-        if version not in {1, 2}:
-            raise ValueError("SOURCE_ADD restart guard release version is invalid")
-        expected_keys = {
-            "p_actor_ref",
-            "p_guard_generation",
-            "p_guard_id",
-            "p_owner_id",
-        }
-        if not isinstance(body, dict) or set(body) != expected_keys:
-            raise ValueError("SOURCE_ADD restart guard release input is invalid")
-        guard_id = body["p_guard_id"]
-        owner_id = body["p_owner_id"]
-        generation = body["p_guard_generation"]
-        actor_ref = body["p_actor_ref"]
-        if (
-            not isinstance(guard_id, str)
-            or SOURCE_ADD_GUARD_ID_RE.fullmatch(guard_id) is None
-            or not isinstance(owner_id, str)
-            or SOURCE_ADD_OWNER_ID_RE.fullmatch(owner_id) is None
-            or not isinstance(generation, int)
-            or isinstance(generation, bool)
-            or generation <= 0
-            or not isinstance(actor_ref, str)
-            or not actor_ref.strip()
-        ):
-            raise ValueError("SOURCE_ADD restart guard release input is invalid")
-        guard_commitment = self._source_add_commitment(guard_id)
-        owner_commitment = self._source_add_commitment(owner_id)
-        observed_now = (now or datetime.now(timezone.utc)).astimezone(
-            timezone.utc
-        )
-        with self.lock:
-            self._validate_source_add_control()
-            row = self.rows["research_lab_source_add_control"][0]
-            if (
-                not row["restart_guard_commitment"]
-                or row["restart_guard_commitment"] != guard_commitment
-                or row["restart_guard_owner_commitment"] != owner_commitment
-                or row["restart_guard_generation"] != generation
-            ):
-                raise ValueError(
-                    "SOURCE_ADD restart guard owner or generation does not match"
-                )
-            owner_generation = self._source_add_owner_generation_commitment(
-                owner_commitment, generation
-            )
-            final_paused = True
-            if version == 2:
-                restore_paused = row["restart_guard_restore_paused"]
-                if not isinstance(restore_paused, bool):
-                    raise ValueError(
-                        "SOURCE_ADD restart restore state is unavailable"
-                    )
-                final_paused = bool(
-                    restore_paused
-                    or row["reason"] != "canonical_restart_guard"
-                    or row["actor_ref"] != actor_ref[:200]
-                )
-            row.update(
-                {
-                    "paused": final_paused,
-                    "reason": (
-                        "canonical_restart_guard_released_paused"
-                        if version == 1
-                        else (
-                            "canonical_restart_guard_restored_paused"
-                            if final_paused
-                            else "canonical_restart_guard_restored_active"
-                        )
-                    ),
-                    "actor_ref": actor_ref[:200],
-                    "updated_at": observed_now.isoformat(),
-                    "restart_guard_commitment": "",
-                    "restart_guard_owner_commitment": "",
-                    "restart_guard_expires_at": None,
-                    "restart_guard_acquired_at": None,
-                    "restart_guard_actor_ref": "",
-                    "restart_guard_restore_paused": None,
-                }
-            )
-            self._write_durable_state_locked(mutated=True)
-            result = {
-                "schema_version": (
-                    f"leadpoet.source_add_restart_guard_release.v{version}"
-                ),
-                "released": True,
-                "paused": final_paused,
-                "guard_active": False,
-                "guard_generation": generation,
-                "owner_generation_commitment": owner_generation,
-            }
-            if version == 2:
-                result["restored_pre_restart_state"] = True
-            return result
-
+            self._write_durable_state_locked(mutated=False)
     def _restore_durable_state(self) -> None:
         path = self.durable_state_path
         if path is None or not path.exists():
@@ -3543,49 +2637,6 @@ class Handler(BaseHTTPRequestHandler):
                 "research_lab_stateful_subnet_epoch_cutover_public_state_v1"
             ):
                 response = self.server.state.cutover_state
-            elif name == "research_lab_source_add_claim_work":
-                # The exact fixture intentionally has no source-add work.
-                response = []
-            elif name == "research_lab_source_add_restart_guard_state_v1":
-                response = self.server.state.source_add_restart_guard_state(
-                    body
-                )
-            elif name == "research_lab_source_add_restart_guard_state_v2":
-                response = self.server.state.source_add_restart_guard_state(
-                    body, version=2
-                )
-            elif name == (
-                "research_lab_source_add_acquire_restart_guard_v1"
-            ):
-                response = self.server.state.acquire_source_add_restart_guard(
-                    body
-                )
-            elif name == (
-                "research_lab_source_add_acquire_restart_guard_v2"
-            ):
-                response = self.server.state.acquire_source_add_restart_guard(
-                    body, version=2
-                )
-            elif name == "research_lab_source_add_set_paused":
-                response = self.server.state.set_source_add_paused(body)
-            elif name == (
-                "research_lab_source_add_restart_quiescence_v1"
-            ):
-                response = self.server.state.source_add_restart_quiescence(
-                    body
-                )
-            elif name == (
-                "research_lab_source_add_release_restart_guard_v1"
-            ):
-                response = self.server.state.release_source_add_restart_guard(
-                    body
-                )
-            elif name == (
-                "research_lab_source_add_release_restart_guard_v2"
-            ):
-                response = self.server.state.release_source_add_restart_guard(
-                    body, version=2
-                )
             elif name == "research_lab_acquire_maintenance_lease":
                 response = self.server.state.acquire_maintenance_lease(body)
                 self.server.state.record(
@@ -3659,265 +2710,6 @@ class Handler(BaseHTTPRequestHandler):
                     "identity_unique_constraint_enabled": True,
                     "row_level_security_enabled": True,
                     "finalized_stage_supported": True,
-                }
-            elif name == (
-                "research_lab_source_add_admission_control_contract_v1"
-            ):
-                if body not in ({}, None):
-                    raise ValueError(
-                        "SOURCE_ADD admission-control contract body is invalid"
-                    )
-                response = {
-                    "schema_version": (
-                        "leadpoet.source_add_admission_control_contract.v1"
-                    ),
-                    "control_row_present": True,
-                    "trigger_enabled": True,
-                    "pause_rpc": "research_lab_source_add_set_paused",
-                    "admission_trigger": (
-                        "trg_source_add_work_admission_control"
-                    ),
-                }
-            elif name == (
-                "research_lab_source_add_provider_origin_contract_v1"
-            ):
-                if body not in ({}, None):
-                    raise ValueError(
-                        "SOURCE_ADD provider-origin contract body is invalid"
-                    )
-                response = {
-                    "schema_version": (
-                        "leadpoet.source_add_provider_origin_contract.v1"
-                    ),
-                    "identity_version": "v1",
-                    "identity_scope": "normalized_exact_host",
-                    "admission_rpc": "research_lab_source_add_admit_v2",
-                    "recheck_rpc": (
-                        "research_lab_source_add_requeue_provenance_v2"
-                    ),
-                    "owner_count": 0,
-                    "reserved_count": 0,
-                    "coverage_complete": True,
-                    "collision_free": True,
-                    "submission_trigger_enabled": True,
-                    "catalog_trigger_enabled": True,
-                    "provision_trigger_enabled": True,
-                    "terminal_release_trigger_enabled": True,
-                    "append_only_trigger_enabled": True,
-                    "row_level_security_enabled": True,
-                    "service_role_policy_enabled": True,
-                }
-            elif name == (
-                "research_lab_source_add_duplicate_privacy_contract_v1"
-            ):
-                if body not in ({}, None):
-                    raise ValueError(
-                        "SOURCE_ADD duplicate-privacy contract body is invalid"
-                    )
-                response = {
-                    "schema_version": (
-                        "leadpoet.source_add_duplicate_privacy_contract.v1"
-                    ),
-                    "admission_rpc": "research_lab_source_add_admit_v3",
-                    "admission_signature": (
-                        "jsonb,text,text,text,text,text,integer,integer,integer,integer"
-                    ),
-                    "compatibility_rpc": "research_lab_source_add_admit_v2",
-                    "compatibility_signature": (
-                        "jsonb,text,text,text,text,text,integer,integer,integer"
-                    ),
-                    "compatibility_cooldown_seconds": 20,
-                    "cooldown_parameter_min_seconds": 1,
-                    "cooldown_parameter_max_seconds": 3600,
-                    "cooldown_clock": (
-                        "clock_timestamp_after_advisory_locks"
-                    ),
-                    "cooldown_source": "durable_miner_provenance_work",
-                    "duplicate_precedes_cooldown": True,
-                    "lock_order": [
-                        "provider_origin_or_identity",
-                        "hotkey",
-                        "submission_or_work",
-                    ],
-                    "function_authority_sha256": (
-                        "sha256:26bf34c94725b855f81c2e48b6afbd72"
-                        "d68db36a4aeffb5642494a5da32233e0"
-                    ),
-                    "functions": {
-                        "admit_v1": True,
-                        "admit_v2_compatibility": True,
-                        "admit_v3": True,
-                        "provider_origin_hash_v1": True,
-                        "provider_origin_host_v1": True,
-                    },
-                    "permissions": {
-                        "service_role_exists": True,
-                        "v3_service_role_callable": True,
-                        "v2_service_role_callable": True,
-                        "contract_service_role_callable": True,
-                        "anon_callable": False,
-                        "authenticated_callable": False,
-                    },
-                }
-            elif name == (
-                "research_lab_source_add_post_accept_leg1_contract_v4"
-            ):
-                if body not in ({}, None):
-                    raise ValueError(
-                        "SOURCE_ADD automatic provenance Leg 1 contract body "
-                        "is invalid"
-                    )
-                response = {
-                    "schema_version": (
-                        "leadpoet.source_add_post_accept_leg1_contract.v4"
-                    ),
-                    "required_migration": (
-                        "scripts/176-research-lab-source-add-provenance-"
-                        "origin-repair.sql"
-                    ),
-                    "daily_cap": 50,
-                    "leg1_alpha_percent": 0.2,
-                    "leg1_reward_epochs": 20,
-                    "approval_boundary": "provenance_precheck_passed",
-                    "backfill_policy": (
-                        "earliest_exact_attested_provenance_per_provider_origin"
-                    ),
-                    "provider_origin_scope": "normalized_exact_host",
-                    "provider_origin_winner_order": [
-                        "provenance_created_at",
-                        "submission_id",
-                    ],
-                    "cancelled_intents_are_authority": False,
-                    "public_trigger_fields": [
-                        "precheck_status",
-                        "provenance_artifact_hash",
-                        "provenance_precheck_passed",
-                        "provenance_receipt_hash",
-                        "provenance_result_hash",
-                        "submission_id",
-                    ],
-                    "authority_view": (
-                        "research_lab_source_add_provenance_leg1_authority_v1"
-                    ),
-                    "function_authority_sha256": (
-                        self.server.state.source_add_post_accept_leg1_function_authority
-                    ),
-                    "trigger_authority_sha256": (
-                        self.server.state.source_add_provenance_leg1_trigger_authority
-                    ),
-                    "view_authority_sha256": (
-                        self.server.state.source_add_provenance_leg1_view_authority
-                    ),
-                    "repair_function_authority_sha256": (
-                        self.server.state.source_add_provenance_origin_repair_function_authority
-                    ),
-                    "functions": {
-                        "configure_probe_v3": True,
-                        "enqueue_leg1_after_provenance_v1": True,
-                        "enqueue_provision_smoke_v2": True,
-                        "finalize_leg1_v4": True,
-                        "finalize_provision_smoke_v3": True,
-                        "finalize_provision_v3": True,
-                        "reject_current_builtin_v3": True,
-                        "reconcile_provenance_leg1_v1": True,
-                        "reserve_leg1_slot_v4": True,
-                    },
-                    "triggers": {
-                        "automatic_enqueue": True,
-                        "eligible_v2": True,
-                        "eligible_v3": True,
-                        "leg1_initial_event_v3": True,
-                        "leg1_obligation_v3": True,
-                        "leg1_slot_v3": True,
-                        "leg1_work_v3": True,
-                    },
-                    "columns": {
-                        "intent_approval_kind": True,
-                        "intent_provenance_artifact_hash": True,
-                        "intent_provenance_receipt_hash": True,
-                        "slot_approval_kind": True,
-                    },
-                    "permissions": {
-                        "service_role_exists": True,
-                        "candidate_callable": True,
-                        "internal_not_callable": True,
-                        "rollback_v2_callable": True,
-                    },
-                }
-            elif name == (
-                "research_lab_source_add_claim_control_contract_v1"
-            ):
-                if body not in ({}, None):
-                    raise ValueError(
-                        "SOURCE_ADD claim-control contract body is invalid"
-                    )
-                response = _source_add_claim_control_contract()
-            elif name == (
-                "research_lab_source_add_claim_control_contract_v2"
-            ):
-                if body not in ({}, None):
-                    raise ValueError(
-                        "SOURCE_ADD restart-state contract body is invalid"
-                    )
-                response = _source_add_claim_control_contract_v2(
-                    self.server.state.source_root
-                )
-            elif name == (
-                "research_lab_source_add_miner_status_contract_v1"
-            ):
-                if body not in ({}, None):
-                    raise ValueError(
-                        "SOURCE_ADD miner-status contract body is invalid"
-                    )
-                response = {
-                    "schema_version": (
-                        "leadpoet.source_add_miner_status_contract.v1"
-                    ),
-                    "view_name": "research_lab_source_add_miner_status_v1",
-                    "page_rpc": "research_lab_source_add_miner_status_page_v1",
-                    "page_signature": "text,text,integer",
-                    "view_columns": [
-                        "schema_version",
-                        "submission_id",
-                        "miner_hotkey",
-                        "source_name",
-                        "submitted_at",
-                        "updated_at",
-                        "decision_status",
-                        "decision_reason_code",
-                        "decision_reason",
-                        "reward_status",
-                        "alpha_percent",
-                        "reward_epochs",
-                        "start_epoch",
-                        "end_epoch",
-                    ],
-                    "view_security_invoker": True,
-                    "view_security_barrier": True,
-                    "page_security_invoker": True,
-                    "page_stable": True,
-                    "view_authority_sha256": (
-                        self.server.state.source_add_miner_status_view_authority
-                    ),
-                    "page_authority_sha256": (
-                        self.server.state.source_add_miner_status_page_authority
-                    ),
-                    "contract_authority_sha256": (
-                        self.server.state.source_add_miner_status_contract_authority
-                    ),
-                    "permissions": {
-                        "view_service_role_select": True,
-                        "view_anon_select": False,
-                        "view_authenticated_select": False,
-                        "view_public_select": False,
-                        "page_service_role_callable": True,
-                        "page_anon_callable": False,
-                        "page_authenticated_callable": False,
-                        "page_public_callable": False,
-                        "contract_service_role_callable": True,
-                        "contract_anon_callable": False,
-                        "contract_authenticated_callable": False,
-                    },
                 }
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)

@@ -52,9 +52,6 @@ STATIC_BOOTSTRAP_POLICY = "LeadpoetProductionParityStaticBootstrap"
 MINIMUM_VOLUME_GIB = 512
 DEFAULT_VOLUME_GIB = 512
 GATEWAY_IAM_CACHE = Path("/home/ec2-user/.config/leadpoet/gateway.env")
-DEFAULT_MINER_INTAKE_SECRET_ID = (
-    "leadpoet/staging/production-parity-miner-intake"
-)
 CONTROLLER_WORKFLOWS = (
     "Production Parity Full",
     "Production Parity Fast",
@@ -870,7 +867,6 @@ def _controller_policy(
     region: str,
     production_secret_id: str,
     readonly_secret_id: str,
-    miner_intake_secret_id: str,
     runner_arn: str,
 ) -> dict[str, Any]:
     run_secret = (
@@ -884,10 +880,6 @@ def _controller_policy(
     readonly_secret = (
         f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
         f"{readonly_secret_id}-??????"
-    )
-    miner_intake_secret = (
-        f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
-        f"{miner_intake_secret_id}-??????"
     )
     parity_bucket = f"arn:aws:s3:::leadpoet-parity-{account_id}-*"
     ec2_prefix = f"arn:aws:ec2:{region}:{account_id}"
@@ -1275,7 +1267,7 @@ def _controller_policy(
                     "secretsmanager:TagResource",
                     "secretsmanager:UntagResource",
                 ],
-                "Resource": [readonly_secret, miner_intake_secret],
+                "Resource": [readonly_secret],
             },
             {
                 "Effect": "Allow",
@@ -1323,7 +1315,6 @@ def _controller_policy_slices(
     region: str,
     production_secret_id: str,
     readonly_secret_id: str,
-    miner_intake_secret_id: str,
     runner_arn: str,
 ) -> dict[str, dict[str, Any]]:
     complete = _controller_policy(
@@ -1331,7 +1322,6 @@ def _controller_policy_slices(
         region=region,
         production_secret_id=production_secret_id,
         readonly_secret_id=readonly_secret_id,
-        miner_intake_secret_id=miner_intake_secret_id,
         runner_arn=runner_arn,
     )
     grouped: dict[str, list[Mapping[str, Any]]] = {
@@ -1983,7 +1973,6 @@ def _runner_policy(
     region: str,
     production_secret_id: str,
     readonly_secret_id: str,
-    miner_intake_secret_id: str,
 ) -> dict[str, Any]:
     run_secret = (
         f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
@@ -1992,10 +1981,6 @@ def _runner_policy(
     readonly_secret = (
         f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
         f"{readonly_secret_id}-??????"
-    )
-    miner_intake_secret = (
-        f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
-        f"{miner_intake_secret_id}-??????"
     )
     parity_bucket = f"arn:aws:s3:::leadpoet-parity-{account_id}-*"
     run_objects = parity_bucket + "/*"
@@ -2074,7 +2059,6 @@ def _runner_policy(
                 "Resource": [
                     f"arn:aws:secretsmanager:{region}:{account_id}:secret:{production_secret_id}-??????",
                     readonly_secret,
-                    miner_intake_secret,
                     run_secret,
                 ],
             },
@@ -2129,7 +2113,7 @@ def _runner_policy(
                     "secretsmanager:TagResource",
                     "secretsmanager:UntagResource",
                 ],
-                "Resource": [readonly_secret, miner_intake_secret],
+                "Resource": [readonly_secret],
             },
             {
                 "Effect": "Allow",
@@ -2188,7 +2172,6 @@ def _static_bootstrap_policy(
     account_id: str,
     region: str,
     readonly_secret_id: str,
-    miner_intake_secret_id: str,
     expires_at: str,
 ) -> dict[str, Any]:
     try:
@@ -2202,7 +2185,7 @@ def _static_bootstrap_policy(
             f"arn:aws:secretsmanager:{region}:{account_id}:secret:"
             f"{secret_id}"
         )
-        for secret_id in (readonly_secret_id, miner_intake_secret_id)
+        for secret_id in (readonly_secret_id,)
     ]
     static_secrets = [
         resource
@@ -2235,7 +2218,6 @@ def _static_bootstrap_policy(
                     "StringEquals": {
                         "secretsmanager:Name": [
                             readonly_secret_id,
-                            miner_intake_secret_id,
                         ],
                         "aws:RequestTag/leadpoet:purpose": (
                             "production-parity-static"
@@ -2482,7 +2464,6 @@ def _validate_identity_inputs(args: argparse.Namespace) -> None:
         or args.production_gateway_ip != PRODUCTION_GATEWAY_IP
         or args.production_gateway_secret_id != PRODUCTION_GATEWAY_SECRET_ID
         or args.readonly_dsn_secret_id != READONLY_DSN_SECRET_ID
-        or args.miner_intake_secret_id != DEFAULT_MINER_INTAKE_SECRET_ID
         or int(args.volume_gib) != DEFAULT_VOLUME_GIB
     ):
         raise SetupError("setup inputs are invalid")
@@ -2694,7 +2675,6 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
         region=args.region,
         production_secret_id=args.production_gateway_secret_id,
         readonly_secret_id=args.readonly_dsn_secret_id,
-        miner_intake_secret_id=args.miner_intake_secret_id,
     )
     inert_trust = _inert_trust()
     controller_trust = _controller_trust(oidc_arn=oidc_arn)
@@ -2758,7 +2738,6 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
             region=args.region,
             production_secret_id=args.production_gateway_secret_id,
             readonly_secret_id=args.readonly_dsn_secret_id,
-            miner_intake_secret_id=args.miner_intake_secret_id,
             runner_arn=runner_arn,
         )
         controller_arn = _ensure_role(
@@ -2855,7 +2834,6 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
             account_id=account_id,
             region=args.region,
             readonly_secret_id=args.readonly_dsn_secret_id,
-            miner_intake_secret_id=args.miner_intake_secret_id,
             expires_at=bootstrap_expires_at,
         )
         _put_policy(
@@ -3025,7 +3003,6 @@ def setup_iam_only(args: argparse.Namespace) -> dict[str, Any]:
         "static_bootstrap_installer_requested_assume_seconds": 900,
         "static_bootstrap_trust_expires_at": bootstrap_expires_at,
         "readonly_secret_id": args.readonly_dsn_secret_id,
-        "miner_intake_secret_id": args.miner_intake_secret_id,
         "github_variables_mutated": False,
         "secret_values_printed": False,
     }
@@ -3090,8 +3067,6 @@ def _validate_bootstrap_receipt(
             expected_bootstrap_prefix
         )
         or receipt.get("readonly_secret_id") != args.readonly_dsn_secret_id
-        or receipt.get("miner_intake_secret_id")
-        != args.miner_intake_secret_id
         or receipt.get("reader_role") != "leadpoet_parity_reader"
         or receipt.get("reader_default_read_only_verified") is not True
         or receipt.get("secret_values_printed") is not False
@@ -3133,7 +3108,6 @@ def configure_repository(args: argparse.Namespace) -> dict[str, Any]:
                 args.production_gateway_secret_id
             ),
             "LEADPOET_PARITY_READONLY_DSN_SECRET_ID": args.readonly_dsn_secret_id,
-            "LEADPOET_PARITY_MINER_INTAKE_SECRET_ID": args.miner_intake_secret_id,
             "LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE": RUNNER_PROFILE,
             "LEADPOET_PARITY_POSTGRES_IMAGE": postgres,
             "LEADPOET_PARITY_POSTGREST_IMAGE": postgrest,
@@ -3192,10 +3166,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         command.add_argument(
             "--readonly-dsn-secret-id",
             default="leadpoet/staging/production-parity/readonly-dsn",
-        )
-        command.add_argument(
-            "--miner-intake-secret-id",
-            default=DEFAULT_MINER_INTAKE_SECRET_ID,
         )
         command.add_argument("--volume-gib", type=int, default=DEFAULT_VOLUME_GIB)
 

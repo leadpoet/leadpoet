@@ -1,6 +1,5 @@
 import pytest
 
-from gateway.research_lab import admin
 from gateway.research_lab.admin import build_parser
 
 
@@ -23,17 +22,3 @@ def test_research_lab_admin_help_formats_every_subcommand(capsys):
 def test_research_lab_admin_rejects_retired_scoring_controls(command):
     with pytest.raises(SystemExit):
         build_parser().parse_args([command])
-
-
-@pytest.mark.asyncio
-async def test_research_lab_admin_status_only_reports_source_add(monkeypatch):
-    expected = {"action": "source-add status", "paused": False}
-
-    async def source_add_status():
-        return expected
-
-    monkeypatch.setattr(admin, "_source_add_status", source_add_status)
-
-    result = await admin._run(build_parser().parse_args(["status"]))
-
-    assert result == {"ok": True, "source_add": expected}

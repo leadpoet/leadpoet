@@ -156,7 +156,6 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
     policy = payload.get("policy")
     reimbursements = payload.get("active_reimbursement_obligations")
     champions = payload.get("active_champion_obligations")
-    source_add = payload.get("active_source_add_obligations", [])
     fallback_reimbursements = payload.get(
         "fallback_reimbursement_obligations",
         [],
@@ -166,7 +165,6 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
     if (
         not isinstance(reimbursements, list)
         or not isinstance(champions, list)
-        or not isinstance(source_add, list)
         or not isinstance(fallback_reimbursements, list)
     ):
         raise ScoringExecutorError("allocation obligations must be lists")
@@ -175,7 +173,6 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
         policy,
         reimbursements,
         champions,
-        active_source_add_obligations=source_add,
         fallback_reimbursement_obligations=fallback_reimbursements,
     )
     allocation_hash = str(allocation.get("allocation_hash") or "")

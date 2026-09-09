@@ -2837,14 +2837,14 @@ def test_miner_bootstrap_exec_preserves_stable_cwd_and_timing_ledger(
     ]
 
 
-def test_gateway_restart_checks_source_add_without_retired_admin_command() -> None:
+def test_gateway_restart_checks_shared_maintenance_without_retired_admin_command() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     v2_health = "if ! wait_for_gateway_v2_authority; then"
     handoff = "-m gateway.tee.verify_weight_submission_ready_v2"
-    source_add_status = (
+    shared_status = (
         "curl -fsS http://localhost:8000/research-lab/status"
     )
-    source_add_runtime = (
+    maintenance_runtime = (
         "-m gateway.tee.gateway_miner_maintenance_restart_v1"
     )
     completed = 'GATEWAY_DEPLOY_STAGE="completed"'
@@ -2858,10 +2858,10 @@ def test_gateway_restart_checks_source_add_without_retired_admin_command() -> No
     ):
         assert f"-m gateway.research_lab.admin {command}" not in script
     assert script.rindex(v2_health) < script.rindex(handoff)
-    assert script.rindex(handoff) < script.rindex(source_add_status)
+    assert script.rindex(handoff) < script.rindex(shared_status)
     assert (
-        script.rindex(source_add_status)
-        < script.rindex(source_add_runtime)
+        script.rindex(shared_status)
+        < script.rindex(maintenance_runtime)
         < script.rindex(completed)
     )
 

@@ -66,14 +66,12 @@ from scripts.production_parity_snapshot import (
 from scripts.run_production_parity_full_host import (
     FullParityError,
     _arena_provider_keys,
-    _builtwith_key_from_secret,
     _clone_arena_service_role_key,
     _clone_service_role_key,
     _current_epoch_from_readiness,
     _dsn_from_secret,
     _parse_gateway_environment_file,
     _required_secret_from_environment,
-    _verify_builtwith_credential_live,
 )
 from scripts.run_production_parity_fast import (
     _ProductionReadOnlySupabaseProvider,
@@ -86,10 +84,6 @@ from scripts.setup_production_parity_staging import (
 )
 from scripts.resolve_production_parity_controller_requirements import (
     resolve_controller_requirements,
-)
-from tests.test_gateway_restart_preflight_v2 import (
-    _source_add_claim_control_contract_response,
-    _source_add_miner_status_contract_response,
 )
 
 
@@ -113,7 +107,6 @@ _HISTORICAL_ATTESTED_ROLE_PURPOSES = {
         "research_lab.allocation.v2",
         "research_lab.champion_input.v2",
         "research_lab.reimbursement_input.v2",
-        "research_lab.source_add_reward_input.v2",
         "research_lab.sourcing_input.v2",
         "research_lab.fulfillment_input.v2",
         "research_lab.leaderboard_input.v2",
@@ -131,7 +124,6 @@ _HISTORICAL_ATTESTED_ROLE_PURPOSES = {
         "research_lab.benchmark.v2",
         "research_lab.rebenchmark.v2",
         "research_lab.confirmation_score.v2",
-        "research_lab.source_add_judge.v2",
         "qualification.lead_decision.v2",
         "qualification.email_evidence.v2",
         "qualification.sourcing_epoch.v2",
@@ -1129,21 +1121,6 @@ def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
     )
 
 
-def _schema_only_source_add_maintenance_readback() -> dict[str, object]:
-    return {
-        "schema_version": (
-            parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION
-        ),
-        "initial_paused": False,
-        "pause_rpc": "research_lab_source_add_set_paused",
-        "control_rows": 1,
-        "work_rows": 0,
-        "paused": True,
-        "guard_active": False,
-        "guard_generation": 0,
-        "reason_bound": True,
-        "actor_bound": True,
-    }
 
 
 def _copy_cutover_migration(
@@ -1156,185 +1133,10 @@ def _copy_cutover_migration(
     return migration
 
 
-@pytest.mark.parametrize(
-    "migration_identity",
-    parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS,
-    ids=lambda migration: f"migration-{migration['sequence']}",
-)
-def test_schema_only_restore_stages_exact_source_add_migration_precondition(
-    monkeypatch,
-    tmp_path: Path,
-    migration_identity: dict[str, object],
-):
-    image = "postgres@sha256:" + "c" * 64
-    archive = tmp_path / "runtime" / "production.dump"
-    archive.parent.mkdir()
-    archive.write_bytes(b"snapshot")
-    migration_identity = dict(migration_identity)
-    migration = _copy_cutover_migration(tmp_path, migration_identity)
-    maintenance = _schema_only_source_add_maintenance_readback()
-    calls: list[dict[str, object]] = []
-
-    def fake_run_postgres(command, **kwargs):
-        calls.append({"command": list(command), **kwargs})
-        stdout = b""
-        if command[0] == "psql" and "-f" not in command:
-            stdout = (json.dumps(maintenance, sort_keys=True) + "\n").encode()
-        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
-
-    monkeypatch.setattr(
-        parity_snapshot,
-        "verify_snapshot",
-        lambda **_kwargs: {"migration_delta": [migration_identity]},
-    )
-    monkeypatch.setattr(
-        parity_snapshot,
-        "_load_json",
-        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
-    )
-    monkeypatch.setattr(
-        parity_snapshot, "validate_snapshot_manifest", lambda value: value
-    )
-    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
-
-    evidence = restore_snapshot(
-        root=tmp_path,
-        contract_path=tmp_path / "contract.json",
-        manifest_path=tmp_path / "manifest.json",
-        archive_path=archive,
-        target_dsn=(
-            "postgresql://postgres:secret@127.0.0.1:32768/"
-            "leadpoet_parity_test"
-        ),
-        production_host="db.production.example",
-        postgres_image=image,
-    )
-
-    assert [call["command"][0] for call in calls] == [
-        "pg_restore",
-        "psql",
-        "psql",
-    ]
-    staging = calls[1]
-    assert staging.get("mounts", ()) == ()
-    assert "-f" not in staging["command"]
-    staging_sql = staging["stdin"].decode("utf-8")
-    assert "schema-only SOURCE_ADD control state is not empty" in staging_sql
-    assert "schema-only SOURCE_ADD work state is not empty" in staging_sql
-    assert "IN ACCESS EXCLUSIVE MODE NOWAIT" in staging_sql
-    assert "IN SHARE ROW EXCLUSIVE MODE NOWAIT" in staging_sql
-    assert "research_lab_source_add_set_paused(" in staging_sql
-    assert "FALSE," in staging_sql
-    assert parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON in staging_sql
-    assert parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR in staging_sql
-    applied = calls[2]
-    assert applied["command"][-1] == parity_snapshot._POSTGRES_MIGRATION_TARGET
-    assert applied["mounts"] == (
-        parity_snapshot._PostgresClientMount(
-            source=migration,
-            target=parity_snapshot._POSTGRES_MIGRATION_TARGET,
-            read_only=True,
-        ),
-    )
-    assert evidence["clone_migration_preconditions"] == [
-        {
-            **maintenance,
-            "migration_path": migration_identity["path"],
-            "migration_sha256": migration_identity["sha256"],
-        }
-    ]
 
 
-def test_schema_only_restore_stages_source_add_cutover_only_once(
-    monkeypatch,
-    tmp_path: Path,
-):
-    image = "postgres@sha256:" + "c" * 64
-    archive = tmp_path / "runtime" / "production.dump"
-    archive.parent.mkdir()
-    archive.write_bytes(b"snapshot")
-    migrations = [
-        dict(migration)
-        for migration in parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS
-    ]
-    migration_paths = [
-        _copy_cutover_migration(tmp_path, migration) for migration in migrations
-    ]
-    maintenance = _schema_only_source_add_maintenance_readback()
-    calls: list[dict[str, object]] = []
-
-    def fake_run_postgres(command, **kwargs):
-        calls.append({"command": list(command), **kwargs})
-        stdout = b""
-        if command[0] == "psql" and "-f" not in command:
-            stdout = (json.dumps(maintenance, sort_keys=True) + "\n").encode()
-        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
-
-    monkeypatch.setattr(
-        parity_snapshot,
-        "verify_snapshot",
-        lambda **_kwargs: {"migration_delta": migrations},
-    )
-    monkeypatch.setattr(
-        parity_snapshot,
-        "_load_json",
-        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
-    )
-    monkeypatch.setattr(
-        parity_snapshot, "validate_snapshot_manifest", lambda value: value
-    )
-    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
-
-    evidence = restore_snapshot(
-        root=tmp_path,
-        contract_path=tmp_path / "contract.json",
-        manifest_path=tmp_path / "manifest.json",
-        archive_path=archive,
-        target_dsn=(
-            "postgresql://postgres:secret@127.0.0.1:32768/"
-            "leadpoet_parity_test"
-        ),
-        production_host="db.production.example",
-        postgres_image=image,
-    )
-
-    assert [call["command"][0] for call in calls] == [
-        "pg_restore",
-        "psql",
-        *(["psql"] * len(migrations)),
-    ]
-    assert "-f" not in calls[1]["command"]
-    assert [
-        calls[index]["mounts"][0].source
-        for index in range(2, 2 + len(migrations))
-    ] == migration_paths
-    assert evidence["clone_migration_preconditions"] == [
-        {
-            **maintenance,
-            "migration_path": migrations[0]["path"],
-            "migration_sha256": migrations[0]["sha256"],
-        }
-    ]
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("sequence", 174),
-        ("sha256", "sha256:" + "0" * 64),
-        ("transaction_mode", "autocommit"),
-    ),
-)
-def test_schema_only_source_add_cutover_rejects_malformed_identity(field, value):
-    migration = dict(
-        parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS[-1]
-    )
-    migration[field] = value
-    with pytest.raises(
-        ProductionParityError,
-        match="schema-only SOURCE_ADD maintenance migration identity differs",
-    ):
-        parity_snapshot._schema_only_source_add_maintenance_sql(migration)
 
 
 
@@ -1379,61 +1181,6 @@ def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypa
 
 
 
-def test_full_restore_does_not_stage_schema_only_source_add_state(
-    monkeypatch,
-    tmp_path: Path,
-):
-    archive = tmp_path / "production.dump"
-    archive.write_bytes(b"snapshot")
-    migration_identity = dict(
-        parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS[-1]
-    )
-    migration = _copy_cutover_migration(tmp_path, migration_identity)
-    calls: list[list[str]] = []
-
-    monkeypatch.setattr(
-        parity_snapshot,
-        "verify_snapshot",
-        lambda **_kwargs: {"migration_delta": [migration_identity]},
-    )
-    monkeypatch.setattr(
-        parity_snapshot,
-        "_load_json",
-        lambda *_args, **_kwargs: {
-            "capture_mode": "full",
-            "database": {"total_relation_bytes": 1},
-        },
-    )
-    monkeypatch.setattr(
-        parity_snapshot, "validate_snapshot_manifest", lambda value: value
-    )
-    monkeypatch.setattr(
-        parity_snapshot,
-        "_require_full_snapshot_disk_headroom",
-        lambda *_args, **_kwargs: {},
-    )
-
-    def fake_run_postgres(command, **_kwargs):
-        calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
-
-    evidence = restore_snapshot(
-        root=tmp_path,
-        contract_path=tmp_path / "contract.json",
-        manifest_path=tmp_path / "manifest.json",
-        archive_path=archive,
-        target_dsn=(
-            "postgresql://postgres:secret@127.0.0.1:32768/"
-            "leadpoet_parity_test"
-        ),
-        production_host="db.production.example",
-    )
-
-    assert [command[0] for command in calls] == ["pg_restore", "psql"]
-    assert "-f" in calls[1]
-    assert "clone_migration_preconditions" not in evidence
 
 
 def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
@@ -1980,8 +1727,6 @@ def _full_host_main_args(output: Path) -> list[str]:
         "gateway-secret",
         "--readonly-dsn-secret-id",
         "readonly-secret",
-        "--miner-intake-secret-id",
-        "miner-secret",
         "--supabase-origin",
         ORIGIN,
         "--artifact-bucket",
@@ -2245,7 +1990,6 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
             candidate_sha="b" * 40,
             production_gateway_secret_id="gateway-secret",
             readonly_dsn_secret_id="readonly-secret",
-            miner_intake_secret_id="miner-secret",
             supabase_origin=ORIGIN,
             artifact_bucket="parity-artifacts",
             postgres_image="postgres@sha256:" + "c" * 64,
@@ -2302,7 +2046,6 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
             candidate_sha="b" * 40,
             production_gateway_secret_id="gateway-secret",
             readonly_dsn_secret_id="readonly-secret",
-            miner_intake_secret_id="miner-secret",
             supabase_origin=ORIGIN,
             artifact_bucket="parity-artifacts",
             postgres_image="postgres@sha256:" + "c" * 64,
@@ -2546,7 +2289,6 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
             candidate_sha="b" * 40,
             production_gateway_secret_id="gateway-secret",
             readonly_dsn_secret_id="readonly-secret",
-            miner_intake_secret_id="miner-secret",
             supabase_origin=ORIGIN,
             artifact_bucket="parity-artifacts",
             postgres_image="postgres@sha256:" + "c" * 64,
@@ -3717,158 +3459,9 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "constraint_valid": True,
             "constraint_definition": purpose_definition,
         }
-        source_add_origin_contract = {
-            "schema_version": "leadpoet.source_add_provider_origin_contract.v1",
-            "identity_version": "v1",
-            "identity_scope": "normalized_exact_host",
-            "admission_rpc": "research_lab_source_add_admit_v2",
-            "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
-            "owner_count": 0,
-            "reserved_count": 0,
-            "coverage_complete": True,
-            "collision_free": True,
-            "submission_trigger_enabled": True,
-            "catalog_trigger_enabled": True,
-            "provision_trigger_enabled": True,
-            "terminal_release_trigger_enabled": True,
-            "append_only_trigger_enabled": True,
-            "row_level_security_enabled": True,
-            "service_role_policy_enabled": True,
-        }
-        source_add_duplicate_privacy_contract = {
-            "schema_version": (
-                "leadpoet.source_add_duplicate_privacy_contract.v1"
-            ),
-            "admission_rpc": "research_lab_source_add_admit_v3",
-            "admission_signature": (
-                "jsonb,text,text,text,text,text,integer,integer,integer,integer"
-            ),
-            "compatibility_rpc": "research_lab_source_add_admit_v2",
-            "compatibility_signature": (
-                "jsonb,text,text,text,text,text,integer,integer,integer"
-            ),
-            "compatibility_cooldown_seconds": 20,
-            "cooldown_parameter_min_seconds": 1,
-            "cooldown_parameter_max_seconds": 3600,
-            "cooldown_clock": "clock_timestamp_after_advisory_locks",
-            "cooldown_source": "durable_miner_provenance_work",
-            "duplicate_precedes_cooldown": True,
-            "lock_order": [
-                "provider_origin_or_identity",
-                "hotkey",
-                "submission_or_work",
-            ],
-            "function_authority_sha256": (
-                schema_preflight.SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256
-            ),
-            "functions": {
-                "admit_v1": True,
-                "admit_v2_compatibility": True,
-                "admit_v3": True,
-                "provider_origin_hash_v1": True,
-                "provider_origin_host_v1": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "v3_service_role_callable": True,
-                "v2_service_role_callable": True,
-                "contract_service_role_callable": True,
-                "anon_callable": False,
-                "authenticated_callable": False,
-            },
-        }
-        source_add_provenance_leg1_contract = {
-            "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v4",
-            "required_migration": (
-                "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
-            ),
-            "daily_cap": 50,
-            "leg1_alpha_percent": 0.2,
-            "leg1_reward_epochs": 20,
-            "approval_boundary": "provenance_precheck_passed",
-            "backfill_policy": (
-                "earliest_exact_attested_provenance_per_provider_origin"
-            ),
-            "provider_origin_scope": "normalized_exact_host",
-            "provider_origin_winner_order": [
-                "provenance_created_at",
-                "submission_id",
-            ],
-            "cancelled_intents_are_authority": False,
-            "public_trigger_fields": [
-                "precheck_status",
-                "provenance_artifact_hash",
-                "provenance_precheck_passed",
-                "provenance_receipt_hash",
-                "provenance_result_hash",
-                "submission_id",
-            ],
-            "authority_view": (
-                "research_lab_source_add_provenance_leg1_authority_v1"
-            ),
-            "function_authority_sha256": (
-                schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
-            ),
-            "trigger_authority_sha256": (
-                schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
-            ),
-            "view_authority_sha256": (
-                schema_preflight.SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256
-            ),
-            "repair_function_authority_sha256": (
-                schema_preflight.SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256
-            ),
-            "functions": {
-                "configure_probe_v3": True,
-                "enqueue_leg1_after_provenance_v1": True,
-                "enqueue_provision_smoke_v2": True,
-                "finalize_leg1_v4": True,
-                "finalize_provision_smoke_v3": True,
-                "finalize_provision_v3": True,
-                "reject_current_builtin_v3": True,
-                "reconcile_provenance_leg1_v1": True,
-                "reserve_leg1_slot_v4": True,
-            },
-            "triggers": {
-                "automatic_enqueue": True,
-                "eligible_v2": True,
-                "eligible_v3": True,
-                "leg1_initial_event_v3": True,
-                "leg1_obligation_v3": True,
-                "leg1_slot_v3": True,
-                "leg1_work_v3": True,
-            },
-            "columns": {
-                "intent_approval_kind": True,
-                "intent_provenance_artifact_hash": True,
-                "intent_provenance_receipt_hash": True,
-                "slot_approval_kind": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "candidate_callable": True,
-                "internal_not_callable": True,
-                "rollback_v2_callable": True,
-            },
-        }
         contract_functions = {
             "research_lab_compact_weight_settlement_contract_v1": compact_contract,
             "research_lab_candidate_hybrid_purpose_contract_v1": purpose_contract,
-            "research_lab_source_add_provider_origin_contract_v1": (
-                source_add_origin_contract
-            ),
-            "research_lab_source_add_duplicate_privacy_contract_v1": (
-                source_add_duplicate_privacy_contract
-            ),
-            "research_lab_source_add_post_accept_leg1_contract_v4": (
-                source_add_provenance_leg1_contract
-            ),
-            "research_lab_source_add_claim_control_contract_v2": json.loads(
-                _source_add_claim_control_contract_response()
-            ),
-            "research_lab_source_add_miner_status_contract_v1": json.loads(
-                _source_add_miner_status_contract_response()
-            ),
         }
         for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:
             assert re.fullmatch(r"[a-z_][a-z0-9_]*", function_name)
@@ -3920,7 +3513,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             == "0"
         )
         assert result["status"] == "ready"
-        assert result["data_probe_count"] == 6
+        assert result["data_probe_count"] == 2
         assert (
             result["chain_realized_settlement_activation_http_probe_count"] == 0
         )
@@ -3934,10 +3527,6 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "source_finalized_block": activation["source_finalized_block"],
         }
         assert result["compact_weight_settlement_contract"] == compact_contract
-        assert (
-            result["source_add_provider_origin_contract"]
-            == source_add_origin_contract
-        )
         assert result["rpc_probe_count"] == len(
             schema_preflight.REQUIRED_SUPABASE_V2_RPCS
         )
@@ -5693,7 +5282,7 @@ def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
     assert fast_parity.FAST_JOB_MINIMUM_TIMEOUT_SECONDS == expected_minimum
     assert outer_seconds == fast_parity.FAST_JOB_OUTER_TIMEOUT_SECONDS
     assert outer_seconds - expected_minimum >= 10 * 60
-    assert fast_parity._fast_job_minimum_timeout_seconds(7) >= outer_seconds
+    assert fast_parity._fast_job_minimum_timeout_seconds(10) >= outer_seconds
     assert role_duration_seconds == fast_parity.FAST_AWS_ROLE_DURATION_SECONDS
     assert role_duration_seconds - outer_seconds >= 19 * 60
 
@@ -5827,7 +5416,6 @@ def test_fast_live_boundary_enforces_per_request_and_aggregate_deadlines(
         provider(request)
 
 
-@pytest.mark.asyncio
 def test_critical_stage_ledger_fails_closed_and_hashes_evidence():
     ledger = StageLedger(
         lane="full",
@@ -5996,7 +5584,6 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["BITTENSOR_NETWORK"] == "finney"
     assert environment["BITTENSOR_NETUID"] == "71"
     assert environment["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] == "false"
-    assert environment["RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED"] == "false"
     assert environment["DISABLE_BACKGROUND_TASKS"] == "true"
     assert environment["GATEWAY_STATEFUL_CUTOVER_CEREMONY"] == "0"
@@ -6568,138 +6155,12 @@ def test_full_child_environments_ignore_parent_and_clone_process_poison(
             assert key not in runtime
 
 
-def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
-    monkeypatch,
-    tmp_path: Path,
-):
-    observed: dict[str, object] = {}
-    poisoned_clone = {
-        "PATH": "/clone/path-poison",
-        "PYTHONPATH": "/clone/import-poison",
-        "HTTP_PROXY": "http://clone-proxy.invalid",
-        "HTTPS_PROXY": "http://clone-proxy.invalid",
-        "GIT_SSH_COMMAND": "ssh -i /clone/key",
-        "AWS_ACCESS_KEY_ID": "clone-access-key",
-        "AWS_SECRET_ACCESS_KEY": "clone-secret-key",
-        "RESEARCH_LAB_PROVIDER_HTTP_PROXY": "provider-proxy-ref",
-    }
-
-    monkeypatch.setattr(
-        full_host,
-        "_validated_clone_environment",
-        lambda *_args, **_kwargs: poisoned_clone,
-    )
-
-    def fake_run(_command, **kwargs):
-        observed["env"] = dict(kwargs["env"])
-        return subprocess.CompletedProcess(
-            [],
-            0,
-            stdout=json.dumps(
-                {
-                    "schema_version": (
-                        "leadpoet.production_parity_miner_intake_evidence.v1"
-                    ),
-                    "candidate_sha": SHA,
-                    "run_id": "pp-1-1",
-                    "artifact_bucket": (
-                        "leadpoet-parity-493765492819-" + "f" * 16
-                    ),
-                    "status": "passed",
-                    "production_database_mutated": False,
-                    "production_chain_mutated": False,
-                    "chain_registration_boundary": "strict-ephemeral-hotkey",
-                    "source_add": {
-                        "admitted": True,
-                        "source_add_paused": False,
-                    },
-                }
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(full_host, "_run", fake_run)
-    full_host._run_miner_intake_path(
-        region="us-east-1",
-        candidate_sha=SHA,
-        run_id="pp-1-1",
-        supabase_origin=ORIGIN,
-        gateway_env_file=tmp_path / "gateway.env",
-        artifact_bucket="leadpoet-parity-493765492819-" + "f" * 16,
-        miner_intake_secret=json.dumps(
-            {"builtwith_api_key": "builtwith-credential"}
-        ),
-    )
-    child_env = observed["env"]
-    assert isinstance(child_env, dict)
-    assert child_env["PATH"] == "/usr/local/bin:/usr/bin:/bin"
-    assert child_env["AWS_REGION"] == "us-east-1"
-    assert child_env["AWS_DEFAULT_REGION"] == "us-east-1"
-    assert child_env["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] == "false"
-    assert child_env["RESEARCH_LAB_SOURCE_ADD_ENABLED"] == "true"
-    for key in poisoned_clone:
-        if key != "PATH":
-            assert key not in child_env
 
 
-def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
-    assert (
-        _builtwith_key_from_secret(
-            json.dumps({"builtwith_api_key": "provider-value-for-test"})
-        )
-        == "provider-value-for-test"
-    )
-    with pytest.raises(FullParityError, match="miner-intake secret is invalid"):
-        _builtwith_key_from_secret(json.dumps({"builtwith_api_key": "bad value"}))
-    assert (
-        _required_secret_from_environment(
-            {"FIRST": "", "SECOND": "credential-value"},
-            ("FIRST", "SECOND"),
-            field="credential",
-        )
-        == "credential-value"
-    )
-    with pytest.raises(FullParityError, match="credential is unavailable"):
-        _required_secret_from_environment({}, ("FIRST",), field="credential")
 
 
-@pytest.mark.asyncio
-async def test_miner_intake_restores_controls_changed_for_source_only_state():
-    observed: list[tuple[str, object]] = []
-
-    async def call_rpc(name, payload):
-        observed.append((name, dict(payload)))
-
-    await full_host._restore_miner_intake_controls(
-        {"source_add_paused": True},
-        call_rpc=call_rpc,
-    )
-
-    assert observed == [
-        (
-            "research_lab_source_add_set_paused",
-            {
-                "p_paused": True,
-                "p_reason": "production_parity_miner_intake_complete",
-                "p_actor_ref": "system:production-parity",
-            },
-        )
-    ]
 
 
-@pytest.mark.asyncio
-async def test_miner_intake_does_not_rewrite_already_active_source_add():
-    observed: list[tuple[str, object]] = []
-
-    async def call_rpc(name, payload):
-        observed.append((name, dict(payload)))
-
-    await full_host._restore_miner_intake_controls(
-        {"source_add_paused": False},
-        call_rpc=call_rpc,
-    )
-
-    assert observed == []
 
 
 def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
@@ -6769,40 +6230,6 @@ def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
         )
 
 
-def test_builtwith_live_probe_keeps_credential_out_of_url(monkeypatch):
-    observed = {}
-    payload = b'{"Results":[{"Lookup":"builtwith.com"}]}'
-
-    class Response:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self, _limit):
-            return payload
-
-    def fake_urlopen(request, *, timeout):
-        observed["url"] = request.full_url
-        observed["authorization"] = request.get_header("Authorization")
-        observed["timeout"] = timeout
-        return Response()
-
-    monkeypatch.setattr("scripts.run_production_parity_full_host.urlopen", fake_urlopen)
-    credential = "provider-credential-for-test"
-    assert _verify_builtwith_credential_live(credential) == {
-        "http_status": 200,
-        "json_verified": True,
-        "response_bytes": len(payload),
-    }
-    assert credential not in observed["url"]
-    assert "LOOKUP=builtwith.com" in observed["url"]
-    assert "NOPII=yes" in observed["url"]
-    assert observed["authorization"] == f"API {credential}"
-    assert observed["timeout"] == 45
 
 
 def test_weight_readiness_epoch_parser_uses_real_reported_epoch():
@@ -6818,7 +6245,6 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
         region="us-east-1",
         production_secret_id="leadpoet/prod/gateway/env",
         readonly_secret_id="leadpoet/staging/production-parity/readonly-dsn",
-        miner_intake_secret_id=("leadpoet/staging/production-parity-miner-intake"),
         runner_arn="arn:aws:iam::493765492819:role/runner",
     )
     runner = _runner_policy(
@@ -6826,12 +6252,10 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
         region="us-east-1",
         production_secret_id="leadpoet/prod/gateway/env",
         readonly_secret_id="leadpoet/staging/production-parity/readonly-dsn",
-        miner_intake_secret_id=("leadpoet/staging/production-parity-miner-intake"),
     )
     encoded = json.dumps({"controller": controller, "runner": runner})
     assert "iam:PassRole" in encoded
     assert "leadpoet-parity-493765492819-*" in encoded
-    assert "leadpoet/staging/production-parity-miner-intake" in encoded
     assert "ssm:DescribeInstanceInformation" in encoded
     assert "secretsmanager:ListSecrets" in encoded
     assert "s3:GetBucketObjectLockConfiguration" in encoded
@@ -6887,7 +6311,6 @@ def test_runner_iam_policy_is_nonforwarding_and_write_scoped():
     assert write_statement["Resource"].endswith(
         "production-parity/runs/pp-*/gateway-??????"
     )
-    assert "production-parity-miner-intake" not in write_statement["Resource"]
 
 
 def test_agent_guides_match_and_parity_runbooks_define_both_lanes():

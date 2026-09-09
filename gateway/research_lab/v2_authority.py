@@ -16,12 +16,6 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
 from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
-from gateway.tee.source_add_runtime_v2 import (
-    build_source_add_probe_job_envelope_v2,
-    build_source_add_probe_route_v2,
-    build_source_add_runtime_catalog_v2,
-    validate_source_add_runtime_catalog_v2,
-)
 from gateway.tee.coordinator_executor_v2 import (
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
     OP_CLASSIFY_LEGACY_ALLOCATION_V2,
@@ -41,18 +35,6 @@ from gateway.tee.reward_executor_v2 import (
     OP_RESEARCH_LAB_REWARD_DECISION,
     champion_reward_row_projection_v2,
     reward_receipt_projection_v2,
-    source_add_reward_row_projection_v2,
-)
-from gateway.tee.coordinator_source_add_v2 import (
-    OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
-    OP_SOURCE_ADD_PROVENANCE_V2,
-    SOURCE_ADD_FUNCTIONAL_PROBE_REQUEST_SCHEMA_VERSION,
-    SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION,
-    SOURCE_ADD_PROVENANCE_REQUEST_SCHEMA_VERSION,
-    SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
-)
-from gateway.tee.coordinator_executor_v2 import (
-    OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2,
 )
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
@@ -192,320 +174,8 @@ def _validate_allocation_parent_graphs(
     return bindings
 
 
-async def evaluate_source_add_provenance_v2(
-    *,
-    submission_id: str,
-    source_name: str,
-    source_kind: str,
-    declared_base_domains: Sequence[str],
-    source_metadata: Mapping[str, Any],
-    epoch_id: int,
-    sequence: int,
-    timeout_seconds: int = 45,
-    execute: Any = execute_coordinator_v2,
-    persist_links: Any = None,
-) -> tuple[Any, dict[str, Any]]:
-    """Execute the unchanged SOURCE_ADD provenance rules in the coordinator."""
-
-    from gateway.research_lab.source_add_provenance import (
-        SourceAddProvenanceResult,
-    )
-
-    outcome = await execute(
-        operation=OP_SOURCE_ADD_PROVENANCE_V2,
-        purpose="research_lab.source_add_provenance.v2",
-        epoch_id=max(0, int(epoch_id)),
-        sequence=max(0, int(sequence)),
-        payload={
-            "schema_version": SOURCE_ADD_PROVENANCE_REQUEST_SCHEMA_VERSION,
-            "submission_id": str(submission_id),
-            "source_name": str(source_name),
-            "source_kind": str(source_kind),
-            "declared_base_domains": [str(item) for item in declared_base_domains],
-            "source_metadata": dict(source_metadata),
-            "timeout_seconds": int(timeout_seconds),
-        },
-    )
-    result = outcome.get("result")
-    required = {
-        "schema_version",
-        "submission_id",
-        "precheck_status",
-        "reasons",
-        "precheck_doc",
-    }
-    if (
-        not isinstance(result, Mapping)
-        or set(result) != required
-        or result.get("schema_version")
-        != SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION
-        or result.get("submission_id") != str(submission_id)
-        or not isinstance(result.get("reasons"), list)
-        or any(not isinstance(item, str) for item in result["reasons"])
-        or not isinstance(result.get("precheck_doc"), Mapping)
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD provenance result binding differs"
-        )
-    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-    if (
-        not isinstance(receipt, Mapping)
-        or receipt.get("output_root") != sha256_json(dict(result))
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD provenance receipt output differs"
-        )
-    precheck_doc = dict(result["precheck_doc"])
-    if (
-        precheck_doc.get("precheck_status") != result["precheck_status"]
-        or list(precheck_doc.get("reasons") or []) != list(result["reasons"])
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD provenance document projection differs"
-        )
-    artifact = {
-        "artifact_kind": "source_add_provenance",
-        "artifact_ref": str(submission_id),
-        "artifact_hash": str(receipt["output_root"]),
-    }
-    authority_outcome = dict(outcome)
-    try:
-        link = await _persist_business_links(
-            outcome,
-            (artifact,),
-            persist_links=persist_links,
-        )
-    except Exception as exc:
-        from gateway.research_lab.attested_v2_store import (
-            AttestedV2StoreError,
-            load_business_artifact_graph_v2,
-        )
-
-        if not isinstance(exc, AttestedV2StoreError) or str(exc) != (
-            "research_lab_attested_business_artifact_links_v2 "
-            "stored row conflicts at receipt_hash"
-        ):
-            raise
-        existing_graph = await load_business_artifact_graph_v2(
-            artifact_kind=artifact["artifact_kind"],
-            artifact_ref=artifact["artifact_ref"],
-            artifact_hash=artifact["artifact_hash"],
-        )
-        try:
-            validate_receipt_graph(
-                existing_graph,
-                required_purposes={"research_lab.source_add_provenance.v2"},
-            )
-        except Exception as validation_exc:
-            raise ResearchLabV2AuthorityError(
-                "existing SOURCE_ADD provenance authority is invalid"
-            ) from validation_exc
-        existing_root_hash = str(existing_graph.get("root_receipt_hash") or "")
-        existing_roots = [
-            item
-            for item in existing_graph.get("receipts") or ()
-            if isinstance(item, Mapping)
-            and item.get("receipt_hash") == existing_root_hash
-        ]
-        if (
-            len(existing_roots) != 1
-            or existing_roots[0].get("role") != "gateway_coordinator"
-            or existing_roots[0].get("purpose")
-            != "research_lab.source_add_provenance.v2"
-            or existing_roots[0].get("status") != "succeeded"
-            or existing_roots[0].get("output_root") != artifact["artifact_hash"]
-        ):
-            raise ResearchLabV2AuthorityError(
-                "existing SOURCE_ADD provenance authority differs"
-            ) from exc
-        existing_receipt = dict(existing_roots[0])
-        authority_outcome.update(
-            {
-                "execution_receipt": existing_receipt,
-                "receipt": existing_receipt,
-                "execution_receipt_graph": dict(existing_graph),
-                "receipt_graph": dict(existing_graph),
-            }
-        )
-        link = {
-            "status": "reused_existing_authority",
-            "receipt_hash": existing_root_hash,
-        }
-    provenance = SourceAddProvenanceResult(
-        precheck_status=str(result["precheck_status"]),
-        reasons=tuple(str(item) for item in result["reasons"]),
-        doc={
-            key: value
-            for key, value in precheck_doc.items()
-            if key not in {"precheck_status", "reasons"}
-        },
-    )
-    return provenance, {
-        **authority_outcome,
-        "status": "matched",
-        "artifact_link_status": link,
-    }
 
 
-async def evaluate_source_add_functional_probe_v2(
-    *,
-    submission_id: str,
-    config_ref: str,
-    evaluation_mode: str,
-    epoch_id: int,
-    sequence: int,
-    artifact_ref: str,
-    timeout_seconds: int = 45,
-    execute: Any = execute_coordinator_v2,
-    load_probe_row: Any = None,
-    persist_links: Any = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Run one exact provisional API test through the V2 provider broker."""
-
-    if evaluation_mode not in {"functional_probe", "provisioning_smoke"}:
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD functional evaluation mode is invalid"
-        )
-    if load_probe_row is None:
-        from gateway.research_lab.store import select_one
-
-        async def load_probe_row(value: str) -> Mapping[str, Any] | None:
-            config = await select_one(
-                "research_lab_source_add_probe_config_current",
-                filters=(
-                    ("submission_id", value),
-                    ("config_status", "active"),
-                ),
-            )
-            submission = await select_one(
-                "research_lab_source_add_submission_current",
-                filters=(("submission_id", value),),
-            )
-            if not isinstance(config, Mapping) or not isinstance(
-                submission, Mapping
-            ):
-                return None
-            return {
-                **dict(config),
-                "miner_hotkey": str(submission.get("miner_hotkey") or ""),
-            }
-
-    row = await load_probe_row(str(submission_id))
-    if not isinstance(row, Mapping) or str(row.get("config_ref") or "") != str(
-        config_ref
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD current probe configuration is unavailable"
-        )
-    try:
-        route = build_source_add_probe_route_v2(row)
-    except Exception as exc:
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD probe route is invalid"
-        ) from exc
-
-    dynamic_refs = {}
-    if route["credential_slot"]:
-        dynamic_refs[str(route["credential_slot"])] = str(
-            route["credential_value_hash"]
-        )
-
-    async def envelope_builder(job_id: str):
-        envelope = build_source_add_probe_job_envelope_v2(row, job_id=job_id)
-        return (envelope,) if envelope is not None else ()
-
-    outcome = await execute(
-        operation=OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
-        purpose="research_lab.source_add_functional_probe.v2",
-        epoch_id=max(0, int(epoch_id)),
-        sequence=max(0, int(sequence)),
-        payload={
-            "schema_version": SOURCE_ADD_FUNCTIONAL_PROBE_REQUEST_SCHEMA_VERSION,
-            "submission_id": str(submission_id),
-            "config_ref": str(config_ref),
-            "evaluation_mode": str(evaluation_mode),
-            "timeout_seconds": int(timeout_seconds),
-        },
-        input_artifact_hashes=(str(route["route_hash"]),),
-        provider_credential_ref_hashes=dynamic_refs,
-        additional_job_credential_envelope_builder=envelope_builder,
-        timeout_seconds=max(60.0, float(timeout_seconds) * 3.0 + 30.0),
-    )
-    result = outcome.get("result")
-    required = {
-        "schema_version",
-        "evaluator_version",
-        "submission_id",
-        "adapter_id",
-        "config_ref",
-        "evaluation_mode",
-        "result_status",
-        "route_hash",
-        "selected_probe_index",
-        "response_hash",
-        "status_class",
-        "content_type",
-        "byte_count",
-        "duration_ms",
-        "retry_after_seconds",
-        "reason_codes",
-        "probe_summaries",
-    }
-    if (
-        not isinstance(result, Mapping)
-        or set(result) != required
-        or result.get("schema_version")
-        != SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION
-        or result.get("submission_id") != str(submission_id)
-        or result.get("config_ref") != str(config_ref)
-        or result.get("evaluation_mode") != str(evaluation_mode)
-        or result.get("route_hash") != route["route_hash"]
-        or result.get("result_status")
-        not in {"passed", "retryable", "awaiting_operator", "manual_review", "failed"}
-        or not isinstance(result.get("reason_codes"), list)
-        or not isinstance(result.get("probe_summaries"), list)
-        or not isinstance(result.get("retry_after_seconds"), int)
-        or not 0 <= int(result["retry_after_seconds"]) <= 21_600
-        or not 1 <= len(result["probe_summaries"]) <= 3
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD functional probe result binding differs"
-        )
-    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-    graph = outcome.get("execution_receipt_graph") or outcome.get("receipt_graph")
-    if (
-        not isinstance(receipt, Mapping)
-        or not isinstance(graph, Mapping)
-        or receipt.get("output_root") != sha256_json(dict(result))
-        or graph.get("root_receipt_hash") != receipt.get("receipt_hash")
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD functional probe receipt differs"
-        )
-    validate_receipt_graph(
-        graph,
-        required_purposes={"research_lab.source_add_functional_probe.v2"},
-    )
-    link = await _persist_business_links(
-        outcome,
-        (
-            {
-                "artifact_kind": (
-                    "source_add_functional_probe"
-                    if evaluation_mode == "functional_probe"
-                    else "source_add_provisioning_smoke"
-                ),
-                "artifact_ref": str(artifact_ref),
-                "artifact_hash": str(receipt["output_root"]),
-            },
-        ),
-        persist_links=persist_links,
-    )
-    return dict(result), {
-        **dict(outcome),
-        "status": "matched",
-        "artifact_link_status": link,
-    }
 
 
 async def authorize_reward_decision_v2(
@@ -601,30 +271,6 @@ async def attest_historical_champion_reward_v2(
     )
 
 
-async def attest_historical_source_add_reward_v2(
-    *,
-    epoch_id: int,
-    reward_ref: str,
-    execute: Any = execute_coordinator_v2,
-    persist_links: Any = None,
-) -> dict[str, Any]:
-    """Migrate one measured pre-V2 provenance reward into V2 authority."""
-
-    normalized_ref = str(reward_ref or "")
-    if not re.fullmatch(r"source_add_reward:[0-9a-f]{16}", normalized_ref):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD reward ref is invalid")
-    return await authorize_reward_decision_v2(
-        epoch_id=int(epoch_id),
-        sequence=1,
-        decision_kind="source_add_migration",
-        decision_payload={"reward_ref": normalized_ref},
-        expected_result=None,
-        artifact_kind="source_add_reward_decision",
-        artifact_ref=normalized_ref,
-        parent_graphs=(),
-        execute=execute,
-        persist_links=persist_links,
-    )
 
 
 async def attest_historical_champion_settlement_v2(
@@ -837,77 +483,6 @@ async def classify_historical_champion_allocation_v2(
     }
 
 
-async def load_source_add_catalog_snapshot_v2(
-    *,
-    epoch_id: int,
-    execute: Any = execute_coordinator_v2,
-) -> dict[str, Any]:
-    outcome = await execute(
-        operation=OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2,
-        purpose="research_lab.source_add_catalog_snapshot.v2",
-        epoch_id=int(epoch_id),
-        sequence=0,
-        payload={"limit": 200},
-    )
-    result = outcome.get("result")
-    if not isinstance(result, Mapping):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD catalog snapshot result is missing"
-        )
-    rows = result.get("provisioned_sources")
-    private_rows = result.get("private_registry_rows")
-    runtime_catalog = result.get("runtime_catalog")
-    if (
-        result.get("schema_version")
-        != "leadpoet.source_add_catalog_snapshot.v2"
-        or not isinstance(rows, list)
-        or any(not isinstance(item, Mapping) for item in rows)
-        or not isinstance(private_rows, list)
-        or any(not isinstance(item, Mapping) for item in private_rows)
-        or not isinstance(runtime_catalog, Mapping)
-        or result.get("provisioned_sources_hash")
-        != sha256_json([dict(item) for item in rows])
-        or result.get("private_registry_rows_hash")
-        != sha256_json([dict(item) for item in private_rows])
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD catalog snapshot result is invalid"
-        )
-    try:
-        normalized_runtime_catalog = validate_source_add_runtime_catalog_v2(
-            runtime_catalog
-        )
-        independently_derived_catalog = build_source_add_runtime_catalog_v2(
-            [dict(item) for item in rows]
-        )
-    except Exception as exc:
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD runtime catalog is invalid"
-        ) from exc
-    if (
-        normalized_runtime_catalog != independently_derived_catalog
-        or result.get("runtime_catalog_hash")
-        != normalized_runtime_catalog["catalog_hash"]
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD runtime catalog commitment differs"
-        )
-    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-    graph = outcome.get("execution_receipt_graph") or outcome.get("receipt_graph")
-    if (
-        not isinstance(receipt, Mapping)
-        or not isinstance(graph, Mapping)
-        or receipt.get("output_root") != sha256_json(dict(result))
-        or graph.get("root_receipt_hash") != receipt.get("receipt_hash")
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD catalog snapshot receipt differs"
-        )
-    validate_receipt_graph(
-        graph,
-        required_purposes={"research_lab.source_add_catalog_snapshot.v2"},
-    )
-    return dict(outcome)
 
 
 async def execute_provider_preflight_v2(
@@ -1325,10 +900,6 @@ async def build_allocation_v2(
             source_state.get("champion_obligations") or []
         ),
     }
-    if "source_add_obligations" in source_state:
-        expected_inputs["active_source_add_obligations"] = list(
-            source_state.get("source_add_obligations") or []
-        )
     fallback_obligations = list(
         source_state.get("fallback_reimbursement_obligations") or []
     )
@@ -2521,9 +2092,7 @@ async def _load_allocation_parent_graphs_v2(
         if bool(policy.get("enable_champ_cap", True))
         else ("active", "queued", "partially_paid", "paid")
     )
-    source_statuses = ("active", "queued", "partially_paid")
     champion_rows = []
-    source_rows = []
     for status in champion_statuses:
         selected_rows = await select_all(
             "research_lab_champion_reward_current",
@@ -2546,19 +2115,9 @@ async def _load_allocation_parent_graphs_v2(
             )
         except ValueError as exc:
             raise ResearchLabV2AuthorityError(str(exc)) from exc
-    for status in source_statuses:
-        source_rows.extend(
-            await select_all(
-                "research_lab_source_add_reward_current",
-                filters=(
-                    ("current_reward_status", status),
-                    ("start_epoch", "lte", int(epoch_id)),
-                ),
-            )
-        )
     history_starts = [
         int(row.get("start_epoch") or 0)
-        for row in champion_rows + source_rows
+        for row in champion_rows
         if int(row.get("start_epoch") or 0) <= int(epoch_id)
     ]
     normalized_finalized_history: list[dict[str, Any]] = []
@@ -2630,28 +2189,6 @@ async def _load_allocation_parent_graphs_v2(
             )
             for receipt_hash in row.get("chain_realized_credit_receipt_hashes") or ():
                 add_receipt_root(str(receipt_hash))
-    for row in source_rows:
-        reward_ref = str(row.get("reward_ref") or "")
-        try:
-            decision_hash = sha256_json(
-                source_add_reward_row_projection_v2(
-                    "source_add_leg%d" % int(row.get("leg") or 0),
-                    {
-                        **dict(row),
-                        "initial_reward_status": "active",
-                    },
-                )
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ResearchLabV2AuthorityError(
-                "allocation SOURCE_ADD reward identity is invalid"
-            ) from exc
-        if (
-            prior_reward_checkpoints.get(("source_add", reward_ref))
-            != decision_hash
-        ):
-            add_exact("source_add_reward_decision", reward_ref, decision_hash)
-
     exact_items = sorted(
         (kind, ref, digest)
         for (kind, ref), digest in exact_artifact_refs.items()

@@ -412,11 +412,7 @@ async def test_weight_readiness_repair_requires_internal_key_before_writes(
         raise AssertionError("repair writes must not run without authentication")
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
-    monkeypatch.setattr(
-        maintenance,
-        "backfill_source_add_reward_v2_authority",
-        unexpected_write,
-    )
+    monkeypatch.setattr(maintenance, "backfill_champion_reward_v2_authority", unexpected_write)
 
     with pytest.raises(
         readiness.WeightSubmissionReadinessV2Error,
@@ -440,9 +436,6 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         calls.append(("rewards", kwargs))
         return {"ok": True, "migrated_count": 23}
 
-    async def source_rewards(**kwargs):
-        calls.append(("source_rewards", kwargs))
-        return {"ok": True, "migrated_count": 1}
 
     async def settlements(**kwargs):
         calls.append(("settlements", kwargs))
@@ -482,11 +475,6 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
     monkeypatch.setattr(
         maintenance,
-        "backfill_source_add_reward_v2_authority",
-        source_rewards,
-    )
-    monkeypatch.setattr(
-        maintenance,
         "backfill_champion_reward_v2_authority",
         rewards,
     )
@@ -522,13 +510,11 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     result = await readiness.verify_weight_submission_ready_v2(repair=True)
 
     assert result["status"] == "ready"
-    assert result["source_add_reward_receipts_created"] == 1
     assert result["champion_reward_receipts_created"] == 23
     assert result["historical_allocations_classified"] == 149
     assert result["historical_compute_fallbacks_classified"] == 1
     assert [name for name, _kwargs in calls] == [
         "handoff",
-        "source_rewards",
         "rewards",
         "settlements",
         "fallback",
@@ -541,21 +527,16 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     }
     assert calls[2][1] == {
         "epoch": 24032,
+        "netuid": 71,
         "limit": 10000,
         "dry_run": False,
     }
     assert calls[3][1] == {
         "epoch": 24032,
         "netuid": 71,
-        "limit": 10000,
         "dry_run": False,
     }
-    assert calls[4][1] == {
-        "epoch": 24032,
-        "netuid": 71,
-        "dry_run": False,
-    }
-    assert calls[0][1] == calls[5][1] == {
+    assert calls[0][1] == calls[4][1] == {
         "epoch": 24032,
         "current_epoch": 24032,
         "internal_key": "validator-secret",
@@ -585,11 +566,6 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
         return {"handoff": True}
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
-    monkeypatch.setattr(
-        maintenance,
-        "backfill_source_add_reward_v2_authority",
-        unexpected_repair,
-    )
     monkeypatch.setattr(
         maintenance,
         "backfill_champion_reward_v2_authority",
@@ -622,7 +598,6 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     result = await readiness.verify_weight_submission_ready_v2(repair=True)
 
     assert result["status"] == "ready"
-    assert result["source_add_reward_receipts_created"] == 0
     assert result["champion_reward_receipts_created"] == 0
     assert result["historical_allocations_classified"] == 0
     assert calls == ["handoff"]
@@ -648,11 +623,6 @@ async def test_weight_readiness_repair_does_not_mask_invalid_handoff(
         return {"handoff": "invalid"}
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
-    monkeypatch.setattr(
-        maintenance,
-        "backfill_source_add_reward_v2_authority",
-        unexpected_repair,
-    )
     monkeypatch.setattr(
         maintenance,
         "backfill_champion_reward_v2_authority",
@@ -713,11 +683,6 @@ async def test_weight_readiness_repair_retries_transport_without_backfill(
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
     monkeypatch.setattr(
         maintenance,
-        "backfill_source_add_reward_v2_authority",
-        unexpected_repair,
-    )
-    monkeypatch.setattr(
-        maintenance,
         "backfill_champion_reward_v2_authority",
         unexpected_repair,
     )
@@ -747,7 +712,6 @@ async def test_weight_readiness_repair_retries_transport_without_backfill(
     )
 
     assert result["status"] == "ready"
-    assert result["source_add_reward_receipts_created"] == 0
     assert result["champion_reward_receipts_created"] == 0
     assert result["historical_allocations_classified"] == 0
     assert calls == ["handoff", "handoff"]

@@ -23,10 +23,7 @@ from gateway.tee.provider_broker_v2 import (
     ProviderBrokerV2,
 )
 from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
-from gateway.tee.source_add_runtime_v2 import (
-    source_add_dynamic_retry_policy_hash,
-    validate_source_add_runtime_route_v2,
-)
+
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval.provider_evidence_cache import canonical_request_fingerprint
 from research_lab.probe_catalog import (
@@ -248,12 +245,7 @@ class ProviderEvidenceAuthorityV2:
         normalized = self._request(request)
         endpoint = ProviderProbeEndpoint.from_mapping(normalized["endpoint"])
         method = endpoint.method
-        dynamic_route = normalized.get("dynamic_route")
-        if isinstance(dynamic_route, Mapping):
-            provider_id = str(dynamic_route["provider_id"])
-            base_url = str(dynamic_route["base_url"])
-        else:
-            provider_id, base_url = _PROVIDER_ROUTES[endpoint.provider_id]
+        provider_id, base_url = _PROVIDER_ROUTES[endpoint.provider_id]
         url = base_url + endpoint.path
         if normalized["query_params"]:
             url += "?" + urlencode(
@@ -351,13 +343,9 @@ class ProviderEvidenceAuthorityV2:
                     "body_b64": base64.b64encode(body).decode("ascii"),
                     "timeout_ms": normalized["timeout_seconds"] * 1000,
                     "retry_policy_hash": (
-                        source_add_dynamic_retry_policy_hash(dynamic_route)
-                        if isinstance(dynamic_route, Mapping)
-                        else self._broker.retry_policy_hashes[provider_id]
+                        self._broker.retry_policy_hashes[provider_id]
                     ),
                 }
-            if isinstance(dynamic_route, Mapping):
-                broker_request["dynamic_route"] = dict(dynamic_route)
             result = self._broker.execute(broker_request)
             broker_artifacts = list(result.get("evidence_artifact_hashes") or [])
             if any(not _HASH_RE.fullmatch(str(item or "")) for item in broker_artifacts):
@@ -483,7 +471,6 @@ class ProviderEvidenceAuthorityV2:
         value_fields = frozenset(value) if isinstance(value, Mapping) else frozenset()
         if value_fields not in {
             frozenset(fields),
-            frozenset(fields | {"dynamic_route"}),
         }:
             raise ProviderEvidenceV2Error("provider evidence request fields are invalid")
         if value.get("schema_version") != REQUEST_SCHEMA_VERSION:
@@ -492,36 +479,9 @@ class ProviderEvidenceAuthorityV2:
         errors = validate_probe_catalog([endpoint])
         if errors:
             raise ProviderEvidenceV2Error("provider probe endpoint is not measured")
-        dynamic_route = None
-        if endpoint.provider_id in _PROVIDER_ROUTES:
-            if "dynamic_route" in value:
-                raise ProviderEvidenceV2Error(
-                    "builtin provider cannot use a dynamic route"
-                )
-            _provider_id, expected_base = _PROVIDER_ROUTES[endpoint.provider_id]
-        else:
-            try:
-                dynamic_route = validate_source_add_runtime_route_v2(
-                    value.get("dynamic_route") or {}
-                )
-            except Exception as exc:
-                raise ProviderEvidenceV2Error(
-                    "dynamic provider probe route is invalid"
-                ) from exc
-            if dynamic_route["provider_id"] != endpoint.provider_id:
-                raise ProviderEvidenceV2Error(
-                    "dynamic provider probe identity differs"
-                )
-            expected_base = str(dynamic_route["base_url"])
-            expected_path = urlsplit(expected_base + endpoint.path).path or "/"
-            if not any(
-                item["method"] == endpoint.method
-                and item["path"] == expected_path
-                for item in dynamic_route["allowed_routes"]
-            ):
-                raise ProviderEvidenceV2Error(
-                    "dynamic provider probe route is not measured"
-                )
+        if endpoint.provider_id not in _PROVIDER_ROUTES:
+            raise ProviderEvidenceV2Error("provider probe endpoint is not measured")
+        _provider_id, expected_base = _PROVIDER_ROUTES[endpoint.provider_id]
         if str(value.get("upstream_base_url") or "").rstrip("/") != expected_base:
             raise ProviderEvidenceV2Error("provider probe base URL differs")
         query_params = value.get("query_params")
@@ -565,8 +525,6 @@ class ProviderEvidenceAuthorityV2:
             "live_enabled": bool(value.get("live_enabled")),
             "timeout_seconds": timeout,
         }
-        if dynamic_route is not None:
-            normalized["dynamic_route"] = dynamic_route
         return normalized
 
     def _terminal(

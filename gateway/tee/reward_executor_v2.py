@@ -6,19 +6,12 @@ import re
 from typing import Any, Dict, Mapping
 
 from leadpoet_canonical.attested_v2 import sha256_json
-from research_lab.source_add_rewards import (
-    PUBLIC_LABELS,
-    REWARD_KIND_SOURCE_ACCEPTANCE,
-    create_leg1_reward,
-)
 
 
 OP_RESEARCH_LAB_REWARD_DECISION = "research_lab_reward_decision"
 REWARD_DECISION_KINDS = frozenset(
     {
         "champion_migration",
-        "source_add_leg1",
-        "source_add_migration",
     }
 )
 
@@ -36,9 +29,6 @@ def reward_receipt_projection_v2(result: Mapping[str, Any]) -> Dict[str, Any]:
     if kind == "champion":
         reward = _mapping(result.get("reward"), "champion reward")
         return champion_reward_row_projection_v2(reward)
-    if kind in {"source_add_leg1", "source_add_leg2"}:
-        reward = _mapping(result.get("reward"), "SOURCE_ADD reward")
-        return source_add_reward_row_projection_v2(kind, reward)
     if kind == "reimbursement":
         award = _mapping(result.get("award"), "reimbursement award")
         schedule = _mapping(result.get("schedule"), "reimbursement schedule")
@@ -70,36 +60,6 @@ def champion_reward_row_projection_v2(reward: Mapping[str, Any]) -> Dict[str, An
     }
 
 
-def source_add_reward_row_projection_v2(
-    kind: str,
-    reward: Mapping[str, Any],
-) -> Dict[str, Any]:
-    if kind not in {"source_add_leg1", "source_add_leg2"}:
-        raise RewardExecutorV2Error("SOURCE_ADD reward projection kind is invalid")
-    return {
-        "schema_version": "leadpoet.reward_row_projection.v2",
-        "decision_kind": str(kind),
-        "reward_row": {
-            "reward_ref": str(reward["reward_ref"]),
-            "adapter_id": str(reward["adapter_id"]),
-            "miner_hotkey": str(
-                reward.get("miner_hotkey", reward.get("miner_ref", ""))
-            ),
-            "leg": int(reward["leg"]),
-            "reward_kind": str(reward["reward_kind"]),
-            "alpha_percent": float(reward["alpha_percent"]),
-            "reward_epochs": int(reward["reward_epochs"]),
-            "start_epoch": int(reward["start_epoch"]),
-            "initial_reward_status": str(
-                reward.get("initial_reward_status", reward.get("state", ""))
-            ),
-            "trigger_evidence_doc": dict(
-                reward.get("trigger_evidence_doc", reward.get("trigger_evidence", {}))
-                or {}
-            ),
-            "public_label": str(reward.get("public_label") or ""),
-        },
-    }
 
 
 def reimbursement_reward_row_projection_v2(
@@ -161,9 +121,7 @@ def execute_reward_decision_v2(payload: Mapping[str, Any]) -> Dict[str, Any]:
         raise RewardExecutorV2Error("reward decision input is invalid")
     if kind == "champion_migration":
         return _champion_migration(value)
-    if kind == "source_add_migration":
-        return _source_add_migration(value)
-    return _source_add(kind, value)
+    return _champion_migration(value)
 
 
 def _champion_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
@@ -270,170 +228,5 @@ def _champion_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
             **reconstructed,
             "champion_reward_id": reward_id,
             "anchored_hash": anchored_hash,
-        },
-    }
-
-
-def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
-    if kind != "source_add_leg1":
-        raise RewardExecutorV2Error("SOURCE_ADD reward producer is retired")
-    common = {
-        "adapter_id",
-        "miner_ref",
-        "start_epoch",
-        "existing_rewards",
-        "alpha_percent",
-        "reward_epochs",
-    }
-    expected = common | {"provenance_result", "trigger_evidence"}
-    if set(value) != expected:
-        raise RewardExecutorV2Error("SOURCE_ADD reward fields are invalid")
-    existing = value.get("existing_rewards")
-    if not isinstance(existing, list) or any(
-        not isinstance(item, Mapping) for item in existing
-    ):
-        raise RewardExecutorV2Error("SOURCE_ADD existing rewards are invalid")
-    kwargs = {
-        "adapter_id": str(value.get("adapter_id") or ""),
-        "start_epoch": int(value.get("start_epoch") or 0),
-        "existing_rewards": [dict(item) for item in existing],
-        "alpha_percent": float(value.get("alpha_percent") or 0.0),
-        "reward_epochs": int(value.get("reward_epochs") or 0),
-    }
-    if kind == "source_add_leg1":
-        provenance = value.get("provenance_result")
-        trigger = value.get("trigger_evidence")
-        provenance_hash = (
-            sha256_json(dict(provenance))
-            if isinstance(provenance, Mapping)
-            else ""
-        )
-        if (
-            not isinstance(provenance, Mapping)
-            or set(provenance)
-            != {
-                "schema_version",
-                "submission_id",
-                "precheck_status",
-                "reasons",
-                "precheck_doc",
-            }
-            or provenance.get("schema_version")
-            != "leadpoet.source_add_provenance_result.v2"
-            or provenance.get("precheck_status")
-            != "provenance_precheck_passed"
-            or not isinstance(provenance.get("reasons"), list)
-            or any(not isinstance(item, str) for item in provenance["reasons"])
-            or not isinstance(provenance.get("precheck_doc"), Mapping)
-            or provenance["precheck_doc"].get("precheck_status")
-            != provenance.get("precheck_status")
-            or list(provenance["precheck_doc"].get("reasons") or [])
-            != list(provenance["reasons"])
-            or not isinstance(trigger, Mapping)
-            or set(trigger)
-            != {
-                "provenance_precheck_passed",
-                "submission_id",
-                "precheck_status",
-                "provenance_receipt_hash",
-                "provenance_artifact_hash",
-                "provenance_result_hash",
-            }
-            or trigger.get("provenance_precheck_passed") is not True
-            or trigger.get("submission_id") != provenance.get("submission_id")
-            or trigger.get("precheck_status")
-            != provenance.get("precheck_status")
-            or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(trigger.get("provenance_receipt_hash") or ""),
-            )
-            or trigger.get("provenance_artifact_hash") != provenance_hash
-            or trigger.get("provenance_result_hash") != provenance_hash
-        ):
-            raise RewardExecutorV2Error(
-                "SOURCE_ADD Leg 1 credible provenance result is invalid"
-            )
-        reward = create_leg1_reward(
-            miner_ref=str(value.get("miner_ref") or ""),
-            trigger_evidence=dict(trigger),
-            **kwargs,
-        )
-    return {
-        "decision_kind": kind,
-        "reward": reward.to_dict() if reward is not None else None,
-    }
-
-
-def _source_add_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
-    """Attest the exact legacy Leg 1 provenance-precheck reward contract."""
-
-    if not isinstance(value, Mapping) or set(value) != {
-        "reward_row",
-        "source_submission",
-    }:
-        raise RewardExecutorV2Error("SOURCE_ADD migration fields are invalid")
-    reward = _mapping(value.get("reward_row"), "SOURCE_ADD migration reward")
-    submission = _mapping(
-        value.get("source_submission"), "SOURCE_ADD migration submission"
-    )
-    adapter_id = str(reward.get("adapter_id") or "")
-    reward_ref = str(reward.get("reward_ref") or "")
-    miner_hotkey = str(reward.get("miner_hotkey") or "")
-    trigger = _mapping(
-        reward.get("trigger_evidence_doc"), "SOURCE_ADD migration trigger"
-    )
-    submission_id = str(trigger.get("submission_id") or "")
-    expected_ref = (
-        "source_add_reward:"
-        + sha256_json({"adapter_id": adapter_id, "leg": 1}).split(":", 1)[1][:16]
-    )
-    if (
-        int(reward.get("leg") or 0) != 1
-        or str(reward.get("reward_kind") or "")
-        != REWARD_KIND_SOURCE_ACCEPTANCE
-        or reward_ref != expected_ref
-        or not adapter_id
-        or not miner_hotkey
-        or float(reward.get("alpha_percent") or 0.0) <= 0.0
-        or float(reward.get("alpha_percent") or 0.0) > 100.0
-        or int(reward.get("reward_epochs") or 0) <= 0
-        or int(reward.get("start_epoch") or -1) < 0
-        or str(reward.get("public_label") or "")
-        != PUBLIC_LABELS[REWARD_KIND_SOURCE_ACCEPTANCE]
-        or str(reward.get("current_reward_status") or "")
-        not in {"active", "queued", "partially_paid"}
-    ):
-        raise RewardExecutorV2Error(
-            "SOURCE_ADD migration reward differs from the legacy Leg 1 contract"
-        )
-    if (
-        trigger.get("precheck_status") != "provenance_precheck_passed"
-        or trigger.get("reward_trigger") != "provenance_precheck_passed"
-        or not re.fullmatch(r"source_add_submission:[0-9a-f]{16}", submission_id)
-        or str(submission.get("submission_id") or "") != submission_id
-        or str(submission.get("adapter_id") or "") != adapter_id
-        or str(submission.get("miner_hotkey") or "") != miner_hotkey
-        or str(submission.get("precheck_status") or "")
-        != "provenance_precheck_passed"
-    ):
-        raise RewardExecutorV2Error(
-            "SOURCE_ADD migration provenance differs from measured submission"
-        )
-    return {
-        "decision_kind": "source_add_leg1",
-        "reward": {
-            "reward_ref": reward_ref,
-            "adapter_id": adapter_id,
-            "miner_ref": miner_hotkey,
-            "leg": 1,
-            "alpha_percent": float(reward["alpha_percent"]),
-            "reward_epochs": int(reward["reward_epochs"]),
-            "start_epoch": int(reward["start_epoch"]),
-            "state": "active",
-            "reward_kind": REWARD_KIND_SOURCE_ACCEPTANCE,
-            "allocation_ref": "",
-            "trigger_evidence": dict(trigger),
-            "public_label": PUBLIC_LABELS[REWARD_KIND_SOURCE_ACCEPTANCE],
-            "stopped_reason": "",
         },
     }

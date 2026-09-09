@@ -1,7 +1,7 @@
 """Arena installation under the non-superuser role used by hosted Supabase."""
 
 from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS
-from tests.test_source_add_end_to_end_postgres import SCRIPTS, _database_with_migrations
+from tests.postgres_migration_harness import SCRIPTS, _database_with_migrations
 
 
 def test_hosted_owner_transfers_and_idempotent_upgrade():
@@ -28,8 +28,11 @@ def test_hosted_owner_transfers_and_idempotent_upgrade():
             connection.autocommit = True
             with connection.cursor() as cursor:
                 cursor.execute("SET ROLE hosted_migrator")
-                for _ in range(2):
-                    for migration in DEFAULT_MIGRATIONS:
+                # Applied historical view definitions need not support replay
+                # after later migrations add columns. Reapply the current
+                # migration, not obsolete definitions that would drop columns.
+                for migrations in (DEFAULT_MIGRATIONS, DEFAULT_MIGRATIONS[-1:]):
+                    for migration in migrations:
                         cursor.execute((SCRIPTS / migration).read_text())
                         cursor.execute(
                             "SELECT has_schema_privilege('lab_arena_owner', 'public', 'CREATE'), "

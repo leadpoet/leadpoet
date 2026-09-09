@@ -534,14 +534,7 @@ def test_marked_malformed_lifetime_credit_fails_closed(
 def test_only_champion_and_burn_weights_change_when_lifetime_cap_binds():
     baseline = {
         "lab_cap_percent": 30.0,
-        "unallocated_percent": 0.0,
-        "source_add_allocations": [
-            {
-                "uid": 3,
-                "miner_hotkey": "source-add",
-                "paid_alpha_percent": 2.0,
-            }
-        ],
+        "unallocated_percent": 2.0,
         "reimbursement_allocations": [
             {
                 "uid": 4,
@@ -560,8 +553,8 @@ def test_only_champion_and_burn_weights_change_when_lifetime_cap_binds():
     }
     capped = deepcopy(baseline)
     capped["champion_allocations"][0]["paid_alpha_percent"] = 21.0
-    capped["unallocated_percent"] = 4.0
-    hotkeys = ["burn", "unused-1", "unused-2", "source-add", "reimbursement", "champion"]
+    capped["unallocated_percent"] = 6.0
+    hotkeys = ["burn", "unused-1", "unused-2", "unused-3", "reimbursement", "champion"]
 
     baseline_weights, baseline_burn, _ = (
         research_lab_uid_weights_from_allocation(
@@ -576,8 +569,7 @@ def test_only_champion_and_burn_weights_change_when_lifetime_cap_binds():
         reserved_share=0.30,
     )
 
-    assert capped_weights[3] == baseline_weights[3]
-    assert capped_weights[4] == baseline_weights[4]
+    assert capped_weights[4] == pytest.approx(baseline_weights[4])
     assert capped_weights[5] == pytest.approx(baseline_weights[5] - 0.04)
     assert capped_burn == pytest.approx(baseline_burn + 0.04)
     assert sum(capped_weights.values()) + capped_burn == pytest.approx(0.30)

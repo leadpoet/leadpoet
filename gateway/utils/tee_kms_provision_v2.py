@@ -426,15 +426,9 @@ async def provision_job_provider_envelope_v2(
 def validate_job_credential_envelope_v2(
     value: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """Validate either an existing KMS envelope or coordinator-sealed SOURCE_ADD."""
+    """Validate a measured KMS job credential envelope."""
 
-    from gateway.tee.source_add_runtime_v2 import (
-        SOURCE_ADD_SEALED_JOB_ENVELOPE_SCHEMA_VERSION,
-        validate_source_add_sealed_job_envelope_v2,
-    )
 
-    if value.get("schema_version") == SOURCE_ADD_SEALED_JOB_ENVELOPE_SCHEMA_VERSION:
-        return validate_source_add_sealed_job_envelope_v2(value)
     return validate_job_provider_envelope(value)
 
 
@@ -446,9 +440,6 @@ async def provision_job_credential_envelope_v2(
 ) -> Dict[str, Any]:
     """Lease one validated job credential without exposing plaintext to parent."""
 
-    from gateway.tee.source_add_runtime_v2 import (
-        SOURCE_ADD_SEALED_JOB_ENVELOPE_SCHEMA_VERSION,
-    )
 
     normalized = validate_job_credential_envelope_v2(envelope)
     if client is None:
@@ -458,26 +449,9 @@ async def provision_job_credential_envelope_v2(
         for key, item in normalized.items()
         if key not in {"ciphertext_blob", "envelope_kind"}
     }
-    if normalized["schema_version"] != SOURCE_ADD_SEALED_JOB_ENVELOPE_SCHEMA_VERSION:
-        return await provision_job_provider_envelope_v2(
-            wire,
-            client=client,
-            kms_client=kms_client,
-        )
-    result = await client.v2_provision_job_sealed_source_add_secret(
-        envelope=wire,
+    return await provision_job_provider_envelope_v2(
+        wire, client=client, kms_client=kms_client,
     )
-    if (
-        result.get("status") != "ready"
-        or result.get("job_id") != normalized["job_id"]
-        or result.get("credential_slot") != normalized["credential_slot"]
-        or result.get("credential_ref_hash")
-        != normalized["credential_value_hash"]
-    ):
-        raise TEEKMSProvisionV2Error(
-            "coordinator rejected sealed SOURCE_ADD job credential"
-        )
-    return dict(result)
 
 
 def load_provider_envelopes(paths: Sequence[Path]) -> list[Dict[str, Any]]:

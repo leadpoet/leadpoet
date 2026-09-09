@@ -18,10 +18,6 @@ from gateway.tee.provider_evidence_v2 import (
     create_signed_provider_evidence_record,
     validate_signed_provider_evidence_record,
 )
-from gateway.tee.source_add_runtime_v2 import (
-    build_source_add_runtime_catalog_v2,
-    source_add_dynamic_retry_policy_hash,
-)
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
     sha256_bytes,
@@ -256,7 +252,6 @@ def test_provider_evidence_rejects_tampered_record_and_route():
     with pytest.raises(ProviderEvidenceV2Error, match="base URL differs"):
         authority.resolve(request)
 
-
 def test_provider_evidence_rejects_params_moved_between_query_and_body():
     key = Ed25519PrivateKey.generate()
     identity = _identity(key)
@@ -270,82 +265,3 @@ def test_provider_evidence_rejects_params_moved_between_query_and_body():
     request["query_params"] = {"query": "developer tools"}
     with pytest.raises(ProviderEvidenceV2Error, match="params differ"):
         authority.resolve(request)
-
-
-def test_provider_evidence_routes_dynamic_source_only_with_measured_route():
-    key = Ed25519PrivateKey.generate()
-    identity = _identity(key)
-    broker = _Broker()
-    authority = ProviderEvidenceAuthorityV2(
-        broker=broker,
-        boot_identity_supplier=lambda: identity,
-        sign_digest=key.sign,
-        clock=lambda: "2026-07-10T00:00:00Z",
-    )
-    row = {
-        "adapter_id": "adapter:public-source",
-        "miner_hotkey": "miner-one",
-        "provision_status": "provisioned",
-        "registry_provider_id": "public_source",
-        "credential_envelope": {},
-        "provision_doc": {
-            "provider_registry_entry": {
-                "id": "public_source",
-                "base_url": "https://api.public-source.example",
-                "auth_kind": "none",
-                "auth_name": "",
-                "credential_ref": [],
-                "per_day_quota": 10,
-                "cost_model": {"est_cost_microusd_per_call": 0},
-                "capability_policy": {
-                    "routes": [{"method": "POST", "path": "/search"}]
-                },
-            },
-            "probe_endpoints": [
-                {
-                    "endpoint_id": "public_source.search",
-                    "provider_id": "public_source",
-                    "method": "POST",
-                    "path": "/search",
-                    "params": [
-                        {
-                            "name": "query",
-                            "type": "string",
-                            "required": True,
-                            "location": "body",
-                            "max_length": 300,
-                        }
-                    ],
-                }
-            ],
-        },
-    }
-    route = build_source_add_runtime_catalog_v2([row])["routes"][0]
-    request = {
-        "schema_version": REQUEST_SCHEMA_VERSION,
-        "caller_job_id": "autoresearch-v2:dynamic-probe",
-        "purpose": "research_lab.candidate_decision.v2",
-        "endpoint": row["provision_doc"]["probe_endpoints"][0],
-        "upstream_base_url": route["base_url"],
-        "query_params": {},
-        "body_params": {"query": "developer tools"},
-        "live_enabled": True,
-        "timeout_seconds": 60,
-        "dynamic_route": route,
-    }
-
-    result = authority.resolve(request)
-
-    assert result["evidence"] == "recorded"
-    assert broker.calls[0]["provider_id"] == "public_source"
-    assert broker.calls[0]["dynamic_route"]["route_hash"] == route["route_hash"]
-    assert broker.calls[0]["retry_policy_hash"] == (
-        source_add_dynamic_retry_policy_hash(route)
-    )
-
-    tampered = {
-        **route,
-        "allowed_routes": [{"method": "POST", "path": "/unlisted"}],
-    }
-    with pytest.raises(ProviderEvidenceV2Error, match="route is invalid"):
-        authority.resolve({**request, "dynamic_route": tampered})

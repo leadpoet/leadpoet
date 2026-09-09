@@ -22,7 +22,7 @@ from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
     _publish,
 )
 from tests.lab_arena.test_lab_arena_promotion_migration_postgres import _plan
-from tests.test_source_add_end_to_end_postgres import SCRIPTS
+from tests.postgres_migration_harness import SCRIPTS
 
 
 def test_network_scope_migration_is_idempotent_and_keeps_legacy_rows_on_finney():
@@ -218,7 +218,10 @@ def test_reward_scope_upgrade_under_hosted_role_preserves_access_controls():
     control.autocommit = True
     try:
         with control.cursor() as cursor:
-            cursor.execute('CREATE ROLE reward_migrator LOGIN NOSUPERUSER')
+            cursor.execute(
+                'CREATE ROLE reward_migrator LOGIN NOSUPERUSER PASSWORD %s',
+                (dsn.get('password', 'disposable-test-password'),),
+            )
             cursor.execute('GRANT lab_arena_owner TO reward_migrator')
             cursor.execute('ALTER SCHEMA public OWNER TO reward_migrator')
         admin = psycopg2.connect(**dict(dsn, user='reward_migrator'))

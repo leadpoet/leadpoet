@@ -210,6 +210,9 @@ def research_lab_uid_weights_from_allocation(
     paid_share = 0.0
     deregistered_share = 0.0
     for section in (
+        # Verification of immutable pre-retirement V2 snapshots still needs
+        # their signed vector. Current allocation producers no longer emit
+        # this section.
         "source_add_allocations",
         "reimbursement_allocations",
         "champion_allocations",

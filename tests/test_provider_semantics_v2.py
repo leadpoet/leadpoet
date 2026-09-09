@@ -51,10 +51,6 @@ from gateway.tee.provider_semantics_v2 import (
     ProviderSemanticsAuthorityV2,
     ProviderSemanticsV2Error,
 )
-from gateway.tee.source_add_runtime_v2 import (
-    build_source_add_runtime_catalog_v2,
-    source_add_dynamic_retry_policy_hash,
-)
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
@@ -351,15 +347,10 @@ def _request(
     body=b'{"query":"example"}',
     headers=None,
     logical_operation_id="provider-operation",
-    dynamic_route=None,
     job_id="job-provider-semantics",
     purpose="research_lab.company_score.v2",
 ):
-    retry = (
-        source_add_dynamic_retry_policy_hash(dynamic_route)
-        if dynamic_route is not None
-        else sha256_json({"retry": provider})
-    )
+    retry = sha256_json({"retry": provider})
     request = {
         "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
         "logical_operation_id": logical_operation_id,
@@ -374,43 +365,9 @@ def _request(
         "timeout_ms": 30000,
         "retry_policy_hash": retry,
     }
-    if dynamic_route is not None:
-        request["dynamic_route"] = dict(dynamic_route)
     return request
 
 
-def _dynamic_public_route(*, per_day_quota=1):
-    row = {
-        "adapter_id": "adapter:public-source",
-        "miner_hotkey": "miner-one",
-        "provision_status": "provisioned",
-        "registry_provider_id": "public_source",
-        "credential_envelope": {},
-        "provision_doc": {
-            "provider_registry_entry": {
-                "id": "public_source",
-                "base_url": "https://api.public-source.example",
-                "auth_kind": "none",
-                "auth_name": "",
-                "credential_ref": [],
-                "per_day_quota": per_day_quota,
-                "cost_model": {"est_cost_microusd_per_call": 500},
-                "capability_policy": {
-                    "routes": [{"method": "POST", "path": "/search"}]
-                },
-            },
-            "probe_endpoints": [
-                {
-                    "endpoint_id": "public_source.search",
-                    "provider_id": "public_source",
-                    "method": "POST",
-                    "path": "/search",
-                    "params": [],
-                }
-            ],
-        },
-    }
-    return build_source_add_runtime_catalog_v2([row])["routes"][0]
 
 
 def test_live_record_then_cache_hit_preserves_existing_fingerprint_and_costs():
@@ -1429,42 +1386,6 @@ def test_replay_miss_and_budget_cap_do_not_call_provider_or_cache(legacy_header)
     assert cache.payloads == {}
 
 
-def test_dynamic_source_add_keeps_daily_cache_and_enforces_measured_quota():
-    authority, broker, _cache, _artifacts = _authority()
-    route = _dynamic_public_route(per_day_quota=1)
-    first = authority.execute(
-        _request(
-            provider="public_source",
-            url="https://api.public-source.example/search",
-            dynamic_route=route,
-        )
-    )
-    cached = authority.execute(
-        _request(
-            provider="public_source",
-            url="https://api.public-source.example/search",
-            logical_operation_id="public-source-cache-hit",
-            dynamic_route=route,
-        )
-    )
-    quota = authority.execute(
-        _request(
-            provider="public_source",
-            url="https://api.public-source.example/search",
-            body=b'{"query":"different"}',
-            logical_operation_id="public-source-quota",
-            dynamic_route=route,
-        )
-    )
-
-    assert first["terminal_status"] == "authenticated_response"
-    assert cached["terminal_status"] == "attested_local_response"
-    assert cached["evidence"] == "hit"
-    assert quota["terminal_status"] == "attested_local_response"
-    assert quota["http_status"] == 429
-    assert quota["evidence"] == "quota_exhausted"
-    assert len(broker.calls) == 1
-    assert broker.calls[0]["dynamic_route"]["route_hash"] == route["route_hash"]
 
 
 def test_openrouter_reconciliation_uses_organizer_key_and_exact_cost():

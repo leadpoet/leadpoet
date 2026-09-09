@@ -54,7 +54,6 @@ WEIGHT_INPUT_PURPOSES = {
     "research_lab_allocation": (COORDINATOR_ROLE, "research_lab.allocation.v2"),
     "champions": (COORDINATOR_ROLE, "research_lab.champion_input.v2"),
     "reimbursements": (COORDINATOR_ROLE, "research_lab.reimbursement_input.v2"),
-    "source_add_rewards": (COORDINATOR_ROLE, "research_lab.source_add_reward_input.v2"),
     "fulfillment_rewards": (COORDINATOR_ROLE, "research_lab.fulfillment_input.v2"),
     "leaderboard": (COORDINATOR_ROLE, "research_lab.leaderboard_input.v2"),
     "bans": (COORDINATOR_ROLE, "research_lab.ban_input.v2"),
@@ -69,6 +68,11 @@ WEIGHT_INPUT_PURPOSES = {
     "feature_flags": (WEIGHT_ROLE, "validator.feature_flags.v2"),
     "constants": (WEIGHT_ROLE, "validator.constants.v2"),
 }
+_HISTORICAL_SOURCE_ADD_CATEGORY = "source_add_rewards"
+_HISTORICAL_SOURCE_ADD_PURPOSE = (
+    COORDINATOR_ROLE,
+    "research_lab.source_add_reward_input.v2",
+)
 
 SUPABASE_WEIGHT_SOURCE_HOST = "qplwoislplkcegvdmbim.supabase.co"
 GATEWAY_TLS_WEIGHT_INPUTS = frozenset(
@@ -76,7 +80,6 @@ GATEWAY_TLS_WEIGHT_INPUTS = frozenset(
         "research_lab_allocation",
         "champions",
         "reimbursements",
-        "source_add_rewards",
         "fulfillment_rewards",
         "leaderboard",
         "bans",
@@ -170,12 +173,19 @@ def _int(value: Any, field: str) -> int:
     return value
 
 
-def _normalized_input_receipts(value: Mapping[str, Any]) -> Dict[str, str]:
+def _normalized_input_receipts(
+    value: Mapping[str, Any],
+    *,
+    allow_historical_source_add: bool = False,
+) -> Dict[str, str]:
     _require(isinstance(value, Mapping), "input_receipt_hashes must be an object")
-    _require(set(value) == set(WEIGHT_INPUT_PURPOSES), "weight input receipt categories are incomplete")
+    expected = set(WEIGHT_INPUT_PURPOSES)
+    if allow_historical_source_add:
+        expected.add(_HISTORICAL_SOURCE_ADD_CATEGORY)
+    _require(set(value) == expected, "weight input receipt categories are incomplete")
     normalized = {
         category: _hash(value[category], "%s receipt hash" % category)
-        for category in sorted(WEIGHT_INPUT_PURPOSES)
+        for category in sorted(expected)
     }
     _require(
         len(set(normalized.values())) == len(normalized),
@@ -189,6 +199,7 @@ def _weight_input_value_documents_v2(
     calculation_snapshot: Mapping[str, Any],
     finalized_chain_state_root: Optional[str],
     gateway_authority_event_hash: str,
+    include_historical_source_add: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Return the exact value each semantic input receipt must commit.
 
@@ -278,14 +289,6 @@ def _weight_input_value_documents_v2(
             {
                 "reimbursement_allocations": list(
                     allocation.get("reimbursement_allocations") or []
-                )
-            },
-        ),
-        "source_add_rewards": document(
-            "source_add_rewards",
-            {
-                "source_add_allocations": list(
-                    allocation.get("source_add_allocations") or []
                 )
             },
         ),
@@ -391,6 +394,15 @@ def _weight_input_value_documents_v2(
             },
         ),
     })
+    if include_historical_source_add:
+        documents[_HISTORICAL_SOURCE_ADD_CATEGORY] = document(
+            _HISTORICAL_SOURCE_ADD_CATEGORY,
+            {
+                "source_add_allocations": list(
+                    allocation.get("source_add_allocations") or []
+                )
+            },
+        )
     return documents
 
 
@@ -418,6 +430,7 @@ def weight_input_value_documents_v2(
     calculation_snapshot: Mapping[str, Any],
     finalized_chain_state_root: str,
     gateway_authority_event_hash: str,
+    include_historical_source_add: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Return all gateway and validator input documents for a finalized block."""
 
@@ -425,9 +438,18 @@ def weight_input_value_documents_v2(
         calculation_snapshot=calculation_snapshot,
         finalized_chain_state_root=finalized_chain_state_root,
         gateway_authority_event_hash=gateway_authority_event_hash,
+        include_historical_source_add=include_historical_source_add,
     )
     _require(
-        set(documents) == set(WEIGHT_INPUT_PURPOSES),
+        set(documents)
+        == (
+            set(WEIGHT_INPUT_PURPOSES)
+            | (
+                {_HISTORICAL_SOURCE_ADD_CATEGORY}
+                if include_historical_source_add
+                else set()
+            )
+        ),
         "weight input value categories are incomplete",
     )
     return documents
@@ -438,14 +460,18 @@ def weight_input_output_roots_v2(
     calculation_snapshot: Mapping[str, Any],
     finalized_chain_state_root: str,
     gateway_authority_event_hash: str,
+    include_historical_source_add: bool = False,
 ) -> Dict[str, str]:
     documents = weight_input_value_documents_v2(
         calculation_snapshot=calculation_snapshot,
         finalized_chain_state_root=finalized_chain_state_root,
         gateway_authority_event_hash=gateway_authority_event_hash,
+        include_historical_source_add=include_historical_source_add,
     )
     _require(
-        set(documents) == set(WEIGHT_INPUT_PURPOSES),
+        set(documents)
+        == set(WEIGHT_INPUT_PURPOSES)
+        | ({_HISTORICAL_SOURCE_ADD_CATEGORY} if include_historical_source_add else set()),
         "weight input value categories are incomplete",
     )
     return {
@@ -470,7 +496,8 @@ def validate_weight_input_source_evidence_v2(
 
     normalized_category = str(category or "")
     _require(
-        normalized_category in WEIGHT_INPUT_PURPOSES,
+        normalized_category in WEIGHT_INPUT_PURPOSES
+        or normalized_category == _HISTORICAL_SOURCE_ADD_CATEGORY,
         "weight input source category is invalid",
     )
     _require(
@@ -486,7 +513,10 @@ def validate_weight_input_source_evidence_v2(
     value_hash = sha256_json(document["value"])
     artifact_hashes = [value_hash]
 
-    if normalized_category in GATEWAY_TLS_WEIGHT_INPUTS:
+    if (
+        normalized_category in GATEWAY_TLS_WEIGHT_INPUTS
+        or normalized_category == _HISTORICAL_SOURCE_ADD_CATEGORY
+    ):
         _require(scoped_attempts, "%s input has no authenticated database read" % normalized_category)
         for attempt in scoped_attempts:
             _require(
@@ -585,10 +615,14 @@ def weight_source_input_root(
     input_receipt_hashes: Mapping[str, Any],
     finalized_chain_state_root: str,
     gateway_authority_event_hash: str,
+    _allow_historical_source_add: bool = False,
 ) -> str:
     return sha256_json(
         {
-            "input_receipt_hashes": _normalized_input_receipts(input_receipt_hashes),
+            "input_receipt_hashes": _normalized_input_receipts(
+                input_receipt_hashes,
+                allow_historical_source_add=_allow_historical_source_add,
+            ),
             "finalized_chain_state_root": _hash(
                 finalized_chain_state_root, "finalized_chain_state_root"
             ),
@@ -606,12 +640,16 @@ def build_weight_snapshot_v2(
     input_receipt_hashes: Mapping[str, Any],
     finalized_chain_state_root: str,
     gateway_authority_event_hash: str,
+    _allow_historical_source_add: bool = False,
 ) -> Dict[str, Any]:
     _require(isinstance(calculation_snapshot, Mapping), "calculation_snapshot must be an object")
     normalized_calculation = dict(calculation_snapshot)
     # Canonical validation is delegated to the unchanged production formula.
     compute_final_weights(normalized_calculation)
-    normalized_inputs = _normalized_input_receipts(input_receipt_hashes)
+    normalized_inputs = _normalized_input_receipts(
+        input_receipt_hashes,
+        allow_historical_source_add=_allow_historical_source_add,
+    )
     expected_parents = sorted(normalized_inputs.values())
     _require(
         normalized_calculation.get("parent_receipt_hashes") == expected_parents,
@@ -626,6 +664,7 @@ def build_weight_snapshot_v2(
         input_receipt_hashes=normalized_inputs,
         finalized_chain_state_root=finalized_chain_state_root,
         gateway_authority_event_hash=gateway_authority_event_hash,
+        _allow_historical_source_add=_allow_historical_source_add,
     )
     body = {
         "schema_version": WEIGHT_SNAPSHOT_V2_SCHEMA_VERSION,
@@ -650,12 +689,34 @@ def build_weight_snapshot_v2(
 def validate_weight_snapshot_v2(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     _require(isinstance(snapshot, Mapping), "weight_snapshot must be an object")
     _require(set(snapshot) == _SNAPSHOT_FIELDS, "weight_snapshot fields do not match V2 schema")
+    input_categories = set(
+        snapshot.get("input_receipt_hashes") or {}
+    )
+    allocation = (
+        snapshot.get("calculation_snapshot", {}).get(
+            "research_lab_allocation_doc"
+        )
+        if isinstance(snapshot.get("calculation_snapshot"), Mapping)
+        else None
+    )
+    historical_allocation = (
+        isinstance(allocation, Mapping)
+        and "source_add_allocations" in allocation
+    )
+    historical = input_categories == (
+        set(WEIGHT_INPUT_PURPOSES) | {_HISTORICAL_SOURCE_ADD_CATEGORY}
+    )
+    _require(
+        historical == historical_allocation,
+        "historical SOURCE_ADD allocation and receipt category must be paired",
+    )
     rebuilt = build_weight_snapshot_v2(
         validator_hotkey=snapshot["validator_hotkey"],
         calculation_snapshot=snapshot["calculation_snapshot"],
         input_receipt_hashes=snapshot["input_receipt_hashes"],
         finalized_chain_state_root=snapshot["finalized_chain_state_root"],
         gateway_authority_event_hash=snapshot["gateway_authority_event_hash"],
+        _allow_historical_source_add=historical,
     )
     _require(dict(snapshot) == rebuilt, "weight_snapshot is not canonical")
     return compute_final_weights(snapshot["calculation_snapshot"])
@@ -708,6 +769,9 @@ def validate_published_weight_bundle_v2(
     hotkey_signature = str(bundle.get("validator_hotkey_signature") or "").strip().lower()
     _require(bool(_SIGNATURE_RE.fullmatch(hotkey_signature)), "validator_hotkey_signature is invalid")
 
+    historical = _HISTORICAL_SOURCE_ADD_CATEGORY in set(
+        snapshot.get("input_receipt_hashes") or {}
+    )
     required_purposes = {
         purpose for _, purpose in WEIGHT_INPUT_PURPOSES.values()
     } | {
@@ -715,6 +779,8 @@ def validate_published_weight_bundle_v2(
         "validator.weights.computed.v2",
         "validator.hotkey_signature.v2",
     }
+    if historical:
+        required_purposes.add(_HISTORICAL_SOURCE_ADD_PURPOSE[1])
     try:
         validate_receipt_graph(
             graph,
@@ -739,11 +805,15 @@ def validate_published_weight_bundle_v2(
         "weight graph root must be the enclave hotkey binding receipt",
     )
 
-    inputs = _normalized_input_receipts(snapshot["input_receipt_hashes"])
+    inputs = _normalized_input_receipts(
+        snapshot["input_receipt_hashes"],
+        allow_historical_source_add=historical,
+    )
     input_documents = weight_input_value_documents_v2(
         calculation_snapshot=snapshot["calculation_snapshot"],
         finalized_chain_state_root=snapshot["finalized_chain_state_root"],
         gateway_authority_event_hash=snapshot["gateway_authority_event_hash"],
+        include_historical_source_add=historical,
     )
     expected_input_roots = {
         category: sha256_json(document)
@@ -753,7 +823,11 @@ def validate_published_weight_bundle_v2(
     for category, receipt_hash in inputs.items():
         receipt = receipts.get(receipt_hash)
         _require(receipt is not None, "weight input receipt %s is missing" % category)
-        expected_role, expected_purpose = WEIGHT_INPUT_PURPOSES[category]
+        expected_role, expected_purpose = (
+            _HISTORICAL_SOURCE_ADD_PURPOSE
+            if category == _HISTORICAL_SOURCE_ADD_CATEGORY
+            else WEIGHT_INPUT_PURPOSES[category]
+        )
         _require(receipt.get("role") == expected_role, "%s receipt role is invalid" % category)
         _require(
             receipt.get("purpose") == expected_purpose,

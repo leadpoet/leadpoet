@@ -345,7 +345,6 @@ class SanitizedWeightFixture:
         ]
         allocation_rows = []
         for section in (
-            "source_add_allocations",
             "reimbursement_allocations",
             "champion_allocations",
             "queued_champion_allocations",
@@ -532,7 +531,6 @@ class SanitizedWeightFixture:
                         "research_lab_allocation",
                         "champions",
                         "reimbursements",
-                        "source_add_rewards",
                     }
                     else []
                 ),

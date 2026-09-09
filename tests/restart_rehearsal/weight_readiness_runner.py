@@ -165,14 +165,12 @@ def _build_handoff(epoch: int) -> dict[str, Any]:
         policy,
         [],
         [],
-        active_source_add_obligations=[],
     )
     source_state = {
         "epoch": epoch,
         "netuid": NETUID,
         "policy_id": policy["policy_id"],
         "policy": policy,
-        "source_add_obligations": [],
         "reimbursement_obligations": [],
         "champion_obligations": [],
     }
@@ -504,13 +502,6 @@ def _install_boundaries(stage: str, scenario: str) -> None:
         )
         return resolved_epoch
 
-    async def source_rewards(**_kwargs):
-        _event(
-            "weight-readiness-boundary",
-            boundary="source_reward_backfill",
-            status="ok",
-        )
-        return {"ok": True, "migrated_count": 0}
 
     async def champion_rewards(**_kwargs):
         _event(
@@ -654,7 +645,6 @@ def _install_boundaries(stage: str, scenario: str) -> None:
         return _build_handoff(POST_LAUNCH_EPOCH)
 
     maintenance._resolve_maintenance_epoch = resolve
-    maintenance.backfill_source_add_reward_v2_authority = source_rewards
     maintenance.backfill_champion_reward_v2_authority = champion_rewards
     maintenance.backfill_champion_settlement_v2_authority = settlements
     maintenance.champion_v2_cutover_readiness_report = report

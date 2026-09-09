@@ -25,7 +25,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
     round_config,
     stage_positions,
 )
-from tests.test_source_add_end_to_end_postgres import SCRIPTS
+from tests.postgres_migration_harness import SCRIPTS
 
 
 CANDIDATE = "a" * 40

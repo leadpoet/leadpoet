@@ -207,7 +207,6 @@
             "PROMPT_EDIT",
             "PARAM_EDIT",
             "STRATEGY_SWAP",
-            "SOURCE_ADD",
             "CODE_EDIT"
           ]
         },

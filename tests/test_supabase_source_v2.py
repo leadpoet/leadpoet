@@ -482,66 +482,10 @@ def test_fulfillment_rewards_use_stable_consensus_order_across_pages():
     assert ("order", "consensus_id.asc") in query
 
 
-def test_source_add_migration_reads_one_exact_measured_reward_reference():
-    reward_ref = "source_add_reward:201a08f0d2b503bf"
-    provider = FakeProvider([{"rows": [{"reward_ref": reward_ref}]}])
-    rows, attempts, _artifacts, _sleeps = _read(
-        provider,
-        policy_id="source_add_reward_by_ref",
-        parameters={"reward_ref": reward_ref},
-    )
-
-    assert rows == [{"reward_ref": reward_ref}]
-    assert len(attempts) == 1
-    url = provider.requests[0]["url"]
-    assert "research_lab_source_add_reward_current" in url
-    assert "reward_ref=eq.source_add_reward%3A201a08f0d2b503bf" in url
-    assert "limit=2" in url
-
-    with pytest.raises(SupabaseSourceV2Error, match="reward_ref"):
-        _read(
-            FakeProvider([{"rows": []}]),
-            policy_id="source_add_reward_by_ref",
-            parameters={"reward_ref": reward_ref + "&select=secret"},
-        )
 
 
-def test_allocation_source_add_query_binds_fifo_creation_order():
-    provider = FakeProvider([{"rows": []}])
-
-    _read(
-        provider,
-        policy_id="allocation_source_add_rewards",
-        parameters={"epoch_id": 100},
-    )
-
-    url = urlsplit(provider.requests[0]["url"])
-    query = dict(parse_qsl(url.query, keep_blank_values=True))
-    assert "created_at" in query["select"].split(",")
-    assert query["order"] == "created_at.asc,reward_ref.asc"
 
 
-def test_source_add_functional_probe_query_binds_approval_config():
-    provider = FakeProvider([{"rows": []}])
-
-    _read(
-        provider,
-        policy_id="source_add_functional_probe_by_submission",
-        parameters={"submission_id": "source_add_submission:1234567890abcdef"},
-    )
-
-    url = urlsplit(provider.requests[0]["url"])
-    query = dict(parse_qsl(url.query, keep_blank_values=True))
-    assert url.path.endswith(
-        "/rest/v1/research_lab_source_add_functional_probe_current"
-    )
-    assert query["submission_id"] == (
-        "eq.source_add_submission:1234567890abcdef"
-    )
-    selected = query["select"].split(",")
-    assert "evaluation_mode" in selected
-    assert "config_ref" in selected
-    assert query["limit"] == "2"
 
 
 def test_unmeasured_policy_and_inverted_epoch_range_fail_before_network():

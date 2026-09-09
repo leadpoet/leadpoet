@@ -28,9 +28,6 @@ ACTIVE_SCHEDULE_STATUSES = {"scheduled"}
 ACTIVE_CHAMPION_STATUSES = {"active", "queued", "partially_paid"}
 SETTLEMENT_TRACKED_CHAMPION_STATUSES = ACTIVE_CHAMPION_STATUSES | {"paid"}
 RATE_QUANT = Decimal("0.000001")
-_SOURCE_ADD_CHAIN_QUANTIZATION_TOLERANCE_PERCENT = Decimal("100") / Decimal(
-    "65535"
-)
 POSTGREST_IN_FILTER_CHUNK = 50
 LATEST_NATIVE_COMPUTE_AUTHORITY_TABLE = (
     "research_lab_finalized_allocation_epochs_v2"
@@ -286,16 +283,11 @@ async def build_research_lab_allocation_bundle(
     fallback_reimbursement_obligations = list(
         allocation_inputs.get("fallback_reimbursement_obligations") or []
     )
-    source_add_present = "active_source_add_obligations" in allocation_inputs
-    source_add_obligations = list(
-        allocation_inputs.get("active_source_add_obligations") or []
-    )
     skipped = source_state.get("skipped")
     if not isinstance(skipped, Mapping):
         raise ValueError("Research Lab V2 allocation skipped-state is invalid")
     reimbursement_skipped = list(skipped.get("reimbursements") or [])
     champion_skipped = list(skipped.get("champions") or [])
-    source_add_skipped = list(skipped.get("source_add") or [])
     fallback_reimbursement_skipped = list(
         skipped.get("fallback_reimbursements") or []
     )
@@ -359,19 +351,6 @@ async def build_research_lab_allocation_bundle(
             ],
         },
     }
-    if source_add_present:
-        bundle_without_id["observability"].update(
-            {
-                "source_add_alpha_percent": float(allocation.get("source_add_alpha_percent") or 0.0),
-                "champion_reimbursement_cap_percent": float(
-                    allocation.get("champion_reimbursement_cap_percent")
-                    or allocation.get("lab_cap_percent")
-                    or 0.0
-                ),
-                "source_add_allocation_count": len(allocation.get("source_add_allocations") or []),
-                "skipped_source_add_count": len(source_add_skipped),
-            }
-        )
     bundle_id = "research_lab_allocation_bundle:" + sha256_json(bundle_without_id).split(":", 1)[1]
     return {**bundle_without_id, "bundle_id": bundle_id}
 
@@ -855,81 +834,8 @@ async def _active_champion_obligations(
     return obligations, skipped
 
 
-async def _active_source_add_reward_rows(epoch: int) -> list[dict[str, Any]]:
-    """Load active SOURCE_ADD rows without coupling them to champion rails."""
-
-    rows: list[dict[str, Any]] = []
-    for status in sorted(ACTIVE_CHAMPION_STATUSES):
-        try:
-            source_rows = await select_all(
-                "research_lab_source_add_reward_current",
-                filters=(("current_reward_status", status), ("start_epoch", "lte", int(epoch))),
-            )
-        except Exception as exc:
-            logger.warning(
-                "research_lab_source_add_allocation_rows_unavailable epoch=%s error=%s",
-                int(epoch),
-                str(exc)[:300],
-            )
-            return []
-        rows.extend(dict(row) for row in source_rows)
-    return rows
 
 
-async def _active_source_add_obligations(
-    epoch: int,
-    *,
-    netuid: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    source_rows = await _active_source_add_reward_rows(int(epoch))
-    paid_by_reward = await _source_add_paid_alpha_to_date(
-        epoch=int(epoch),
-        netuid=int(netuid),
-        source_rows=source_rows,
-    )
-    hotkey_uids = await resolve_hotkey_uids(str(row.get("miner_hotkey") or "") for row in source_rows)
-    obligations: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for row in source_rows:
-        status = str(row.get("current_reward_status") or "")
-        if status not in ACTIVE_CHAMPION_STATUSES:
-            continue
-        reward_ref = str(row.get("reward_ref") or "")
-        miner_hotkey = str(row.get("miner_hotkey") or "")
-        uid = hotkey_uids.get(miner_hotkey)
-        if uid is None:
-            skipped.append({"source_add_reward_id": reward_ref, "reason": "miner_hotkey_not_registered"})
-            continue
-        replay_obligation = _champion_replay_obligation(
-            {
-                "champion_reward_id": reward_ref,
-                "start_epoch": int(row.get("start_epoch") or 0),
-                "epoch_count": int(row.get("epoch_count") or row.get("reward_epochs") or 0),
-                "desired_alpha_percent": float(
-                    row.get("desired_alpha_percent") or row.get("alpha_percent") or 0.0
-                ),
-            },
-            paid_by_reward=paid_by_reward,
-            epoch=int(epoch),
-        )
-        if replay_obligation is None:
-            continue
-        obligations.append(
-            {
-                "uid": uid,
-                "miner_uid": uid,
-                "miner_hotkey": miner_hotkey,
-                "source_id": reward_ref,
-                "source_add_reward_id": reward_ref,
-                "adapter_id": str(row.get("adapter_id") or ""),
-                "leg": int(row.get("leg") or 0),
-                "reward_kind": str(row.get("reward_kind") or ""),
-                "created_at": str(row.get("created_at") or ""),
-                "status": "active",
-                **replay_obligation,
-            }
-        )
-    return obligations, skipped
 
 
 async def _champion_paid_alpha_to_date(
@@ -995,98 +901,8 @@ async def _champion_finalized_paid_alpha_to_date(
     )
 
 
-async def _source_add_paid_alpha_to_date(
-    *,
-    epoch: int,
-    netuid: int,
-    source_rows: list[dict[str, Any]],
-) -> dict[str, float]:
-    if not source_rows:
-        return {}
-    start_epochs = [
-        int(row.get("start_epoch") or 0)
-        for row in source_rows
-        if int(row.get("start_epoch") or 0) <= int(epoch)
-    ]
-    if not start_epochs:
-        return {}
-    start_floor = min(start_epochs)
-    from gateway.research_lab.champion_settlement_v2 import (
-        load_settled_allocation_history_v2,
-    )
-
-    snapshot_rows = await load_settled_allocation_history_v2(
-        netuid=int(netuid),
-        start_epoch=int(start_floor),
-        end_epoch=int(epoch) - 1,
-    )
-    return _source_add_paid_alpha_to_date_from_snapshots(snapshot_rows)
 
 
-def _source_add_paid_alpha_to_date_from_snapshots(
-    snapshot_rows: list[Mapping[str, Any]],
-) -> dict[str, float]:
-    """Count only first-class SOURCE_ADD allocation rows as settled."""
-
-    paid_by_reward: dict[str, Decimal] = {}
-    for row in snapshot_rows:
-        allocation_doc = row.get("allocation_doc") or {}
-        if not isinstance(allocation_doc, Mapping):
-            continue
-        allocations = allocation_doc.get("source_add_allocations") or []
-        if not isinstance(allocations, list):
-            continue
-        for allocation in allocations:
-            if not isinstance(allocation, Mapping):
-                continue
-            source_id = str(
-                allocation.get("source_add_reward_id")
-                or allocation.get("source_id")
-                or ""
-            )
-            if not source_id.startswith("source_add_reward:"):
-                continue
-            paid = _decimal(allocation.get("paid_alpha_percent") or 0)
-            # The exact chain-realized bundle remains payment authority. A
-            # sub-u16 rounding deficit fulfills this scheduled epoch; any
-            # larger shortfall remains due and enters normal replay.
-            if allocation_doc.get("source") == "chain_realized_obligation_credits":
-                if allocation_doc.get("authority_type") != "chain_realized_emission_v1":
-                    raise ValueError(
-                        "SOURCE_ADD chain settlement authority is invalid"
-                    )
-                scheduled = _decimal(
-                    allocation.get("base_desired_alpha_percent") or 0
-                )
-                attributed = _decimal(
-                    allocation.get("lab_attributed_alpha_percent") or 0
-                )
-                observed = _decimal(
-                    allocation.get("observed_chain_alpha_percent") or 0
-                )
-                if (
-                    not all(
-                        amount.is_finite()
-                        for amount in (paid, scheduled, attributed, observed)
-                    )
-                    or paid <= 0
-                    or scheduled <= 0
-                    or paid != min(attributed, scheduled)
-                    or attributed > observed
-                ):
-                    raise ValueError(
-                        "SOURCE_ADD chain settlement credit is invalid"
-                    )
-                if (
-                    paid <= scheduled
-                    and scheduled - paid
-                    <= _SOURCE_ADD_CHAIN_QUANTIZATION_TOLERANCE_PERCENT
-                ):
-                    paid = scheduled
-            paid_by_reward[source_id] = paid_by_reward.get(
-                source_id, Decimal("0")
-            ) + paid
-    return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
 
 
 def _champion_schedule_cap_start_epoch() -> int:

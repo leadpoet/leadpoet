@@ -35,6 +35,23 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_weight_finalization_submission_v2,
 )
 
+_HISTORICAL_SOURCE_ADD_CATEGORY = "source_add_rewards"
+_HISTORICAL_SOURCE_ADD_PURPOSE = "research_lab.source_add_reward_input.v2"
+
+
+def _weight_input_categories_v2(snapshot: Mapping[str, Any]) -> set[str]:
+    categories = set(WEIGHT_INPUT_PURPOSES)
+    if _HISTORICAL_SOURCE_ADD_CATEGORY in set(snapshot.get("input_receipt_hashes") or {}):
+        categories.add(_HISTORICAL_SOURCE_ADD_CATEGORY)
+    return categories
+
+
+def _gateway_weight_input_categories_v2(snapshot: Mapping[str, Any]) -> set[str]:
+    categories = set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+    if _HISTORICAL_SOURCE_ADD_CATEGORY in _weight_input_categories_v2(snapshot):
+        categories.add(_HISTORICAL_SOURCE_ADD_CATEGORY)
+    return categories
+
 
 COMPACT_WEIGHT_SUBMISSION_SCHEMA_VERSION = (
     "leadpoet.compact_weight_submission.v2"
@@ -175,12 +192,19 @@ def build_weight_ancestry_commitment_v2(
 ) -> str:
     """Commit every input, certificate, proof, frontier, and direct attempt."""
 
+    historical_source_add = _HISTORICAL_SOURCE_ADD_CATEGORY in input_receipt_hashes
+    expected_inputs = set(WEIGHT_INPUT_PURPOSES) | (
+        {_HISTORICAL_SOURCE_ADD_CATEGORY} if historical_source_add else set()
+    )
+    expected_proofs = set(GATEWAY_WEIGHT_INPUT_CATEGORIES) | (
+        {_HISTORICAL_SOURCE_ADD_CATEGORY} if historical_source_add else set()
+    )
     _require(
-        set(input_receipt_hashes) == set(WEIGHT_INPUT_PURPOSES),
+        set(input_receipt_hashes) == expected_inputs,
         "weight input receipt categories are incomplete",
     )
     _require(
-        set(upstream_ancestry_proofs) == set(GATEWAY_WEIGHT_INPUT_CATEGORIES),
+        set(upstream_ancestry_proofs) == expected_proofs,
         "gateway compact proof categories are incomplete",
     )
     attempt_hashes = []
@@ -278,9 +302,15 @@ def validate_compact_weight_submission_shape_v2(
         "compact weight documents are invalid",
     )
     proofs = value.get("upstream_ancestry_proofs")
+    historical_source_add = "source_add_rewards" in set(
+        value.get("weight_snapshot", {}).get("input_receipt_hashes") or {}
+    )
+    expected_proof_categories = set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+    if historical_source_add:
+        expected_proof_categories.add("source_add_rewards")
     _require(
         isinstance(proofs, Mapping)
-        and set(proofs) == set(GATEWAY_WEIGHT_INPUT_CATEGORIES),
+        and set(proofs) == expected_proof_categories,
         "compact proof categories are incomplete",
     )
     attempts = value.get("upstream_transport_attempts")
@@ -410,13 +440,19 @@ def validate_compact_weight_ancestry_v2(
     input_hashes = snapshot.get("input_receipt_hashes")
     _require(
         isinstance(input_hashes, Mapping)
-        and set(input_hashes) == set(WEIGHT_INPUT_PURPOSES),
+        and set(input_hashes) == _weight_input_categories_v2(snapshot),
         "compact snapshot inputs are incomplete",
     )
     proofs = {}
     direct_scopes = set()
-    for category in sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES):
-        expected_role, expected_purpose = WEIGHT_INPUT_PURPOSES[category]
+    for category in sorted(_gateway_weight_input_categories_v2(snapshot)):
+        if category == _HISTORICAL_SOURCE_ADD_CATEGORY:
+            expected_role, expected_purpose = (
+                "gateway_coordinator",
+                _HISTORICAL_SOURCE_ADD_PURPOSE,
+            )
+        else:
+            expected_role, expected_purpose = WEIGHT_INPUT_PURPOSES[category]
         direct_hash = _hash(input_hashes[category], "%s input receipt" % category)
         try:
             proof = validate_compact_ancestry_proof_v2(

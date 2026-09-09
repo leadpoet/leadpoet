@@ -97,8 +97,6 @@ MINER_EXACT = {
     "/fulfillment/requests/active",
     "/fulfillment/commit",
     "/fulfillment/reveal",
-    "/research-lab/source-adapters",
-    "/research-lab/source-adapters/status",
 }
 MINER_PREFIXES = (
     "/arena/v1/submissions/",

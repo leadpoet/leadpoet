@@ -4104,8 +4104,8 @@ if ! drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"; then
   exit 1
 fi
 
-echo "Rechecking guarded SOURCE_ADD quiescence at the destructive boundary"
-GATEWAY_DEPLOY_STAGE="source_add_shutdown_quiescence"
+echo "Rechecking shared miner maintenance at the destructive boundary"
+GATEWAY_DEPLOY_STAGE="miner_maintenance_shutdown_verification"
 export GATEWAY_DEPLOY_STAGE
 if ! (
     set -a
@@ -4116,7 +4116,7 @@ if ! (
       --verify-shutdown-quiescence \
       --expected-commit "$PREPARED_GATEWAY_SHA"
   ); then
-  echo "ERROR: guarded SOURCE_ADD quiescence changed before shutdown" >&2
+  echo "ERROR: shared miner-maintenance authority changed before shutdown" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
@@ -4809,7 +4809,7 @@ if actual != expected:
 print(f"verified gateway /build-info commit: {actual}")
 VERIFY_BUILD_INFO
 
-echo "Verifying retained SOURCE_ADD gateway status"
+echo "Verifying gateway admission status"
 timeout 30 curl -fsS http://localhost:8000/research-lab/status >/dev/null
 timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
 

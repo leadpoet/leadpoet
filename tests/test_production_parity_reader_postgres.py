@@ -5,7 +5,6 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from urllib.request import urlopen
 import uuid
 
 import psycopg2
@@ -13,12 +12,6 @@ from psycopg2 import OperationalError
 import pytest
 
 from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport
-from gateway.tee.supabase_schema_preflight_v2 import (
-    _verify_source_add_claim_control_contract_v2,
-    _verify_source_add_duplicate_privacy_contract_v1,
-    _verify_source_add_miner_status_contract_v1,
-    _verify_source_add_post_accept_leg1_contract_v4,
-)
 from leadpoet_canonical.production_parity import (
     CONTRACT_SCHEMA_VERSION,
     ProductionParityError,
@@ -34,8 +27,10 @@ from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS as ARENA_MIGRATIONS,
     _DAILY_SOURCE_SHIM_SQL,
 )
-from tests.test_source_add_end_to_end_postgres import _database_with_migrations
-from tests.test_source_add_restart_state_restore_postgres import ACL_MIGRATIONS
+from tests.postgres_migration_harness import (
+    HISTORICAL_SOURCE_ADD_UPGRADE_MIGRATIONS,
+    _database_with_migrations,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -511,9 +506,9 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
     expected_probe_rows: int,
 ):
     source_generator = _database_with_migrations(
-        ACL_MIGRATIONS
-        + ("186-research-lab-source-add-provisioned-status.sql",)
-        + tuple(ARENA_MIGRATIONS),
+        HISTORICAL_SOURCE_ADD_UPGRADE_MIGRATIONS
+        + tuple(ARENA_MIGRATIONS)
+        + ("198-retire-research-lab-source-add-schema.sql",),
         setup_sql=_DAILY_SOURCE_SHIM_SQL,
     )
     psycopg2_module, source = next(source_generator)
@@ -696,7 +691,7 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
         try:
             assert arena.require_service_role()["current_user"] == "lab_arena_service"
             schema = arena._transport.rpc("lab_arena_schema_version_v1", {})
-            assert schema["version"] == 194
+            assert schema["version"] == 197
             for table in (
                 "lab_arena_rounds",
                 "lab_arena_submissions",
@@ -732,22 +727,18 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
             finally:
                 transport.close()
 
-        source_add_headers = {
-            "apikey": service_token,
-            "Authorization": f"Bearer {service_token}",
-        }
-        for verify_source_add_contract in (
-            _verify_source_add_duplicate_privacy_contract_v1,
-            _verify_source_add_post_accept_leg1_contract_v4,
-            _verify_source_add_claim_control_contract_v2,
-            _verify_source_add_miner_status_contract_v1,
-        ):
-            assert verify_source_add_contract(
-                headers=source_add_headers,
-                supabase_url=supabase_url,
-                opener=urlopen,
-                timeout_seconds=10,
-            )
+        with psycopg2_module.connect(**source) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND c.relname LIKE 'research_lab_source_add%'
+                    """
+                )
+                assert cursor.fetchone() == (0,)
     finally:
         if prefix_adapter is not None:
             prefix_adapter.cleanup()

@@ -33,7 +33,6 @@ _ALLOCATION_CATEGORIES = frozenset(
         "research_lab_allocation",
         "champions",
         "reimbursements",
-        "source_add_rewards",
     }
 )
 

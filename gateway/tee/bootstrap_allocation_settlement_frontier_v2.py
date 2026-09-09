@@ -154,18 +154,9 @@ async def _load_candidate_reward_graphs_v2(
         "source_id",
         "champion_reward_id",
     )
-    source_add_ids = source_ids(
-        "source_add_obligations",
-        "source_add_obligation_count",
-        "source_id",
-        "source_add_reward_id",
-    )
     refs = {
         ("champion_reward_decision", source_id)
         for source_id in champion_ids
-    } | {
-        ("source_add_reward_decision", source_id)
-        for source_id in source_add_ids
     }
     if any(not kind or not ref for kind, ref in refs):
         raise AllocationSettlementFrontierBootstrapV2Error(

@@ -37,11 +37,6 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_transport_attempt,
 )
-from gateway.tee.source_add_runtime_v2 import (
-    source_add_dynamic_retry_policy_hash,
-    source_add_route_for_url_v2,
-    validate_source_add_runtime_catalog_v2,
-)
 class ProviderClientV2Error(RuntimeError):
     """A runner request lacks an authenticated coordinator terminal record."""
 
@@ -336,7 +331,6 @@ class _ExecutionScope:
         terminal_sink: Optional[Callable[[Mapping[str, Any]], None]],
         artifact_sink: Optional[Callable[[str], None]] = None,
         allow_transport_failures: bool = False,
-        dynamic_provider_catalog: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.job_id = str(job_id)
         self.purpose = str(purpose)
@@ -346,11 +340,6 @@ class _ExecutionScope:
         self.terminal_sink = terminal_sink
         self.artifact_sink = artifact_sink
         self.allow_transport_failures = bool(allow_transport_failures)
-        self.dynamic_provider_catalog = (
-            validate_source_add_runtime_catalog_v2(dynamic_provider_catalog)
-            if dynamic_provider_catalog is not None
-            else None
-        )
         self.attempts = {}  # type: Dict[str, int]
         self.request_intents = set()
         self.terminals = {}
@@ -525,7 +514,6 @@ class BrokeredProviderTransportV2:
         terminal_sink: Optional[Callable[[Mapping[str, Any]], None]] = None,
         artifact_sink: Optional[Callable[[str], None]] = None,
         allow_transport_failures: bool = False,
-        dynamic_provider_catalog: Optional[Mapping[str, Any]] = None,
     ):
         self.install()
         scope = self.create_scope(
@@ -537,7 +525,6 @@ class BrokeredProviderTransportV2:
             terminal_sink=terminal_sink,
             artifact_sink=artifact_sink,
             allow_transport_failures=allow_transport_failures,
-            dynamic_provider_catalog=dynamic_provider_catalog,
         )
         with self.activate_scope(scope):
             try:
@@ -558,7 +545,6 @@ class BrokeredProviderTransportV2:
         terminal_sink: Optional[Callable[[Mapping[str, Any]], None]] = None,
         artifact_sink: Optional[Callable[[str], None]] = None,
         allow_transport_failures: bool = False,
-        dynamic_provider_catalog: Optional[Mapping[str, Any]] = None,
     ) -> _ExecutionScope:
         return _ExecutionScope(
             job_id=job_id,
@@ -569,7 +555,6 @@ class BrokeredProviderTransportV2:
             terminal_sink=terminal_sink or self._terminal_sink,
             artifact_sink=artifact_sink,
             allow_transport_failures=allow_transport_failures,
-            dynamic_provider_catalog=dynamic_provider_catalog,
         )
 
     @contextmanager
@@ -632,17 +617,8 @@ class BrokeredProviderTransportV2:
             raise ProviderClientV2Error(
                 "attested local response request must use HTTPS"
             )
-        dynamic_route = None
-        if scope.dynamic_provider_catalog is not None:
-            dynamic_route = source_add_route_for_url_v2(
-                scope.dynamic_provider_catalog,
-                normalized_method,
-                normalized_url,
-            )
         provider_id = (
-            str(dynamic_route["provider_id"])
-            if dynamic_route is not None
-            else _provider_id(normalized_url)
+            _provider_id(normalized_url)
         )
         sanitized_headers = _headers_without_credentials(headers)
         body_bytes = bytes(body)
@@ -660,12 +636,6 @@ class BrokeredProviderTransportV2:
         if not retry_policy_hash:
             raise ProviderClientV2Error(
                 "provider retry policy is not configured"
-            )
-        if dynamic_route is not None and retry_policy_hash != (
-            source_add_dynamic_retry_policy_hash(dynamic_route)
-        ):
-            raise ProviderClientV2Error(
-                "dynamic provider retry policy differs from measured route"
             )
         logical_operation_id = "%s:%s" % (
             scope.logical_operation_id,
@@ -1041,17 +1011,8 @@ class BrokeredProviderTransportV2:
         scope = self._scope.get()
         if scope is None:
             raise ProviderClientV2Error("provider request is outside an attested job")
-        dynamic_route = None
-        if scope.dynamic_provider_catalog is not None:
-            dynamic_route = source_add_route_for_url_v2(
-                scope.dynamic_provider_catalog,
-                str(method).upper(),
-                str(url),
-            )
         provider_id = (
-            str(dynamic_route["provider_id"])
-            if dynamic_route is not None
-            else _provider_id(url)
+            _provider_id(url)
         )
         sanitized_headers = _headers_without_credentials(headers)
         fingerprint = sha256_bytes(
@@ -1067,12 +1028,6 @@ class BrokeredProviderTransportV2:
         retry_policy_hash = scope.retry_policy_hashes.get(provider_id)
         if not retry_policy_hash:
             raise ProviderClientV2Error("provider retry policy is not configured")
-        if dynamic_route is not None and retry_policy_hash != (
-            source_add_dynamic_retry_policy_hash(dynamic_route)
-        ):
-            raise ProviderClientV2Error(
-                "dynamic provider retry policy differs from measured route"
-            )
         logical_operation_id = "%s:%s" % (
             scope.logical_operation_id,
             fingerprint.split(":", 1)[1][:16],
@@ -1095,8 +1050,6 @@ class BrokeredProviderTransportV2:
             "timeout_ms": int(timeout_ms or scope.default_timeout_ms),
             "retry_policy_hash": retry_policy_hash,
         }
-        if dynamic_route is not None:
-            broker_request["dynamic_route"] = dict(dynamic_route)
         result = dict(self._execute(broker_request))
         attempt = result.get("transport_attempt")
         if not isinstance(attempt, Mapping):

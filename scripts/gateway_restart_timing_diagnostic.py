@@ -44,7 +44,7 @@ GATEWAY_RESTART_TIMING_STAGES = frozenset(
         "python_cache_cleanup",
         "restart_reexec",
         "runtime_env_and_ecr",
-        "source_add_shutdown_quiescence",
+        "miner_maintenance_shutdown_verification",
         "stateful_epoch_cutover",
         "stateful_epoch_cutover_preflight",
         "v2_credential_envelope_preparation",

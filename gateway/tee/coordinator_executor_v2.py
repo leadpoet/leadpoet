@@ -45,10 +45,6 @@ from gateway.tee.reward_executor_v2 import (
     execute_reward_decision_v2,
     reward_receipt_projection_v2,
 )
-from gateway.tee.coordinator_source_add_v2 import (
-    OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
-    OP_SOURCE_ADD_PROVENANCE_V2,
-)
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
     attest_subnet_epoch_cutover_v2,
@@ -65,7 +61,6 @@ OP_ATTEST_ARTIFACT_PERSISTENCE = "attest_artifact_persistence"
 OP_ATTEST_QUALIFICATION_ADMISSION = "attest_qualification_admission"
 OP_ATTEST_WEIGHT_INPUT = "attest_weight_input"
 OP_ATTEST_WEIGHT_PUBLICATION = "attest_weight_publication"
-OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2 = "source_add_catalog_snapshot_v2"
 OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
     "attest_legacy_finalized_allocation_v2"
 )
@@ -202,15 +197,6 @@ COORDINATOR_OPERATIONS_V2 = {
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2: frozenset(
         {"research_lab.subnet_epoch_cutover.v2"}
     ),
-    OP_SOURCE_ADD_PROVENANCE_V2: frozenset(
-        {"research_lab.source_add_provenance.v2"}
-    ),
-    OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2: frozenset(
-        {"research_lab.source_add_functional_probe.v2"}
-    ),
-    OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2: frozenset(
-        {"research_lab.source_add_catalog_snapshot.v2"}
-    ),
     OP_ATTEST_ARTIFACT_PERSISTENCE: frozenset(
         {"leadpoet.artifact_persistence.v2"}
     ),
@@ -304,12 +290,6 @@ class CoordinatorExecutorV2:
         allocation_frontier_bootstrap_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
-        source_add_provenance_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        source_add_functional_probe_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
         reward_source_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
@@ -325,9 +305,6 @@ class CoordinatorExecutorV2:
         chain_realized_settlement_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
-        source_add_catalog_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
     ) -> None:
         self._artifact_evidence_supplier = artifact_evidence_supplier
         self._weight_source_resolver = weight_source_resolver
@@ -335,10 +312,6 @@ class CoordinatorExecutorV2:
         self._allocation_source_resolver = allocation_source_resolver
         self._allocation_frontier_bootstrap_resolver = (
             allocation_frontier_bootstrap_resolver
-        )
-        self._source_add_provenance_resolver = source_add_provenance_resolver
-        self._source_add_functional_probe_resolver = (
-            source_add_functional_probe_resolver
         )
         self._reward_source_resolver = reward_source_resolver
         self._legacy_settlement_source_resolver = (
@@ -353,7 +326,6 @@ class CoordinatorExecutorV2:
         self._chain_realized_settlement_resolver = (
             chain_realized_settlement_resolver
         )
-        self._source_add_catalog_resolver = source_add_catalog_resolver
 
     async def __call__(
         self,
@@ -528,44 +500,10 @@ class CoordinatorExecutorV2:
             )
         if operation == OP_RESEARCH_LAB_ALLOCATION:
             return await self._research_lab_allocation(payload, context)
-        if operation == OP_SOURCE_ADD_PROVENANCE_V2:
-            if self._source_add_provenance_resolver is None:
-                raise ValueError("measured SOURCE_ADD provenance is unavailable")
-            output = dict(self._source_add_provenance_resolver(payload, context))
-            return ExecutionResultV2(
-                output=output,
-                artifact_hashes=(sha256_json(output),),
-            )
-        if operation == OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2:
-            if self._source_add_functional_probe_resolver is None:
-                raise ValueError("measured SOURCE_ADD functional probe is unavailable")
-            output = dict(
-                self._source_add_functional_probe_resolver(payload, context)
-            )
-            return ExecutionResultV2(
-                output=output,
-                artifact_hashes=(sha256_json(output),),
-            )
-        if operation == OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2:
-            if self._source_add_catalog_resolver is None:
-                raise ValueError("measured SOURCE_ADD catalog is unavailable")
-            output = dict(self._source_add_catalog_resolver(payload, context))
-            return ExecutionResultV2(
-                output=output,
-                artifact_hashes=(
-                    str(output["provisioned_sources_hash"]),
-                    str(output["private_registry_rows_hash"]),
-                    str(output["runtime_catalog_hash"]),
-                ),
-            )
         if operation == OP_RESEARCH_LAB_REWARD_DECISION:
             decision_kind = str(payload.get("decision_kind") or "")
             measured_payload = payload
-            if decision_kind in {
-                "champion_migration",
-                "source_add_migration",
-                "source_add_leg1",
-            }:
+            if decision_kind == "champion_migration":
                 if self._reward_source_resolver is None:
                     raise ValueError("measured reward source is unavailable")
                 measured_payload = self._reward_source_resolver(payload, context)
@@ -669,7 +607,7 @@ class CoordinatorExecutorV2:
         context: ExecutionContextV2,
     ) -> None:
         kind = str(payload.get("decision_kind") or "")
-        if kind in {"champion_migration", "source_add_migration"}:
+        if kind == "champion_migration":
             if (
                 context.external_receipt_graphs
                 or context.external_ancestry_proofs
@@ -679,38 +617,7 @@ class CoordinatorExecutorV2:
                     "reward migration cannot inherit host-selected ancestry"
                 )
             return
-        if kind != "source_add_leg1":
-            raise ValueError("reward ancestry kind is unsupported")
-        expected_purpose = "research_lab.source_add_provenance.v2"
-        try:
-            graphs = list(context.external_receipt_authority_graphs())
-        except ExecutionJobV2Error as exc:
-            raise ValueError("reward decision parent authority is invalid") from exc
-        decision_payload = payload.get("decision_payload")
-        if not isinstance(decision_payload, Mapping):
-            raise ValueError("reward decision input is invalid")
-        if len(graphs) != 1 or len(context.parent_receipt_hashes) != 1:
-            raise ValueError("reward decision requires exactly one parent graph")
-        graph = graphs[0]
-        root_hash = str(graph.get("root_receipt_hash") or "")
-        receipts = {
-            str(receipt.get("receipt_hash") or ""): receipt
-            for receipt in graph.get("receipts") or ()
-            if isinstance(receipt, Mapping)
-        }
-        root = receipts.get(root_hash)
-        if (
-            not isinstance(root, Mapping)
-            or root.get("purpose") != expected_purpose
-            or root_hash not in context.parent_receipt_hashes
-        ):
-            raise ValueError("reward decision parent purpose is invalid")
-        bound_result = decision_payload.get("provenance_result")
-        if bound_result is not None and (
-            not isinstance(bound_result, Mapping)
-            or root.get("output_root") != sha256_json(dict(bound_result))
-        ):
-            raise ValueError("reward decision parent output differs")
+        raise ValueError("reward ancestry kind is unsupported")
 
     async def _research_lab_allocation(
         self,

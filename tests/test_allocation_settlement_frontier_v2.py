@@ -18,7 +18,6 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.reward_executor_v2 import (
     champion_reward_row_projection_v2,
-    source_add_reward_row_projection_v2,
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from leadpoet_verifier.economics import (
@@ -63,51 +62,23 @@ def _champion_row(*, status="paid", input_hash=None):
     }
 
 
-def _source_add_row(*, status="stopped_forward", alpha_percent=1.0):
-    return {
-        "reward_ref": "source_add_reward:" + "d" * 16,
-        "adapter_id": "adapter-1",
-        "miner_hotkey": "5SourceAdd",
-        "leg": 1,
-        "reward_kind": "source_acceptance",
-        "alpha_percent": alpha_percent,
-        "reward_epochs": 20,
-        "start_epoch": 100,
-        "current_reward_status": status,
-        "trigger_evidence_doc": {
-            "submission_id": "source_add_submission:abcd1234abcd1234"
-        },
-        "public_label": "Source acceptance",
-        "desired_alpha_percent": alpha_percent,
-        "epoch_count": 20,
-    }
-
-
 def _checkpoint_for_row(*, reward_kind, row, applied="30", realized="30"):
-    if reward_kind == "champion":
-        source_id = row["champion_reward_id"]
-        projection = champion_reward_row_projection_v2(row)
-        desired = row["desired_alpha_percent"]
-        epoch_count = row["epoch_count"]
-    else:
-        source_id = row["reward_ref"]
-        projection = source_add_reward_row_projection_v2(
-            "source_add_leg%d" % row["leg"],
-            {**row, "initial_reward_status": "active"},
-        )
-        desired = row["alpha_percent"]
-        epoch_count = row["reward_epochs"]
+    assert reward_kind == "champion"
     return build_reward_settlement_checkpoint_v2(
         reward_kind=reward_kind,
-        source_id=source_id,
-        obligation_hash=sha256_json(projection),
+        source_id=row["champion_reward_id"],
+        obligation_hash=sha256_json(champion_reward_row_projection_v2(row)),
         start_epoch=row["start_epoch"],
-        epoch_count=epoch_count,
-        desired_alpha_percent=desired,
+        epoch_count=row["epoch_count"],
+        desired_alpha_percent=row["desired_alpha_percent"],
         applied_alpha_percent=applied,
         realized_alpha_percent=realized,
         excess_alpha_percent=Decimal(realized) - Decimal(applied),
     )
+
+
+
+
 
 
 def _execution_context():
@@ -117,6 +88,32 @@ def _execution_context():
         epoch_id=121,
         parent_receipt_hashes=(),
     )
+
+
+def test_historical_source_checkpoint_remains_valid_without_live_reward_query():
+    checkpoint = build_reward_settlement_checkpoint_v2(
+        reward_kind="source_add",
+        source_id="source_add_reward:0123456789abcdef",
+        obligation_hash="sha256:" + "d" * 64,
+        start_epoch=100,
+        epoch_count=20,
+        desired_alpha_percent=0.2,
+        applied_alpha_percent=0.2,
+        realized_alpha_percent=0.2,
+        excess_alpha_percent=0,
+    )
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=120,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=[checkpoint],
+    )
+
+    assert validate_allocation_settlement_frontier_v2(frontier) == frontier
+    assert frontier_paid_maps_v2(frontier)["source_add"] == {
+        checkpoint["source_id"]: 0.2
+    }
 
 
 def test_frontier_is_canonical_and_binds_every_checkpoint():
@@ -140,31 +137,6 @@ def test_frontier_is_canonical_and_binds_every_checkpoint():
     )
 
 
-def test_coordinator_canonicalizes_fifo_ordered_source_add_rewards():
-    from gateway.tee.coordinator_allocation_source_v2 import (
-        CoordinatorAllocationSourceV2,
-    )
-
-    later_id = _source_add_row(status="active", alpha_percent=0.2)
-    later_id["reward_ref"] = "source_add_reward:fca534a2e276213a"
-    earlier_id = _source_add_row(status="active", alpha_percent=0.2)
-    earlier_id["reward_ref"] = "source_add_reward:109de568f747a6a8"
-
-    frontier = object.__new__(
-        CoordinatorAllocationSourceV2
-    )._build_settlement_frontier(
-        epoch=24942,
-        netuid=71,
-        champion_rows=[],
-        source_add_rows=[later_id, earlier_id],
-        history=[],
-        predecessor=None,
-    )
-
-    assert [
-        checkpoint["source_id"]
-        for checkpoint in frontier["reward_checkpoints"]
-    ] == [earlier_id["reward_ref"], later_id["reward_ref"]]
 
 
 def test_frontier_successor_rejects_rewind_fork_and_tampering():
@@ -253,7 +225,6 @@ def test_long_gap_delta_collapses_to_one_cumulative_checkpoint():
         epoch=100,
         netuid=71,
         champion_rows=[reward],
-        source_add_rows=[],
         history=[],
         predecessor=None,
     )
@@ -283,7 +254,6 @@ def test_long_gap_delta_collapses_to_one_cumulative_checkpoint():
         epoch=200,
         netuid=71,
         champion_rows=[reward],
-        source_add_rows=[],
         history=history,
         predecessor=predecessor,
     )
@@ -395,7 +365,6 @@ def test_unsettled_reward_cannot_disappear_from_successor_frontier():
             epoch=121,
             netuid=71,
             champion_rows=[],
-            source_add_rows=[],
             history=[],
             predecessor=predecessor,
         )
@@ -426,14 +395,12 @@ def test_terminal_paid_champion_retires_with_hash_bound_evidence(monkeypatch):
     retirements = resolver._resolve_settlement_frontier_retirements(
         predecessor=predecessor,
         champion_rows=[],
-        source_add_rows=[],
         context=_execution_context(),
     )
     successor = resolver._build_settlement_frontier(
         epoch=121,
         netuid=71,
         champion_rows=[],
-        source_add_rows=[],
         history=[],
         predecessor=predecessor,
         terminal_retirements=retirements,
@@ -450,50 +417,6 @@ def test_terminal_paid_champion_retires_with_hash_bound_evidence(monkeypatch):
     assert successor["reward_checkpoint_count"] == 0
 
 
-def test_terminal_source_add_retires_with_hash_bound_evidence(monkeypatch):
-    from gateway.tee.coordinator_allocation_source_v2 import (
-        CoordinatorAllocationSourceV2,
-    )
-
-    row = _source_add_row()
-    checkpoint = _checkpoint_for_row(
-        reward_kind="source_add",
-        row=row,
-        applied="10",
-        realized="10",
-    )
-    predecessor = build_allocation_settlement_frontier_v2(
-        mode="legacy_full_history_bootstrap",
-        netuid=71,
-        allocation_epoch=120,
-        predecessor_frontier_hash=None,
-        reward_checkpoints=(checkpoint,),
-    )
-    resolver = object.__new__(CoordinatorAllocationSourceV2)
-
-    monkeypatch.setattr(
-        resolver,
-        "_read",
-        lambda policy_id, parameters, _context: [row],
-    )
-    retirements = resolver._resolve_settlement_frontier_retirements(
-        predecessor=predecessor,
-        champion_rows=[],
-        source_add_rows=[],
-        context=_execution_context(),
-    )
-    successor = resolver._build_settlement_frontier(
-        epoch=121,
-        netuid=71,
-        champion_rows=[],
-        source_add_rows=[],
-        history=[],
-        predecessor=predecessor,
-        terminal_retirements=retirements,
-    )
-
-    assert retirements[0]["terminal_status"] == "stopped_forward"
-    assert successor["reward_checkpoint_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -536,7 +459,6 @@ def test_terminal_retirement_fails_closed_on_status_or_identity(
         resolver._resolve_settlement_frontier_retirements(
             predecessor=predecessor,
             champion_rows=[],
-            source_add_rows=[],
             context=_execution_context(),
         )
 
@@ -566,7 +488,6 @@ def test_terminal_retirement_cannot_be_replayed_for_an_active_reward(monkeypatch
     retirements = resolver._resolve_settlement_frontier_retirements(
         predecessor=predecessor,
         champion_rows=[],
-        source_add_rows=[],
         context=_execution_context(),
     )
 
@@ -578,7 +499,6 @@ def test_terminal_retirement_cannot_be_replayed_for_an_active_reward(monkeypatch
             epoch=121,
             netuid=71,
             champion_rows=[active_row],
-            source_add_rows=[],
             history=[],
             predecessor=predecessor,
             terminal_retirements=retirements,
@@ -603,7 +523,6 @@ def test_fully_settled_reward_retires_from_successor_frontier():
         epoch=121,
         netuid=71,
         champion_rows=[],
-        source_add_rows=[],
         history=[],
         predecessor=predecessor,
     )
@@ -671,7 +590,6 @@ def test_coordinator_frontier_stays_bounded_and_retires_across_one_hundred_epoch
             epoch=epoch,
             netuid=71,
             champion_rows=[reward] if epoch <= 105 else [],
-            source_add_rows=[],
             history=history,
             predecessor=frontier,
         )

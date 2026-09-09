@@ -17,7 +17,6 @@ from gateway.tee.provider_broker_v2 import (
     credential_reference_hash,
     credential_value_hash,
 )
-from gateway.tee.source_add_runtime_v2 import source_add_job_credential_slot
 from leadpoet_canonical.attested_v2 import sha256_json
 
 
@@ -586,25 +585,3 @@ def test_job_only_slot_does_not_become_a_boot_global_credential():
     )["credential_slot"] == "egress_proxy"
     with pytest.raises(KMSRecipientV2Error, match="not measured"):
         manager.recipient_request("egress_proxy")
-
-
-def test_dynamic_source_add_slot_is_job_only_and_hash_bound():
-    manager, _, _ = _manager()
-    slot = source_add_job_credential_slot("source_one")
-    secret = "source-add-job-secret"
-    request = manager.job_recipient_request(
-        job_id="autoresearch-v2:source-one",
-        slot=slot,
-        credential_value_hash_expected=credential_value_hash(secret),
-        key_ref_hash=sha256_json(
-            {"key_ref": "encrypted_ref:source_add:" + "a" * 32}
-        ),
-    )
-    lease = manager.unwrap_job_credential(
-        request_id=request["request_id"],
-        ciphertext_for_recipient_b64=_encrypt(request, secret),
-    )
-    assert lease["credential_slot"] == slot
-    assert lease["credential"] == secret
-    with pytest.raises(KMSRecipientV2Error, match="not measured"):
-        manager.recipient_request(slot)

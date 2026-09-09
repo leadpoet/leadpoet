@@ -14,7 +14,6 @@ from gateway.research_lab.allocations import (
     _champion_replay_obligation,
     _epoch_active,
     _historical_compute_fallback_from_snapshot,
-    _source_add_paid_alpha_to_date_from_snapshots,
     champion_reward_requires_allocation_history_v2,
 )
 from gateway.research_lab.champion_settlement_v2 import (
@@ -39,7 +38,6 @@ from gateway.tee.reward_executor_v2 import (
     RewardExecutorV2Error,
     champion_reward_row_projection_v2,
     reimbursement_reward_row_projection_v2,
-    source_add_reward_row_projection_v2,
 )
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
@@ -77,7 +75,6 @@ SETTLEMENT_FRONTIER_RETIREMENT_SCHEMA_VERSION = (
 )
 _TERMINAL_SETTLEMENT_REWARD_STATUSES = {
     "champion": frozenset({"paid", "voided", "tombstoned"}),
-    "source_add": frozenset({"stopped_forward"}),
 }
 
 
@@ -352,9 +349,6 @@ class CoordinatorAllocationSourceV2:
             ]
         except ValueError as exc:
             raise CoordinatorAllocationSourceV2Error(str(exc)) from exc
-        source_add_rows = self._read(
-            "allocation_source_add_rewards", {"epoch_id": epoch}, context
-        )
         prior_frontier_context = self._load_prior_settlement_frontier(
             epoch=epoch,
             netuid=netuid,
@@ -374,7 +368,7 @@ class CoordinatorAllocationSourceV2:
         finalized_reward_history = self._finalized_champion_history(
             epoch=epoch,
             netuid=netuid,
-            champion_rows=tuple(champion_source_rows) + tuple(source_add_rows),
+            champion_rows=champion_source_rows,
             history_start=(
                 int(prior_frontier["settled_through_epoch"]) + 1
                 if prior_frontier is not None
@@ -387,7 +381,6 @@ class CoordinatorAllocationSourceV2:
             self._resolve_settlement_frontier_retirements(
                 predecessor=prior_frontier,
                 champion_rows=champion_source_rows,
-                source_add_rows=source_add_rows,
                 context=context,
             )
         )
@@ -395,7 +388,6 @@ class CoordinatorAllocationSourceV2:
             epoch=epoch,
             netuid=netuid,
             champion_rows=champion_source_rows,
-            source_add_rows=source_add_rows,
             history=finalized_reward_history,
             predecessor=prior_frontier,
             terminal_retirements=settlement_frontier_retirements,
@@ -407,15 +399,6 @@ class CoordinatorAllocationSourceV2:
             paid_by_reward=paid_maps["champion"],
             hotkey_uids=hotkey_uids,
             enable_champ_cap=bool(policy.get("enable_champ_cap", True)),
-            context=context,
-            required_parents=required_parent_hashes,
-            prior_reward_checkpoints=prior_reward_checkpoints,
-        )
-        source_add_obligations, source_add_skipped = self._source_add(
-            epoch=epoch,
-            rows=source_add_rows,
-            paid_by_reward=paid_maps["source_add"],
-            hotkey_uids=hotkey_uids,
             context=context,
             required_parents=required_parent_hashes,
             prior_reward_checkpoints=prior_reward_checkpoints,
@@ -498,15 +481,12 @@ class CoordinatorAllocationSourceV2:
                 "allocation parent receipt set differs from authenticated sources"
             )
 
-        source_add_present = bool(source_add_obligations or source_add_skipped)
         allocation_inputs: Dict[str, Any] = {
             "epoch": epoch,
             "policy": policy,
             "active_reimbursement_obligations": reimbursement_rows,
             "active_champion_obligations": champion_rows,
         }
-        if source_add_present:
-            allocation_inputs["active_source_add_obligations"] = source_add_obligations
         if fallback_reimbursement_rows:
             allocation_inputs["fallback_reimbursement_obligations"] = (
                 fallback_reimbursement_rows
@@ -516,7 +496,6 @@ class CoordinatorAllocationSourceV2:
             policy,
             reimbursement_rows,
             champion_rows,
-            active_source_add_obligations=source_add_obligations,
             fallback_reimbursement_obligations=fallback_reimbursement_rows,
         )
         source_state: Dict[str, Any] = {
@@ -534,12 +513,6 @@ class CoordinatorAllocationSourceV2:
                 "champions": champion_skipped,
             },
         }
-        if source_add_present:
-            source_state["source_add_obligation_count"] = len(
-                source_add_obligations
-            )
-            source_state["source_add_obligations"] = source_add_obligations
-            source_state["skipped"]["source_add"] = source_add_skipped
         if settlement_frontier_retirements:
             source_state["settlement_frontier_retirements"] = (
                 settlement_frontier_retirements
@@ -1041,20 +1014,8 @@ class CoordinatorAllocationSourceV2:
                 "settlement frontier reward is not terminal"
             )
         try:
-            if reward_kind == "champion":
-                observed_source_id = str(
-                    terminal_row.get("champion_reward_id") or ""
-                )
-                projection = champion_reward_row_projection_v2(terminal_row)
-            else:
-                observed_source_id = str(terminal_row.get("reward_ref") or "")
-                projection = source_add_reward_row_projection_v2(
-                    "source_add_leg%d" % int(terminal_row.get("leg") or 0),
-                    {
-                        **dict(terminal_row),
-                        "initial_reward_status": "active",
-                    },
-                )
+            observed_source_id = str(terminal_row.get("champion_reward_id") or "")
+            projection = champion_reward_row_projection_v2(terminal_row)
         except (KeyError, TypeError, ValueError) as exc:
             raise CoordinatorAllocationSourceV2Error(
                 "settlement frontier terminal reward is invalid"
@@ -1085,7 +1046,6 @@ class CoordinatorAllocationSourceV2:
         *,
         predecessor: Any,
         champion_rows: Sequence[Mapping[str, Any]],
-        source_add_rows: Sequence[Mapping[str, Any]],
         context: ExecutionContextV2,
     ) -> list[Dict[str, Any]]:
         if predecessor is None:
@@ -1095,26 +1055,21 @@ class CoordinatorAllocationSourceV2:
             ("champion", str(row.get("champion_reward_id") or ""))
             for row in champion_rows
         }
-        active_keys.update(
-            ("source_add", str(row.get("reward_ref") or ""))
-            for row in source_add_rows
-        )
         retirements: list[Dict[str, Any]] = []
         for checkpoint in previous["reward_checkpoints"]:
             reward_kind = str(checkpoint["reward_kind"])
             source_id = str(checkpoint["source_id"])
             if (reward_kind, source_id) in active_keys:
                 continue
+            if reward_kind == "source_add":
+                # Retired SOURCE_ADD checkpoints remain immutable frontier
+                # evidence. They are not active obligations and must not make
+                # the live allocator depend on the retired reward tables.
+                continue
             if reward_kind == "champion":
                 rows = self._read(
                     "champion_reward_by_id",
                     {"champion_reward_id": source_id},
-                    context,
-                )
-            elif reward_kind == "source_add":
-                rows = self._read(
-                    "source_add_reward_by_ref",
-                    {"reward_ref": source_id},
                     context,
                 )
             else:
@@ -1143,7 +1098,6 @@ class CoordinatorAllocationSourceV2:
         epoch: int,
         netuid: int,
         champion_rows: Sequence[Mapping[str, Any]],
-        source_add_rows: Sequence[Mapping[str, Any]],
         history: Sequence[Mapping[str, Any]],
         predecessor: Any,
         terminal_retirements: Sequence[Mapping[str, Any]] = (),
@@ -1162,9 +1116,6 @@ class CoordinatorAllocationSourceV2:
             list(history),
             obligation_caps=None,
         )["realized_by_reward"]
-        source_add_delta = _source_add_paid_alpha_to_date_from_snapshots(
-            list(history)
-        )
         checkpoints: list[Dict[str, Any]] = []
         seen: set[Tuple[str, str]] = set()
         retirement_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -1299,42 +1250,16 @@ class CoordinatorAllocationSourceV2:
                 desired_alpha_percent=row.get("desired_alpha_percent") or 0,
                 delta_realized=champion_delta.get(source_id, 0),
             )
-        for row in source_add_rows:
-            source_id = str(row.get("reward_ref") or "")
-            append_checkpoint(
-                reward_kind="source_add",
-                source_id=source_id,
-                obligation_hash=sha256_json(
-                    source_add_reward_row_projection_v2(
-                        "source_add_leg%d" % int(row.get("leg") or 0),
-                        {
-                            **dict(row),
-                            "initial_reward_status": "active",
-                        },
-                    )
-                ),
-                start_epoch=int(row.get("start_epoch") or 0),
-                epoch_count=int(
-                    row.get("epoch_count")
-                    or row.get("reward_epochs")
-                    or 0
-                ),
-                desired_alpha_percent=(
-                    row.get("desired_alpha_percent")
-                    or row.get("alpha_percent")
-                    or 0
-                ),
-                delta_realized=source_add_delta.get(source_id, 0),
-            )
         for key, prior in previous_index.items():
             if key in seen:
                 continue
             reward_kind, source_id = key
-            raw_delta = (
-                champion_delta.get(source_id, 0)
-                if reward_kind == "champion"
-                else source_add_delta.get(source_id, 0)
-            )
+            if reward_kind == "source_add":
+                # Preserve the signed predecessor accounting checkpoint without
+                # creating an obligation or querying the retired source tables.
+                checkpoints.append(dict(prior))
+                continue
+            raw_delta = champion_delta.get(source_id, 0)
             try:
                 delta = Decimal(str(raw_delta or 0))
                 prior_applied = Decimal(str(prior["applied_alpha_percent"]))
@@ -2017,89 +1942,6 @@ class CoordinatorAllocationSourceV2:
             required_parents.add(root)
         return finalized
 
-    def _source_add(
-        self,
-        *,
-        epoch: int,
-        rows: Sequence[Mapping[str, Any]],
-        paid_by_reward: Mapping[str, float],
-        hotkey_uids: Mapping[str, int],
-        context: ExecutionContextV2,
-        required_parents: Set[str],
-        prior_reward_checkpoints: Optional[Mapping[
-            Tuple[str, str], Mapping[str, Any]
-        ]] = None,
-    ) -> Tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
-        obligations = []
-        skipped = []
-        for row in rows:
-            status = str(row.get("current_reward_status") or "")
-            if status not in ACTIVE_CHAMPION_STATUSES:
-                continue
-            reward_ref = str(row.get("reward_ref") or "")
-            decision_hash = sha256_json(
-                source_add_reward_row_projection_v2(
-                    "source_add_leg%d" % int(row.get("leg") or 0),
-                    {**dict(row), "initial_reward_status": "active"},
-                )
-            )
-            if not self._prior_frontier_binds_reward_decision(
-                reward_kind="source_add",
-                source_id=reward_ref,
-                decision_hash=decision_hash,
-                prior_reward_checkpoints=prior_reward_checkpoints or {},
-            ):
-                self._require_reward_receipt(
-                    artifact_kind="source_add_reward_decision",
-                    artifact_ref=reward_ref,
-                    expected_output_root=decision_hash,
-                    context=context,
-                    required_parents=required_parents,
-                )
-            replay = _champion_replay_obligation(
-                {
-                    "champion_reward_id": reward_ref,
-                    "start_epoch": int(row.get("start_epoch") or 0),
-                    "epoch_count": int(
-                        row.get("epoch_count") or row.get("reward_epochs") or 0
-                    ),
-                    "desired_alpha_percent": float(
-                        row.get("desired_alpha_percent")
-                        or row.get("alpha_percent")
-                        or 0.0
-                    ),
-                },
-                paid_by_reward=paid_by_reward,
-                epoch=epoch,
-            )
-            if replay is None:
-                continue
-            hotkey = str(row.get("miner_hotkey") or "")
-            uid = hotkey_uids.get(hotkey)
-            if uid is None:
-                skipped.append(
-                    {
-                        "source_add_reward_id": reward_ref,
-                        "reason": "miner_hotkey_not_registered",
-                    }
-                )
-                continue
-            obligations.append(
-                {
-                    "uid": uid,
-                    "miner_uid": uid,
-                    "miner_hotkey": hotkey,
-                    "source_id": reward_ref,
-                    "source_add_reward_id": reward_ref,
-                    "adapter_id": str(row.get("adapter_id") or ""),
-                    "leg": int(row.get("leg") or 0),
-                    "reward_kind": str(row.get("reward_kind") or ""),
-                    "created_at": str(row.get("created_at") or ""),
-                    "status": "active",
-                    **replay,
-                }
-            )
-        return obligations, skipped
 
     def _allocation_history(
         self,
@@ -2107,13 +1949,12 @@ class CoordinatorAllocationSourceV2:
         epoch: int,
         netuid: int,
         champion_rows: Sequence[Mapping[str, Any]],
-        source_add_rows: Sequence[Mapping[str, Any]],
         context: ExecutionContextV2,
         required_parents: Set[str],
     ) -> list[Dict[str, Any]]:
         starts = [
             int(row.get("start_epoch") or 0)
-            for row in tuple(champion_rows) + tuple(source_add_rows)
+            for row in champion_rows
             if int(row.get("start_epoch") or 0) <= epoch
         ]
         if not starts or epoch <= 0:

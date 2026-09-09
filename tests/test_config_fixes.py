@@ -60,35 +60,8 @@ def test_retired_model_and_loop_environment_has_no_effect(clean_env):
     assert not hasattr(baseline, "conditional_validation_mode")
 
 
-def test_source_add_status_exposes_current_controls(clean_env):
-    config = ResearchLabGatewayConfig.from_env()
-    status = config.public_status()
-
-    assert config.source_add_enabled is True
-    assert config.source_add_rewards_enabled is True
-    assert config.source_add_dispatcher_enabled is True
-    assert config.source_add_functional_probes_enabled is True
-    assert config.source_add_leg1_alpha_percent == pytest.approx(0.2)
-    assert status["source_add"]["enabled"] is True
-    assert status["source_add"]["max_per_day_per_hotkey"] == 5
-
-    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_ENABLED", "false")
-    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "false")
-    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED", "false")
-    config = ResearchLabGatewayConfig.from_env()
-    assert config.source_add_enabled is False
-    assert config.source_add_rewards_enabled is False
-    assert config.source_add_dispatcher_enabled is False
 
 
-def test_source_add_work_lease_covers_three_probe_deadlines(clean_env):
-    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_PROBE_TIMEOUT_SECONDS", "120")
-    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_WORK_LEASE_SECONDS", "30")
-
-    config = ResearchLabGatewayConfig.from_env()
-
-    assert config.source_add_probe_timeout_seconds == 120
-    assert config.source_add_work_lease_seconds == 480
 
 
 def test_retained_reward_allocation_defaults(clean_env):
@@ -101,15 +74,3 @@ def test_retained_reward_allocation_defaults(clean_env):
     assert config.lab_champion_min_alpha_percent == pytest.approx(7.0)
     assert config.lab_champion_extra_alpha_percent_per_point == pytest.approx(0.3)
     assert config.lab_champion_max_alpha_percent == pytest.approx(15.0)
-
-
-def test_current_source_add_and_reward_overrides(clean_env):
-    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_PROBE_MAX_ATTEMPTS", "8")
-    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", "0.35")
-    clean_env.setenv("RESEARCH_LAB_EMISSION_PERCENT", "8.5")
-
-    config = ResearchLabGatewayConfig.from_env()
-
-    assert config.source_add_probe_max_attempts == 5
-    assert config.source_add_leg1_alpha_percent == pytest.approx(0.35)
-    assert config.lab_emission_percent == pytest.approx(8.5)

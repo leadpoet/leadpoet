@@ -55,11 +55,6 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_weight_finalization_submission_v2,
     validate_published_weight_bundle_v2,
 )
-from gateway.tee.source_add_runtime_v2 import (
-    build_source_add_runtime_catalog_v2,
-    validate_source_add_credential_envelope_v2,
-    validate_source_add_runtime_catalog_v2,
-)
 
 
 BOOT_TABLE = "research_lab_attested_boot_identities_v2"
@@ -117,7 +112,6 @@ ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_RPC = (
     "persist_research_lab_allocation_frontier_bootstrap_v2"
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_SOURCE_ADD_ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
 _EXACT_INSERT_ATTEMPTS = 4
@@ -132,10 +126,6 @@ _REPLAYABLE_EXECUTION_PAIRS = frozenset(
         (
             "allocation_settlement_frontier_bootstrap_v2",
             "research_lab.allocation_settlement_frontier_bootstrap.v2",
-        ),
-        (
-            "source_add_catalog_snapshot_v2",
-            "research_lab.source_add_catalog_snapshot.v2",
         ),
         (
             "observe_chain_realized_weights_v1",
@@ -2252,148 +2242,9 @@ def _execution_result_projection_v2(
                 "replayable chain-realized settlement result is invalid"
             )
         return dict(settlement)
-    if str(operation) == "source_add_catalog_snapshot_v2":
-        expected_fields = {
-            "schema_version",
-            "provisioned_sources",
-            "provisioned_sources_hash",
-            "private_registry_rows",
-            "private_registry_rows_hash",
-            "runtime_catalog",
-            "runtime_catalog_hash",
-        }
-        provisioned_sources = result.get("provisioned_sources")
-        private_registry_rows = result.get("private_registry_rows")
-        runtime_catalog = result.get("runtime_catalog")
-        if (
-            set(result) != expected_fields
-            or result.get("schema_version")
-            != "leadpoet.source_add_catalog_snapshot.v2"
-            or not isinstance(provisioned_sources, list)
-            or any(not isinstance(item, Mapping) for item in provisioned_sources)
-            or not isinstance(private_registry_rows, list)
-            or any(not isinstance(item, Mapping) for item in private_registry_rows)
-            or not isinstance(runtime_catalog, Mapping)
-        ):
-            raise AttestedV2StoreError(
-                "replayable SOURCE_ADD catalog result is invalid"
-            )
-        normalized_sources = [dict(item) for item in provisioned_sources]
-        normalized_private_rows = [dict(item) for item in private_registry_rows]
-        try:
-            normalized_catalog = validate_source_add_runtime_catalog_v2(
-                runtime_catalog
-            )
-            independently_derived_catalog = build_source_add_runtime_catalog_v2(
-                normalized_sources
-            )
-        except Exception as exc:
-            raise AttestedV2StoreError(
-                "replayable SOURCE_ADD runtime catalog is invalid"
-            ) from exc
-        if (
-            result.get("provisioned_sources_hash")
-            != sha256_json(normalized_sources)
-            or result.get("private_registry_rows_hash")
-            != sha256_json(normalized_private_rows)
-            or normalized_catalog != independently_derived_catalog
-            or result.get("runtime_catalog_hash")
-            != normalized_catalog["catalog_hash"]
-        ):
-            raise AttestedV2StoreError(
-                "replayable SOURCE_ADD catalog commitment differs"
-            )
-        return dict(result)
     return dict(result)
 
 
-def _source_add_catalog_secret_scan_projection_v2(
-    result: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Remove only validated encrypted credential metadata before scanning."""
-
-    scan_result = dict(result)
-    scan_sources: list[dict[str, Any]] = []
-    for raw_source in result.get("provisioned_sources") or ():
-        source = dict(raw_source)
-        raw_envelope = source.pop("credential_envelope", {})
-        provision = source.get("provision_doc")
-        provider = (
-            provision.get("provider_registry_entry")
-            if isinstance(provision, Mapping)
-            else None
-        )
-        if not isinstance(provider, Mapping):
-            raise AttestedV2StoreError(
-                "replayable SOURCE_ADD credential projection is invalid"
-            )
-        provider_scan = dict(provider)
-        auth_kind = str(provider_scan.get("auth_kind") or "none").lower()
-        envelope_ref = ""
-        if auth_kind != "none":
-            try:
-                normalized_envelope = validate_source_add_credential_envelope_v2(
-                    raw_envelope
-                )
-            except Exception as exc:
-                raise AttestedV2StoreError(
-                    "replayable SOURCE_ADD credential projection is invalid"
-                ) from exc
-            envelope_ref = str(normalized_envelope["credential_ref"])
-        elif raw_envelope:
-            raise AttestedV2StoreError(
-                "replayable SOURCE_ADD credential projection is invalid"
-            )
-
-        if "credential_ref" in provider_scan:
-            refs = provider_scan.pop("credential_ref")
-            if not isinstance(refs, list) or any(
-                not isinstance(item, str)
-                or (
-                    item != envelope_ref
-                    and not _SOURCE_ADD_ENV_REF_RE.fullmatch(item)
-                )
-                for item in refs
-            ):
-                raise AttestedV2StoreError(
-                    "replayable SOURCE_ADD credential projection is invalid"
-                )
-        if "credential_ready" in provider_scan:
-            ready = provider_scan.pop("credential_ready")
-            if (
-                ready is not None
-                and not isinstance(ready, bool)
-                and ready != "[redacted]"
-            ):
-                raise AttestedV2StoreError(
-                    "replayable SOURCE_ADD credential projection is invalid"
-                )
-
-        provision_scan = dict(provision)
-        provision_scan["provider_registry_entry"] = provider_scan
-        source["provision_doc"] = provision_scan
-        scan_sources.append(source)
-    scan_result["provisioned_sources"] = scan_sources
-
-    runtime_catalog = dict(result.get("runtime_catalog") or {})
-    scan_routes: list[dict[str, Any]] = []
-    for raw_route in runtime_catalog.get("routes") or ():
-        route = dict(raw_route)
-        for field in (
-            "credential_slot",
-            "credential_value_hash",
-            "credential_env_refs",
-            "credential_envelope_hash",
-        ):
-            if field not in route:
-                raise AttestedV2StoreError(
-                    "replayable SOURCE_ADD credential projection is invalid"
-                )
-            route.pop(field)
-        scan_routes.append(route)
-    runtime_catalog["routes"] = scan_routes
-    scan_result["runtime_catalog"] = runtime_catalog
-    return scan_result
 
 
 def _execution_result_storage_row_v2(
@@ -2442,10 +2293,6 @@ def _execution_result_storage_row_v2(
     from gateway.research_lab.bundles import contains_secret_material
 
     secret_scan_projection = normalized_result
-    if normalized_operation == "source_add_catalog_snapshot_v2":
-        secret_scan_projection = _source_add_catalog_secret_scan_projection_v2(
-            normalized_result
-        )
     if contains_secret_material(secret_scan_projection):
         raise AttestedV2StoreError(
             "replayable execution result contains secret material"

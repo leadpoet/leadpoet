@@ -37,9 +37,6 @@ from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from gateway.tee.provider_evidence_v2 import (
     create_signed_provider_evidence_record,
 )
-from gateway.tee.source_add_runtime_v2 import (
-    validate_source_add_runtime_route_v2,
-)
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
     canonical_json,
@@ -77,7 +74,7 @@ _REQUEST_FIELDS = {
     "timeout_ms",
     "retry_policy_hash",
 }
-_OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
+_OPTIONAL_REQUEST_FIELDS = set()
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
 _FAIL_CLOSED_REQUEST_SCHEMA_VERSION = (
     "leadpoet.provider_semantics_fail_closed_request.v2"
@@ -428,10 +425,7 @@ class ProviderSemanticsAuthorityV2:
     def _execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         normalized, original_body, parsed, fingerprint = self._request(request)
         day = self._utc_day()
-        dynamic_route = normalized.get("dynamic_route")
         provider = _LEGACY_PROVIDER_IDS.get(normalized["provider_id"])
-        if provider is None and isinstance(dynamic_route, Mapping):
-            provider = str(dynamic_route["provider_id"])
         if provider is None:
             # Infrastructure routes such as Supabase retain authenticated
             # transport, but must not recursively read or populate the
@@ -526,21 +520,6 @@ class ProviderSemanticsAuthorityV2:
                     normalized["job_id"] if bypass_cache else "unscoped"
                 ),
             )
-            if isinstance(dynamic_route, Mapping):
-                quota = int(dynamic_route["per_day_quota"])
-                with self._lock:
-                    used = self._live_calls.get((day, provider), 0)
-                if quota > 0 and used >= quota:
-                    return self._local_response(
-                        normalized,
-                        parsed=parsed,
-                        body=b'{"error":"provider day quota exhausted"}',
-                        status=429,
-                        evidence="quota_exhausted",
-                        cost_event=None,
-                        additional_attempts=lookup_attempts,
-                        additional_artifacts=lookup_artifacts,
-                    )
             if _truthy(_header(headers, REPLAY_ONLY_HEADER)):
                 event_doc = ledger.cache_hit_event(
                     provider=provider,
@@ -1138,22 +1117,6 @@ class ProviderSemanticsAuthorityV2:
             body or None,
         )
         normalized = {**dict(request), "headers": dict(headers)}
-        if "dynamic_route" in request:
-            try:
-                dynamic_route = validate_source_add_runtime_route_v2(
-                    request["dynamic_route"]
-                )
-            except Exception as exc:
-                raise ProviderSemanticsV2Error(
-                    "provider semantics dynamic route is invalid"
-                ) from exc
-            if dynamic_route["provider_id"] != str(
-                request.get("provider_id") or ""
-            ):
-                raise ProviderSemanticsV2Error(
-                    "provider semantics dynamic identity differs"
-                )
-            normalized["dynamic_route"] = dynamic_route
         return normalized, body, parsed, fingerprint
 
     def _cost_ledger(

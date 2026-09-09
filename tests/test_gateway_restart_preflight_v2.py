@@ -536,7 +536,7 @@ def test_required_supabase_v2_schema_keeps_only_public_arena_reward_boundary() -
         function for _migration, function in rpc_contract
     )
     assert (
-        "scripts/183-lab-arena-miner-reward-basis.sql",
+        "scripts/197-lab-arena-reward-chain-scope.sql",
         "lab_arena_reward_basis_v1",
     ) in schema_contract
     assert {
@@ -549,6 +549,8 @@ def test_required_supabase_v2_schema_keeps_only_public_arena_reward_boundary() -
         "king_hotkey",
         "king_start_epoch",
         "published_at",
+        "arena_network_name",
+        "arena_netuid",
     } == relation_columns["lab_arena_reward_basis_v1"]
 
     retired_markers = (

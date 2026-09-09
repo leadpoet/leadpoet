@@ -218,7 +218,10 @@ def test_reward_scope_upgrade_under_hosted_role_preserves_access_controls():
     control.autocommit = True
     try:
         with control.cursor() as cursor:
-            cursor.execute('CREATE ROLE reward_migrator LOGIN NOSUPERUSER')
+            cursor.execute(
+                'CREATE ROLE reward_migrator LOGIN NOSUPERUSER PASSWORD %s',
+                (dsn.get('password', 'disposable-test-password'),),
+            )
             cursor.execute('GRANT lab_arena_owner TO reward_migrator')
             cursor.execute('ALTER SCHEMA public OWNER TO reward_migrator')
         admin = psycopg2.connect(**dict(dsn, user='reward_migrator'))

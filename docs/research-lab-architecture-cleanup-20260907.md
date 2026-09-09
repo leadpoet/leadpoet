@@ -65,6 +65,13 @@ Historical migration files and immutable weight/allocation receipts remain
 available for settlement verification. Apply the tested, committed migration
 only after the retired workers are no longer running.
 
+The active settlement reader and auditors still verify signed weight bundles
+from before retirement. Their historical-only receipt category and vector
+interpretation remain. Current input builders reject that category. Existing
+frontier checkpoints are carried forward without querying retired reward
+tables or creating new obligations. Remove these readers only after all
+dependent finalized history has a replacement settlement authority.
+
 ## Acceptance evidence
 
 Local validation covers Arena rounds through PostgreSQL and PostgREST, shared

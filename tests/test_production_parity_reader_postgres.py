@@ -691,7 +691,7 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
         try:
             assert arena.require_service_role()["current_user"] == "lab_arena_service"
             schema = arena._transport.rpc("lab_arena_schema_version_v1", {})
-            assert schema["version"] == 194
+            assert schema["version"] == 197
             for table in (
                 "lab_arena_rounds",
                 "lab_arena_submissions",

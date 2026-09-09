@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 
 CONTRACT_SCHEMA_VERSION = "leadpoet.production_parity_contract.v1"
-SNAPSHOT_SCHEMA_VERSION = "leadpoet.production_parity_snapshot.v5"
+SNAPSHOT_SCHEMA_VERSION = "leadpoet.production_parity_snapshot.v6"
 LEDGER_SCHEMA_VERSION = "leadpoet.production_parity_ledger.v1"
 HISTORICAL_ORACLE_SCHEMA_VERSION = (
     "leadpoet.production_parity_historical_oracle.v1"
@@ -332,12 +332,16 @@ def validate_snapshot_manifest(
         archive.get("format") != expected_archive_format
         or archive.get("storage") != "ephemeral-encrypted-volume"
         or archive.get("persisted") is not False
+        or archive.get("ownership") != "preserved"
+        or archive.get("acl") != "preserved"
     ):
         raise ProductionParityError("snapshot archive format is unsupported")
     document["archive"] = {
         "format": expected_archive_format,
         "storage": "ephemeral-encrypted-volume",
         "persisted": False,
+        "ownership": "preserved",
+        "acl": "preserved",
         "sha256": archive_hash,
         "size_bytes": archive_size,
     }

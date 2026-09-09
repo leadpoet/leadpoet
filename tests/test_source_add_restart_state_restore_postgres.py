@@ -81,11 +81,6 @@ def database():
     yield from _database_with_migrations(MIGRATIONS)
 
 
-@pytest.fixture(scope="module")
-def acl_database():
-    yield from _database_with_migrations(ACL_MIGRATIONS)
-
-
 def _set_paused(cursor, paused: bool, reason: str, actor: str) -> dict:
     cursor.execute(
         "SELECT public.research_lab_source_add_set_paused(%s, %s, %s)",
@@ -99,91 +94,6 @@ def _state(cursor) -> dict:
         "SELECT public.research_lab_source_add_restart_guard_state_v2()"
     )
     return cursor.fetchone()[0]
-
-
-def _source_add_acl_contracts(cursor) -> dict:
-    cursor.execute(
-        """
-        SELECT pg_catalog.json_build_object(
-            'duplicate_privacy',
-                public.research_lab_source_add_duplicate_privacy_contract_v1()
-                    -> 'permissions',
-            'post_accept_leg1',
-                public.research_lab_source_add_post_accept_leg1_contract_v3()
-                    -> 'permissions',
-            'claim_control',
-                public.research_lab_source_add_claim_control_contract_v2()
-                    -> 'permissions'
-        )
-        """
-    )
-    return cursor.fetchone()[0]
-
-
-def _source_add_function_acl(cursor, signature: str) -> dict[str, bool]:
-    cursor.execute(
-        """
-        WITH function_row AS (
-            SELECT function_catalog.*
-            FROM pg_catalog.pg_proc AS function_catalog
-            WHERE function_catalog.oid = pg_catalog.to_regprocedure(%s)
-        )
-        SELECT
-            pg_catalog.has_function_privilege(
-                'service_role', function_row.oid, 'EXECUTE'
-            ),
-            EXISTS (
-                SELECT 1
-                FROM pg_catalog.aclexplode(
-                    COALESCE(
-                        function_row.proacl,
-                        pg_catalog.acldefault('f', function_row.proowner)
-                    )
-                ) AS privilege
-                WHERE privilege.grantee = 0
-                  AND privilege.privilege_type = 'EXECUTE'
-            ),
-            pg_catalog.has_function_privilege(
-                'anon', function_row.oid, 'EXECUTE'
-            ),
-            pg_catalog.has_function_privilege(
-                'authenticated', function_row.oid, 'EXECUTE'
-            )
-        FROM function_row
-        """,
-        (signature,),
-    )
-    row = cursor.fetchone()
-    assert row is not None, signature
-    return {
-        "service_role_callable": row[0],
-        "public_callable": row[1],
-        "anon_callable": row[2],
-        "authenticated_callable": row[3],
-    }
-
-
-def _assert_complete_source_add_acl(cursor) -> None:
-    expected = parity_snapshot._schema_only_source_add_acl_expectations()
-    cursor.execute(
-        """
-        SELECT COUNT(*)
-        FROM pg_catalog.pg_proc AS function_row
-        JOIN pg_catalog.pg_namespace AS namespace
-          ON namespace.oid = function_row.pronamespace
-        WHERE namespace.nspname = 'public'
-          AND (
-                pg_catalog.strpos(function_row.proname, 'source_add') > 0
-                OR function_row.proname =
-                    'enforce_research_lab_source_catalog_provider_origin'
-          )
-        """
-    )
-    assert cursor.fetchone()[0] == len(expected)
-    assert {
-        signature: _source_add_function_acl(cursor, signature)
-        for signature in expected
-    } == expected
 
 
 def _acquire(
@@ -399,22 +309,6 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
             )
             assert cursor.fetchone()[0] == 0
 
-            # pg_dump/pg_restore --no-acl recreates PostgreSQL's default
-            # PUBLIC EXECUTE privilege; the parity role bootstrap also grants
-            # service_role every function before this clone-only repair.
-            cursor.execute(
-                "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO PUBLIC"
-            )
-            cursor.execute(
-                """
-                SELECT public.research_lab_source_add_duplicate_privacy_contract_v1()
-                    -> 'permissions'
-                """
-            )
-            leaked_duplicate_permissions = cursor.fetchone()[0]
-            assert leaked_duplicate_permissions["anon_callable"] is True
-            assert leaked_duplicate_permissions["authenticated_callable"] is True
-
             cursor.execute(staging_sql)
             cursor.execute(
                 """
@@ -461,66 +355,20 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
                 (SCRIPTS / MINER_STATUS_MIGRATION).read_text(encoding="utf-8")
             )
             cursor.execute(
-                "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role"
+                "SELECT public.research_lab_source_add_post_accept_leg1_contract_v3()"
+                " -> 'permissions'"
             )
-            cursor.execute(
-                "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO PUBLIC"
-            )
-            for leaked_signature in (
-                "public.research_lab_source_add_finish_work"
-                "(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,"
-                "timestamp with time zone,boolean)",
-                "public.research_lab_source_add_requeue_provenance_v2"
-                "(text,text,text,text,text,text,text)",
-                "public.enforce_research_lab_source_add_leg1_obligation_v2()",
-            ):
-                assert _source_add_function_acl(cursor, leaked_signature) == {
-                    "service_role_callable": True,
-                    "public_callable": True,
-                    "anon_callable": True,
-                    "authenticated_callable": True,
-                }
-            cursor.execute(
-                parity_snapshot._schema_only_source_add_acl_sql(
-                    parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
-                ).decode("utf-8")
-            )
-            _assert_complete_source_add_acl(cursor)
-            assert _source_add_function_acl(
-                cursor,
-                "public.research_lab_source_add_finish_work"
-                "(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,"
-                "timestamp with time zone,boolean)",
-            )["service_role_callable"] is True
-            assert _source_add_function_acl(
-                cursor,
-                "public.enforce_research_lab_source_add_leg1_obligation_v2()",
-            ) == {
-                "service_role_callable": False,
-                "public_callable": False,
-                "anon_callable": False,
-                "authenticated_callable": False,
-            }
-            assert _source_add_function_acl(
-                cursor,
-                "public.prevent_research_lab_source_add_reward_mutation()",
-            ) == {
-                "service_role_callable": True,
-                "public_callable": True,
-                "anon_callable": True,
-                "authenticated_callable": True,
-            }
-            repaired_contracts = _source_add_acl_contracts(cursor)
-            assert repaired_contracts["duplicate_privacy"] == (
-                source_duplicate_permissions
-            )
-            assert repaired_contracts["post_accept_leg1"] == {
+            assert cursor.fetchone()[0] == {
                 "service_role_exists": True,
                 "candidate_callable": True,
                 "rollback_v2_callable": True,
                 "internal_not_callable": True,
             }
-            assert repaired_contracts["claim_control"] == {
+            cursor.execute(
+                "SELECT public.research_lab_source_add_claim_control_contract_v2()"
+                " -> 'permissions'"
+            )
+            assert cursor.fetchone()[0] == {
                 "service_role_exists": True,
                 "service_role_callable": True,
                 "anon_callable": False,
@@ -598,40 +446,6 @@ def test_schema_only_parity_pauses_exact_174_clone_before_migration_175(
                 generation=0,
                 restore_paused=None,
             )
-    finally:
-        connection.close()
-
-
-def test_schema_only_acl_repair_rejects_unreviewed_function_surface(
-    acl_database,
-) -> None:
-    psycopg2, dsn = acl_database
-    connection = psycopg2.connect(**dsn)
-    connection.autocommit = True
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE FUNCTION public.research_lab_source_add_unreviewed()
-                RETURNS VOID
-                LANGUAGE plpgsql
-                AS 'BEGIN RETURN; END'
-                """
-            )
-            with pytest.raises(
-                psycopg2.Error,
-                match="schema-only SOURCE_ADD ACL function inventory differs",
-            ):
-                cursor.execute(
-                    parity_snapshot._schema_only_source_add_acl_sql(
-                        parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
-                    ).decode("utf-8")
-                )
-            cursor.execute("ROLLBACK")
-            cursor.execute(
-                "DROP FUNCTION public.research_lab_source_add_unreviewed()"
-            )
-            _assert_complete_source_add_acl(cursor)
     finally:
         connection.close()
 

@@ -7,10 +7,12 @@ import sys
 import time
 import uuid
 
+import httpx
 import psycopg2
 from psycopg2 import OperationalError
 import pytest
 
+from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport
 from leadpoet_canonical.production_parity import (
     CONTRACT_SCHEMA_VERSION,
     ProductionParityError,
@@ -19,6 +21,15 @@ from leadpoet_canonical.production_parity import (
     sha256_json,
 )
 from scripts import production_parity_snapshot as parity_snapshot
+from scripts import run_production_parity_fast as fast_parity
+from scripts.run_production_parity_full_host import _ClonePostgrestPrefixAdapter
+from scripts.materialize_production_parity_secrets import _jwt
+from tests.lab_arena.lab_arena_pg_harness import (
+    DEFAULT_MIGRATIONS as ARENA_MIGRATIONS,
+    _DAILY_SOURCE_SHIM_SQL,
+)
+from tests.test_source_add_end_to_end_postgres import _database_with_migrations
+from tests.test_source_add_restart_state_restore_postgres import ACL_MIGRATIONS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -228,6 +239,19 @@ def _pinned_postgres_image() -> str:
     return str(digests[0])
 
 
+def _pinned_postgrest_image() -> str:
+    raw = _docker(
+        "image",
+        "inspect",
+        "postgrest/postgrest:v12.2.8",
+        "--format",
+        "{{json .RepoDigests}}",
+    ).stdout.strip()
+    digests = json.loads(raw)
+    assert isinstance(digests, list) and digests
+    return str(digests[0])
+
+
 def test_reader_migration_is_clone_safe_read_only_and_idempotent(postgres):
     _apply_migration(postgres)
     initial = _contract(postgres)
@@ -335,14 +359,14 @@ def test_migration_refuses_an_existing_superuser_collision(postgres):
         _apply_migration(postgres)
 
 
-def test_snapshot_v5_real_capture_verify_restore_is_candidate_bound(
+def test_snapshot_v6_real_capture_verify_restore_is_candidate_bound(
     postgres,
     monkeypatch,
     tmp_path: Path,
 ):
     _apply_migration(postgres)
     assert _bind(postgres, PASSWORD)["status"] == "bound"
-    target_database = "leadpoet_parity_snapshot_v5"
+    target_database = "leadpoet_parity_snapshot_v6"
     connection = _admin(postgres)
     try:
         with connection.cursor() as cursor:
@@ -406,6 +430,8 @@ def test_snapshot_v5_real_capture_verify_restore_is_candidate_bound(
     )
 
     assert manifest["schema_version"] == SNAPSHOT_SCHEMA_VERSION
+    assert manifest["archive"]["ownership"] == "preserved"
+    assert manifest["archive"]["acl"] == "preserved"
     assert set(manifest["database"]) == {
         "server_version_num",
         "relation_count",
@@ -466,3 +492,290 @@ def test_snapshot_v5_real_capture_verify_restore_is_candidate_bound(
             archive_path=archive_path,
             postgres_image=postgres_image,
         )
+
+
+@pytest.mark.parametrize(
+    ("capture_mode", "expected_probe_rows"),
+    (("full", 1), ("schema-only", 0)),
+)
+def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
+    monkeypatch,
+    tmp_path: Path,
+    capture_mode: str,
+    expected_probe_rows: int,
+):
+    source_generator = _database_with_migrations(
+        ACL_MIGRATIONS
+        + ("186-research-lab-source-add-provisioned-status.sql",)
+        + tuple(ARENA_MIGRATIONS),
+        setup_sql=_DAILY_SOURCE_SHIM_SQL,
+    )
+    psycopg2_module, source = next(source_generator)
+    database = None
+    prefix_adapter = None
+    try:
+        connection = psycopg2_module.connect(**source)
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(
+                "SELECT public.leadpoet_set_production_parity_reader_password_v1(%s)",
+                (PASSWORD,),
+            )
+            assert cursor.fetchone()[0]["status"] == "bound"
+            cursor.execute(
+                """
+                DO $$ BEGIN
+                  CREATE ROLE supabase_admin NOLOGIN NOINHERIT;
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$;
+                CREATE TABLE public.native_acl_probe (
+                  id INTEGER PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
+                INSERT INTO public.native_acl_probe VALUES (1, 'preserved');
+                ALTER TABLE public.native_acl_probe OWNER TO supabase_admin;
+                GRANT SELECT ON public.native_acl_probe TO leadpoet_parity_reader;
+                ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public
+                  GRANT SELECT ON TABLES TO leadpoet_parity_reader;
+                CREATE TABLE IF NOT EXISTS
+                  public.research_lab_finalized_allocation_epochs_v2 (
+                    netuid INTEGER NOT NULL,
+                    epoch_id INTEGER NOT NULL
+                  );
+                INSERT INTO public.research_lab_finalized_allocation_epochs_v2
+                  (netuid, epoch_id) VALUES (71, 25000);
+                GRANT SELECT ON public.research_lab_finalized_allocation_epochs_v2
+                  TO leadpoet_parity_reader;
+                """
+            )
+        connection.close()
+
+        contract = _snapshot_contract()
+        contract_path = tmp_path / "contract.json"
+        manifest_path = tmp_path / "manifest.json"
+        archive_path = tmp_path / "snapshot.dump"
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        original_postgres_env = parity_snapshot._postgres_env
+        client_host = (
+            "host.docker.internal" if sys.platform == "darwin" else "127.0.0.1"
+        )
+
+        def local_postgres_env(dsn: str, *, read_only: bool):
+            env, host = original_postgres_env(dsn, read_only=read_only)
+            env["PGSSLMODE"] = "disable"
+            env["PGHOST"] = client_host
+            return env, host
+
+        monkeypatch.setattr(parity_snapshot, "_postgres_env", local_postgres_env)
+        postgres_image = _pinned_postgres_image()
+        postgrest_image = _pinned_postgrest_image()
+        source_dsn = (
+            f"postgresql://{READER}:{PASSWORD}@production.test:"
+            f"{source['port']}/postgres"
+        )
+        manifest = parity_snapshot.capture_snapshot(
+            contract_path=contract_path,
+            archive_path=archive_path,
+            manifest_path=manifest_path,
+            dsn=source_dsn,
+            expected_production_host="production.test",
+            ttl_hours=1,
+            source_sha=str(contract["base_sha"]),
+            capture_mode=capture_mode,
+            postgres_image=postgres_image,
+        )
+        database = fast_parity._DockerDatabase(
+            candidate_sha=str(contract["candidate_sha"]),
+            postgres_image=postgres_image,
+            postgrest_image=postgrest_image,
+        )
+        database.start()
+        prerequisites = database.prepare_snapshot_restore()
+        assert prerequisites["supabase_admin_role"] is True
+        assert prerequisites["parity_reader_placeholder_role"] is True
+        database._psql("DROP ROLE supabase_admin")
+        with pytest.raises(
+            ProductionParityError,
+            match="isolated production snapshot restore failed",
+        ):
+            parity_snapshot.restore_snapshot(
+                root=ROOT,
+                contract_path=contract_path,
+                manifest_path=manifest_path,
+                archive_path=archive_path,
+                target_dsn=database.target_dsn,
+                production_host="production.test",
+                postgres_image=postgres_image,
+            )
+        prerequisites = database.prepare_snapshot_restore()
+        assert prerequisites["supabase_admin_role"] is True
+        restored = parity_snapshot.restore_snapshot(
+            root=ROOT,
+            contract_path=contract_path,
+            manifest_path=manifest_path,
+            archive_path=archive_path,
+            target_dsn=database.target_dsn,
+            production_host="production.test",
+            postgres_image=postgres_image,
+        )
+        assert manifest["archive"]["ownership"] == "preserved"
+        assert manifest["archive"]["acl"] == "preserved"
+        assert restored["migration_delta"] == []
+
+        ownership = json.loads(
+            database._psql(
+                """
+                SELECT json_build_object(
+                  'public_schema_owner', pg_catalog.pg_get_userbyid(namespace.nspowner),
+                  'probe_owner', pg_catalog.pg_get_userbyid(probe.relowner),
+                  'probe_reader_select', pg_catalog.has_table_privilege(
+                    'leadpoet_parity_reader', probe.oid, 'SELECT'
+                  ),
+                  'probe_rows', (SELECT count(*) FROM public.native_acl_probe),
+                  'arena_schema_owner', pg_catalog.pg_get_userbyid(function.proowner),
+                  'arena_schema_security_definer', function.prosecdef,
+                  'default_acl_preserved', EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_default_acl AS defaults
+                    JOIN pg_catalog.pg_roles AS owner ON owner.oid = defaults.defaclrole
+                    JOIN pg_catalog.pg_roles AS grantee
+                      ON grantee.rolname = 'leadpoet_parity_reader'
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+                    WHERE owner.rolname = 'supabase_admin'
+                      AND defaults.defaclnamespace = namespace.oid
+                      AND defaults.defaclobjtype = 'r'
+                      AND acl.grantee = grantee.oid
+                      AND acl.privilege_type = 'SELECT'
+                  )
+                )::text
+                FROM pg_catalog.pg_namespace AS namespace
+                JOIN pg_catalog.pg_class AS probe
+                  ON probe.relnamespace = namespace.oid
+                 AND probe.relname = 'native_acl_probe'
+                JOIN pg_catalog.pg_proc AS function
+                  ON function.oid =
+                     'public.lab_arena_schema_version_v1()'::regprocedure
+                WHERE namespace.nspname = 'public';
+                """
+            )
+        )
+        assert ownership == {
+            "public_schema_owner": "pg_database_owner",
+            "probe_owner": "supabase_admin",
+            "probe_reader_select": True,
+            "probe_rows": expected_probe_rows,
+            "arena_schema_owner": "lab_arena_owner",
+            "arena_schema_security_definer": True,
+            "default_acl_preserved": True,
+        }
+
+        local_postgrest_url, service_token = database.start_postgrest()
+        prefix_adapter = _ClonePostgrestPrefixAdapter(
+            upstream_origin=local_postgrest_url,
+            public_origin="https://test.cloudfront.net",
+            listen_host="127.0.0.1",
+            listen_port=0,
+        )
+        prefix_evidence = prefix_adapter.start()
+        supabase_url = "http://127.0.0.1:%d" % prefix_evidence["listen_port"]
+        arena_token = _jwt(database.jwt_secret, "lab_arena_service")
+        arena_transport = PostgrestTransport(
+            supabase_url,
+            anon_key=arena_token,
+            service_jwt=arena_token,
+            timeout_seconds=10,
+        )
+        arena = ArenaStore(arena_transport)
+        try:
+            assert arena.require_service_role()["current_user"] == "lab_arena_service"
+            schema = arena._transport.rpc("lab_arena_schema_version_v1", {})
+            assert schema["version"] == 194
+            for table in (
+                "lab_arena_rounds",
+                "lab_arena_submissions",
+                "lab_arena_runs",
+                "lab_arena_ledger",
+            ):
+                assert arena._transport.select(table, limit=1) == []
+            for function, params in (
+                ("lab_arena_expire_leases", {"p_round_id": "arena-0000-00-00"}),
+                ("lab_arena_close_stage", {"p_round_id": "arena-0000-00-00", "p_stage": 1}),
+                ("lab_arena_cancel_round", {"p_round_id": "arena-0000-00-00", "p_reason": "startup-probe"}),
+            ):
+                with pytest.raises(ArenaStoreError, match="lab_arena_round_missing"):
+                    arena._transport.rpc(function, params)
+            assert arena.current_daily_icp_set(20990101)["status"] == "unavailable"
+        finally:
+            arena.close()
+
+        for role_token in (
+            service_token,
+            _jwt(database.jwt_secret, "anon"),
+            _jwt(database.jwt_secret, "authenticated"),
+        ):
+            transport = PostgrestTransport(
+                supabase_url,
+                anon_key=role_token,
+                service_jwt=role_token,
+                timeout_seconds=10,
+            )
+            try:
+                with pytest.raises(ArenaStoreError):
+                    transport.select("lab_arena_rounds", limit=1)
+            finally:
+                transport.close()
+
+        source_add_expectations = {
+            "research_lab_source_add_duplicate_privacy_contract_v1": {
+                "anon_callable": False,
+                "authenticated_callable": False,
+                "contract_service_role_callable": True,
+                "service_role_exists": True,
+                "v2_service_role_callable": True,
+                "v3_service_role_callable": True,
+            },
+            "research_lab_source_add_post_accept_leg1_contract_v4": {
+                "candidate_callable": True,
+                "internal_not_callable": True,
+                "rollback_v2_callable": True,
+                "service_role_exists": True,
+            },
+            "research_lab_source_add_claim_control_contract_v2": {
+                "anon_callable": False,
+                "authenticated_callable": False,
+                "service_role_callable": True,
+                "service_role_exists": True,
+            },
+            "research_lab_source_add_miner_status_contract_v1": {
+                "contract_anon_callable": False,
+                "contract_authenticated_callable": False,
+                "contract_service_role_callable": True,
+                "page_anon_callable": False,
+                "page_authenticated_callable": False,
+                "page_public_callable": False,
+                "page_service_role_callable": True,
+                "view_anon_select": False,
+                "view_authenticated_select": False,
+                "view_public_select": False,
+                "view_service_role_select": True,
+            },
+        }
+        with httpx.Client(trust_env=False, timeout=10) as client:
+            for function, expected_permissions in source_add_expectations.items():
+                response = client.post(
+                    f"{supabase_url}/rest/v1/rpc/{function}",
+                    headers={
+                        "apikey": service_token,
+                        "Authorization": f"Bearer {service_token}",
+                    },
+                    json={},
+                )
+                assert response.status_code == 200
+                assert response.json()["permissions"] == expected_permissions
+    finally:
+        if prefix_adapter is not None:
+            prefix_adapter.cleanup()
+        if database is not None:
+            database.cleanup()
+        source_generator.close()

@@ -49,16 +49,21 @@ def _publish(
     baseline_score: float,
     miner_score: float,
     crowned: bool,
+    network_name: str | None = None,
+    netuid: int | None = None,
 ) -> str:
     constants = rewards.reward_constants_document()
+    configuration = {
+        "mode": "live",
+        "rewards_enabled": True,
+        "baseline_hotkey": BASELINE,
+        "reward_constants": constants,
+    }
+    if network_name is not None and netuid is not None:
+        configuration.update({"network_name": network_name, "netuid": netuid})
     assert store.create_round(
         round_id,
-        {
-            "mode": "live",
-            "rewards_enabled": True,
-            "baseline_hotkey": BASELINE,
-            "reward_constants": constants,
-        },
+        configuration,
     )["status"] == "created"
     participants = [
         {"submission_id": round_id + "-baseline", "miner_hotkey": BASELINE, "is_king": True},

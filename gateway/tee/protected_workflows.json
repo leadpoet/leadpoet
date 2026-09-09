@@ -912,7 +912,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:09ea816b4022fa05ca3e703e7a9e3c719b7e2ce6f711cf60777685af14e4dc99",
+      "ast_sha256": "sha256:7d329a2a1d587c28b9f039d168e808075194ed87fd5a70c0810a64dc538a6ce4",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -922,7 +922,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:81a08d87424ac087e74926bf4fb9dac0f149522e8feca48a3cbb546fdcb63e04",
+      "ast_sha256": "sha256:3e43e401fd7d82b2b6c68685cbd0572d8adf12667671e47fa1021bcea0c0851f",
       "path": "gateway/tee/coordinator_weight_source_v2.py",
       "symbol": "CoordinatorWeightSourceV2"
     },
@@ -2677,7 +2677,7 @@
       "symbol": "verify_required_supabase_v2_schema"
     },
     {
-      "ast_sha256": "sha256:20093ff8bc121dba72c6af1eafe96e19c37fd53a28c9f593474dac891bc8f3cd",
+      "ast_sha256": "sha256:e061ac1de0cf4fc82dc1c9b9d013052565c4441e24a3efb87516e4f7664822a0",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "QUERY_POLICIES"
     },
@@ -2687,7 +2687,7 @@
       "symbol": "SupabaseSourceReaderV2"
     },
     {
-      "ast_sha256": "sha256:05a87acb4ad8290e4b3b32b4f9dce70d7f0025e1f05033dfd243b4a0cd6fc15f",
+      "ast_sha256": "sha256:4171957b10c342991e32c51ace279063aaa76219576477c885dc75fd8e76dcb3",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "_filters"
     },
@@ -2792,7 +2792,7 @@
       "symbol": "execute_v2_provider_request"
     },
     {
-      "ast_sha256": "sha256:3d95c7629cfd062ac6370f077a4487585cbef557ee58dbf78ace657518e5dff9",
+      "ast_sha256": "sha256:01c2bb53b84b102e4591a6cfe98b9f7bfb47cef08c3d73b86039a3738f06c1e6",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_coordinator_job_manager"
     },
@@ -3392,6 +3392,26 @@
       "symbol": "verify_compact_weight_submission_v2"
     },
     {
+      "ast_sha256": "sha256:9c553ecfd1306c77619a89988de03f42dcdd5e3f4c0e26280d2490a6f32c2622",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "_HISTORICAL_SOURCE_ADD_CATEGORY"
+    },
+    {
+      "ast_sha256": "sha256:5baab43772a57a551b3855523988f0a8d7f766e9f2273faf072000f91b316bc0",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "_HISTORICAL_SOURCE_ADD_PURPOSE"
+    },
+    {
+      "ast_sha256": "sha256:fbff01a4a39dfcbcff8db57dbd3e3a1eb4574a1d67e68eaebe2899898ebf190e",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "_gateway_weight_input_categories_v2"
+    },
+    {
+      "ast_sha256": "sha256:066bfd2baca4073607050ac309767701042623eaaa0d67069f1673b69d578e5e",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "_weight_input_categories_v2"
+    },
+    {
       "ast_sha256": "sha256:433c2eea3901eb22066956f76560bef4478569208121dd7759d44b74941e4269",
       "path": "leadpoet_canonical/compact_weight_authority_v2.py",
       "symbol": "build_checkpointed_weight_finalization_graph_v2"
@@ -3412,7 +3432,7 @@
       "symbol": "build_stateful_epoch_evidence_from_compact_v2"
     },
     {
-      "ast_sha256": "sha256:6671f54e9986cde385a4643fbbbcbbc91700540cb9f56d42a9e7e28929a0c54c",
+      "ast_sha256": "sha256:88eb588bb785e47deafc4f377c72b2149a30cc4173d2d105fe688662990c49ff",
       "path": "leadpoet_canonical/compact_weight_authority_v2.py",
       "symbol": "build_weight_ancestry_commitment_v2"
     },
@@ -3437,7 +3457,7 @@
       "symbol": "reconstruct_weight_finalization_from_compact_v2"
     },
     {
-      "ast_sha256": "sha256:92050fb67acfc8c12a2c2183e378624c27885ee023b90cdc1ec50d2577025d47",
+      "ast_sha256": "sha256:c4832bd0859ebb8622cf0033b71aaf69dad8b97c5a9c3907d05d3c0b98b7d2b4",
       "path": "leadpoet_canonical/compact_weight_authority_v2.py",
       "symbol": "validate_compact_weight_ancestry_v2"
     },
@@ -3452,7 +3472,7 @@
       "symbol": "validate_compact_weight_finalization_shape_v2"
     },
     {
-      "ast_sha256": "sha256:d3178f1a9d31e7888471a779685cbbae1fecdb9e849f43381d2f678490d4ee79",
+      "ast_sha256": "sha256:c78ff5533fff1a0e51c78d225e85a4c286bec5b8c417b4d771a9b1fe89e5962a",
       "path": "leadpoet_canonical/compact_weight_authority_v2.py",
       "symbol": "validate_compact_weight_submission_shape_v2"
     },
@@ -3632,7 +3652,27 @@
       "symbol": "__module__"
     },
     {
-      "ast_sha256": "sha256:9da83659412c65a826b0c1e9c6aa9d7b9cce7bf255ae164fc120ea09f0641378",
+      "ast_sha256": "sha256:9c553ecfd1306c77619a89988de03f42dcdd5e3f4c0e26280d2490a6f32c2622",
+      "path": "leadpoet_canonical/weight_authority_v2.py",
+      "symbol": "_HISTORICAL_SOURCE_ADD_CATEGORY"
+    },
+    {
+      "ast_sha256": "sha256:4e13d8e88247373caec861fa5489255a139b0b6de75ab48e913770df5b4d8b49",
+      "path": "leadpoet_canonical/weight_authority_v2.py",
+      "symbol": "_HISTORICAL_SOURCE_ADD_PURPOSE"
+    },
+    {
+      "ast_sha256": "sha256:4f654773faf0f4780b98370d8378485c852ae8f307b48ce330a0d8861056c4c6",
+      "path": "leadpoet_canonical/weight_authority_v2.py",
+      "symbol": "_normalized_input_receipts"
+    },
+    {
+      "ast_sha256": "sha256:fa19d5a5f3b8504392b8761a0ae7deeae8f3b24a22d03dc4c3afd036dcfa79f4",
+      "path": "leadpoet_canonical/weight_authority_v2.py",
+      "symbol": "_weight_input_value_documents_v2"
+    },
+    {
+      "ast_sha256": "sha256:1cc4b819f4f2a8cdf874e0ae264a013b91fb4904c2687a62118726805e57be93",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "build_weight_snapshot_v2"
     },
@@ -3642,7 +3682,7 @@
       "symbol": "gateway_weight_input_value_documents_v2"
     },
     {
-      "ast_sha256": "sha256:d20544a7f9e324c4edb69c7168a5df059ac835d64e7737896ad524f215fbffd8",
+      "ast_sha256": "sha256:6e9a4b8e94c7d7a80a3bd6ac9f39ae8e2317a202f86a909aed22a830e7b782cd",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "validate_published_weight_bundle_v2"
     },
@@ -3652,12 +3692,17 @@
       "symbol": "validate_weight_finalization_submission_v2"
     },
     {
-      "ast_sha256": "sha256:a6a17da7bbf7a4207934cca0b775b0f387f8a00aba9d3b9bd9b5d8cad5951319",
+      "ast_sha256": "sha256:12362165c84e657573bd2235bb6844dbc866539e13bf34db7472919af74d0fdb",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "validate_weight_input_source_evidence_v2"
     },
     {
-      "ast_sha256": "sha256:c51abe1cc3254d7b6a5bf8b78bbf62a1131a099371f8ab53d6e7bb08134b8917",
+      "ast_sha256": "sha256:66cee6e8ad2d93f465ee5094eaa020140ff9b672ef5733f0abac783983c03ae1",
+      "path": "leadpoet_canonical/weight_authority_v2.py",
+      "symbol": "weight_input_output_roots_v2"
+    },
+    {
+      "ast_sha256": "sha256:7be0e572b2532017ea92ada73e5ba955012136a6a7b63cce68137203c66ff75a",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "weight_input_value_documents_v2"
     },
@@ -3677,7 +3722,7 @@
       "symbol": "normalize_to_u16_with_uids_pure"
     },
     {
-      "ast_sha256": "sha256:9e7c9f2af3015c9137166d9829e15279f089fbd050fcbc87412ffcd6e9c28a31",
+      "ast_sha256": "sha256:cb1c15801bacc5692309dc14ee03b597900f04bf3db605c634902f4e3e30f68b",
       "path": "leadpoet_canonical/weight_computation.py",
       "symbol": "research_lab_uid_weights_from_allocation"
     },
@@ -3692,7 +3737,7 @@
       "symbol": "_allocate_capped_pro_rata"
     },
     {
-      "ast_sha256": "sha256:36d18ed0296b4c9b7a5351c8557946fcb40bec63590cd0283cb48e343570100d",
+      "ast_sha256": "sha256:5b5b6ec60344f4a61978ebb2ecaa39dd68da6e10c99140042a7e4dd75f8d1f17",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_allocate_champions"
     },
@@ -3715,11 +3760,6 @@
       "ast_sha256": "sha256:477a22c85b18c2a4858217d0b803f59f073800fa7de249700cd9c016474e2399",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_allocate_reimbursements_at_set_rate"
-    },
-    {
-      "ast_sha256": "sha256:c0a7f03c32638e441a944b298f5cfb8db4e7718aeb917fa4b10f9a64fa3dcf61",
-      "path": "leadpoet_verifier/economics.py",
-      "symbol": "_allocate_research_lab_epoch_existing"
     },
     {
       "ast_sha256": "sha256:ff2a7f25d2190d2ffbe96c88b6ff527756546ea781c7f058e7fae89cd48ae139",
@@ -3747,7 +3787,7 @@
       "symbol": "_distribute_reimbursement_surplus"
     },
     {
-      "ast_sha256": "sha256:aa0454a2ea247b01e39f5951052f508de07a5dde4ddac691c2b11ceb7619bf61",
+      "ast_sha256": "sha256:66f6cbd758ccc879a0de6fcfa7677e345254782bfe48faf705c0f0050c006c49",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_normalize_champion_obligation"
     },
@@ -3762,7 +3802,7 @@
       "symbol": "_normalize_reimbursement_obligation"
     },
     {
-      "ast_sha256": "sha256:2ca2d1c713fb846f5d2572459f7a5a4eac36128b5e69aa3a549f31dcaffc3e5e",
+      "ast_sha256": "sha256:230e45c6301b158e726ce41fef793e888f30467e2797a7c204a0162cd5104a03",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "allocate_research_lab_epoch"
     },
@@ -4062,7 +4102,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:bd98dc7fb6cd24722d3b6e0afe39c2e2810433c36d4df2e24ea3cbe6e9b9838b",
-  "protected_source_commit": "157782602",
+  "manifest_hash": "sha256:efdf3ad400f1b4b3fcaf9c65297ed9b591506ff98173288f3a4890afc5fa403b",
+  "protected_source_commit": "7835b3347",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

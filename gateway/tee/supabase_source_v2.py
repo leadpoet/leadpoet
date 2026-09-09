@@ -102,8 +102,8 @@ QUERY_POLICIES = {
     "lab_arena_reward_basis": SupabaseQueryV2(
         policy_id="lab_arena_reward_basis",
         table="lab_arena_reward_basis_v1",
-        select="round_id,effective_reward_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc",
-        parameter_names=("epoch_id",),
+        select="round_id,effective_reward_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc,arena_network_name,arena_netuid",
+        parameter_names=("epoch_id", "network_name", "netuid"),
         max_pages=1,
         order="effective_reward_epoch.desc",
         limit=1,
@@ -647,7 +647,15 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         )
     if policy.policy_id == "lab_arena_reward_basis":
         epoch_id = _non_negative_int(parameters["epoch_id"], "epoch_id")
-        return (("effective_reward_epoch", "lte.%d" % epoch_id),)
+        netuid = _non_negative_int(parameters["netuid"], "netuid")
+        network_name = parameters["network_name"]
+        if network_name not in ("finney", "test"):
+            raise SupabaseSourceV2Error("Arena reward network is invalid")
+        return (
+            ("effective_reward_epoch", "lte.%d" % epoch_id),
+            ("arena_network_name", "eq.%s" % network_name),
+            ("arena_netuid", "eq.%d" % netuid),
+        )
     if policy.policy_id == "research_lab_allocation_current":
         return (
             ("epoch", "eq.%d" % _non_negative_int(parameters["epoch_id"], "epoch_id")),

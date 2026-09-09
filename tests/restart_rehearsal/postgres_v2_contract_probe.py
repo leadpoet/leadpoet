@@ -314,6 +314,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION,
     "193-lab-arena-upload-recovery.sql",
     "194-lab-arena-open-scorer-refresh.sql",
+    "197-lab-arena-reward-chain-scope.sql",
     SOURCE_ADD_SCHEMA_RETIREMENT_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
@@ -3386,6 +3387,22 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-194 Lab Arena scorer refresh contract differs"
+            )
+        reward_scope_migration = "197-lab-arena-reward-chain-scope.sql"
+        database.apply_migration(scripts / reward_scope_migration)
+        applied.append(reward_scope_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 197,
+        }:
+            raise PostgresContractProbeError(
+                "post-197 Lab Arena reward scope contract differs"
             )
         database.apply_migration(
             scripts / SOURCE_ADD_SCHEMA_RETIREMENT_MIGRATION

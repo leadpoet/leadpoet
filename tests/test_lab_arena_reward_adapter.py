@@ -199,7 +199,7 @@ def _coordinator_case(signer, monkeypatch, basis, proposed_basis=None, row_overr
     from gateway.tee.coordinator_weight_source_v2 import CoordinatorWeightSourceV2
 
     monkeypatch.setenv(kernel.SIGNING_KEY_HASH_ENV, pinned or signer.public_key_hash)
-    row = {"round_id": basis["round_id"], "effective_reward_epoch": basis["effective_reward_epoch"], "reward_basis_hash": basis["reward_basis_hash"], "reward_basis_doc": basis, "signing_key_doc": signing_key_document(signer.public_key_der)}
+    row = {"round_id": basis["round_id"], "effective_reward_epoch": basis["effective_reward_epoch"], "reward_basis_hash": basis["reward_basis_hash"], "reward_basis_doc": basis, "signing_key_doc": signing_key_document(signer.public_key_der), "arena_network_name": "finney", "arena_netuid": 71}
     row.update(row_overrides or {})
     calculation = proposed_snapshot(proposed_basis or basis)
     documents = gateway_weight_input_value_documents_v2(calculation_snapshot=calculation, gateway_authority_event_hash=_sha("event"))
@@ -215,7 +215,7 @@ def test_coordinator_reconstructs_the_triple_from_the_measured_row(signer, monke
     source, proposed, calculation, context, reader = _coordinator_case(signer, monkeypatch, basis)
     reconstructed = source._champion_document(proposed, calculation, context)
     assert canonical_json(reconstructed) == canonical_json(proposed)
-    assert reader.calls == [("lab_arena_reward_basis", {"epoch_id": EPOCH})]
+    assert reader.calls == [("lab_arena_reward_basis", {"epoch_id": EPOCH, "network_name": "finney", "netuid": 71})]
     # A proposal that names a different (older) basis than the governing row is reported as newer.
     older = signed_basis(signer, effective=24790, start=24790)
     source, proposed, calculation, context, _ = _coordinator_case(signer, monkeypatch, basis, proposed_basis=older)
@@ -260,7 +260,7 @@ def test_coordinator_requires_an_empty_legacy_slot_without_a_basis(monkeypatch, 
     active_reader = FakeReader({})
     active_source = CoordinatorWeightSourceV2(active_reader)
     assert active_source._champion_document(documents["champions"], calculation, context) == documents["champions"]
-    assert active_reader.calls == [("lab_arena_reward_basis", {"epoch_id": EPOCH})]
+    assert active_reader.calls == [("lab_arena_reward_basis", {"epoch_id": EPOCH, "network_name": "finney", "netuid": 71})]
 
     basis = signed_basis(signer)
     authoritative_reader = FakeReader({"lab_arena_reward_basis": [{"reward_basis_doc": basis}]})
@@ -295,6 +295,10 @@ class _View:
         self.filters.append(("lte", column, value))
         return self
 
+    def eq(self, column, value):
+        self.filters.append(("eq", column, value))
+        return self
+
     def order(self, column, desc=False):
         self.filters.append(("order", column, desc))
         return self
@@ -304,7 +308,17 @@ class _View:
         return self
 
     def execute(self):
-        rows = [row for row in self.rows if row["effective_reward_epoch"] <= [f for f in self.filters if f[0] == "lte"][0][2]]
+        rows = [
+            row for row in self.rows
+            if row["effective_reward_epoch"] <= [
+                f for f in self.filters if f[0] == "lte"
+            ][0][2]
+            and all(
+                row.get(item[1]) == item[2]
+                for item in self.filters
+                if item[0] == "eq"
+            )
+        ]
         rows.sort(key=lambda row: -row["effective_reward_epoch"])
         return SimpleNamespace(data=rows[:1])
 
@@ -323,7 +337,9 @@ def test_gateway_route_serves_the_governing_row_or_none(signer, monkeypatch):
 
     basis = signed_basis(signer)
     key_document = signing_key_document(signer.public_key_der)
-    rows = [{"round_id": basis["round_id"], "effective_reward_epoch": basis["effective_reward_epoch"], "reward_basis_hash": basis["reward_basis_hash"], "reward_basis_doc": basis, "signing_key_doc": key_document}]
+    monkeypatch.setattr(fulfillment_api, "BITTENSOR_NETWORK", "finney")
+    monkeypatch.setattr(fulfillment_api, "BITTENSOR_NETUID", 71)
+    rows = [{"round_id": basis["round_id"], "effective_reward_epoch": basis["effective_reward_epoch"], "reward_basis_hash": basis["reward_basis_hash"], "reward_basis_doc": basis, "signing_key_doc": key_document, "arena_network_name": "finney", "arena_netuid": 71}]
     monkeypatch.setattr(fulfillment_api, "_get_supabase", lambda: _Supabase(rows))
     served = fulfillment_api._collect_lab_arena_reward_basis_sync(EPOCH)
     assert served == {"epoch": EPOCH, "round_id": basis["round_id"], "reward_basis_hash": basis["reward_basis_hash"], "reward_basis": basis, "signing_key": key_document, "lookup_ok": True}
@@ -359,3 +375,51 @@ def test_validator_read_requires_a_complete_response(signer, monkeypatch):
         fake_get.payload = broken
         with pytest.raises(RuntimeError, match="failed after 3 attempts"):
             cloud_db.gateway_get_lab_arena_reward_basis(None, EPOCH)
+
+
+@pytest.mark.parametrize('scope', [
+    {'arena_network_name': 'test', 'arena_netuid': 71},
+    {'arena_network_name': 'finney', 'arena_netuid': 401},
+    {'arena_network_name': 'test', 'arena_netuid': 401},
+    {'arena_network_name': None, 'arena_netuid': None},
+])
+def test_coordinator_rejects_a_reward_row_from_another_chain(signer, monkeypatch, scope):
+    from gateway.tee.coordinator_weight_source_v2 import CoordinatorWeightSourceV2Error
+    source, proposed, calculation, context, _ = _coordinator_case(
+        signer, monkeypatch, signed_basis(signer), row_overrides=scope,
+    )
+    with pytest.raises(CoordinatorWeightSourceV2Error, match='reward basis is invalid'):
+        source._champion_document(proposed, calculation, context)
+
+
+def test_coordinator_uses_its_configured_network_not_a_host_reward_proposal(signer, monkeypatch):
+    from gateway.tee.coordinator_weight_source_v2 import CoordinatorWeightSourceV2
+    _, proposed, calculation, context, reader = _coordinator_case(
+        signer, monkeypatch, signed_basis(signer), row_overrides={'arena_network_name': 'test'},
+    )
+    source = CoordinatorWeightSourceV2(reader, network_name='test')
+    assert source._champion_document(proposed, calculation, context) == proposed
+    assert reader.calls == [('lab_arena_reward_basis', {
+        'epoch_id': EPOCH, 'network_name': 'test', 'netuid': 71,
+    })]
+
+
+def test_gateway_reward_lookup_ignores_foreign_chain_rows_before_taking_latest(signer, monkeypatch):
+    from gateway.fulfillment import api as fulfillment_api
+    monkeypatch.setattr(fulfillment_api, 'BITTENSOR_NETWORK', 'finney')
+    monkeypatch.setattr(fulfillment_api, 'BITTENSOR_NETUID', 71)
+    basis = signed_basis(signer)
+    own = {'round_id': basis['round_id'], 'effective_reward_epoch': basis['effective_reward_epoch'],
+           'reward_basis_hash': basis['reward_basis_hash'], 'reward_basis_doc': basis,
+           'signing_key_doc': signing_key_document(signer.public_key_der),
+           'arena_network_name': 'finney', 'arena_netuid': 71}
+    foreign = [dict(own, effective_reward_epoch=EPOCH, **scope) for scope in (
+        {'arena_network_name': 'test', 'arena_netuid': 71},
+        {'arena_network_name': 'finney', 'arena_netuid': 401},
+        {'arena_network_name': 'test', 'arena_netuid': 401},
+    )]
+    database = _Supabase(foreign)
+    monkeypatch.setattr(fulfillment_api, '_get_supabase', lambda: database)
+    assert fulfillment_api._collect_lab_arena_reward_basis_sync(EPOCH)['reward_basis'] is None
+    database.view.rows.append(own)
+    assert fulfillment_api._collect_lab_arena_reward_basis_sync(EPOCH)['reward_basis'] == basis

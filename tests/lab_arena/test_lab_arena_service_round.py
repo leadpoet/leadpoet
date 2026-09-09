@@ -586,7 +586,7 @@ class Harness:
 def test_startup_checks_require_the_current_arena_schema(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     checks = harness.service.startup_checks()
-    assert checks["schema_version"] == 194
+    assert checks["schema_version"] == 197
     assert checks["database_identity"]["current_user"] == "lab_arena_service"
 
 
@@ -1311,6 +1311,9 @@ def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evi
     )
     participants = _start_round(harness, day=23, epoch=30423)
     _run_stage_one_to_scoring(harness, participants, runners=2)
+    with pytest.raises(svc.ServiceError, match="benchmark_not_public"):
+        harness.service.public_benchmark(harness.round_id)
+    expected_icps = harness.service.benchmark_icps(harness.round_id)
     store = harness.service.store
     round_participants = store.get_round(harness.round_id)["participants"]
     failing = next(
@@ -1440,6 +1443,10 @@ def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evi
     assert matching_public_jobs, (accepted, public["judge_jobs"])
     public_job = matching_public_jobs[0]
     assert public_job["evidence_status"] == "available"
+    public_benchmark = harness.service.public_benchmark(harness.round_id)
+    assert public_benchmark == {"round_id": harness.round_id, "icps": expected_icps}
+    assert len(public_benchmark["icps"]) == contracts.BENCHMARK_ICP_COUNT
+    assert public_benchmark["icps"][int(accepted["icp_position"])] == icp
     assert any(
         evidence["run_id"] == accepted["run_id"]
         for evidence in public["judge_evidence"]

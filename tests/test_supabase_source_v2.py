@@ -895,3 +895,32 @@ def test_finalized_allocation_history_uses_bounded_complete_pages():
         "14-15",
         "16-17",
     ]
+
+
+@pytest.mark.parametrize('network_name,netuid', [('finney', 71), ('test', 71), ('test', 401)])
+def test_arena_reward_query_filters_both_chain_dimensions_before_limit(network_name, netuid):
+    provider = FakeProvider([{'rows': []}])
+    rows, attempts, _, _ = _read(provider, policy_id='lab_arena_reward_basis', parameters={
+        'epoch_id': 25074, 'network_name': network_name, 'netuid': netuid,
+    })
+    assert rows == [] and len(attempts) == 1
+    query = dict(parse_qsl(urlsplit(provider.requests[0]['url']).query))
+    assert query['arena_network_name'] == 'eq.' + network_name
+    assert query['arena_netuid'] == 'eq.' + str(netuid)
+    assert query['effective_reward_epoch'] == 'lte.25074'
+    assert query['order'] == 'effective_reward_epoch.desc'
+    assert query['limit'] == '1'
+    assert {'arena_network_name', 'arena_netuid'} <= set(query['select'].split(','))
+
+
+@pytest.mark.parametrize('parameters', [
+    {'epoch_id': 25074},
+    {'epoch_id': 25074, 'netuid': 71},
+    {'epoch_id': 25074, 'network_name': 'finney'},
+    {'epoch_id': 25074, 'network_name': 'test,arena_netuid.eq.71', 'netuid': 401},
+])
+def test_arena_reward_query_requires_one_valid_chain_pair(parameters):
+    provider = FakeProvider([])
+    with pytest.raises(SupabaseSourceV2Error):
+        _read(provider, policy_id='lab_arena_reward_basis', parameters=parameters)
+    assert provider.requests == []

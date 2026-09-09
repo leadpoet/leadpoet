@@ -661,6 +661,7 @@ def _migration_schema_contract(
         "190-lab-arena-restart-claim-drain.sql",
         "193-lab-arena-upload-recovery.sql",
         "194-lab-arena-open-scorer-refresh.sql",
+        "197-lab-arena-reward-chain-scope.sql",
         "198-retire-research-lab-source-add-schema.sql",
     ]
     applied_migrations = document.get("applied_migrations")

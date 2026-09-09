@@ -111,8 +111,9 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/188-lab-arena-baseline-promotion.sql`,
 `scripts/189-lab-arena-round-network-scope.sql`,
 `scripts/190-lab-arena-restart-claim-drain.sql`, and
-`scripts/193-lab-arena-upload-recovery.sql`, then
-`scripts/194-lab-arena-open-scorer-refresh.sql` with the database owner
+`scripts/193-lab-arena-upload-recovery.sql`,
+`scripts/194-lab-arena-open-scorer-refresh.sql`, then
+`scripts/197-lab-arena-reward-chain-scope.sql` with the database owner
 before service startup. Then check the service wiring:
 
 `scripts/191-lab-arena-upload-recovery.sql` remains byte-identical only because
@@ -186,8 +187,9 @@ Each round freezes `LAB_ARENA_NETWORK` and `LAB_ARENA_NETUID` in its
 configuration. API and driver instances only select rounds in their configured
 chain scope. Historical rows without these fields are treated as Finney/netuid
 71. This permits a pinned testnet service to use the shared database without
-redirecting or advancing a Finney round. Promotion ordering and published
-reward history remain shared across scopes.
+redirecting or advancing a Finney round. Reward activation and published reward
+history are independent for each chain scope. Baseline Git publication keeps
+its existing serialized ordering against the shared branch.
 
 ## Runner configuration
 

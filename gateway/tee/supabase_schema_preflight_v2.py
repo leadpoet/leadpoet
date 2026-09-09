@@ -210,7 +210,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/183-lab-arena-miner-reward-basis.sql",
+        "scripts/197-lab-arena-reward-chain-scope.sql",
         "lab_arena_reward_basis_v1",
         (
             "round_id",
@@ -222,6 +222,8 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "king_hotkey",
             "king_start_epoch",
             "published_at",
+            "arena_network_name",
+            "arena_netuid",
         ),
     ),
 )

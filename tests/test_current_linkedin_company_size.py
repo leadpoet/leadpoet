@@ -11,6 +11,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
     company_fit_match,
+    company_fit_unavailable,
 )
 from qualification.scoring import linkedin_company_size
 from qualification.scoring.competition import (
@@ -675,6 +676,176 @@ def test_same_domain_dewa_alias_is_insufficient_without_a_profile_failure(
     assert not scorer_breakdown_has_retryable_infrastructure_failure(
         {"verifier_gate_receipts": [receipt]}
     )
+
+
+@pytest.mark.parametrize(
+    ("homepage_reason", "expected_retryable"),
+    [
+        ("website returned HTTP 502", True),
+        ("website returned HTTP 404", False),
+        (
+            "homepage identity evidence unavailable: LinkedIn company binding not found",
+            False,
+        ),
+    ],
+)
+def test_same_domain_unproven_alias_preserves_homepage_failure_classification(
+    monkeypatch,
+    homepage_reason,
+    expected_retryable,
+):
+    company = _company(linkedin="").model_copy(
+        update={
+            "company_name": "Dubai Electricity and Water Authority",
+            "company_website": "https://dewa.gov.ae/",
+        }
+    )
+    icp = _icp().model_copy(update={"company_stage": "Series A"})
+    verdict = _verdict(
+        observed_size="5,001-10,000",
+        size_matches=True,
+        employee_url="https://www.linkedin.com/company/dewaofficial",
+    )
+    verdict.update(
+        observed_company_name="Dubai Electricity & Water Authority - DEWA",
+        observed_company_website="https://dewa.gov.ae",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/dewaofficial"
+        ),
+        employee_size_evidence_quote="Company size 5,001-10,000 employees",
+        observed_company_stage="",
+        stage_matches=None,
+        stage_evidence_url="",
+        stage_evidence_quote="",
+    )
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable(homepage_reason)
+
+    async def provider(**_kwargs):
+        return dict(verdict), ""
+
+    async def unexpected_fetch(_url):
+        raise AssertionError("an unbound profile must not be fetched")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_request_company_reverify_json",
+        provider,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        unexpected_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer.score_company_competition_intent(
+            company,
+            icp,
+            0.0,
+            0.0,
+            set(),
+        )
+    )
+    breakdown = result.model_dump(mode="json")
+    receipt = breakdown["verifier_gate_receipts"][0]
+
+    assert result.final_score == 0.0
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["dimension_evidence"]["identity"][
+        "homepage_identity_reason"
+    ] == homepage_reason
+    assert scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown
+    ) is expected_retryable
+    assert (receipt.get("failure_class") == "insufficient_fit_evidence") is (
+        not expected_retryable
+    )
+
+
+def test_resolved_web_identity_does_not_make_missing_stage_retryable(monkeypatch):
+    company = _company()
+    icp = _icp().model_copy(update={"company_stage": "Series A"})
+    verdict = _verdict(observed_size="11-50", size_matches=True)
+    verdict.update(
+        observed_company_stage="",
+        stage_matches=None,
+        stage_evidence_url="",
+        stage_evidence_quote="",
+    )
+    provider_calls = []
+    profile_fetches = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable("website returned HTTP 502")
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return dict(verdict), ""
+
+    async def profile(url):
+        profile_fetches.append(url)
+        return {
+            "employee_count": "11-50",
+            "quote": "Company size 11-50 employees",
+            "url": "https://www.linkedin.com/company/acme",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_request_company_reverify_json",
+        provider,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        profile,
+    )
+
+    result = asyncio.run(
+        lead_scorer.score_company_competition_intent(
+            company,
+            icp,
+            0.0,
+            0.0,
+            set(),
+        )
+    )
+    breakdown = result.model_dump(mode="json")
+    receipt = breakdown["verifier_gate_receipts"][0]
+
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert profile_fetches == ["https://www.linkedin.com/company/acme"]
+    assert result.final_score == 0.0
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["company_fit_dimensions"]["identity"] == COMPANY_FIT_MATCH
+    assert receipt["company_fit_dimensions"]["employee_size"] == (
+        COMPANY_FIT_MATCH
+    )
+    assert receipt["company_fit_dimensions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert receipt["dimension_evidence"]["identity"][
+        "homepage_identity_reason"
+    ] == "website returned HTTP 502"
+    assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
 
 
 def test_identity_insufficient_path_does_not_hide_malformed_evidence():

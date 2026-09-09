@@ -2063,6 +2063,27 @@ def _complete_company_fit_result(
     return company_fit_unavailable(reason, details=details)
 
 
+def _homepage_identity_has_retryable_failure(
+    result: CompanyFitDecisionResult,
+) -> bool:
+    """Keep bounded homepage transport failures eligible for an Arena retry."""
+
+    if result.decision != COMPANY_FIT_UNAVAILABLE:
+        return False
+    reason = str(result.reason or "")
+    if reason.startswith((
+        "website unreachable:",
+        "website fetch error:",
+        "company identity provider error:",
+    )):
+        return True
+    match = re.fullmatch(r"website returned HTTP ([1-5][0-9]{2})", reason)
+    if match is None:
+        return False
+    status = int(match.group(1))
+    return status in {408, 425, 429} or status >= 500
+
+
 async def _verify_company_fit(
     company: CompanyOutput,
     icp: ICPPrompt,
@@ -2372,6 +2393,23 @@ async def _verify_company_fit(
         if decision == COMPANY_FIT_MATCH
         else "; ".join(failure_parts)
     )
+    failure_class = ""
+    candidate_failure_class = str(web_details.get("failure_class") or "")
+    if (
+        decision == COMPANY_FIT_UNAVAILABLE
+        and candidate_failure_class
+        in {
+            EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS,
+            INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
+        }
+        and not (
+            candidate_failure_class
+            == INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+            and web_identity_decision == COMPANY_FIT_UNAVAILABLE
+            and _homepage_identity_has_retryable_failure(identity)
+        )
+    ):
+        failure_class = candidate_failure_class
     return _complete_company_fit_result(
         decision,
         reason,
@@ -2380,18 +2418,7 @@ async def _verify_company_fit(
         stage_required=stage_required,
         required_attribute_decision=required_attribute_decision,
         supporting_receipts=supporting_receipts,
-        failure_class=(
-            str(web_details.get("failure_class") or "")
-            if (
-                decision == COMPANY_FIT_UNAVAILABLE
-                and web_details.get("failure_class")
-                in {
-                    EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS,
-                    INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
-                }
-            )
-            else ""
-        ),
+        failure_class=failure_class,
     )
 
 

@@ -1240,13 +1240,15 @@ def test_scoring_lease_runs_the_judge_image_in_trusted_mode(tmp_path):
     assert sandbox.specs[0].input_dir.name == "input"
 
 
-@pytest.mark.parametrize("output, timed_out, expected", [
-    ({"schema_version": "leadpoet.lab_arena.scoring_output.v1", "scored_run_id": "r1", "failure": "judge_error"}, False, "judge_error"),
-    (None, True, "judge_timeout"),
-    (b"not json", False, "judge_error"),
-    ({"companies": [valid_company(1)]}, False, "judge_error"),
+@pytest.mark.parametrize("output, timed_out, expected, diagnostic_class", [
+    ({"schema_version": "leadpoet.lab_arena.scoring_output.v1", "scored_run_id": "r1", "failure": "judge_error"}, False, "judge_error", "judge_error"),
+    (None, True, "judge_timeout", "judge_timeout"),
+    (b"not json", False, "judge_error", "scoring_output_invalid"),
+    ({"companies": [valid_company(1)]}, False, "judge_error", "scoring_output_invalid"),
 ])
-def test_judge_failures_map_to_judge_causes_with_no_output(tmp_path, output, timed_out, expected):
+def test_judge_failures_map_to_judge_causes_with_no_output(
+    tmp_path, output, timed_out, expected, diagnostic_class
+):
     api = FakeApi([scoring_lease()])
     sandbox = BridgingRuntime(output=output, timed_out=timed_out, calls=0)
     (tmp_path / "work").mkdir()
@@ -1254,6 +1256,7 @@ def test_judge_failures_map_to_judge_causes_with_no_output(tmp_path, output, tim
     assert runner_.run_once() == 1 and runner_.abandoned == 0
     validated = contracts.validate_run_result(api.completions[0]["body"]["result"])
     assert validated["terminal_status"] == expected
+    assert validated["failure_diagnostic"]["error_class"] == diagnostic_class
     assert api.completions[0]["body"].get("output") in (None, {})
 
 
@@ -1275,9 +1278,9 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
     assert runner_.run_once() == 1
 
     captured = capsys.readouterr()
-    assert "Lab Arena judge diagnostic:" in captured.err
+    assert "Lab Arena judge failure:" in captured.err
     assert "run_id=r9" in captured.err
-    assert "event=scoring_failure" in captured.err
+    assert "stage=scorer" in captured.err
     assert "error_class=judge_error" in captured.err
     assert "https://[redacted]/path?[redacted]" in captured.err
     assert "Bearer [redacted]" in captured.err
@@ -1304,6 +1307,11 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
         "started_at",
         "finished_at",
         "terminal_status",
+        "failure_diagnostic",
+    }
+    assert api.completions[0]["body"]["result"]["failure_diagnostic"] == {
+        "stage": "scorer",
+        "error_class": "judge_error",
     }
 
 
@@ -1341,9 +1349,9 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
 def test_judge_diagnostic_logger_redacts_credential_forms(
     capsys, detail, safe_fragment, secrets
 ):
-    rn._log_judge_diagnostic(
+    rn._log_judge_failure(
         "credential-test",
-        event="scoring_failure",
+        stage="scorer",
         error_class="judge_error",
         detail=detail,
     )
@@ -1353,26 +1361,39 @@ def test_judge_diagnostic_logger_redacts_credential_forms(
     assert all(secret not in diagnostic for secret in secrets)
 
 
+def test_judge_diagnostic_logger_rejects_unstructured_labels(capsys):
+    rn._log_judge_failure(
+        "label-test",
+        stage="provider-stage-secret",
+        error_class="api-key-class-secret",
+    )
+
+    diagnostic = capsys.readouterr().err
+    assert "stage=unknown error_class=unknown" in diagnostic
+    assert "provider-stage-secret" not in diagnostic
+    assert "api-key-class-secret" not in diagnostic
+
+
 @pytest.mark.parametrize(
-    ("result", "event", "error_class"),
+    ("result", "stage", "error_class"),
     [
         (
             runtime.fake_result(
                 output_bytes=None,
                 output_error="unbounded output api_key=never-log-this",
             ),
-            "output_error",
-            "SandboxOutputError",
+            "sandbox_output",
+            "sandbox_output_error",
         ),
         (
             runtime.fake_result(output_bytes=b"not-json"),
-            "output_parse_error",
-            "ScoringError",
+            "scoring_output",
+            "scoring_output_invalid",
         ),
     ],
 )
 def test_judge_prevalidation_failure_logs_safe_class_without_output(
-    tmp_path, capsys, result, event, error_class
+    tmp_path, capsys, result, stage, error_class
 ):
     api = FakeApi([scoring_lease(run_id="prevalidation")])
     sandbox = runtime.FakeRuntime([result])
@@ -1382,10 +1403,14 @@ def test_judge_prevalidation_failure_logs_safe_class_without_output(
     assert runner_.run_once() == 1
 
     captured = capsys.readouterr()
-    assert f"event={event}" in captured.err
+    assert f"stage={stage}" in captured.err
     assert f"error_class={error_class}" in captured.err
     assert "never-log-this" not in captured.err
     assert api.completions[0]["body"].get("output") in (None, {})
+    assert api.completions[0]["body"]["result"]["failure_diagnostic"] == {
+        "stage": stage,
+        "error_class": error_class,
+    }
 
 
 def test_accepted_judge_output_does_not_log_payload(tmp_path, capsys):
@@ -1403,7 +1428,7 @@ def test_accepted_judge_output_does_not_log_payload(tmp_path, capsys):
     assert runner_.run_once() == 1
 
     captured = capsys.readouterr()
-    assert "Lab Arena judge diagnostic:" not in captured.err
+    assert "Lab Arena judge failure:" not in captured.err
     assert "accepted-secret" not in captured.err
     assert api.completions[0]["body"]["output"] == output
 

@@ -138,6 +138,8 @@ def _shell_functions(script_name: str, function_name: str) -> str:
     functions = []
     if script_name == "gw_restart.sh":
         functions.append(_shell_function(script_name, "verify_controller_process_helper"))
+    elif function_name == "start_lab_arena_runner":
+        functions.append(_shell_function(script_name, "rotate_lab_arena_runner_log"))
     functions.append(_shell_function(script_name, function_name))
     return "\n".join(functions)
 
@@ -351,12 +353,18 @@ def test_post_activation_start_records_with_current_controller_helper(
         runsc = tmp_path / "runsc"
         runsc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         runsc.chmod(0o755)
+        runner_log = tmp_path / "arena.log"
+        incident = "judge-stage=scorer error_class=judge_error"
+        runner_log.write_text("discarded-prefix-" * 20 + incident, encoding="utf-8")
+        Path(str(runner_log) + ".1").write_text("previous-one", encoding="utf-8")
+        Path(str(runner_log) + ".2").write_text("previous-two", encoding="utf-8")
+        Path(str(runner_log) + ".5").write_text("outside-retention", encoding="utf-8")
         environment = {
             "VALIDATOR_PYTHON_BIN": sys.executable,
             "VALIDATOR_ROOT": str(historical_checkout),
             "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(current_authority),
             "LAB_ARENA_RUNNER_STATE_FILE": str(state_file),
-            "LAB_ARENA_RUNNER_LOG_FILE": str(tmp_path / "arena.log"),
+            "LAB_ARENA_RUNNER_LOG_FILE": str(runner_log),
             "LAB_ARENA_MODE": "shadow",
             "LAB_ARENA_API_BASE_URL": "https://gateway.invalid",
             "LAB_ARENA_RUNSC_PATH": str(runsc),
@@ -390,6 +398,13 @@ def test_post_activation_start_records_with_current_controller_helper(
             assert state["argv"][-len(production_args) :] == production_args
         else:
             assert state["argv"][-1] == relative_path
+            archived = Path(environment["LAB_ARENA_RUNNER_LOG_FILE"] + ".1")
+            assert archived.stat().st_size <= 4194304
+            assert incident in archived.read_text(encoding="utf-8")
+            assert Path(environment["LAB_ARENA_RUNNER_LOG_FILE"] + ".2").read_text(
+                encoding="utf-8"
+            ) == "previous-one"
+            assert not Path(environment["LAB_ARENA_RUNNER_LOG_FILE"] + ".5").exists()
         assert not (historical_checkout / "scripts" / HELPER.name).exists()
     finally:
         if state_file.exists():

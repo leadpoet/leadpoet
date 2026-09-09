@@ -2,6 +2,10 @@
 
 Applies to this repository. `AGENTS.md` and `CLAUDE.md` must remain byte-identical.
 
+## Scoped production authorization: competition release hardening
+
+The user explicitly authorized `$overnight-rebenchmark-validation` on 2026-09-09 for the competition timeout, failure-retention, and capacity fixes; production deployment and complete live validation; and the README update. Use committed fixes and migrations, protected secrets, and the canonical paired restart. Preserve scoring, +1 promotion, disclosure timing, and reward security. This does not authorize unrelated task work and expires when this task completes.
+
 1. End every final response with `## TLDR:` followed by 1-3 plain-English sentences stating the outcome or decision I need. Before it, include the concise supporting detail needed to understand or verify the result, expanding only when the task's complexity warrants it.
 
 2. Use only this status emoji vocabulary: 🚧 = blocked on me, 👾 = confirmed bug, ⛳️ = milestone, and 🔹 = must-read line. Do not use emojis decoratively.

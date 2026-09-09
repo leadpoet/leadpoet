@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, signing, source_bundle, source_disclosure, submission_rate_limit, verify
+from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, signing, source_bundle, source_disclosure, submission_rate_limit, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -33,9 +33,9 @@ DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/arch
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 240,
-    "stage_1_scoring": 360,
+    "stage_1_scoring": 390,
     "stage_2": 180,
-    "final_scoring": 240,
+    "final_scoring": 390,
 }
 CANCEL_REASONS = {
     "benchmark_leak": "benchmark_leaked_before_cutoff",
@@ -589,6 +589,13 @@ class ArenaService:
             "banned_hotkeys": banned_hotkeys,
             "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
         }
+        # Keep the announced intake within the actual all-participant workload.
+        # Shadow-only short rehearsals deliberately do not reserve live budgets.
+        if self._config.mode == "live":
+            supported = capacity.daily_challenger_capacity(document)
+            if supported < 1:
+                raise ServiceError("daily_runner_capacity_insufficient", 503)
+            document["max_challengers"] = min(document["max_challengers"], supported)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
         if result.get("status") not in ("created", "existing"):
@@ -1007,12 +1014,21 @@ class ArenaService:
                 {"rejection_rule": exc.code},
             )
             raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
-        result = self._store.accept_submission_with_credentials(
-            str(round_row["round_id"]),
-            submission_id,
-            validated["hotkey"],
-            encrypted_credentials,
-        )
+        try:
+            result = self._store.accept_submission_with_credentials(
+                str(round_row["round_id"]),
+                submission_id,
+                validated["hotkey"],
+                encrypted_credentials,
+            )
+        except ArenaStoreError as exc:
+            if "lab_arena_round_full" not in str(exc):
+                raise
+            self._store.update_submission(
+                str(round_row["round_id"]), submission_id, "uploading", "rejected",
+                {"rejection_rule": "capacity.round_full"},
+            )
+            raise ServiceError("submission_rejected:capacity.round_full", 409) from exc
         if result.get("status") == "window_closed":
             raise ServiceError("submission_window_closed", 409)
         if result.get("status") not in ("ok", "existing"):

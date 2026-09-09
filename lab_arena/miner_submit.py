@@ -164,6 +164,7 @@ _SAFE_ADMISSION_ERRORS = frozenset({
     "credential_kms_unavailable", "submission_credentials_missing",
     "submission_superseded", "submission_rejected:source_checksum_mismatch",
     "submission_rejected:source_contains_credentials",
+    "submission_rejected:capacity.round_full",
     "submission_rejected:openrouter_api_key_invalid",
     "submission_rejected:openrouter_api_key_no_credit",
     "submission_rejected:openrouter_management_key_invalid",

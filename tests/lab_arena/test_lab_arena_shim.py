@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import replace
 import json
 import os
+from pathlib import Path
 import shutil
 import socket
 import tempfile
@@ -27,7 +29,17 @@ import httpx
 import pytest
 import requests
 
-from lab_arena import contracts, operations, shim
+from lab_arena import contracts, operations, runner, shim
+from qualification.scoring.company_fit_decision import (
+    COMPANY_FIT_MATCH,
+    COMPANY_FIT_UNAVAILABLE,
+)
+from qualification.scoring.company_verification import verify_company_exists
+from tests.lab_arena.test_lab_arena_broker import (
+    CONTEXT,
+    FakeTransport,
+    make_broker,
+)
 
 ORIGINALS = {
     "urlopen": urllib.request.urlopen,
@@ -141,6 +153,47 @@ def assert_frame_is_minimal(frame: dict, raw: bytes, operation_id: str) -> None:
         assert marker not in text, marker
     # Frames are canonical JSON so the worker can hash them for call identity.
     assert raw == contracts.canonical_json(frame).encode("utf-8")
+
+
+def _verify_company_through_broker(monkeypatch, provider_broker):
+    context = replace(CONTEXT, kind="score", round_id="arena-2026-09-04")
+
+    class BrokerApi:
+        def provider(self, _run_id, _lease_token, frame):
+            return provider_broker.execute(
+                context,
+                operation_id=frame["operation_id"],
+                parameters=frame["parameters"],
+                action_sequence=frame["action_sequence"],
+                timeout_ms=frame["timeout_ms"],
+            ).to_document()
+
+    socket_dir = tempfile.mkdtemp(prefix="la-timeout-", dir="/tmp")
+    socket_path = Path(socket_dir) / "worker.sock"
+    server = runner.WorkerSocketServer(
+        socket_path,
+        BrokerApi(),
+        runner.RunState(lease={"run_id": context.run_id}, lease_token="tok-r1"),
+    )
+    server.start()
+    monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+    monkeypatch.setenv(shim.TRUSTED_SCORER_ENV, "1")
+    shim.install()
+    try:
+        return asyncio.run(
+            verify_company_exists(
+                "Example Company",
+                "https://example.com/",
+                company_linkedin=(
+                    "https://www.linkedin.com/company/example-company"
+                ),
+                require_https_transport=True,
+            )
+        )
+    finally:
+        shim.uninstall()
+        server.stop()
+        shutil.rmtree(socket_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +317,62 @@ def test_aiohttp_get_and_post(worker):
     assert_frame_is_minimal(worker.frames[1], worker.raw_frames[1], "deepline.execute")
     # Tool payloads are opaque: passed through byte-for-byte, never normalized.
     assert worker.frames[1]["parameters"] == {"tool": "exa_search", "payload": {"query": "x", "includeDomains": ["Example.com"]}}
+
+
+def test_company_verification_routed_page_fetch_uses_provider_deadline(
+    monkeypatch,
+):
+    source_url = "https://example.com/"
+    envelope = {
+        "job_id": "test",
+        "status": "completed",
+        "result": {
+            "data": {
+                "rawHtml": (
+                    "<html><title>Example Company</title>"
+                    '<a href="https://www.linkedin.com/company/example-company">'
+                    "LinkedIn</a></html>"
+                ),
+                "metadata": {
+                    "sourceURL": source_url,
+                    "url": source_url,
+                    "statusCode": 200,
+                },
+            }
+        },
+        "billing": {"cost_usd": 0.002},
+    }
+    provider_broker, _ledger, transport = make_broker(
+        transport=FakeTransport([(200, envelope)]),
+        credential_for=lambda _context, _provider: "miner-deepline-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = _verify_company_through_broker(monkeypatch, provider_broker)
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert len(transport.sent) == 1
+    assert transport.sent[0]["timeout"] == 60.0
+    request = json.loads(transport.sent[0]["body"])
+    assert request["operation"] == "firecrawl_scrape"
+    assert request["payload"]["timeout"] == 60_000
+
+
+def test_company_verification_routed_failure_stays_explicit_and_bounded(
+    monkeypatch,
+):
+    provider_broker, ledger, transport = make_broker(
+        transport=FakeTransport(fail=True),
+        credential_for=lambda _context, _provider: "miner-deepline-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = _verify_company_through_broker(monkeypatch, provider_broker)
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.passed is False
+    assert result.reason == "website returned HTTP 502"
+    assert len(transport.sent) == 1
+    assert transport.sent[0]["timeout"] == 60.0
+    assert ledger.log == ["reserve", "dispatch", "uncertain"]
 
 
 def test_aiohttp_error_status_raise_for_status(worker):

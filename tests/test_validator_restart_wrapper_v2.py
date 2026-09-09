@@ -1407,3 +1407,77 @@ def test_cutover_preparation_stops_before_full_validator_and_preserves_start():
         < final_check
         < delete_start
     )
+
+
+def _arena_runner_log_rotation_function() -> str:
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("rotate_lab_arena_runner_log() {")
+    end = script.index("\n}\n", start) + 3
+    return script[start:end]
+
+
+def _rotate_arena_runner_log(log_file: Path):
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -e\n"
+            + _arena_runner_log_rotation_function()
+            + "\nrotate_lab_arena_runner_log\n",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**os.environ, "LAB_ARENA_RUNNER_LOG_FILE": str(log_file)},
+    )
+
+
+def test_arena_runner_restart_retains_bounded_log_tail(tmp_path: Path):
+    log_file = tmp_path / "runner.log"
+    incident = "stage=scorer error_class=judge_error"
+    log_file.write_text("x" * 4194304 + incident, encoding="utf-8")
+    for index in range(1, 6):
+        Path(str(log_file) + f".{index}").write_text(
+            f"previous-{index}", encoding="utf-8"
+        )
+
+    result = _rotate_arena_runner_log(log_file)
+
+    assert result.returncode == 0, result.stderr
+    retained = Path(str(log_file) + ".1")
+    assert retained.stat().st_size <= 4194304
+    assert incident in retained.read_text(encoding="utf-8")
+    assert Path(str(log_file) + ".2").read_text(encoding="utf-8") == "previous-1"
+    assert Path(str(log_file) + ".4").read_text(encoding="utf-8") == "previous-3"
+    assert not Path(str(log_file) + ".5").exists()
+    assert all(
+        (Path(str(log_file) + suffix).stat().st_mode & 0o777) == 0o600
+        for suffix in ("", ".1", ".2", ".3", ".4")
+    )
+
+
+def test_empty_arena_runner_restart_does_not_consume_archive(tmp_path: Path):
+    log_file = tmp_path / "runner.log"
+    log_file.write_text("", encoding="utf-8")
+    archive = Path(str(log_file) + ".1")
+    archive.write_text("retain-me", encoding="utf-8")
+
+    result = _rotate_arena_runner_log(log_file)
+
+    assert result.returncode == 0, result.stderr
+    assert archive.read_text(encoding="utf-8") == "retain-me"
+    assert (archive.stat().st_mode & 0o777) == 0o600
+
+
+def test_arena_runner_log_rotation_rejects_symlink(tmp_path: Path):
+    log_file = tmp_path / "runner.log"
+    protected = tmp_path / "protected"
+    protected.write_text("unchanged", encoding="utf-8")
+    log_file.symlink_to(protected)
+
+    result = _rotate_arena_runner_log(log_file)
+
+    assert result.returncode != 0
+    assert "not a regular file" in result.stderr
+    assert protected.read_text(encoding="utf-8") == "unchanged"

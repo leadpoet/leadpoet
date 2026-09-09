@@ -1109,7 +1109,7 @@ def test_startup_checks_fail_closed_and_a_banned_configured_runner_stops_round_c
         svc.ArenaService(svc.ServiceConfig(**{**harness.service.config.__dict__, "object_store": BrokenObjects()})).startup_checks()
 
 
-def test_freeze_exempts_the_daily_baseline_from_the_challenger_cap_and_records_overflow(connect, tmp_path):
+def test_admission_exempts_baseline_and_rejects_overflow_before_acceptance(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=["Zulu-1", "Zulu-2", "Zulu-3", "Zulu-4", "Zulu-5"], runners=["alpha"])
     harness.max_challengers = 2
     harness.service = harness.build_service()  # the cap is a round default, read when the service is built
@@ -1119,7 +1119,10 @@ def test_freeze_exempts_the_daily_baseline_from_the_challenger_cap_and_records_o
     assert configuration["max_challengers"] == 2
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
-    submitted = [harness.submit(flavor, round_id) for flavor in harness.challengers]
+    submitted = [harness.submit(flavor, round_id) for flavor in harness.challengers[:2]]
+    for flavor in harness.challengers[2:]:
+        with pytest.raises(svc.ServiceError, match="submission_rejected:capacity.round_full"):
+            harness.submit(flavor, round_id)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     committed = service.advance_round(round_id)
     assert committed["status"] == "ok"
@@ -1131,7 +1134,7 @@ def test_freeze_exempts_the_daily_baseline_from_the_challenger_cap_and_records_o
     frozen = {submission_id for submission_id in submitted if by_id[submission_id]["status"] == "frozen"}
     assert frozen == {participant["submission_id"] for participant in participants} & set(submitted)
     assert len(frozen) == 2
-    rejected = [by_id[submission_id] for submission_id in submitted if submission_id not in frozen]
+    rejected = [row for row in by_id.values() if row["status"] == "rejected"]
     assert len(rejected) == 3
     assert all((row["status"], row["rejection_rule"]) == ("rejected", "capacity.round_full") for row in rejected)
     service.store.cancel_round(round_id, "operator_abort")
@@ -1304,6 +1307,24 @@ def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(conne
     assert len(failed_score_runs) == 2
     assert {run["terminal_cause"] for run in failed_score_runs} == {"judge_error"}
     assert {int(run["attempt"]) for run in failed_score_runs} == {1, 2}
+    assert {
+        tuple(sorted(run["result_doc"]["failure_diagnostic"].items()))
+        for run in failed_score_runs
+    } == {
+        (("error_class", "missing_output"), ("stage", "sandbox_output"))
+    }
+    assert all(
+        set(run["result_doc"])
+        == {
+            "schema_version",
+            "resource_summary",
+            "started_at",
+            "finished_at",
+            "terminal_status",
+            "failure_diagnostic",
+        }
+        for run in failed_score_runs
+    )
     execute_runs = harness.service.store.list_runs(
         harness.round_id,
         stage=1,

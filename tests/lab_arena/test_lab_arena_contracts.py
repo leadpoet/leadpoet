@@ -267,6 +267,28 @@ def test_run_result_reward_basis_and_scoring_plan_contracts():
         "started_at": "2026-09-02T01:00:00Z", "finished_at": "2026-09-02T01:01:00Z", "terminal_status": "accepted",
     }
     assert c.validate_run_result(run_result)["terminal_status"] == "accepted"
+    failed_result = dict(
+        run_result,
+        terminal_status="judge_error",
+        failure_diagnostic={
+            "stage": "scoring_output",
+            "error_class": "scoring_output_invalid",
+        },
+    )
+    assert c.validate_run_result(failed_result)["failure_diagnostic"] == {
+        "stage": "scoring_output",
+        "error_class": "scoring_output_invalid",
+    }
+    for unsafe in (
+        {"stage": "scorer", "error_class": "api_key=do-not-store"},
+        {
+            "stage": "scorer",
+            "error_class": "judge_error",
+            "detail": "raw exception text",
+        },
+    ):
+        with pytest.raises(c.ArenaContractError):
+            c.validate_run_result(dict(failed_result, failure_diagnostic=unsafe))
     with pytest.raises(c.ArenaContractError):
         c.validate_run_result(dict(run_result, runner_signature="not-part-of-the-contract"))
     basis = c.finalize_reward_basis({

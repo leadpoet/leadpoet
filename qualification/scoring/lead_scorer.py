@@ -47,7 +47,7 @@ import re
 import logging
 import unicodedata
 from datetime import date, datetime
-from typing import Any, Set, Optional, Tuple, List, Mapping
+from typing import Any, Set, Optional, Tuple, List, Mapping, Sequence
 from collections import Counter
 from urllib.parse import unquote, urlparse, urlsplit
 
@@ -377,6 +377,226 @@ _SCORER_REVERIFY_SYSTEM_PROMPT = (
     "the requested strict JSON object."
 )
 
+_STAGE_PROOF_NEGATED_OR_UNCERTAIN_RE = re.compile(
+    r"\b(?:not|never|no|without|unconfirmed|rumou?red|plans?|planned|"
+    r"planning|proposed|future|seeks?|seeking|expects?|expected|targets?|"
+    r"targeted|might|could|would)\b(?:\W+\w+){0,6}\W*$",
+    re.I,
+)
+_STAGE_PROOF_HISTORICAL_RE = re.compile(
+    r"\b(?:formerly|previously|once)\b(?:\W+\w+){0,6}\W*$",
+    re.I,
+)
+_STAGE_PROOF_FAILED_EVENT_RE = re.compile(
+    r"^.{0,40}\b(?:not\s+(?:close|closed|complete|completed)|cancelled|"
+    r"canceled|fell\s+through|superseded)\b",
+    re.I,
+)
+_STAGE_PROOF_PROSPECTIVE_EVENT_RE = re.compile(
+    r"^.{0,40}\b(?:planned|proposed|expected|discussions?|negotiations?|"
+    r"talks?)\b",
+    re.I,
+)
+_STAGE_PROOF_COMPLETED_EVENT_RE = re.compile(
+    r"\b(?:raised|closed|secured|completed|received)\b",
+    re.I,
+)
+_CALENDAR_MAY_LEFT_RE = re.compile(r"\b(?:in|on|since|during|of)\s*$", re.I)
+_CALENDAR_MAY_RIGHT_RE = re.compile(
+    r"^\W*(?:\d{1,2}(?:st|nd|rd|th)?(?:\W+\d{4})?|\d{4})\b",
+    re.I,
+)
+
+
+def _has_stage_proof_uncertainty(value: str) -> bool:
+    if _STAGE_PROOF_NEGATED_OR_UNCERTAIN_RE.search(value):
+        return True
+    for match in re.finditer(r"\bmay\b", value, re.I):
+        tail = value[match.end():]
+        if len(re.findall(r"\b\w+\b", tail)) > 6:
+            continue
+        if _CALENDAR_MAY_LEFT_RE.search(value[:match.start()]):
+            continue
+        if _CALENDAR_MAY_RIGHT_RE.search(tail):
+            continue
+        return True
+    return False
+
+
+def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
+    return (
+        re.compile(
+            rf"\b(?:raised|closed|secured|completed|announced|received)\b"
+            rf".{{0,60}}\b{label}\b",
+            re.I,
+        ),
+        re.compile(
+            rf"\b{label}\b.{{0,45}}\b(?:round|funding|financing|investment)\b",
+            re.I,
+        ),
+    )
+
+
+_VENTURE_STAGE_PROOF_PATTERNS = {
+    "seed": (
+        re.compile(
+            r"\b(?:pre[- ]seed|seed)(?:[- ]stage|\s+(?:round|funding|"
+            r"financing|investment|capital))\b",
+            re.I,
+        ),
+        re.compile(
+            r"\b(?:raised|closed|secured|completed|announced)\b.{0,40}"
+            r"\b(?:pre[- ]seed|seed)\b",
+            re.I,
+        ),
+    ),
+    "series a": _series_stage_proof_patterns(r"series\s+a"),
+    "series b": _series_stage_proof_patterns(r"series\s+b"),
+    "series c+": _series_stage_proof_patterns(r"series\s+[c-z]"),
+}
+_PUBLIC_STAGE_PROOF_PATTERNS = (
+    re.compile(r"\bpublicly\s+traded\b", re.I),
+    re.compile(r"\bpublicly\s+listed\s+(?:shares?|stock)\b", re.I),
+    re.compile(
+        r"\b(?:shares?|stock)\b.{0,35}\b(?:listed|trad(?:e|es|ed))\s+on\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:listed|traded)\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
+        r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|"
+        r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:nasdaq|nyse|lse|euronext|tsx|asx|hkex)[- ]listed\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:went|became)\s+public\b", re.I),
+    re.compile(
+        r"\bcompleted\s+(?:its|an?|the)\s+(?:ipo|initial\s+public\s+offering)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:ipo|initial\s+public\s+offering)\s+(?:closed|completed)\b",
+        re.I,
+    ),
+)
+_PRIVATE_EQUITY_LABEL = (
+    r"(?:private[- ]equity|private[- ]markets)(?:\s+(?:firm|fund|sponsor|"
+    r"owner|group))?"
+)
+_PRIVATE_EQUITY_CONTROL = (
+    r"(?:acquired\s+by|owned\s+by|controlled\s+by|taken\s+private\s+by|"
+    r"majority[- ]owned\s+by|controlling\s+owner|majority\s+stake|"
+    r"controlling\s+stake)"
+)
+_PRIVATE_EQUITY_STAGE_PROOF_PATTERNS = (
+    re.compile(
+        rf"\b{_PRIVATE_EQUITY_CONTROL}\b.{{0,100}}\b{_PRIVATE_EQUITY_LABEL}\b",
+        re.I,
+    ),
+    re.compile(
+        rf"\b{_PRIVATE_EQUITY_LABEL}\b.{{0,100}}\b(?:acquired|owns?|"
+        r"majority[- ]owned|controls?|controlling\s+owner|took\s+.{0,30}\s+private|"
+        r"majority\s+stake|controlling\s+stake)\b",
+        re.I,
+    ),
+)
+
+
+def _has_affirmed_stage_proof(
+    text: str,
+    patterns: Sequence[re.Pattern],
+    *,
+    reject_historical: bool = False,
+    reject_minority: bool = False,
+) -> bool:
+    """Reject negated, historical, prospective, and failed stage mentions."""
+
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            prefix = re.split(
+                r"[.!?;:\n]|\bbut\b|\bhowever\b",
+                text[max(0, match.start() - 100):match.start()],
+                flags=re.I,
+            )[-1]
+            suffix = text[match.end():match.end() + 60]
+            suffix_clause = re.split(r"[.!?;:\n]", suffix, maxsplit=1)[0]
+            context = text[max(0, match.start() - 40):match.end() + 60]
+            if (
+                _has_stage_proof_uncertainty(prefix)
+                or _has_stage_proof_uncertainty(match.group(0))
+            ):
+                continue
+            if reject_historical and (
+                _STAGE_PROOF_HISTORICAL_RE.search(prefix)
+                or _STAGE_PROOF_HISTORICAL_RE.search(match.group(0))
+            ):
+                continue
+            if _STAGE_PROOF_FAILED_EVENT_RE.search(suffix):
+                continue
+            match_names_completed_event = bool(
+                _STAGE_PROOF_COMPLETED_EVENT_RE.match(match.group(0))
+            )
+            if (
+                not match_names_completed_event
+                and (
+                    _STAGE_PROOF_PROSPECTIVE_EVENT_RE.search(suffix)
+                    or _has_stage_proof_uncertainty(suffix_clause)
+                )
+            ):
+                continue
+            if reject_minority and "minority" in context.casefold():
+                continue
+            return True
+    return False
+
+
+def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
+    """Require the quote itself to prove the reported funding/ownership stage."""
+
+    text = str(quote or "").strip()
+    if not text:
+        return False
+    public = _has_affirmed_stage_proof(
+        text,
+        _PUBLIC_STAGE_PROOF_PATTERNS,
+        reject_historical=True,
+    )
+    private_equity = _has_affirmed_stage_proof(
+        text,
+        _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS,
+        reject_historical=True,
+        reject_minority=True,
+    )
+    if public and private_equity:
+        return False
+    if public or private_equity:
+        expected = "public" if public else "private equity"
+        return observed == expected
+
+    proven_venture_stages = [
+        stage
+        for stage, patterns in _VENTURE_STAGE_PROOF_PATTERNS.items()
+        if _has_affirmed_stage_proof(text, patterns)
+    ]
+    if not proven_venture_stages:
+        return False
+    latest = max(
+        proven_venture_stages,
+        key=("seed", "series a", "series b", "series c+").index,
+    )
+    observed_category = (
+        "series c+" if observed in _SERIES_C_PLUS_MATCHING_STAGES else observed
+    )
+    if re.search(
+        rf"\bformerly\s+(?:an?\s+)?{re.escape(observed_category)}\b",
+        text,
+        re.I,
+    ):
+        return False
+    return observed_category == latest
+
 
 def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
     observed_value = verdict.get("observed_employee_count")
@@ -624,7 +844,10 @@ def _decision_from_observed_stage(verdict: dict, icp_stage: str) -> str:
         return COMPANY_FIT_UNAVAILABLE
     observed = _normalize_company_stage(observed_value)
     flag = strict_company_fit_boolean(verdict.get("stage_matches"))
-    if not observed:
+    stage_evidence = _dimension_web_evidence(verdict, "stage")
+    if not observed or not _stage_quote_supports_observation(
+        observed, stage_evidence["quote"]
+    ):
         return COMPANY_FIT_UNAVAILABLE
     canonical_match = _company_stage_matches(observed, icp_stage)
     if flag is None or flag is not canonical_match:
@@ -1321,6 +1544,13 @@ def _has_explicitly_unproven_fit_dimensions(
             if observed_value is not None:
                 return False
         elif observed_value is not None and observed_value != "":
+            normalized_stage = _normalize_company_stage(observed_value)
+            effective_evidence = _dimension_web_evidence(verdict, dimension)
+            if normalized_stage and not _stage_quote_supports_observation(
+                normalized_stage,
+                effective_evidence["quote"],
+            ):
+                continue
             return False
         if verdict.get(matches) is not None:
             return False
@@ -1482,7 +1712,13 @@ async def _llm_reverify_company(
             f'ONLY if you are confident it is a different stage. Use the latest '
             f'completed funding round or current ownership; an older Seed, Series A, '
             f'or Series B quote does not establish the current stage when later-round '
-            f'evidence exists. If the latest stage is unresolved, return null.')
+            f'evidence exists. The stage evidence quote must itself name the relevant '
+            f'completed round, current controlling private-equity ownership, or current '
+            f'public listing. A funding amount or total raised, a press release or '
+            f'public product launch, a "Privately Held" label, planned IPO, absence of '
+            f'funding data, or negated statement such as "not publicly traded" proves '
+            f'no stage. If the latest stage is unresolved, return null with empty stage '
+            f'observation and evidence fields.')
     locator_data: dict[str, Any] = {
         "registrable_dns_domain": prompt_identity["company"],
     }

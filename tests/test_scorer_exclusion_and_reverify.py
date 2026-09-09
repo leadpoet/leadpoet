@@ -491,6 +491,8 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
         "geography_matches": True,
         "observed_company_stage": "Series A",
         "stage_matches": True,
+        "stage_evidence_url": "https://evidence.example/stage",
+        "stage_evidence_quote": "Acme completed its Series A funding round.",
     }
 
     observed_match_flag_false = {
@@ -515,6 +517,10 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
     }
     if dimension == "industry":
         observed_conflict_flag_true["industry_activity_role"] = "unresolved"
+    elif dimension == "stage":
+        observed_conflict_flag_true["stage_evidence_quote"] = (
+            "Acme completed its Series C funding round."
+        )
     inconsistent_conflict = _reverify_decision(
         observed_conflict_flag_true,
         "",
@@ -532,6 +538,10 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
     }
     if dimension == "industry":
         supported_conflict_verdict["industry_activity_role"] = "unresolved"
+    elif dimension == "stage":
+        supported_conflict_verdict["stage_evidence_quote"] = (
+            "Acme completed its Series C funding round."
+        )
     supported_conflict = _reverify_decision(
         supported_conflict_verdict,
         "",
@@ -540,6 +550,182 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
     )
     assert supported_conflict.details["dimension_decisions"][dimension] == (
         COMPANY_FIT_MISMATCH
+    )
+
+
+@pytest.mark.parametrize(
+    ("requested", "observed", "matches", "quote", "expected"),
+    [
+        (
+            "Series A",
+            "Series A",
+            True,
+            "Acme closed its Series A financing.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series B",
+            "Series B",
+            True,
+            "Acme completed its Series B funding round in 2022.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series B",
+            "Series B",
+            True,
+            "In May 2024, Acme raised a Series B round.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series B",
+            "Series B",
+            True,
+            "Acme closed Series B in 2022 and plans a future Series C round.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series C+",
+            "Series D",
+            True,
+            "Acme completed a Series D funding round.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series C+",
+            "Series C+",
+            True,
+            "Acme completed a Series I funding round.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series A",
+            "Series D",
+            False,
+            "Acme completed a Series D funding round.",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            "Private Equity",
+            "Private Equity",
+            True,
+            "Acme was acquired by a private-equity firm that is its controlling owner.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series B",
+            "Private Equity",
+            False,
+            "A private-equity firm acquired Acme and is its controlling owner.",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
+            "Acme shares are publicly traded on Nasdaq.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
+            "Acme is Nasdaq-listed.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Private Equity",
+            "Public",
+            False,
+            "Acme shares are publicly traded on Nasdaq.",
+            COMPANY_FIT_MISMATCH,
+        ),
+    ],
+)
+def test_stage_decision_requires_category_specific_proof(
+    requested,
+    observed,
+    matches,
+    quote,
+    expected,
+):
+    verdict = _explicitly_unproven_fit_verdict()
+    verdict.update(
+        observed_company_stage=observed,
+        stage_matches=matches,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote=quote,
+    )
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        requested.casefold(),
+        icp=_icp(company_stage=requested),
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == expected
+
+
+@pytest.mark.parametrize(
+    ("observed", "matches", "quote"),
+    [
+        ("Series C+", False, "Maxio has raised $169M."),
+        (
+            "Public",
+            False,
+            "This press release announces general availability of Jupiter 6.0; "
+            "it provides no funding round.",
+        ),
+        ("Public", False, "Privately Held · Founded 1992 · 51-200 employees"),
+        ("Public", True, "Acme is not publicly traded."),
+        ("Public", True, "Acme stock is not traded on Nasdaq."),
+        ("Series C+", False, "Acme closed its Series B financing."),
+        ("Series B", True, "Acme was formerly a Series B company."),
+        (
+            "Series B",
+            True,
+            "Acme's Series B financing was superseded by debt financing.",
+        ),
+        (
+            "Series C+",
+            True,
+            "Acme's Series C funding is planned for next year.",
+        ),
+        (
+            "Series C+",
+            True,
+            "Acme may pursue a Series C funding round.",
+        ),
+        (
+            "Private Equity",
+            False,
+            "Acme received a minority investment from a private-equity firm.",
+        ),
+    ],
+)
+def test_stage_decision_rejects_unproven_or_contradictory_observations(
+    observed,
+    matches,
+    quote,
+):
+    verdict = _explicitly_unproven_fit_verdict()
+    verdict.update(
+        observed_company_stage=observed,
+        stage_matches=matches,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote=quote,
+    )
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "Series A",
+        icp=_icp(company_stage="Series A"),
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
     )
 
 
@@ -963,6 +1149,9 @@ def test_industry_prompt_keeps_requested_value_in_an_inert_data_boundary(
     assert "not to any unrelated product or service it supplies" in prompt
     assert "Use the latest completed funding round or current ownership" in prompt
     assert "older Seed, Series A, or Series B quote does not establish" in prompt
+    assert "funding amount or total raised" in prompt
+    assert 'a "Privately Held" label' in prompt
+    assert '"not publicly traded" proves no stage' in prompt
 
 
 def test_grounded_supplier_role_resolves_taxonomy_disagreement():
@@ -1119,17 +1308,30 @@ def test_llm_explicitly_unproven_fit_after_repair_is_classified(
     )
 
 
-def test_llm_repair_provider_failure_remains_retryable(monkeypatch):
+@pytest.mark.parametrize(
+    "repair_error",
+    ["provider HTTP 503", "provider response contained no JSON object"],
+)
+def test_llm_repair_provider_failure_remains_retryable(
+    monkeypatch,
+    repair_error,
+):
     import qualification.scoring.lead_scorer as scorer
 
     verdict = _explicitly_unproven_fit_verdict("employee_size")
+    verdict.update(
+        observed_company_stage="Public",
+        stage_matches=False,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote="Privately Held · Founded 1992",
+    )
     calls = []
 
     async def provider(**kwargs):
         calls.append(kwargs["telemetry_purpose"])
         if len(calls) == 1:
             return verdict, ""
-        return None, "provider HTTP 503"
+        return None, repair_error
 
     async def keep_employee_observation(candidate, *_args, **_kwargs):
         return candidate

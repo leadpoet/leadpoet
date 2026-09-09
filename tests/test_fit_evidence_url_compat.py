@@ -119,7 +119,11 @@ def _complete_verdict(*, name="Acme", website="https://acme.example.com"):
         verdict[f"{dimension}_evidence_url"] = (
             f"https://independent.example.com/{dimension}"
         )
-        verdict[f"{dimension}_evidence_quote"] = f"Verified {dimension}."
+        verdict[f"{dimension}_evidence_quote"] = (
+            "Acme completed its Series A funding round."
+            if dimension == "stage"
+            else f"Verified {dimension}."
+        )
     return verdict
 
 

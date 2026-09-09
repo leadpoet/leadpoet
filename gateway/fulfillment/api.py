@@ -24,6 +24,7 @@ from gateway.fulfillment.config import (
     FULFILLMENT_MINER_SUBMISSION_MULTIPLIER,
     epochs_to_seconds,
 )
+from gateway.config import BITTENSOR_NETWORK, BITTENSOR_NETUID
 import math
 from gateway.fulfillment.hashing import HASH_SCHEMA_VERSION, hash_request, verify_commit
 from gateway.fulfillment.models import (
@@ -1964,7 +1965,10 @@ async def get_banned_hotkeys():
 # GET /fulfillment/lab-arena-reward-basis — the Lab Arena king's signed basis
 # ---------------------------------------------------------------
 LAB_ARENA_REWARD_BASIS_VIEW = "lab_arena_reward_basis_v1"
-LAB_ARENA_REWARD_BASIS_COLUMNS = "round_id,effective_reward_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc"
+LAB_ARENA_REWARD_BASIS_COLUMNS = (
+    "round_id,effective_reward_epoch,reward_basis_hash,reward_basis_doc,"
+    "signing_key_doc,arena_network_name,arena_netuid"
+)
 
 
 def _collect_lab_arena_reward_basis_sync(epoch: int) -> dict:
@@ -1980,6 +1984,8 @@ def _collect_lab_arena_reward_basis_sync(epoch: int) -> dict:
     page = (
         supabase.table(LAB_ARENA_REWARD_BASIS_VIEW)
         .select(LAB_ARENA_REWARD_BASIS_COLUMNS)
+        .eq("arena_network_name", BITTENSOR_NETWORK)
+        .eq("arena_netuid", BITTENSOR_NETUID)
         .lte("effective_reward_epoch", int(epoch))
         .order("effective_reward_epoch", desc=True)
         .limit(1)
@@ -1996,6 +2002,8 @@ def _collect_lab_arena_reward_basis_sync(epoch: int) -> dict:
         or not isinstance(signing_key, dict)
         or basis.get("reward_basis_hash") != row.get("reward_basis_hash")
         or basis.get("effective_reward_epoch") != row.get("effective_reward_epoch")
+        or row.get("arena_network_name") != BITTENSOR_NETWORK
+        or row.get("arena_netuid") != BITTENSOR_NETUID
         or int(row.get("effective_reward_epoch")) > int(epoch)
     ):
         raise RuntimeError("lab arena reward basis row is incoherent")

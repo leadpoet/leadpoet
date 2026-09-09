@@ -60,8 +60,11 @@ def _allocation_share(calculation: Mapping[str, Any]) -> float:
 
 
 class CoordinatorWeightSourceV2:
-    def __init__(self, reader: SupabaseSourceReaderV2) -> None:
+    def __init__(self, reader: SupabaseSourceReaderV2, *, network_name: str = "finney") -> None:
+        if network_name not in ("finney", "test"):
+            raise CoordinatorWeightSourceV2Error("weight source network is invalid")
         self._reader = reader
+        self._network_name = network_name
 
     def resolve(
         self,
@@ -384,7 +387,7 @@ class CoordinatorWeightSourceV2:
             if lab_arena_rewards.rewards_enabled_from_environment(os.environ):
                 rows = self._read(
                     "lab_arena_reward_basis",
-                    {"epoch_id": context.epoch_id},
+                    {"epoch_id": context.epoch_id, "network_name": self._network_name, "netuid": proposed["netuid"]},
                     context,
                 )
                 if rows:
@@ -394,7 +397,9 @@ class CoordinatorWeightSourceV2:
             return dict(proposed)
         proposed_basis = value["lab_arena_reward_basis"]
         rows = self._read(
-            "lab_arena_reward_basis", {"epoch_id": context.epoch_id}, context
+            "lab_arena_reward_basis",
+            {"epoch_id": context.epoch_id, "network_name": self._network_name, "netuid": proposed["netuid"]},
+            context,
         )
         if len(rows) != 1:
             raise CoordinatorWeightSourceV2Error(
@@ -409,6 +414,8 @@ class CoordinatorWeightSourceV2:
             if (
                 measured.get("reward_basis_hash") != row.get("reward_basis_hash")
                 or int(measured["effective_reward_epoch"]) != int(row.get("effective_reward_epoch"))
+                or row.get("arena_network_name") != self._network_name
+                or row.get("arena_netuid") != proposed["netuid"]
                 or int(measured["effective_reward_epoch"]) > int(context.epoch_id)
             ):
                 raise lab_arena_rewards.LabArenaRewardError(

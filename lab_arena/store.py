@@ -627,10 +627,19 @@ class ArenaStore:
             columns=columns,
         )
 
-    def published_reward_bases(self, *, mode: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+    def published_reward_bases(
+        self, *, mode: Optional[str] = None,
+        network_name: Optional[str] = None, netuid: Optional[int] = None,
+        limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        if (network_name is None) != (netuid is None):
+            raise ArenaStoreError("round network filters must be supplied together")
         filters: Dict[str, Any] = {"status": "published"}
         if mode is not None:
             filters[ROUND_MODE_FILTER] = mode
+        if network_name is not None:
+            filters[ROUND_NETWORK_COLUMN] = str(network_name)
+            filters[ROUND_NETUID_COLUMN] = int(netuid)
         rows = self._transport.select(
             "lab_arena_rounds",
             filters=filters,

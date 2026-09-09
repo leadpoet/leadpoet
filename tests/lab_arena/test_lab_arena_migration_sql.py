@@ -34,6 +34,9 @@ NETWORK_SCOPE_SQL = (SCRIPTS / "189-lab-arena-round-network-scope.sql").read_tex
 SCORER_REFRESH_SQL = (SCRIPTS / "194-lab-arena-open-scorer-refresh.sql").read_text(
     encoding="utf-8"
 )
+REWARD_CHAIN_SCOPE_SQL = (
+    SCRIPTS / "197-lab-arena-reward-chain-scope.sql"
+).read_text(encoding="utf-8")
 HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
 HISTORICAL_UPLOAD_SHA256 = (
     "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
@@ -94,11 +97,22 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[191] == ["191-fresh-network-subnet-epoch-authority.sql"]
     assert numbered[193] == ["193-lab-arena-upload-recovery.sql"]
     assert numbered[194] == ["194-lab-arena-open-scorer-refresh.sql"]
+    assert numbered[197] == ["197-lab-arena-reward-chain-scope.sql"]
     arena_frontier = max(
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 194
+    assert arena_frontier == 197
+
+
+def test_reward_chain_scope_migration_scopes_every_reward_history_read():
+    assert "lab_arena_rounds_reward_chain_epoch_uq" in REWARD_CHAIN_SCOPE_SQL
+    assert REWARD_CHAIN_SCOPE_SQL.count(
+        "arena_network_name = v_round.arena_network_name"
+    ) >= 3
+    assert REWARD_CHAIN_SCOPE_SQL.count("arena_netuid = v_round.arena_netuid") >= 3
+    assert "published_at, arena_network_name, arena_netuid" in REWARD_CHAIN_SCOPE_SQL
+    assert "'version', 197" in REWARD_CHAIN_SCOPE_SQL
 
 
 def test_historical_upload_migration_is_retained_byte_for_byte():

@@ -1102,7 +1102,7 @@
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
     {
-      "ast_sha256": "sha256:81a08d87424ac087e74926bf4fb9dac0f149522e8feca48a3cbb546fdcb63e04",
+      "ast_sha256": "sha256:3e43e401fd7d82b2b6c68685cbd0572d8adf12667671e47fa1021bcea0c0851f",
       "path": "gateway/tee/coordinator_weight_source_v2.py",
       "symbol": "CoordinatorWeightSourceV2"
     },
@@ -3247,7 +3247,7 @@
       "symbol": "verify_required_supabase_v2_schema"
     },
     {
-      "ast_sha256": "sha256:7c73e27615973bc110635ec601d2316fbc4462d8cbd038f17b3174e2c6fc1bf7",
+      "ast_sha256": "sha256:00d0adf98d4416bd26e70c59eb1013617c573d088f0cef11aae04f62238525c2",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "QUERY_POLICIES"
     },
@@ -3257,7 +3257,7 @@
       "symbol": "SupabaseSourceReaderV2"
     },
     {
-      "ast_sha256": "sha256:2baf076f32d6a2f819d782585b05c37bca6ba223eba809d2270514e22f3d1b6b",
+      "ast_sha256": "sha256:4ed1c516cecc950efcbf1a3cbbb212ac96f4410bcab0d1dafb3a2cc33ef50def",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "_filters"
     },
@@ -3362,7 +3362,7 @@
       "symbol": "execute_v2_provider_request"
     },
     {
-      "ast_sha256": "sha256:c31b581cf9ae3afb4ba3a7a7a52274eede4409f8761b19ff441020fc1b0a6573",
+      "ast_sha256": "sha256:7712c593c0b00e287b10288d908cbffe2f6a00868f57c13a1c155d3649f11ea9",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_coordinator_job_manager"
     },
@@ -4667,7 +4667,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:34f2c108170a7d2521d76ca856dd9d8d2d56464819fc34922739e819736d7c7d",
-  "protected_source_commit": "3d091391cbe93f6b5d7a522bc65b0553863a2519",
+  "manifest_hash": "sha256:41a46571210142e49a8f3e25e300727fe01a0fe3f8728b009a24c0ec04ad0e13",
+  "protected_source_commit": "95ebe8a82bd136fb45b3c0420a208132a1107385",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

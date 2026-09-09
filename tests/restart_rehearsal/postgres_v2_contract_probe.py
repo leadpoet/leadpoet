@@ -322,6 +322,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION,
     "193-lab-arena-upload-recovery.sql",
     "194-lab-arena-open-scorer-refresh.sql",
+    "197-lab-arena-reward-chain-scope.sql",
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",

@@ -73,6 +73,7 @@ def test_candidate_retains_real_applied_arena_migration_history() -> None:
     assert {
         "scripts/193-lab-arena-upload-recovery.sql",
         "scripts/194-lab-arena-open-scorer-refresh.sql",
+        "scripts/197-lab-arena-reward-chain-scope.sql",
     } <= delta_paths
 
     without_history = [

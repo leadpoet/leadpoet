@@ -1906,7 +1906,12 @@ def get_v2_coordinator_job_manager():
             retry_policy_hash=retry_hashes["supabase"],
             origin=_v2_supabase_origin(configuration),
         )
-        weight_source = CoordinatorWeightSourceV2(source_reader)
+        weight_source = CoordinatorWeightSourceV2(
+            source_reader,
+            network_name=configuration["research_lab_execution_config"][
+                "epoch_authority"
+            ]["chain_signing_profile"]["network"],
+        )
         chain_source = CoordinatorChainSourceV2(
             execute_provider=get_v2_provider_broker().execute,
             retry_policy_hashes=retry_hashes,

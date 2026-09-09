@@ -452,7 +452,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (194,)
+        supported_versions = (197,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
@@ -1828,8 +1828,11 @@ class ArenaService:
         if configuration.get("mode") != "live" or configuration.get("rewards_enabled") is not True:
             return {"status": "disabled"}
         # A later no-winner round must not activate while an earlier accepted
-        # baseline is still unpublished. This is global, like Git ordering.
-        if self._store.pending_promotions(limit=1):
+        # baseline in the same chain scope is still unpublished.
+        network_name, netuid = self._chain_scope()
+        if self._store.pending_promotions(
+            network_name=network_name, netuid=netuid, limit=1
+        ):
             return {"status": "waiting_for_promotion"}
         publication = row.get("publication_doc") or {}
         decision = publication.get("king_decision") or {}
@@ -1839,7 +1842,9 @@ class ArenaService:
             and not row.get("baseline_promoted_at")
         ):
             return {"status": "waiting_for_promotion"}
-        prior = self._store.published_reward_bases(mode="live", limit=200)
+        prior = self._store.published_reward_bases(
+            mode="live", network_name=network_name, netuid=netuid, limit=200
+        )
         maximum_epoch = max((int(item["effective_reward_epoch"]) for item in prior if item.get("effective_reward_epoch") is not None), default=-1)
         effective_epoch = max(int(self._config.chain.current_settlement_epoch()) + 1, maximum_epoch + 1)
         usable = self._usable_reward_bases(prior)
@@ -2277,7 +2282,10 @@ class ArenaService:
                 if eligibility:
                     week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
         elif self._config.mode == "live":
-            rows = self._store.published_reward_bases(mode="live", limit=200)
+            network_name, netuid = self._chain_scope()
+            rows = self._store.published_reward_bases(
+                mode="live", network_name=network_name, netuid=netuid, limit=200
+            )
             bases = self._usable_reward_bases(rows)
             if bases:
                 governing = max(
@@ -2299,7 +2307,10 @@ class ArenaService:
     def public_reward_basis(self, epoch: int) -> Optional[Dict[str, Any]]:
         if self._config.mode != "live":
             return None
-        rows = self._store.published_reward_bases(mode="live", limit=200)
+        network_name, netuid = self._chain_scope()
+        rows = self._store.published_reward_bases(
+            mode="live", network_name=network_name, netuid=netuid, limit=200
+        )
         return rewards.governing_reward_basis(
             self._usable_reward_bases(rows), int(epoch)
         )
@@ -2347,7 +2358,9 @@ class ArenaService:
         # The split is decided only after the complete baseline is scored.
         # The private complement never enters the public response.
         disclosure = self._public_icp_disclosure(row)
-        if disclosure is None:
+        if disclosure is None or row["status"] not in (
+            "stage2_closed", "stage2_scoring", "stage2_judged", "scored", "published", "cancelled"
+        ):
             raise ServiceError("benchmark_not_public", 403)
         icps = self.benchmark_icps(round_id)
         return {

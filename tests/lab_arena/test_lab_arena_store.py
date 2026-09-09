@@ -306,7 +306,9 @@ def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
         statuses=("open", "committed"), mode="live",
         network_name="test", netuid=401, limit=20, offset=20
     )
-    store.published_reward_bases(mode="live", limit=200)
+    store.published_reward_bases(
+        mode="live", network_name="test", netuid=401, limit=200
+    )
     active = calls[0][1]
     rewards = calls[1][1]
     assert active["filters"] == {
@@ -319,6 +321,8 @@ def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
     assert rewards["filters"] == {
         "status": "published",
         "configuration_doc->>mode": "live",
+        "arena_network_name": "test",
+        "arena_netuid": 401,
     }
     assert rewards["limit"] == 200
 
@@ -332,6 +336,8 @@ def test_round_store_requires_the_network_filter_pair():
     store = ArenaStore(Transport())
     with pytest.raises(ArenaStoreError, match="supplied together"):
         store.list_rounds(mode="live", network_name="test")
+    with pytest.raises(ArenaStoreError, match="supplied together"):
+        store.published_reward_bases(mode="live", network_name="test")
     with pytest.raises(ArenaStoreError, match="supplied together"):
         store.list_rounds(mode="live", netuid=401)
 

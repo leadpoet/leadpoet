@@ -563,13 +563,17 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
 
         captured = {}
 
+        reward_queries = []
+
         class Store:
             @staticmethod
-            def pending_promotions(**_kwargs):
+            def pending_promotions(**kwargs):
+                reward_queries.append(("promotions", kwargs))
                 return []
 
             @staticmethod
-            def published_reward_bases(**_kwargs):
+            def published_reward_bases(**kwargs):
+                reward_queries.append(("bases", kwargs))
                 return prior
 
             @staticmethod
@@ -583,6 +587,8 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
         service._signer_lock = threading.Lock()
         service._config = SimpleNamespace(
             mode="live",
+            network_name="test",
+            netuid=401,
             chain=SimpleNamespace(current_settlement_epoch=lambda: 100),
             reward_signer_factory=None,
         )
@@ -605,6 +611,21 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
             },
         }
         assert service.activate_reward("arena-2026-09-02")["status"] == "activated"
+        assert reward_queries == [
+            (
+                "promotions",
+                {"network_name": "test", "netuid": 401, "limit": 1},
+            ),
+            (
+                "bases",
+                {
+                    "mode": "live",
+                    "network_name": "test",
+                    "netuid": 401,
+                    "limit": 200,
+                },
+            ),
+        ]
         return captured["basis"]
 
     assert activate()["king_outcome"] == "no_king"

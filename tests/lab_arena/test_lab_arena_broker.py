@@ -7,6 +7,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from urllib.parse import quote
 
 import pytest
 
@@ -17,6 +18,9 @@ KEY = "sk-or-v1-" + "k" * 40
 DL_KEY = "dl_secret_" + "e" * 30
 DOG_KEY = "dogsecret" + "d" * 30
 HOST_KEYS = {"openrouter": KEY, "deepline": DL_KEY, "scrapingdog": DOG_KEY}
+ECHO_KEY = "synthetic+/=query-key"
+ENCODED_ECHO_KEY = quote(ECHO_KEY, safe="")
+LOWERCASE_ENCODED_ECHO_KEY = ENCODED_ECHO_KEY.replace("%2B", "%2b").replace("%2F", "%2f").replace("%3D", "%3d")
 
 
 def price_table():
@@ -196,6 +200,78 @@ def test_scrapingdog_credential_goes_in_the_query_and_never_in_the_model_respons
     assert "premium=" not in sent["url"]  # the judge's premium tiers are declared fields, no longer pinned off
     assert DOG_KEY not in result.body.decode() and DOG_KEY not in json.dumps(result.call)
     assert result.call["reserved_microusd"] == 0 and store.calls[result.call["call_identity"]]["provider"] == "scrapingdog"
+
+
+@pytest.mark.parametrize(
+    ("provider_body", "response_header"),
+    (
+        (("<html>request api_key=%s</html>" % ECHO_KEY).encode(), ""),
+        (("<html>request api_key=%s</html>" % ENCODED_ECHO_KEY).encode(), ""),
+        (("<html>request api_key=%s</html>" % LOWERCASE_ENCODED_ECHO_KEY).encode(), ""),
+        (b'{"echo":"synthetic\\u002b\\u002f\\u003dquery-key"}', ""),
+        (b'{"echo":"synthetic\\u00252B\\u00252F\\u00253Dquery-key"}', ""),
+        (b"<html>ordinary provider content</html>", LOWERCASE_ENCODED_ECHO_KEY),
+    ),
+    ids=("literal", "url_encoded", "url_encoded_lowercase", "json_escaped", "json_escaped_url_encoded", "header"),
+)
+def test_scrapingdog_credential_echo_is_blocked_before_return_or_persistence(provider_body, response_header):
+
+    class EchoTransport(FakeTransport):
+        def send(self, **kwargs):
+            response = super().send(**kwargs)
+            if not response_header:
+                return response
+            return br.ProviderResponse(
+                response.status,
+                {**response.headers, "x-request-echo": response_header},
+                response.body,
+            )
+
+    broker, store, transport = make_broker(
+        transport=EchoTransport([(200, provider_body)]),
+        credential_for=lambda _context, _provider: ECHO_KEY,
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert "api_key=" + ENCODED_ECHO_KEY in transport.sent[0]["url"]
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    persisted_body = base64.b64decode(terminal["body_b64"])
+    assert ECHO_KEY.encode() not in persisted_body
+    assert ENCODED_ECHO_KEY.encode() not in persisted_body
+    assert not response_header or response_header not in json.dumps(terminal)
+
+
+@pytest.mark.parametrize(
+    "provider_body",
+    (b"<html>ordinary provider content</html>", b'{"text":"\\ud800"}'),
+    ids=("ordinary", "json_lone_surrogate"),
+)
+def test_benign_scrapingdog_text_is_returned_unchanged(provider_body):
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, provider_body)]),
+        credential_for=lambda _context, _provider: ECHO_KEY,
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 200 and result.body == provider_body
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert base64.b64decode(terminal["body_b64"]) == provider_body
 
 
 def test_openrouter_reserves_maximum_cost_and_settles_actual_from_pinned_table():

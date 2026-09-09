@@ -22,6 +22,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
+from urllib.parse import unquote_to_bytes
 
 import httpx
 
@@ -344,10 +345,17 @@ class ProviderResponse:
 
 
 def _response_contains_credential(response: ProviderResponse, secret: str) -> bool:
-    """Catch literal and JSON-escaped echoes before adaptation or persistence."""
+    """Catch literal, URL-encoded, and JSON-escaped echoes before persistence."""
 
-    if secret.encode("utf-8") in response.body or any(
-        secret in name or secret in value for name, value in response.headers.items()
+    secret_bytes = secret.encode("utf-8")
+
+    def contains_secret(value: bytes) -> bool:
+        return secret_bytes in value or secret_bytes in unquote_to_bytes(value)
+
+    if contains_secret(response.body) or any(
+        contains_secret(name.encode("utf-8", errors="surrogatepass"))
+        or contains_secret(value.encode("utf-8", errors="surrogatepass"))
+        for name, value in response.headers.items()
     ):
         return True
     try:
@@ -363,7 +371,9 @@ def _response_contains_credential(response: ProviderResponse, secret: str) -> bo
     pending = [parsed]
     while pending:
         value = pending.pop()
-        if isinstance(value, str) and secret in value:
+        if isinstance(value, str) and contains_secret(
+            value.encode("utf-8", errors="surrogatepass")
+        ):
             return True
         if isinstance(value, (list, tuple)):
             pending.extend(value)

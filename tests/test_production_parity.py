@@ -3882,6 +3882,11 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
                 "LANGUAGE sql STABLE AS $function$ "
                 f"SELECT $json${payload}$json$::jsonb $function$;"
             )
+        # This synthetic schema needs its own read grants. Real snapshot ACLs
+        # are restored by PostgreSQL and must not be broadened at HTTP startup.
+        statements.append(
+            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO service_role;"
+        )
         database._psql("\n".join(statements))
 
         activation = _chain_realized_activation_row()

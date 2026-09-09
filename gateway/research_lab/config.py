@@ -278,4 +278,9 @@ class ResearchLabGatewayConfig:
         return {
             "api_enabled": self.api_enabled,
             "production_writes_enabled": self.production_writes_enabled,
+            # Canonical restart verifies this shared latch in the live process.
+            # Arena admission is controlled by its separate restart guard.
+            "miner_submissions_enabled": _truthy(
+                "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
+            ),
         }

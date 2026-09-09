@@ -4,6 +4,8 @@ import inspect
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from gateway.research_lab import api
 from gateway.research_lab.admin import build_parser
@@ -12,6 +14,32 @@ from gateway.tee.coordinator_executor_v2 import COORDINATOR_OPERATIONS_V2
 from gateway.tee.reward_executor_v2 import execute_reward_decision_v2
 from gateway.tee.supabase_source_v2 import QUERY_POLICIES
 from leadpoet_verifier.economics import allocate_research_lab_epoch
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_live_status_exposes_shared_restart_latch_without_source_controls(monkeypatch, enabled):
+    from gateway.tee import gateway_miner_maintenance_restart_v1 as maintenance
+
+    monkeypatch.setenv("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED", str(enabled).lower())
+    app = FastAPI()
+    app.include_router(api.router)
+    response = TestClient(app).get("/research-lab/status")
+    assert response.status_code == 200
+    status = response.json()
+    assert status["miner_submissions_enabled"] is enabled
+    assert not any("source_add" in key for key in status)
+    monkeypatch.setattr(maintenance, "_production_parity_clone_authority", lambda *a, **k: {"verified": True})
+    kwargs = {
+        "deploy_commit": "a" * 40,
+        "candidate_tree_hash": "b" * 40,
+        "runtime_environment": {"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false"},
+        "runtime_status": status,
+    }
+    if enabled:
+        with pytest.raises(maintenance.GatewayMinerMaintenanceRestartError, match="not disabled"):
+            maintenance.verify_gateway_miner_maintenance_runtime_state(**kwargs)
+    else:
+        assert maintenance.verify_gateway_miner_maintenance_runtime_state(**kwargs)["runtime_status"] == "disabled"
 
 
 def test_source_intake_routes_operations_and_configuration_are_absent():

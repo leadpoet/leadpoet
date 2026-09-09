@@ -1080,7 +1080,11 @@ async def test_default_allocation_uses_frontier_without_legacy_readiness(
 
 
 @pytest.mark.asyncio
-async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
+@pytest.mark.parametrize("historical_source_add", (False, True))
+async def test_default_allocation_recovers_exact_current_frontier(
+    monkeypatch,
+    historical_source_add,
+):
     frontier = _frontier(epoch=100)
     parent_roots = [
         "sha256:" + "%064x" % index for index in range(1, 258)
@@ -1094,19 +1098,28 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
         "champion_obligations": [],
         "settlement_frontier": frontier,
     }
+    if historical_source_add:
+        source_state["source_add_obligations"] = [
+            {"reward_ref": "source_add_reward:historical"}
+        ]
     allocation_payload = {"epoch": 100, "netuid": 71}
     allocation = {
         **allocation_payload,
         "allocation_hash": v2_authority.sha256_json(allocation_payload),
     }
+    allocation_inputs = {
+        "epoch": 100,
+        "policy": {},
+        "active_reimbursement_obligations": [],
+        "active_champion_obligations": [],
+    }
+    if historical_source_add:
+        allocation_inputs["active_source_add_obligations"] = list(
+            source_state["source_add_obligations"]
+        )
     authority_result = {
         "allocation": allocation,
-        "allocation_inputs": {
-            "epoch": 100,
-            "policy": {},
-            "active_reimbursement_obligations": [],
-            "active_champion_obligations": [],
-        },
+        "allocation_inputs": allocation_inputs,
         "source_state": source_state,
         "source_state_hash": v2_authority.sha256_json(source_state),
     }
@@ -1207,6 +1220,60 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
     assert recovered["receipt"] == source_receipt
     assert recovered["receipt_graph"] == source_graph
     assert recovered["replay_status"] == "durable_current_frontier"
+
+
+@pytest.mark.asyncio
+async def test_fresh_allocation_rejects_retired_source_add_projection(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    source_add_obligations = [
+        {"reward_ref": "source_add_reward:retired"}
+    ]
+    source_state = {
+        "epoch": 100,
+        "netuid": 71,
+        "policy": {},
+        "reimbursement_obligations": [],
+        "champion_obligations": [],
+        "source_add_obligations": source_add_obligations,
+        "settlement_frontier": _frontier(epoch=100),
+    }
+
+    async def load_parent_graphs(**_kwargs):
+        return []
+
+    async def execute(**_kwargs):
+        return _outcome(
+            {
+                "allocation": {"allocation_hash": HASH_A},
+                "allocation_inputs": {
+                    "epoch": 100,
+                    "policy": {},
+                    "active_reimbursement_obligations": [],
+                    "active_champion_obligations": [],
+                    "active_source_add_obligations": source_add_obligations,
+                },
+                "source_state": source_state,
+                "source_state_hash": v2_authority.sha256_json(source_state),
+            }
+        )
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="allocation source projection",
+    ):
+        await v2_authority.build_allocation_v2(
+            epoch_id=100,
+            netuid=71,
+            policy={},
+            execute=execute,
+            load_allocation_parent_graphs=load_parent_graphs,
+        )
 
 
 @pytest.mark.asyncio

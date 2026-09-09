@@ -900,6 +900,13 @@ async def build_allocation_v2(
             source_state.get("champion_obligations") or []
         ),
     }
+    if (
+        current_frontier_context is not None
+        and "source_add_obligations" in source_state
+    ):
+        expected_inputs["active_source_add_obligations"] = list(
+            source_state.get("source_add_obligations") or []
+        )
     fallback_obligations = list(
         source_state.get("fallback_reimbursement_obligations") or []
     )

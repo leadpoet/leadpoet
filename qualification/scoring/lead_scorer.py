@@ -1025,16 +1025,6 @@ async def _refresh_linkedin_employee_size_observation(
         invocation_cache["refresh_outcome"] = "retryable_failure"
         return unavailable
 
-    refresh_input_valid = (
-        _decision_from_observed_employee_size(dict(verdict), icp)
-        in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
-        and bool(
-            str(
-                _dimension_web_evidence(verdict, "employee_size").get("quote")
-                or ""
-            ).strip()
-        )
-    )
     profile_url = f"https://www.linkedin.com/company/{evidence_slug}"
     if not invocation_cache.get("attempted"):
         invocation_cache["attempted"] = True
@@ -1063,10 +1053,10 @@ async def _refresh_linkedin_employee_size_observation(
         current.get("outcome")
         == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
     ):
+        # The identity-bound current profile controls this dimension even when
+        # the separate model observation was malformed or incomplete.
         invocation_cache["refresh_outcome"] = (
             CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
-            if refresh_input_valid
-            else "retryable_failure"
         )
         return unavailable
     employee_count = current.get("employee_count")

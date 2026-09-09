@@ -455,6 +455,8 @@ def test_exact_profile_empty_text_is_insufficient(monkeypatch):
     [
         ("1", False, "11-50", COMPANY_FIT_MATCH),
         ("11-50", True, "51-200", COMPANY_FIT_MISMATCH),
+        ("1-10", True, "11-50", COMPANY_FIT_MATCH),
+        (None, None, "51-200", COMPANY_FIT_MISMATCH),
     ],
 )
 def test_current_profile_replaces_stale_linkedin_match_or_mismatch(
@@ -552,13 +554,28 @@ def test_failed_refresh_clears_stale_size_and_is_reused_on_schema_repair(monkeyp
     assert original_verdict["employee_size_matches"] is False
 
 
-def test_successful_profile_without_size_is_reused_as_insufficient(monkeypatch):
+@pytest.mark.parametrize(
+    ("observed_size", "size_matches"),
+    [
+        ("1", False),
+        ("1-10", True),
+        (None, None),
+    ],
+)
+def test_successful_profile_without_size_is_reused_as_insufficient(
+    monkeypatch,
+    observed_size,
+    size_matches,
+):
     provider_calls = []
     fetches = []
 
     async def provider(**kwargs):
         provider_calls.append(kwargs["telemetry_purpose"])
-        return _verdict(), ""
+        return _verdict(
+            observed_size=observed_size,
+            size_matches=size_matches,
+        ), ""
 
     async def fetch(url):
         fetches.append(url)

@@ -51,6 +51,8 @@ def _publish(
     crowned: bool,
     network_name: str | None = None,
     netuid: int | None = None,
+    evaluation_date: str | None = None,
+    published_at: str = "2026-09-04T00:00:00Z",
 ) -> str:
     constants = rewards.reward_constants_document()
     configuration = {
@@ -72,8 +74,9 @@ def _publish(
     with control.cursor() as cursor:
         cursor.execute(
             "UPDATE public.lab_arena_rounds SET status = 'scored', "
-            "participants = %s::jsonb, finalists = '[]'::jsonb WHERE round_id = %s",
-            (json.dumps(participants), round_id),
+            "participants = %s::jsonb, finalists = '[]'::jsonb, "
+            "evaluation_date = %s WHERE round_id = %s",
+            (json.dumps(participants), evaluation_date, round_id),
         )
     winner_id = round_id + "-miner"
     baseline_id = round_id + "-baseline"
@@ -98,7 +101,6 @@ def _publish(
         "king_hotkey": miner if crowned else "",
         "winner_submission_id": winner_id if crowned else None,
     }
-    published_at = "2026-09-04T00:00:00Z"
     publication = {
         "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
         "round_id": round_id,

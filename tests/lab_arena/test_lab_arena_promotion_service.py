@@ -6,6 +6,7 @@ These tests use persisted scoring fixtures and do not claim live ICP execution.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 
@@ -62,6 +63,7 @@ def _service(
     return svc.ArenaService(
         svc.ServiceConfig(
             mode="live",
+            clock=lambda: datetime(2026, 9, 9, tzinfo=timezone.utc),
             store=store,
             object_store=objects,
             signer=signer,
@@ -90,6 +92,8 @@ def _winner(store, control, objects, round_id: str, payload: bytes) -> str:
         baseline_score=50,
         miner_score=60,
         crowned=True,
+        evaluation_date="2026-09-07",
+        published_at="2026-09-08T00:00:00Z",
     )
     submission_id = round_id + "-miner"
     source_ref = f"arena/{round_id}/sources/{submission_id}.tar.gz"
@@ -98,7 +102,8 @@ def _winner(store, control, objects, round_id: str, payload: bytes) -> str:
         cursor.execute(
             "INSERT INTO public.lab_arena_submissions "
             "(submission_id, round_id, miner_hotkey, status, is_king, source_ref, "
-            "source_size_bytes) VALUES (%s, %s, %s, 'frozen', FALSE, %s, %s)",
+            "source_size_bytes, consent) VALUES (%s, %s, %s, 'frozen', FALSE, %s, %s, "
+            "'{\"public_rerun\":true}'::jsonb)",
             (submission_id, round_id, MINER_A, source_ref, len(payload)),
         )
     return submission_id

@@ -6814,6 +6814,26 @@ def test_rehearsal_routes_provider_boot_credentials_to_candidate_runtime(
         ),
     ]
 
+    for method in (
+        "v2_list_encrypted_artifacts",
+        "v2_export_encrypted_artifact",
+        "v2_verify_encrypted_artifact_persistence",
+        "v2_get_job_kms_recipient",
+        "v2_provision_job_encrypted_secret",
+        "v2_release_job_credentials",
+    ):
+        params = {"job_id": "shared-settlement-job"}
+        result = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            "gateway_coordinator", method, params,
+        )
+        assert result["method"] == method
+        assert runtime.calls[-1] == (method, params)
+
+    with pytest.raises(ValueError, match="unknown method"):
+        rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            "gateway_coordinator", "v2_get_source_add_ingress_recipient", {},
+        )
+
 def test_rehearsal_driver_must_match_frozen_harness_commit(
     monkeypatch,
     tmp_path,

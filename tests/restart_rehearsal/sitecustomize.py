@@ -2640,6 +2640,18 @@ def _handle_gateway_enclave_rpc(
                 method, dict(params)
             )
         )
+    if role == "gateway_coordinator" and method in {
+        "v2_list_encrypted_artifacts",
+        "v2_export_encrypted_artifact",
+        "v2_verify_encrypted_artifact_persistence",
+        "v2_get_job_kms_recipient",
+        "v2_provision_job_encrypted_secret",
+        "v2_release_job_credentials",
+    }:
+        objects = _gateway_runtime_objects(role, role_state)
+        return _unwrap_candidate_rpc(
+            objects["tee_service"].handle_v2_runtime_rpc(method, dict(params))
+        )
     if method == "v2_get_boot_identity" and empty_params:
         return _local_boot_identity(role, config_hash)
     if method == "v2_get_transport_certificate" and empty_params:

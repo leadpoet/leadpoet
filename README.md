@@ -77,8 +77,6 @@ The miner will ask which mode to run:
 
 - **Agent Competition**
 - **Fulfillment**
-- **Submit API Source**
-- **Check API Source Submissions**
 
 ### Research Lab
 
@@ -191,36 +189,6 @@ hidden while miners submit. On Day 1, submissions close, all twenty of Day 0's
 ICPs become public, and the frozen baseline and submitted models are evaluated
 on that same set. Code, final scores, and all per-ICP scores become public when
 evaluation completes. Day 1's new ICP set stays hidden until Day 2.
-
-#### Submit API Source
-
-Choose **Submit API Source** in the miner menu. You only need to provide the API's public integration details:
-
-- The source/API name and source kind.
-- Its HTTPS API base URL and public documentation URL.
-- The authentication type (`none`, API key, or bearer token) and rate-limit notes.
-- At least one working endpoint example: `GET` or `POST`, a relative path, what it does, and an example query or JSON body.
-
-Provenance notes and third-party reference URLs are optional. Do not submit API keys or other secrets; an operator adds any required credential after submission.
-
-The gateway checks that the source manifest is credible, novel, and not already
-in the active model. Duplicate, already-integrated, and invalid submissions
-receive the same generic failure response and do not earn rewards. A submission
-that passes the measured provenance precheck automatically receives **0.2% of
-emissions per epoch for 20 epochs**. Leg 1 is processed FIFO and currently
-allows up to 50 approvals per UTC day; separate per-hotkey anti-spam limits also
-apply. Operator testing and catalog provisioning happen later and do not gate
-Leg 1; only provisioned catalog sources can be used by approved product
-integrations.
-
-Choose **Check API Source Submissions** to view your own submission decisions
-and Leg 1 reward state. The miner signs this read request with the same hotkey
-that made the submission. The gateway returns only that hotkey's records and
-safe, public reason categories. It does not show another miner's submissions,
-raw validation evidence, duplicate matches, catalog contents, or sources used
-by the current model. An **approved** result means that the automated Leg 1
-approval boundary passed; it does not mean that the source is already in the
-catalog or model.
 
 ### Fulfillment
 

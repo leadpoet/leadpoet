@@ -217,6 +217,14 @@ def test_testnet_privacy_guards_preserve_mainnet_and_private_worker_routes(monke
     )
     assert blocked_results.status_code == 403
     assert blocked_results.json() == {"detail": "testnet results are private"}
+    for path in (
+        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2",
+        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/submissions",
+        "/testnet/arena/v1/submissions/submission-1/code",
+    ):
+        blocked = client.get(path)
+        assert blocked.status_code == 403
+        assert blocked.json() == {"detail": "testnet evaluation is private"}
     assert observed == [
         (
             "GET",
@@ -233,6 +241,29 @@ def test_testnet_privacy_guards_preserve_mainnet_and_private_worker_routes(monke
             True,
         ),
     ]
+
+
+def test_testnet_disclosure_guards_do_not_block_mainnet_reads(monkeypatch):
+    observed = []
+
+    async def forward(method, path, *, query, body, headers, testnet=False):
+        observed.append((method, path, testnet))
+        return httpx.Response(200, content=b'{}')
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = _app()
+    paths = (
+        "v1/rounds/arena-2026-09-05",
+        "v1/rounds/arena-2026-09-05/submissions",
+        "v1/submissions/submission-1/code",
+    )
+
+    for path in paths:
+        assert client.get("/arena/" + path).status_code == 200
+
+    assert observed == [("GET", path, False) for path in paths]
 
 
 def test_sidecar_destination_is_fixed_by_network(monkeypatch):

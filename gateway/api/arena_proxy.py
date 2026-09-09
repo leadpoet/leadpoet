@@ -59,6 +59,35 @@ def _is_public_results_path(arena_path: str) -> bool:
     )
 
 
+def _is_public_round_detail_path(arena_path: str) -> bool:
+    parts = arena_path.split("/")
+    return (
+        len(parts) == 3
+        and parts[:2] == ["v1", "rounds"]
+        and parts[2] not in {"", ".", ".."}
+    )
+
+
+def _is_public_submissions_path(arena_path: str) -> bool:
+    parts = arena_path.split("/")
+    return (
+        len(parts) == 4
+        and parts[:2] == ["v1", "rounds"]
+        and parts[2] not in {"", ".", ".."}
+        and parts[3] == "submissions"
+    )
+
+
+def _is_public_source_code_path(arena_path: str) -> bool:
+    parts = arena_path.split("/")
+    return (
+        len(parts) == 4
+        and parts[:2] == ["v1", "submissions"]
+        and parts[2] not in {"", ".", ".."}
+        and parts[3] == "code"
+    )
+
+
 async def _bounded_body(request: Request, *, limit: int = _MAX_REQUEST_BYTES) -> bytes:
     declared = request.headers.get("content-length")
     if declared is not None:
@@ -121,10 +150,16 @@ async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
     if request.method == "GET" and _is_public_benchmark_path(arena_path):
         raise HTTPException(status_code=403, detail="testnet benchmark is private")
     if request.method == "GET" and _is_public_results_path(arena_path):
-        # The current testnet worker predates the ten-ICP disclosure boundary
-        # and can return all twenty results. Keep it private until the worker
-        # serves the current allow-listed result projection.
         raise HTTPException(status_code=403, detail="testnet results are private")
+    if request.method == "GET" and (
+        _is_public_round_detail_path(arena_path)
+        or _is_public_submissions_path(arena_path)
+        or _is_public_source_code_path(arena_path)
+    ):
+        raise HTTPException(status_code=403, detail="testnet evaluation is private")
+    # Temporary compatibility boundary: the current testnet worker predates
+    # publication-gated results, source, and finalist projections. Remove these
+    # GET guards together only after that worker is upgraded and verified.
     return await _proxy_request(arena_path, request, testnet=True)
 
 

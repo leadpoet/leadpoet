@@ -1637,6 +1637,8 @@ class Runner:
             # until it has nothing to lease or this call reaches its claim cap.
             while taken < max_claims:
                 if not self._slots.acquire(blocking=False):
+                    if not futures:
+                        break
                     done, futures = wait(
                         futures,
                         return_when=FIRST_COMPLETED,

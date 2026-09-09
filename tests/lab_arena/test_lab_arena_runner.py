@@ -469,10 +469,26 @@ def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):
         make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=2)
     )
     slow_release = threading.Event()
+    quick_release = threading.Event()
     queued_started = threading.Event()
+    slots_full = threading.Event()
     state_lock = threading.Lock()
     active = 0
     max_active = 0
+
+    real_slots = runner_._slots
+
+    class ObservableSlots:
+        def acquire(self, *args, **kwargs):
+            acquired = real_slots.acquire(*args, **kwargs)
+            if not acquired:
+                slots_full.set()
+            return acquired
+
+        def release(self):
+            real_slots.release()
+
+    runner_._slots = ObservableSlots()
 
     def run_lease(run_lease):
         nonlocal active, max_active
@@ -482,6 +498,8 @@ def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):
         try:
             if run_lease["run_id"] == "slow":
                 assert slow_release.wait(timeout=3)
+            elif run_lease["run_id"] == "quick":
+                assert quick_release.wait(timeout=3)
             elif run_lease["run_id"] == "queued":
                 queued_started.set()
         finally:
@@ -490,17 +508,39 @@ def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):
             runner_._slots.release()
 
     runner_._run_lease = run_lease
+    caller = ThreadPoolExecutor(max_workers=1)
     try:
-        with ThreadPoolExecutor(max_workers=1) as caller:
-            result = caller.submit(runner_.run_once, max_claims=3)
-            assert queued_started.wait(timeout=2)
-            assert not result.done()
-            slow_release.set()
-            assert result.result(timeout=2) == 3
+        result = caller.submit(runner_.run_once, max_claims=3)
+        assert slots_full.wait(timeout=2)
+        quick_release.set()
+        assert queued_started.wait(timeout=2)
+        assert not result.done()
+        slow_release.set()
+        assert result.result(timeout=2) == 3
         assert max_active == 2
         assert [item["body"]["declared_parallelism"] for item in api.claims] == [2, 2, 2]
     finally:
+        quick_release.set()
         slow_release.set()
+        caller.shutdown(wait=True)
+        runner_.close()
+
+
+def test_run_once_returns_when_its_only_slot_is_already_occupied(tmp_path):
+    api = FakeApi([])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(
+        make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=1)
+    )
+    assert runner_._slots.acquire(blocking=False)
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(runner_.run_once)
+        assert result.result(timeout=1) == 0
+        assert api.claims == []
+    finally:
+        runner_._slots.release()
+        caller.shutdown(wait=True)
         runner_.close()
 
 

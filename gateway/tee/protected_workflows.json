@@ -3372,6 +3372,16 @@
       "symbol": "weights_storage_key"
     },
     {
+      "ast_sha256": "sha256:9c553ecfd1306c77619a89988de03f42dcdd5e3f4c0e26280d2490a6f32c2622",
+      "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
+      "symbol": "_HISTORICAL_SOURCE_ADD_CATEGORY"
+    },
+    {
+      "ast_sha256": "sha256:b96fe8e4ecc4ca6203683d1641192317762a3a23fcb6cf15ba11c6759b3f2659",
+      "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
+      "symbol": "_HISTORICAL_SOURCE_ADD_SCOPE"
+    },
+    {
       "ast_sha256": "sha256:e42729deac58c01dd354e30e5d897bef3665d344e522d21afdb902b600f72976",
       "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
       "symbol": "build_compact_published_weight_authority_v2"
@@ -3387,7 +3397,7 @@
       "symbol": "verify_compact_published_weight_authority_v2"
     },
     {
-      "ast_sha256": "sha256:518190c71c2c4acbf3a25e9e581bea8e3e310f4f2c00023f26de321409989f88",
+      "ast_sha256": "sha256:a7cc58bd58614603391323dc537341107254acd65529ebddc0044c5e635652c5",
       "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
       "symbol": "verify_compact_weight_submission_v2"
     },
@@ -4102,7 +4112,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:cf275cc1b9acb93821a9d6c1d5abd1b4f65510842b5f001430975b0ad1f18a68",
-  "protected_source_commit": "4b5d6f07508bb4800ba60fb18f493472f3d3f600",
+  "manifest_hash": "sha256:741aded6546b7508b918cfb3140e72763818e12f991ff3cde353a2b862128dd7",
+  "protected_source_commit": "1aeb8714fa42b687923f9cbb9f2e988c9ade9fc3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

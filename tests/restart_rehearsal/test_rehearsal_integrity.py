@@ -3030,6 +3030,38 @@ def test_gateway_boundary_registers_background_startup_schema_contracts() -> Non
     ).read_text(encoding="utf-8")
 
 
+def test_local_schema_probes_preserve_shared_settlement_reads(monkeypatch):
+    observed = []
+    monkeypatch.setattr(
+        rehearsal_sitecustomize, "_external_event",
+        lambda *args, **kwargs: observed.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize, "_current_settlement_epoch_id", lambda: 30000,
+    )
+
+    def request(path):
+        return rehearsal_sitecustomize._local_urlopen(
+            urllib.request.Request(
+                "https://example.invalid/rest/v1/" + path,
+                headers={
+                    "Authorization": "Bearer rehearsal-secret",
+                    "apikey": "rehearsal-secret",
+                },
+            ),
+            timeout=10.0,
+        )
+
+    assert json.loads(request("validator_sourcing_epoch_inputs_v2?limit=0").read()) == []
+    activation = json.loads(request(
+        "research_lab_chain_realized_settlement_activation_v1?limit=2"
+    ).read())
+    assert activation[0]["first_epoch_id"] == 29999
+    assert all(args == ("supabase_postgrest", "select") for args, _ in observed)
+    with pytest.raises(ValueError, match="unknown schema probe"):
+        request("unknown")
+
+
 def test_local_urlopen_routes_authenticated_weight_handoff_to_real_gateway(
     tmp_path,
     monkeypatch,

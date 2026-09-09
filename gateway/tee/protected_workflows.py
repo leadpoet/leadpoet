@@ -342,7 +342,6 @@ PROTECTED_SYMBOLS = {
     ),
     "research_lab/eval/provider_evidence_cache.py": (
         "canonical_request_fingerprint",
-        "icp_evidence_cache_key",
         "build_evidence_cache_from_trace_entries",
         "merge_evidence_caches",
     ),

@@ -461,7 +461,14 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def runsc_run_command(config: RuntimeConfig, runsc_root: Path, bundle: Path, sandbox_id: str) -> List[str]:
+def runsc_run_command(
+    config: RuntimeConfig,
+    runsc_root: Path,
+    bundle: Path,
+    sandbox_id: str,
+    *,
+    pid_file: Path,
+) -> List[str]:
     return [
         str(config.runsc_path),
         "--root=%s" % runsc_root,
@@ -474,6 +481,7 @@ def runsc_run_command(config: RuntimeConfig, runsc_root: Path, bundle: Path, san
         "--platform=%s" % config.platform,
         "run",
         "--bundle=%s" % bundle,
+        "--pid-file=%s" % pid_file,
         sandbox_id,
     ]
 
@@ -708,10 +716,10 @@ def run_sandbox(
 
     Writes the bundle, mounts the bounded output tmpfs, runs runsc with a hard
     deadline of ``wall_clock_seconds + TIMEOUT_GRACE_SECONDS``, kills on
-    timeout, reads ``companies.json`` into the result, then deletes the
-    sandbox, unmounts, and removes the output and bundle directories. Cleanup
-    runs every step even after a failure and raises ``SandboxCleanupError``
-    if any step failed.
+    timeout, requires runsc's container-creation pid file, reads
+    ``companies.json`` into the result, then deletes the sandbox, unmounts,
+    and removes the output and bundle directories. Cleanup runs every step
+    even after a failure and raises ``SandboxCleanupError`` if any step failed.
     """
 
     if not config.work_dir.is_dir():
@@ -721,6 +729,7 @@ def run_sandbox(
     require_safe_agent_mounts(spec)
     bundle = Path(tempfile.mkdtemp(prefix="lab-arena-%s-" % spec.sandbox_id, dir=config.work_dir))
     runsc_root = bundle / "runsc"
+    pid_file = bundle / "sandbox.pid"
     cleanup_errors: List[str] = []
     output_mounted = False
     process: Any = None
@@ -744,7 +753,13 @@ def run_sandbox(
         cpu_before, _ = rusage()
         started = clock()
         process = process_runner(
-            runsc_run_command(config, runsc_root, bundle, spec.sandbox_id),
+            runsc_run_command(
+                config,
+                runsc_root,
+                bundle,
+                spec.sandbox_id,
+                pid_file=pid_file,
+            ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -784,6 +799,18 @@ def run_sandbox(
             raise ArenaRuntimeError("sandbox pipes did not close")
         if stdout_capture.failed or stderr_capture.failed:
             raise ArenaRuntimeError("sandbox pipe read failed")
+        # runsc writes --pid-file only after container creation completes.
+        # Without it, the model process never reached the sandbox boundary.
+        try:
+            pid_file_mode = os.lstat(pid_file).st_mode
+        except OSError as exc:
+            raise RuntimeHostError(
+                "runsc exited before sandbox creation completed"
+            ) from exc
+        if not stat.S_ISREG(pid_file_mode):
+            raise RuntimeHostError(
+                "runsc exited before sandbox creation completed"
+            )
         cpu_after, max_rss = rusage()
         output_bytes: Optional[bytes] = None
         output_error: Optional[str] = None

@@ -10,6 +10,7 @@ import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring.lead_scorer import (
+    INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
     _industry_evidence_decision,
     _llm_reverify_company,
     _matches_exclusion_list,
@@ -73,6 +74,52 @@ def _complete_industry_disagreement_verdict():
             for dimension in ("employee_size", "industry", "geography")
         },
     }
+
+
+def _explicitly_unproven_fit_verdict(*dimensions):
+    verdict = {
+        "observed_company_name": "Acme",
+        "observed_company_website": "https://acme.com/about",
+        "observed_company_linkedin": "",
+        "observed_employee_count": "51-200",
+        "employee_size_matches": True,
+        "employee_size_evidence_url": "https://evidence.example/employee-size",
+        "employee_size_evidence_quote": "Acme has 51-200 employees.",
+        "observed_industry": "Software",
+        "observed_subindustry": "SaaS",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_url": "https://evidence.example/industry",
+        "industry_evidence_quote": "Acme supplies SaaS software.",
+        "observed_hq_country": "United States",
+        "observed_hq_state": "",
+        "geography_matches": True,
+        "geography_evidence_url": "https://evidence.example/geography",
+        "geography_evidence_quote": "Acme is headquartered in the US.",
+        "observed_company_stage": "Series A",
+        "stage_matches": True,
+        "stage_evidence_url": "https://evidence.example/stage",
+        "stage_evidence_quote": "Acme announced its Series A.",
+        "attribute_satisfied": None,
+        "required_attribute_evidence_url": "",
+        "required_attribute_evidence_quote": "",
+        "reason": "Some requested fit evidence could not be established.",
+    }
+    if "employee_size" in dimensions:
+        verdict.update(
+            observed_employee_count=None,
+            employee_size_matches=None,
+            employee_size_evidence_url="",
+            employee_size_evidence_quote="",
+        )
+    if "stage" in dimensions:
+        verdict.update(
+            observed_company_stage="",
+            stage_matches=None,
+            stage_evidence_url="",
+            stage_evidence_quote="",
+        )
+    return verdict
 
 
 def _complete_cinchy_industry_verdict():
@@ -1025,6 +1072,140 @@ def test_llm_incomplete_verdict_still_uses_schema_repair(
     ]
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert "failure_class" not in result.details
+
+
+@pytest.mark.parametrize(
+    "unproven_dimensions",
+    [("employee_size",), ("stage",), ("employee_size", "stage")],
+)
+def test_llm_explicitly_unproven_fit_after_repair_is_classified(
+    monkeypatch,
+    unproven_dimensions,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    verdict = _explicitly_unproven_fit_verdict(*unproven_dimensions)
+    calls = []
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return verdict, ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company().model_copy(update={"company_stage": "Series A"}),
+            _icp(company_stage="Series A"),
+            require_company_fit_dimensions=True,
+        )
+    )
+
+    assert calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == (
+        INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+    )
+
+
+def test_llm_repair_provider_failure_remains_retryable(monkeypatch):
+    import qualification.scoring.lead_scorer as scorer
+
+    verdict = _explicitly_unproven_fit_verdict("employee_size")
+    calls = []
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        if len(calls) == 1:
+            return verdict, ""
+        return None, "provider HTTP 503"
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company().model_copy(update={"company_stage": "Series A"}),
+            _icp(company_stage="Series A"),
+            require_company_fit_dimensions=True,
+        )
+    )
+    breakdown = {
+        "final_score": 0.0,
+        "failure_reason": f"Company fit unavailable: {result.reason}",
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    }
+
+    assert calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert "failure_class" not in result.details
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+@pytest.mark.parametrize("dimension", ["employee_size", "stage"])
+def test_null_fit_with_nested_claimed_evidence_remains_retryable(
+    monkeypatch,
+    dimension,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    verdict = _explicitly_unproven_fit_verdict(dimension)
+    verdict["dimension_evidence"] = {
+        dimension: {
+            "url": f"https://evidence.example/{dimension}",
+            "quote": f"Claimed {dimension} proof.",
+        }
+    }
+
+    async def provider(**_kwargs):
+        return verdict, ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company().model_copy(update={"company_stage": "Series A"}),
+            _icp(company_stage="Series A"),
+            require_company_fit_dimensions=True,
+        )
+    )
+    breakdown = {
+        "final_score": 0.0,
+        "failure_reason": f"Company fit unavailable: {result.reason}",
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    }
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "failure_class" not in result.details
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
 
 
 def test_llm_missing_activity_role_can_repair_without_an_extra_kind_of_call(

@@ -171,7 +171,28 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert 'sys.path.append(str(site_packages))' in source
     assert "leadpoet.local_readiness_python.v1" in source
     assert "pure readiness imports loaded the validator wallet dependency" in source
-    assert source.count("run_local_readiness_python ") == 11
+    readiness_callers = set()
+    current_function = ""
+    for line in source.splitlines():
+        function = re.fullmatch(r"([a-zA-Z0-9_]+)\(\) \{", line)
+        if function is not None:
+            current_function = function.group(1)
+        if "run_local_readiness_python " in line:
+            readiness_callers.add(current_function)
+    assert {
+        "preflight_local_readiness_python",
+        "invalidate_deploy_readiness",
+        "validate_validator_initial_release_requirements",
+        "validate_gateway_final_release_authority",
+        "fetch_and_install_gateway_counterpart_lineage",
+        "bind_component_validator_to_gateway_release_authority",
+        "authorize_validator_lab_arena_restart",
+        "mark_validator_lab_arena_ready",
+        "prepare_and_publish_paired_local_release_channel",
+        "verify_gateway_release",
+        "verify_validator_release",
+        "finalize_deploy_readiness",
+    } <= readiness_callers
     assert 'PYTHONPATH="$ROOT" python3' not in source
     assert "/health/v2-authority" in source
     assert "attestation = get('/attest')" in source

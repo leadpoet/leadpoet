@@ -208,6 +208,52 @@ def _icp() -> ICPPrompt:
     )
 
 
+def _structured_fit_verdict_with_unproven(dimension: str) -> dict:
+    verdict = {
+        "observed_company_name": "Strand Therapeutics",
+        "observed_company_website": "https://strandtx.com/about",
+        "observed_company_linkedin": "https://linkedin.com/company/strandtx",
+        "observed_employee_count": "51-200",
+        "employee_size_matches": True,
+        "employee_size_evidence_url": "https://evidence.example/employee-size",
+        "employee_size_evidence_quote": "Strand has 51-200 employees.",
+        "observed_industry": "Biotechnology",
+        "observed_subindustry": "Therapeutics",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_url": "https://evidence.example/industry",
+        "industry_evidence_quote": "Strand develops mRNA therapeutics.",
+        "observed_hq_country": "United States",
+        "observed_hq_state": "",
+        "geography_matches": True,
+        "geography_evidence_url": "https://evidence.example/geography",
+        "geography_evidence_quote": "Strand is headquartered in the US.",
+        "observed_company_stage": "Series B",
+        "stage_matches": True,
+        "stage_evidence_url": "https://evidence.example/stage",
+        "stage_evidence_quote": "Strand closed its Series B.",
+        "attribute_satisfied": None,
+        "required_attribute_evidence_url": "",
+        "required_attribute_evidence_quote": "",
+        "reason": "One requested fit dimension remains unproven.",
+    }
+    if dimension == "employee_size":
+        verdict.update(
+            employee_size_evidence_url=(
+                "https://www.linkedin.com/company/strandtx"
+            ),
+            employee_size_evidence_quote="Strand has 51-200 employees.",
+        )
+    else:
+        verdict.update(
+            observed_company_stage="",
+            stage_matches=None,
+            stage_evidence_url="",
+            stage_evidence_quote="",
+        )
+    return verdict
+
+
 def test_arena_scorer_does_not_turn_ambiguous_identity_into_fabrication(
     monkeypatch,
 ):
@@ -318,6 +364,248 @@ def test_confirmed_missing_evidence_is_a_nonretryable_zero(monkeypatch):
         arena_scoring.build_scorer_policy(),
     )
     assert row["per_icp_score"] == 0.0
+
+
+@pytest.mark.parametrize("unproven_dimension", ["employee_size", "stage"])
+def test_unproven_structured_fit_scores_zero_without_arena_retry(
+    monkeypatch,
+    unproven_dimension,
+):
+    verdict = _structured_fit_verdict_with_unproven(unproven_dimension)
+    provider_calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return verdict, ""
+
+    async def fetch_current_profile(url):
+        assert unproven_dimension == "employee_size"
+        assert url == "https://www.linkedin.com/company/strandtx"
+        return {
+            "outcome": "insufficient_evidence",
+            "url": url,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", provider
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        fetch_current_profile,
+    )
+
+    scorer_calls = 0
+
+    async def counted_scorer(companies, icp, is_reference_model):
+        nonlocal scorer_calls
+        scorer_calls += 1
+        assert companies == [_company().model_dump(mode="json")]
+        assert icp == _icp().model_dump(mode="json")
+        assert is_reference_model is False
+        result = await lead_scorer.score_company_competition_intent(
+            _company(), _icp(), 0.0, 0.0, set()
+        )
+        return [result.model_dump(mode="json")]
+
+    companies = [_company().model_dump(mode="json")]
+    icp = _icp().model_dump(mode="json")
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": f"unproven-{unproven_dimension}"},
+        icp=icp,
+        companies=companies,
+        scorer=counted_scorer,
+        max_retries=3,
+    )
+    breakdown = accepted[0]
+    receipt = breakdown["verifier_gate_receipts"][0]
+
+    assert scorer_calls == 1
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert breakdown["final_score"] == 0.0
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert receipt["company_fit_dimensions"][unproven_dimension] == (
+        "unavailable"
+    )
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown
+    )
+    assert count_penalizable_false_positives(
+        accepted, icp_has_intent_signals=True
+    ) == (0, 0)
+    row = arena_verify.scored_row(
+        "submission-1",
+        0,
+        f"unproven-{unproven_dimension}",
+        icp,
+        companies,
+        accepted,
+        arena_scoring.build_scorer_policy(),
+    )
+    assert row["per_icp_score"] == 0.0
+
+
+def test_linkedin_refresh_timeout_keeps_arena_retry(monkeypatch):
+    verdict = _structured_fit_verdict_with_unproven("employee_size")
+    scorer_calls = 0
+    fetches = []
+    produced = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def provider(**_kwargs):
+        return verdict, ""
+
+    async def timeout(url):
+        fetches.append(url)
+        return None
+
+    async def counted_scorer(*_args):
+        nonlocal scorer_calls
+        scorer_calls += 1
+        result = await lead_scorer.score_company_competition_intent(
+            _company(), _icp(), 0.0, 0.0, set()
+        )
+        breakdown = result.model_dump(mode="json")
+        produced.append(breakdown)
+        return [breakdown]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", provider
+    )
+    monkeypatch.setattr(
+        lead_scorer, "fetch_current_linkedin_company_size", timeout
+    )
+
+    companies = [_company().model_dump(mode="json")]
+    with pytest.raises(
+        arena_scoring.ScoringError,
+        match="independent employee-size verification failed",
+    ):
+        arena_scoring.score_work_item(
+            {"scored_run_id": "linkedin-timeout"},
+            icp=_icp().model_dump(mode="json"),
+            companies=companies,
+            scorer=counted_scorer,
+            max_retries=2,
+        )
+
+    assert scorer_calls == 2
+    assert fetches == ["https://www.linkedin.com/company/strandtx"] * 2
+    assert all(
+        row["verifier_gate_receipts"][0]["failure_class"]
+        == "employee_size_verification_failed"
+        for row in produced
+    )
+    assert all(
+        scorer_breakdown_has_retryable_infrastructure_failure(row)
+        for row in produced
+    )
+
+
+def test_exact_profile_without_size_accepts_zero_after_invalid_repair_guess(
+    monkeypatch,
+):
+    initial = _structured_fit_verdict_with_unproven("employee_size")
+    initial.update(
+        observed_employee_count=None,
+        employee_size_matches=None,
+        employee_size_evidence_url="",
+        employee_size_evidence_quote="",
+    )
+    repair = _structured_fit_verdict_with_unproven("employee_size")
+    repair.update(
+        observed_employee_count="1-10",
+        employee_size_matches=True,
+    )
+    verdicts = [initial, repair]
+    provider_calls = []
+    fetches = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return verdicts.pop(0), ""
+
+    async def no_current_size(url):
+        fetches.append(url)
+        return {
+            "outcome": "insufficient_evidence",
+            "url": url,
+        }
+
+    scorer_calls = 0
+
+    async def counted_scorer(*_args):
+        nonlocal scorer_calls
+        scorer_calls += 1
+        result = await lead_scorer.score_company_competition_intent(
+            _company(), _icp(), 0.0, 0.0, set()
+        )
+        return [result.model_dump(mode="json")]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", provider
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        no_current_size,
+    )
+
+    companies = [_company().model_dump(mode="json")]
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": "linkedin-no-size-after-invalid-repair"},
+        icp=_icp().model_dump(mode="json"),
+        companies=companies,
+        scorer=counted_scorer,
+        max_retries=3,
+    )
+
+    breakdown = accepted[0]
+    receipt = breakdown["verifier_gate_receipts"][0]
+    assert scorer_calls == 1
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert fetches == ["https://www.linkedin.com/company/strandtx"]
+    assert breakdown["final_score"] == 0.0
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert receipt["company_fit_dimensions"]["employee_size"] == "unavailable"
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+    assert count_penalizable_false_positives(
+        accepted, icp_has_intent_signals=True
+    ) == (0, 0)
 
 
 @pytest.mark.parametrize(
@@ -500,6 +788,7 @@ def test_alex_bank_fit_summary_uses_final_dimension_decisions(monkeypatch):
     }
 
     assert fit.decision == "mismatch"
+    assert "failure_class" not in fit.details
     assert fit.reason == (
         "company fit mismatch: identity; unproven dimensions: employee_size"
     )

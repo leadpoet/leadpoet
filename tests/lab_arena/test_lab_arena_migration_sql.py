@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -29,6 +30,13 @@ PROMOTION_THRESHOLD_SQL = (SCRIPTS / "187-lab-arena-promotion-threshold.sql").re
 )
 NETWORK_SCOPE_SQL = (SCRIPTS / "189-lab-arena-round-network-scope.sql").read_text(
     encoding="utf-8"
+)
+SCORER_REFRESH_SQL = (SCRIPTS / "194-lab-arena-open-scorer-refresh.sql").read_text(
+    encoding="utf-8"
+)
+HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
+HISTORICAL_UPLOAD_SHA256 = (
+    "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
 )
 
 SERVICE_FUNCTIONS = (
@@ -63,6 +71,10 @@ TABLES = (
 def test_arena_migrations_are_uniquely_numbered():
     numbered = {}
     for path in SCRIPTS.glob("*.sql"):
+        # This exact path was applied before the Arena migration moved to 193.
+        # Keep its blob for snapshot history, but never select it as a forward migration.
+        if path == HISTORICAL_UPLOAD_MIGRATION:
+            continue
         match = re.match(r"^(\d+)-", path.name)
         if match and int(match.group(1)) >= 100:
             numbered.setdefault(int(match.group(1)), []).append(path.name)
@@ -78,11 +90,21 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[187] == ["187-lab-arena-promotion-threshold.sql"]
     assert numbered[188] == ["188-lab-arena-baseline-promotion.sql"]
     assert numbered[189] == ["189-lab-arena-round-network-scope.sql"]
+    assert numbered[190] == ["190-lab-arena-restart-claim-drain.sql"]
+    assert numbered[191] == ["191-fresh-network-subnet-epoch-authority.sql"]
+    assert numbered[193] == ["193-lab-arena-upload-recovery.sql"]
+    assert numbered[194] == ["194-lab-arena-open-scorer-refresh.sql"]
     arena_frontier = max(
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 190
+    assert arena_frontier == 194
+
+
+def test_historical_upload_migration_is_retained_byte_for_byte():
+    assert hashlib.sha256(HISTORICAL_UPLOAD_MIGRATION.read_bytes()).hexdigest() == (
+        HISTORICAL_UPLOAD_SHA256
+    )
 
 
 def test_network_scope_migration_keeps_legacy_finney_defaults_queryable():
@@ -92,6 +114,17 @@ def test_network_scope_migration_keeps_legacy_finney_defaults_queryable():
     assert "(configuration_doc ? 'network_name') = (configuration_doc ? 'netuid')" in NETWORK_SCOPE_SQL
     assert "'version', 189" in NETWORK_SCOPE_SQL
     assert "NOTIFY pgrst, 'reload schema';" in NETWORK_SCOPE_SQL
+
+
+def test_scorer_refresh_is_limited_to_atomic_open_commit():
+    assert "p_expected_status = 'open' AND p_next_status = 'committed'" in SCORER_REFRESH_SQL
+    assert "ARRAY['scorer_image_digest', 'scorer_image_reference']" in SCORER_REFRESH_SQL
+    assert "v_round.configuration_doc || pg_catalog.jsonb_build_object" in SCORER_REFRESH_SQL
+    assert "OLD.status = 'open'" in SCORER_REFRESH_SQL
+    assert "AND NEW.status = 'committed'" in SCORER_REFRESH_SQL
+    assert "NEW.configuration_doc - 'scorer_image_digest' - 'scorer_image_reference'" in SCORER_REFRESH_SQL
+    assert "lab_arena_scorer_image_invalid" in SCORER_REFRESH_SQL
+    assert "'version', 194" in SCORER_REFRESH_SQL
 
 
 def test_promotion_threshold_migration_uses_exact_numeric_one_point_gate():

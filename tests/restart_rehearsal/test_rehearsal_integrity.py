@@ -505,6 +505,85 @@ def test_gateway_cli_secret_matches_initial_durable_secret(
     )
 
 
+def test_gateway_lineage_uses_exact_command_local_git_trust(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    assert contract_adapter._git_commit_is_ancestor.__kwdefaults__ == {
+        "repository": Path("/source")
+    }
+    repository = tmp_path / "source"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    git = ["git", "-C", str(repository)]
+    subprocess.run([*git, "config", "user.name", "Leadpoet Rehearsal"], check=True)
+    subprocess.run(
+        [*git, "config", "user.email", "restart-rehearsal@leadpoet.invalid"],
+        check=True,
+    )
+    commits = []
+    for message in ("first", "second"):
+        subprocess.run(
+            [*git, "commit", "--allow-empty", "-q", "-m", message],
+            check=True,
+        )
+        commits.append(
+            subprocess.run(
+                [*git, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    first, second = commits
+    global_config = tmp_path / "global-git-config"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    real_run = subprocess.run
+    commands: list[list[str]] = []
+
+    def capture_run(command, **kwargs):
+        commands.append(list(command))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(contract_adapter.subprocess, "run", capture_run)
+
+    assert contract_adapter._git_commit_is_ancestor(
+        first,
+        second,
+        repository=repository,
+    )
+    assert not contract_adapter._git_commit_is_ancestor(
+        second,
+        first,
+        repository=repository,
+    )
+    with pytest.raises(
+        ValueError,
+        match="gateway miner-maintenance lineage is unavailable",
+    ):
+        contract_adapter._git_commit_is_ancestor(
+            "f" * 40,
+            second,
+            repository=repository,
+        )
+
+    assert commands
+    for command in commands:
+        assert command[:5] == [
+            contract_adapter.REAL_GIT,
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+        ]
+        assert "safe.directory=*" not in command
+        assert "--global" not in command
+    assert not global_config.exists()
+
+
 def _receipt_graph_seed_contract() -> tuple[
     dict[str, dict[str, Any]],
     dict[str, list[dict[str, Any]]],
@@ -5869,6 +5948,116 @@ def test_workflow_runs_before_command_adapters_are_installed() -> None:
     assert "/harness/production_workflow_runner.py" in script[workflow:adapters]
 
 
+def _local_postgrest_startup_function() -> str:
+    script = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    start = script.index("wait_for_local_postgrest_startup() {")
+    end = script.index("\n}\ncleanup_boundary_service() {", start) + 2
+    return script[start:end]
+
+
+@pytest.mark.parametrize("component", ["gateway", "validator"])
+@pytest.mark.parametrize(
+    ("scenario", "expected_status", "expected_marker"),
+    [
+        (
+            "process_exit",
+            1,
+            "outcome=process_exit returncode=23",
+        ),
+        ("readiness_timeout", 1, "outcome=readiness_timeout"),
+        ("delayed_ready", 0, None),
+    ],
+)
+def test_local_postgrest_startup_gate_executes_bounded_outcomes(
+    component: str,
+    scenario: str,
+    expected_status: int,
+    expected_marker: str | None,
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    runner = tmp_path / "startup-gate.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/bin/bash",
+                "set -u",
+                _local_postgrest_startup_function(),
+                'COMPONENT="$1"',
+                'REHEARSAL_STATE_ROOT="$2"',
+                'scenario="$3"',
+                'BOUNDARY_SERVICE_PID=""',
+                'case "$scenario" in',
+                "  process_exit)",
+                "    (exit 23) &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    for _attempt in $(seq 1 100); do",
+                '      kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null || break',
+                "      /bin/sleep 0.01",
+                "    done",
+                "    ;;",
+                "  readiness_timeout)",
+                "    /bin/sleep 40 &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    ;;",
+                "  delayed_ready)",
+                '    (/bin/sleep 6; '
+                ': >"$REHEARSAL_STATE_ROOT/local-postgrest.ready"; '
+                "exec /bin/sleep 40) &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    ;;",
+                "esac",
+                "gate_status=0",
+                "wait_for_local_postgrest_startup || gate_status=$?",
+                'if [ -n "$BOUNDARY_SERVICE_PID" ]; then',
+                '  kill "$BOUNDARY_SERVICE_PID" 2>/dev/null || true',
+                '  wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || true',
+                "fi",
+                'exit "$gate_status"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner.chmod(0o700)
+
+    started = time.monotonic()
+    result = subprocess.run(
+        ["/bin/bash", str(runner), component, str(state_root), scenario],
+        capture_output=True,
+        text=True,
+        timeout=40,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == expected_status
+    if scenario == "process_exit":
+        assert elapsed < 2
+    elif scenario == "delayed_ready":
+        assert 5.5 <= elapsed < 15
+    else:
+        assert 25 <= elapsed < 40
+    if expected_marker is None:
+        assert "REHEARSAL_POSTGREST_STARTUP" not in result.stderr
+        assert "ERROR: strict local PostgREST" not in result.stderr
+    else:
+        assert (
+            f"REHEARSAL_POSTGREST_STARTUP component={component} "
+            f"{expected_marker}"
+        ) in result.stderr
+        if scenario == "readiness_timeout":
+            marker_line = next(
+                line
+                for line in result.stderr.splitlines()
+                if line.startswith("REHEARSAL_POSTGREST_STARTUP")
+            )
+            assert "returncode=" not in marker_line
+
+
 def test_workflow_uses_the_strict_exact_external_boundaries(
     tmp_path,
     monkeypatch,
@@ -7740,8 +7929,83 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
     assert '"VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=' in script
     assert '"VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=' in script
     assert '"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE=' in script
+    assert "lab_arena_restart_guard_handoff.py validate-request" in script
+    assert "lab_arena_restart_guard_handoff.py write-permit" in script
+    assert "run_rehearsal_lab_arena_guard authorize" in script
+    assert "run_rehearsal_lab_arena_guard release" in script
+    assert (
+        '"VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='
+        '$ACTIVE_RELEASE_AUTHORITY_SHA"'
+    ) in script
+    assert (
+        '"VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT='
+        '$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"'
+    ) in script
+    assert "mktemp -d /tmp/validator-restart-controller-bootstrap.XXXXXXXX" in script
+    assert (
+        "^/tmp/validator-restart-controller-bootstrap\\.[A-Za-z0-9]+$"
+        in script
+    )
+    assert (
+        'archive "$ACTIVE_RELEASE_AUTHORITY_SHA"'
+        in script
+    )
+    assert (
+        'find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type f -exec chmod 400'
+        in script
+    )
+    assert (
+        'find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type d -exec chmod 500'
+        in script
+    )
+    assert script.count(
+        '--authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA"'
+    ) == 3
+    assert '--authority-commit "$CANDIDATE_SHA"' not in script
+    assert "rehearsal accepted a foreign Arena guard permit" in script
+    assert "rehearsal accepted a stale Arena guard authority" in script
+    assert '"/proc/$ARENA_GUARD_CONTROLLER_PID/stat"' in script
+    validator_restart = script.index(
+        "bash /home/ec2-user/validator_restart.sh",
+        script.index('echo "REHEARSAL_START component=validator'),
+    )
+    controller_complete = script.index(
+        ': >"$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE"',
+        validator_restart,
+    )
+    validator_ready = script.index(
+        "run_rehearsal_lab_arena_guard ready",
+        controller_complete,
+    )
+    validator_release = script.index(
+        "release_rehearsal_lab_arena_guard validator",
+        validator_ready,
+    )
+    assert (
+        validator_restart
+        < controller_complete
+        < validator_ready
+        < validator_release
+    )
     assert '"${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \\' in script
     assert '"${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \\' in script
+
+
+def test_exact_rehearsal_gateway_secret_uses_local_arena_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    secret = contract_adapter._gateway_secret()
+    assert secret["LAB_ARENA_SUPABASE_URL"] == (
+        contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    assert secret["LAB_ARENA_SUPABASE_ANON_KEY"] == "rehearsal-secret"
+    assert secret["LAB_ARENA_SERVICE_JWT"] == "rehearsal.header.signature"
 
 
 def test_rehearsal_inherits_the_installed_cutover_manifest() -> None:

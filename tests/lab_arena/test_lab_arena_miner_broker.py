@@ -1,6 +1,7 @@
 """Credential-isolation regression checks; these are not live-run evidence."""
 
 from dataclasses import replace
+import base64
 import json
 
 import pytest
@@ -160,3 +161,70 @@ def test_provider_cannot_echo_runtime_key_into_output_or_storage():
     assert result.status == 502
     assert secret not in repr(result.to_document())
     assert secret not in repr(ledger.calls)
+
+
+@pytest.mark.parametrize("operation_id,parameters", [
+    ("openrouter.chat", CHAT),
+    ("deepline.execute", {"tool": "exa_search", "payload": {"query": "Acme"}}),
+    ("exa.search", {"query": "Acme"}),
+])
+@pytest.mark.parametrize("location", ["value", "key", "duplicate_member"])
+def test_json_escaped_credential_echo_is_blocked_before_storage(operation_id, parameters, location):
+    secret = "synthetic-arena-runtime-key-0123456789"
+    escaped = "".join("\\u%04x" % ord(character) for character in secret)
+    inner = ('{"nested":["prefix ' + escaped + ' suffix"]}' if location == "value"
+             else '{"' + escaped + '":"value"}')
+    if location == "duplicate_member":
+        inner = '{"value":"' + escaped + '","value":"safe"}'
+    body = ('{"status":"completed","result":{"data":' + inner + '}}').encode()
+    assert secret.encode() not in body
+    broker, ledger, transport = make_broker(
+        transport=FakeTransport([(200, body)]),
+        credential_for=lambda context, provider: secret,
+        funding_source_for=lambda context: "miner_key",
+    )
+    args = dict(operation_id=operation_id, parameters=parameters, action_sequence=0, timeout_ms=5000)
+    result = broker.execute(CONTEXT, **args)
+    assert result.status == 502
+    assert secret not in str(json.loads(result.body))
+    terminal = ledger.calls[result.call["call_identity"]]["terminal"]
+    assert secret not in str(json.loads(base64.b64decode(terminal["body_b64"])))
+    replay = broker.execute(CONTEXT, **args)
+    assert replay.status == result.status and replay.body == result.body
+    assert len(transport.sent) == 1
+
+
+def test_valid_json_escapes_without_a_credential_keep_the_response():
+    body = b'{"choices":[{"message":{"content":"Acme\\u0020Inc"}}]}'
+    broker, ledger, transport = make_broker(
+        transport=FakeTransport([(200, body)]),
+        credential_for=lambda context, provider: "synthetic-arena-runtime-key",
+        funding_source_for=lambda context: "miner_key",
+    )
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=5000)
+    assert result.status == 200 and result.body == body
+
+
+def test_provider_credential_echo_in_a_header_is_blocked():
+    secret = "synthetic-arena-runtime-key"
+
+    class HeaderEchoTransport:
+        def send(self, **kwargs):
+            return br.ProviderResponse(200, {"content-type": "text/" + secret}, b"safe")
+
+    broker, ledger, _ = make_broker(
+        transport=HeaderEchoTransport(),
+        credential_for=lambda context, provider: secret,
+    )
+    result = broker.execute(CONTEXT, operation_id="scrapingdog.scrape", parameters={"url": "https://example.com"}, action_sequence=0, timeout_ms=5000)
+    assert result.status == 502
+    assert secret not in repr(result.to_document())
+    assert secret not in repr(ledger.calls)
+
+
+def test_json_too_deep_to_inspect_settles_a_generic_response():
+    body = b"[" * 2000 + b"0" + b"]" * 2000
+    broker, ledger, _ = make_broker(transport=FakeTransport([(200, body)]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=5000)
+    assert result.status == 502
+    assert ledger.log == ["reserve", "dispatch", "settle"]

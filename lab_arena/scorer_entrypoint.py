@@ -1,8 +1,9 @@
 """Entrypoint of the Arena-built judge image, run by validators for scoring assignments.
 
 Inside the gVisor sandbox with no network, the shim routes every provider call
-the Research Lab evaluator makes through the validator's worker socket to the
-Arena broker, which adds the organizer's shared provider keys. This process
+the evaluator makes through the validator's worker socket to the gateway
+broker. The gateway adds the submission's miner keys, or the organizer's keys
+for the public baseline. The validator never receives those keys. This process
 reads one scoring input (ICP, output, scorer policy), scores it with
 the Lab scorer exactly as the Arena's central path did, and writes the
 breakdown list. Placeholder credentials satisfy the evaluator's environment

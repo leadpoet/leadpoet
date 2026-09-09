@@ -242,6 +242,9 @@ SOURCE_ADD_MINER_STATUS_MIGRATION = (
 SOURCE_ADD_PROVISIONED_STATUS_MIGRATION = (
     "186-research-lab-source-add-provisioned-status.sql"
 )
+LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION = (
+    "190-lab-arena-restart-claim-drain.sql"
+)
 LAB_ARENA_MIGRATIONS = (
     "179-lab-arena-v1.sql",
     "180-lab-arena-daily-competition.sql",
@@ -250,6 +253,11 @@ LAB_ARENA_MIGRATIONS = (
     "183-lab-arena-miner-reward-basis.sql",
     "184-lab-arena-scoring-failure-isolation.sql",
     "185-lab-arena-miner-credentials.sql",
+)
+LAB_ARENA_POST_185_MIGRATIONS = (
+    "187-lab-arena-promotion-threshold.sql",
+    "188-lab-arena-baseline-promotion.sql",
+    "189-lab-arena-round-network-scope.sql",
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -310,6 +318,10 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_MINER_STATUS_MIGRATION,
     SOURCE_ADD_PROVISIONED_STATUS_MIGRATION,
     *LAB_ARENA_MIGRATIONS,
+    *LAB_ARENA_POST_185_MIGRATIONS,
+    LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION,
+    "193-lab-arena-upload-recovery.sql",
+    "194-lab-arena-open-scorer-refresh.sql",
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -344,6 +356,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_178_source_add_miner_status_valid",
     "post_186_source_add_provisioned_status_valid",
     "post_185_lab_arena_schema_valid",
+    "post_190_lab_arena_restart_guard_valid",
     "provider_evidence_cache_put_atomic",
     "pre_132_lifetime_credit_rejected",
     "post_132_lifetime_credit_persisted",
@@ -544,6 +557,70 @@ class DisposablePostgres:
         self.socket.mkdir()
         os.chown(self.socket, account.pw_uid, account.pw_gid)
 
+    @classmethod
+    def attach(
+        cls,
+        path: Path,
+        *,
+        candidate_sha: str,
+    ) -> "DisposablePostgres":
+        if path.is_symlink() or not path.is_file():
+            raise PostgresContractProbeError(
+                "rehearsal PostgreSQL connection is unavailable"
+            )
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(value, Mapping)
+            or value.get("schema_version")
+            != "leadpoet.restart_rehearsal.postgres_connection.v1"
+            or value.get("candidate_sha") != candidate_sha
+            or value.get("database") != "leadpoet_rehearsal"
+            or value.get("port") != 55432
+        ):
+            raise PostgresContractProbeError(
+                "rehearsal PostgreSQL connection differs"
+            )
+        root = Path(str(value.get("root") or ""))
+        data = Path(str(value.get("data") or ""))
+        socket = Path(str(value.get("socket") or ""))
+        if (
+            not re.fullmatch(
+                r"/tmp/leadpoet-postgres-v2-[A-Za-z0-9_-]+", str(root)
+            )
+            or root.is_symlink()
+            or data != root / "data"
+            or socket != root / "socket"
+            or data.is_symlink()
+            or socket.is_symlink()
+            or not data.is_dir()
+            or not socket.is_dir()
+        ):
+            raise PostgresContractProbeError(
+                "rehearsal PostgreSQL connection paths differ"
+            )
+        database = cls.__new__(cls)
+        database.state_root = path.parent
+        database.root = root
+        database.data = data
+        database.socket = socket
+        database.port = 55432
+        database.database = "leadpoet_rehearsal"
+        database.started = True
+        return database
+
+    def connection_document(self, *, candidate_sha: str) -> dict[str, Any]:
+        return {
+            "schema_version": (
+                "leadpoet.restart_rehearsal.postgres_connection.v1"
+            ),
+            "candidate_sha": candidate_sha,
+            "root": str(self.root),
+            "data": str(self.data),
+            "socket": str(self.socket),
+            "port": self.port,
+            "database": self.database,
+        }
+
     @staticmethod
     def _binary(name: str) -> str:
         if not IDENTIFIER_RE.fullmatch(name):
@@ -625,7 +702,7 @@ class DisposablePostgres:
 
     def stop(self) -> None:
         if self.started:
-            self._as_postgres(
+            result = self._as_postgres(
                 [
                     self._binary("pg_ctl"),
                     "--pgdata",
@@ -637,6 +714,10 @@ class DisposablePostgres:
                 ],
                 check=False,
             )
+            if result.returncode != 0:
+                raise PostgresContractProbeError(
+                    "disposable PostgreSQL did not stop cleanly"
+                )
             self.started = False
         shutil.rmtree(self.root, ignore_errors=True)
 
@@ -646,6 +727,7 @@ class DisposablePostgres:
         *,
         database: str | None = None,
         check: bool = True,
+        quiet: bool = False,
         tuples_only: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         argv = [
@@ -664,6 +746,8 @@ class DisposablePostgres:
         ]
         if tuples_only:
             argv.extend(["--tuples-only", "--no-align"])
+        if quiet:
+            argv.append("--quiet")
         return self._as_postgres(argv, input_text=sql, check=check)
 
     def apply_migration(self, path: Path) -> None:
@@ -2514,6 +2598,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         candidate_sha=args.candidate_sha,
     )
     database = DisposablePostgres(state_root=args.state_root)
+    retain_database = False
     try:
         database.start()
         scripts = args.source_root / "scripts"
@@ -4337,6 +4422,28 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         for migration in LAB_ARENA_MIGRATIONS:
             database.apply_migration(scripts / migration)
             applied.append(migration)
+        lab_arena_schema_contract_185 = json.loads(
+            database.psql(
+                """
+                SELECT public.lab_arena_schema_version_v1()::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract_185 != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 185,
+        }:
+            raise PostgresContractProbeError(
+                "post-185 Lab Arena schema contract differs"
+            )
+        for migration in LAB_ARENA_POST_185_MIGRATIONS:
+            database.apply_migration(scripts / migration)
+            applied.append(migration)
+        database.apply_migration(
+            scripts / LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION
+        )
+        applied.append(LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION)
         lab_arena_schema_contract = json.loads(
             database.psql(
                 """
@@ -4347,10 +4454,62 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         if lab_arena_schema_contract != {
             "schema_version": "leadpoet.lab_arena.schema_version.v1",
-            "version": 185,
+            "version": 190,
         }:
             raise PostgresContractProbeError(
-                "post-185 Lab Arena schema contract differs"
+                "post-190 Lab Arena restart guard contract differs"
+            )
+        arena_service_state = database.psql(
+            """
+            SET ROLE lab_arena_service;
+            SELECT public.lab_arena_restart_guard_state_v1()::text;
+            """,
+            check=False,
+            tuples_only=True,
+        )
+        arena_anon_state = database.psql(
+            """
+            SET ROLE anon;
+            SELECT public.lab_arena_restart_guard_state_v1()::text;
+            """,
+            check=False,
+            tuples_only=True,
+        )
+        if arena_service_state.returncode != 0 or arena_anon_state.returncode == 0:
+            raise PostgresContractProbeError(
+                "post-190 Lab Arena restart guard role grants differ"
+            )
+        upload_migration = "193-lab-arena-upload-recovery.sql"
+        database.apply_migration(scripts / upload_migration)
+        applied.append(upload_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 193,
+        }:
+            raise PostgresContractProbeError(
+                "post-193 Lab Arena upload recovery contract differs"
+            )
+        scorer_refresh_migration = "194-lab-arena-open-scorer-refresh.sql"
+        database.apply_migration(scripts / scorer_refresh_migration)
+        applied.append(scorer_refresh_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 194,
+        }:
+            raise PostgresContractProbeError(
+                "post-194 Lab Arena scorer refresh contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
@@ -4452,7 +4611,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "catalog and finalized view projections differ"
             )
-        return {
+        result = {
             "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
             "candidate_sha": args.candidate_sha,
             "applied_migrations": applied,
@@ -4485,8 +4644,25 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "provider_evidence_cache": provider_evidence_cache_contract,
             "required_schema_declarations": declaration_counts,
         }
+        connection_output = getattr(args, "postgres_connection_output", None)
+        if connection_output is not None:
+            connection_output.write_text(
+                json.dumps(
+                    database.connection_document(
+                        candidate_sha=args.candidate_sha
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            connection_output.chmod(0o600)
+            retain_database = True
+        return result
     finally:
-        database.stop()
+        if not retain_database:
+            database.stop()
 
 
 def main() -> int:
@@ -4496,6 +4672,7 @@ def main() -> int:
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--release-build-input", type=Path, required=True)
     parser.add_argument("--epoch-id", type=int)
+    parser.add_argument("--postgres-connection-output", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):

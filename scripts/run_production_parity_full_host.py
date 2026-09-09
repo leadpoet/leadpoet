@@ -71,6 +71,12 @@ from scripts.production_parity_snapshot import (  # noqa: E402
     capture_snapshot,
     restore_snapshot,
 )
+from Leadpoet.utils.restart_epoch_gate import (  # noqa: E402
+    MAXIMUM_RESTART_EPOCH_BLOCK,
+)
+from scripts.gateway_restart_timing_diagnostic import (  # noqa: E402
+    gateway_restart_timing_diagnostic as _gateway_restart_timing_diagnostic,
+)
 from scripts.run_production_parity_fast import _DockerDatabase  # noqa: E402
 from qualification.competition_models import (  # noqa: E402
     public_http_url,
@@ -105,52 +111,6 @@ EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
 )
 FULL_WORK_ROOT = Path("/opt/leadpoet-production-parity")
-GATEWAY_RESTART_TIMING_STAGES = frozenset(
-    {
-        "active_release_lineage_selection",
-        "ancestry_frontier_recovery",
-        "ancestry_postcheckpoint",
-        "ancestry_precheckpoint",
-        "attested_runtime_and_enclave_build",
-        "build_provenance",
-        "bootstrap",
-        "completed",
-        "dependency_import_preflight",
-        "dependency_install",
-        "dependency_preflight",
-        "docker_disk_cleanup",
-        "gateway_health_check",
-        "gateway_process_launch",
-        "git_activate",
-        "git_prepare",
-        "git_prepared_tree_verification",
-        "git_tree_verification",
-        "historical_release_acquisition",
-        "host_restart_script_install",
-        "lab_arena_service_start",
-        "local_release_build",
-        "miner_maintenance_pre_hydration",
-        "miner_maintenance_runtime_verify",
-        "python_cache_cleanup",
-        "restart_reexec",
-        "runtime_env_and_ecr",
-        "source_add_shutdown_quiescence",
-        "stateful_epoch_cutover",
-        "stateful_epoch_cutover_preflight",
-        "v2_credential_envelope_preparation",
-        "v2_kms_provision",
-        "v2_offline_artifact_prepare",
-        "v2_pre_shutdown_preflight",
-        "v2_release_lineage_revalidation",
-        "v2_runtime_bootstrap",
-        "v2_runtime_readiness",
-        "validator_weight_input_http_check",
-        "validator_weight_input_repair",
-        "validator_weight_input_storage_preflight",
-    }
-)
-GATEWAY_RESTART_TIMING_STATUSES = frozenset({"failed", "passed", "reached"})
-GATEWAY_RESTART_TIMING_MAX_BYTES = 128 * 1024
 ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
 ATTESTED_V2_KMS_KEY_ID = (
@@ -178,6 +138,7 @@ FULL_FAILURE_STAGES = frozenset(
         "snapshot-capture",
         "clone-start",
         "snapshot-restore",
+        "clone-arena-normalization",
         "clone-http-origin",
         "clone-secret",
         "gateway-restart",
@@ -211,6 +172,233 @@ FULL_ERROR_TYPES = frozenset(
         "ValueError",
     }
 )
+CLONE_ARENA_FAILURE_CATEGORIES = frozenset(
+    {
+        "clone_arena_control_invalid",
+        "clone_arena_operator_paused",
+        "clone_arena_lease_not_expired",
+        "clone_arena_recovery_failed",
+        "clone_arena_state_invalid",
+    }
+)
+_GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES = 256 * 1024
+_GATEWAY_RESTART_MAX_SECONDS = 10_800
+_RESTART_EPOCH_RETRY_WAIT_SECONDS = 60
+_RESTART_EPOCH_GATE_ERROR_RE = re.compile(
+    r"^(?:(?:Leadpoet\.utils\.restart_epoch_gate|__main__)\.)?"
+    r"RestartEpochGateError: "
+    rf"production restart may start only at official subnet epoch block "
+    rf"{MAXIMUM_RESTART_EPOCH_BLOCK} or "
+    r"earlier; observed ([0-9]{1,7})$"
+)
+_TRACEBACK_TERMINAL_EXCEPTION_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*:.*$"
+)
+_LOCAL_RELEASE_EXACT_OBSERVATIONS = {
+    "ERROR: rsync is required to stage attested runtime packages": (
+        "required_executable_missing",
+        "rsync",
+    ),
+    "ERROR: git is required to stage a clean attested runtime commit": (
+        "required_executable_missing",
+        "git",
+    ),
+    "ERROR: offline scoring wheelhouse contains an unexpected entry": (
+        "offline_wheelhouse_unexpected_entry",
+        None,
+    ),
+    "ERROR: exact local runtime identity build failed": (
+        "local_runtime_identity_build_failed",
+        None,
+    ),
+    "GatewayPCR0BuildError: nitro-cli output did not contain a valid PCR0": (
+        "nitro_measurement_missing",
+        None,
+    ),
+    "GatewayPCR0BuildError: gateway role build identity is unavailable": (
+        "gateway_build_identity_unavailable",
+        None,
+    ),
+    "GatewayPCR0BuildError: gateway role build identity mismatch": (
+        "gateway_build_identity_mismatch",
+        None,
+    ),
+    "GatewayPCR0BuildError: gateway image ID is invalid": (
+        "gateway_image_identity_invalid",
+        None,
+    ),
+}
+_LOCAL_RELEASE_PREFIX_OBSERVATIONS = {
+    "ERROR: prepared offline scoring wheelhouse is unavailable:": (
+        "offline_wheelhouse_unavailable",
+        None,
+    ),
+    "ERROR: clean gateway source missing:": (
+        "clean_gateway_source_missing",
+        None,
+    ),
+    "ERROR: required runtime package missing:": (
+        "required_runtime_package_missing",
+        None,
+    ),
+}
+_LOCAL_RELEASE_COMMAND_FAILURE_RE = re.compile(
+    r"^GatewayPCR0BuildError: (bash|docker|nitro-cli) failed with exit code "
+    r"([1-9][0-9]{0,2})(?::.*)?$"
+)
+_LOCAL_RELEASE_MISSING_EXECUTABLE_RE = re.compile(
+    r"^FileNotFoundError: \[Errno 2\] No such file or directory: "
+    r"['\"](docker|git|gzip|jq|nitro-cli|rsync|tar)['\"]$"
+)
+_LOCAL_RELEASE_SHELL_MISSING_EXECUTABLE_RE = re.compile(
+    r"(?:^|: )(docker|git|gzip|jq|nitro-cli|rsync|tar): command not found$"
+)
+_TRACEBACK_START = "Traceback (most recent call last):"
+_TRACEBACK_CHAIN_SEPARATORS = frozenset(
+    {
+        "During handling of the above exception, another exception occurred:",
+        "The above exception was the direct cause of the following exception:",
+    }
+)
+_TRACEBACK_FRAME_RE = re.compile(
+    r'^\s*File "([^"\n]{1,4096})", line [1-9][0-9]{0,6}, in '
+    r"([A-Za-z_][A-Za-z0-9_]*|<module>)$"
+)
+_TRACEBACK_EXCEPTION_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*([A-Za-z][A-Za-z0-9]{0,63}):"
+)
+_CREDENTIAL_EXCEPTION_CLASSES = frozenset(
+    {
+        "ClientError",
+        "ConnectTimeoutError",
+        "EndpointConnectionError",
+        "FileNotFoundError",
+        "GatewayEnvelopePreparationV2Error",
+        "HTTPError",
+        "ImportError",
+        "JSONDecodeError",
+        "ModuleNotFoundError",
+        "NoCredentialsError",
+        "OSError",
+        "PermissionError",
+        "ReadTimeoutError",
+        "SupabaseSchemaPreflightV2Error",
+        "TEEKMSProvisionV2Error",
+        "TimeoutError",
+        "URLError",
+        "ValueError",
+        "WorkerProxyTransportCleanupV2Error",
+        "WorkerProxyTransportPreflightV2Error",
+    }
+)
+_CREDENTIAL_SCHEMA_FUNCTIONS = frozenset(
+    {
+        "_source_add_leg1_release_environment_policy_v1",
+        "_verify_chain_realized_activation_v1",
+        "_verify_compact_weight_settlement_contract_v1",
+        "_verify_source_add_claim_control_contract_v1",
+        "_verify_source_add_claim_control_contract_v2",
+        "_verify_source_add_duplicate_privacy_contract_v1",
+        "_verify_source_add_miner_status_contract_v1",
+        "_verify_source_add_post_accept_leg1_contract_v2",
+        "_verify_source_add_post_accept_leg1_contract_v3",
+        "_verify_source_add_post_accept_leg1_contract_v4",
+        "_verify_source_add_provider_origin_contract_v1",
+        "verify_required_supabase_v2_schema",
+    }
+)
+_CREDENTIAL_PROXY_FUNCTIONS = frozenset(
+    {
+        "_preferred_scoring_proxy_configuration",
+        "_validate_v2_proxy_migration_capacity",
+        "_validated_worker_proxy_configuration",
+        "verify_tls_proxy_connect_v2",
+        "verify_worker_proxy_fleets_v2",
+    }
+)
+_CREDENTIAL_ENVELOPE_FUNCTIONS = frozenset(
+    {
+        "_secret",
+        "_write_json",
+        "install_gateway_envelopes_v2",
+        "prepare_gateway_envelopes_v2",
+    }
+)
+_CREDENTIAL_SCHEMA_PROBES = {
+    "_source_add_leg1_release_environment_policy_v1": "source_add_leg1_release_policy",
+    "_verify_chain_realized_activation_v1": "chain_realized_activation",
+    "_verify_compact_weight_settlement_contract_v1": (
+        "research_lab_compact_weight_settlement_contract_v1"
+    ),
+    "_verify_source_add_claim_control_contract_v1": (
+        "research_lab_source_add_claim_control_contract_v1"
+    ),
+    "_verify_source_add_claim_control_contract_v2": (
+        "research_lab_source_add_claim_control_contract_v2"
+    ),
+    "_verify_source_add_duplicate_privacy_contract_v1": (
+        "research_lab_source_add_duplicate_privacy_contract_v1"
+    ),
+    "_verify_source_add_miner_status_contract_v1": (
+        "research_lab_source_add_miner_status_contract_v1"
+    ),
+    "_verify_source_add_post_accept_leg1_contract_v2": (
+        "research_lab_source_add_post_accept_leg1_contract_v2"
+    ),
+    "_verify_source_add_post_accept_leg1_contract_v3": (
+        "research_lab_source_add_post_accept_leg1_contract_v3"
+    ),
+    "_verify_source_add_post_accept_leg1_contract_v4": (
+        "research_lab_source_add_post_accept_leg1_contract_v4"
+    ),
+    "_verify_source_add_provider_origin_contract_v1": (
+        "research_lab_source_add_provider_origin_contract_v1"
+    ),
+}
+_CREDENTIAL_AWS_ERROR_RE = re.compile(
+    r"^botocore\.exceptions\.ClientError: An error occurred "
+    r"\(([A-Za-z][A-Za-z0-9]{0,63})\) when calling the "
+    r"([A-Za-z][A-Za-z0-9]{0,63}) operation:"
+)
+_CREDENTIAL_SCHEMA_UNAVAILABLE_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*SupabaseSchemaPreflightV2Error: required "
+    r"Supabase V2 schema is unavailable for ([a-z][a-z0-9_]{0,62}); apply "
+    r"scripts/[0-9]{1,3}-[a-z0-9-]{1,100}\.sql before restart "
+    r"\(HTTP ([1-5][0-9]{2})\)$"
+)
+_CREDENTIAL_SCHEMA_PROBE_FAILED_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*SupabaseSchemaPreflightV2Error: Supabase V2 "
+    r"schema probe failed for ([a-z][a-z0-9_]{0,62})$"
+)
+_CREDENTIAL_RPC_UNAVAILABLE_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*SupabaseSchemaPreflightV2Error: required "
+    r"Supabase V2 RPC is unavailable for ([a-z][a-z0-9_]{0,62}); apply "
+    r"scripts/[0-9]{1,3}-[a-z0-9-]{1,100}\.sql before restart$"
+)
+_CREDENTIAL_ENVIRONMENT_UNAVAILABLE_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*GatewayEnvelopePreparationV2Error: gateway "
+    r"source environment is unavailable$"
+)
+_CREDENTIAL_AWS_ERROR_CODES = frozenset(
+    {
+        "AccessDenied",
+        "AccessDeniedException",
+        "DependencyTimeoutException",
+        "DisabledException",
+        "ExpiredTokenException",
+        "InvalidClientTokenId",
+        "InvalidKeyUsageException",
+        "KMSInternalException",
+        "KMSInvalidStateException",
+        "KeyUnavailableException",
+        "NotFoundException",
+        "RequestTimeout",
+        "ServiceUnavailableException",
+        "ThrottlingException",
+        "UnrecognizedClientException",
+    }
+)
+_CREDENTIAL_AWS_OPERATIONS = frozenset({"Encrypt"})
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -239,6 +427,14 @@ def _connection_nominated_headers(headers: Mapping[str, Any]) -> set[str]:
 
 class FullParityError(RuntimeError):
     """The full disposable workflow did not reach every required stage."""
+
+
+class CloneArenaNormalizationFailure(FullParityError):
+    """The exact disposable clone could not safely normalize copied Arena state."""
+
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category
 
 
 def _validated_public_origin(origin: str) -> str:
@@ -270,6 +466,8 @@ def _failure_identity(stage: str, exc: BaseException) -> tuple[str, str]:
             if original is not None
             else "ProductionParityError"
         )
+    elif isinstance(exc, CloneArenaNormalizationFailure):
+        raw_type = "FullParityError"
     else:
         raw_type = type(exc).__name__
     bounded_type = raw_type if raw_type in FULL_ERROR_TYPES else "UnexpectedError"
@@ -285,6 +483,20 @@ def _snapshot_failure_category(stage: str, exc: BaseException) -> str | None:
     return category.value
 
 
+def _clone_arena_failure_category(stage: str, exc: BaseException) -> str | None:
+    if stage != "clone-arena-normalization" or not isinstance(
+        exc, CloneArenaNormalizationFailure
+    ):
+        return None
+    category = getattr(exc, "category", None)
+    return (
+        category
+        if isinstance(category, str)
+        and category in CLONE_ARENA_FAILURE_CATEGORIES
+        else None
+    )
+
+
 def _record_failure_identity(
     evidence: dict[str, Any], stage: str, exc: BaseException
 ) -> None:
@@ -293,66 +505,10 @@ def _record_failure_identity(
     evidence["failure_stage"] = bounded_stage
     evidence["error_type"] = bounded_type
     failure_category = _snapshot_failure_category(stage, exc)
+    if failure_category is None:
+        failure_category = _clone_arena_failure_category(stage, exc)
     if failure_category is not None:
         evidence["failure_category"] = failure_category
-
-
-def _gateway_restart_timing_diagnostic(timing_dir: Path) -> dict[str, Any] | None:
-    """Return only the final bounded fields from one run-owned timing ledger."""
-
-    try:
-        ledgers = list(timing_dir.glob("gateway-*.jsonl"))
-    except OSError:
-        return None
-    if len(ledgers) != 1:
-        return None
-    descriptor = None
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NONBLOCK
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(ledgers[0], flags)
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or not 0 < metadata.st_size <= GATEWAY_RESTART_TIMING_MAX_BYTES
-        ):
-            return None
-        raw = os.read(descriptor, GATEWAY_RESTART_TIMING_MAX_BYTES + 1)
-        if len(raw) != metadata.st_size:
-            return None
-        lines = raw.decode("utf-8").splitlines()
-    except (OSError, UnicodeError):
-        return None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    if not lines or len(lines) > 512:
-        return None
-    try:
-        final = json.loads(lines[-1])
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(final, Mapping):
-        return None
-    stage = final.get("stage")
-    status = final.get("status")
-    elapsed = final.get("elapsed_seconds")
-    if (
-        not isinstance(stage, str)
-        or stage not in GATEWAY_RESTART_TIMING_STAGES
-        or not isinstance(status, str)
-        or status not in GATEWAY_RESTART_TIMING_STATUSES
-        or not isinstance(elapsed, (int, float))
-        or isinstance(elapsed, bool)
-        or not math.isfinite(elapsed)
-        or not 0 <= elapsed <= MAX_FULL_TIMEOUT_SECONDS
-    ):
-        return None
-    return {
-        "final_stage": stage,
-        "final_status": status,
-        "elapsed_seconds": round(float(elapsed), 3),
-    }
 
 
 def _write_early_failure_evidence(
@@ -411,6 +567,419 @@ def _write_early_failure_evidence(
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _bounded_gateway_log_tail(log_path: Path) -> bytes | None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(log_path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        offset = max(0, metadata.st_size - _GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES)
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        body = os.read(descriptor, _GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES)
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if offset:
+        _partial, _separator, body = body.partition(b"\n")
+    return body
+
+
+def _restart_epoch_gate_observation(log_path: Path) -> dict[str, Any] | None:
+    """Project one exact, source-bound late-epoch rejection from an attempt log."""
+
+    body = _bounded_gateway_log_tail(log_path)
+    if body is None:
+        return None
+    lines = body.decode("utf-8", errors="replace").splitlines()
+    starts = [index for index, line in enumerate(lines) if line == _TRACEBACK_START]
+    if not starts:
+        return None
+    block = lines[starts[-1] + 1 :]
+    frames = []
+    exception_line = None
+    for line in block:
+        frame = _TRACEBACK_FRAME_RE.fullmatch(line)
+        if frame is not None:
+            frames.append((frame.group(1).replace("\\", "/"), frame.group(2)))
+        if _TRACEBACK_TERMINAL_EXCEPTION_RE.fullmatch(line) is not None:
+            exception_line = line
+    error = _RESTART_EPOCH_GATE_ERROR_RE.fullmatch(exception_line or "")
+    observed_epoch_block = int(error.group(1)) if error is not None else None
+    if (
+        observed_epoch_block is None
+        or observed_epoch_block <= MAXIMUM_RESTART_EPOCH_BLOCK
+        or not any(
+            path.endswith("/Leadpoet/utils/restart_epoch_gate.py")
+            and function == "verify_restart_epoch_window"
+            for path, function in frames
+        )
+    ):
+        return None
+    return {
+        "marker": "restart_epoch_gate_observation",
+        "maximum_restart_epoch_block": MAXIMUM_RESTART_EPOCH_BLOCK,
+        "observed_epoch_block": observed_epoch_block,
+        "reason": "epoch_block_after_restart_deadline",
+    }
+
+
+def _run_gateway_restart_with_epoch_retry(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    log_path: Path,
+    timing_dir: Path,
+    deadline: float,
+    candidate_sha: str,
+) -> tuple[
+    subprocess.CompletedProcess[str] | None,
+    subprocess.TimeoutExpired | None,
+    dict[str, Any],
+    Path,
+    Path,
+]:
+    """Retry only one exact canonical late-epoch rejection before shutdown."""
+
+    if (
+        SHA_RE.fullmatch(candidate_sha) is None
+        or env.get("GATEWAY_DEPLOY_COMMIT") != candidate_sha
+        or list(command)
+        != ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha]
+    ):
+        raise FullParityError("exact gateway restart retry identity is invalid")
+    restart_deadline = min(
+        deadline,
+        time.monotonic() + _GATEWAY_RESTART_MAX_SECONDS,
+    )
+    rejections: list[dict[str, Any]] = []
+    attempt = 0
+    while True:
+        attempt += 1
+        attempt_log = log_path.with_name(f"{log_path.stem}-attempt-{attempt}.log")
+        attempt_timing_dir = timing_dir / f"attempt-{attempt}"
+        attempt_env = dict(env)
+        attempt_env["GATEWAY_RESTART_TIMING_DIR"] = str(attempt_timing_dir)
+        remaining = math.ceil(restart_deadline - time.monotonic())
+        if remaining <= 0:
+            raise FullParityError("full parity budget exhausted before exact gateway restart")
+        try:
+            result = _run(
+                command,
+                timeout=remaining,
+                env=attempt_env,
+                log_path=attempt_log,
+            )
+        except subprocess.TimeoutExpired as exc:
+            diagnostic: dict[str, Any] = {
+                "outcome": "timed_out",
+                "timeout_seconds": remaining,
+            }
+            if rejections:
+                diagnostic["epoch_gate_rejections"] = rejections
+            return None, exc, diagnostic, attempt_log, attempt_timing_dir
+
+        diagnostic = {"outcome": "exited", "returncode": result.returncode}
+        if rejections:
+            diagnostic["epoch_gate_rejections"] = rejections
+        if result.returncode == 0:
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
+        observation = (
+            _restart_epoch_gate_observation(attempt_log)
+            if result.returncode == 75
+            else None
+        )
+        if observation is None:
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
+        rejections.append({"attempt": attempt, **observation})
+        diagnostic["epoch_gate_rejections"] = rejections
+        remaining_before_retry = restart_deadline - time.monotonic()
+        if remaining_before_retry <= 0:
+            diagnostic["retry_deadline_exhausted"] = True
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
+        time.sleep(min(_RESTART_EPOCH_RETRY_WAIT_SECONDS, remaining_before_retry))
+        if time.monotonic() >= restart_deadline:
+            diagnostic["retry_deadline_exhausted"] = True
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
+
+
+def _local_release_build_observations(log_path: Path) -> list[dict[str, Any]]:
+    """Project fixed local-build failures without retaining raw log text."""
+
+    body = _bounded_gateway_log_tail(log_path)
+    if body is None:
+        return []
+
+    observations: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, Any], ...]] = set()
+
+    def retain(value: dict[str, Any]) -> None:
+        identity = tuple(sorted(value.items()))
+        if identity not in seen and len(observations) < 8:
+            seen.add(identity)
+            observations.append(value)
+
+    for raw_line in body.decode("utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        fixed = _LOCAL_RELEASE_EXACT_OBSERVATIONS.get(line)
+        if fixed is None:
+            fixed = next(
+                (
+                    value
+                    for prefix, value in _LOCAL_RELEASE_PREFIX_OBSERVATIONS.items()
+                    if line.startswith(prefix)
+                ),
+                None,
+            )
+        if fixed is not None:
+            identifier, executable = fixed
+            observation: dict[str, Any] = {
+                "marker": "local_release_build_observation",
+                "identifier": identifier,
+            }
+            if executable is not None:
+                observation["executable"] = executable
+            retain(observation)
+            continue
+        command_failure = _LOCAL_RELEASE_COMMAND_FAILURE_RE.fullmatch(line)
+        if command_failure is not None:
+            returncode = int(command_failure.group(2))
+            if returncode <= 255:
+                retain(
+                    {
+                        "marker": "local_release_build_observation",
+                        "identifier": "command_failed",
+                        "command": command_failure.group(1),
+                        "returncode": returncode,
+                    }
+                )
+            continue
+        missing = _LOCAL_RELEASE_MISSING_EXECUTABLE_RE.fullmatch(line)
+        if missing is None:
+            missing = _LOCAL_RELEASE_SHELL_MISSING_EXECUTABLE_RE.search(line)
+        if missing is not None:
+            retain(
+                {
+                    "marker": "local_release_build_observation",
+                    "identifier": "required_executable_missing",
+                    "executable": missing.group(1),
+                }
+            )
+    return observations
+
+
+def _credential_traceback_phase(
+    frames: Sequence[tuple[str, str]],
+) -> str | None:
+    normalized = tuple(
+        (path.replace("\\", "/"), function) for path, function in frames
+    )
+    if any(
+        path.endswith("/gateway/tee/supabase_schema_preflight_v2.py")
+        and function in _CREDENTIAL_SCHEMA_FUNCTIONS
+        for path, function in normalized
+    ):
+        return "schema_preflight"
+    if any(
+        (
+            path.endswith("/gateway/tee/proxy_transport_preflight_v2.py")
+            and function in _CREDENTIAL_PROXY_FUNCTIONS
+        )
+        or (
+            path.endswith("/gateway/tee/prepare_gateway_envelopes_v2.py")
+            and function in _CREDENTIAL_PROXY_FUNCTIONS
+        )
+        for path, function in normalized
+    ):
+        return "proxy_preflight"
+    if any(
+        path.endswith("/gateway/utils/tee_kms_provision_v2.py")
+        and function == "build_provider_envelope_v2"
+        for path, function in normalized
+    ):
+        return "kms"
+    if any(
+        path.endswith("/gateway/tee/prepare_gateway_envelopes_v2.py")
+        and function == "load_environment_file"
+        for path, function in normalized
+    ):
+        return "environment_load"
+    if any(
+        path.endswith("/gateway/tee/prepare_gateway_envelopes_v2.py")
+        and function in _CREDENTIAL_ENVELOPE_FUNCTIONS
+        for path, function in normalized
+    ):
+        return "envelope_install"
+    return None
+
+
+def _credential_traceback_probe(
+    frames: Sequence[tuple[str, str]],
+) -> str | None:
+    for path, function in reversed(frames):
+        if path.replace("\\", "/").endswith(
+            "/gateway/tee/supabase_schema_preflight_v2.py"
+        ):
+            probe = _CREDENTIAL_SCHEMA_PROBES.get(function)
+            if probe is not None:
+                return probe
+    return None
+
+
+def _credential_schema_detail(exception_line: str) -> dict[str, Any]:
+    from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
+
+    required_tables = {
+        table
+        for _migration, table, _columns in schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+    }
+    probe_match = _CREDENTIAL_SCHEMA_PROBE_FAILED_RE.fullmatch(exception_line)
+    if probe_match is not None and probe_match.group(1) in required_tables:
+        return {
+            "reason": "schema_table_probe_failed",
+            "schema_object": probe_match.group(1),
+        }
+    table_match = _CREDENTIAL_SCHEMA_UNAVAILABLE_RE.fullmatch(exception_line)
+    if table_match is not None:
+        if table_match.group(1) in required_tables:
+            return {
+                "reason": "schema_table_unavailable",
+                "schema_object": table_match.group(1),
+                "http_status": int(table_match.group(2)),
+            }
+    rpc_match = _CREDENTIAL_RPC_UNAVAILABLE_RE.fullmatch(exception_line)
+    if rpc_match is not None:
+        required_rpcs = {
+            function_name
+            for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+        }
+        if rpc_match.group(1) in required_rpcs:
+            return {
+                "reason": "rpc_unavailable",
+                "rpc": rpc_match.group(1),
+            }
+    return {}
+
+
+def _credential_fixed_reason(
+    phase: str,
+    frames: Sequence[tuple[str, str]],
+    exception_class: str,
+    exception_line: str,
+) -> str | None:
+    functions = {function for _path, function in frames}
+    if (
+        phase == "environment_load"
+        and exception_class == "GatewayEnvelopePreparationV2Error"
+        and _CREDENTIAL_ENVIRONMENT_UNAVAILABLE_RE.fullmatch(exception_line)
+        is not None
+    ):
+        return "environment_unavailable"
+    if phase == "proxy_preflight" and "verify_worker_proxy_fleets_v2" in functions:
+        return "proxy_connect_failed"
+    if phase == "envelope_install" and "_secret" in functions:
+        return "credential_unavailable"
+    return None
+
+
+def _credential_envelope_observations(log_path: Path) -> list[dict[str, Any]]:
+    """Project fixed credential-stage traceback identities from one bounded log."""
+
+    body = _bounded_gateway_log_tail(log_path)
+    if body is None:
+        return []
+    lines = body.decode("utf-8", errors="replace").splitlines()
+    starts = [index for index, line in enumerate(lines) if line == _TRACEBACK_START]
+    if not starts:
+        return []
+    chain_start = len(starts) - 1
+    while chain_start:
+        previous = lines[starts[chain_start - 1] + 1 : starts[chain_start]]
+        if not (
+            len(previous) >= 3
+            and previous[-3] == ""
+            and previous[-2] in _TRACEBACK_CHAIN_SEPARATORS
+            and previous[-1] == ""
+        ):
+            break
+        chain_start -= 1
+    starts = starts[chain_start:]
+    observations: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, Any], ...]] = set()
+    for position, start in enumerate(starts):
+        stop = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        block = lines[start + 1 : stop]
+        frames = []
+        exception_class = None
+        exception_line = None
+        for line in block:
+            frame = _TRACEBACK_FRAME_RE.fullmatch(line)
+            if frame is not None:
+                frames.append((frame.group(1), frame.group(2)))
+            exception = _TRACEBACK_EXCEPTION_RE.match(line)
+            if exception is not None and exception.group(1) in _CREDENTIAL_EXCEPTION_CLASSES:
+                exception_class = exception.group(1)
+                exception_line = line
+        phase = _credential_traceback_phase(frames)
+        if exception_class in {"ImportError", "ModuleNotFoundError"} and any(
+            path.replace("\\", "/").endswith(
+                "/gateway/tee/prepare_gateway_envelopes_v2.py"
+            )
+            and function == "<module>"
+            for path, function in frames
+        ):
+            phase = "credential_module_load"
+        if phase is None or exception_class is None or exception_line is None:
+            continue
+        observation: dict[str, Any] = {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": phase,
+            "exception_class": exception_class,
+        }
+        probe = _credential_traceback_probe(frames)
+        if probe is not None:
+            observation["probe"] = probe
+        if phase == "schema_preflight":
+            observation.update(_credential_schema_detail(exception_line))
+        reason = _credential_fixed_reason(
+            phase, frames, exception_class, exception_line
+        )
+        if reason is not None:
+            observation["reason"] = reason
+        aws_error = _CREDENTIAL_AWS_ERROR_RE.match(exception_line)
+        if (
+            aws_error is not None
+            and aws_error.group(1) in _CREDENTIAL_AWS_ERROR_CODES
+            and aws_error.group(2) in _CREDENTIAL_AWS_OPERATIONS
+        ):
+            observation["aws_error_code"] = aws_error.group(1)
+            observation["aws_operation"] = aws_error.group(2)
+        identity = tuple(sorted(observation.items()))
+        if identity not in seen and len(observations) < 8:
+            seen.add(identity)
+            observations.append(observation)
+    aws_observations = [
+        observation for observation in observations if "aws_error_code" in observation
+    ]
+    if aws_observations:
+        return aws_observations[-1:]
+    if not observations:
+        return []
+    selected = dict(observations[-1])
+    for observation in reversed(observations[:-1]):
+        if observation["phase"] != selected["phase"]:
+            continue
+        for field in ("probe", "reason", "schema_object", "rpc", "http_status"):
+            if field not in selected and field in observation:
+                selected[field] = observation[field]
+    return [selected]
 
 
 class _RejectCloneRedirects(HTTPRedirectHandler):
@@ -1086,6 +1655,15 @@ def _full_restart_environment(
     if region != "us-east-1":
         raise FullParityError("gateway restart region is invalid")
     restart_home = Path(home)
+    gateway_python_bin = Path(
+        str(updates.get("GATEWAY_PYTHON_BIN", sys.executable))
+    )
+    if (
+        not gateway_python_bin.is_absolute()
+        or not gateway_python_bin.is_file()
+        or not os.access(gateway_python_bin, os.X_OK)
+    ):
+        raise FullParityError("gateway restart Python runtime is unavailable")
     try:
         home_metadata = restart_home.lstat()
     except OSError as exc:
@@ -1120,10 +1698,6 @@ def _full_restart_environment(
     return {
         "LANG": "C.UTF-8",
         "LOGNAME": "root",
-        "PATH": (
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        ),
-        "PYTHONNOUSERSITE": "1",
         "SHELL": "/bin/bash",
         "USER": "root",
         **dict(updates),
@@ -1131,6 +1705,11 @@ def _full_restart_environment(
         "AWS_DEFAULT_REGION": region,
         "HOME": str(restart_home),
         "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
+        "PATH": (
+            f"{gateway_python_bin.parent}:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        "PYTHONNOUSERSITE": "1",
     }
 
 
@@ -1367,6 +1946,274 @@ def _last_json_document(output: str, *, field: str) -> dict[str, Any]:
         if isinstance(value, Mapping):
             return dict(value)
     raise FullParityError(f"{field} did not return redacted JSON evidence")
+
+
+def _normalize_full_parity_clone_arena_restart_state(
+    database: _DockerDatabase,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    """Recover expired copied leases and remove restart ownership from the clone."""
+
+    expected_database = f"leadpoet_parity_{candidate_sha[:12]}"
+    expected_container = re.compile(
+        rf"^leadpoet-parity-postgres-{re.escape(candidate_sha[:10])}-[0-9a-f]{{6}}$"
+    )
+    try:
+        target = urlparse(database.target_dsn)
+        target_port = target.port
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise FullParityError("Full parity clone database identity is invalid") from exc
+    if (
+        SHA_RE.fullmatch(candidate_sha) is None
+        or target.scheme not in {"postgres", "postgresql"}
+        or target.hostname != "127.0.0.1"
+        or target_port is None
+        or target.path != f"/{expected_database}"
+        or database.database != expected_database
+        or expected_container.fullmatch(database.postgres) is None
+    ):
+        raise FullParityError("Full parity clone database identity is invalid")
+
+    try:
+        raw = database._psql(
+            """
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '40s';
+DO $full_parity_clone_arena$
+DECLARE
+  v_control public.lab_arena_restart_claim_control;
+  v_control_count BIGINT := 0;
+  v_initial_leased BIGINT := 0;
+  v_expired_eligible BIGINT := 0;
+  v_affected_rounds BIGINT := 0;
+  v_expired BIGINT := 0;
+  v_retried BIGINT := 0;
+  v_remaining BIGINT := 0;
+  v_normalized BIGINT := 0;
+  v_round_id TEXT;
+  v_expiry JSONB;
+  v_guard_generation BIGINT;
+  v_guard_cleared BOOLEAN := FALSE;
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('lab-arena-claim-control', 0)
+  );
+  SELECT COUNT(*)::BIGINT INTO v_control_count
+  FROM public.lab_arena_restart_claim_control;
+  IF v_control_count <> 1 THEN
+    PERFORM pg_catalog.set_config(
+      'leadpoet.full_parity_clone_arena_evidence',
+      pg_catalog.json_build_object(
+        'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+        'outcome', 'control_invalid',
+        'control_count', v_control_count
+      )::TEXT,
+      FALSE
+    );
+    RETURN;
+  END IF;
+  SELECT current.* INTO STRICT v_control
+  FROM public.lab_arena_restart_claim_control AS current
+  WHERE current.singleton
+  FOR UPDATE;
+  IF v_control.operator_paused THEN
+    PERFORM pg_catalog.set_config(
+      'leadpoet.full_parity_clone_arena_evidence',
+      pg_catalog.json_build_object(
+        'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+        'outcome', 'operator_paused',
+        'control_count', v_control_count,
+        'operator_paused', TRUE
+      )::TEXT,
+      FALSE
+    );
+    RETURN;
+  END IF;
+  SELECT COUNT(*)::BIGINT,
+    COUNT(*) FILTER (
+      WHERE lease_expires_at IS NOT NULL
+        AND lease_expires_at <= pg_catalog.clock_timestamp()
+    )::BIGINT,
+    COUNT(DISTINCT round_id)::BIGINT
+  INTO v_initial_leased, v_expired_eligible, v_affected_rounds
+  FROM public.lab_arena_runs
+  WHERE status = 'leased';
+  IF v_initial_leased <> v_expired_eligible THEN
+    PERFORM pg_catalog.set_config(
+      'leadpoet.full_parity_clone_arena_evidence',
+      pg_catalog.json_build_object(
+        'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+        'outcome', 'lease_not_expired',
+        'control_count', v_control_count,
+        'operator_paused', FALSE,
+        'initial_leased_count', v_initial_leased,
+        'expired_eligible_count', v_expired_eligible,
+        'affected_round_count', v_affected_rounds
+      )::TEXT,
+      FALSE
+    );
+    RETURN;
+  END IF;
+  FOR v_round_id IN
+    SELECT DISTINCT runs.round_id
+    FROM public.lab_arena_runs AS runs
+    WHERE runs.status = 'leased'
+    ORDER BY runs.round_id
+  LOOP
+    SELECT public.lab_arena_expire_leases(v_round_id) INTO v_expiry;
+    IF pg_catalog.jsonb_typeof(v_expiry) IS DISTINCT FROM 'object'
+       OR v_expiry ->> 'status' IS DISTINCT FROM 'ok'
+       OR COALESCE(v_expiry ->> 'expired', '') !~ '^[0-9]+$'
+       OR COALESCE(v_expiry ->> 'retried', '') !~ '^[0-9]+$' THEN
+      RAISE EXCEPTION 'full_parity_clone_arena_expiry_failed';
+    END IF;
+    IF (v_expiry ->> 'retried')::BIGINT
+       > (v_expiry ->> 'expired')::BIGINT THEN
+      RAISE EXCEPTION 'full_parity_clone_arena_expiry_failed';
+    END IF;
+    v_expired := v_expired + (v_expiry ->> 'expired')::BIGINT;
+    v_retried := v_retried + (v_expiry ->> 'retried')::BIGINT;
+  END LOOP;
+  SELECT COUNT(*)::BIGINT INTO v_remaining
+  FROM public.lab_arena_runs
+  WHERE status = 'leased';
+  IF v_expired <> v_initial_leased
+     OR v_retried > v_expired
+     OR v_remaining <> 0 THEN
+    RAISE EXCEPTION 'full_parity_clone_arena_expiry_incomplete';
+  END IF;
+  UPDATE public.lab_arena_restart_claim_control AS current SET
+    guard_commitment = '',
+    owner_commitment = '',
+    guard_expires_at = NULL,
+    candidate_commit = '',
+    restart_scope = '',
+    restart_phase = '',
+    captured_leases = '[]'::JSONB
+  WHERE current.singleton
+    AND current.operator_paused IS FALSE
+  RETURNING current.guard_generation,
+    current.guard_commitment = ''
+      AND current.owner_commitment = ''
+      AND current.guard_expires_at IS NULL
+      AND current.candidate_commit = ''
+      AND current.restart_scope = ''
+      AND current.restart_phase = ''
+      AND current.captured_leases = '[]'::JSONB
+  INTO v_guard_generation, v_guard_cleared;
+  GET DIAGNOSTICS v_normalized = ROW_COUNT;
+  IF v_normalized <> 1
+     OR v_guard_cleared IS NOT TRUE
+     OR v_guard_generation IS DISTINCT FROM v_control.guard_generation THEN
+    RAISE EXCEPTION 'full_parity_clone_arena_guard_clear_failed';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'leadpoet.full_parity_clone_arena_evidence',
+    pg_catalog.json_build_object(
+      'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+      'outcome', 'normalized',
+      'control_count', v_control_count,
+      'operator_paused', FALSE,
+      'initial_leased_count', v_initial_leased,
+      'expired_eligible_count', v_expired_eligible,
+      'affected_round_count', v_affected_rounds,
+      'expired_count', v_expired,
+      'retried_count', v_retried,
+      'remaining_leased_count', v_remaining,
+      'normalization_count', v_normalized,
+      'guard_generation', v_guard_generation,
+      'guard_cleared', v_guard_cleared
+    )::TEXT,
+    FALSE
+  );
+END;
+$full_parity_clone_arena$;
+COMMIT;
+SELECT pg_catalog.current_setting(
+  'leadpoet.full_parity_clone_arena_evidence', FALSE
+);
+""",
+            timeout=45,
+        )
+    except ProductionParityError as exc:
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_recovery_failed",
+            "Full parity clone Arena recovery failed",
+        ) from exc
+    try:
+        evidence = _last_json_document(
+            raw, field="clone Arena restart state normalization"
+        )
+    except FullParityError as exc:
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_state_invalid",
+            "Full parity clone Arena restart evidence is invalid",
+        ) from exc
+    if (
+        isinstance(evidence.get("control_count"), bool)
+        or not isinstance(evidence.get("control_count"), int)
+        or evidence["control_count"] != 1
+    ):
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_control_invalid",
+            "Full parity clone Arena restart control is invalid",
+        )
+    if not isinstance(evidence.get("operator_paused"), bool):
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_control_invalid",
+            "Full parity clone Arena restart control is invalid",
+        )
+    if evidence["operator_paused"] is True:
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_operator_paused",
+            "Full parity clone preserves an operator Arena pause",
+        )
+    if evidence.get("outcome") == "lease_not_expired":
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_lease_not_expired",
+            "Full parity clone contains an unexpired Arena lease",
+        )
+    generation = evidence.get("guard_generation")
+    count_fields = (
+        "initial_leased_count",
+        "expired_eligible_count",
+        "affected_round_count",
+        "expired_count",
+        "retried_count",
+        "remaining_leased_count",
+        "normalization_count",
+    )
+    if (
+        evidence.get("schema_version")
+        != "leadpoet.production_parity_clone_arena_state.v2"
+        or evidence.get("outcome") != "normalized"
+        or any(
+            isinstance(evidence.get(field), bool)
+            or not isinstance(evidence.get(field), int)
+            or int(evidence[field]) < 0
+            for field in count_fields
+        )
+        or evidence["initial_leased_count"]
+        != evidence["expired_eligible_count"]
+        or evidence["initial_leased_count"] != evidence["expired_count"]
+        or evidence["retried_count"] > evidence["expired_count"]
+        or evidence["affected_round_count"] > evidence["initial_leased_count"]
+        or (evidence["affected_round_count"] == 0)
+        != (evidence["initial_leased_count"] == 0)
+        or evidence["remaining_leased_count"] != 0
+        or evidence.get("normalization_count") != 1
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or evidence.get("guard_cleared") is not True
+    ):
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_state_invalid",
+            "Full parity clone Arena restart state did not normalize",
+        )
+    return evidence
 
 
 def _arena_provider_keys(values: Mapping[str, str]) -> dict[str, str]:
@@ -1634,6 +2481,54 @@ def _validate_arena_rebenchmark_evidence(
     ):
         raise FullParityError("Arena rebenchmark evidence is incomplete")
     return dict(value)
+
+
+def _release_full_parity_arena_restart_guard(
+    *,
+    region: str,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    gateway_env_file: Path,
+    artifact_bucket: str,
+) -> None:
+    """Release the clone guard left by the successful bare gateway restart."""
+
+    _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
+    )
+    result = _run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "lab_arena_restart_claim_guard.py"),
+            "release",
+            "--environment-file",
+            str(gateway_env_file),
+            "--candidate",
+            candidate_sha,
+            "--invocation",
+            run_id,
+        ],
+        timeout=60,
+        env=_clone_child_environment(region=region),
+    )
+    released = _last_json_document(
+        _require(result, stage="clone Arena restart guard release"),
+        field="clone Arena restart guard release",
+    )
+    if (
+        released.get("schema_version")
+        != "leadpoet.lab_arena.restart_guard_state.v1"
+        or released.get("guard_present") is not False
+        or released.get("guard_active") is not False
+        or not isinstance(released.get("operator_paused"), bool)
+        or released.get("paused") is not released.get("operator_paused")
+    ):
+        raise FullParityError("clone Arena restart guard release is incomplete")
 
 
 def _run_arena_rebenchmark_path(
@@ -3478,10 +4373,16 @@ def run_full(
             postgres_image=postgres_image,
         )
         restore_contract = database.verify_snapshot_restore()
+        failure_stage = "clone-arena-normalization"
+        clone_arena_state = _normalize_full_parity_clone_arena_restart_state(
+            database,
+            candidate_sha=candidate_sha,
+        )
         restore = {
             **restore,
             "clone_prerequisites": prerequisites,
             "clone_restore_contract": restore_contract,
+            "clone_arena_restart_state": clone_arena_state,
         }
         failure_stage = "clone-http-origin"
         local_url, _ = database.start_postgrest()
@@ -3551,6 +4452,7 @@ def run_full(
                 "GATEWAY_RESTART_TIMING_DIR": str(gateway_restart_timing_dir),
                 "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(work / "docker-operation.lock"),
                 "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "full-parity",
+                "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID": run_id,
                 "GATEWAY_DEPLOY_COMMIT": candidate_sha,
                 "GATEWAY_PYTHON_BIN": sys.executable,
                 "GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET,
@@ -3559,30 +4461,24 @@ def run_full(
             },
         )
         failure_stage = "gateway-restart"
-        restart_timeout = min(
-            _remaining_full_timeout(
-                deadline=deadline,
-                stage="exact gateway restart",
-            ),
-            10800,
+        (
+            restart,
+            restart_timeout_error,
+            gateway_restart_diagnostic,
+            gateway_log,
+            gateway_restart_timing_dir,
+        ) = _run_gateway_restart_with_epoch_retry(
+            ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
+            env=env,
+            log_path=gateway_log,
+            timing_dir=gateway_restart_timing_dir,
+            deadline=deadline,
+            candidate_sha=candidate_sha,
         )
-        try:
-            restart = _run(
-                ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
-                timeout=restart_timeout,
-                env=env,
-                log_path=gateway_log,
-            )
-        except subprocess.TimeoutExpired:
-            gateway_restart_diagnostic = {
-                "outcome": "timed_out",
-                "timeout_seconds": restart_timeout,
-            }
-            raise
-        gateway_restart_diagnostic = {
-            "outcome": "exited",
-            "returncode": restart.returncode,
-        }
+        if restart_timeout_error is not None:
+            raise restart_timeout_error
+        if restart is None:
+            raise FullParityError("exact gateway restart result is unavailable")
         if restart.returncode != 0:
             raise FullParityError("exact gateway restart failed")
         failure_stage = "gateway-health"
@@ -3603,6 +4499,14 @@ def run_full(
             artifact_bucket=artifact_bucket,
         )
         failure_stage = "arena-rebenchmark"
+        _release_full_parity_arena_restart_guard(
+            region=region,
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+            gateway_env_file=gateway_env_file,
+            artifact_bucket=artifact_bucket,
+        )
         arena_rebenchmark = _run_arena_rebenchmark_path(
             region=region,
             candidate_sha=candidate_sha,
@@ -3730,14 +4634,41 @@ def run_full(
     finally:
         cleanup: dict[str, Any] = {}
         if gateway_restart_diagnostic is not None:
+            timing = None
             try:
                 timing = _gateway_restart_timing_diagnostic(
-                    gateway_restart_timing_dir
+                    gateway_restart_timing_dir,
+                    expected_candidate_sha=candidate_sha,
                 )
                 if timing is not None:
                     gateway_restart_diagnostic["timing"] = timing
             except Exception:  # noqa: BLE001 - diagnostics cannot suppress cleanup
                 pass
+            gateway_failed = (
+                gateway_restart_diagnostic.get("outcome") == "timed_out"
+                or (
+                    gateway_restart_diagnostic.get("outcome") == "exited"
+                    and gateway_restart_diagnostic.get("returncode") != 0
+                )
+            )
+            if (
+                gateway_failed
+                and isinstance(timing, dict)
+                and timing.get("final_status") == "failed"
+            ):
+                try:
+                    final_stage = timing.get("final_stage")
+                    observations = (
+                        _local_release_build_observations(gateway_log)
+                        if final_stage == "local_release_build"
+                        else _credential_envelope_observations(gateway_log)
+                        if final_stage == "v2_credential_envelope_preparation"
+                        else []
+                    )
+                    if observations:
+                        gateway_restart_diagnostic["observations"] = observations
+                except Exception:  # noqa: BLE001 - diagnostics cannot suppress cleanup
+                    pass
             evidence["gateway_restart_diagnostic"] = gateway_restart_diagnostic
         if prefix_adapter is not None:
             try:

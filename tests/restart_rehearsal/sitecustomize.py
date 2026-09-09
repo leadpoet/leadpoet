@@ -296,11 +296,11 @@ class _LocalSupabaseHTTPSConnection:
             "authorization",
             "apikey",
             "connection",
-            "host",
         }
         normalized_method = str(method).upper()
         if body is not None:
             expected_headers |= {"content-length", "content-type"}
+        supplied_host = normalized_headers.pop("host", None)
         if (
             self._requested
             or normalized_method not in {"GET", "POST"}
@@ -310,11 +310,20 @@ class _LocalSupabaseHTTPSConnection:
             or parsed.fragment
             or encode_chunked
             or set(normalized_headers) != expected_headers
-            or normalized_headers.get("host") != _PRODUCTION_SUPABASE_HOST
+            or supplied_host not in (None, _PRODUCTION_SUPABASE_HOST)
             or normalized_headers.get("accept") != "application/json"
-            or normalized_headers.get("apikey") != "rehearsal-secret"
-            or normalized_headers.get("authorization")
-            != "Bearer rehearsal-secret"
+            or (
+                normalized_headers.get("apikey"),
+                normalized_headers.get("authorization"),
+            )
+            not in {
+                ("rehearsal-public", "Bearer rehearsal-public"),
+                ("rehearsal-secret", "Bearer rehearsal-secret"),
+                (
+                    "rehearsal-secret",
+                    "Bearer rehearsal.header.signature",
+                ),
+            }
             or normalized_headers.get("connection") != "close"
             or (normalized_method == "GET" and body is not None)
             or (normalized_method == "POST" and not isinstance(body, bytes))

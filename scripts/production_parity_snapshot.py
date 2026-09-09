@@ -1467,9 +1467,6 @@ SELECT json_build_object(
   'largest_relation_bytes', COALESCE(MAX(pg_total_relation_size(c.oid)), 0),
   'capture_utc_timestamp', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::text || '+00:00',
   'capture_utc_date', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text,
-  'latest_completed_benchmark_date', NULL,
-  'current_day_rebenchmark_run_count', 0,
-  'current_day_benchmark_bundle_count', 0,
   'weight_history_scope', (
     SELECT json_build_object(
       'netuid', netuid,
@@ -1815,15 +1812,6 @@ def capture_snapshot(
             "largest_relation_bytes": int(stats.get("largest_relation_bytes") or 0),
             "capture_utc_date": str(stats.get("capture_utc_date") or ""),
             "target_rebenchmark_date": target_rebenchmark_date.isoformat(),
-            "latest_completed_benchmark_date": stats.get(
-                "latest_completed_benchmark_date"
-            ),
-            "current_day_rebenchmark_run_count": int(
-                stats.get("current_day_rebenchmark_run_count") or 0
-            ),
-            "current_day_benchmark_bundle_count": int(
-                stats.get("current_day_benchmark_bundle_count") or 0
-            ),
             "source_role": dict(source_role),
             "weight_history_scope": dict(stats.get("weight_history_scope") or {}),
         },

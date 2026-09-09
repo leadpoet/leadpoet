@@ -3,11 +3,16 @@
 
 Secret documents are read and changed on their owning hosts. The complete
 documents and the scoped service key travel only on SSH stdin and stay in memory.
+The fixed validator credential KMS guard mode runs from a gateway checkout and
+uses the gateway's pinned IAM operator session; it does not use SSH.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -24,6 +29,17 @@ VALIDATOR_SECRET = "leadpoet/prod/validator/env"
 DEFAULT_SSH_KEY = Path.home() / ".ssh" / "leadpoet-2026-07-28.pem"
 AUTH_ENV = "LEADPOET_LAB_ARENA_PRODUCTION_APPLY"
 KNOWN_ACCOUNTS = frozenset({"187445349696", "493765492819"})
+IAM_ACCOUNT = "493765492819"
+IAM_CALLER_ARN = "arn:aws:iam::493765492819:user/pranav-main"
+VALIDATOR_IAM_ROLE = "leadpoet-validator-s3-cloudwatch-role"
+VALIDATOR_IAM_POLICY = "leadpoet-research-lab-kms-sign-and-trace"
+VALIDATOR_IAM_ROLE_ARN = f"arn:aws:iam::{IAM_ACCOUNT}:role/{VALIDATOR_IAM_ROLE}"
+LAB_ARENA_CREDENTIAL_KMS_KEY_ARN = (
+    "arn:aws:kms:us-east-1:493765492819:key/"
+    "ef29d954-deb5-4f3e-89fe-a193338624d1"
+)
+LAB_ARENA_CREDENTIAL_KMS_PURPOSE = "leadpoet_lab_arena_miner_runtime_credential"
+LAB_ARENA_CREDENTIAL_DENY_SID = "DenyLabArenaMinerCredentialDecrypt"
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DIGEST_REFERENCE_RE = re.compile(
     r"(?=.{1,512}\Z)(?=[^\s\x00-\x1f\x7f]+\Z)[^/@\s]+/[^@\s]+@sha256:[0-9a-f]{64}\Z"
@@ -32,6 +48,153 @@ _DIGEST_REFERENCE_RE = re.compile(
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+def _gateway_iam_session():
+    """Load the existing pinned gateway IAM credential reader."""
+
+    path = Path(__file__).with_name("setup_production_parity_staging.py")
+    spec = importlib.util.spec_from_file_location(
+        "_leadpoet_production_parity_setup_for_arena", path
+    )
+    if spec is None or spec.loader is None:
+        raise ConfigurationError("gateway IAM authority loader is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        return module._gateway_iam_session()
+    except Exception as exc:
+        raise ConfigurationError("gateway IAM authority is unavailable") from exc
+
+
+def _policy_hash(document: Mapping[str, object]) -> str:
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _credential_deny_statement() -> dict[str, object]:
+    return {
+        "Sid": LAB_ARENA_CREDENTIAL_DENY_SID,
+        "Effect": "Deny",
+        "Action": ["kms:Decrypt", "kms:ReEncryptFrom"],
+        "Resource": LAB_ARENA_CREDENTIAL_KMS_KEY_ARN,
+        "Condition": {
+            "StringEquals": {
+                "kms:EncryptionContext:purpose": LAB_ARENA_CREDENTIAL_KMS_PURPOSE
+            }
+        },
+    }
+
+
+def _policy_with_credential_deny(document: object) -> tuple[dict[str, object], bool]:
+    if not isinstance(document, Mapping) or set(document) != {"Version", "Statement"}:
+        raise ConfigurationError("validator IAM policy document is invalid")
+    if document.get("Version") != "2012-10-17":
+        raise ConfigurationError("validator IAM policy version is invalid")
+    raw_statements = document.get("Statement")
+    statements = [raw_statements] if isinstance(raw_statements, Mapping) else raw_statements
+    if (
+        not isinstance(statements, list)
+        or not statements
+        or any(not isinstance(item, Mapping) for item in statements)
+    ):
+        raise ConfigurationError("validator IAM policy statements are invalid")
+    desired = copy.deepcopy(dict(document))
+    desired["Statement"] = copy.deepcopy(statements)
+    expected = _credential_deny_statement()
+    existing = [
+        item
+        for item in desired["Statement"]
+        if item.get("Sid") == LAB_ARENA_CREDENTIAL_DENY_SID
+    ]
+    if existing:
+        if len(existing) != 1 or existing[0] != expected:
+            raise ConfigurationError("validator Arena credential deny differs")
+        return desired, False
+    desired["Statement"].append(expected)
+    return desired, True
+
+
+def _validator_policy_document(iam) -> dict[str, object]:
+    role = iam.get_role(RoleName=VALIDATOR_IAM_ROLE).get("Role", {})
+    if str(role.get("Arn") or "") != VALIDATOR_IAM_ROLE_ARN:
+        raise ConfigurationError("validator IAM role identity differs")
+    names: list[str] = []
+    marker = ""
+    while True:
+        request = {"RoleName": VALIDATOR_IAM_ROLE}
+        if marker:
+            request["Marker"] = marker
+        response = iam.list_role_policies(**request)
+        rows = response.get("PolicyNames", [])
+        if not isinstance(rows, list) or any(not isinstance(name, str) for name in rows):
+            raise ConfigurationError("validator IAM policy inventory is invalid")
+        names.extend(rows)
+        if not response.get("IsTruncated"):
+            break
+        marker = str(response.get("Marker") or "")
+        if not marker:
+            raise ConfigurationError("validator IAM policy inventory is invalid")
+    if names.count(VALIDATOR_IAM_POLICY) != 1:
+        raise ConfigurationError("validator IAM policy identity differs")
+    document = iam.get_role_policy(
+        RoleName=VALIDATOR_IAM_ROLE, PolicyName=VALIDATOR_IAM_POLICY
+    ).get("PolicyDocument")
+    if not isinstance(document, Mapping):
+        raise ConfigurationError("validator IAM policy document is invalid")
+    return copy.deepcopy(dict(document))
+
+
+def _configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, object]:
+    session = _gateway_iam_session()
+    sts = session.client("sts")
+    iam = session.client("iam")
+    identity = sts.get_caller_identity()
+    if (
+        str(identity.get("Account") or "") != IAM_ACCOUNT
+        or str(identity.get("Arn") or "") != IAM_CALLER_ARN
+    ):
+        raise ConfigurationError("gateway IAM caller identity differs")
+    before = _validator_policy_document(iam)
+    desired, changed = _policy_with_credential_deny(before)
+    result: dict[str, object] = {
+        "ok": True,
+        "mode": "apply" if apply else "check",
+        "account": IAM_ACCOUNT,
+        "role": VALIDATOR_IAM_ROLE,
+        "policy": VALIDATOR_IAM_POLICY,
+        "prior_document_hash": _policy_hash(before),
+        "desired_document_hash": _policy_hash(desired),
+        "changed": changed,
+        "applied": False,
+    }
+    if not changed or not apply:
+        return result
+    current = _validator_policy_document(iam)
+    if current != before:
+        raise ConfigurationError("validator IAM policy changed before write")
+    iam.put_role_policy(
+        RoleName=VALIDATOR_IAM_ROLE,
+        PolicyName=VALIDATOR_IAM_POLICY,
+        PolicyDocument=json.dumps(desired, separators=(",", ":")),
+    )
+    after = _validator_policy_document(iam)
+    if after != desired:
+        raise ConfigurationError("validator IAM policy post-write differs")
+    result["applied"] = True
+    result["readback_document_hash"] = _policy_hash(after)
+    return result
+
+
+def configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, object]:
+    try:
+        return _configure_validator_credential_kms_guard(apply=apply)
+    except ConfigurationError:
+        raise
+    except Exception as exc:
+        raise ConfigurationError("validator IAM guard operation failed") from exc
 
 
 def _dotenv_key(line: str) -> str:
@@ -436,6 +599,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--miner-credentials-only", action="store_true", help="configure only the gateway miner KMS key from its existing Research Lab key")
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
+    scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
@@ -460,9 +624,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("--apply requires %s=1" % AUTH_ENV)
     if not 0 <= args.daily_cutoff_utc <= 23:
         raise ConfigurationError("--daily-cutoff-utc must be between 0 and 23")
-    if not args.ssh_key.is_file():
+    if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
-    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None or args.scorer_image_only
+    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None or args.scorer_image_only or args.validator_credential_kms_guard
+    if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
+        raise ConfigurationError("validator IAM guard requires the exact production account")
     if args.miner_credential_kms_key_id is not None and not args.miner_credentials_only:
         raise ConfigurationError("--miner-credential-kms-key-id requires --miner-credentials-only")
     if args.scorer_image_only:
@@ -483,6 +649,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         _validate_args(args)
+        if args.validator_credential_kms_guard:
+            result = configure_validator_credential_kms_guard(apply=args.apply)
+            print(json.dumps(result, separators=(",", ":")))
+            return 0
         if args.testnet_proxy is not None:
             request = {
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,

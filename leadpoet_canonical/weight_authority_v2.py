@@ -706,8 +706,11 @@ def validate_weight_snapshot_v2(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     historical = input_categories == (
         set(WEIGHT_INPUT_PURPOSES) | {_HISTORICAL_SOURCE_ADD_CATEGORY}
     )
+    # The retired producer omitted source_add_allocations when it was empty,
+    # but still emitted the signed source_add_rewards input. Full bundle
+    # validation below binds that receipt to the implied empty list.
     _require(
-        historical == historical_allocation,
+        not historical_allocation or historical,
         "historical SOURCE_ADD allocation and receipt category must be paired",
     )
     rebuilt = build_weight_snapshot_v2(

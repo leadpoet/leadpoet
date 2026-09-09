@@ -294,12 +294,16 @@ def _bundle(
     category_purpose_override=None,
     category_output_override=None,
     historical_source_allocations=None,
+    historical_source_add_omitted=False,
 ):
     coordinator_key, coordinator_pub = _keypair()
     weight_key, weight_pub = _keypair()
     preliminary = _calculation_snapshot([], "")
-    historical = historical_source_allocations is not None
-    if historical:
+    historical = (
+        historical_source_allocations is not None
+        or historical_source_add_omitted
+    )
+    if historical and not historical_source_add_omitted:
         preliminary["research_lab_allocation_doc"][
             "source_add_allocations"
         ] = historical_source_allocations
@@ -426,7 +430,7 @@ def _bundle(
         list(input_hashes.values()),
         input_hashes["research_lab_allocation"],
     )
-    if historical:
+    if historical and not historical_source_add_omitted:
         calculation["research_lab_allocation_doc"][
             "source_add_allocations"
         ] = historical_source_allocations
@@ -561,6 +565,52 @@ def test_historical_source_add_signed_weight_bundle_rejects_receipt_tampering():
     source_receipt["purpose"] = "research_lab.fulfillment_input.v2"
 
     with pytest.raises(WeightAuthorityV2Error):
+        validate_published_weight_bundle_v2(bundle)
+
+
+def test_historical_zero_source_add_bundle_accepts_omitted_allocation_field():
+    bundle = _bundle(historical_source_add_omitted=True)
+    original = copy.deepcopy(bundle)
+
+    verified = validate_published_weight_bundle_v2(bundle)
+
+    allocation = bundle["weight_snapshot"]["calculation_snapshot"][
+        "research_lab_allocation_doc"
+    ]
+    assert "source_add_allocations" not in allocation
+    assert bundle == original
+    assert verified["weights_hash"] == bundle["weight_result"]["weights_hash"]
+
+
+def test_historical_omitted_source_add_rejects_nonempty_receipt_value():
+    nonempty_source_root = sha256_json(
+        {
+            "schema_version": "leadpoet.weight_input_value.v2",
+            "category": "source_add_rewards",
+            "netuid": 71,
+            "epoch_id": 100,
+            "value": {
+                "source_add_allocations": [
+                    {
+                        "uid": 3,
+                        "miner_hotkey": "source-hotkey",
+                        "paid_alpha_percent": 1.0,
+                    }
+                ]
+            },
+        }
+    )
+    bundle = _bundle(
+        historical_source_add_omitted=True,
+        category_output_override={
+            "source_add_rewards": nonempty_source_root,
+        },
+    )
+
+    with pytest.raises(
+        WeightAuthorityV2Error,
+        match="source_add_rewards receipt output does not bind its weight input",
+    ):
         validate_published_weight_bundle_v2(bundle)
 
 

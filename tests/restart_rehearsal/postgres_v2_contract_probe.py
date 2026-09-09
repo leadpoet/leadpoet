@@ -4512,6 +4512,22 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-194 Lab Arena scorer refresh contract differs"
             )
+        reward_scope_migration = "197-lab-arena-reward-chain-scope.sql"
+        database.apply_migration(scripts / reward_scope_migration)
+        applied.append(reward_scope_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 197,
+        }:
+            raise PostgresContractProbeError(
+                "post-197 Lab Arena reward scope contract differs"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,

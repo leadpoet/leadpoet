@@ -53,6 +53,15 @@ CHAIN_MAX_CHECKPOINT_DECOMPRESSED_BYTES = 128 * 1024 * 1024
 # bound to the exact authenticated runtime metadata that was reviewed. An
 # unknown runtime fails closed until its metadata is added here.
 _REVEAL_PERIOD_METADATA_DEFAULTS_V2 = {
+    # Temporary testnet401 proof. The authenticated E22067 close (7964750)
+    # has byte-identical runtime455 metadata to the reviewed Finney runtime.
+    # Remove this network-specific entry with the temporary signing capacity.
+    (
+        "8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105",
+        455,
+        1,
+        "sha256:74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7",
+    ): 1,
     (
         "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
         452,

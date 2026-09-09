@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from lab_arena import signing
+from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
@@ -196,6 +198,13 @@ def test_reward_activation_history_and_epochs_are_chain_scoped(other_network, ot
             mode="live", network_name="finney", netuid=71,
         )] == [finney]
         assert store.activate_reward(finney, finney_basis, key)["status"] == "existing"
+        service = object.__new__(ArenaService)
+        service._store = store
+        service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71)
+        assert service.public_reward_basis(99) is None
+        assert service.public_reward_basis(101) == finney_basis
+        service._config = SimpleNamespace(mode="live", network_name=other_network, netuid=other_netuid)
+        assert service.public_reward_basis(101) == defended
     finally:
         transport.close()
         control.close()

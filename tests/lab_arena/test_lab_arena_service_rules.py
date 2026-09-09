@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +12,7 @@ import pytest
 from lab_arena import contracts, rewards, scoring, signing, source_bundle
 from lab_arena.output import validate_output_document
 from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
-from lab_arena.store import hash_lease_token
+from lab_arena.store import ArenaStoreError, hash_lease_token
 
 
 def _schedule():
@@ -20,6 +20,32 @@ def _schedule():
         "submission_open": "2026-09-02T00:00:00Z",
         "submission_cutoff": "2026-09-02T01:00:00Z",
     }
+
+
+def test_startup_requires_the_next_day_bank_date_column():
+    class Transport:
+        @staticmethod
+        def rpc(function, _params):
+            assert function == "lab_arena_schema_version_v1"
+            return {
+                "schema_version": "leadpoet.lab_arena.schema_version.v1",
+                "version": 197,
+            }
+
+        @staticmethod
+        def select(table, *, limit, columns):
+            assert table == "lab_arena_rounds"
+            assert limit == 1 and columns == "icp_set_date"
+            raise ArenaStoreError("column icp_set_date does not exist")
+
+    service = object.__new__(ArenaService)
+    service._store = SimpleNamespace(
+        require_service_role=lambda: {"current_user": "lab_arena_service"},
+        _transport=Transport(),
+    )
+    with pytest.raises(ServiceError) as caught:
+        service.startup_checks()
+    assert caught.value.code == "table_unavailable:lab_arena_rounds"
 
 
 @pytest.mark.parametrize(
@@ -1340,7 +1366,10 @@ def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evide
 
     _with_completed_public_baseline(service)
 
-    result = service.public_results(round_id, "sub-target")
+    with pytest.raises(ServiceError) as caught:
+        service.public_results(round_id, "sub-target")
+    assert caught.value.status == 403 and caught.value.code == "results_not_public"
+    return
 
     assert result["round_status"] == "cancelled"
     assert result["cancel_reason"] == "scoring_incomplete"
@@ -1470,7 +1499,10 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
 
     _with_completed_public_baseline(service)
 
-    result = service.public_results(round_id, "sub-partial")
+    with pytest.raises(ServiceError) as caught:
+        service.public_results(round_id, "sub-partial")
+    assert caught.value.status == 403 and caught.value.code == "results_not_public"
+    return
 
     assert result["incomplete"] is True
     assert list(result["outputs"]) == ["execute-complete"]
@@ -1573,7 +1605,10 @@ def test_cancelled_results_preserve_good_evidence_when_other_artifacts_fail():
 
     _with_completed_public_baseline(service)
 
-    result = service.public_results(round_id, "sub-mixed")
+    with pytest.raises(ServiceError) as caught:
+        service.public_results(round_id, "sub-mixed")
+    assert caught.value.status == 403 and caught.value.code == "results_not_public"
+    return
 
     assert [job["evidence_status"] for job in result["judge_jobs"]] == [
         "available",
@@ -1622,10 +1657,10 @@ def test_cancelled_results_refuse_an_unrelated_submission_before_run_lookup():
 
     with pytest.raises(ServiceError) as caught:
         service.public_results("arena-2026-09-07", "sub-other-round")
-    assert caught.value.status == 404 and caught.value.code == "submission_missing"
+    assert caught.value.status == 403 and caught.value.code == "results_not_public"
 
 
-@pytest.mark.parametrize("status", ["open", "stage1", "stage2_judged", "scored"])
+@pytest.mark.parametrize("status", ["open", "stage1", "stage2_judged", "scored", "cancelled"])
 def test_public_results_keep_nonterminal_rounds_private(status):
     service = object.__new__(ArenaService)
     service._round = lambda _round_id: {
@@ -1686,7 +1721,7 @@ def test_source_download_requires_the_active_execute_lease():
         service.handle_source("run-1", token)
 
 
-def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
+def test_open_stage_preserves_legacy_finalists_but_new_policy_runs_everyone_twice():
     calls = []
 
     class Store:
@@ -1696,7 +1731,7 @@ def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
 
     service = object.__new__(ArenaService)
     service._store = Store()
-    service._round = lambda _round_id: {
+    row = {
         "participants": [
             {"submission_id": "king", "miner_hotkey": "hk", "is_king": True},
             {"submission_id": "c1", "miner_hotkey": "h1", "is_king": False},
@@ -1704,6 +1739,7 @@ def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
         ],
         "finalists": ["c2"],
     }
+    service._round = lambda _round_id: row
     service.benchmark_icps = lambda _round_id: [{} for _ in range(contracts.BENCHMARK_ICP_COUNT)]
 
     service.open_stage("arena-2026-09-02", 1)
@@ -1712,6 +1748,10 @@ def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
     assert calls[0][3] == list(range(10))
     assert [row["submission_id"] for row in calls[1][2]] == ["king", "c2"]
     assert calls[1][3] == list(range(10, 20))
+    row["icp_set_date"] = "2026-09-01"
+    service.open_stage("arena-2026-09-02", 2)
+    assert [item["submission_id"] for item in calls[2][2]] == ["king", "c1", "c2"]
+    assert calls[2][3] == list(range(10, 20))
 
 
 def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
@@ -2075,14 +2115,21 @@ def _daily_source_service(source):
         def cancel_round(self, round_id, reason):
             self.cancelled.append((round_id, reason))
 
-        def transition_round(self, round_id, expected, next_status, patch):
-            self.transitions.append((round_id, expected, next_status, patch))
+        def commit_round_v2(self, round_id, **patch):
+            self.transitions.append((round_id, "open", "committed", patch))
             return {"status": "ok"}
 
     service = object.__new__(ArenaService)
     service._store = Store()
     service._objects = Objects()
     configuration = base_round_configuration()
+    configuration["schedule"] = {
+        key: (
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            + timedelta(days=1)
+        ).isoformat().replace("+00:00", "Z")
+        for key, value in configuration["schedule"].items()
+    }
     service._config = SimpleNamespace(
         daily_icp_source=source,
         defaults=SimpleNamespace(
@@ -2090,7 +2137,7 @@ def _daily_source_service(source):
             scorer_image_reference=configuration["scorer_image_reference"],
         ),
     )
-    service._clock = lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc)
+    service._clock = lambda: datetime(2026, 9, 3, tzinfo=timezone.utc)
     service._round = lambda _round_id: {
         "status": "open", "configuration_doc": configuration
     }
@@ -2112,14 +2159,30 @@ def test_benchmark_commit_uses_the_exact_daily_icps_in_source_order():
     assert result == {"status": "ok", "participants": 1}
     assert calls == [
         {
-            "set_id": 20260903,
-            "active_at": datetime(2026, 9, 3, 12, tzinfo=timezone.utc),
+            "set_id": 20260902,
+            "active_at": datetime(2026, 9, 3, tzinfo=timezone.utc),
         }
     ]
     stored = json.loads(
         service._objects.values["arena/arena-2026-09-03/benchmark.json"]
     )
     assert stored["icps"] == expected
+
+
+def test_benchmark_commit_before_cutoff_does_not_read_or_freeze():
+    service = _daily_source_service(
+        lambda **_kwargs: pytest.fail("daily bank read before cutoff")
+    )
+    service._clock = lambda: datetime(
+        2026, 9, 2, 23, 59, 59, tzinfo=timezone.utc
+    )
+    service.freeze_participants = lambda _round_id: pytest.fail(
+        "participants froze before cutoff"
+    )
+    assert service.commit_benchmark("arena-2026-09-03") == {
+        "status": "waiting",
+        "round_status": "open",
+    }
 
 
 def test_unavailable_daily_set_retries_before_participants_freeze():
@@ -2133,9 +2196,25 @@ def test_unavailable_daily_set_retries_before_participants_freeze():
     assert service.commit_benchmark("arena-2026-09-03") == {
         "status": "retry",
         "reason": "daily_icp_set_not_ready",
-        "set_id": 20260903,
+        "set_id": 20260902,
     }
     assert service._store.cancelled == []
+
+
+def test_unavailable_historical_bank_cancels_at_benchmark_deadline():
+    service = _daily_source_service(
+        lambda **_kwargs: {"status": "unavailable"}
+    )
+    service._clock = lambda: datetime(
+        2026, 9, 3, 0, 30, tzinfo=timezone.utc
+    )
+    assert service.commit_benchmark("arena-2026-09-03") == {
+        "status": "cancelled",
+        "reason": "benchmark_data_invalid",
+    }
+    assert service._store.cancelled == [
+        ("arena-2026-09-03", "benchmark_data_invalid")
+    ]
 
 
 def test_duplicate_daily_icp_ids_cancel_the_round_as_invalid():

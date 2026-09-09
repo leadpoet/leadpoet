@@ -684,12 +684,13 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
         ).stdout
 
     harness.service._config.baseline_source_fetcher = promoted_baseline
-    winner_row = harness.service.store.get_submission(winner_submission_id)
-    accepted_at = datetime.fromisoformat(str(winner_row["accepted_at"]).replace("Z", "+00:00"))
-    harness.clock.now = accepted_at + timedelta(hours=24) - timedelta(microseconds=1)
+    published_at = datetime.fromisoformat(
+        str(first["published_at"]).replace("Z", "+00:00")
+    )
+    harness.clock.now = published_at - timedelta(microseconds=1)
     assert harness.service.promote_pending_baselines() == {"status": "source_private", "promoted": 0}
     assert harness.service.store.get_round(round_id)["baseline_promoted_at"] is None
-    harness.clock.now = accepted_at + timedelta(hours=24)
+    harness.clock.now = published_at
     assert harness.service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
     promoted_source = promoted_baseline("", source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
     with tarfile.open(fileobj=io.BytesIO(promoted_source), mode="r:gz") as archive:
@@ -725,7 +726,7 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
         "final_ranking"
     ][0]["submission_id"]
     public = harness.service.public_results(harness.round_id, winner)
-    assert len(public["scores"]["stage_1"]) + len(public["scores"]["stage_2"]) == 10
+    assert len(public["scores"]["stage_1"]) + len(public["scores"]["stage_2"]) == 20
     disclosed = harness.service.public_benchmark(harness.round_id)
     assert {item["icp_position"] for item in disclosed["icps"]} == {
         item["icp_position"] for item in public["scores"]["stage_1"] + public["scores"]["stage_2"]
@@ -794,7 +795,7 @@ def test_driver_discovers_an_older_live_round_through_unrelated_history_and_publ
     assert len(score_runs) == contracts.BENCHMARK_ICP_COUNT
     assert all(run["status"] == "accepted" for run in execute_runs + score_runs)
     public = service.public_results(harness.round_id, participants[0]["submission_id"])
-    assert len(public["scores"]["stage_1"]) + len(public["scores"]["stage_2"]) == 10
+    assert len(public["scores"]["stage_1"]) + len(public["scores"]["stage_2"]) == 20
     assert {
         item["icp_position"]
         for item in public["scores"]["stage_1"] + public["scores"]["stage_2"]
@@ -875,9 +876,9 @@ def test_partially_successful_baseline_publishes_a_numeric_mean(connect, tmp_pat
     )
     assert isinstance(public["submission_scores"]["final"], float)
     scores = public["scores"]["stage_1"] + public["scores"]["stage_2"]
-    assert len(scores) == 10
-    assert sum(float(item["per_icp_score"]) == 0.0 for item in scores) == 9
-    # Final ranking still uses all 20 scores; only the public view is filtered.
+    assert len(scores) == 20
+    assert sum(float(item["per_icp_score"]) == 0.0 for item in scores) == 19
+    # Final ranking and the post-evaluation public view both use all 20 scores.
     all_runs = [item for item in harness.service.store.list_runs(harness.round_id, submission_id=baseline["submission_id"], kind="execute") if item.get("per_icp_score") is not None]
     expected = verify.stage_score(
         [float(item["per_icp_score"]) for item in all_runs], len(all_runs)
@@ -1321,8 +1322,7 @@ def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evi
     )
     participants = _start_round(harness, day=23, epoch=30423)
     _run_stage_one_to_scoring(harness, participants, runners=2)
-    with pytest.raises(svc.ServiceError, match="benchmark_not_public"):
-        harness.service.public_benchmark(harness.round_id)
+    assert len(harness.service.public_benchmark(harness.round_id)["icps"]) == 20
     expected_icps = harness.service.benchmark_icps(harness.round_id)
     store = harness.service.store
     round_participants = store.get_round(harness.round_id)["participants"]
@@ -1442,21 +1442,11 @@ def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evi
     accepted_after = store.get_run(accepted["run_id"])
     assert accepted_after["status"] == "accepted"
     assert accepted_after["output_ref"] == accepted_ref
-    public = harness.service.public_results(
-        harness.round_id, accepted["submission_id"]
-    )
-    matching_public_jobs = [
-        job
-        for job in public["judge_jobs"]
-        if job["run_id"] == accepted["run_id"]
-    ]
-    # Cancellation before all baseline scores preserves evidence internally,
-    # but cannot disclose any ICP or its judge evidence publicly.
-    assert matching_public_jobs == []
-    assert public["judge_evidence"] == []
-    assert public["public_icp_status"] == "pending"
-    with pytest.raises(svc.ServiceError, match="benchmark_not_public"):
-        harness.service.public_benchmark(harness.round_id)
+    with pytest.raises(svc.ServiceError, match="results_not_public"):
+        harness.service.public_results(harness.round_id, accepted["submission_id"])
+    # Cancellation preserves evidence internally. The Day 0 bank is public
+    # after cutoff, but no model output or score is public without evaluation.
+    assert len(harness.service.public_benchmark(harness.round_id)["icps"]) == 20
     assert harness.service.benchmark_icps(harness.round_id) == expected_icps
     execution_runs = store.list_runs(
         harness.round_id, stage=1, kind="execute"
@@ -1725,9 +1715,9 @@ def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_
         ).stdout
 
     service._config.baseline_source_fetcher = promoted_baseline
-    winner_row = service.store.get_submission(first["publication_doc"]["king_decision"]["winner_submission_id"])
-    accepted_at = datetime.fromisoformat(str(winner_row["accepted_at"]).replace("Z", "+00:00"))
-    harness.clock.now = accepted_at + timedelta(hours=24)
+    harness.clock.now = datetime.fromisoformat(
+        str(first["published_at"]).replace("Z", "+00:00")
+    )
     assert service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
     # Next day: the prior winner submits fresh source under the same hotkey.
     harness.chain.epoch = 30040
@@ -1937,14 +1927,14 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     )
     assert results.status_code == 200
     public_scores = results.json()["scores"]["stage_1"] + results.json()["scores"]["stage_2"]
-    assert len(public_scores) == 10
+    assert len(public_scores) == 20
     benchmark = original_get("http://localhost/arena/v1/rounds/%s/benchmark" % harness.round_id)
     assert benchmark.status_code == 200
     public_positions = {icp["icp_position"] for icp in benchmark.json()["icps"]}
-    assert len(public_positions) == 10
+    assert len(public_positions) == 20
     assert {score["icp_position"] for score in public_scores} == public_positions
-    assert benchmark.json()["disclosure_policy"] == "baseline_7_weakest_3_strongest"
-    assert benchmark.json()["private_icp_count"] == 10
+    assert benchmark.json()["disclosure_policy"] == "all_20_next_day"
+    assert benchmark.json()["private_icp_count"] == 0
     # Full parity must validate all persisted baseline outputs while respecting
     # the same public HTTP partition used by the dashboard.
     from scripts.run_production_parity_full_host import (
@@ -1965,26 +1955,21 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     )
     baseline_runs, persisted_outputs = _verify_arena_daily_public_results(**verify_args)
     assert len(baseline_runs) == len(persisted_outputs) == 20
-    assert len(baseline_public["outputs"]) == 10
-    private_run = next(run for run in baseline_runs if run["icp_position"] not in public_positions)
-    leaked = dict(baseline_public, outputs={
-        **baseline_public["outputs"],
-        private_run["run_id"]: persisted_outputs[private_run["run_id"]],
-    })
-    with pytest.raises(FullParityError, match="discloses private ICPs"):
-        _verify_arena_daily_public_results(**dict(verify_args, results_view=leaked))
+    assert len(baseline_public["outputs"]) == 20
     missing = dict(baseline_public, scores={**baseline_public["scores"], "stage_1": []})
     with pytest.raises(FullParityError, match="public daily scores differ"):
         _verify_arena_daily_public_results(**dict(verify_args, results_view=missing))
     original_read = harness.service._objects.get_bounded
 
-    def missing_private_output(ref, maximum):
-        if ref == private_run["output_ref"]:
+    missing_run = baseline_runs[0]
+
+    def missing_persisted_output(ref, maximum):
+        if ref == missing_run["output_ref"]:
             raise FileNotFoundError("private output unavailable")
         return original_read(ref, maximum)
 
     with monkeypatch.context() as patch:
-        patch.setattr(harness.service._objects, "get_bounded", missing_private_output)
+        patch.setattr(harness.service._objects, "get_bounded", missing_persisted_output)
         with pytest.raises(FullParityError, match="persisted company output is invalid"):
             _verify_arena_daily_public_results(**verify_args)
     current = original_get("http://localhost/arena/v1/current")
@@ -2201,7 +2186,7 @@ def test_result_writes_retry_after_transient_object_store_failures(connect, tmp_
         "final_ranking"
     ][0]["submission_id"]
     results = harness.service.public_results(harness.round_id, winner)
-    assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 10
+    assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 20
     attempts = harness.service.store.list_runs(harness.round_id)
     assert all(int(run["attempt"]) == 1 for run in attempts)
     assert_canary_absent(harness, connect)

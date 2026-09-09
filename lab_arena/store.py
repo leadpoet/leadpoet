@@ -43,6 +43,15 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_whoami": (),
     "lab_arena_schema_version_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
+    "lab_arena_commit_round_v2": (
+        ("p_round_id", "text"),
+        ("p_participants", "jsonb"),
+        ("p_benchmark_ref", "text"),
+        ("p_evaluation_date", "text"),
+        ("p_icp_set_date", "date"),
+        ("p_scorer_image_digest", "text"),
+        ("p_scorer_image_reference", "text"),
+    ),
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
@@ -530,6 +539,35 @@ class ArenaStore:
                 {"p_round_id": round_id, "p_expected_status": expected_status, "p_next_status": next_status, "p_patch": dict(patch or {})},
             ),
             "transition_round",
+        )
+
+    def commit_round_v2(
+        self,
+        round_id: str,
+        *,
+        participants: Sequence[Mapping[str, Any]],
+        benchmark_ref: str,
+        evaluation_date: str,
+        icp_set_date: str,
+        scorer_image_digest: str,
+        scorer_image_reference: str,
+    ) -> Dict[str, Any]:
+        """Atomically commit an explicit Day 0 bank date for new-policy rounds."""
+
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_commit_round_v2",
+                {
+                    "p_round_id": round_id,
+                    "p_participants": [dict(item) for item in participants],
+                    "p_benchmark_ref": benchmark_ref,
+                    "p_evaluation_date": evaluation_date,
+                    "p_icp_set_date": icp_set_date,
+                    "p_scorer_image_digest": scorer_image_digest,
+                    "p_scorer_image_reference": scorer_image_reference,
+                },
+            ),
+            "commit_round_v2",
         )
 
     def activate_reward(self, round_id: str, reward_basis: Mapping[str, Any], signing_key_doc: Mapping[str, Any]) -> Dict[str, Any]:

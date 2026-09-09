@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -30,6 +30,7 @@ from lab_arena.store import (
 )
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
+    LAB_ARENA_NEXT_DAY_ICP_MIGRATION,
     database_with_lab_arena_migration,
 )
 from tests.postgres_migration_harness import SCRIPTS
@@ -243,6 +244,44 @@ def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
         assert len(policies) == 4 and all(name.endswith("_service_read") for _, name in policies)
 
 
+def test_next_day_icp_migration_is_repeatable(superuser):
+    migration = (SCRIPTS / LAB_ARENA_NEXT_DAY_ICP_MIGRATION).read_text(
+        encoding="utf-8"
+    )
+    with superuser.cursor() as cursor:
+        cursor.execute(migration)
+        cursor.execute(migration)
+        cursor.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'lab_arena_rounds' "
+            "AND column_name = 'icp_set_date'"
+        )
+        assert cursor.fetchone() == ("date",)
+
+
+def test_next_day_icp_migration_requires_source_disclosure_migration():
+    database = database_with_lab_arena_migration(DEFAULT_MIGRATIONS[:-2])
+    connection = None
+    try:
+        psycopg2, dsn = next(database)
+        connection = psycopg2.connect(**dsn)
+        connection.autocommit = True
+        migration = (SCRIPTS / LAB_ARENA_NEXT_DAY_ICP_MIGRATION).read_text(
+            encoding="utf-8"
+        )
+        with connection.cursor() as cursor:
+            with pytest.raises(
+                psycopg2.Error,
+                match="apply 199-lab-arena-source-disclosure-time.sql first",
+            ):
+                cursor.execute(migration)
+    finally:
+        if connection is not None:
+            connection.close()
+        database.close()
+
+
 def test_open_commit_refreshes_only_the_scorer_pin_and_legacy_callers_preserve_it(store):
     new_digest = "sha256:" + "b" * 64
     new_reference = "registry.example/lab/scorer@" + new_digest
@@ -361,10 +400,13 @@ def test_open_commit_cannot_change_any_other_configuration_field(database, super
         assert cursor.fetchone() == ("open", configuration)
 
 
-def test_daily_icp_function_is_current_only_and_source_table_is_private(database):
+def test_daily_icp_function_reads_exact_historical_date_and_source_table_is_private(database):
     psycopg2, dsn = database
     now = datetime.now(timezone.utc)
     set_id = int(now.strftime("%Y%m%d"))
+    prior = now.date() - timedelta(days=1)
+    prior_set_id = int(prior.strftime("%Y%m%d"))
+    future_set_id = int((now.date() + timedelta(days=1)).strftime("%Y%m%d"))
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True
     icps = [{"icp_id": "today-%d" % index} for index in range(20)]
@@ -391,6 +433,24 @@ def test_daily_icp_function_is_current_only_and_source_table_is_private(database
                     json.dumps(icps),
                 ),
             )
+            cursor.execute(
+                """
+                INSERT INTO public.qualification_private_icp_sets (
+                  set_id, icps, active_from, active_until, is_active
+                ) VALUES (%s, %s::jsonb, %s, %s, FALSE)
+                ON CONFLICT (set_id) DO UPDATE
+                SET icps = EXCLUDED.icps,
+                    active_from = EXCLUDED.active_from,
+                    active_until = EXCLUDED.active_until,
+                    is_active = FALSE
+                """,
+                (
+                    prior_set_id,
+                    json.dumps(icps),
+                    datetime.combine(prior, datetime.min.time(), tzinfo=timezone.utc),
+                    datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc),
+                ),
+            )
     finally:
         connection.close()
 
@@ -402,9 +462,16 @@ def test_daily_icp_function_is_current_only_and_source_table_is_private(database
             "set_id": set_id,
             "icps": icps,
         }
-        assert daily_store.current_daily_icp_set(set_id - 1) == {
+        # Historical rows are inactive after rotation, but the service can
+        # retrieve the exact bank that was active on the requested UTC date.
+        assert daily_store.current_daily_icp_set(prior_set_id) == {
+            "status": "ready",
+            "set_id": prior_set_id,
+            "icps": icps,
+        }
+        assert daily_store.current_daily_icp_set(future_set_id) == {
             "status": "unavailable",
-            "set_id": set_id - 1,
+            "set_id": future_set_id,
         }
         control = psycopg2.connect(**dsn)
         control.autocommit = True
@@ -440,6 +507,184 @@ def test_daily_icp_function_is_current_only_and_source_table_is_private(database
             direct.rollback()
     finally:
         direct.close()
+
+
+def test_commit_persists_day_zero_bank_date_and_it_is_write_once(database, store, superuser):
+    round_id = "arena-2026-09-25-bankdate"
+    bank_date = datetime.now(timezone.utc).date()
+    evaluation_date = bank_date + timedelta(days=1)
+    configuration = round_config(round_id, [hotkey("bank-date-runner")])
+    configuration["schedule"] = {
+        "submission_open": datetime.combine(
+            bank_date, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
+        "submission_cutoff": datetime.combine(
+            evaluation_date, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
+    }
+    assert store.create_round(round_id, configuration)["status"] == "created"
+    participants = frozen_participants(
+        store, round_id, 1, prefix="bank-date", king_index=0
+    )
+    assert store.commit_round_v2(
+        round_id,
+        participants=participants,
+        benchmark_ref="arena/%s/benchmark.json" % round_id,
+        evaluation_date=evaluation_date.isoformat(),
+        icp_set_date=bank_date.isoformat(),
+        scorer_image_digest=configuration["scorer_image_digest"],
+        scorer_image_reference=configuration["scorer_image_reference"],
+    )["status"] == "ok"
+    assert str(store.get_round(round_id)["icp_set_date"]) == bank_date.isoformat()
+    with superuser.cursor() as cursor:
+        with pytest.raises(database[0].Error, match="icp_set_date_write_once"):
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET icp_set_date = %s WHERE round_id = %s",
+                ((bank_date - timedelta(days=1)).isoformat(), round_id),
+            )
+
+
+def test_previous_service_commit_remains_legacy_after_migration(store):
+    round_id = "arena-2026-09-26-nminus1"
+    configuration = round_config(round_id, [hotkey("n-minus-one-runner")])
+    assert store.create_round(round_id, configuration)["status"] == "created"
+    commit_round(store, round_id, [])
+    row = store.get_round(round_id)
+    assert row["status"] == "committed"
+    assert row["icp_set_date"] is None
+
+
+def test_new_policy_stage_two_assigns_all_twenty_to_more_than_ten_challengers(
+    store, superuser
+):
+    round_id = "arena-2026-09-27-all20"
+    bank_date = datetime.now(timezone.utc).date()
+    evaluation_date = bank_date + timedelta(days=1)
+    configuration = round_config(round_id, [hotkey("all20-runner")])
+    configuration["schedule"] = {
+        "submission_open": datetime.combine(
+            bank_date, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
+        "submission_cutoff": datetime.combine(
+            evaluation_date, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
+    }
+    assert store.create_round(round_id, configuration)["status"] == "created"
+    participants = frozen_participants(
+        store, round_id, 13, prefix="all20-stage2", king_index=0
+    )
+    assert store.commit_round_v2(
+        round_id,
+        participants=participants,
+        benchmark_ref="arena/%s/benchmark.json" % round_id,
+        evaluation_date=evaluation_date.isoformat(),
+        icp_set_date=bank_date.isoformat(),
+        scorer_image_digest=configuration["scorer_image_digest"],
+        scorer_image_reference=configuration["scorer_image_reference"],
+    )["status"] == "ok"
+    finalists = [
+        item["submission_id"] for item in participants if not item["is_king"]
+    ][:10]
+    with superuser.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.lab_arena_rounds "
+            "SET status = 'stage1_scored', finalists = %s::jsonb "
+            "WHERE round_id = %s",
+            (json.dumps(finalists), round_id),
+        )
+    opened = store.open_stage(round_id, 2, participants, stage_positions(2))
+    assert opened["status"] == "ok"
+    assert opened["assignments"] == 13 * contracts.STAGE_2_ICP_COUNT
+
+
+def test_commit_waits_for_inflight_acceptance_and_retries_without_orphan(
+    connect, store
+):
+    round_id = "arena-2026-09-28-cutoffrace"
+    bank_date = datetime.now(timezone.utc).date()
+    evaluation_date = bank_date + timedelta(days=1)
+    configuration = round_config(round_id, [hotkey("cutoff-race-runner")])
+    configuration["schedule"] = {
+        "submission_open": datetime.combine(
+            bank_date, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
+        "submission_cutoff": datetime.combine(
+            evaluation_date, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
+    }
+    assert store.create_round(round_id, configuration)["status"] == "created"
+    participants = frozen_participants(
+        store, round_id, 1, prefix="cutoff-race-base", king_index=0
+    )
+    miner_hotkey = hotkey("cutoff-race-miner")
+    miner_submission = "cutoff-race-miner-sub"
+    assert store.register_submission(
+        round_id,
+        miner_submission,
+        miner_hotkey,
+        source_submission_doc(round_id, miner_submission),
+    )["status"] == "registered"
+
+    accepting = connect()
+    accepting.autocommit = False
+    try:
+        with accepting.cursor() as cursor:
+            cursor.execute("SET ROLE lab_arena_service")
+            cursor.execute(
+                "SELECT public.lab_arena_accept_submission_with_credentials("
+                "%s, %s, %s, %s::jsonb)",
+                (
+                    round_id,
+                    miner_submission,
+                    miner_hotkey,
+                    json.dumps(encrypted_runtime_credentials(miner_submission)),
+                ),
+            )
+            assert cursor.fetchone()[0]["status"] == "ok"
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(
+                store.commit_round_v2,
+                round_id,
+                participants=participants,
+                benchmark_ref="arena/%s/benchmark.json" % round_id,
+                evaluation_date=evaluation_date.isoformat(),
+                icp_set_date=bank_date.isoformat(),
+                scorer_image_digest=configuration["scorer_image_digest"],
+                scorer_image_reference=configuration["scorer_image_reference"],
+            )
+            with pytest.raises(FutureTimeout):
+                pending.result(timeout=0.1)
+            accepting.commit()
+            assert pending.result(timeout=5) == {
+                "status": "retry",
+                "round_status": "open",
+                "remaining_admissions": 1,
+            }
+    finally:
+        accepting.rollback()
+        accepting.close()
+
+    assert store.get_round(round_id)["status"] == "open"
+    assert store.update_submission(
+        round_id, miner_submission, "accepted", "frozen", {}
+    )["status"] == "ok"
+    participants.append(
+        {
+            "submission_id": miner_submission,
+            "miner_hotkey": miner_hotkey,
+            "is_king": False,
+        }
+    )
+    assert store.commit_round_v2(
+        round_id,
+        participants=participants,
+        benchmark_ref="arena/%s/benchmark.json" % round_id,
+        evaluation_date=evaluation_date.isoformat(),
+        icp_set_date=bank_date.isoformat(),
+        scorer_image_digest=configuration["scorer_image_digest"],
+        scorer_image_reference=configuration["scorer_image_reference"],
+    )["status"] == "ok"
+    assert store.list_submissions(round_id, status="accepted") == []
 
 
 def test_migration_removes_the_draft_receipt_and_hash_chain_state(superuser):
@@ -528,8 +773,29 @@ def test_service_role_function_grants_and_non_arena_denial(superuser, store):
                 assert cursor.fetchone()[0] is False, (role, table)
             cursor.execute("SELECT has_function_privilege(%s, 'public.lab_arena_create_round(text, jsonb)', 'EXECUTE')", (role,))
             assert cursor.fetchone()[0] is False
+            cursor.execute(
+                "SELECT has_function_privilege(%s, "
+                "'public.lab_arena_current_daily_icp_set(bigint)', 'EXECUTE')",
+                (role,),
+            )
+            assert cursor.fetchone()[0] is False
+            cursor.execute(
+                "SELECT has_function_privilege(%s, "
+                "'public.lab_arena_commit_round_v2(text,jsonb,text,text,date,text,text)', "
+                "'EXECUTE')",
+                (role,),
+            )
+            assert cursor.fetchone()[0] is False
         cursor.execute("SELECT has_function_privilege('lab_arena_service', 'public.lab_arena_create_round(text, jsonb)', 'EXECUTE')")
         assert cursor.fetchone()[0] is True
+        cursor.execute(
+            "SELECT has_function_privilege('lab_arena_service', "
+            "'public.lab_arena_current_daily_icp_set(bigint)', 'EXECUTE'), "
+            "has_function_privilege('lab_arena_service', "
+            "'public.lab_arena_commit_round_v2(text,jsonb,text,text,date,text,text)', "
+            "'EXECUTE')"
+        )
+        assert cursor.fetchone() == (True, True)
         cursor.execute("SELECT has_function_privilege('lab_arena_service', 'public.lab_arena__terminate_open_calls(text, text)', 'EXECUTE')")
         assert cursor.fetchone()[0] is False
         for table in ("lab_arena_ledger", "lab_arena_rounds"):

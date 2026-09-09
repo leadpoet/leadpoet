@@ -3025,7 +3025,7 @@ def _verify_arena_daily_public_results(
     runs = service.store.list_runs(
         round_id, submission_id=baseline_submission_id, kind="execute", status="accepted"
     )
-    disclosure = baseline_disclosure(row or {}, runs)
+    disclosure = baseline_disclosure(row or {}, runs, service.now())
     if (
         disclosure is None or len(runs) != len(icps)
         or disclosure["baseline_submission_id"] != baseline_submission_id

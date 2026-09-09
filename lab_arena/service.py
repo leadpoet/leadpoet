@@ -461,12 +461,28 @@ class ArenaService:
             raise ServiceError("arena_schema_version_invalid", 500)
         for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger"):
             try:
-                self._store._transport.select(table, limit=1)
+                self._store._transport.select(
+                    table,
+                    limit=1,
+                    columns="icp_set_date" if table == "lab_arena_rounds" else "*",
+                )
             except ArenaStoreError as exc:
                 raise ServiceError("table_unavailable:%s" % table, 500) from exc
         # Every service function must exist and be granted: a missing round is the
         # expected structured failure; a permission or undefined-function error is not.
         for function, params in (
+            (
+                "lab_arena_commit_round_v2",
+                {
+                    "p_round_id": "arena-0000-00-00",
+                    "p_participants": [],
+                    "p_benchmark_ref": "probe",
+                    "p_evaluation_date": "2000-01-02",
+                    "p_icp_set_date": "2000-01-01",
+                    "p_scorer_image_digest": "sha256:" + "0" * 64,
+                    "p_scorer_image_reference": "probe@sha256:" + "0" * 64,
+                },
+            ),
             ("lab_arena_expire_leases", {"p_round_id": "arena-0000-00-00"}),
             ("lab_arena_close_stage", {"p_round_id": "arena-0000-00-00", "p_stage": 1}),
             ("lab_arena_cancel_round", {"p_round_id": "arena-0000-00-00", "p_reason": "startup-probe"}),
@@ -1210,7 +1226,12 @@ class ArenaService:
         except ArenaContractError as exc:
             raise ServiceError("scorer_image_invalid", 500) from exc
         started = self.now()
-        set_id = int(round_id.replace("arena-", "").replace("-", "")[:8])
+        schedule = round_row["configuration_doc"]["schedule"]
+        if started < _parse_iso(schedule["submission_cutoff"]):
+            return {"status": "waiting", "round_status": "open"}
+        submission_open = _parse_iso(schedule["submission_open"])
+        icp_set_date = submission_open.astimezone(timezone.utc).date().isoformat()
+        set_id = int(icp_set_date.replace("-", ""))
         source = self._config.daily_icp_source(set_id=set_id, active_at=started)
         if not isinstance(source, Mapping) or source.get("status") not in (
             "ready",
@@ -1222,8 +1243,7 @@ class ArenaService:
                 "reason": CANCEL_REASONS["benchmark_invalid"],
             }
         if source.get("status") == "unavailable":
-            evaluation_date = round_id.replace("arena-", "")[:10]
-            if evaluation_date < started.date().isoformat():
+            if started >= _parse_iso(schedule["benchmark_deadline"]):
                 self._store.cancel_round(
                     round_id, CANCEL_REASONS["benchmark_invalid"]
                 )
@@ -1266,15 +1286,20 @@ class ArenaService:
             if exc.code in ("baseline_source_not_ready", "baseline_promotion_pending"):
                 return {"status": "retry", "reason": exc.code, "set_id": set_id}
             raise
-        evaluation_date = round_id.replace("arena-", "")[:10]
+        evaluation_date = _parse_iso(
+            schedule["submission_cutoff"]
+        ).astimezone(timezone.utc).date().isoformat()
         benchmark_ref = "arena/%s/benchmark.json" % round_id
         self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": icps}).encode("utf-8"))
-        transition = self._store.transition_round(round_id, "open", "committed", {
-            "participants": participants,
-            "benchmark_ref": benchmark_ref,
-            "evaluation_date": evaluation_date,
-            **scorer_image,
-        })
+        transition = self._store.commit_round_v2(
+            round_id,
+            participants=participants,
+            benchmark_ref=benchmark_ref,
+            evaluation_date=evaluation_date,
+            icp_set_date=icp_set_date,
+            scorer_image_digest=scorer_image["scorer_image_digest"],
+            scorer_image_reference=scorer_image["scorer_image_reference"],
+        )
         return {"status": transition.get("status"), "participants": len(participants)}
 
     def benchmark_icps(self, round_id: str) -> List[Dict[str, Any]]:
@@ -1299,7 +1324,7 @@ class ArenaService:
         if stage not in (1, 2):
             raise ServiceError("stage_invalid", 400)
         participants = list(round_row.get("participants") or [])
-        if stage == 2:
+        if stage == 2 and round_row.get("icp_set_date") is None:
             finalists = set(str(item) for item in (round_row.get("finalists") or []))
             participants = [participant for participant in participants if participant["submission_id"] in finalists or participant.get("is_king")]
         self.benchmark_icps(round_id)
@@ -1703,11 +1728,10 @@ class ArenaService:
             or submission.get("status") != "frozen"
         ):
             raise ServiceError("promotion_winner_invalid", 500)
-        # Public Git branches must respect the same source privacy delay as
-        # the dashboard. The driver retries this after the deadline; the
-        # existing promotion/reward handoff remains unchanged.
+        # Public Git branches use the same completed-evaluation publication
+        # gate as the dashboard. There is no additional upload-age delay.
         from lab_arena.source_disclosure import disclosure_status
-        disclosure = disclosure_status(submission, self.now())
+        disclosure = disclosure_status(submission, self.now(), round_row=row)
         if not disclosure["available"]:
             return {"status": "source_private", "available_at": disclosure["available_at"]}
         payload = self._objects.get_bounded(
@@ -2242,10 +2266,10 @@ class ArenaService:
         submission = self._store.get_submission(submission_id)
         if submission is None:
             raise ServiceError("submission_missing", 404)
-        self._round(str(submission.get("round_id") or ""))
+        row = self._round(str(submission.get("round_id") or ""))
         try:
             return source_disclosure.public_source_code(
-                self._objects, submission, self.now()
+                self._objects, submission, self.now(), round_row=row
             )
         except source_disclosure.SourceDisclosureError as exc:
             raise ServiceError(exc.code, exc.status) from exc
@@ -2333,7 +2357,7 @@ class ArenaService:
             "status": row["status"],
             "schedule": dict(configuration.get("schedule") or {}),
             "participants": participants,
-            "finalists": row.get("finalists"),
+            "finalists": row.get("finalists") if row["status"] == "published" else None,
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
             "effective_reward_epoch": row.get("effective_reward_epoch"), "cancel_reason": row.get("cancel_reason"),
             "final_ranking": None, "reward_basis": row.get("reward_basis_doc"),
@@ -2344,34 +2368,39 @@ class ArenaService:
         return view
 
     def _public_icp_disclosure(self, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-        from lab_arena.icp_disclosure import baseline_disclosure
-        baselines = [p for p in row.get("participants") or [] if p.get("is_king") is True]
-        if len(baselines) != 1:
+        from lab_arena.icp_disclosure import baseline_disclosure, disclosure_metadata
+        if disclosure_metadata(row) is None:
             return None
-        runs = self._store.list_runs(
-            str(row["round_id"]), submission_id=str(baselines[0]["submission_id"]), kind="execute"
+        baselines = [p for p in row.get("participants") or [] if p.get("is_king") is True]
+        runs = (
+            self._store.list_runs(
+                str(row["round_id"]),
+                submission_id=str(baselines[0]["submission_id"]),
+                kind="execute",
+            )
+            if len(baselines) == 1
+            else []
         )
-        return baseline_disclosure(row, runs)
+        return baseline_disclosure(row, runs, self.now())
 
     def public_benchmark(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
-        # The split is decided only after the complete baseline is scored.
-        # The private complement never enters the public response.
         disclosure = self._public_icp_disclosure(row)
-        if disclosure is None or row["status"] not in (
-            "stage2_closed", "stage2_scoring", "stage2_judged", "scored", "published", "cancelled"
-        ):
+        if disclosure is None:
             raise ServiceError("benchmark_not_public", 403)
         icps = self.benchmark_icps(round_id)
         return {
             "round_id": round_id,
             "icps": [
                 {**icps[position], "icp_position": position,
-                 "baseline_score": disclosure["baseline_scores"][position]}
+                 "baseline_score": disclosure["baseline_scores"].get(position)}
                 for position in disclosure["public_positions"]
             ],
-            "public_icp_count": 10, "private_icp_count": 10,
-            "disclosure_policy": "baseline_7_weakest_3_strongest",
+            "icp_set_date": disclosure["icp_set_date"],
+            "public_at": disclosure["public_at"],
+            "public_icp_count": contracts.BENCHMARK_ICP_COUNT,
+            "private_icp_count": 0,
+            "disclosure_policy": disclosure["disclosure_policy"],
         }
 
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
@@ -2379,7 +2408,7 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
         row = self._round(round_id)
         round_status = str(row["status"])
-        if round_status not in ("published", "cancelled"):
+        if round_status != "published":
             raise ServiceError("results_not_public", 403)
         publication = row.get("publication_doc") or {}
         participants = (

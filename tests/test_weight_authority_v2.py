@@ -295,6 +295,7 @@ def _bundle(
     category_output_override=None,
     historical_source_allocations=None,
     historical_source_add_omitted=False,
+    current_source_allocations=None,
 ):
     coordinator_key, coordinator_pub = _keypair()
     weight_key, weight_pub = _keypair()
@@ -303,10 +304,15 @@ def _bundle(
         historical_source_allocations is not None
         or historical_source_add_omitted
     )
+    assert not (historical and current_source_allocations is not None)
     if historical and not historical_source_add_omitted:
         preliminary["research_lab_allocation_doc"][
             "source_add_allocations"
         ] = historical_source_allocations
+    if current_source_allocations is not None:
+        preliminary["research_lab_allocation_doc"][
+            "source_add_allocations"
+        ] = current_source_allocations
     weight_config = preliminary["config_hash"]
     coordinator_boot = _boot(COORDINATOR_ROLE, coordinator_key, coordinator_pub, HASH)
     weight_boot = _boot(WEIGHT_ROLE, weight_key, weight_pub, weight_config)
@@ -434,6 +440,10 @@ def _bundle(
         calculation["research_lab_allocation_doc"][
             "source_add_allocations"
         ] = historical_source_allocations
+    if current_source_allocations is not None:
+        calculation["research_lab_allocation_doc"][
+            "source_add_allocations"
+        ] = current_source_allocations
     snapshot = build_weight_snapshot_v2(
         validator_hotkey=VALIDATOR_HOTKEY,
         calculation_snapshot=calculation,
@@ -614,6 +624,64 @@ def test_historical_omitted_source_add_rejects_nonempty_receipt_value():
         validate_published_weight_bundle_v2(bundle)
 
 
+def _retained_current_source_add_allocations():
+    return [
+        {
+            "uid": 3,
+            "miner_hotkey": "source-hotkey",
+            "paid_alpha_percent": 0.1,
+        }
+        for _ in range(283)
+    ] + [
+        {
+            "uid": 3,
+            "miner_hotkey": "source-hotkey",
+            "paid_alpha_percent": 1.7,
+        }
+    ]
+
+
+def test_current_weight_bundle_accepts_retained_source_add_allocation():
+    allocations = _retained_current_source_add_allocations()
+    bundle = _bundle(current_source_allocations=allocations)
+    original = copy.deepcopy(bundle)
+
+    verified = validate_published_weight_bundle_v2(bundle)
+
+    assert set(bundle["weight_snapshot"]["input_receipt_hashes"]) == set(
+        WEIGHT_INPUT_PURPOSES
+    )
+    assert "source_add_rewards" not in bundle["weight_snapshot"][
+        "input_receipt_hashes"
+    ]
+    assert len(allocations) == 284
+    assert sum(row["paid_alpha_percent"] for row in allocations) == pytest.approx(
+        30.0
+    )
+    assert bundle["weight_result"]["components"][
+        "research_lab_paid"
+    ] == pytest.approx(0.05)
+    assert verified["weights_hash"] == bundle["weight_result"]["weights_hash"]
+    assert bundle == original
+
+
+def test_current_retained_source_add_requires_exact_allocation_receipt():
+    bundle = _bundle(
+        current_source_allocations=_retained_current_source_add_allocations(),
+        category_output_override={
+            "research_lab_allocation": sha256_json(
+                {"allocation": "different"}
+            ),
+        },
+    )
+
+    with pytest.raises(
+        WeightAuthorityV2Error,
+        match="research_lab_allocation receipt output does not bind its weight input",
+    ):
+        validate_published_weight_bundle_v2(bundle)
+
+
 def test_host_composes_binding_receipt_as_authoritative_graph_root():
     expected = _bundle()
     bound_graph = expected["receipt_graph"]
@@ -726,7 +794,7 @@ def test_historical_source_add_snapshot_verification_is_read_only_and_exact(
 
     omitted = copy.deepcopy(historical)
     del omitted["input_receipt_hashes"]["source_add_rewards"]
-    with pytest.raises(WeightAuthorityV2Error, match="must be paired"):
+    with pytest.raises(WeightAuthorityV2Error, match="parents differ"):
         validate_weight_snapshot_v2(omitted)
 
     tampered = copy.deepcopy(historical)

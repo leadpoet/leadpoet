@@ -68,12 +68,27 @@ from validator_tee.host.weight_authority_v2 import (
 
 
 @pytest.mark.parametrize(
-    "historical_source_allocations", [None, [], [{"hotkey": "source", "share": 0.01}]]
+    ("source_add_mode", "source_add_allocations"),
+    [
+        ("current", None),
+        (
+            "current_retained",
+            [
+                {
+                    "uid": 3,
+                    "miner_hotkey": "source-hotkey",
+                    "paid_alpha_percent": 1.0,
+                }
+            ],
+        ),
+        ("historical", []),
+        ("historical", [{"hotkey": "source", "share": 0.01}]),
+    ],
 )
 def test_compact_weight_publication_reconstructs_exact_canonical_bundle(
-    monkeypatch, historical_source_allocations
+    monkeypatch, source_add_mode, source_add_allocations
 ):
-    historical = historical_source_allocations is not None
+    historical = source_add_mode == "historical"
     gateway_categories = set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
     purposes = dict(WEIGHT_INPUT_PURPOSES)
     if historical:
@@ -153,10 +168,10 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(
     )
 
     preliminary = _calculation_snapshot([], "")
-    if historical:
+    if source_add_allocations is not None:
         preliminary["research_lab_allocation_doc"][
             "source_add_allocations"
-        ] = historical_source_allocations
+        ] = source_add_allocations
     gateway_event_hash = event_receipt["receipt_hash"]
     expected_roots = weight_input_output_roots_v2(
         calculation_snapshot=preliminary,
@@ -261,10 +276,10 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(
     calculation = _calculation_snapshot(
         input_hashes.values(), input_hashes["research_lab_allocation"]
     )
-    if historical:
+    if source_add_allocations is not None:
         calculation["research_lab_allocation_doc"][
             "source_add_allocations"
-        ] = historical_source_allocations
+        ] = source_add_allocations
     enclave_response = authority.compute(
         {
             "validator_hotkey": VALIDATOR_HOTKEY,
@@ -374,7 +389,7 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(
     verified = validate_published_weight_bundle_v2(bundle)
     assert bundle["weight_result"] == enclave_response["weight_result"]
     assert verified["weights_hash"] == enclave_response["weight_result"]["weights_hash"]
-    assert verified["uids"] == enclave_response["weight_result"]["uids"]
+    assert verified["uids"] == enclave_response["weight_result"]["sparse_uids"]
     assert bundle["weight_result"]["weights"] == enclave_response["weight_result"][
         "weights"
     ]

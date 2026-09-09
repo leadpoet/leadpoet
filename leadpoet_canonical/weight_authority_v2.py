@@ -692,26 +692,10 @@ def validate_weight_snapshot_v2(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     input_categories = set(
         snapshot.get("input_receipt_hashes") or {}
     )
-    allocation = (
-        snapshot.get("calculation_snapshot", {}).get(
-            "research_lab_allocation_doc"
-        )
-        if isinstance(snapshot.get("calculation_snapshot"), Mapping)
-        else None
-    )
-    historical_allocation = (
-        isinstance(allocation, Mapping)
-        and "source_add_allocations" in allocation
-    )
+    # Historical mode selects the retired receipt schema. The complete
+    # allocation document is independently bound by its current input receipt.
     historical = input_categories == (
         set(WEIGHT_INPUT_PURPOSES) | {_HISTORICAL_SOURCE_ADD_CATEGORY}
-    )
-    # The retired producer omitted source_add_allocations when it was empty,
-    # but still emitted the signed source_add_rewards input. Full bundle
-    # validation below binds that receipt to the implied empty list.
-    _require(
-        not historical_allocation or historical,
-        "historical SOURCE_ADD allocation and receipt category must be paired",
     )
     rebuilt = build_weight_snapshot_v2(
         validator_hotkey=snapshot["validator_hotkey"],

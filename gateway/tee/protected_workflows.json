@@ -1067,7 +1067,7 @@
       "symbol": "CoordinatorChainRealizedSettlementV1"
     },
     {
-      "ast_sha256": "sha256:aac33f5d9651220d1cb4ffa5c7f0687c22542ca2a694818aa88b42efc5849c40",
+      "ast_sha256": "sha256:fd0c2ea18a85b6cafdb678b6f5fb3edeb7f89b50710370f7a5662c9e8e68fabb",
       "path": "gateway/tee/coordinator_chain_source_v2.py",
       "symbol": "CoordinatorChainSourceV2"
     },
@@ -3382,7 +3382,7 @@
       "symbol": "execute_v2_provider_request"
     },
     {
-      "ast_sha256": "sha256:c22d99436c3f3ba0cf04f4a419c5503b219679c06bd44eebf616582c73c60517",
+      "ast_sha256": "sha256:1a0cc9b4fb794e10b9303b78af964fcc375f90a0528431b016aa1868b6a877e1",
       "path": "gateway/tee/tee_service.py",
       "symbol": "get_v2_coordinator_job_manager"
     },
@@ -3872,7 +3872,7 @@
       "symbol": "CHAIN_MAX_RUNTIME_METADATA_BYTES"
     },
     {
-      "ast_sha256": "sha256:8025868d5fd244b64c7d29c8dae9f4bdf137752ba97545b032a438988585a2a8",
+      "ast_sha256": "sha256:319e44a0963bf6b8dd572d20eadf6ed55cf0861585e2ecf554d85ee64da3e108",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "_REVEAL_PERIOD_METADATA_DEFAULTS_V2"
     },
@@ -4217,7 +4217,7 @@
       "symbol": "validate_production_parity_boundary_v2"
     },
     {
-      "ast_sha256": "sha256:ee1dbc649fb16b2e6403e6071cfc3244cdd99034871f6da2631c7b6642d0e0ac",
+      "ast_sha256": "sha256:30a12cb7dfeae6a484667fe4496cf5ff48d5b67cc3cc2ad5390849c89c715706",
       "path": "leadpoet_canonical/subtensor_events_v2.py",
       "symbol": "__module__"
     },
@@ -4687,7 +4687,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:a6eda6f39acd4da445124c287788db991378131370fa212d1ee69dfff2d7e89b",
-  "protected_source_commit": "075e4b1f2ddb3ff955b76bfd1c72218ec5b89f15",
+  "manifest_hash": "sha256:7cdee33ed8d21545df723d32f42eeb6d77cf653a0ea8f493e3e06b5a6d2b5457",
+  "protected_source_commit": "10ca8c3f02992a128761af21c328f4e139185d65",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

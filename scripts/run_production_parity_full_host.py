@@ -296,12 +296,9 @@ _CREDENTIAL_SCHEMA_FUNCTIONS = frozenset(
         "_source_add_leg1_release_environment_policy_v1",
         "_verify_chain_realized_activation_v1",
         "_verify_compact_weight_settlement_contract_v1",
-        "_verify_source_add_claim_control_contract_v1",
         "_verify_source_add_claim_control_contract_v2",
         "_verify_source_add_duplicate_privacy_contract_v1",
         "_verify_source_add_miner_status_contract_v1",
-        "_verify_source_add_post_accept_leg1_contract_v2",
-        "_verify_source_add_post_accept_leg1_contract_v3",
         "_verify_source_add_post_accept_leg1_contract_v4",
         "_verify_source_add_provider_origin_contract_v1",
         "verify_required_supabase_v2_schema",
@@ -330,9 +327,6 @@ _CREDENTIAL_SCHEMA_PROBES = {
     "_verify_compact_weight_settlement_contract_v1": (
         "research_lab_compact_weight_settlement_contract_v1"
     ),
-    "_verify_source_add_claim_control_contract_v1": (
-        "research_lab_source_add_claim_control_contract_v1"
-    ),
     "_verify_source_add_claim_control_contract_v2": (
         "research_lab_source_add_claim_control_contract_v2"
     ),
@@ -341,12 +335,6 @@ _CREDENTIAL_SCHEMA_PROBES = {
     ),
     "_verify_source_add_miner_status_contract_v1": (
         "research_lab_source_add_miner_status_contract_v1"
-    ),
-    "_verify_source_add_post_accept_leg1_contract_v2": (
-        "research_lab_source_add_post_accept_leg1_contract_v2"
-    ),
-    "_verify_source_add_post_accept_leg1_contract_v3": (
-        "research_lab_source_add_post_accept_leg1_contract_v3"
     ),
     "_verify_source_add_post_accept_leg1_contract_v4": (
         "research_lab_source_add_post_accept_leg1_contract_v4"

@@ -1514,37 +1514,6 @@ def _v2_expected_chain(configuration: Dict[str, Any]) -> str:
     )
 
 
-def _configure_v2_chain_source_boundary(
-    configuration: Dict[str, Any],
-) -> Dict[str, str]:
-    """Bind copied canonical chain constants before coordinator imports."""
-
-    from gateway.tee.research_lab_runtime_config_v2 import (
-        validate_research_lab_execution_config,
-    )
-    from leadpoet_canonical.chain_source_v2 import (
-        chain_source_boundary_for_profile_v2,
-        configure_chain_source_boundary_v2,
-    )
-
-    for module_name in (
-        "leadpoet_canonical.weight_authority_v2",
-        "leadpoet_canonical.compact_auditor_authority_v2",
-    ):
-        if module_name in sys.modules:
-            raise RuntimeError("V2 canonical chain consumer loaded before boundary")
-    execution_config = validate_research_lab_execution_config(
-        configuration["research_lab_execution_config"]
-    )
-    profile = execution_config["epoch_authority"]["chain_signing_profile"]
-    boundary = chain_source_boundary_for_profile_v2(profile)
-    configure_chain_source_boundary_v2(
-        chain_host=boundary["chain_host"],
-        chain_archive_host=boundary["chain_archive_host"],
-    )
-    return boundary
-
-
 def get_v2_provider_broker():
     """Build the coordinator broker with the stable routing verifier.
 
@@ -1908,7 +1877,6 @@ def get_v2_coordinator_job_manager():
             raise RuntimeError("V2 coordinator manager is coordinator-only")
         runtime = get_v2_runtime_identity()
         configuration = runtime.runtime_configuration()["configuration"]
-        _configure_v2_chain_source_boundary(configuration)
         runtime.apply_research_lab_behavior_environment()
 
         from gateway.tee.coordinator_executor_v2 import (

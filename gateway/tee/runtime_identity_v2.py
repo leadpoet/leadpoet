@@ -78,6 +78,42 @@ def _validate_hash(value: Any, field: str) -> str:
     return normalized
 
 
+def _configure_chain_source_boundary(
+    configuration: Mapping[str, Any],
+) -> Dict[str, str]:
+    """Bind copied canonical consumers before this runtime becomes ready."""
+
+    import sys
+
+    from leadpoet_canonical.chain_source_v2 import (
+        chain_source_boundary_for_profile_v2,
+        configure_chain_source_boundary_v2,
+    )
+
+    execution_config = configuration["research_lab_execution_config"]
+    profile = execution_config["epoch_authority"]["chain_signing_profile"]
+    boundary = chain_source_boundary_for_profile_v2(profile)
+    for module_name in (
+        "leadpoet_canonical.weight_authority_v2",
+        "leadpoet_canonical.compact_auditor_authority_v2",
+    ):
+        consumer = sys.modules.get(module_name)
+        if consumer is not None and (
+            getattr(consumer, "CHAIN_ENDPOINT_HOST", None)
+            != boundary["chain_host"]
+            or getattr(consumer, "CHAIN_ARCHIVE_ENDPOINT_HOST", None)
+            != boundary["chain_archive_host"]
+        ):
+            raise RuntimeIdentityV2Error(
+                "V2 canonical chain consumer loaded before boundary"
+            )
+    configure_chain_source_boundary_v2(
+        chain_host=boundary["chain_host"],
+        chain_archive_host=boundary["chain_archive_host"],
+    )
+    return boundary
+
+
 def _validate_release_configuration(
     configuration: Mapping[str, Any],
     *,
@@ -440,6 +476,7 @@ class RuntimeIdentityV2:
                 body=body,
                 attestation_document_b64=base64.b64encode(document).decode("ascii"),
             )
+            _configure_chain_source_boundary(normalized)
             self._runtime_configuration = config_document
             self._tls_identity = tls_identity
             self._boot_identity = boot_identity

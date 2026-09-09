@@ -2310,7 +2310,7 @@ class ArenaService:
     def public_benchmark(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
         # The benchmark is public once every execution has ended.
-        if row["status"] not in ("stage2_closed", "stage2_scoring", "stage2_judged", "scored", "published"):
+        if row["status"] not in ("stage2_closed", "stage2_scoring", "stage2_judged", "scored", "published", "cancelled"):
             raise ServiceError("benchmark_not_public", 403)
         icps = self.benchmark_icps(round_id)
         return {"round_id": round_id, "icps": icps}

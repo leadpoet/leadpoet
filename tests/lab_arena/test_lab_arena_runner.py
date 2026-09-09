@@ -980,6 +980,62 @@ def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
         shutil.rmtree(socket_dir, ignore_errors=True)
 
 
+@pytest.mark.parametrize("transport_kind", ["frame", "http"])
+def test_large_html_passes_the_real_broker_and_worker_with_the_text_cap(monkeypatch, transport_kind):
+    """A 3.2 MiB page is capped before framing, for both model and judge clients."""
+    import http.client
+    from tests.lab_arena.test_lab_arena_broker import CONTEXT, FakeTransport, make_broker
+
+    raw = b"<html>" + b"a" * int(3.2 * 1024 * 1024) + b"</html>"
+    broker, store, _transport = make_broker(transport=FakeTransport([(200, raw)]))
+
+    class BrokerApi:
+        def provider(self, run_id, lease_token, frame):
+            assert run_id == CONTEXT.run_id
+            return broker.execute(
+                CONTEXT, operation_id=frame["operation_id"],
+                parameters=frame["parameters"], action_sequence=frame["action_sequence"],
+                timeout_ms=frame["timeout_ms"],
+            ).to_document()
+
+    state = rn.RunState(lease=lease("r1"), lease_token="tok-r1")
+    socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
+    socket_path = socket_dir / runtime.SANDBOX_SOCKET_NAME
+    server = rn.WorkerSocketServer(socket_path, BrokerApi(), state)
+    server.start()
+    try:
+        if transport_kind == "frame":
+            monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+            status, headers, body = shim.dispatch(
+                "scrapingdog.scrape", {"url": "https://example.com/"}, 5000,
+            )
+        else:
+            connection = http.client.HTTPConnection("api.scrapingdog.com")
+            connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.sock.connect(str(socket_path))
+            try:
+                connection.request("GET", "/scrape?url=https%3A%2F%2Fexample.com%2F")
+                response = connection.getresponse()
+                status, headers, body = response.status, dict(response.getheaders()), response.read()
+            finally:
+                connection.close()
+        assert status == 200
+        assert body == raw[:2 * 1024 * 1024]
+        normalized_headers = {k.lower(): v for k, v in headers.items()}
+        assert int(normalized_headers["content-length"]) == len(body)
+        assert store.log == ["reserve", "dispatch", "settle"]
+        assert len(state.calls) == 1 and state.calls[0]["outcome"] == "settled"
+        # The broker removes private call metadata from the model response.
+        frame = contracts.canonical_json({
+            "status": status, "headers": {k: v for k, v in headers.items() if k.lower() in ("content-type", "content-length")},
+            "body_b64": base64.b64encode(body).decode("ascii"),
+        })
+        assert len(frame) < shim.MAX_RESPONSE_FRAME_BYTES
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir)
+
+
 def test_agent_entrypoint_loads_the_trusted_shim_for_a_standard_http_client(tmp_path):
     """The OCI Python path installs the broker shim before a miner harness imports urllib."""
 

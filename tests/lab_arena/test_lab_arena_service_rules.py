@@ -22,6 +22,40 @@ def _schedule():
     }
 
 
+@pytest.mark.parametrize(
+    "status",
+    ["open", "benchmark_committed", "stage1", "stage1_closed", "stage1_scoring",
+     "stage1_judged", "stage1_scored", "stage2"],
+)
+def test_public_benchmark_stays_private_while_execution_can_continue(status):
+    service = object.__new__(ArenaService)
+    service._round = lambda _round_id: {"status": status}
+    service.benchmark_icps = lambda _round_id: pytest.fail("private benchmark was read")
+
+    with pytest.raises(ServiceError, match="benchmark_not_public"):
+        service.public_benchmark("arena-2026-09-09")
+
+
+def test_cancelled_round_without_a_benchmark_does_not_invent_one():
+    service = object.__new__(ArenaService)
+    service._round = lambda _round_id: {"status": "cancelled", "benchmark_ref": None}
+
+    with pytest.raises(ServiceError, match="benchmark_not_committed"):
+        service.public_benchmark("arena-2026-09-09")
+
+
+def test_cancelled_benchmark_remains_bound_to_the_service_network():
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71)
+    service._store = SimpleNamespace(get_round=lambda _round_id: {
+        "status": "cancelled",
+        "configuration_doc": {"mode": "live", "network_name": "test", "netuid": 401},
+    })
+
+    with pytest.raises(ServiceError, match="round_network_mismatch"):
+        service.public_benchmark("arena-2026-09-09")
+
+
 def _scoring_driver_service(stage, runs, *, work_item_ids=("execute-planned",)):
     round_id = "arena-2026-09-02"
     positions = list(contracts.stage_positions(stage))

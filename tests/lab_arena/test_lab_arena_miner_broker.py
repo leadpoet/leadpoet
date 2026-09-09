@@ -169,9 +169,11 @@ def test_provider_cannot_echo_runtime_key_into_output_or_storage():
     ("exa.search", {"query": "Acme"}),
 ])
 @pytest.mark.parametrize("location", ["value", "key", "duplicate_member"])
-def test_json_escaped_credential_echo_is_blocked_before_storage(operation_id, parameters, location):
+@pytest.mark.parametrize("percent_encoded", [False, True])
+def test_json_escaped_credential_echo_is_blocked_before_storage(operation_id, parameters, location, percent_encoded):
     secret = "synthetic-arena-runtime-key-0123456789"
-    escaped = "".join("\\u%04x" % ord(character) for character in secret)
+    echoed = "".join("%%%02x" % ord(character) for character in secret) if percent_encoded else secret
+    escaped = "".join("\\u%04x" % ord(character) for character in echoed)
     inner = ('{"nested":["prefix ' + escaped + ' suffix"]}' if location == "value"
              else '{"' + escaped + '":"value"}')
     if location == "duplicate_member":

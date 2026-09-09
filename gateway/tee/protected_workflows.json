@@ -3192,11 +3192,6 @@
       "symbol": "SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:93d9f7ec0646fecd0b0fe3fc9ec0eae6a56a7162feae1534a7977cc79f0b16e2",
-      "path": "gateway/tee/supabase_schema_preflight_v2.py",
-      "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
-    },
-    {
       "ast_sha256": "sha256:78bc6a8222bedb66026bd906f9c290477636188afa91d5f2335f3da6dd2a533b",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256"
@@ -3237,24 +3232,9 @@
       "symbol": "_source_add_leg1_release_environment_policy_v1"
     },
     {
-      "ast_sha256": "sha256:4aec84bf5dac408dce6363223cb85f330fc3a27c4291c810f1240165782859c8",
-      "path": "gateway/tee/supabase_schema_preflight_v2.py",
-      "symbol": "_verify_source_add_claim_control_contract_v1"
-    },
-    {
       "ast_sha256": "sha256:1ddb9efa58f05b40dfb4b991ba68b8e227af1740f0fa6236b212184ebc859cd4",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_verify_source_add_claim_control_contract_v2"
-    },
-    {
-      "ast_sha256": "sha256:6497d7412a0d48b013c7e136d651a3d0569351155f4843e7df660f4d4c90e08d",
-      "path": "gateway/tee/supabase_schema_preflight_v2.py",
-      "symbol": "_verify_source_add_post_accept_leg1_contract_v2"
-    },
-    {
-      "ast_sha256": "sha256:038e59520359da930908f59d7cf8f78d8f4db8351a6a488a2d098f4428bf81ed",
-      "path": "gateway/tee/supabase_schema_preflight_v2.py",
-      "symbol": "_verify_source_add_post_accept_leg1_contract_v3"
     },
     {
       "ast_sha256": "sha256:a8a6064dd75356d3617766aa1ea6938cd11e6dcb908a6497aad9b05bc6aa183b",
@@ -4687,7 +4667,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8beca098bd6577987502683ab9ba4f76f646e713c50f3ac8f7b2b30255818978",
-  "protected_source_commit": "70991f8d8c97b436733eacb6c19244a8ea3838d3",
+  "manifest_hash": "sha256:34f2c108170a7d2521d76ca856dd9d8d2d56464819fc34922739e819736d7c7d",
+  "protected_source_commit": "3d091391cbe93f6b5d7a522bc65b0553863a2519",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

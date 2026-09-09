@@ -847,6 +847,38 @@ def test_full_failure_document_projects_only_typed_allowlisted_snapshot_category
     assert secret not in json.dumps(forged)
 
 
+def test_full_failure_document_projects_only_fixed_clone_arena_category():
+    secret = "must-not-escape-clone-arena-failure"
+    typed = full_host.CloneArenaNormalizationFailure(
+        "clone_arena_lease_not_expired", secret
+    )
+    evidence: dict[str, object] = {}
+
+    full_host._record_failure_identity(
+        evidence, "clone-arena-normalization", typed
+    )
+
+    assert evidence == {
+        "status": "failed",
+        "failure_stage": "clone-arena-normalization",
+        "error_type": "FullParityError",
+        "failure_category": "clone_arena_lease_not_expired",
+    }
+    assert secret not in json.dumps(evidence)
+
+    wrong_stage: dict[str, object] = {}
+    full_host._record_failure_identity(wrong_stage, "snapshot-restore", typed)
+    assert "failure_category" not in wrong_stage
+
+    typed.category = ["secret-bearing-category"]
+    malformed: dict[str, object] = {}
+    full_host._record_failure_identity(
+        malformed, "clone-arena-normalization", typed
+    )
+    assert "failure_category" not in malformed
+    assert secret not in json.dumps(malformed)
+
+
 def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
     observed = {}
     value = {

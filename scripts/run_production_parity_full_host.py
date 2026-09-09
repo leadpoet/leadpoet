@@ -169,6 +169,15 @@ FULL_ERROR_TYPES = frozenset(
         "ValueError",
     }
 )
+CLONE_ARENA_FAILURE_CATEGORIES = frozenset(
+    {
+        "clone_arena_control_invalid",
+        "clone_arena_operator_paused",
+        "clone_arena_lease_not_expired",
+        "clone_arena_recovery_failed",
+        "clone_arena_state_invalid",
+    }
+)
 _GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES = 256 * 1024
 _LOCAL_RELEASE_EXACT_OBSERVATIONS = {
     "ERROR: rsync is required to stage attested runtime packages": (
@@ -405,6 +414,14 @@ class FullParityError(RuntimeError):
     """The full disposable workflow did not reach every required stage."""
 
 
+class CloneArenaNormalizationFailure(FullParityError):
+    """The exact disposable clone could not safely normalize copied Arena state."""
+
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
 def _validated_public_origin(origin: str) -> str:
     parsed = urlsplit(str(origin or ""))
     try:
@@ -434,6 +451,8 @@ def _failure_identity(stage: str, exc: BaseException) -> tuple[str, str]:
             if original is not None
             else "ProductionParityError"
         )
+    elif isinstance(exc, CloneArenaNormalizationFailure):
+        raw_type = "FullParityError"
     else:
         raw_type = type(exc).__name__
     bounded_type = raw_type if raw_type in FULL_ERROR_TYPES else "UnexpectedError"
@@ -449,6 +468,20 @@ def _snapshot_failure_category(stage: str, exc: BaseException) -> str | None:
     return category.value
 
 
+def _clone_arena_failure_category(stage: str, exc: BaseException) -> str | None:
+    if stage != "clone-arena-normalization" or not isinstance(
+        exc, CloneArenaNormalizationFailure
+    ):
+        return None
+    category = getattr(exc, "category", None)
+    return (
+        category
+        if isinstance(category, str)
+        and category in CLONE_ARENA_FAILURE_CATEGORIES
+        else None
+    )
+
+
 def _record_failure_identity(
     evidence: dict[str, Any], stage: str, exc: BaseException
 ) -> None:
@@ -457,6 +490,8 @@ def _record_failure_identity(
     evidence["failure_stage"] = bounded_stage
     evidence["error_type"] = bounded_type
     failure_category = _snapshot_failure_category(stage, exc)
+    if failure_category is None:
+        failure_category = _clone_arena_failure_category(stage, exc)
     if failure_category is not None:
         evidence["failure_category"] = failure_category
 
@@ -1785,7 +1820,7 @@ def _normalize_full_parity_clone_arena_restart_state(
     *,
     candidate_sha: str,
 ) -> dict[str, Any]:
-    """Remove source-environment restart ownership from an exact disposable clone."""
+    """Recover expired copied leases and remove restart ownership from the clone."""
 
     expected_database = f"leadpoet_parity_{candidate_sha[:12]}"
     expected_container = re.compile(
@@ -1807,25 +1842,115 @@ def _normalize_full_parity_clone_arena_restart_state(
     ):
         raise FullParityError("Full parity clone database identity is invalid")
 
-    raw = database._psql(
-        """
-WITH advisory AS MATERIALIZED (
-  SELECT pg_catalog.pg_advisory_xact_lock(
+    try:
+        raw = database._psql(
+            """
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '40s';
+DO $full_parity_clone_arena$
+DECLARE
+  v_control public.lab_arena_restart_claim_control;
+  v_control_count BIGINT := 0;
+  v_initial_leased BIGINT := 0;
+  v_expired_eligible BIGINT := 0;
+  v_affected_rounds BIGINT := 0;
+  v_expired BIGINT := 0;
+  v_retried BIGINT := 0;
+  v_remaining BIGINT := 0;
+  v_normalized BIGINT := 0;
+  v_round_id TEXT;
+  v_expiry JSONB;
+  v_guard_generation BIGINT;
+  v_guard_cleared BOOLEAN := FALSE;
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended('lab-arena-claim-control', 0)
-  )
-), control AS MATERIALIZED (
-  SELECT current.*
+  );
+  SELECT COUNT(*)::BIGINT INTO v_control_count
+  FROM public.lab_arena_restart_claim_control;
+  IF v_control_count <> 1 THEN
+    PERFORM pg_catalog.set_config(
+      'leadpoet.full_parity_clone_arena_evidence',
+      pg_catalog.json_build_object(
+        'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+        'outcome', 'control_invalid',
+        'control_count', v_control_count
+      )::TEXT,
+      FALSE
+    );
+    RETURN;
+  END IF;
+  SELECT current.* INTO STRICT v_control
   FROM public.lab_arena_restart_claim_control AS current
-  CROSS JOIN advisory
-  FOR UPDATE OF current
-), control_shape AS MATERIALIZED (
-  SELECT COUNT(*)::BIGINT AS count FROM control
-), leased AS MATERIALIZED (
-  SELECT COUNT(*)::BIGINT AS count
+  WHERE current.singleton
+  FOR UPDATE;
+  IF v_control.operator_paused THEN
+    PERFORM pg_catalog.set_config(
+      'leadpoet.full_parity_clone_arena_evidence',
+      pg_catalog.json_build_object(
+        'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+        'outcome', 'operator_paused',
+        'control_count', v_control_count,
+        'operator_paused', TRUE
+      )::TEXT,
+      FALSE
+    );
+    RETURN;
+  END IF;
+  SELECT COUNT(*)::BIGINT,
+    COUNT(*) FILTER (
+      WHERE lease_expires_at IS NOT NULL
+        AND lease_expires_at <= pg_catalog.clock_timestamp()
+    )::BIGINT,
+    COUNT(DISTINCT round_id)::BIGINT
+  INTO v_initial_leased, v_expired_eligible, v_affected_rounds
   FROM public.lab_arena_runs
-  CROSS JOIN advisory
-  WHERE status = 'leased'
-), normalized AS (
+  WHERE status = 'leased';
+  IF v_initial_leased <> v_expired_eligible THEN
+    PERFORM pg_catalog.set_config(
+      'leadpoet.full_parity_clone_arena_evidence',
+      pg_catalog.json_build_object(
+        'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+        'outcome', 'lease_not_expired',
+        'control_count', v_control_count,
+        'operator_paused', FALSE,
+        'initial_leased_count', v_initial_leased,
+        'expired_eligible_count', v_expired_eligible,
+        'affected_round_count', v_affected_rounds
+      )::TEXT,
+      FALSE
+    );
+    RETURN;
+  END IF;
+  FOR v_round_id IN
+    SELECT DISTINCT runs.round_id
+    FROM public.lab_arena_runs AS runs
+    WHERE runs.status = 'leased'
+    ORDER BY runs.round_id
+  LOOP
+    SELECT public.lab_arena_expire_leases(v_round_id) INTO v_expiry;
+    IF pg_catalog.jsonb_typeof(v_expiry) IS DISTINCT FROM 'object'
+       OR v_expiry ->> 'status' IS DISTINCT FROM 'ok'
+       OR COALESCE(v_expiry ->> 'expired', '') !~ '^[0-9]+$'
+       OR COALESCE(v_expiry ->> 'retried', '') !~ '^[0-9]+$' THEN
+      RAISE EXCEPTION 'full_parity_clone_arena_expiry_failed';
+    END IF;
+    IF (v_expiry ->> 'retried')::BIGINT
+       > (v_expiry ->> 'expired')::BIGINT THEN
+      RAISE EXCEPTION 'full_parity_clone_arena_expiry_failed';
+    END IF;
+    v_expired := v_expired + (v_expiry ->> 'expired')::BIGINT;
+    v_retried := v_retried + (v_expiry ->> 'retried')::BIGINT;
+  END LOOP;
+  SELECT COUNT(*)::BIGINT INTO v_remaining
+  FROM public.lab_arena_runs
+  WHERE status = 'leased';
+  IF v_expired <> v_initial_leased
+     OR v_retried > v_expired
+     OR v_remaining <> 0 THEN
+    RAISE EXCEPTION 'full_parity_clone_arena_expiry_incomplete';
+  END IF;
   UPDATE public.lab_arena_restart_claim_control AS current SET
     guard_commitment = '',
     owner_commitment = '',
@@ -1834,11 +1959,8 @@ WITH advisory AS MATERIALIZED (
     restart_scope = '',
     restart_phase = '',
     captured_leases = '[]'::JSONB
-  FROM control, control_shape, leased
-  WHERE current.singleton = control.singleton
-    AND control_shape.count = 1
-    AND control.operator_paused IS FALSE
-    AND leased.count = 0
+  WHERE current.singleton
+    AND current.operator_paused IS FALSE
   RETURNING current.guard_generation,
     current.guard_commitment = ''
       AND current.owner_commitment = ''
@@ -1846,43 +1968,118 @@ WITH advisory AS MATERIALIZED (
       AND current.candidate_commit = ''
       AND current.restart_scope = ''
       AND current.restart_phase = ''
-      AND current.captured_leases = '[]'::JSONB AS guard_cleared
-)
-SELECT pg_catalog.json_build_object(
-  'schema_version', 'leadpoet.production_parity_clone_arena_state.v1',
-  'control_count', (SELECT count FROM control_shape),
-  'operator_paused', (SELECT operator_paused FROM control),
-  'current_leased_count', (SELECT count FROM leased),
-  'normalization_count', (SELECT COUNT(*) FROM normalized),
-  'guard_generation', (SELECT guard_generation FROM normalized),
-  'guard_cleared', (SELECT guard_cleared FROM normalized)
-)::TEXT;
+      AND current.captured_leases = '[]'::JSONB
+  INTO v_guard_generation, v_guard_cleared;
+  GET DIAGNOSTICS v_normalized = ROW_COUNT;
+  IF v_normalized <> 1
+     OR v_guard_cleared IS NOT TRUE
+     OR v_guard_generation IS DISTINCT FROM v_control.guard_generation THEN
+    RAISE EXCEPTION 'full_parity_clone_arena_guard_clear_failed';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'leadpoet.full_parity_clone_arena_evidence',
+    pg_catalog.json_build_object(
+      'schema_version', 'leadpoet.production_parity_clone_arena_state.v2',
+      'outcome', 'normalized',
+      'control_count', v_control_count,
+      'operator_paused', FALSE,
+      'initial_leased_count', v_initial_leased,
+      'expired_eligible_count', v_expired_eligible,
+      'affected_round_count', v_affected_rounds,
+      'expired_count', v_expired,
+      'retried_count', v_retried,
+      'remaining_leased_count', v_remaining,
+      'normalization_count', v_normalized,
+      'guard_generation', v_guard_generation,
+      'guard_cleared', v_guard_cleared
+    )::TEXT,
+    FALSE
+  );
+END;
+$full_parity_clone_arena$;
+COMMIT;
+SELECT pg_catalog.current_setting(
+  'leadpoet.full_parity_clone_arena_evidence', FALSE
+);
 """,
-        timeout=45,
-    )
-    evidence = _last_json_document(raw, field="clone Arena restart state normalization")
-    if evidence.get("control_count") != 1:
-        raise FullParityError("Full parity clone Arena restart control is invalid")
+            timeout=45,
+        )
+    except ProductionParityError as exc:
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_recovery_failed",
+            "Full parity clone Arena recovery failed",
+        ) from exc
+    try:
+        evidence = _last_json_document(
+            raw, field="clone Arena restart state normalization"
+        )
+    except FullParityError as exc:
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_state_invalid",
+            "Full parity clone Arena restart evidence is invalid",
+        ) from exc
+    if (
+        isinstance(evidence.get("control_count"), bool)
+        or not isinstance(evidence.get("control_count"), int)
+        or evidence["control_count"] != 1
+    ):
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_control_invalid",
+            "Full parity clone Arena restart control is invalid",
+        )
     if not isinstance(evidence.get("operator_paused"), bool):
-        raise FullParityError("Full parity clone Arena restart control is invalid")
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_control_invalid",
+            "Full parity clone Arena restart control is invalid",
+        )
     if evidence["operator_paused"] is True:
-        raise FullParityError("Full parity clone preserves an operator Arena pause")
-    leased_count = evidence.get("current_leased_count")
-    if isinstance(leased_count, bool) or not isinstance(leased_count, int):
-        raise FullParityError("Full parity clone Arena lease state is invalid")
-    if leased_count != 0:
-        raise FullParityError("Full parity clone contains active Arena leases")
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_operator_paused",
+            "Full parity clone preserves an operator Arena pause",
+        )
+    if evidence.get("outcome") == "lease_not_expired":
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_lease_not_expired",
+            "Full parity clone contains an unexpired Arena lease",
+        )
     generation = evidence.get("guard_generation")
+    count_fields = (
+        "initial_leased_count",
+        "expired_eligible_count",
+        "affected_round_count",
+        "expired_count",
+        "retried_count",
+        "remaining_leased_count",
+        "normalization_count",
+    )
     if (
         evidence.get("schema_version")
-        != "leadpoet.production_parity_clone_arena_state.v1"
+        != "leadpoet.production_parity_clone_arena_state.v2"
+        or evidence.get("outcome") != "normalized"
+        or any(
+            isinstance(evidence.get(field), bool)
+            or not isinstance(evidence.get(field), int)
+            or int(evidence[field]) < 0
+            for field in count_fields
+        )
+        or evidence["initial_leased_count"]
+        != evidence["expired_eligible_count"]
+        or evidence["initial_leased_count"] != evidence["expired_count"]
+        or evidence["retried_count"] > evidence["expired_count"]
+        or evidence["affected_round_count"] > evidence["initial_leased_count"]
+        or (evidence["affected_round_count"] == 0)
+        != (evidence["initial_leased_count"] == 0)
+        or evidence["remaining_leased_count"] != 0
         or evidence.get("normalization_count") != 1
         or isinstance(generation, bool)
         or not isinstance(generation, int)
         or generation < 0
         or evidence.get("guard_cleared") is not True
     ):
-        raise FullParityError("Full parity clone Arena restart state did not normalize")
+        raise CloneArenaNormalizationFailure(
+            "clone_arena_state_invalid",
+            "Full parity clone Arena restart state did not normalize",
+        )
     return evidence
 
 

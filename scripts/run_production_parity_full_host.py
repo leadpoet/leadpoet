@@ -71,6 +71,9 @@ from scripts.production_parity_snapshot import (  # noqa: E402
     capture_snapshot,
     restore_snapshot,
 )
+from Leadpoet.utils.restart_epoch_gate import (  # noqa: E402
+    MAXIMUM_RESTART_EPOCH_BLOCK,
+)
 from scripts.gateway_restart_timing_diagnostic import (  # noqa: E402
     gateway_restart_timing_diagnostic as _gateway_restart_timing_diagnostic,
 )
@@ -179,6 +182,18 @@ CLONE_ARENA_FAILURE_CATEGORIES = frozenset(
     }
 )
 _GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES = 256 * 1024
+_GATEWAY_RESTART_MAX_SECONDS = 10_800
+_RESTART_EPOCH_RETRY_WAIT_SECONDS = 60
+_RESTART_EPOCH_GATE_ERROR_RE = re.compile(
+    r"^(?:(?:Leadpoet\.utils\.restart_epoch_gate|__main__)\.)?"
+    r"RestartEpochGateError: "
+    rf"production restart may start only at official subnet epoch block "
+    rf"{MAXIMUM_RESTART_EPOCH_BLOCK} or "
+    r"earlier; observed ([0-9]{1,7})$"
+)
+_TRACEBACK_TERMINAL_EXCEPTION_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*:.*$"
+)
 _LOCAL_RELEASE_EXACT_OBSERVATIONS = {
     "ERROR: rsync is required to stage attested runtime packages": (
         "required_executable_missing",
@@ -575,6 +590,124 @@ def _bounded_gateway_log_tail(log_path: Path) -> bytes | None:
     if offset:
         _partial, _separator, body = body.partition(b"\n")
     return body
+
+
+def _restart_epoch_gate_observation(log_path: Path) -> dict[str, Any] | None:
+    """Project one exact, source-bound late-epoch rejection from an attempt log."""
+
+    body = _bounded_gateway_log_tail(log_path)
+    if body is None:
+        return None
+    lines = body.decode("utf-8", errors="replace").splitlines()
+    starts = [index for index, line in enumerate(lines) if line == _TRACEBACK_START]
+    if not starts:
+        return None
+    block = lines[starts[-1] + 1 :]
+    frames = []
+    exception_line = None
+    for line in block:
+        frame = _TRACEBACK_FRAME_RE.fullmatch(line)
+        if frame is not None:
+            frames.append((frame.group(1).replace("\\", "/"), frame.group(2)))
+        if _TRACEBACK_TERMINAL_EXCEPTION_RE.fullmatch(line) is not None:
+            exception_line = line
+    error = _RESTART_EPOCH_GATE_ERROR_RE.fullmatch(exception_line or "")
+    observed_epoch_block = int(error.group(1)) if error is not None else None
+    if (
+        observed_epoch_block is None
+        or observed_epoch_block <= MAXIMUM_RESTART_EPOCH_BLOCK
+        or not any(
+            path.endswith("/Leadpoet/utils/restart_epoch_gate.py")
+            and function == "verify_restart_epoch_window"
+            for path, function in frames
+        )
+    ):
+        return None
+    return {
+        "marker": "restart_epoch_gate_observation",
+        "maximum_restart_epoch_block": MAXIMUM_RESTART_EPOCH_BLOCK,
+        "observed_epoch_block": observed_epoch_block,
+        "reason": "epoch_block_after_restart_deadline",
+    }
+
+
+def _run_gateway_restart_with_epoch_retry(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    log_path: Path,
+    timing_dir: Path,
+    deadline: float,
+    candidate_sha: str,
+) -> tuple[
+    subprocess.CompletedProcess[str] | None,
+    subprocess.TimeoutExpired | None,
+    dict[str, Any],
+    Path,
+    Path,
+]:
+    """Retry only one exact canonical late-epoch rejection before shutdown."""
+
+    if (
+        SHA_RE.fullmatch(candidate_sha) is None
+        or env.get("GATEWAY_DEPLOY_COMMIT") != candidate_sha
+        or list(command)
+        != ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha]
+    ):
+        raise FullParityError("exact gateway restart retry identity is invalid")
+    restart_deadline = min(
+        deadline,
+        time.monotonic() + _GATEWAY_RESTART_MAX_SECONDS,
+    )
+    rejections: list[dict[str, Any]] = []
+    attempt = 0
+    while True:
+        attempt += 1
+        attempt_log = log_path.with_name(f"{log_path.stem}-attempt-{attempt}.log")
+        attempt_timing_dir = timing_dir / f"attempt-{attempt}"
+        attempt_env = dict(env)
+        attempt_env["GATEWAY_RESTART_TIMING_DIR"] = str(attempt_timing_dir)
+        remaining = math.ceil(restart_deadline - time.monotonic())
+        if remaining <= 0:
+            raise FullParityError("full parity budget exhausted before exact gateway restart")
+        try:
+            result = _run(
+                command,
+                timeout=remaining,
+                env=attempt_env,
+                log_path=attempt_log,
+            )
+        except subprocess.TimeoutExpired as exc:
+            diagnostic: dict[str, Any] = {
+                "outcome": "timed_out",
+                "timeout_seconds": remaining,
+            }
+            if rejections:
+                diagnostic["epoch_gate_rejections"] = rejections
+            return None, exc, diagnostic, attempt_log, attempt_timing_dir
+
+        diagnostic = {"outcome": "exited", "returncode": result.returncode}
+        if rejections:
+            diagnostic["epoch_gate_rejections"] = rejections
+        if result.returncode == 0:
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
+        observation = (
+            _restart_epoch_gate_observation(attempt_log)
+            if result.returncode == 75
+            else None
+        )
+        if observation is None:
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
+        rejections.append({"attempt": attempt, **observation})
+        diagnostic["epoch_gate_rejections"] = rejections
+        remaining_before_retry = restart_deadline - time.monotonic()
+        if remaining_before_retry <= 0:
+            diagnostic["retry_deadline_exhausted"] = True
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
+        time.sleep(min(_RESTART_EPOCH_RETRY_WAIT_SECONDS, remaining_before_retry))
+        if time.monotonic() >= restart_deadline:
+            diagnostic["retry_deadline_exhausted"] = True
+            return result, None, diagnostic, attempt_log, attempt_timing_dir
 
 
 def _local_release_build_observations(log_path: Path) -> list[dict[str, Any]]:
@@ -4328,30 +4461,24 @@ def run_full(
             },
         )
         failure_stage = "gateway-restart"
-        restart_timeout = min(
-            _remaining_full_timeout(
-                deadline=deadline,
-                stage="exact gateway restart",
-            ),
-            10800,
+        (
+            restart,
+            restart_timeout_error,
+            gateway_restart_diagnostic,
+            gateway_log,
+            gateway_restart_timing_dir,
+        ) = _run_gateway_restart_with_epoch_retry(
+            ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
+            env=env,
+            log_path=gateway_log,
+            timing_dir=gateway_restart_timing_dir,
+            deadline=deadline,
+            candidate_sha=candidate_sha,
         )
-        try:
-            restart = _run(
-                ["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha],
-                timeout=restart_timeout,
-                env=env,
-                log_path=gateway_log,
-            )
-        except subprocess.TimeoutExpired:
-            gateway_restart_diagnostic = {
-                "outcome": "timed_out",
-                "timeout_seconds": restart_timeout,
-            }
-            raise
-        gateway_restart_diagnostic = {
-            "outcome": "exited",
-            "returncode": restart.returncode,
-        }
+        if restart_timeout_error is not None:
+            raise restart_timeout_error
+        if restart is None:
+            raise FullParityError("exact gateway restart result is unavailable")
         if restart.returncode != 0:
             raise FullParityError("exact gateway restart failed")
         failure_stage = "gateway-health"

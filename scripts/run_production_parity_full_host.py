@@ -169,7 +169,7 @@ FULL_ERROR_TYPES = frozenset(
         "ValueError",
     }
 )
-_LOCAL_RELEASE_LOG_TAIL_BYTES = 256 * 1024
+_GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES = 256 * 1024
 _LOCAL_RELEASE_EXACT_OBSERVATIONS = {
     "ERROR: rsync is required to stage attested runtime packages": (
         "required_executable_missing",
@@ -229,6 +229,152 @@ _LOCAL_RELEASE_MISSING_EXECUTABLE_RE = re.compile(
 _LOCAL_RELEASE_SHELL_MISSING_EXECUTABLE_RE = re.compile(
     r"(?:^|: )(docker|git|gzip|jq|nitro-cli|rsync|tar): command not found$"
 )
+_TRACEBACK_START = "Traceback (most recent call last):"
+_TRACEBACK_CHAIN_SEPARATORS = frozenset(
+    {
+        "During handling of the above exception, another exception occurred:",
+        "The above exception was the direct cause of the following exception:",
+    }
+)
+_TRACEBACK_FRAME_RE = re.compile(
+    r'^\s*File "([^"\n]{1,4096})", line [1-9][0-9]{0,6}, in '
+    r"([A-Za-z_][A-Za-z0-9_]*|<module>)$"
+)
+_TRACEBACK_EXCEPTION_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*([A-Za-z][A-Za-z0-9]{0,63}):"
+)
+_CREDENTIAL_EXCEPTION_CLASSES = frozenset(
+    {
+        "ClientError",
+        "ConnectTimeoutError",
+        "EndpointConnectionError",
+        "FileNotFoundError",
+        "GatewayEnvelopePreparationV2Error",
+        "HTTPError",
+        "ImportError",
+        "JSONDecodeError",
+        "ModuleNotFoundError",
+        "NoCredentialsError",
+        "OSError",
+        "PermissionError",
+        "ReadTimeoutError",
+        "SupabaseSchemaPreflightV2Error",
+        "TEEKMSProvisionV2Error",
+        "TimeoutError",
+        "URLError",
+        "ValueError",
+        "WorkerProxyTransportCleanupV2Error",
+        "WorkerProxyTransportPreflightV2Error",
+    }
+)
+_CREDENTIAL_SCHEMA_FUNCTIONS = frozenset(
+    {
+        "_source_add_leg1_release_environment_policy_v1",
+        "_verify_chain_realized_activation_v1",
+        "_verify_compact_weight_settlement_contract_v1",
+        "_verify_source_add_claim_control_contract_v1",
+        "_verify_source_add_claim_control_contract_v2",
+        "_verify_source_add_duplicate_privacy_contract_v1",
+        "_verify_source_add_miner_status_contract_v1",
+        "_verify_source_add_post_accept_leg1_contract_v2",
+        "_verify_source_add_post_accept_leg1_contract_v3",
+        "_verify_source_add_post_accept_leg1_contract_v4",
+        "_verify_source_add_provider_origin_contract_v1",
+        "verify_required_supabase_v2_schema",
+    }
+)
+_CREDENTIAL_PROXY_FUNCTIONS = frozenset(
+    {
+        "_preferred_scoring_proxy_configuration",
+        "_validate_v2_proxy_migration_capacity",
+        "_validated_worker_proxy_configuration",
+        "verify_tls_proxy_connect_v2",
+        "verify_worker_proxy_fleets_v2",
+    }
+)
+_CREDENTIAL_ENVELOPE_FUNCTIONS = frozenset(
+    {
+        "_secret",
+        "_write_json",
+        "install_gateway_envelopes_v2",
+        "prepare_gateway_envelopes_v2",
+    }
+)
+_CREDENTIAL_SCHEMA_PROBES = {
+    "_source_add_leg1_release_environment_policy_v1": "source_add_leg1_release_policy",
+    "_verify_chain_realized_activation_v1": "chain_realized_activation",
+    "_verify_compact_weight_settlement_contract_v1": (
+        "research_lab_compact_weight_settlement_contract_v1"
+    ),
+    "_verify_source_add_claim_control_contract_v1": (
+        "research_lab_source_add_claim_control_contract_v1"
+    ),
+    "_verify_source_add_claim_control_contract_v2": (
+        "research_lab_source_add_claim_control_contract_v2"
+    ),
+    "_verify_source_add_duplicate_privacy_contract_v1": (
+        "research_lab_source_add_duplicate_privacy_contract_v1"
+    ),
+    "_verify_source_add_miner_status_contract_v1": (
+        "research_lab_source_add_miner_status_contract_v1"
+    ),
+    "_verify_source_add_post_accept_leg1_contract_v2": (
+        "research_lab_source_add_post_accept_leg1_contract_v2"
+    ),
+    "_verify_source_add_post_accept_leg1_contract_v3": (
+        "research_lab_source_add_post_accept_leg1_contract_v3"
+    ),
+    "_verify_source_add_post_accept_leg1_contract_v4": (
+        "research_lab_source_add_post_accept_leg1_contract_v4"
+    ),
+    "_verify_source_add_provider_origin_contract_v1": (
+        "research_lab_source_add_provider_origin_contract_v1"
+    ),
+}
+_CREDENTIAL_AWS_ERROR_RE = re.compile(
+    r"^botocore\.exceptions\.ClientError: An error occurred "
+    r"\(([A-Za-z][A-Za-z0-9]{0,63})\) when calling the "
+    r"([A-Za-z][A-Za-z0-9]{0,63}) operation:"
+)
+_CREDENTIAL_SCHEMA_UNAVAILABLE_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*SupabaseSchemaPreflightV2Error: required "
+    r"Supabase V2 schema is unavailable for ([a-z][a-z0-9_]{0,62}); apply "
+    r"scripts/[0-9]{1,3}-[a-z0-9-]{1,100}\.sql before restart "
+    r"\(HTTP ([1-5][0-9]{2})\)$"
+)
+_CREDENTIAL_SCHEMA_PROBE_FAILED_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*SupabaseSchemaPreflightV2Error: Supabase V2 "
+    r"schema probe failed for ([a-z][a-z0-9_]{0,62})$"
+)
+_CREDENTIAL_RPC_UNAVAILABLE_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*SupabaseSchemaPreflightV2Error: required "
+    r"Supabase V2 RPC is unavailable for ([a-z][a-z0-9_]{0,62}); apply "
+    r"scripts/[0-9]{1,3}-[a-z0-9-]{1,100}\.sql before restart$"
+)
+_CREDENTIAL_ENVIRONMENT_UNAVAILABLE_RE = re.compile(
+    r"^(?:[a-z_][a-z0-9_]*\.)*GatewayEnvelopePreparationV2Error: gateway "
+    r"source environment is unavailable$"
+)
+_CREDENTIAL_AWS_ERROR_CODES = frozenset(
+    {
+        "AccessDenied",
+        "AccessDeniedException",
+        "DependencyTimeoutException",
+        "DisabledException",
+        "ExpiredTokenException",
+        "InvalidClientTokenId",
+        "InvalidKeyUsageException",
+        "KMSInternalException",
+        "KMSInvalidStateException",
+        "KeyUnavailableException",
+        "NotFoundException",
+        "RequestTimeout",
+        "ServiceUnavailableException",
+        "ThrottlingException",
+        "UnrecognizedClientException",
+    }
+)
+_CREDENTIAL_AWS_OPERATIONS = frozenset({"Encrypt"})
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -373,9 +519,7 @@ def _write_early_failure_evidence(
         os.close(descriptor)
 
 
-def _local_release_build_observations(log_path: Path) -> list[dict[str, Any]]:
-    """Project fixed local-build failures without retaining raw log text."""
-
+def _bounded_gateway_log_tail(log_path: Path) -> bytes | None:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -384,17 +528,26 @@ def _local_release_build_observations(log_path: Path) -> list[dict[str, Any]]:
         descriptor = os.open(log_path, flags)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
-            return []
-        offset = max(0, metadata.st_size - _LOCAL_RELEASE_LOG_TAIL_BYTES)
+            return None
+        offset = max(0, metadata.st_size - _GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES)
         os.lseek(descriptor, offset, os.SEEK_SET)
-        body = os.read(descriptor, _LOCAL_RELEASE_LOG_TAIL_BYTES)
+        body = os.read(descriptor, _GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES)
     except OSError:
-        return []
+        return None
     finally:
         if descriptor is not None:
             os.close(descriptor)
     if offset:
         _partial, _separator, body = body.partition(b"\n")
+    return body
+
+
+def _local_release_build_observations(log_path: Path) -> list[dict[str, Any]]:
+    """Project fixed local-build failures without retaining raw log text."""
+
+    body = _bounded_gateway_log_tail(log_path)
+    if body is None:
+        return []
 
     observations: list[dict[str, Any]] = []
     seen: set[tuple[tuple[str, Any], ...]] = set()
@@ -452,6 +605,213 @@ def _local_release_build_observations(log_path: Path) -> list[dict[str, Any]]:
                 }
             )
     return observations
+
+
+def _credential_traceback_phase(
+    frames: Sequence[tuple[str, str]],
+) -> str | None:
+    normalized = tuple(
+        (path.replace("\\", "/"), function) for path, function in frames
+    )
+    if any(
+        path.endswith("/gateway/tee/supabase_schema_preflight_v2.py")
+        and function in _CREDENTIAL_SCHEMA_FUNCTIONS
+        for path, function in normalized
+    ):
+        return "schema_preflight"
+    if any(
+        (
+            path.endswith("/gateway/tee/proxy_transport_preflight_v2.py")
+            and function in _CREDENTIAL_PROXY_FUNCTIONS
+        )
+        or (
+            path.endswith("/gateway/tee/prepare_gateway_envelopes_v2.py")
+            and function in _CREDENTIAL_PROXY_FUNCTIONS
+        )
+        for path, function in normalized
+    ):
+        return "proxy_preflight"
+    if any(
+        path.endswith("/gateway/utils/tee_kms_provision_v2.py")
+        and function == "build_provider_envelope_v2"
+        for path, function in normalized
+    ):
+        return "kms"
+    if any(
+        path.endswith("/gateway/tee/prepare_gateway_envelopes_v2.py")
+        and function == "load_environment_file"
+        for path, function in normalized
+    ):
+        return "environment_load"
+    if any(
+        path.endswith("/gateway/tee/prepare_gateway_envelopes_v2.py")
+        and function in _CREDENTIAL_ENVELOPE_FUNCTIONS
+        for path, function in normalized
+    ):
+        return "envelope_install"
+    return None
+
+
+def _credential_traceback_probe(
+    frames: Sequence[tuple[str, str]],
+) -> str | None:
+    for path, function in reversed(frames):
+        if path.replace("\\", "/").endswith(
+            "/gateway/tee/supabase_schema_preflight_v2.py"
+        ):
+            probe = _CREDENTIAL_SCHEMA_PROBES.get(function)
+            if probe is not None:
+                return probe
+    return None
+
+
+def _credential_schema_detail(exception_line: str) -> dict[str, Any]:
+    from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
+
+    required_tables = {
+        table
+        for _migration, table, _columns in schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+    }
+    probe_match = _CREDENTIAL_SCHEMA_PROBE_FAILED_RE.fullmatch(exception_line)
+    if probe_match is not None and probe_match.group(1) in required_tables:
+        return {
+            "reason": "schema_table_probe_failed",
+            "schema_object": probe_match.group(1),
+        }
+    table_match = _CREDENTIAL_SCHEMA_UNAVAILABLE_RE.fullmatch(exception_line)
+    if table_match is not None:
+        if table_match.group(1) in required_tables:
+            return {
+                "reason": "schema_table_unavailable",
+                "schema_object": table_match.group(1),
+                "http_status": int(table_match.group(2)),
+            }
+    rpc_match = _CREDENTIAL_RPC_UNAVAILABLE_RE.fullmatch(exception_line)
+    if rpc_match is not None:
+        required_rpcs = {
+            function_name
+            for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+        }
+        if rpc_match.group(1) in required_rpcs:
+            return {
+                "reason": "rpc_unavailable",
+                "rpc": rpc_match.group(1),
+            }
+    return {}
+
+
+def _credential_fixed_reason(
+    phase: str,
+    frames: Sequence[tuple[str, str]],
+    exception_class: str,
+    exception_line: str,
+) -> str | None:
+    functions = {function for _path, function in frames}
+    if (
+        phase == "environment_load"
+        and exception_class == "GatewayEnvelopePreparationV2Error"
+        and _CREDENTIAL_ENVIRONMENT_UNAVAILABLE_RE.fullmatch(exception_line)
+        is not None
+    ):
+        return "environment_unavailable"
+    if phase == "proxy_preflight" and "verify_worker_proxy_fleets_v2" in functions:
+        return "proxy_connect_failed"
+    if phase == "envelope_install" and "_secret" in functions:
+        return "credential_unavailable"
+    return None
+
+
+def _credential_envelope_observations(log_path: Path) -> list[dict[str, Any]]:
+    """Project fixed credential-stage traceback identities from one bounded log."""
+
+    body = _bounded_gateway_log_tail(log_path)
+    if body is None:
+        return []
+    lines = body.decode("utf-8", errors="replace").splitlines()
+    starts = [index for index, line in enumerate(lines) if line == _TRACEBACK_START]
+    if not starts:
+        return []
+    chain_start = len(starts) - 1
+    while chain_start:
+        previous = lines[starts[chain_start - 1] + 1 : starts[chain_start]]
+        if not (
+            len(previous) >= 3
+            and previous[-3] == ""
+            and previous[-2] in _TRACEBACK_CHAIN_SEPARATORS
+            and previous[-1] == ""
+        ):
+            break
+        chain_start -= 1
+    starts = starts[chain_start:]
+    observations: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, Any], ...]] = set()
+    for position, start in enumerate(starts):
+        stop = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        block = lines[start + 1 : stop]
+        frames = []
+        exception_class = None
+        exception_line = None
+        for line in block:
+            frame = _TRACEBACK_FRAME_RE.fullmatch(line)
+            if frame is not None:
+                frames.append((frame.group(1), frame.group(2)))
+            exception = _TRACEBACK_EXCEPTION_RE.match(line)
+            if exception is not None and exception.group(1) in _CREDENTIAL_EXCEPTION_CLASSES:
+                exception_class = exception.group(1)
+                exception_line = line
+        phase = _credential_traceback_phase(frames)
+        if exception_class in {"ImportError", "ModuleNotFoundError"} and any(
+            path.replace("\\", "/").endswith(
+                "/gateway/tee/prepare_gateway_envelopes_v2.py"
+            )
+            and function == "<module>"
+            for path, function in frames
+        ):
+            phase = "credential_module_load"
+        if phase is None or exception_class is None or exception_line is None:
+            continue
+        observation: dict[str, Any] = {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": phase,
+            "exception_class": exception_class,
+        }
+        probe = _credential_traceback_probe(frames)
+        if probe is not None:
+            observation["probe"] = probe
+        if phase == "schema_preflight":
+            observation.update(_credential_schema_detail(exception_line))
+        reason = _credential_fixed_reason(
+            phase, frames, exception_class, exception_line
+        )
+        if reason is not None:
+            observation["reason"] = reason
+        aws_error = _CREDENTIAL_AWS_ERROR_RE.match(exception_line)
+        if (
+            aws_error is not None
+            and aws_error.group(1) in _CREDENTIAL_AWS_ERROR_CODES
+            and aws_error.group(2) in _CREDENTIAL_AWS_OPERATIONS
+        ):
+            observation["aws_error_code"] = aws_error.group(1)
+            observation["aws_operation"] = aws_error.group(2)
+        identity = tuple(sorted(observation.items()))
+        if identity not in seen and len(observations) < 8:
+            seen.add(identity)
+            observations.append(observation)
+    aws_observations = [
+        observation for observation in observations if "aws_error_code" in observation
+    ]
+    if aws_observations:
+        return aws_observations[-1:]
+    if not observations:
+        return []
+    selected = dict(observations[-1])
+    for observation in reversed(observations[:-1]):
+        if observation["phase"] != selected["phase"]:
+            continue
+        for field in ("probe", "reason", "schema_object", "rpc", "http_status"):
+            if field not in selected and field in observation:
+                selected[field] = observation[field]
+    return [selected]
 
 
 class _RejectCloneRedirects(HTTPRedirectHandler):
@@ -3970,11 +4330,17 @@ def run_full(
             if (
                 gateway_failed
                 and isinstance(timing, dict)
-                and timing.get("final_stage") == "local_release_build"
                 and timing.get("final_status") == "failed"
             ):
                 try:
-                    observations = _local_release_build_observations(gateway_log)
+                    final_stage = timing.get("final_stage")
+                    observations = (
+                        _local_release_build_observations(gateway_log)
+                        if final_stage == "local_release_build"
+                        else _credential_envelope_observations(gateway_log)
+                        if final_stage == "v2_credential_envelope_preparation"
+                        else []
+                    )
                     if observations:
                         gateway_restart_diagnostic["observations"] = observations
                 except Exception:  # noqa: BLE001 - diagnostics cannot suppress cleanup

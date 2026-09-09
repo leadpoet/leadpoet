@@ -157,6 +157,8 @@ PROTECTED_SYMBOLS = {
         "reconstruct_weight_finalization_from_compact_v2",
     ),
     "leadpoet_canonical/compact_auditor_authority_v2.py": (
+        "_HISTORICAL_SOURCE_ADD_CATEGORY",
+        "_HISTORICAL_SOURCE_ADD_SCOPE",
         "build_compact_published_weight_authority_v2",
         "validate_compact_published_weight_authority_shape_v2",
         "verify_compact_weight_submission_v2",

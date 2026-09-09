@@ -47,6 +47,12 @@ from leadpoet_canonical.weight_authority_v2 import (
     weight_input_value_documents_v2,
 )
 
+_HISTORICAL_SOURCE_ADD_CATEGORY = "source_add_rewards"
+_HISTORICAL_SOURCE_ADD_SCOPE = (
+    "gateway_coordinator",
+    "research_lab.source_add_reward_input.v2",
+)
+
 
 COMPACT_PUBLISHED_WEIGHT_AUTHORITY_SCHEMA_VERSION = (
     "leadpoet.compact_published_weight_authority.v2"
@@ -251,10 +257,12 @@ def verify_compact_weight_submission_v2(
         boot_verifier=boot_verifier,
     )
     inputs = dict(snapshot["input_receipt_hashes"])
+    historical_source_add = _HISTORICAL_SOURCE_ADD_CATEGORY in inputs
     documents = weight_input_value_documents_v2(
         calculation_snapshot=snapshot["calculation_snapshot"],
         finalized_chain_state_root=snapshot["finalized_chain_state_root"],
         gateway_authority_event_hash=snapshot["gateway_authority_event_hash"],
+        include_historical_source_add=historical_source_add,
     )
     all_attempts = [*normalized["upstream_transport_attempts"], *attempts]
     for category, receipt_hash in inputs.items():
@@ -264,7 +272,11 @@ def verify_compact_weight_submission_v2(
             disclosed = [item for item in proof.get("disclosed_receipts", []) if item.get("receipt_hash") == receipt_hash] if isinstance(proof, Mapping) else []
             _require(len(disclosed) == 1, "%s compact input receipt is missing" % category)
             receipt = dict(disclosed[0])
-        role, purpose = WEIGHT_INPUT_PURPOSES[category]
+        role, purpose = (
+            _HISTORICAL_SOURCE_ADD_SCOPE
+            if category == _HISTORICAL_SOURCE_ADD_CATEGORY
+            else WEIGHT_INPUT_PURPOSES[category]
+        )
         _require(receipt.get("role") == role and receipt.get("purpose") == purpose, "%s compact input scope differs" % category)
         _require(int(receipt.get("epoch_id", -1)) == int(computed["epoch_id"]), "%s compact input epoch differs" % category)
         _require(receipt.get("output_root") == sha256_json(documents[category]), "%s compact input value differs" % category)

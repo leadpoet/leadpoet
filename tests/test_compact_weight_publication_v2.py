@@ -61,12 +61,51 @@ from tests.test_validator_hotkey_authority_v2 import (
     _profile,
 )
 from validator_tee.enclave.hotkey_authority_v2 import ValidatorHotkeyAuthorityV2
+import validator_tee.enclave.weight_authority_v2 as enclave_weight_authority
 from validator_tee.host.weight_authority_v2 import (
     build_compact_weight_submission_v2,
 )
 
 
-def test_compact_weight_publication_reconstructs_exact_canonical_bundle(monkeypatch):
+@pytest.mark.parametrize(
+    "historical_source_allocations", [None, [], [{"hotkey": "source", "share": 0.01}]]
+)
+def test_compact_weight_publication_reconstructs_exact_canonical_bundle(
+    monkeypatch, historical_source_allocations
+):
+    historical = historical_source_allocations is not None
+    gateway_categories = set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+    purposes = dict(WEIGHT_INPUT_PURPOSES)
+    if historical:
+        # Recreate the retired producer's signed input shape. All downstream
+        # compact reconstruction and auditor verification use current code.
+        gateway_categories.add("source_add_rewards")
+        purposes["source_add_rewards"] = (
+            "gateway_coordinator",
+            "research_lab.source_add_reward_input.v2",
+        )
+        monkeypatch.setattr(
+            enclave_weight_authority,
+            "GATEWAY_WEIGHT_INPUT_CATEGORIES",
+            frozenset(gateway_categories),
+        )
+        monkeypatch.setattr(enclave_weight_authority, "WEIGHT_INPUT_PURPOSES", purposes)
+        original_input_documents = enclave_weight_authority.weight_input_value_documents_v2
+        monkeypatch.setattr(
+            enclave_weight_authority,
+            "weight_input_value_documents_v2",
+            lambda **kwargs: original_input_documents(
+                **kwargs, include_historical_source_add=True
+            ),
+        )
+        original_build_snapshot = enclave_weight_authority.build_weight_snapshot_v2
+        monkeypatch.setattr(
+            enclave_weight_authority,
+            "build_weight_snapshot_v2",
+            lambda **kwargs: original_build_snapshot(
+                **kwargs, _allow_historical_source_add=True
+            ),
+        )
     fixture = _fixture(stateful=True)
     authority = fixture["authority"]
     validator_boot = fixture["validator_boot"]
@@ -114,23 +153,29 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(monkeypa
     )
 
     preliminary = _calculation_snapshot([], "")
+    if historical:
+        preliminary["research_lab_allocation_doc"][
+            "source_add_allocations"
+        ] = historical_source_allocations
     gateway_event_hash = event_receipt["receipt_hash"]
     expected_roots = weight_input_output_roots_v2(
         calculation_snapshot=preliminary,
         finalized_chain_state_root=fixture["finalized_chain_state_root"],
         gateway_authority_event_hash=gateway_event_hash,
+        include_historical_source_add=historical,
     )
     documents = weight_input_value_documents_v2(
         calculation_snapshot=preliminary,
         finalized_chain_state_root=fixture["finalized_chain_state_root"],
         gateway_authority_event_hash=gateway_event_hash,
+        include_historical_source_add=historical,
     )
     proofs = {}
     full_graphs = {}
     input_hashes = {}
     direct_attempts = []
-    for sequence, category in enumerate(sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES)):
-        _role, purpose = WEIGHT_INPUT_PURPOSES[category]
+    for sequence, category in enumerate(sorted(gateway_categories)):
+        _role, purpose = purposes[category]
         job_id = "compact-weight-input-%s" % category
         attempt = None
         if category != "anomaly_adjustments":
@@ -216,6 +261,10 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(monkeypa
     calculation = _calculation_snapshot(
         input_hashes.values(), input_hashes["research_lab_allocation"]
     )
+    if historical:
+        calculation["research_lab_allocation_doc"][
+            "source_add_allocations"
+        ] = historical_source_allocations
     enclave_response = authority.compute(
         {
             "validator_hotkey": VALIDATOR_HOTKEY,
@@ -249,7 +298,7 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(monkeypa
                     "receipt_graph_delta",
                     "ancestry_commitment",
                     "boot_identity",
-                )
+            )
             }
         )
     )
@@ -344,7 +393,29 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(monkeypa
                 expected_lineage_id=lineage_id,
                 full_graphs_by_root=full_graphs,
                 boot_attestation_verifier=verify_boot,
-            )
+                )
+
+    if historical:
+        missing_source_proof = deepcopy(compact)
+        missing_source_proof["upstream_ancestry_proofs"].pop(
+            "source_add_rewards"
+        )
+        assert_compact_rejected(missing_source_proof)
+
+        tampered_source_receipt = deepcopy(compact)
+        source_proof = tampered_source_receipt["upstream_ancestry_proofs"][
+            "source_add_rewards"
+        ]
+        source_receipt = next(
+            receipt
+            for receipt in source_proof["disclosed_receipts"]
+            if receipt["receipt_hash"]
+            == tampered_source_receipt["weight_snapshot"][
+                "input_receipt_hashes"
+            ]["source_add_rewards"]
+        )
+        source_receipt["purpose"] = "research_lab.fulfillment_input.v2"
+        assert_compact_rejected(tampered_source_receipt)
 
     dropped_receipt = deepcopy(compact)
     dropped_receipt["validator_receipt_delta"]["receipts"].pop(0)

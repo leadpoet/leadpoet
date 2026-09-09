@@ -569,16 +569,19 @@ def test_snapshot_v6_real_capture_verify_restore_is_candidate_bound(
     ("capture_mode", "expected_probe_rows"),
     (("full", 1), ("schema-only", 0)),
 )
+@pytest.mark.parametrize("retire_source_add", [False, True])
 def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
     monkeypatch,
     tmp_path: Path,
     capture_mode: str,
     expected_probe_rows: int,
+    retire_source_add: bool,
 ):
+    retirement = "198-retire-research-lab-source-add-schema.sql"
     source_generator = _database_with_migrations(
         HISTORICAL_SOURCE_ADD_UPGRADE_MIGRATIONS
         + tuple(ARENA_MIGRATIONS)
-        + ("198-retire-research-lab-source-add-schema.sql",),
+        + (() if retire_source_add else (retirement,)),
         setup_sql=_DAILY_SOURCE_SHIM_SQL,
     )
     psycopg2_module, source = next(source_generator)
@@ -656,6 +659,21 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
             capture_mode=capture_mode,
             postgres_image=postgres_image,
         )
+        migration_delta = []
+        if retire_source_add:
+            # Declare the candidate migration at this fixture's restore seam.
+            # Archive/manifest verification still runs, followed by the real,
+            # byte-checked SQL migration against the restored PostgreSQL clone.
+            migration_delta = [{
+                "path": "scripts/" + retirement,
+                "sha256": parity_snapshot.file_sha256(ROOT / "scripts" / retirement),
+            }]
+            verify_archive = parity_snapshot.verify_snapshot
+
+            def verify_with_retirement(**kwargs):
+                return {**verify_archive(**kwargs), "migration_delta": migration_delta}
+
+            monkeypatch.setattr(parity_snapshot, "verify_snapshot", verify_with_retirement)
         database = fast_parity._DockerDatabase(
             candidate_sha=str(contract["candidate_sha"]),
             postgres_image=postgres_image,
@@ -692,7 +710,17 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
         )
         assert manifest["archive"]["ownership"] == "preserved"
         assert manifest["archive"]["acl"] == "preserved"
-        assert restored["migration_delta"] == []
+        assert restored["migration_delta"] == migration_delta
+        before = restored["database_before_migrations"]
+        after = restored["database_after_migrations"]
+        assert before["relation_count"] == manifest["database"]["relation_count"]
+        assert (after["relation_count"] < before["relation_count"]) is retire_source_add
+        parity_snapshot.validate_database_relation_shape(after, after, capture_mode=capture_mode)
+        if retire_source_add:
+            with pytest.raises(ProductionParityError, match="lost production relations"):
+                parity_snapshot.validate_database_relation_shape(
+                    before, after, capture_mode=capture_mode
+                )
 
         ownership = json.loads(
             database._psql(
@@ -808,7 +836,13 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
                       AND c.relname LIKE 'research_lab_source_add%'
                     """
                 )
-                assert cursor.fetchone() == (0,)
+                source_retired_relations = cursor.fetchone()[0]
+                assert (source_retired_relations > 0) is retire_source_add
+        assert int(database._psql(
+            "SELECT count(*) FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname='public' AND c.relname LIKE 'research_lab_source_add%'"
+        )) == 0
     finally:
         if prefix_adapter is not None:
             prefix_adapter.cleanup()

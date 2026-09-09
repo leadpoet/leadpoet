@@ -49,7 +49,6 @@ if str(ROOT) not in sys.path:
 from leadpoet_canonical.production_parity import (  # noqa: E402
     ProductionParityError,
     sha256_json,
-    validate_snapshot_manifest,
 )
 from leadpoet_canonical.production_parity_boundary_v2 import (  # noqa: E402
     validate_production_parity_boundary_document_v2,
@@ -3013,6 +3012,73 @@ def _close_parity_arena_runtime(
         raise FullParityError("Arena runtime cleanup failed")
 
 
+def _verify_arena_daily_public_results(
+    *, service: Any, round_id: str, baseline_submission_id: str,
+    icps: list[dict[str, Any]], round_view: Mapping[str, Any],
+    benchmark_view: Mapping[str, Any], results_view: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Verify public disclosure, then read all scored outputs from isolated state."""
+    from lab_arena.icp_disclosure import baseline_disclosure
+    from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
+
+    row = service.store.get_round(round_id)
+    runs = service.store.list_runs(
+        round_id, submission_id=baseline_submission_id, kind="execute", status="accepted"
+    )
+    disclosure = baseline_disclosure(row or {}, runs)
+    if (
+        disclosure is None or len(runs) != len(icps)
+        or disclosure["baseline_submission_id"] != baseline_submission_id
+    ):
+        raise FullParityError("Arena persisted baseline scores are incomplete")
+    public_positions = set(disclosure["public_positions"])
+    public_runs = [run for run in runs if run["icp_position"] in public_positions]
+    expected_icps = [
+        {**icps[position], "icp_position": position,
+         "baseline_score": disclosure["baseline_scores"][position]}
+        for position in disclosure["public_positions"]
+    ]
+    public_outputs = results_view.get("outputs")
+    public_scores = results_view.get("scores")
+    if (
+        round_view.get("status") != "published"
+        or not isinstance(round_view.get("publication"), Mapping)
+        or benchmark_view.get("icps") != expected_icps
+        or benchmark_view.get("public_icp_count") != len(public_positions)
+        or benchmark_view.get("private_icp_count") != len(disclosure["private_positions"])
+        or not isinstance(public_outputs, Mapping)
+        or set(public_outputs) != {run["run_id"] for run in public_runs}
+        or not isinstance(public_scores, Mapping)
+        or results_view.get("public_icp_count") != len(public_positions)
+        or results_view.get("public_icp_status") != "ready"
+        or results_view.get("submission", {}).get("is_baseline") is not True
+    ):
+        raise FullParityError("Arena public daily result is incomplete or discloses private ICPs")
+    for stage in (1, 2):
+        scores = public_scores.get(f"stage_{stage}")
+        expected = {run["run_id"]: {
+            "run_id": run["run_id"], "icp_position": run["icp_position"],
+            "per_icp_score": run["per_icp_score"],
+        } for run in public_runs if run["stage"] == stage}
+        if (
+            not isinstance(scores, list) or len(scores) != len(expected)
+            or any(not isinstance(score, Mapping) for score in scores)
+            or {score.get("run_id"): score for score in scores} != expected
+        ):
+            raise FullParityError("Arena public daily scores differ from the public partition")
+    outputs = {}
+    for run in runs:
+        try:
+            raw = service._objects.get_bounded(str(run["output_ref"]), MAX_OUTPUT_BYTES)
+            output = validate_output_document(json.loads(raw.decode("utf-8")))
+        except Exception as exc:
+            raise FullParityError("Arena persisted company output is invalid") from exc
+        if run["run_id"] in public_outputs and public_outputs[run["run_id"]] != output:
+            raise FullParityError("Arena public output differs from its persisted output")
+        outputs[run["run_id"]] = output
+    return runs, outputs
+
+
 def _run_arena_rebenchmark_child(
     request: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -3264,34 +3330,12 @@ def _run_arena_rebenchmark_child(
             api_base_url,
             f"/arena/v1/rounds/{round_id}/results/{baseline_submission_id}",
         )
-        benchmark_icps = benchmark_view.get("icps")
-        benchmark_ids = (
-            [str(item.get("icp_id") or "") for item in benchmark_icps]
-            if isinstance(benchmark_icps, list)
-            and all(isinstance(item, Mapping) for item in benchmark_icps)
-            else []
+        all_execute, outputs = _verify_arena_daily_public_results(
+            service=service, round_id=round_id,
+            baseline_submission_id=baseline_submission_id, icps=icps,
+            round_view=round_view, benchmark_view=benchmark_view,
+            results_view=results_view,
         )
-        outputs = results_view.get("outputs")
-        score_doc = results_view.get("scores")
-        stage1_scores = (
-            score_doc.get("stage_1") if isinstance(score_doc, Mapping) else None
-        )
-        stage2_scores = (
-            score_doc.get("stage_2") if isinstance(score_doc, Mapping) else None
-        )
-        if (
-            round_view.get("status") != "published"
-            or not isinstance(round_view.get("publication"), Mapping)
-            or benchmark_ids != icp_ids
-            or not isinstance(outputs, Mapping)
-            or len(outputs) != configured_count
-            or not isinstance(stage1_scores, list)
-            or not isinstance(stage2_scores, list)
-            or len(stage1_scores) + len(stage2_scores) != configured_count
-            or results_view.get("submission", {}).get("is_baseline") is not True
-        ):
-            raise FullParityError("Arena public daily result is incomplete")
-        all_execute = stage1_execute + stage2_execute
         all_score = stage1_score + stage2_score
         positions = {int(row["icp_position"]) for row in all_execute}
         score_positions = {int(row["icp_position"]) for row in all_score}
@@ -3326,7 +3370,7 @@ def _run_arena_rebenchmark_child(
                 output.get("companies") if isinstance(output, Mapping) else None
             )
             if not isinstance(companies, list):
-                raise FullParityError("Arena public company output is invalid")
+                raise FullParityError("Arena persisted company output is invalid")
             try:
                 validated_companies = validate_companies(
                     companies,
@@ -3334,7 +3378,7 @@ def _run_arena_rebenchmark_child(
                 )
             except ValueError as exc:
                 raise FullParityError(
-                    "Arena public company output is invalid"
+                    "Arena persisted company output is invalid"
                 ) from exc
             company_count += len(validated_companies)
             position_evidence_urls: set[str] = set()
@@ -4110,9 +4154,10 @@ def run_full(
         )
         shape = database.shape_evidence(
             service_role_key=service_role_key,
-            expected_shape=validate_snapshot_manifest(manifest)["database"],
+            expected_shape=restore["database_after_migrations"],
             capture_mode="full",
         )
+        shape["comparison_baseline"] = "after_candidate_migrations"
         failure_stage = "clone-weight-history"
         scale = database.weight_input_scale_evidence(
             service_role_key=service_role_key

@@ -421,8 +421,66 @@ def _require_success(result: subprocess.CompletedProcess[bytes], *, stage: str) 
     return result.stdout
 
 
+DATABASE_RELATION_SHAPE_SQL = """
+SELECT json_build_object(
+  'relation_count', COUNT(*),
+  'total_relation_bytes', COALESCE(SUM(pg_total_relation_size(c.oid)), 0),
+  'largest_relation_bytes', COALESCE(MAX(pg_total_relation_size(c.oid)), 0)
+)::text
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'm')
+  AND n.nspname = 'public';
+"""
 
 
+def validate_database_relation_shape(
+    expected: Mapping[str, Any], restored: Mapping[str, Any], *, capture_mode: str
+) -> None:
+    expected_relations = int(expected.get("relation_count") or 0)
+    restored_relations = int(restored.get("relation_count") or 0)
+    if expected_relations <= 0 or restored_relations < expected_relations:
+        raise ProductionParityError(
+            "restored relation inventory lost production relations"
+        )
+    expected_total = int(expected.get("total_relation_bytes") or 0)
+    restored_total = int(restored.get("total_relation_bytes") or 0)
+    if expected_total <= 0 or restored_total <= 0:
+        raise ProductionParityError("restored production data shape is empty")
+    if capture_mode == "schema-only":
+        return
+    if capture_mode != "full":
+        raise ProductionParityError("snapshot capture mode is unsupported")
+    if not 0.5 <= restored_total / expected_total <= 2.0:
+        raise ProductionParityError(
+            "restored relation size differs materially from the production snapshot"
+        )
+
+
+def _database_relation_shape(
+    env: Mapping[str, str], *, postgres_image: str | None
+) -> dict[str, int]:
+    raw = _require_success(
+        _run_postgres(
+            ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", DATABASE_RELATION_SHAPE_SQL],
+            env=env,
+            timeout=60,
+            postgres_image=postgres_image,
+        ),
+        stage="restored database shape read",
+    )
+    try:
+        value = json.loads(raw)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"relation_count", "total_relation_bytes", "largest_relation_bytes"}
+            or any(type(item) is not int or item <= 0 for item in value.values())
+            or value["largest_relation_bytes"] > value["total_relation_bytes"]
+        ):
+            raise ValueError("invalid relation shape")
+    except (ValueError, TypeError) as exc:
+        raise ProductionParityError("restored database shape response is invalid") from exc
+    return value
 
 
 def _database_stats(
@@ -943,7 +1001,12 @@ def restore_snapshot(
         ),
         stage="isolated production snapshot restore",
     )
-    clone_migration_preconditions: list[dict[str, Any]] = []
+    # Verify the restored snapshot before a candidate migration can legitimately
+    # remove tables or data. Later runtime checks use the migrated state.
+    before_migrations = _database_relation_shape(env, postgres_image=postgres_image)
+    validate_database_relation_shape(
+        manifest["database"], before_migrations, capture_mode=manifest["capture_mode"]
+    )
     for migration in evidence["migration_delta"]:
         path = root / str(migration["path"])
         if not path.is_file() or file_sha256(path) != migration["sha256"]:
@@ -981,12 +1044,15 @@ def restore_snapshot(
             ),
             stage=f"candidate migration {migration['path']}",
         )
-    if clone_migration_preconditions:
-        return {
-            **evidence,
-            "clone_migration_preconditions": clone_migration_preconditions,
-        }
-    return evidence
+    after_migrations = (
+        _database_relation_shape(env, postgres_image=postgres_image)
+        if evidence["migration_delta"] else before_migrations
+    )
+    return {
+        **evidence,
+        "database_before_migrations": before_migrations,
+        "database_after_migrations": after_migrations,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:

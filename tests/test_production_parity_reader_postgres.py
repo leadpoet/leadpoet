@@ -5,14 +5,20 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from urllib.request import urlopen
 import uuid
 
-import httpx
 import psycopg2
 from psycopg2 import OperationalError
 import pytest
 
 from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport
+from gateway.tee.supabase_schema_preflight_v2 import (
+    _verify_source_add_claim_control_contract_v2,
+    _verify_source_add_duplicate_privacy_contract_v1,
+    _verify_source_add_miner_status_contract_v1,
+    _verify_source_add_post_accept_leg1_contract_v4,
+)
 from leadpoet_canonical.production_parity import (
     CONTRACT_SCHEMA_VERSION,
     ProductionParityError,
@@ -726,53 +732,22 @@ def test_snapshot_v6_preserves_native_acl_owners_and_arena_postgrest(
             finally:
                 transport.close()
 
-        source_add_expectations = {
-            "research_lab_source_add_duplicate_privacy_contract_v1": {
-                "anon_callable": False,
-                "authenticated_callable": False,
-                "contract_service_role_callable": True,
-                "service_role_exists": True,
-                "v2_service_role_callable": True,
-                "v3_service_role_callable": True,
-            },
-            "research_lab_source_add_post_accept_leg1_contract_v4": {
-                "candidate_callable": True,
-                "internal_not_callable": True,
-                "rollback_v2_callable": True,
-                "service_role_exists": True,
-            },
-            "research_lab_source_add_claim_control_contract_v2": {
-                "anon_callable": False,
-                "authenticated_callable": False,
-                "service_role_callable": True,
-                "service_role_exists": True,
-            },
-            "research_lab_source_add_miner_status_contract_v1": {
-                "contract_anon_callable": False,
-                "contract_authenticated_callable": False,
-                "contract_service_role_callable": True,
-                "page_anon_callable": False,
-                "page_authenticated_callable": False,
-                "page_public_callable": False,
-                "page_service_role_callable": True,
-                "view_anon_select": False,
-                "view_authenticated_select": False,
-                "view_public_select": False,
-                "view_service_role_select": True,
-            },
+        source_add_headers = {
+            "apikey": service_token,
+            "Authorization": f"Bearer {service_token}",
         }
-        with httpx.Client(trust_env=False, timeout=10) as client:
-            for function, expected_permissions in source_add_expectations.items():
-                response = client.post(
-                    f"{supabase_url}/rest/v1/rpc/{function}",
-                    headers={
-                        "apikey": service_token,
-                        "Authorization": f"Bearer {service_token}",
-                    },
-                    json={},
-                )
-                assert response.status_code == 200
-                assert response.json()["permissions"] == expected_permissions
+        for verify_source_add_contract in (
+            _verify_source_add_duplicate_privacy_contract_v1,
+            _verify_source_add_post_accept_leg1_contract_v4,
+            _verify_source_add_claim_control_contract_v2,
+            _verify_source_add_miner_status_contract_v1,
+        ):
+            assert verify_source_add_contract(
+                headers=source_add_headers,
+                supabase_url=supabase_url,
+                opener=urlopen,
+                timeout_seconds=10,
+            )
     finally:
         if prefix_adapter is not None:
             prefix_adapter.cleanup()

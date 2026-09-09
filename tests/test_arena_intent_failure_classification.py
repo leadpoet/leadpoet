@@ -458,8 +458,118 @@ def test_unproven_structured_fit_scores_zero_without_arena_retry(
     assert row["per_icp_score"] == 0.0
 
 
+@pytest.mark.parametrize(
+    ("requested_stage", "observed_stage", "quote", "employee_unknown"),
+    [
+        ("Series A", "Series C+", "Maxio has raised $169M.", True),
+        (
+            "Series A",
+            "Public",
+            "This is a press release announcing general availability of Jupiter "
+            "6.0; it does not provide a funding round.",
+            False,
+        ),
+        (
+            "Series B",
+            "Public",
+            "Privately Held · Founded 1992 · 51-200 employees",
+            False,
+        ),
+    ],
+)
+def test_unsupported_stage_observation_repairs_then_scores_as_insufficient_evidence(
+    monkeypatch,
+    requested_stage,
+    observed_stage,
+    quote,
+    employee_unknown,
+):
+    verdict = _structured_fit_verdict_with_unproven("stage")
+    verdict.update(
+        observed_company_stage=observed_stage,
+        stage_matches=False,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote=quote,
+    )
+    if employee_unknown:
+        verdict.update(
+            observed_employee_count=None,
+            employee_size_matches=None,
+            employee_size_evidence_url="",
+            employee_size_evidence_quote="",
+        )
+    provider_calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return verdict, ""
+
+    company = _company().model_copy(update={"company_stage": ""})
+    icp_model = _icp().model_copy(update={"company_stage": requested_stage})
+    scorer_calls = 0
+
+    async def counted_scorer(*_args):
+        nonlocal scorer_calls
+        scorer_calls += 1
+        result = await lead_scorer.score_company_competition_intent(
+            company, icp_model, 0.0, 0.0, set()
+        )
+        return [result.model_dump(mode="json")]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", provider
+    )
+
+    companies = [company.model_dump(mode="json")]
+    icp = icp_model.model_dump(mode="json")
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": "unsupported-stage"},
+        icp=icp,
+        companies=companies,
+        scorer=counted_scorer,
+        max_retries=3,
+    )
+    breakdown = accepted[0]
+    receipt = breakdown["verifier_gate_receipts"][0]
+
+    assert scorer_calls == 1
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert breakdown["final_score"] == 0.0
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert receipt["company_fit_dimensions"]["stage"] == "unavailable"
+    if employee_unknown:
+        assert receipt["company_fit_dimensions"]["employee_size"] == (
+            "unavailable"
+        )
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown
+    )
+    assert count_penalizable_false_positives(
+        accepted, icp_has_intent_signals=True
+    ) == (0, 0)
+
+
 def test_linkedin_refresh_timeout_keeps_arena_retry(monkeypatch):
     verdict = _structured_fit_verdict_with_unproven("employee_size")
+    verdict.update(
+        observed_company_stage="Public",
+        stage_matches=False,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote="Privately Held · Founded 1992",
+    )
     scorer_calls = 0
     fetches = []
     produced = []

@@ -56,7 +56,9 @@ PAGE_HTML = "<html><head><title>Acme Robotics raises Series B</title></head><bod
 def arena_icp() -> Dict[str, Any]:
     """One ordinary ICP from the same stored daily-set shape as production."""
 
-    return raw_icp("Software", 1)
+    icp = raw_icp("Software", 1)
+    icp["company_stage"] = "Series B"
+    return icp
 
 
 def companies_for(icp: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -157,7 +159,7 @@ def judge_reply(normalized: Mapping[str, Any]) -> str:
         "observed_hq_country": "United States",
         "observed_hq_state": "California",
         "geography_matches": True,
-        "observed_company_stage": "Series A",
+        "observed_company_stage": "Series B",
         "stage_matches": True,
         "attribute_satisfied": True,
         "attribute_evidence": SENTENCE,

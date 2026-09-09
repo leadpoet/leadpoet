@@ -15,13 +15,20 @@ import stat
 import subprocess
 import sys
 import threading
+import traceback
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
 import yaml
+from botocore.exceptions import ClientError
 
+from gateway.tee import prepare_gateway_envelopes_v2 as envelope_prepare
 from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
+from gateway.tee.proxy_transport_preflight_v2 import (
+    WorkerProxyTransportPreflightV2Error,
+    verify_worker_proxy_fleets_v2,
+)
 
 from leadpoet_canonical.production_parity import (
     SNAPSHOT_SCHEMA_VERSION,
@@ -2531,6 +2538,19 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
                 "elapsed_seconds": 259.607,
             },
         ),
+        (
+            {
+                "stage": "v2_credential_envelope_preparation",
+                "status": "failed",
+                "elapsed_seconds": 312.913,
+            },
+            "exited",
+            {
+                "final_stage": "v2_credential_envelope_preparation",
+                "final_status": "failed",
+                "elapsed_seconds": 312.913,
+            },
+        ),
     ],
 )
 def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
@@ -2590,6 +2610,18 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
                 "GatewayPCR0BuildError: nitro-cli failed with exit code 127: "
                 "must-not-survive\n"
                 "ERROR: exact local runtime identity build failed\n",
+                encoding="utf-8",
+            )
+        if timing_record.get("stage") == "v2_credential_envelope_preparation":
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "Traceback (most recent call last):\n"
+                '  File "/run/candidate/gateway/tee/prepare_gateway_envelopes_v2.py", '
+                'line 965, in main\n'
+                '  File "/run/candidate/gateway/tee/supabase_schema_preflight_v2.py", '
+                'line 1926, in verify_required_supabase_v2_schema\n'
+                "SupabaseSchemaPreflightV2Error: must-not-survive\n",
                 encoding="utf-8",
             )
         if restart_outcome == "timed_out":
@@ -2717,6 +2749,16 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
                 "identifier": "local_runtime_identity_build_failed",
             },
         ]
+    if expected_timing is not None and (
+        expected_timing["final_stage"] == "v2_credential_envelope_preparation"
+    ):
+        expected["observations"] = [
+            {
+                "marker": "credential_envelope_preparation_observation",
+                "phase": "schema_preflight",
+                "exception_class": "SupabaseSchemaPreflightV2Error",
+            }
+        ]
     assert evidence["gateway_restart_diagnostic"] == expected
     assert evidence["cleanup"]["work"] == "removed"
     assert not (work_root / "pp-test-1" / "runtime").exists()
@@ -2815,6 +2857,467 @@ def test_local_release_build_observations_do_not_block_on_fifo(tmp_path: Path):
     os.mkfifo(fifo)
 
     assert full_host._local_release_build_observations(fifo) == []
+
+
+def _credential_cli_environment() -> dict[str, str]:
+    return {
+        "SUPABASE_URL": "http://127.0.0.1:1",
+        "SUPABASE_SERVICE_ROLE_KEY": "must-not-survive-service-role",
+        "RESEARCH_LAB_V2_OPENROUTER_API_KEY": "must-not-survive-openrouter",
+        "RESEARCH_LAB_V2_EXA_API_KEY": "must-not-survive-exa",
+        "RESEARCH_LAB_V2_SCRAPINGDOG_API_KEY": "must-not-survive-scrapingdog",
+        "RESEARCH_LAB_V2_DEEPLINE_API_KEY": "must-not-survive-deepline",
+        "TRUELIST_API_KEY": "must-not-survive-truelist",
+        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
+            "https://must-not-survive-proxy.example"
+        ),
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "1",
+    }
+
+
+def _capture_failure_traceback(log_path: Path, function) -> None:
+    try:
+        function()
+    except Exception:  # noqa: BLE001 - exercise real CLI traceback projection
+        with log_path.open("w", encoding="utf-8") as handle:
+            traceback.print_exc(file=handle)
+    else:
+        pytest.fail("controlled credential CLI boundary did not fail")
+
+
+def _credential_cli_args(env_path: Path, output_dir: Path) -> list[str]:
+    return [
+        "--install",
+        "--env-file",
+        str(env_path),
+        "--kms-key-id",
+        "alias/gateway-v2",
+        "--deploy-commit",
+        "a" * 40,
+        "--output-dir",
+        str(output_dir),
+    ]
+
+
+def test_credential_envelope_observations_classify_executed_cli_boundaries(
+    monkeypatch,
+    tmp_path: Path,
+):
+    environment = _credential_cli_environment()
+    env_path = tmp_path / "gateway.env.json"
+    env_path.write_text(json.dumps(environment), encoding="utf-8")
+    original_install = envelope_prepare.install_gateway_envelopes_v2
+
+    scenarios = []
+
+    missing_log = tmp_path / "environment-load.log"
+    _capture_failure_traceback(
+        missing_log,
+        lambda: envelope_prepare.main(
+            _credential_cli_args(tmp_path / "missing.env", tmp_path / "env-out")
+        ),
+    )
+    scenarios.append(
+        (
+            missing_log,
+            "environment_load",
+            "GatewayEnvelopePreparationV2Error",
+            {"reason": "environment_unavailable"},
+        )
+    )
+
+    schema_log = tmp_path / "schema.log"
+    with monkeypatch.context() as context:
+        def unavailable_schema(*_args, **_kwargs):
+            raise OSError("must-not-survive-schema-failure")
+
+        def schema_failure(environment):
+            return schema_preflight.verify_required_supabase_v2_schema(
+                environment,
+                opener=unavailable_schema,
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            schema_failure,
+        )
+        _capture_failure_traceback(
+            schema_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(env_path, tmp_path / "schema-out")
+            ),
+        )
+    scenarios.append(
+        (
+            schema_log,
+            "schema_preflight",
+            "SupabaseSchemaPreflightV2Error",
+            {
+                "reason": "schema_table_probe_failed",
+                "schema_object": "validator_sourcing_epoch_inputs_v2",
+            },
+        )
+    )
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            lambda _environment: {"status": "ready"},
+        )
+
+        def proxy_failure(*_args, **_kwargs):
+            raise WorkerProxyTransportPreflightV2Error(
+                "must-not-survive-proxy-failure"
+            )
+
+        def install_with_proxy_failure(**kwargs):
+            return original_install(
+                **kwargs,
+                proxy_fleet_probe=lambda fleets: verify_worker_proxy_fleets_v2(
+                    fleets,
+                    verify_proxy=proxy_failure,
+                ),
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "install_gateway_envelopes_v2",
+            install_with_proxy_failure,
+        )
+        proxy_log = tmp_path / "proxy.log"
+        _capture_failure_traceback(
+            proxy_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(env_path, tmp_path / "proxy-out")
+            ),
+        )
+    scenarios.append(
+        (
+            proxy_log,
+            "proxy_preflight",
+            "GatewayEnvelopePreparationV2Error",
+            {"reason": "proxy_connect_failed"},
+        )
+    )
+
+    class SuccessfulKMS:
+        requests = 0
+
+        def encrypt(self, **_request):
+            self.requests += 1
+            return {
+                "KeyId": "arn:aws:kms:us-east-1:123:key/test",
+                "CiphertextBlob": f"ciphertext-{self.requests}".encode(),
+            }
+
+    missing_credential = dict(environment)
+    missing_credential.pop("TRUELIST_API_KEY")
+    missing_credential_path = tmp_path / "missing-credential.env.json"
+    missing_credential_path.write_text(
+        json.dumps(missing_credential), encoding="utf-8"
+    )
+    with monkeypatch.context() as context:
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            lambda _environment: {"status": "ready"},
+        )
+
+        def install_with_missing_credential(**kwargs):
+            kwargs.pop("kms_client", None)
+            return original_install(
+                **kwargs,
+                kms_client=SuccessfulKMS(),
+                proxy_fleet_probe=lambda fleets: fleets,
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "install_gateway_envelopes_v2",
+            install_with_missing_credential,
+        )
+        envelope_log = tmp_path / "envelope.log"
+        _capture_failure_traceback(
+            envelope_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(
+                    missing_credential_path,
+                    tmp_path / "envelope-out",
+                )
+            ),
+        )
+    scenarios.append(
+        (
+            envelope_log,
+            "envelope_install",
+            "GatewayEnvelopePreparationV2Error",
+            {"reason": "credential_unavailable"},
+        )
+    )
+
+    class FailingKMS:
+        def encrypt(self, **_request):
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "AccessDeniedException",
+                        "Message": "must-not-survive-kms-message",
+                    }
+                },
+                "Encrypt",
+            )
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            lambda _environment: {"status": "ready"},
+        )
+
+        def install_with_kms_failure(**kwargs):
+            kwargs.pop("kms_client", None)
+            return original_install(
+                **kwargs,
+                kms_client=FailingKMS(),
+                proxy_fleet_probe=lambda fleets: fleets,
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "install_gateway_envelopes_v2",
+            install_with_kms_failure,
+        )
+        kms_log = tmp_path / "kms.log"
+        _capture_failure_traceback(
+            kms_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(env_path, tmp_path / "kms-out")
+            ),
+        )
+    scenarios.append(
+        (
+            kms_log,
+            "kms",
+            "ClientError",
+            {
+                "aws_error_code": "AccessDeniedException",
+                "aws_operation": "Encrypt",
+            },
+        )
+    )
+
+    for log_path, phase, exception_class, extra in scenarios:
+        assert full_host._credential_envelope_observations(log_path) == [
+            {
+                "marker": "credential_envelope_preparation_observation",
+                "phase": phase,
+                "exception_class": exception_class,
+                **extra,
+            }
+        ]
+    assert "must-not-survive" not in json.dumps(
+        [
+            observation
+            for log_path, *_rest in scenarios
+            for observation in full_host._credential_envelope_observations(log_path)
+        ],
+        sort_keys=True,
+    )
+
+
+def test_credential_envelope_observations_reject_unsafe_log_boundaries(
+    tmp_path: Path,
+):
+    missing = tmp_path / "missing.log"
+    assert full_host._credential_envelope_observations(missing) == []
+
+    target = tmp_path / "private.log"
+    target.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/prepare_gateway_envelopes_v2.py", '
+        "line 131, in load_environment_file\n"
+        "GatewayEnvelopePreparationV2Error: must-not-survive\n",
+        encoding="utf-8",
+    )
+    symlink = tmp_path / "gateway.log"
+    symlink.symlink_to(target)
+    assert full_host._credential_envelope_observations(symlink) == []
+
+    fifo = tmp_path / "gateway.fifo"
+    os.mkfifo(fifo)
+    assert full_host._credential_envelope_observations(fifo) == []
+
+    oversized = tmp_path / "oversized.log"
+    oversized.write_bytes(
+        target.read_bytes()
+        + b"x" * (full_host._GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES + 1024)
+    )
+    assert full_host._credential_envelope_observations(oversized) == []
+    oversized.write_bytes(
+        b"x" * (full_host._GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES + 1024)
+        + b"\n"
+        + target.read_bytes()
+    )
+    assert full_host._credential_envelope_observations(oversized) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "environment_load",
+            "exception_class": "GatewayEnvelopePreparationV2Error",
+        }
+    ]
+
+
+def test_credential_envelope_observations_drop_messages_and_unknown_aws_fields(
+    tmp_path: Path,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/utils/tee_kms_provision_v2.py", '
+        "line 65, in build_provider_envelope_v2\n"
+        "botocore.exceptions.ClientError: An error occurred (PrivateSecretCode) "
+        "when calling the Decrypt operation: must-not-survive\n",
+        encoding="utf-8",
+    )
+
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "kms",
+            "exception_class": "ClientError",
+        }
+    ]
+    assert "must-not-survive" not in json.dumps(
+        full_host._credential_envelope_observations(log_path)
+    )
+
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/utils/tee_kms_provision_v2.py", '
+        "line 65, in build_provider_envelope_v2\n"
+        "botocore.exceptions.ClientError: An error occurred "
+        "(AccessDeniedException) when calling the Encrypt operation: "
+        "must-not-survive\n"
+        "unrelated command output\n"
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/prepare_gateway_envelopes_v2.py", '
+        "line 131, in load_environment_file\n"
+        "GatewayEnvelopePreparationV2Error: gateway source environment "
+        "is unavailable\n",
+        encoding="utf-8",
+    )
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "environment_load",
+            "exception_class": "GatewayEnvelopePreparationV2Error",
+            "reason": "environment_unavailable",
+        }
+    ]
+
+
+@pytest.mark.parametrize("exception_class", ["ImportError", "ModuleNotFoundError"])
+def test_credential_envelope_observations_classify_module_load_without_name(
+    tmp_path: Path,
+    exception_class: str,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/prepare_gateway_envelopes_v2.py", '
+        "line 1, in <module>\n"
+        f"{exception_class}: must-not-survive-private-module-name\n",
+        encoding="utf-8",
+    )
+
+    observation = full_host._credential_envelope_observations(log_path)
+    assert observation == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "credential_module_load",
+            "exception_class": exception_class,
+        }
+    ]
+    assert "must-not-survive" not in json.dumps(observation)
+
+
+def test_credential_envelope_observations_retain_allowlisted_schema_probe(
+    tmp_path: Path,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/supabase_schema_preflight_v2.py", '
+        "line 777, in _verify_compact_weight_settlement_contract_v1\n"
+        "SupabaseSchemaPreflightV2Error: compact weight settlement schema "
+        "contract differs must-not-survive\n",
+        encoding="utf-8",
+    )
+
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "schema_preflight",
+            "exception_class": "SupabaseSchemaPreflightV2Error",
+            "probe": "research_lab_compact_weight_settlement_contract_v1",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        (
+            "required Supabase V2 schema is unavailable for "
+            "validator_sourcing_epoch_inputs_v2; apply "
+            "scripts/92-validator-sourcing-attested-v2.sql before restart "
+            "(HTTP 404)",
+            {
+                "reason": "schema_table_unavailable",
+                "schema_object": "validator_sourcing_epoch_inputs_v2",
+                "http_status": 404,
+            },
+        ),
+        (
+            "required Supabase V2 RPC is unavailable for "
+            "persist_research_lab_chain_realized_settlement_v1; apply "
+            "scripts/126-research-lab-chain-realized-settlement.sql before restart",
+            {
+                "reason": "rpc_unavailable",
+                "rpc": "persist_research_lab_chain_realized_settlement_v1",
+            },
+        ),
+        (
+            "required Supabase V2 schema is unavailable for private_secret_table; "
+            "apply scripts/999-private-secret.sql before restart (HTTP 418)",
+            {},
+        ),
+    ],
+)
+def test_credential_envelope_observations_retain_required_schema_identity(
+    tmp_path: Path,
+    message: str,
+    detail: dict,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/supabase_schema_preflight_v2.py", '
+        "line 1926, in verify_required_supabase_v2_schema\n"
+        f"SupabaseSchemaPreflightV2Error: {message}\n",
+        encoding="utf-8",
+    )
+
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "schema_preflight",
+            "exception_class": "SupabaseSchemaPreflightV2Error",
+            **detail,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

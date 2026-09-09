@@ -22,6 +22,196 @@ def _schedule():
     }
 
 
+def _scoring_driver_service(stage, runs, *, work_item_ids=("execute-planned",)):
+    round_id = "arena-2026-09-02"
+    positions = list(contracts.stage_positions(stage))
+    work_items = [
+        {
+            "scored_run_id": scored_run_id,
+            "submission_id": "submission-%d" % index,
+            "icp_position": positions[index],
+            "output_ref": "arena/output-%d.json" % index,
+        }
+        for index, scored_run_id in enumerate(work_item_ids)
+    ]
+    plan = {
+        "schema_version": contracts.SCORING_PLAN_SCHEMA_VERSION,
+        "round_id": round_id,
+        "stage": stage,
+        "work_items": work_items,
+        "zero_rows": [],
+    }
+    row = {
+        "round_id": round_id,
+        "status": "stage%d_scoring" % stage,
+        "configuration_doc": {
+            "schedule": {
+                "stage_1_scoring_close": "2100-01-01T00:00:00Z",
+                "final_scoring_close": "2100-01-01T00:00:00Z",
+            }
+        },
+        "stage%d_scoring_plan_doc" % stage: plan,
+    }
+
+    class Store:
+        def __init__(self):
+            self.cancelled = []
+            self.expired = 0
+
+        def expire_leases(self, requested_round_id):
+            assert requested_round_id == round_id
+            self.expired += 1
+            return {"status": "ok"}
+
+        def list_runs(self, requested_round_id, **filters):
+            assert requested_round_id == round_id
+            assert filters == {"stage": stage, "kind": "score"}
+            return list(runs)
+
+        def cancel_round(self, requested_round_id, reason):
+            self.cancelled.append((requested_round_id, reason))
+            return {"status": "cancelled", "round_status": "cancelled"}
+
+        def close_scoring(self, *_args):
+            return {"status": "closed", "round_status": "stage%d_judged" % stage}
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._clock = lambda: datetime(2026, 9, 2, tzinfo=timezone.utc)
+    service._lock = threading.RLock()
+    service._round = lambda requested_round_id: row
+    return service
+
+
+@pytest.mark.parametrize(
+    ("stage", "cause"),
+    [(1, "judge_error"), (2, "judge_error"), (1, "lease_expired")],
+)
+def test_advance_cancels_scoring_when_a_planned_judge_failure_exhausts_retries(
+    stage, cause
+):
+    work_item_ids = ("execute-failed", "execute-pending")
+    runs = [
+        {
+            "scored_run_id": "execute-failed",
+            "attempt": 1,
+            "status": "failed",
+            "terminal_cause": "judge_error",
+        },
+        {
+            "scored_run_id": "execute-failed",
+            "attempt": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
+            "status": "failed",
+            "terminal_cause": cause,
+        },
+        {
+            "scored_run_id": "execute-pending",
+            "attempt": 1,
+            "status": "pending",
+            "terminal_cause": None,
+        },
+    ]
+    service = _scoring_driver_service(stage, runs, work_item_ids=work_item_ids)
+
+    result = service._advance_round_locked("arena-2026-09-02")
+
+    assert result == {"status": "cancelled", "round_status": "cancelled"}
+    assert service._store.cancelled == [
+        ("arena-2026-09-02", "scoring_incomplete")
+    ]
+
+
+@pytest.mark.parametrize(
+    "runs",
+    [
+        [
+            {
+                "scored_run_id": "execute-planned",
+                "attempt": 1,
+                "status": "failed",
+                "terminal_cause": "judge_error",
+            },
+            {
+                "scored_run_id": "execute-planned",
+                "attempt": 2,
+                "status": "pending",
+                "terminal_cause": None,
+            },
+        ],
+        [
+            {
+                "scored_run_id": "execute-planned",
+                "attempt": 1,
+                "status": "accepted",
+                "terminal_cause": "accepted",
+            },
+            {
+                "scored_run_id": "execute-planned",
+                "attempt": 2,
+                "status": "failed",
+                "terminal_cause": "judge_error",
+            },
+        ],
+        [
+            {
+                "scored_run_id": "execute-planned",
+                "attempt": 1,
+                "status": "pending",
+                "terminal_cause": None,
+            },
+            {
+                "scored_run_id": "execute-outside-plan",
+                "attempt": 2,
+                "status": "failed",
+                "terminal_cause": "judge_error",
+            },
+        ],
+    ],
+    ids=("retry-active", "accepted-overrides-failure", "nonplan-failure"),
+)
+def test_advance_keeps_scoring_open_when_a_planned_item_can_still_succeed(runs):
+    work_item_ids = ("execute-planned", "execute-pending")
+    runs = list(runs) + [
+        {
+            "scored_run_id": "execute-pending",
+            "attempt": 1,
+            "status": "pending",
+            "terminal_cause": None,
+        }
+    ]
+    service = _scoring_driver_service(1, runs, work_item_ids=work_item_ids)
+
+    result = service._advance_round_locked("arena-2026-09-02")
+
+    assert result == {"status": "waiting", "round_status": "stage1_scoring"}
+    assert service._store.cancelled == []
+
+
+@pytest.mark.parametrize("cause", ["credential_error", "budget_exhausted"])
+def test_challenger_account_failure_does_not_trigger_early_scoring_cancel(cause):
+    work_item_ids = ("execute-ineligible", "execute-pending")
+    runs = [
+        {
+            "scored_run_id": "execute-ineligible",
+            "attempt": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
+            "status": "failed",
+            "terminal_cause": cause,
+        },
+        {
+            "scored_run_id": "execute-pending",
+            "attempt": 1,
+            "status": "pending",
+            "terminal_cause": None,
+        },
+    ]
+    service = _scoring_driver_service(1, runs, work_item_ids=work_item_ids)
+
+    result = service._advance_round_locked("arena-2026-09-02")
+
+    assert result == {"status": "waiting", "round_status": "stage1_scoring"}
+    assert service._store.cancelled == []
+
+
 def test_run_context_keeps_the_durable_round_identity():
     run = {
         "round_id": "arena-2026-09-04",

@@ -98,11 +98,12 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[193] == ["193-lab-arena-upload-recovery.sql"]
     assert numbered[194] == ["194-lab-arena-open-scorer-refresh.sql"]
     assert numbered[197] == ["197-lab-arena-reward-chain-scope.sql"]
+    assert numbered[199] == ["199-lab-arena-source-disclosure-time.sql"]
     arena_frontier = max(
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 197
+    assert arena_frontier == 199
 
 
 def test_reward_chain_scope_migration_scopes_every_reward_history_read():

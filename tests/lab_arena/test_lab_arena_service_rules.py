@@ -39,8 +39,9 @@ def test_public_benchmark_stays_private_while_execution_can_continue(status):
 def test_cancelled_round_without_a_benchmark_does_not_invent_one():
     service = object.__new__(ArenaService)
     service._round = lambda _round_id: {"status": "cancelled", "benchmark_ref": None}
+    service.benchmark_icps = lambda _round_id: pytest.fail("undisclosed benchmark was read")
 
-    with pytest.raises(ServiceError, match="benchmark_not_committed"):
+    with pytest.raises(ServiceError, match="benchmark_not_public"):
         service.public_benchmark("arena-2026-09-09")
 
 
@@ -1191,8 +1192,42 @@ def test_public_results_take_valid_identity_from_the_round_publication():
         "outputs": {},
         "run_results": [],
         "scores": {"stage_1": [], "stage_2": []},
+        "public_icp_status": "pending",
+        "public_icp_count": 0,
         "submission_scores": {"stage_1": None, "final": None},
     }
+
+
+def _with_completed_public_baseline(service):
+    """Exercise evidence handling after the real 7/3 split is available."""
+    original_round = service._round
+    original_list_runs = service._store.list_runs
+    baseline_id = "baseline-public-evidence"
+
+    def round_with_baseline(round_id):
+        row = original_round(round_id)
+        return {
+            **row,
+            "participants": [
+                *(row.get("participants") or []),
+                {"submission_id": baseline_id, "is_king": True},
+            ],
+        }
+
+    def list_runs(round_id, **filters):
+        if filters == {"submission_id": baseline_id, "kind": "execute"}:
+            return [
+                {
+                    "submission_id": baseline_id, "kind": "execute",
+                    "icp_position": position, "attempt": 1,
+                    "per_icp_score": float(position), "terminal_cause": "accepted",
+                }
+                for position in range(contracts.BENCHMARK_ICP_COUNT)
+            ]
+        return original_list_runs(round_id, **filters)
+
+    service._round = round_with_baseline
+    service._store.list_runs = list_runs
 
 
 def _stored_public_output(name):
@@ -1302,6 +1337,8 @@ def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evide
             output_document if ref == execute["output_ref"] else judge_document
         ).encode(),
     )
+
+    _with_completed_public_baseline(service)
 
     result = service.public_results(round_id, "sub-target")
 
@@ -1431,6 +1468,8 @@ def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_fa
         get_bounded=lambda ref, _limit: json.dumps(output_document).encode(),
     )
 
+    _with_completed_public_baseline(service)
+
     result = service.public_results(round_id, "sub-partial")
 
     assert result["incomplete"] is True
@@ -1531,6 +1570,8 @@ def test_cancelled_results_preserve_good_evidence_when_other_artifacts_fail():
         get=lambda _ref: b'{"companies": []}',
         get_bounded=get_bounded,
     )
+
+    _with_completed_public_baseline(service)
 
     result = service.public_results(round_id, "sub-mixed")
 

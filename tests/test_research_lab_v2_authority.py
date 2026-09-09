@@ -1080,10 +1080,20 @@ async def test_default_allocation_uses_frontier_without_legacy_readiness(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("historical_source_add", (False, True))
+@pytest.mark.parametrize(
+    "projection_case",
+    (
+        "current",
+        "historical_empty",
+        "historical_nonempty",
+        "historical_mismatch",
+        "historical_missing_input",
+        "historical_extra_input",
+    ),
+)
 async def test_default_allocation_recovers_exact_current_frontier(
     monkeypatch,
-    historical_source_add,
+    projection_case,
 ):
     frontier = _frontier(epoch=100)
     parent_roots = [
@@ -1098,10 +1108,20 @@ async def test_default_allocation_recovers_exact_current_frontier(
         "champion_obligations": [],
         "settlement_frontier": frontier,
     }
-    if historical_source_add:
-        source_state["source_add_obligations"] = [
-            {"reward_ref": "source_add_reward:historical"}
-        ]
+    historical_obligations = [
+        {"reward_ref": "source_add_reward:historical"}
+    ]
+    if projection_case in {
+        "historical_empty",
+        "historical_nonempty",
+        "historical_mismatch",
+        "historical_missing_input",
+    }:
+        source_state["source_add_obligations"] = (
+            []
+            if projection_case == "historical_empty"
+            else historical_obligations
+        )
     allocation_payload = {"epoch": 100, "netuid": 71}
     allocation = {
         **allocation_payload,
@@ -1113,9 +1133,20 @@ async def test_default_allocation_recovers_exact_current_frontier(
         "active_reimbursement_obligations": [],
         "active_champion_obligations": [],
     }
-    if historical_source_add:
-        allocation_inputs["active_source_add_obligations"] = list(
-            source_state["source_add_obligations"]
+    if projection_case in {
+        "historical_empty",
+        "historical_nonempty",
+        "historical_mismatch",
+        "historical_extra_input",
+    }:
+        allocation_inputs["active_source_add_obligations"] = (
+            [{"reward_ref": "source_add_reward:different"}]
+            if projection_case == "historical_mismatch"
+            else (
+                []
+                if projection_case == "historical_empty"
+                else historical_obligations
+            )
         )
     authority_result = {
         "allocation": allocation,
@@ -1207,13 +1238,25 @@ async def test_default_allocation_recovers_exact_current_frontier(
         parent_loader,
     )
 
-    recovered = await v2_authority.build_allocation_v2(
+    build = v2_authority.build_allocation_v2(
         epoch_id=100,
         netuid=71,
         policy={},
         execute=execute,
         persist_links=persist_links,
     )
+    if projection_case in {
+        "historical_mismatch",
+        "historical_missing_input",
+        "historical_extra_input",
+    }:
+        with pytest.raises(
+            v2_authority.ResearchLabV2AuthorityError,
+            match="allocation source projection",
+        ):
+            await build
+        return
+    recovered = await build
 
     assert recovered["status"] == "matched"
     assert recovered["result"] == authority_result

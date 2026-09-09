@@ -192,7 +192,8 @@ def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
     return rn.RunnerConfig(
         round_id=ROUND, identity=rn.RunnerIdentity(hotkey=RUNNER.ss58_address, sign=sign), api=api, sandbox_runtime=sandbox_runtime,
         image_cache=cache, source_cache=source_cache, work_dir=tmp_path / "work", max_parallel_runs=parallel,
-        evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc), completion_retry_seconds=(0.0, 0.0),
+        evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
+        claim_retry_seconds=(0.0, 0.0), completion_retry_seconds=(0.0, 0.0),
     )
 
 
@@ -459,6 +460,140 @@ def test_local_slots_bound_claims_and_images_export_once(tmp_path):
     assert runner_.run_once() == 2 and len(api.completions) == 5
     assert runner_.run_once() == 0
     assert all(c["body"]["declared_parallelism"] == 3 for c in api.claims)
+
+
+@pytest.mark.parametrize("failure", ("http_500", "read_timeout"))
+def test_committed_claim_response_failure_replays_same_envelope_and_runs_once(
+    tmp_path, monkeypatch, failure
+):
+    class Response:
+        def __init__(self, status_code, document=None):
+            self.status_code = status_code
+            self._document = document
+
+        def json(self):
+            return self._document
+
+    class CommittedClaimClient:
+        def __init__(self):
+            self.contents = []
+            self.allocations = 0
+
+        def post(self, url, **kwargs):
+            assert url == "http://localhost/arena/v1/runs/claim"
+            self.contents.append(kwargs["content"])
+            if len(self.contents) == 1:
+                # The service committed this lease before its response was lost.
+                self.allocations += 1
+                if failure == "http_500":
+                    return Response(500)
+                raise httpx.ReadTimeout(
+                    "response timed out",
+                    request=httpx.Request("POST", url),
+                )
+            return Response(200, lease())
+
+        def close(self):
+            return None
+
+    class ClaimRetryApi(FakeApi):
+        def __init__(self, client):
+            super().__init__([])
+            self.claim_client = rn.HttpArenaApiClient(
+                "http://localhost", client=client
+            )
+
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            return self.claim_client.claim(envelope)
+
+    client = CommittedClaimClient()
+    api = ClaimRetryApi(client)
+    sandbox = BridgingRuntime(
+        output={"companies": [valid_company(1)]}, calls=0
+    )
+    config = make_config(tmp_path, api, sandbox)
+    config.claim_retry_seconds = (2.0, 5.0)
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+    (tmp_path / "work").mkdir()
+
+    runner_ = rn.Runner(config)
+    assert runner_.run_once(max_claims=1) == 1
+
+    assert sleeps == [2.0]
+    assert client.allocations == 1
+    assert len(client.contents) == 2
+    assert client.contents[0] == client.contents[1]
+    assert len(api.claims) == 2 and api.claims[0] is api.claims[1]
+    assert len(sandbox.specs) == 1
+    assert len(api.completions) == 1
+    assert runner_.completed == [
+        {"run_id": "r1", "result": {"status": "accepted"}}
+    ]
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        {"status": "no_pending"},
+        {"status": "no_work"},
+        {"status": "rejected", "detail": "round closed"},
+    ),
+)
+def test_terminal_claim_response_is_not_retried_and_releases_slot(
+    tmp_path, monkeypatch, response
+):
+    class ClaimDocumentApi(FakeApi):
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            return response
+
+    api = ClaimDocumentApi([])
+    sandbox = BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0)
+    config = make_config(tmp_path, api, sandbox, parallel=2)
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 0
+    assert len(api.claims) == 1
+    assert sleeps == []
+    assert sandbox.specs == []
+    assert runner_._slots.acquire(blocking=False)
+    assert runner_._slots.acquire(blocking=False)
+    runner_._slots.release()
+    runner_._slots.release()
+
+
+def test_claim_retry_exhaustion_fails_closed_and_releases_slot(
+    tmp_path, monkeypatch
+):
+    class UnavailableClaimApi(FakeApi):
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            raise rn.RunnerError("Arena API failed: HTTP 500")
+
+    api = UnavailableClaimApi([])
+    sandbox = BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0)
+    config = make_config(tmp_path, api, sandbox, parallel=2)
+    config.claim_retry_seconds = (2.0, 5.0)
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 0
+    assert sleeps == [2.0, 5.0]
+    assert len(api.claims) == 3
+    assert all(item is api.claims[0] for item in api.claims)
+    assert sandbox.specs == []
+    assert api.completions == []
+    assert runner_._slots.acquire(blocking=False)
+    assert runner_._slots.acquire(blocking=False)
+    runner_._slots.release()
+    runner_._slots.release()
 
 
 def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_path):

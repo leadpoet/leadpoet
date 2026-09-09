@@ -1215,6 +1215,9 @@ class RunnerConfig:
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
     agent_entrypoint_path: Path = AGENT_ENTRYPOINT_PATH
+    # Waits between retries of the same signed claim after a transport or
+    # server failure. The service replays a committed claim by request ID.
+    claim_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
 
     def __post_init__(self) -> None:
         if (
@@ -1523,7 +1526,16 @@ class Runner:
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )
-        return config.api.claim(envelope)
+        retry_delays = iter(tuple(config.claim_retry_seconds))
+        while True:
+            try:
+                return config.api.claim(envelope)
+            except RunnerError as exc:
+                try:
+                    delay = next(retry_delays)
+                except StopIteration:
+                    raise exc from None
+                time.sleep(max(0.0, float(delay)))
 
     def _run_lease(self, lease: Mapping[str, Any]) -> None:
         try:

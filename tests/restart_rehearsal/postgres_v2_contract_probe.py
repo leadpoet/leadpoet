@@ -34,17 +34,6 @@ from gateway.research_lab.attested_v2_store import (
 from gateway.tee.supabase_schema_preflight_v2 import (
     REQUIRED_SUPABASE_V2_RPCS,
     REQUIRED_SUPABASE_V2_SCHEMA,
-    SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256,
-    SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
-    SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256,
-    SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256,
-    SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256,
-    SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256,
-    SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256,
-    SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256,
-    SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256,
-    SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256,
-    SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256,
 )
 from gateway.tee.coordinator_chain_realized_settlement_v1 import (
     OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
@@ -242,6 +231,9 @@ SOURCE_ADD_MINER_STATUS_MIGRATION = (
 SOURCE_ADD_PROVISIONED_STATUS_MIGRATION = (
     "186-research-lab-source-add-provisioned-status.sql"
 )
+SOURCE_ADD_SCHEMA_RETIREMENT_MIGRATION = (
+    "198-retire-research-lab-source-add-schema.sql"
+)
 LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION = (
     "190-lab-arena-restart-claim-drain.sql"
 )
@@ -322,6 +314,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION,
     "193-lab-arena-upload-recovery.sql",
     "194-lab-arena-open-scorer-refresh.sql",
+    SOURCE_ADD_SCHEMA_RETIREMENT_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -336,25 +329,11 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
     "post_139_allocation_frontier_bootstrap_contract_valid",
     "post_141_allocation_frontier_source_contract_valid",
-    "post_142_source_catalog_replay_contract_valid",
     "post_143_compact_checkpoint_contract_valid",
     "post_144_provider_evidence_cache_contract_valid",
-    "post_096_source_add_functional_workflow_valid",
-    "post_145_source_add_admission_control_contract_valid",
-    "post_147_source_catalog_auth_metadata_contract_valid",
     "post_149_compact_weight_settlement_contract_valid",
     "post_155_ancestry_disclosure_lookup_contract_valid",
     "post_156_production_parity_reader_contract_valid",
-    "post_169_source_add_post_accept_leg1_valid",
-    "post_170_source_add_provider_origin_contract_valid",
-    "post_171_source_add_duplicate_privacy_valid",
-    "post_172_source_add_claim_control_valid",
-    "post_173_source_add_leg1_release_policy_valid",
-    "post_174_source_add_restart_state_restore_valid",
-    "post_175_source_add_provenance_leg1_valid",
-    "post_176_source_add_provenance_origin_repair_valid",
-    "post_178_source_add_miner_status_valid",
-    "post_186_source_add_provisioned_status_valid",
     "post_185_lab_arena_schema_valid",
     "post_190_lab_arena_restart_guard_valid",
     "provider_evidence_cache_put_atomic",
@@ -3169,52 +3148,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / SOURCE_CATALOG_RESULT_REPLAY_MIGRATION
         )
         applied.append(SOURCE_CATALOG_RESULT_REPLAY_MIGRATION)
-        source_catalog_replay_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_catalog_replay_contract_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        source_catalog_constraints = source_catalog_replay_contract.get(
-            "constraints"
-        )
-        source_catalog_constraint_definitions = (
-            "\n".join(
-                str(constraint.get("constraint_definition") or "")
-                for constraint in source_catalog_constraints.values()
-            )
-            if isinstance(source_catalog_constraints, Mapping)
-            else ""
-        )
-        if (
-            source_catalog_replay_contract.get("schema_version")
-            != "leadpoet.source_catalog_replay_contract.v2"
-            or source_catalog_replay_contract.get("operation")
-            != "source_add_catalog_snapshot_v2"
-            or source_catalog_replay_contract.get("purpose")
-            != "research_lab.source_add_catalog_snapshot.v2"
-            or not isinstance(source_catalog_constraints, Mapping)
-            or set(source_catalog_constraints)
-            != {
-                "research_lab_attested_execution_results_v2_operation_check",
-                "research_lab_attested_execution_results_v2_purpose_check",
-                "research_lab_attested_exec_results_v2_op_purpose_check",
-            }
-            or any(
-                constraint.get("constraint_valid") is not True
-                for constraint in source_catalog_constraints.values()
-            )
-            or "source_add_catalog_snapshot_v2"
-            not in source_catalog_constraint_definitions
-            or "research_lab.source_add_catalog_snapshot.v2"
-            not in source_catalog_constraint_definitions
-        ):
-            raise PostgresContractProbeError(
-                "post-142 source-catalog replay contract differs"
-            )
         database.apply_migration(
             scripts / COMPACT_ANCESTRY_CHECKPOINT_MIGRATION
         )
@@ -3256,145 +3189,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / SOURCE_ADD_ADMISSION_CONTROL_MIGRATION
         )
         applied.append(SOURCE_ADD_ADMISSION_CONTROL_MIGRATION)
-        source_add_admission_control_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_admission_control_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_admission_control_contract != {
-            "schema_version": (
-                "leadpoet.source_add_admission_control_contract.v1"
-            ),
-            "control_row_present": True,
-            "trigger_enabled": True,
-            "pause_rpc": "research_lab_source_add_set_paused",
-            "admission_trigger": "trg_source_add_work_admission_control",
-        }:
-            raise PostgresContractProbeError(
-                "post-145 source-add admission-control contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_CATALOG_AUTH_METADATA_MIGRATION
-        )
-        # The migration drops and recreates one validated CHECK; rerunning it
-        # must preserve both existing rows and the exact fail-closed contract.
         database.apply_migration(
             scripts / SOURCE_CATALOG_AUTH_METADATA_MIGRATION
         )
         applied.append(SOURCE_CATALOG_AUTH_METADATA_MIGRATION)
-        source_catalog_auth_metadata_contract = json.loads(
-            database.psql(
-                """
-                WITH safe AS (
-                    SELECT jsonb_build_object(
-                        'schema_version',
-                        'leadpoet.source_add_catalog_snapshot.v2',
-                        'provisioned_sources',
-                        jsonb_build_array(jsonb_build_object(
-                            'provision_doc', jsonb_build_object(
-                                'provider_registry_entry',
-                                jsonb_build_object(
-                                    'id', 'builtwith_trends',
-                                    'auth_kind', 'header',
-                                    'auth_name', 'Authorization'
-                                )
-                            )
-                        )),
-                        'provisioned_sources_hash',
-                        'sha256:' || repeat('1', 64),
-                        'private_registry_rows', '[]'::jsonb,
-                        'private_registry_rows_hash',
-                        'sha256:' || repeat('2', 64),
-                        'runtime_catalog', jsonb_build_object(
-                            'routes', jsonb_build_array(jsonb_build_object(
-                                'provider_id', 'builtwith_trends',
-                                'auth_kind', 'header',
-                                'auth_name', 'Authorization',
-                                'request_headers', '{}'::jsonb
-                            ))
-                        ),
-                        'runtime_catalog_hash',
-                        'sha256:' || repeat('3', 64)
-                    ) AS doc
-                )
-                SELECT jsonb_build_object(
-                    'valid_correlated_auth_metadata',
-                    public.research_lab_attested_execution_result_secret_free_v2(
-                        'source_add_catalog_snapshot_v2', doc
-                    ),
-                    'generic_authorization_rejected',
-                    NOT public.research_lab_attested_execution_result_secret_free_v2(
-                        'research_lab_allocation',
-                        '{"authorization":"forbidden"}'::jsonb
-                    ),
-                    'private_registry_authorization_rejected',
-                    NOT public.research_lab_attested_execution_result_secret_free_v2(
-                        'source_add_catalog_snapshot_v2',
-                        jsonb_set(
-                            doc,
-                            '{private_registry_rows}',
-                            '[{"authorization":"forbidden"}]'::jsonb
-                        )
-                    ),
-                    'request_header_authorization_rejected',
-                    NOT public.research_lab_attested_execution_result_secret_free_v2(
-                        'source_add_catalog_snapshot_v2',
-                        jsonb_set(
-                            doc,
-                            '{runtime_catalog,routes,0,request_headers}',
-                            '{"Authorization":"forbidden"}'::jsonb
-                        )
-                    ),
-                    'uncorrelated_auth_metadata_rejected',
-                    NOT public.research_lab_attested_execution_result_secret_free_v2(
-                        'source_add_catalog_snapshot_v2',
-                        jsonb_set(
-                            doc,
-                            '{runtime_catalog,routes,0,provider_id}',
-                            '"different_provider"'::jsonb
-                        )
-                    ),
-                    'proxy_authorization_rejected',
-                    NOT public.research_lab_attested_execution_result_secret_free_v2(
-                        'source_add_catalog_snapshot_v2',
-                        jsonb_set(
-                            doc,
-                            '{runtime_catalog,routes,0,request_headers}',
-                            '{"Proxy-Authorization":"forbidden"}'::jsonb
-                        )
-                    ),
-                    'constraint_valid', EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conrelid =
-                            'public.research_lab_attested_execution_results_v2'
-                                ::regclass
-                          AND conname =
-                            'research_lab_attested_execution_results_v2_result_doc_check'
-                          AND convalidated
-                    )
-                )::text
-                FROM safe;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_catalog_auth_metadata_contract != {
-            "valid_correlated_auth_metadata": True,
-            "generic_authorization_rejected": True,
-            "private_registry_authorization_rejected": True,
-            "request_header_authorization_rejected": True,
-            "uncorrelated_auth_metadata_rejected": True,
-            "proxy_authorization_rejected": True,
-            "constraint_valid": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-147 SOURCE_ADD catalog auth metadata contract differs"
-            )
         database.apply_migration(scripts / ATOMIC_CREDIT_RESUME_MIGRATION)
         applied.append(ATOMIC_CREDIT_RESUME_MIGRATION)
         database.apply_migration(
@@ -3482,943 +3280,21 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-156 production parity reader contract differs"
             )
-        database.apply_migration(
-            scripts / SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION
-        )
-        applied.append(SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION)
-        post_accept_leg1_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_post_accept_leg1_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if post_accept_leg1_contract != {
-            "schema_version": (
-                "leadpoet.source_add_post_accept_leg1_contract.v1"
-            ),
-            "daily_cap": 10,
-            "leg1_alpha_percent": 1.0,
-            "leg1_reward_epochs": 20,
-            "function_authority_sha256": (
-                "sha256:035b4dc17bc8e8b63524df2c123892aa"
-                "3ddaf0a01d08c69fc2d756921e8e96be"
-            ),
-            "functions": {
-                "configure_probe_v2": True,
-                "finalize_provision_v2": True,
-                "reject_current_builtin_v2": True,
-                "reserve_leg1_slot_v2": True,
-                "finalize_leg1_v2": True,
-                "finalize_provision_smoke_v2": True,
-            },
-            "triggers": {
-                "acceptance": True,
-                "eligible": True,
-                "leg1_work": True,
-                "leg1_slot": True,
-                "leg1_obligation": True,
-                "leg1_initial_event": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "v2_callable": True,
-                "legacy_not_callable": True,
-            },
-        }:
-            raise PostgresContractProbeError(
-                "post-169 SOURCE_ADD post-accept Leg 1 contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION
-        )
-        applied.append(SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION)
-        source_add_provider_origin_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_provider_origin_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_provider_origin_contract != {
-            "schema_version": (
-                "leadpoet.source_add_provider_origin_contract.v1"
-            ),
-            "identity_version": "v1",
-            "identity_scope": "normalized_exact_host",
-            "admission_rpc": "research_lab_source_add_admit_v2",
-            "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
-            "owner_count": 0,
-            "reserved_count": 0,
-            "coverage_complete": True,
-            "collision_free": True,
-            "submission_trigger_enabled": True,
-            "catalog_trigger_enabled": True,
-            "provision_trigger_enabled": True,
-            "terminal_release_trigger_enabled": True,
-            "append_only_trigger_enabled": True,
-            "row_level_security_enabled": True,
-            "service_role_policy_enabled": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-170 SOURCE_ADD provider-origin contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION
-        )
-        applied.append(SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION)
-        source_add_duplicate_privacy_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_duplicate_privacy_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_duplicate_privacy_contract != {
-            "schema_version": (
-                "leadpoet.source_add_duplicate_privacy_contract.v1"
-            ),
-            "admission_rpc": "research_lab_source_add_admit_v3",
-            "admission_signature": (
-                "jsonb,text,text,text,text,text,integer,integer,integer,integer"
-            ),
-            "compatibility_rpc": "research_lab_source_add_admit_v2",
-            "compatibility_signature": (
-                "jsonb,text,text,text,text,text,integer,integer,integer"
-            ),
-            "compatibility_cooldown_seconds": 20,
-            "cooldown_parameter_min_seconds": 1,
-            "cooldown_parameter_max_seconds": 3600,
-            "cooldown_clock": "clock_timestamp_after_advisory_locks",
-            "cooldown_source": "durable_miner_provenance_work",
-            "duplicate_precedes_cooldown": True,
-            "lock_order": [
-                "provider_origin_or_identity",
-                "hotkey",
-                "submission_or_work",
-            ],
-            "function_authority_sha256": (
-                "sha256:26bf34c94725b855f81c2e48b6afbd72"
-                "d68db36a4aeffb5642494a5da32233e0"
-            ),
-            "functions": {
-                "admit_v1": True,
-                "admit_v2_compatibility": True,
-                "admit_v3": True,
-                "provider_origin_hash_v1": True,
-                "provider_origin_host_v1": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "v3_service_role_callable": True,
-                "v2_service_role_callable": True,
-                "contract_service_role_callable": True,
-                "anon_callable": False,
-                "authenticated_callable": False,
-            },
-        }:
-            raise PostgresContractProbeError(
-                "post-171 SOURCE_ADD duplicate-privacy contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_CLAIM_CONTROL_MIGRATION
-        )
-        applied.append(SOURCE_ADD_CLAIM_CONTROL_MIGRATION)
-        source_add_claim_control_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_claim_control_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_claim_control_contract != {
-            "schema_version": (
-                "leadpoet.source_add_claim_control_contract.v1"
-            ),
-            "control_lock": "source-add-control",
-            "pause_rpc": "research_lab_source_add_set_paused",
-            "pause_signature": "boolean,text,text",
-            "claim_rpc": "research_lab_source_add_claim_work",
-            "claim_signature": "text,integer",
-            "acquire_guard_rpc": (
-                "research_lab_source_add_acquire_restart_guard_v1"
-            ),
-            "acquire_guard_signature": "text,text,bigint,integer,text",
-            "guard_state_rpc": (
-                "research_lab_source_add_restart_guard_state_v1"
-            ),
-            "guard_state_signature": "",
-            "release_guard_rpc": (
-                "research_lab_source_add_release_restart_guard_v1"
-            ),
-            "release_guard_signature": "text,text,bigint,text",
-            "guard_state_result_fields": [
-                "schema_version",
-                "paused",
-                "guard_active",
-                "guard_commitment",
-                "owner_commitment",
-                "guard_generation",
-                "owner_generation_commitment",
-                "guard_expires_at",
-            ],
-            "acquire_guard_result_fields": [
-                "schema_version",
-                "paused",
-                "guard_active",
-                "guard_commitment",
-                "owner_commitment",
-                "guard_generation",
-                "owner_generation_commitment",
-                "guard_expires_at",
-            ],
-            "release_guard_result_fields": [
-                "schema_version",
-                "released",
-                "paused",
-                "guard_active",
-                "guard_generation",
-                "owner_generation_commitment",
-            ],
-            "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
-            "guard_commitment": "sha256_utf8_guard_id",
-            "owner_id_format": "^source_add_restart_owner:[0-9a-f]{64}$",
-            "owner_commitment": "sha256_utf8_owner_id",
-            "owner_generation_commitment": (
-                "sha256_utf8_owner_commitment_colon_decimal_generation"
-            ),
-            "guard_lease_min_seconds": 60,
-            "guard_lease_max_seconds": 14400,
-            "active_guard_replay_extends_lease": True,
-            "acquire_compare_and_swap": "expected_generation",
-            "different_owner_takeover_increments_generation": True,
-            "expired_reacquire_increments_generation": True,
-            "generation_retained_after_release": True,
-            "resume_requires_guard_clear": True,
-            "expired_guard_recovery": (
-                "explicit_reacquire_then_exact_release"
-            ),
-            "release_keeps_paused": True,
-            "restart_quiescence_rpc": (
-                "research_lab_source_add_restart_quiescence_v1"
-            ),
-            "restart_quiescence_signature": "text,text,bigint",
-            "restart_quiescence_schema_version": (
-                "leadpoet.source_add_restart_quiescence.v1"
-            ),
-            "restart_quiescence_result_fields": [
-                "schema_version",
-                "paused",
-                "guard_active",
-                "guard_matches",
-                "owner_matches",
-                "generation_matches",
-                "guard_commitment",
-                "owner_commitment",
-                "guard_generation",
-                "owner_generation_commitment",
-                "guard_expires_at",
-                "leased_work_count",
-                "quiescent",
-            ],
-            "lock_before_paused_read": True,
-            "leased_scope": "all_leased_regardless_of_expiry",
-            "migration_requires_paused": True,
-            "migration_requires_zero_leased": True,
-            "function_authority_sha256": (
-                "sha256:890a1e42b6dd28eb1c8515c3b8c33d31"
-                "a9974058fbd2c43393bb0880c0ca21e6"
-            ),
-            "functions": {
-                "admission_guard": True,
-                "acquire_restart_guard_v1": True,
-                "claim_work": True,
-                "pause": True,
-                "release_restart_guard_v1": True,
-                "restart_guard_state_v1": True,
-                "restart_quiescence_v1": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "acquire_guard_service_role_callable": True,
-                "claim_service_role_callable": True,
-                "pause_service_role_callable": True,
-                "quiescence_service_role_callable": True,
-                "release_guard_service_role_callable": True,
-                "guard_state_service_role_callable": True,
-                "contract_service_role_callable": True,
-                "anon_callable": False,
-                "authenticated_callable": False,
-            },
-        }:
-            raise PostgresContractProbeError(
-                "post-172 SOURCE_ADD claim-control contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION
-        )
-        applied.append(SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION)
-        source_add_leg1_release_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_post_accept_leg1_contract_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_leg1_release_contract != {
-            "schema_version": (
-                "leadpoet.source_add_post_accept_leg1_contract.v2"
-            ),
-            "daily_cap": 50,
-            "leg1_alpha_percent": 0.2,
-            "leg1_reward_epochs": 20,
-            "function_authority_sha256": (
-                "sha256:6c09aa3c6b82b3fe666c6739c4f71a51"
-                "ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
-            ),
-            "functions": {
-                "configure_probe_v2": True,
-                "finalize_provision_v2": True,
-                "reject_current_builtin_v2": True,
-                "post_accept_contract_v1": True,
-                "reserve_leg1_slot_v2": True,
-                "finalize_leg1_v2": True,
-                "reserve_leg1_slot_v3": True,
-                "finalize_leg1_v3": True,
-                "finalize_provision_smoke_v2": True,
-            },
-            "triggers": {
-                "acceptance": True,
-                "eligible": True,
-                "leg1_work": True,
-                "leg1_slot": True,
-                "leg1_obligation": True,
-                "leg1_initial_event": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "candidate_callable": True,
-                "rollback_v2_callable": True,
-                "legacy_not_callable": True,
-            },
-        }:
-            raise PostgresContractProbeError(
-                "post-173 SOURCE_ADD Leg 1 release contract differs"
-            )
-        rehearsal_guard_id = "source_add_restart_guard:" + "d" * 64
-        rehearsal_guard_commitment = "sha256:" + hashlib.sha256(
-            rehearsal_guard_id.encode("utf-8")
-        ).hexdigest()
-        rehearsal_owner_id = "source_add_restart_owner:" + "e" * 64
-        rehearsal_owner_commitment = "sha256:" + hashlib.sha256(
-            rehearsal_owner_id.encode("utf-8")
-        ).hexdigest()
-        rehearsal_owner_generation_commitment = (
-            "sha256:"
-            + hashlib.sha256(
-                f"{rehearsal_owner_commitment}:1".encode("utf-8")
-            ).hexdigest()
-        )
-        source_add_restart_guard_state = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_restart_guard_state_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_restart_guard_state != {
-            "schema_version": "leadpoet.source_add_restart_guard_state.v1",
-            "paused": True,
-            "guard_active": False,
-            "guard_commitment": "",
-            "owner_commitment": "",
-            "guard_generation": 0,
-            "owner_generation_commitment": "",
-            "guard_expires_at": None,
-        }:
-            raise PostgresContractProbeError(
-                "post-172 SOURCE_ADD restart guard initial state differs"
-            )
-        source_add_restart_guard = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_acquire_restart_guard_v1(
-                    :'guard_id', :'owner_id', 0, 14400,
-                    'operator:restart-rehearsal'
-                )::text;
-                """
-                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
-                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            source_add_restart_guard.get("schema_version")
-            != "leadpoet.source_add_restart_guard.v1"
-            or source_add_restart_guard.get("paused") is not True
-            or source_add_restart_guard.get("guard_active") is not True
-            or source_add_restart_guard.get("guard_commitment")
-            != rehearsal_guard_commitment
-            or source_add_restart_guard.get("owner_commitment")
-            != rehearsal_owner_commitment
-            or source_add_restart_guard.get("guard_generation") != 1
-            or source_add_restart_guard.get(
-                "owner_generation_commitment"
-            )
-            != rehearsal_owner_generation_commitment
-            or not isinstance(
-                source_add_restart_guard.get("guard_expires_at"), str
-            )
+        for migration in (
+            SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION,
+            SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION,
+            SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION,
+            SOURCE_ADD_CLAIM_CONTROL_MIGRATION,
+            SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION,
+            SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION,
+            SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
+            SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
+            SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
+            SOURCE_ADD_MINER_STATUS_MIGRATION,
+            SOURCE_ADD_PROVISIONED_STATUS_MIGRATION,
         ):
-            raise PostgresContractProbeError(
-                "post-172 SOURCE_ADD restart guard differs"
-            )
-        source_add_restart_quiescence = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_restart_quiescence_v1(
-                    :'guard_id', :'owner_id', 1
-                )::text;
-                """
-                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
-                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            source_add_restart_quiescence.get("schema_version")
-            != "leadpoet.source_add_restart_quiescence.v1"
-            or source_add_restart_quiescence.get("paused") is not True
-            or source_add_restart_quiescence.get("guard_active") is not True
-            or source_add_restart_quiescence.get("guard_matches") is not True
-            or source_add_restart_quiescence.get("owner_matches") is not True
-            or source_add_restart_quiescence.get("generation_matches")
-            is not True
-            or source_add_restart_quiescence.get("guard_commitment")
-            != rehearsal_guard_commitment
-            or source_add_restart_quiescence.get("owner_commitment")
-            != rehearsal_owner_commitment
-            or source_add_restart_quiescence.get("guard_generation") != 1
-            or source_add_restart_quiescence.get(
-                "owner_generation_commitment"
-            )
-            != rehearsal_owner_generation_commitment
-            or source_add_restart_quiescence.get("leased_work_count") != 0
-            or source_add_restart_quiescence.get("quiescent") is not True
-        ):
-            raise PostgresContractProbeError(
-                "post-172 SOURCE_ADD restart quiescence differs"
-            )
-        source_add_restart_guard_release = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_release_restart_guard_v1(
-                    :'guard_id', :'owner_id', 1,
-                    'operator:restart-rehearsal'
-                )::text;
-                """
-                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
-                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_restart_guard_release != {
-            "schema_version": "leadpoet.source_add_restart_guard_release.v1",
-            "released": True,
-            "paused": True,
-            "guard_active": False,
-            "guard_generation": 1,
-            "owner_generation_commitment": (
-                rehearsal_owner_generation_commitment
-            ),
-        }:
-            raise PostgresContractProbeError(
-                "post-172 SOURCE_ADD restart guard release differs"
-            )
-        source_add_restart_guard_state = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_restart_guard_state_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            source_add_restart_guard_state.get("paused") is not True
-            or source_add_restart_guard_state.get("guard_active") is not False
-            or source_add_restart_guard_state.get("guard_commitment") != ""
-            or source_add_restart_guard_state.get("owner_commitment") != ""
-            or source_add_restart_guard_state.get("guard_generation") != 1
-            or source_add_restart_guard_state.get(
-                "owner_generation_commitment"
-            )
-            != ""
-            or source_add_restart_guard_state.get("guard_expires_at")
-            is not None
-        ):
-            raise PostgresContractProbeError(
-                "post-172 SOURCE_ADD restart guard released state differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION
-        )
-        applied.append(SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION)
-        source_add_restart_state_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_claim_control_contract_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        expected_restart_state_contract = {
-            "schema_version": "leadpoet.source_add_claim_control_contract.v2",
-            "control_lock": "source-add-control",
-            "pause_rpc": "research_lab_source_add_set_paused",
-            "pause_signature": "boolean,text,text",
-            "claim_rpc": "research_lab_source_add_claim_work",
-            "claim_signature": "text,integer",
-            "acquire_guard_rpc": (
-                "research_lab_source_add_acquire_restart_guard_v2"
-            ),
-            "acquire_guard_signature": "text,text,bigint,integer,text",
-            "guard_state_rpc": (
-                "research_lab_source_add_restart_guard_state_v2"
-            ),
-            "guard_state_signature": "",
-            "release_guard_rpc": (
-                "research_lab_source_add_release_restart_guard_v2"
-            ),
-            "release_guard_signature": "text,text,bigint,text",
-            "restart_quiescence_rpc": (
-                "research_lab_source_add_restart_quiescence_v1"
-            ),
-            "restart_quiescence_signature": "text,text,bigint",
-            "guard_state_result_fields": [
-                "schema_version",
-                "paused",
-                "guard_active",
-                "guard_commitment",
-                "owner_commitment",
-                "guard_generation",
-                "owner_generation_commitment",
-                "guard_expires_at",
-                "restore_paused",
-            ],
-            "acquire_guard_result_fields": [
-                "schema_version",
-                "paused",
-                "guard_active",
-                "guard_commitment",
-                "owner_commitment",
-                "guard_generation",
-                "owner_generation_commitment",
-                "guard_expires_at",
-                "restore_paused",
-            ],
-            "release_guard_result_fields": [
-                "schema_version",
-                "released",
-                "paused",
-                "guard_active",
-                "guard_generation",
-                "owner_generation_commitment",
-                "restored_pre_restart_state",
-            ],
-            "restore_state_column": "restart_guard_restore_paused",
-            "acquire_captures_pre_restart_paused": True,
-            "renewal_preserves_restore_state": True,
-            "expired_takeover_preserves_restore_state": True,
-            "operator_pause_wins": True,
-            "release_restores_pre_restart_state": True,
-            "failed_restart_keeps_paused": True,
-            "rollback_v1_contract_schema_version": (
-                "leadpoet.source_add_claim_control_contract.v1"
-            ),
-            "rollback_v1_contract_sha256": (
-                SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256
-            ),
-            "migration_requires_paused": True,
-            "migration_requires_zero_leased": True,
-            "migration_requires_guard_clear": True,
-            "function_authority_sha256": (
-                SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256
-            ),
-            "functions": {
-                "admission_guard": True,
-                "acquire_restart_guard_v1": True,
-                "acquire_restart_guard_v2": True,
-                "claim_work": True,
-                "pause": True,
-                "release_restart_guard_v1": True,
-                "release_restart_guard_v2": True,
-                "restart_guard_state_v1": True,
-                "restart_guard_state_v2": True,
-                "restart_quiescence_v1": True,
-                "restore_trigger_v2": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "service_role_callable": True,
-                "anon_callable": False,
-                "authenticated_callable": False,
-            },
-        }
-        if source_add_restart_state_contract != expected_restart_state_contract:
-            raise PostgresContractProbeError(
-                "post-174 SOURCE_ADD restart-state contract differs"
-            )
-
-        # A paused pre-state must remain paused after exact release.
-        paused_guard = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_acquire_restart_guard_v2(
-                    :'guard_id', :'owner_id', 1, 14400,
-                    'operator:restart-rehearsal-v2-paused'
-                )::text;
-                """
-                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
-                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if paused_guard.get("restore_paused") is not True:
-            raise PostgresContractProbeError(
-                "post-174 paused SOURCE_ADD restart state was not captured"
-            )
-        paused_release = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_release_restart_guard_v2(
-                    :'guard_id', :'owner_id', 2,
-                    'operator:restart-rehearsal-v2-paused'
-                )::text;
-                """
-                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
-                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            paused_release.get("paused") is not True
-            or paused_release.get("restored_pre_restart_state") is not True
-        ):
-            raise PostgresContractProbeError(
-                "post-174 paused SOURCE_ADD restart state was not restored"
-            )
-
-        # An active pre-state is guarded as paused, then restored active only
-        # by the exact owner/generation release.
-        database.psql(
-            """
-            SELECT public.research_lab_source_add_set_paused(
-                FALSE, 'restart_rehearsal_active_prestate',
-                'operator:restart-rehearsal-v2-active'
-            );
-            """
-        )
-        active_guard = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_acquire_restart_guard_v2(
-                    :'guard_id', :'owner_id', 2, 14400,
-                    'operator:restart-rehearsal-v2-active'
-                )::text;
-                """
-                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
-                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            active_guard.get("paused") is not True
-            or active_guard.get("restore_paused") is not False
-        ):
-            raise PostgresContractProbeError(
-                "post-174 active SOURCE_ADD restart state was not captured"
-            )
-        active_release = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_release_restart_guard_v2(
-                    :'guard_id', :'owner_id', 3,
-                    'operator:restart-rehearsal-v2-active'
-                )::text;
-                """
-                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
-                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            active_release.get("paused") is not False
-            or active_release.get("restored_pre_restart_state") is not True
-        ):
-            raise PostgresContractProbeError(
-                "post-174 active SOURCE_ADD restart state was not restored"
-            )
-        restored_state = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_restart_guard_state_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            restored_state.get("paused") is not False
-            or restored_state.get("guard_active") is not False
-            or restored_state.get("restore_paused") is not None
-            or restored_state.get("guard_generation") != 3
-        ):
-            raise PostgresContractProbeError(
-                "post-174 SOURCE_ADD restored durable state differs"
-            )
-        database.psql(
-            """
-            SELECT public.research_lab_source_add_set_paused(
-                TRUE, 'restart_rehearsal_provenance_leg1_migration',
-                'operator:restart-rehearsal-v2-provenance-leg1'
-            );
-            """
-        )
-        database.apply_migration(
-            scripts / SOURCE_ADD_PROVENANCE_LEG1_MIGRATION
-        )
-        applied.append(SOURCE_ADD_PROVENANCE_LEG1_MIGRATION)
-        source_add_provenance_leg1_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_post_accept_leg1_contract_v3()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_provenance_leg1_contract != {
-            "schema_version": (
-                "leadpoet.source_add_post_accept_leg1_contract.v3"
-            ),
-            "daily_cap": 50,
-            "leg1_alpha_percent": 0.2,
-            "leg1_reward_epochs": 20,
-            "approval_boundary": "provenance_precheck_passed",
-            "backfill_policy": "all_exact_attested_provenance",
-            "public_trigger_fields": [
-                "precheck_status",
-                "provenance_artifact_hash",
-                "provenance_precheck_passed",
-                "provenance_receipt_hash",
-                "provenance_result_hash",
-                "submission_id",
-            ],
-            "authority_view": (
-                "research_lab_source_add_provenance_leg1_authority_v1"
-            ),
-            "function_authority_sha256": (
-                SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256
-            ),
-            "trigger_authority_sha256": (
-                SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
-            ),
-            "view_authority_sha256": (
-                SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256
-            ),
-            "functions": {
-                "configure_probe_v3": True,
-                "enqueue_leg1_after_provenance_v1": True,
-                "enqueue_provision_smoke_v2": True,
-                "finalize_leg1_v4": True,
-                "finalize_provision_smoke_v3": True,
-                "finalize_provision_v3": True,
-                "reject_current_builtin_v3": True,
-                "reconcile_provenance_leg1_v1": True,
-                "reserve_leg1_slot_v4": True,
-            },
-            "triggers": {
-                "automatic_enqueue": True,
-                "eligible_v2": True,
-                "eligible_v3": True,
-                "leg1_initial_event_v3": True,
-                "leg1_obligation_v3": True,
-                "leg1_slot_v3": True,
-                "leg1_work_v3": True,
-            },
-            "columns": {
-                "intent_approval_kind": True,
-                "intent_provenance_artifact_hash": True,
-                "intent_provenance_receipt_hash": True,
-                "slot_approval_kind": True,
-            },
-            "permissions": {
-                "service_role_exists": True,
-                "candidate_callable": True,
-                "internal_not_callable": True,
-                "rollback_v2_callable": True,
-            },
-        }:
-            raise PostgresContractProbeError(
-                "post-175 SOURCE_ADD provenance Leg 1 contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION
-        )
-        applied.append(SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION)
-        database.apply_migration(
-            scripts / SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
-        )
-        applied.append(SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION)
-        source_add_provenance_origin_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_post_accept_leg1_contract_v4()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        expected_provenance_origin_contract = dict(
-            source_add_provenance_leg1_contract
-        )
-        expected_provenance_origin_contract.update(
-            {
-                "schema_version": (
-                    "leadpoet.source_add_post_accept_leg1_contract.v4"
-                ),
-                "required_migration": (
-                    "scripts/176-research-lab-source-add-provenance-origin-"
-                    "repair.sql"
-                ),
-                "backfill_policy": (
-                    "earliest_exact_attested_provenance_per_provider_origin"
-                ),
-                "provider_origin_scope": "normalized_exact_host",
-                "provider_origin_winner_order": [
-                    "provenance_created_at",
-                    "submission_id",
-                ],
-                "cancelled_intents_are_authority": False,
-                "view_authority_sha256": (
-                    SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256
-                ),
-                "repair_function_authority_sha256": (
-                    SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256
-                ),
-            }
-        )
-        if (
-            source_add_provenance_origin_contract
-            != expected_provenance_origin_contract
-        ):
-            raise PostgresContractProbeError(
-                "post-176 SOURCE_ADD provenance-origin contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_MINER_STATUS_MIGRATION
-        )
-        applied.append(SOURCE_ADD_MINER_STATUS_MIGRATION)
-        source_add_miner_status_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_miner_status_contract_v1()
-                       ::TEXT;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if source_add_miner_status_contract != {
-            "schema_version": (
-                "leadpoet.source_add_miner_status_contract.v1"
-            ),
-            "view_name": "research_lab_source_add_miner_status_v1",
-            "page_rpc": "research_lab_source_add_miner_status_page_v1",
-            "page_signature": "text,text,integer",
-            "view_columns": [
-                "schema_version",
-                "submission_id",
-                "miner_hotkey",
-                "source_name",
-                "submitted_at",
-                "updated_at",
-                "decision_status",
-                "decision_reason_code",
-                "decision_reason",
-                "reward_status",
-                "alpha_percent",
-                "reward_epochs",
-                "start_epoch",
-                "end_epoch",
-            ],
-            "view_security_invoker": True,
-            "view_security_barrier": True,
-            "page_security_invoker": True,
-            "page_stable": True,
-            "view_authority_sha256": (
-                SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256
-            ),
-            "page_authority_sha256": (
-                SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256
-            ),
-            "contract_authority_sha256": (
-                SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256
-            ),
-            "permissions": {
-                "view_service_role_select": True,
-                "view_anon_select": False,
-                "view_authenticated_select": False,
-                "view_public_select": False,
-                "page_service_role_callable": True,
-                "page_anon_callable": False,
-                "page_authenticated_callable": False,
-                "page_public_callable": False,
-                "contract_service_role_callable": True,
-                "contract_anon_callable": False,
-                "contract_authenticated_callable": False,
-            },
-        }:
-            raise PostgresContractProbeError(
-                "post-178 SOURCE_ADD miner status contract differs"
-            )
-        database.apply_migration(
-            scripts / SOURCE_ADD_PROVISIONED_STATUS_MIGRATION
-        )
-        applied.append(SOURCE_ADD_PROVISIONED_STATUS_MIGRATION)
-        source_add_post_status_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_source_add_post_accept_leg1_contract_v4()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        expected_post_status_contract = dict(
-            expected_provenance_origin_contract
-        )
-        expected_post_status_contract[
-            "function_authority_sha256"
-        ] = SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
-        if source_add_post_status_contract != expected_post_status_contract:
-            raise PostgresContractProbeError(
-                "post-186 SOURCE_ADD provisioned-status contract differs"
-            )
-        # The active agent competition schema follows SOURCE_ADD migration 186.
+            database.apply_migration(scripts / migration)
+            applied.append(migration)
         for migration in LAB_ARENA_MIGRATIONS:
             database.apply_migration(scripts / migration)
             applied.append(migration)
@@ -4510,6 +3386,67 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-194 Lab Arena scorer refresh contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_SCHEMA_RETIREMENT_MIGRATION
+        )
+        applied.append(SOURCE_ADD_SCHEMA_RETIREMENT_MIGRATION)
+        source_add_retirement_relations = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.json_build_object(
+                    'submission_table', to_regclass(
+                        'public.research_lab_source_add_submissions'
+                    ),
+                    'work_table', to_regclass(
+                        'public.research_lab_source_add_work_items'
+                    ),
+                    'reward_obligations', to_regclass(
+                        'public.research_lab_source_add_reward_obligations'
+                    ),
+                    'reward_events', to_regclass(
+                        'public.research_lab_source_add_reward_events'
+                    ),
+                    'reward_view', to_regclass(
+                        'public.research_lab_source_add_reward_current'
+                    ),
+                    'arena_submissions', to_regclass(
+                        'public.lab_arena_submissions'
+                    )
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_retirement_relations != {
+            "submission_table": None,
+            "work_table": None,
+            "reward_obligations": None,
+            "reward_events": None,
+            "reward_view": None,
+            "arena_submissions": "lab_arena_submissions",
+        }:
+            raise PostgresContractProbeError(
+                "post-198 SOURCE_ADD retirement relation set differs"
+            )
+        source_add_operational_functions = int(
+            database.psql(
+                """
+                SELECT count(*)
+                FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND (
+                      p.proname LIKE 'research_lab_source_add_%'
+                      OR p.proname LIKE 'research_lab_source_catalog_%'
+                  );
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_operational_functions != 0:
+            raise PostgresContractProbeError(
+                "post-198 SOURCE_ADD operational functions remain"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
@@ -4622,9 +3559,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 compact_weight_settlement_contract
             ),
             "lab_arena_schema_contract": lab_arena_schema_contract,
-            "source_add_miner_status_contract": (
-                source_add_miner_status_contract
-            ),
             "checks": {
                 name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
             },

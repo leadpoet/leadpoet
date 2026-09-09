@@ -118,62 +118,6 @@ from gateway.tasks.epoch_monitor import EpochMonitor
 supabase: Client = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-def _start_source_add_dispatcher_task(
-    application,
-    *,
-    config_supplier=None,
-    dispatcher=None,
-):
-    """Start and observe SOURCE_ADD independently of other worker fleets."""
-
-    if config_supplier is None:
-        from gateway.research_lab.config import ResearchLabGatewayConfig
-
-        config_supplier = ResearchLabGatewayConfig.from_env
-    config = config_supplier()
-    application.state.source_add_dispatcher_failure = None
-    if not (
-        config.source_add_enabled
-        and config.source_add_dispatcher_enabled
-    ):
-        application.state.source_add_dispatcher_task = None
-        print("ℹ️  SOURCE_ADD dispatcher disabled")
-        return None
-    if dispatcher is None:
-        from gateway.research_lab.source_add_workflow import (
-            run_source_add_dispatcher,
-        )
-
-        dispatcher = run_source_add_dispatcher
-
-    task = asyncio.create_task(dispatcher())
-    application.state.source_add_dispatcher_task = task
-
-    def _record_outcome(completed_task):
-        if completed_task.cancelled():
-            return
-        failure = completed_task.exception()
-        if failure is None:
-            application.state.source_add_dispatcher_failure = {
-                "status": "stopped",
-            }
-            print("SOURCE_ADD dispatcher stopped unexpectedly", flush=True)
-            return
-        application.state.source_add_dispatcher_failure = {
-            "status": "failed",
-            "exception_type": type(failure).__name__,
-        }
-        print(
-            "SOURCE_ADD dispatcher failed type=%s"
-            % type(failure).__name__,
-            flush=True,
-        )
-
-    task.add_done_callback(_record_outcome)
-    print("✅ SOURCE_ADD dispatcher started (one leased queue consumer)")
-    return task
-
-
 # ============================================================
 # Lifespan Context Manager (for background tasks)
 # ============================================================
@@ -358,7 +302,6 @@ async def lifespan(app: FastAPI):
     rate_limiter_task = None
     icp_task = None
     fulfillment_task_handle = None
-    source_add_dispatcher_task = None
     hotkey_bucket_cleanup_task = None
     pcr0_builder_task_handle = None
 
@@ -512,8 +455,6 @@ async def lifespan(app: FastAPI):
         pcr0_builder_task_handle = start_pcr0_builder()
         print("✅ PCR0 builder started (trustless validator verification)")
         
-        # SOURCE_ADD has its own queue and failure boundary.
-        source_add_dispatcher_task = _start_source_add_dispatcher_task(app)
         app.state.event_signing_identity = dict(event_signing_identity)
         
         print("")
@@ -548,7 +489,6 @@ async def lifespan(app: FastAPI):
             hotkey_bucket_cleanup_task,
             icp_task,
             fulfillment_task_handle,
-            source_add_dispatcher_task,
             pcr0_builder_task_handle,
         ]
         
@@ -598,64 +538,6 @@ app = FastAPI(
     lifespan=lifespan,  # Use lifespan context manager
     redirect_slashes=False,  # Prevent 307 redirects from consuming semaphore slots
 )
-
-_SOURCE_ADD_INDEPENDENT_PATHS = frozenset(
-    {
-        "/research-lab/source-adapters",
-    }
-)
-
-
-def _gateway_source_add_dispatcher_ready(application: FastAPI) -> bool:
-    dispatcher_task = getattr(
-        application.state,
-        "source_add_dispatcher_task",
-        None,
-    )
-    return bool(
-        dispatcher_task is not None
-        and not dispatcher_task.done()
-    )
-
-
-@app.middleware("http")
-async def require_source_add_dispatcher(
-    request: Request,
-    call_next,
-):
-    """Keep SOURCE_ADD writes closed when its queue consumer is not ready."""
-
-    path_parts = request.url.path.split("/")
-    source_add_admin_request = bool(
-        request.method == "POST"
-        and len(path_parts) == 6
-        and path_parts[:4] == ["", "research-lab", "admin", "source-adapters"]
-        and path_parts[4]
-        and path_parts[5]
-        in {
-            "recheck-provenance",
-            "credential-recipient",
-            "configure-test",
-            "provision",
-        }
-    )
-    source_add_request = bool(
-        request.method == "POST"
-        and (
-            request.url.path in _SOURCE_ADD_INDEPENDENT_PATHS
-            or source_add_admin_request
-        )
-    )
-    source_add_independently_ready = bool(
-        source_add_request
-        and _gateway_source_add_dispatcher_ready(request.app)
-    )
-    if source_add_request and not source_add_independently_ready:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "SOURCE_ADD dispatcher authority is not ready"},
-        )
-    return await call_next(request)
 
 # ============================================================
 # CORS Middleware

@@ -34,6 +34,8 @@ from leadpoet_canonical.compact_weight_authority_v2 import (
     reconstruct_published_weight_bundle_from_compact_v2,
     validate_compact_weight_ancestry_v2,
 )
+
+
 from leadpoet_canonical.hotkey_authority_v2 import (
     build_application_signature_request_v2,
 )

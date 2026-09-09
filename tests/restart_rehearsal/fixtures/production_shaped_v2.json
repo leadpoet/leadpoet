@@ -47,7 +47,7 @@
       "burn-hotkey",
       "fulfillment-hotkey",
       "research-lab-hotkey",
-      "source-add-hotkey"
+      "spare-hotkey"
     ]
   },
   "research_lab_allocation": {

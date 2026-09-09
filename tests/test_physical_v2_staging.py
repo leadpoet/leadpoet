@@ -1379,7 +1379,6 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "testnet" not in source.lower()
     assert "funded" not in source.lower()
     assert "environment:" not in source
-    assert "LEADPOET_PARITY_MINER_INTAKE_SECRET_ID" in source
     assert "leadpoet.production_parity_full.v3" in source
     assert 'test "$AWS_REGION" = "us-east-1"' in source
     assert "export AWS_REGION={q(required['AWS_REGION'])}" in source
@@ -1746,9 +1745,6 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
         "--production-allocation",
         "primary/audit workflow did not consume the clone allocation",
         '"chain_boundary": "strict-non-forwarding"',
-        "_run_miner_intake_path(",
-        "/research-lab/source-adapters",
-        '"chain_registration_boundary": "strict-ephemeral-hotkey"',
         "_run_arena_rebenchmark_path(",
         '"baseline_source_url": ARENA_BASELINE_SOURCE_URL',
         '"sandbox": "gvisor-runsc"',
@@ -1765,32 +1761,8 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
     )
 
 
-def test_full_miner_intake_keeps_public_source_credentials_forbidden():
-    source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
-    assert '"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false"' in source
-    assert '"RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false"' in source
-    assert '"global_miner_submissions_enabled"' not in source
-    assert '"source_add_paused": False' in source
-    assert 'retired_response.status_code != 410' in source
-    assert 'forbidden_response.status_code != 422' in source
-    assert '"credential_transport": "operator-managed-production-contract"' in source
-    assert "builtwith_credential in source_persistence" in source
-    assert '"Authorization": f"API {credential}"' in source
-    assert "KEY=" not in source
 
 
-def test_fast_contract_binds_every_exact_miner_intake_source():
-    source = (
-        ROOT / "scripts/build_production_parity_contract.py"
-    ).read_text()
-    for path in (
-        "gateway/research_lab/api.py",
-        "gateway/research_lab/models.py",
-        "gateway/research_lab/key_vault.py",
-        "neurons/miner.py",
-        "research_lab/source_add_miner.py",
-    ):
-        assert f'"{path}"' in source
 
 
 def test_rehearsal_override_is_hash_bound_and_read_only():

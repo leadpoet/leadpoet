@@ -123,7 +123,6 @@ def _response(request):
                         "research_lab_allocation",
                         "champions",
                         "reimbursements",
-                        "source_add_rewards",
                     }
                     else []
                 ),

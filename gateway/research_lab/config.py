@@ -2,8 +2,8 @@
 
 The Research Lab no longer builds or promotes sourcing models. Agent
 competition settings live in :mod:`lab_arena`. This module keeps only the
-SOURCE_ADD controls and the allocation settings needed to settle existing
-Research Lab rewards beside the Arena reward path.
+allocation settings needed to settle existing Research Lab rewards beside
+the Arena reward path.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def resolve_worker_process_count(
 
 @dataclass(frozen=True)
 class ResearchLabGatewayConfig:
-    """Controls still consumed by SOURCE_ADD and reward settlement."""
+    """Controls still consumed by Research Lab reward settlement."""
 
     api_enabled: bool = False
     production_writes_enabled: bool = False
@@ -124,38 +124,12 @@ class ResearchLabGatewayConfig:
     )
     lab_champion_threshold_points: float = 1.0
 
-    # SOURCE_ADD remains a separate live product-input flow.
-    source_add_enabled: bool = True
-    source_add_rewards_enabled: bool = True
-    source_add_dispatcher_enabled: bool = True
-    source_add_functional_probes_enabled: bool = True
-    source_add_dispatcher_poll_seconds: float = 2.0
-    source_add_work_lease_seconds: int = 300
-    source_add_probe_timeout_seconds: int = 45
-    source_add_probe_max_attempts: int = 5
-    source_add_leg1_alpha_percent: float = 0.2
-    source_add_max_concurrent_per_hotkey: int = 3
-    source_add_max_per_day_per_hotkey: int = 5
-    source_add_max_per_30d_per_hotkey: int = 10
-    source_add_leg1_max_per_utc_day: int = 50
-
     arweave_audit_enabled: bool = True
     arweave_audit_shadow_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "ResearchLabGatewayConfig":
         prod_on = _prod_default(True)
-        probe_timeout = min(
-            120,
-            max(5, _int("RESEARCH_LAB_SOURCE_ADD_PROBE_TIMEOUT_SECONDS", 45)),
-        )
-        work_lease = min(
-            900,
-            max(
-                probe_timeout * 3 + 120,
-                _int("RESEARCH_LAB_SOURCE_ADD_WORK_LEASE_SECONDS", 300),
-            ),
-        )
         return cls(
             api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED", prod_on),
             production_writes_enabled=_truthy(
@@ -254,40 +228,6 @@ class ResearchLabGatewayConfig:
             lab_champion_threshold_points=max(
                 0.0, _float("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS", 1.0)
             ),
-            source_add_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_ENABLED", "true"),
-            source_add_rewards_enabled=_truthy(
-                "RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "true"
-            ),
-            source_add_dispatcher_enabled=_truthy(
-                "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED", "true"
-            ),
-            source_add_functional_probes_enabled=_truthy(
-                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_PROBES_ENABLED", "true"
-            ),
-            source_add_dispatcher_poll_seconds=max(
-                0.25, _float("RESEARCH_LAB_SOURCE_ADD_DISPATCHER_POLL_SECONDS", 2.0)
-            ),
-            source_add_work_lease_seconds=work_lease,
-            source_add_probe_timeout_seconds=probe_timeout,
-            source_add_probe_max_attempts=min(
-                5,
-                max(1, _int("RESEARCH_LAB_SOURCE_ADD_PROBE_MAX_ATTEMPTS", 5)),
-            ),
-            source_add_leg1_alpha_percent=max(
-                0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", 0.2)
-            ),
-            source_add_max_concurrent_per_hotkey=max(
-                1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_CONCURRENT_PER_HOTKEY", 3)
-            ),
-            source_add_max_per_day_per_hotkey=max(
-                1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_PER_DAY_PER_HOTKEY", 5)
-            ),
-            source_add_max_per_30d_per_hotkey=max(
-                1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_PER_30D_PER_HOTKEY", 10)
-            ),
-            source_add_leg1_max_per_utc_day=max(
-                1, _int("RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY", 50)
-            ),
             arweave_audit_enabled=_truthy(
                 "RESEARCH_LAB_ARWEAVE_AUDIT_ENABLED", "true"
             ),
@@ -338,17 +278,4 @@ class ResearchLabGatewayConfig:
         return {
             "api_enabled": self.api_enabled,
             "production_writes_enabled": self.production_writes_enabled,
-            "source_add_enabled": self.source_add_enabled,
-            "source_add": {
-                "enabled": self.source_add_enabled,
-                "rewards_enabled": self.source_add_rewards_enabled,
-                "dispatcher_enabled": self.source_add_dispatcher_enabled,
-                "functional_probes_enabled": self.source_add_functional_probes_enabled,
-                "leg1_alpha_percent": self.source_add_leg1_alpha_percent,
-                "reward_epochs": self.lab_reward_epochs,
-                "max_concurrent_per_hotkey": self.source_add_max_concurrent_per_hotkey,
-                "max_per_day_per_hotkey": self.source_add_max_per_day_per_hotkey,
-                "max_per_30d_per_hotkey": self.source_add_max_per_30d_per_hotkey,
-                "leg1_max_per_utc_day": self.source_add_leg1_max_per_utc_day,
-            },
         }

@@ -1,7 +1,7 @@
 """Disposable PostgreSQL for Lab Arena tests.
 
 Prefers the repository's Docker harness (``_database_with_migrations`` from
-``tests/test_source_add_end_to_end_postgres.py``), which is what CI runs.
+``tests/postgres_migration_harness.py``), which is what CI runs.
 When ``LAB_ARENA_PG_LOCAL=1`` is set, or Docker is unavailable, a local
 PostgreSQL server (``initdb``/``pg_ctl``) is used instead with the same
 Supabase shim, so the migration is exercised identically. Both paths yield
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_source_add_end_to_end_postgres import SCRIPTS, _database_with_migrations
+from tests.postgres_migration_harness import SCRIPTS, _database_with_migrations
 
 LAB_ARENA_MIGRATION = "179-lab-arena-v1.sql"
 LAB_ARENA_DAILY_COMPETITION_MIGRATION = "180-lab-arena-daily-competition.sql"

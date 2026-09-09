@@ -136,7 +136,6 @@ PROTECTED_MODULE_PREFIXES: Tuple[str, ...] = (
     "gateway.tee.provider_semantics_v2",
     "gateway.tee.scoring_executor",
     "gateway.tee.scoring_executor_v2",
-    "gateway.tee.source_add_runtime_v2",
     "gateway.tee.source_bundle_v2",
     "langfuse",
     "openai",
@@ -171,7 +170,6 @@ PROTECTED_PATH_FRAGMENTS: Tuple[str, ...] = (
     "/gateway/tee/provider_evidence_v2",
     "/gateway/tee/provider_semantics_v2",
     "/gateway/tee/scoring_executor",
-    "/gateway/tee/source_add_runtime_v2",
     "/gateway/tee/source_bundle_v2",
 )
 

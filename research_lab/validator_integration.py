@@ -426,7 +426,6 @@ def verify_research_lab_allocation_bundle(
     paid = sum(
         float(allocation_doc.get(field) or 0.0)
         for field in (
-            "source_add_alpha_percent",
             "reimbursement_alpha_percent",
             "champion_alpha_percent",
             "queued_champion_alpha_percent",
@@ -442,7 +441,6 @@ def verify_research_lab_allocation_bundle(
 
     recomputed_allocation_hash: str | None = None
     policy = source_state.get("policy") if isinstance(source_state, Mapping) else None
-    source_add = source_state.get("source_add_obligations") if isinstance(source_state, Mapping) else None
     reimbursements = source_state.get("reimbursement_obligations") if isinstance(source_state, Mapping) else None
     fallback_reimbursements = (
         source_state.get("fallback_reimbursement_obligations")
@@ -462,11 +460,6 @@ def verify_research_lab_allocation_bundle(
             "allocation_fallback_reimbursement_obligations_must_be_array"
         )
         fallback_reimbursements = []
-    if source_add is None:
-        source_add = []
-    elif not isinstance(source_add, list):
-        errors.append("allocation_source_add_obligations_must_be_array")
-        source_add = []
     if not isinstance(champions, list):
         errors.append("allocation_champion_obligations_must_be_array")
         champions = []
@@ -490,7 +483,6 @@ def verify_research_lab_allocation_bundle(
                 policy,
                 reimbursements,
                 champions,
-                active_source_add_obligations=source_add,
                 fallback_reimbursement_obligations=fallback_reimbursements,
             )
             recomputed_allocation_hash = str(recomputed.get("allocation_hash") or "")

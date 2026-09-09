@@ -806,7 +806,6 @@ def test_large_input_exception_is_scoped_to_allocation_ancestry_consumers():
             "research_lab.allocation.v2",
             "research_lab.champion_input.v2",
             "research_lab.reimbursement_input.v2",
-            "research_lab.source_add_reward_input.v2",
             "research_lab.anomaly_adjustment_input.v2",
         },
         "attest_weight_publication": {"gateway.weights.publication.v2"},

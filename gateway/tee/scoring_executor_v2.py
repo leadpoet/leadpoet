@@ -1,4 +1,4 @@
-"""Measured scoring and SOURCE_ADD operations for gateway_scoring."""
+"""Measured scoring operations for gateway_scoring."""
 from __future__ import annotations
 
 import asyncio

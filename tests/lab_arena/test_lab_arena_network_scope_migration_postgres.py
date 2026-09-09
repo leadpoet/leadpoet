@@ -11,7 +11,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     LAB_ARENA_NETWORK_SCOPE_MIGRATION,
     database_with_lab_arena_migration,
 )
-from tests.test_source_add_end_to_end_postgres import SCRIPTS
+from tests.postgres_migration_harness import SCRIPTS
 
 
 def test_network_scope_migration_is_idempotent_and_keeps_legacy_rows_on_finney():

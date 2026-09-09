@@ -24,10 +24,6 @@ from gateway.tee.provider_client_v2 import (
     ProviderClientV2Error,
     _ExecutionScope,
 )
-from gateway.tee.source_add_runtime_v2 import (
-    build_source_add_runtime_catalog_v2,
-    source_add_dynamic_retry_policy_hash,
-)
 from leadpoet_canonical.attested_v2 import DIRECT_EGRESS_REF_HASH, sha256_bytes
 from leadpoet_verifier.semantic_gates import (
     EvidenceSource,
@@ -891,60 +887,6 @@ def test_custom_urllib_proxy_opener_cannot_bypass_attested_transport():
         router.restore()
 
 
-def test_dynamic_source_add_route_is_selected_from_measured_job_catalog():
-    transport = Transport(status=200)
-    router, observed = _router(transport)
-    row = {
-        "adapter_id": "adapter:public-source",
-        "miner_hotkey": "miner-one",
-        "provision_status": "provisioned",
-        "registry_provider_id": "public_source",
-        "credential_envelope": {},
-        "provision_doc": {
-            "provider_registry_entry": {
-                "id": "public_source",
-                "base_url": "https://api.public-source.example",
-                "auth_kind": "none",
-                "auth_name": "",
-                "credential_ref": [],
-                "per_day_quota": 5,
-                "cost_model": {"est_cost_microusd_per_call": 0},
-                "capability_policy": {
-                    "routes": [{"method": "GET", "path": "/status"}]
-                },
-            },
-            "probe_endpoints": [
-                {
-                    "endpoint_id": "public_source.status",
-                    "provider_id": "public_source",
-                    "method": "GET",
-                    "path": "/status",
-                    "params": [],
-                }
-            ],
-        },
-    }
-    catalog = build_source_add_runtime_catalog_v2([row])
-    route = catalog["routes"][0]
-    try:
-        with router.scope(
-            job_id="source-add-job",
-            purpose="research_lab.provider_evidence.v2",
-            logical_operation_id="source-add-operation",
-            retry_policy_hashes={
-                "public_source": source_add_dynamic_retry_policy_hash(route)
-            },
-            dynamic_provider_catalog=catalog,
-        ):
-            with httpx.Client(trust_env=False) as client:
-                response = client.get(
-                    "https://api.public-source.example/status?verbose=1"
-                )
-        assert response.status_code == 200
-        assert observed[0]["transport_attempt"]["provider_id"] == "public_source"
-        assert transport.calls[0]["url"].endswith("/status?verbose=1")
-    finally:
-        router.restore()
 
 
 @pytest.mark.asyncio

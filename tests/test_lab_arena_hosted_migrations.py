@@ -1,7 +1,7 @@
 """Arena installation under the non-superuser role used by hosted Supabase."""
 
 from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS
-from tests.test_source_add_end_to_end_postgres import SCRIPTS, _database_with_migrations
+from tests.postgres_migration_harness import SCRIPTS, _database_with_migrations
 
 
 def test_hosted_owner_transfers_and_idempotent_upgrade():

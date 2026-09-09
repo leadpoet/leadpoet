@@ -16,7 +16,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from gateway.tee.provider_broker_v2 import credential_reference_hash
 from gateway.tee.provider_broker_v2 import credential_value_hash
-from gateway.tee.source_add_runtime_v2 import source_add_dynamic_job_slot
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from leadpoet_canonical.kms_recipient import decrypt_kms_recipient_ciphertext
 
@@ -25,12 +24,6 @@ KMS_RECIPIENT_SCHEMA_VERSION = "leadpoet.kms_recipient.v2"
 KMS_RECIPIENT_PURPOSE = "leadpoet.provider_credential_unseal.v2"
 KMS_JOB_RECIPIENT_SCHEMA_VERSION = "leadpoet.kms_job_recipient.v2"
 KMS_JOB_RECIPIENT_PURPOSE = "leadpoet.job_provider_credential_unseal.v2"
-SOURCE_ADD_INGRESS_RECIPIENT_SCHEMA_VERSION = (
-    "leadpoet.source_add_ingress_recipient.v2"
-)
-SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE = (
-    "leadpoet.source_add_credential_ingress.v2"
-)
 KMS_KEY_ENCRYPTION_ALGORITHM = "RSAES_OAEP_SHA_256"
 MAX_CIPHERTEXT_FOR_RECIPIENT_BYTES = 64 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
@@ -97,7 +90,6 @@ class KMSRecipientV2:
         )
         self._requests = {}  # type: Dict[str, Dict[str, Any]]
         self._job_requests = {}  # type: Dict[str, Dict[str, Any]]
-        self._source_add_requests = {}  # type: Dict[str, Dict[str, Any]]
         self._provisioned = set()
         self._lock = threading.Lock()
 
@@ -153,8 +145,6 @@ class KMSRecipientV2:
         if (
             normalized_slot not in self._expected
             and normalized_slot not in self._job_slots
-            and not source_add_dynamic_job_slot(normalized_slot)
-            and normalized_slot != "source_add_ingress"
         ):
             raise KMSRecipientV2Error("credential slot is not measured")
         try:
@@ -177,126 +167,7 @@ class KMSRecipientV2:
             raise KMSRecipientV2Error("unwrapped secret is invalid")
         return bytes(plaintext)
 
-    def source_add_ingress_recipient_request(
-        self,
-        *,
-        miner_hotkey: str,
-        adapter_ref: str,
-        credential_ref: str,
-    ) -> Dict[str, Any]:
-        """Create a one-use client recipient without exposing a secret hash."""
 
-        normalized_miner = str(miner_hotkey or "")
-        normalized_adapter = str(adapter_ref or "")
-        normalized_ref = str(credential_ref or "")
-        if (
-            not normalized_miner
-            or not re.fullmatch(r"source_add:[A-Za-z0-9_.:-]{1,200}", normalized_adapter)
-            or not re.fullmatch(r"encrypted_ref:source_add:[0-9a-f]{32}", normalized_ref)
-        ):
-            raise KMSRecipientV2Error("SOURCE_ADD ingress scope is invalid")
-        boot = dict(self._boot_identity_supplier())
-        public_hash = "sha256:" + hashlib.sha256(self._public_der).hexdigest()
-        claim = {
-            "schema_version": SOURCE_ADD_INGRESS_RECIPIENT_SCHEMA_VERSION,
-            "purpose": SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE,
-            "boot_identity_hash": str(boot["boot_identity_hash"]),
-            "miner_hotkey_hash": "sha256:"
-            + hashlib.sha256(normalized_miner.encode("utf-8")).hexdigest(),
-            "adapter_ref_hash": "sha256:"
-            + hashlib.sha256(normalized_adapter.encode("utf-8")).hexdigest(),
-            "credential_ref": normalized_ref,
-            "key_ref_hash": "sha256:"
-            + hashlib.sha256(normalized_ref.encode("utf-8")).hexdigest(),
-            "recipient_public_key_hash": public_hash,
-            "request_nonce": secrets.token_hex(16),
-        }
-        request_id = sha256_json(claim)
-        user_data = canonical_json(
-            {
-                "schema_version": SOURCE_ADD_INGRESS_RECIPIENT_SCHEMA_VERSION,
-                "purpose": SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE,
-                "claim_hash": request_id,
-            }
-        ).encode("utf-8")
-        document = self._attestation_supplier(
-            user_data=user_data,
-            signing_pubkey=self._public_der,
-        )
-        if not isinstance(document, (bytes, bytearray)) or not document:
-            raise KMSRecipientV2Error(
-                "SOURCE_ADD ingress recipient attestation is unavailable"
-            )
-        request = {
-            **claim,
-            "request_id": request_id,
-            "recipient_public_key_der_b64": base64.b64encode(
-                self._public_der
-            ).decode("ascii"),
-            "attestation_document_b64": base64.b64encode(bytes(document)).decode(
-                "ascii"
-            ),
-            "key_encryption_algorithm": KMS_KEY_ENCRYPTION_ALGORITHM,
-        }
-        with self._lock:
-            if len(self._source_add_requests) >= MAX_JOB_RECIPIENT_REQUESTS:
-                raise KMSRecipientV2Error(
-                    "SOURCE_ADD ingress recipient capacity is full"
-                )
-            self._source_add_requests[request_id] = {
-                "request": dict(request),
-                "miner_hotkey": normalized_miner,
-                "adapter_ref": normalized_adapter,
-                "used": False,
-            }
-        return request
-
-    def unwrap_source_add_ingress_credential(
-        self,
-        *,
-        request_id: str,
-        ciphertext_b64: str,
-    ) -> Dict[str, str]:
-        normalized_request_id = str(request_id or "").lower()
-        with self._lock:
-            record = self._source_add_requests.get(normalized_request_id)
-            if record is None:
-                raise KMSRecipientV2Error(
-                    "SOURCE_ADD ingress recipient request was not found"
-                )
-            if record["used"]:
-                raise KMSRecipientV2Error(
-                    "SOURCE_ADD ingress recipient request was already used"
-                )
-            request = dict(record["request"])
-            miner_hotkey = str(record["miner_hotkey"])
-            adapter_ref = str(record["adapter_ref"])
-        plaintext = self._unwrap(
-            slot="source_add_ingress",
-            ciphertext_for_recipient_b64=str(ciphertext_b64 or ""),
-        )
-        try:
-            credential = plaintext.decode("utf-8").strip()
-        except UnicodeDecodeError as exc:
-            raise KMSRecipientV2Error(
-                "SOURCE_ADD ingress credential is not UTF-8"
-            ) from exc
-        if not credential or "\x00" in credential:
-            raise KMSRecipientV2Error("SOURCE_ADD ingress credential is invalid")
-        with self._lock:
-            current = self._source_add_requests.get(normalized_request_id)
-            if current is None or current["used"]:
-                raise KMSRecipientV2Error("SOURCE_ADD ingress recipient changed")
-            current["used"] = True
-        return {
-            "request_id": normalized_request_id,
-            "miner_hotkey": miner_hotkey,
-            "adapter_ref": adapter_ref,
-            "credential_ref": str(request["credential_ref"]),
-            "key_ref_hash": str(request["key_ref_hash"]),
-            "credential_value_hash": credential_value_hash(credential),
-            "credential": credential,
-        }
 
     def job_recipient_request(
         self,
@@ -319,7 +190,6 @@ class KMSRecipientV2:
         if (
             normalized_slot not in self._expected
             and normalized_slot not in self._job_slots
-            and not source_add_dynamic_job_slot(normalized_slot)
         ):
             raise KMSRecipientV2Error("job recipient slot is not measured")
         if (

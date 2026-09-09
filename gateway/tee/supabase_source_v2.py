@@ -208,106 +208,6 @@ QUERY_POLICIES = {
         max_pages=1,
         limit=2,
     ),
-    "allocation_source_add_rewards": SupabaseQueryV2(
-        policy_id="allocation_source_add_rewards",
-        table="research_lab_source_add_reward_current",
-        select=(
-            "reward_ref,adapter_id,miner_hotkey,leg,reward_kind,alpha_percent,"
-            "reward_epochs,start_epoch,current_reward_status,trigger_evidence_doc,"
-            "public_label,desired_alpha_percent,epoch_count,created_at"
-        ),
-        parameter_names=("epoch_id",),
-        max_pages=50,
-        order="created_at.asc,reward_ref.asc",
-    ),
-    "source_add_reward_by_ref": SupabaseQueryV2(
-        policy_id="source_add_reward_by_ref",
-        table="research_lab_source_add_reward_current",
-        select=(
-            "reward_ref,adapter_id,miner_hotkey,leg,reward_kind,alpha_percent,"
-            "reward_epochs,start_epoch,current_reward_status,trigger_evidence_doc,"
-            "public_label,desired_alpha_percent,epoch_count"
-        ),
-        parameter_names=("reward_ref",),
-        max_pages=1,
-        limit=2,
-    ),
-    "source_add_rewards_by_adapter": SupabaseQueryV2(
-        policy_id="source_add_rewards_by_adapter",
-        table="research_lab_source_add_reward_current",
-        select="reward_ref,adapter_id,leg,current_reward_status",
-        parameter_names=("adapter_id",),
-        max_pages=1,
-        order="reward_ref.asc",
-    ),
-    "source_add_submission_by_id": SupabaseQueryV2(
-        policy_id="source_add_submission_by_id",
-        table="research_lab_source_add_submission_current",
-        select=(
-            "submission_id,adapter_id,miner_hotkey,stage,precheck_status,"
-            "precheck_doc,submission_doc,source_identity_hash,"
-            "source_identity_version"
-        ),
-        parameter_names=("submission_id",),
-        max_pages=1,
-        limit=2,
-    ),
-    "source_add_probe_config_by_submission": SupabaseQueryV2(
-        policy_id="source_add_probe_config_by_submission",
-        table="research_lab_source_add_probe_config_current",
-        select=(
-            "config_ref,submission_id,adapter_id,config_status,probe_doc,"
-            "credential_envelope,created_at"
-        ),
-        parameter_names=("submission_id",),
-        max_pages=1,
-        limit=2,
-    ),
-    "source_add_functional_probe_by_submission": SupabaseQueryV2(
-        policy_id="source_add_functional_probe_by_submission",
-        table="research_lab_source_add_functional_probe_current",
-        select=(
-            "attempt_ref,submission_id,adapter_id,evaluation_mode,config_ref,"
-            "result_status,route_hash,response_hash,status_class,content_type,"
-            "byte_count,duration_ms,reason_codes,receipt_hash,"
-            "business_artifact_hash,result_doc,created_at"
-        ),
-        parameter_names=("submission_id",),
-        max_pages=1,
-        limit=2,
-    ),
-    "source_add_provisioning_smoke_by_submission": SupabaseQueryV2(
-        policy_id="source_add_provisioning_smoke_by_submission",
-        table="research_lab_source_add_provisioning_smoke_current",
-        select=(
-            "attempt_ref,submission_id,adapter_id,evaluation_mode,config_ref,"
-            "result_status,receipt_hash,business_artifact_hash,result_doc,created_at"
-        ),
-        parameter_names=("submission_id",),
-        max_pages=1,
-        limit=2,
-    ),
-    "source_add_leg1_events_since": SupabaseQueryV2(
-        policy_id="source_add_leg1_events_since",
-        table="research_lab_source_add_reward_events",
-        select="reward_ref,created_at,reason",
-        parameter_names=("day_start",),
-        max_pages=2,
-        order="created_at.asc,reward_ref.asc",
-    ),
-    "source_add_provisioning_eligible": SupabaseQueryV2(
-        policy_id="source_add_provisioning_eligible",
-        table="research_lab_source_add_provisioning_current",
-        select=(
-            "provision_ref,catalog_id,submission_id,adapter_id,miner_hotkey,"
-            "source_identity_hash,registry_provider_id,provision_status,"
-            "provision_doc,credential_envelope,source_name,declared_base_domains,"
-            "catalog_doc,accepted_at"
-        ),
-        parameter_names=(),
-        max_pages=1,
-        limit=200,
-    ),
     "provider_registry_recent": SupabaseQueryV2(
         policy_id="provider_registry_recent",
         table="research_lab_provider_registry",
@@ -858,54 +758,9 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         if not re.fullmatch(r"champion_reward:sha256:[0-9a-f]{64}", reward_id):
             raise SupabaseSourceV2Error("champion_reward_id is invalid")
         return (("champion_reward_id", "eq.%s" % reward_id),)
-    if policy.policy_id == "allocation_source_add_rewards":
-        epoch_id = _non_negative_int(parameters["epoch_id"], "epoch_id")
-        return (
-            ("current_reward_status", "in.(active,queued,partially_paid)"),
-            ("start_epoch", "lte.%d" % epoch_id),
-        )
-    if policy.policy_id == "source_add_reward_by_ref":
-        reward_ref = _identifier(parameters["reward_ref"], "reward_ref")
-        if not re.fullmatch(r"source_add_reward:[0-9a-f]{16}", reward_ref):
-            raise SupabaseSourceV2Error("reward_ref is invalid")
-        return (("reward_ref", "eq.%s" % reward_ref),)
-    if policy.policy_id == "source_add_rewards_by_adapter":
-        return (
-            (
-                "adapter_id",
-                "eq.%s" % _identifier(parameters["adapter_id"], "adapter_id"),
-            ),
-        )
     if policy.policy_id in {
-        "source_add_submission_by_id",
-        "source_add_probe_config_by_submission",
-        "source_add_functional_probe_by_submission",
-        "source_add_provisioning_smoke_by_submission",
-    }:
-        submission_id = _identifier(parameters["submission_id"], "submission_id")
-        if not re.fullmatch(r"source_add_submission:[0-9a-f]{16}", submission_id):
-            raise SupabaseSourceV2Error("submission_id is invalid")
-        filters = [("submission_id", "eq.%s" % submission_id)]
-        if policy.policy_id == "source_add_probe_config_by_submission":
-            filters.append(("config_status", "eq.active"))
-        return tuple(filters)
-    if policy.policy_id == "source_add_leg1_events_since":
-        day_start = _identifier(parameters["day_start"], "day_start")
-        if not _TIMESTAMP_RE.fullmatch(day_start):
-            raise SupabaseSourceV2Error("day_start is not an ISO timestamp")
-        return (
-            (
-                "reason",
-                "in.(leg1_provenance_precheck_passed,leg1_functional_probe_passed)",
-            ),
-            ("created_at", "gte.%s" % day_start),
-        )
-    if policy.policy_id in {
-        "source_add_provisioning_eligible",
         "provider_registry_recent",
     }:
-        if policy.policy_id == "source_add_provisioning_eligible":
-            return (("provision_status", "eq.provisioned"),)
         return ()
     if policy.policy_id == "allocation_history":
         start_epoch = _non_negative_int(parameters["start_epoch"], "start_epoch")

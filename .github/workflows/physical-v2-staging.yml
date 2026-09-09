@@ -37,7 +37,6 @@ jobs:
       PRODUCTION_GATEWAY_URL: ${{ vars.LEADPOET_PARITY_PRODUCTION_GATEWAY_URL }}
       PRODUCTION_GATEWAY_SECRET_ID: ${{ vars.LEADPOET_PARITY_PRODUCTION_GATEWAY_SECRET_ID }}
       READONLY_DSN_SECRET_ID: ${{ vars.LEADPOET_PARITY_READONLY_DSN_SECRET_ID }}
-      MINER_INTAKE_SECRET_ID: ${{ vars.LEADPOET_PARITY_MINER_INTAKE_SECRET_ID }}
       RUNNER_INSTANCE_PROFILE: ${{ vars.LEADPOET_PARITY_RUNNER_INSTANCE_PROFILE }}
       POSTGRES_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGRES_IMAGE }}
       POSTGREST_IMAGE: ${{ vars.LEADPOET_PARITY_POSTGREST_IMAGE }}
@@ -186,7 +185,6 @@ jobs:
           test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
           for name in AWS_REGION PRODUCTION_GATEWAY_IP PRODUCTION_GATEWAY_URL \
             PRODUCTION_GATEWAY_SECRET_ID READONLY_DSN_SECRET_ID \
-            MINER_INTAKE_SECRET_ID \
             RUNNER_INSTANCE_PROFILE POSTGRES_IMAGE \
             POSTGREST_IMAGE PARITY_VOLUME_GIB FULL_TIMEOUT_SECONDS \
             SSM_TIMEOUT_SECONDS; do
@@ -364,7 +362,6 @@ jobs:
           required = {name: os.environ[name] for name in (
               "AWS_REGION", "CANDIDATE_SHA", "PRODUCTION_GATEWAY_SECRET_ID",
               "READONLY_DSN_SECRET_ID",
-              "MINER_INTAKE_SECRET_ID",
               "POSTGRES_IMAGE", "POSTGREST_IMAGE", "FULL_TIMEOUT_SECONDS",
               "SSM_TIMEOUT_SECONDS",
           )}
@@ -694,7 +691,6 @@ jobs:
             --candidate-sha {q(required['CANDIDATE_SHA'])} \
             --production-gateway-secret-id {q(required['PRODUCTION_GATEWAY_SECRET_ID'])} \
             --readonly-dsn-secret-id {q(required['READONLY_DSN_SECRET_ID'])} \
-            --miner-intake-secret-id {q(required['MINER_INTAKE_SECRET_ID'])} \
             --supabase-origin {q(origin)} \
             --artifact-bucket {q(artifact_bucket)} \
             --postgres-image {q(required['POSTGRES_IMAGE'])} \
@@ -1059,23 +1055,6 @@ jobs:
                   != "strict-non-forwarding"
               or value.get("external_write_boundaries", {}).get("arweave")
                   != "blocked-production-parity"
-              or value.get("miner_intake", {}).get("status") != "passed"
-              or value.get("miner_intake", {}).get(
-                  "chain_registration_boundary"
-              ) != "strict-ephemeral-hotkey"
-              or value.get("miner_intake", {}).get("source_add", {}).get(
-                  "live_provider_credential_verified"
-              ) is not True
-              or value.get("miner_intake", {}).get("source_add", {}).get(
-                  "admitted"
-              ) is not True
-              or value.get("miner_intake", {}).get("source_add", {}).get(
-                  "downstream_executed"
-              ) is not False
-              or value.get("miner_intake", {}).get("production_database_mutated")
-                  is not False
-              or value.get("miner_intake", {}).get("production_chain_mutated")
-                  is not False
           ):
               raise SystemExit("full production-parity evidence is incomplete")
           PY

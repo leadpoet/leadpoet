@@ -113,18 +113,11 @@ Usage:
 The default "all" mode starts both exact-commit restarts in one invocation.
 A single-component restart is accepted only when the other component is
 already running the selected commit.
-The miner-submission option is paired-only. It durably pauses SOURCE_ADD,
-holds the canonical restart guard with one invocation-specific owner and
-monotonic generation, drains every leased SOURCE_ADD
-work item to an exact zero readback, proves intake closed, and prepares the
-exact candidate under the canonical gateway lock before the installed N-1
-wrapper hydrates. A fresh retry takes over the same guard at a new generation,
-fencing the prior invocation. The exact owner/generation is renewed with a
-14,400-second lease and the zero-lease state is rechecked immediately before
-shutdown and after candidate startup. A drain timeout aborts while
-leaving SOURCE_ADD paused and guarded; successful runtime verification releases
-the guard and atomically restores the SOURCE_ADD pause state that existed before
-the restart. A failed restart remains paused.
+The miner-submission option is paired-only. It durably disables global miner
+submissions and binds exact secret readback and candidate identity into a sealed
+invocation proof before the installed N-1 wrapper hydrates. Shared maintenance
+authority is verified before shutdown and after startup. Arena admission and
+lease draining use their own fenced restart guard.
 EOF
 }
 

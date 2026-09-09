@@ -472,42 +472,24 @@ def test_retry_can_finalize_when_the_write_once_upload_already_exists(tmp_path):
     assert len(session.posts) == 2
 
 
-def test_miner_menu_has_two_primary_submission_actions():
+def test_miner_menu_has_only_model_submission():
     miner = (Path(__file__).resolve().parents[2] / "neurons" / "miner.py").read_text(
         encoding="utf-8"
     )
     menu = miner.split("def _choose_primary_miner_mode", 1)[1].split(
         "def main", 1
     )[0]
-    assert "Submit SOURCE_ADD" in menu
+    assert "SOURCE_ADD" not in menu
     assert "Submit Model" in menu
     assert "Fulfillment —" not in menu
-    assert "Check my submissions" in menu
+    assert "Check my submissions" not in menu
     assert "Auto Research" not in menu
 
 
-@pytest.mark.parametrize(
-    ("answers", "expected"),
-    (
-        (("",), "agent_competition"),
-        (("2",), "agent_competition"),
-        (("1", ""), "research_lab_source_add"),
-        (("1", "1"), "research_lab_source_add"),
-        (("1", "2"), "research_lab_source_add_status"),
-    ),
-)
-def test_miner_menu_routes_two_primary_actions_and_source_add_status(
-    answers,
-    expected,
-):
+def test_miner_menu_routes_directly_to_model_submission():
     choose = _load_neuron_function("_choose_primary_miner_mode")
-    values = iter(answers)
     output = []
-    assert choose(lambda _prompt: next(values), output.append) == expected
-    primary_lines = [
-        line for line in output if line.startswith("  1.") or line.startswith("  2.")
-    ][:2]
-    assert primary_lines == [
-        "  1. Submit SOURCE_ADD — Submit or check an API/source candidate",
-        "  2. Submit Model — Submit model source and run credentials (default)",
-    ]
+    def unexpected_prompt(_prompt):
+        raise AssertionError("There is only one submission action")
+    assert choose(unexpected_prompt, output.append) == "agent_competition"
+    assert " Submit Model — Submit model source and run credentials" in output

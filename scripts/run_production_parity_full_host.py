@@ -100,13 +100,6 @@ ARENA_BASELINE_SOURCE_URL = (
     "https://github.com/leadpoet/pydantic-harness/"
     "archive/refs/heads/lab.tar.gz"
 )
-MINER_INTAKE_ENVIRONMENT_OVERRIDES = {
-    "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
-    "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
-    "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
-    "RESEARCH_LAB_SOURCE_ADD_ENABLED": "true",
-    "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
-}
 EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
 )
@@ -147,7 +140,6 @@ FULL_FAILURE_STAGES = frozenset(
         "weight-readiness",
         "allocation-handoff",
         "nonforwarding-weight-path",
-        "miner-intake",
         "clone-shape",
         "clone-weight-history",
         "cleanup",
@@ -293,14 +285,8 @@ _CREDENTIAL_EXCEPTION_CLASSES = frozenset(
 )
 _CREDENTIAL_SCHEMA_FUNCTIONS = frozenset(
     {
-        "_source_add_leg1_release_environment_policy_v1",
         "_verify_chain_realized_activation_v1",
         "_verify_compact_weight_settlement_contract_v1",
-        "_verify_source_add_claim_control_contract_v2",
-        "_verify_source_add_duplicate_privacy_contract_v1",
-        "_verify_source_add_miner_status_contract_v1",
-        "_verify_source_add_post_accept_leg1_contract_v4",
-        "_verify_source_add_provider_origin_contract_v1",
         "verify_required_supabase_v2_schema",
     }
 )
@@ -322,25 +308,9 @@ _CREDENTIAL_ENVELOPE_FUNCTIONS = frozenset(
     }
 )
 _CREDENTIAL_SCHEMA_PROBES = {
-    "_source_add_leg1_release_environment_policy_v1": "source_add_leg1_release_policy",
     "_verify_chain_realized_activation_v1": "chain_realized_activation",
     "_verify_compact_weight_settlement_contract_v1": (
         "research_lab_compact_weight_settlement_contract_v1"
-    ),
-    "_verify_source_add_claim_control_contract_v2": (
-        "research_lab_source_add_claim_control_contract_v2"
-    ),
-    "_verify_source_add_duplicate_privacy_contract_v1": (
-        "research_lab_source_add_duplicate_privacy_contract_v1"
-    ),
-    "_verify_source_add_miner_status_contract_v1": (
-        "research_lab_source_add_miner_status_contract_v1"
-    ),
-    "_verify_source_add_post_accept_leg1_contract_v4": (
-        "research_lab_source_add_post_accept_leg1_contract_v4"
-    ),
-    "_verify_source_add_provider_origin_contract_v1": (
-        "research_lab_source_add_provider_origin_contract_v1"
     ),
 }
 _CREDENTIAL_AWS_ERROR_RE = re.compile(
@@ -1906,23 +1876,6 @@ def _clone_arena_service_role_key(
     )
 
 
-def _builtwith_key_from_secret(raw: str) -> str:
-    try:
-        value = json.loads(raw)
-    except ValueError as exc:
-        raise FullParityError("miner-intake secret is invalid") from exc
-    key = (
-        str(value.get("builtwith_api_key") or "").strip()
-        if isinstance(value, Mapping)
-        else ""
-    )
-    if (
-        not 8 <= len(key) <= 512
-        or any(character.isspace() for character in key)
-        or "\x00" in key
-    ):
-        raise FullParityError("miner-intake secret is invalid")
-    return key
 
 
 def _last_json_document(output: str, *, field: str) -> dict[str, Any]:
@@ -3530,429 +3483,14 @@ def _run_arena_rebenchmark_child(
             raise cleanup_error
 
 
-def _run_miner_intake_path(
-    *,
-    region: str,
-    candidate_sha: str,
-    run_id: str,
-    supabase_origin: str,
-    gateway_env_file: Path,
-    artifact_bucket: str,
-    miner_intake_secret: str,
-) -> dict[str, Any]:
-    builtwith_credential = _builtwith_key_from_secret(miner_intake_secret)
-    _validated_clone_environment(
-        gateway_env_file,
-        candidate_sha=candidate_sha,
-        run_id=run_id,
-        supabase_origin=supabase_origin,
-        artifact_bucket=artifact_bucket,
-    )
-    child_env = {
-        **_clone_child_environment(region=region),
-        **MINER_INTAKE_ENVIRONMENT_OVERRIDES,
-    }
-    request = {
-        "schema_version": "leadpoet.production_parity_miner_intake_request.v1",
-        "candidate_sha": candidate_sha,
-        "run_id": run_id,
-        "artifact_bucket": artifact_bucket,
-        "region": region,
-        "supabase_origin": supabase_origin,
-        "gateway_env_file": str(gateway_env_file),
-        "builtwith_credential": builtwith_credential,
-    }
-    result = _run(
-        [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--miner-intake-child",
-        ],
-        timeout=360,
-        env=child_env,
-        input_text=json.dumps(request, separators=(",", ":")),
-    )
-    # Drop all parent references before interpreting child output. The child
-    # emits only bounded booleans/counts; credentials never enter evidence.
-    request.clear()
-    builtwith_credential = ""
-    if (
-        result.returncode != 0
-        or len(result.stdout or "") > 256 * 1024
-        or len(result.stderr or "") > 64 * 1024
-    ):
-        raise FullParityError("exact miner-intake workflow failed closed")
-    evidence = _last_json_document(
-        result.stdout or "", field="miner-intake workflow"
-    )
-    if (
-        evidence.get("schema_version")
-        != "leadpoet.production_parity_miner_intake_evidence.v1"
-        or evidence.get("candidate_sha") != candidate_sha
-        or evidence.get("run_id") != run_id
-        or evidence.get("artifact_bucket") != artifact_bucket
-        or evidence.get("status") != "passed"
-        or evidence.get("production_database_mutated") is not False
-        or evidence.get("production_chain_mutated") is not False
-        or evidence.get("chain_registration_boundary")
-        != "strict-ephemeral-hotkey"
-        or evidence.get("source_add", {}).get("admitted") is not True
-        or evidence.get("source_add", {}).get("source_add_paused") is not False
-    ):
-        raise FullParityError("miner-intake evidence is incomplete")
-    return evidence
 
 
-def _verify_builtwith_credential_live(credential: str) -> dict[str, Any]:
-    url = (
-        "https://api.builtwith.com/v23/api.json?LOOKUP=builtwith.com"
-        "&HIDETEXT=yes&NOMETA=yes&NOPII=yes&NOATTR=yes"
-    )
-    request = Request(
-        url,
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"API {credential}",
-            "User-Agent": "Leadpoet-Production-Parity/1.0",
-        },
-    )
-    try:
-        with urlopen(request, timeout=45) as response:
-            payload = response.read(4 * 1024 * 1024 + 1)
-            status = int(response.status)
-    except Exception as exc:
-        raise FullParityError(
-            "BuiltWith live credential verification failed"
-        ) from exc
-    finally:
-        url = ""
-    if status != 200 or not payload or len(payload) > 4 * 1024 * 1024:
-        raise FullParityError("BuiltWith live credential verification failed")
-    try:
-        document = json.loads(payload)
-    except ValueError as exc:
-        raise FullParityError(
-            "BuiltWith live credential verification returned invalid JSON"
-        ) from exc
-    if not isinstance(document, (Mapping, list)):
-        raise FullParityError(
-            "BuiltWith live credential verification returned invalid JSON"
-        )
-    if isinstance(document, Mapping):
-        errors = document.get("Errors") or document.get("errors")
-        if errors:
-            raise FullParityError("BuiltWith live credential verification failed")
-    return {
-        "http_status": status,
-        "json_verified": True,
-        "response_bytes": len(payload),
-    }
 
 
-async def _run_miner_intake_child(request: Mapping[str, Any]) -> dict[str, Any]:
-    if (
-        request.get("schema_version")
-        != "leadpoet.production_parity_miner_intake_request.v1"
-        or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
-        or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
-        or not ARTIFACT_BUCKET_RE.fullmatch(
-            str(request.get("artifact_bucket") or "")
-        )
-        or request.get("region") != "us-east-1"
-        or os.getenv("AWS_REGION") != "us-east-1"
-        or os.getenv("AWS_DEFAULT_REGION") != "us-east-1"
-    ):
-        raise FullParityError("miner-intake child identity differs")
-    candidate_sha = str(request["candidate_sha"])
-    run_id = str(request["run_id"])
-    artifact_bucket = str(request["artifact_bucket"])
-    supabase_origin = _validated_public_origin(
-        str(request.get("supabase_origin") or "")
-    )
-    gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
-    values = _validated_clone_environment(
-        gateway_env_file,
-        candidate_sha=candidate_sha,
-        run_id=run_id,
-        supabase_origin=supabase_origin,
-        artifact_bucket=artifact_bucket,
-    )
-    with _applied_clone_environment(
-        values,
-        gateway_env_file,
-        overrides=MINER_INTAKE_ENVIRONMENT_OVERRIDES,
-    ):
-        return await _run_miner_intake_child_validated(request)
 
 
-async def _run_miner_intake_child_validated(
-    request: Mapping[str, Any],
-) -> dict[str, Any]:
-    from types import SimpleNamespace
-
-    import httpx
-    from bittensor_wallet import Keypair
-
-    from gateway.main import app
-    from gateway.research_lab import api as research_lab_api
-    from gateway.research_lab.source_add_workflow import source_add_control_state
-    from gateway.research_lab.store import call_rpc, select_many, select_one
-    from neurons.miner import (
-        _research_lab_signed_payload,
-        _research_lab_source_add_signed_payload,
-    )
-    from research_lab.source_add_miner import build_source_add_submission_docs
-
-    if (
-        request.get("schema_version")
-        != "leadpoet.production_parity_miner_intake_request.v1"
-        or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
-        or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
-        or not ARTIFACT_BUCKET_RE.fullmatch(
-            str(request.get("artifact_bucket") or "")
-        )
-        or os.getenv("LEADPOET_PARITY_CANDIDATE_SHA")
-        != request.get("candidate_sha")
-    ):
-        raise FullParityError("miner-intake child identity differs")
-    candidate_sha = str(request["candidate_sha"])
-    run_id = str(request["run_id"])
-    builtwith_credential = str(request.get("builtwith_credential") or "").strip()
-    if not builtwith_credential:
-        raise FullParityError("miner-intake credentials are incomplete")
-
-    keypair = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
-    wallet = SimpleNamespace(hotkey=keypair)
-    miner_hotkey = keypair.ss58_address
-    observed_chain_checks: list[str] = []
-    chain_check_milestones: list[int] = []
-    original_chain_registration = research_lab_api.chain_is_hotkey_registered
-
-    async def strict_chain_registration(hotkey: str):
-        observed_chain_checks.append(str(hotkey))
-        if str(hotkey) != miner_hotkey:
-            return False, None
-        return True, "miner"
-
-    research_lab_api.chain_is_hotkey_registered = strict_chain_registration
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    source_controls: dict[str, Any] = {}
-    try:
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://production-parity.invalid",
-            timeout=httpx.Timeout(180.0),
-        ) as client:
-            builtwith_probe = _verify_builtwith_credential_live(
-                builtwith_credential
-            )
-            source_state = await source_add_control_state()
-            source_controls = {
-                "source_add_paused": bool(source_state.get("paused", True)),
-            }
-            if source_controls["source_add_paused"]:
-                await call_rpc(
-                    "research_lab_source_add_set_paused",
-                    {
-                        "p_paused": False,
-                        "p_reason": "production_parity_miner_intake",
-                        "p_actor_ref": "system:production-parity",
-                    },
-                )
-            source_only_source_state = await source_add_control_state()
-            if source_only_source_state.get("paused") is not False:
-                raise FullParityError("SOURCE_ADD maintenance control did not activate")
-            manifest, source_brief, idempotency_key, source_metadata = (
-                build_source_add_submission_docs(
-                    miner_hotkey=miner_hotkey,
-                    source_name=f"BuiltWith API parity {run_id}",
-                    source_kind="tech_stack",
-                    api_base_url="https://api.builtwith.com/v23",
-                    documentation_url=(
-                        "https://github.com/builtwith/builtwith-ai-sdk"
-                    ),
-                    auth_type="api_key_header",
-                    endpoint_examples=(
-                        {
-                            "method": "GET",
-                            "path": "/api.json",
-                            "purpose": "Retrieve company technology usage",
-                            "example_query": (
-                                "LOOKUP=builtwith.com&HIDETEXT=yes&NOMETA=yes"
-                                "&NOPII=yes&NOATTR=yes"
-                            ),
-                        },
-                    ),
-                    rate_limit_notes=(
-                        "Provider account limits apply; one bounded read-only "
-                        "lookup is used for admission validation."
-                    ),
-                    data_provenance_notes=(
-                        "Technology observations returned by the BuiltWith API."
-                    ),
-                    third_party_refs=(
-                        "https://api.builtwith.com/domain-api",
-                    ),
-                    credential_supplied=False,
-                )
-            )
-            source_payload = _research_lab_source_add_signed_payload(
-                wallet,
-                {
-                    "miner_hotkey": miner_hotkey,
-                    "timestamp": int(time.time()),
-                    "idempotency_key": idempotency_key,
-                    "manifest": manifest,
-                    "source_brief": source_brief,
-                    "source_metadata": source_metadata,
-                },
-            )
-            source_response = await client.post(
-                "/research-lab/source-adapters", json=source_payload
-            )
-            if source_response.status_code != 200:
-                raise FullParityError(
-                    "SOURCE_ADD admission rejected the exact miner request"
-                )
-            chain_check_milestones.append(len(observed_chain_checks))
-            source_result = source_response.json()
-            submission_id = str(source_result.get("submission_id") or "")
-            source_row = await select_one(
-                "research_lab_source_add_submission_current",
-                filters=(("submission_id", submission_id),),
-            )
-            work_rows = await select_many(
-                "research_lab_source_add_work_items",
-                filters=(("submission_id", submission_id),),
-                limit=5,
-            )
-            source_persistence = json.dumps(
-                {
-                    "response": source_result,
-                    "submission": source_row,
-                    "work": work_rows,
-                },
-                sort_keys=True,
-                default=str,
-            )
-            current_doc = (
-                source_row.get("submission_doc")
-                if isinstance(source_row, Mapping)
-                and isinstance(source_row.get("submission_doc"), Mapping)
-                else {}
-            )
-            if (
-                not submission_id
-                or source_result.get("stage") != "provenance_queued"
-                or not isinstance(source_row, Mapping)
-                or source_row.get("stage") != "provenance_queued"
-                or len(work_rows) != 1
-                or work_rows[0].get("work_kind") != "provenance"
-                or work_rows[0].get("work_status") != "queued"
-                or int(work_rows[0].get("attempt_count") or 0) != 0
-                or current_doc.get("credential_envelope") not in ({}, None)
-                or builtwith_credential in source_persistence
-            ):
-                raise FullParityError("SOURCE_ADD admission persistence is incomplete")
-            if (await source_add_control_state()).get("paused") is not False:
-                raise FullParityError("SOURCE_ADD admission changed its intake controls")
-
-            retired_payload = _research_lab_signed_payload(
-                wallet,
-                {
-                    "miner_hotkey": miner_hotkey,
-                    "timestamp": int(time.time()),
-                    "idempotency_key": f"source-add-recipient:{run_id}",
-                    "adapter_id": str(source_result.get("adapter_id") or ""),
-                },
-            )
-            retired_response = await client.post(
-                "/research-lab/source-adapters/credential-recipient",
-                json=retired_payload,
-            )
-            chain_check_milestones.append(len(observed_chain_checks))
-            forbidden_payload = {
-                **source_payload,
-                "adapter_credential": "production-parity-forbidden-value",
-            }
-            forbidden_response = await client.post(
-                "/research-lab/source-adapters", json=forbidden_payload
-            )
-            if (
-                retired_response.status_code != 410
-                or forbidden_response.status_code != 422
-            ):
-                raise FullParityError(
-                    "SOURCE_ADD public credential boundary did not fail closed"
-                )
-
-        if (
-            any(hotkey != miner_hotkey for hotkey in observed_chain_checks)
-            or len(chain_check_milestones) != 2
-            or any(
-                current <= previous
-                for previous, current in zip(
-                    (0, *chain_check_milestones[:-1]),
-                    chain_check_milestones,
-                )
-            )
-        ):
-            raise FullParityError(
-                "miner intake did not traverse the strict registration boundary"
-            )
-        return {
-            "schema_version": (
-                "leadpoet.production_parity_miner_intake_evidence.v1"
-            ),
-            "status": "passed",
-            "candidate_sha": candidate_sha,
-            "run_id": run_id,
-            "artifact_bucket": str(request["artifact_bucket"]),
-            "chain_registration_boundary": "strict-ephemeral-hotkey",
-            "production_database_mutated": False,
-            "production_chain_mutated": False,
-            "source_add": {
-                "provider": "builtwith",
-                "live_provider_credential_verified": (
-                    builtwith_probe["http_status"] == 200
-                    and builtwith_probe["json_verified"] is True
-                ),
-                "miner_signature_verified": True,
-                "admitted": True,
-                "stage": "provenance_queued",
-                "queued_work_count": 1,
-                "downstream_executed": False,
-                "credential_transport": "operator-managed-production-contract",
-                "public_credentials_forbidden": True,
-                "plaintext_absent": True,
-                "source_add_paused": False,
-            },
-        }
-    finally:
-        research_lab_api.chain_is_hotkey_registered = original_chain_registration
-        try:
-            await _restore_miner_intake_controls(source_controls, call_rpc=call_rpc)
-        finally:
-            request = {}
-            builtwith_credential = ""
 
 
-async def _restore_miner_intake_controls(
-    source_controls: Mapping[str, Any],
-    *,
-    call_rpc: Any,
-) -> None:
-    """Restore the clone-local SOURCE_ADD control changed for intake."""
-
-    if source_controls.get("source_add_paused"):
-        await call_rpc(
-            "research_lab_source_add_set_paused",
-            {
-                "p_paused": True,
-                "p_reason": "production_parity_miner_intake_complete",
-                "p_actor_ref": "system:production-parity",
-            },
-        )
 
 
 def _current_epoch_from_readiness(output: str) -> int:
@@ -4206,7 +3744,6 @@ def run_full(
     candidate_sha: str,
     production_gateway_secret_id: str,
     readonly_dsn_secret_id: str,
-    miner_intake_secret_id: str,
     supabase_origin: str,
     artifact_bucket: str,
     postgres_image: str,
@@ -4563,19 +4100,6 @@ def run_full(
                 "gateway handoff and primary/audit allocation hashes differ"
             )
         failure_stage = "miner-intake"
-        miner_intake = _run_miner_intake_path(
-            region=region,
-            candidate_sha=candidate_sha,
-            run_id=run_id,
-            supabase_origin=supabase_origin,
-            gateway_env_file=gateway_env_file,
-            artifact_bucket=artifact_bucket,
-            miner_intake_secret=_secret_value(
-                secrets_client,
-                miner_intake_secret_id,
-                field="miner-intake credential",
-            ),
-        )
         failure_stage = "clone-shape"
         service_role_key = _clone_service_role_key(
             parsed_env,
@@ -4613,7 +4137,6 @@ def run_full(
                 "arena_rebenchmark": arena_rebenchmark,
                 "allocation_handoff": handoff,
                 "weight_path": weight_path,
-                "miner_intake": miner_intake,
             }
         )
     except Exception as exc:
@@ -4711,7 +4234,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     child_modes = {
         "--arena-rebenchmark-child",
         "--clone-handoff-child",
-        "--miner-intake-child",
     }
     if len(raw_args) == 1 and raw_args[0] in child_modes:
         child_mode = raw_args[0]
@@ -4722,8 +4244,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = _run_arena_rebenchmark_child(request)
             elif child_mode == "--clone-handoff-child":
                 result = _run_clone_handoff_child(request)
-            else:
-                result = asyncio.run(_run_miner_intake_child(request))
         except Exception:  # noqa: BLE001 - never print secret-bearing detail
             print("ERROR: clone child failed closed", file=sys.stderr)
             return 1
@@ -4736,7 +4256,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--production-gateway-secret-id", required=True)
     parser.add_argument("--readonly-dsn-secret-id", required=True)
-    parser.add_argument("--miner-intake-secret-id", required=True)
     parser.add_argument("--supabase-origin", required=True)
     parser.add_argument("--artifact-bucket", required=True)
     parser.add_argument("--postgres-image", required=True)
@@ -4758,7 +4277,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             candidate_sha=candidate_sha,
             production_gateway_secret_id=args.production_gateway_secret_id,
             readonly_dsn_secret_id=args.readonly_dsn_secret_id,
-            miner_intake_secret_id=args.miner_intake_secret_id,
             supabase_origin=args.supabase_origin,
             artifact_bucket=args.artifact_bucket,
             postgres_image=args.postgres_image,

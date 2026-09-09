@@ -293,7 +293,6 @@ async def verify_weight_submission_ready_v2(
         backfill_champion_reward_v2_authority,
         backfill_champion_settlement_v2_authority,
         backfill_historical_compute_fallback_v2_authority,
-        backfill_source_add_reward_v2_authority,
     )
 
     effective_epoch = await _resolve_maintenance_epoch(epoch)
@@ -316,7 +315,6 @@ async def verify_weight_submission_ready_v2(
 
     repairs: dict[str, Any] = (
         {
-            "source_add_reward_receipts_created": 0,
             "champion_reward_receipts_created": 0,
             "historical_allocations_classified": 0,
             "historical_compute_fallbacks_classified": 0,
@@ -326,15 +324,6 @@ async def verify_weight_submission_ready_v2(
     )
 
     async def run_authority_repairs() -> dict[str, Any]:
-        source_reward_result = await backfill_source_add_reward_v2_authority(
-            epoch=effective_epoch,
-            limit=10000,
-            dry_run=False,
-        )
-        if source_reward_result.get("ok") is not True:
-            raise WeightSubmissionReadinessV2Error(
-                "SOURCE_ADD reward authority backfill failed"
-            )
         reward_result = await backfill_champion_reward_v2_authority(
             epoch=effective_epoch,
             limit=10000,
@@ -366,9 +355,6 @@ async def verify_weight_submission_ready_v2(
                 "historical compute fallback classification failed"
             )
         return {
-            "source_add_reward_receipts_created": int(
-                source_reward_result.get("migrated_count") or 0
-            ),
             "champion_reward_receipts_created": int(
                 reward_result.get("migrated_count") or 0
             ),

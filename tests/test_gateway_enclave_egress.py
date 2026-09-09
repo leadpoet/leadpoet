@@ -1852,7 +1852,7 @@ def test_httpx_framed_transport_recovers_complete_chunked_json_before_eof(
     try:
         result = transport(
             method="GET",
-            url="https://example.com/rest/v1/source_add_provisioning_eligible",
+            url="https://example.com/rest/v1/qualification_candidates",
             headers={"accept": "application/json"},
             body=b"",
             timeout_ms=3000,

@@ -336,9 +336,6 @@ def test_artifact_egress_transport_boundaries_are_protected():
     ]
     assert {
         "lifespan",
-        "_start_source_add_dispatcher_task",
-        "_SOURCE_ADD_INDEPENDENT_PATHS",
-        "_gateway_source_add_dispatcher_ready",
     } <= set(PROTECTED_SYMBOLS["gateway/main.py"])
     assert {
         "_TRANSIENT_ERROR_SIGNATURES",

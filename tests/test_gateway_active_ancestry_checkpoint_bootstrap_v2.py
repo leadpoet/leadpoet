@@ -494,7 +494,7 @@ async def test_all_active_graph_selections_are_concurrent_and_exact():
 
     async def arrive(name):
         started.add(name)
-        if len(started) == 3:
+        if len(started) == 2:
             both_started.set()
         await asyncio.wait_for(both_started.wait(), timeout=0.2)
         return [deepcopy(graph)]
@@ -505,9 +505,8 @@ async def test_all_active_graph_selections_are_concurrent_and_exact():
         policy={"enabled": True},
         load_allocation_graphs=lambda **_kwargs: arrive("allocation"),
         load_sourcing_graphs=lambda **_kwargs: arrive("sourcing"),
-        load_source_add_graphs=lambda **_kwargs: arrive("source_add"),
     )
-    assert set(started) == {"allocation", "sourcing", "source_add"}
+    assert set(started) == {"allocation", "sourcing"}
     assert selected == {HASH_A: graph}
 
     conflicting = _full_graph(HASH_A)

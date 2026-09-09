@@ -360,38 +360,6 @@ async def test_history_loaders_expose_every_validated_raw_authority_graph(
     }
 
 
-def test_legacy_classification_detects_source_add_payments():
-    payload = {
-        "schema_version": "leadpoet.research_lab_allocation.v2",
-        "epoch": 100,
-        "champion_allocations": [],
-        "queued_champion_allocations": [],
-        "source_add_allocations": [
-            {
-                "source_add_reward_id": "source_add_reward:test",
-                "paid_alpha_percent": 1.0,
-            }
-        ],
-    }
-    allocation = {**payload, "allocation_hash": sha256_json(payload)}
-
-    epoch, allocation_hash, pays_active = (
-        settlement._legacy_allocation_active_champion_payment_v2(
-            {
-                "epoch": 100,
-                "netuid": 71,
-                "allocation_hash": allocation["allocation_hash"],
-                "allocation_doc": allocation,
-            },
-            netuid=71,
-            active_reward_ids=set(),
-            active_source_reward_ids={"source_add_reward:test"},
-        )
-    )
-
-    assert epoch == 100
-    assert allocation_hash == allocation["allocation_hash"]
-    assert pays_active is True
 
 
 def _authority_row(
@@ -3386,8 +3354,6 @@ async def test_cutover_does_not_reclassify_complete_chain_realized_epoch(
                 "",
             )
             return [reward] if status == "active" else []
-        if table == "research_lab_source_add_reward_current":
-            return []
         if table == "research_lab_emission_allocation_current":
             return [
                 {
@@ -3498,7 +3464,6 @@ async def test_cutover_does_not_reclassify_unattributed_chain_realized_epoch(
             )
             return [reward] if status == "active" else []
         if table in {
-            "research_lab_source_add_reward_current",
             "research_lab_emission_allocation_current",
             "research_lab_arweave_epoch_audit_anchor_current",
             "published_weight_bundles",
@@ -3733,91 +3698,6 @@ async def test_default_v2_allocation_path_blocks_incomplete_champion_coverage(
         )
 
 
-@pytest.mark.asyncio
-async def test_source_add_receipt_backfill_is_idempotent_and_measured(monkeypatch):
-    from gateway.research_lab import attested_v2_store, maintenance, v2_authority
-    from gateway.tee.reward_executor_v2 import source_add_reward_row_projection_v2
-
-    reward_ref = "source_add_reward:201a08f0d2b503bf"
-    reward = {
-        "reward_ref": reward_ref,
-        "adapter_id": "adapter:uspto-patents-center-api-86bb73c0149e",
-        "miner_hotkey": "miner-1",
-        "leg": 1,
-        "reward_kind": "source_acceptance",
-        "alpha_percent": 1.0,
-        "reward_epochs": 20,
-        "start_epoch": 23870,
-        "trigger_evidence_doc": {
-            "submission_id": "source_add_submission:a3d8f3e562dca636",
-            "precheck_status": "provenance_precheck_passed",
-            "reward_trigger": "provenance_precheck_passed",
-        },
-        "public_label": "Source acceptance reward",
-        "current_reward_status": "active",
-        "created_at": "2026-07-10T00:00:00Z",
-    }
-
-    async def select_all(_table, *, filters=(), **_kwargs):
-        status = next(
-            (value for field, value in filters if field == "current_reward_status"),
-            "",
-        )
-        return [reward] if status == "active" else []
-
-    migrated = []
-    state = {"covered": False}
-    root_hash = "sha256:" + "e" * 64
-
-    async def load_graph(**_kwargs):
-        if not state["covered"]:
-            raise RuntimeError("not migrated")
-        return {
-            "root_receipt_hash": root_hash,
-            "receipts": [
-                {
-                    "receipt_hash": root_hash,
-                    "purpose": "research_lab.reward_decision.v2",
-                    "output_root": sha256_json(
-                        source_add_reward_row_projection_v2(
-                            "source_add_leg1",
-                            {**reward, "initial_reward_status": "active"},
-                        )
-                    ),
-                }
-            ],
-        }
-
-    async def attest(**kwargs):
-        migrated.append(kwargs)
-        state["covered"] = True
-        return {"execution_receipt": {"receipt_hash": root_hash}}
-
-    monkeypatch.setattr(maintenance, "select_all", select_all)
-    monkeypatch.setattr(
-        attested_v2_store,
-        "load_business_artifact_graph_by_ref_v2",
-        load_graph,
-    )
-    monkeypatch.setattr(
-        v2_authority,
-        "attest_historical_source_add_reward_v2",
-        attest,
-    )
-
-    first = await maintenance.backfill_source_add_reward_v2_authority(
-        epoch=24038,
-        dry_run=False,
-    )
-    second = await maintenance.backfill_source_add_reward_v2_authority(
-        epoch=24038,
-        dry_run=False,
-    )
-
-    assert first["migrated_count"] == 1
-    assert second["already_covered_count"] == 1
-    assert second["migrated_count"] == 0
-    assert migrated == [{"epoch_id": 24038, "reward_ref": reward_ref}]
 
 
 @pytest.mark.asyncio

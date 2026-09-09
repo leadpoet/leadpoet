@@ -206,7 +206,6 @@ def test_allocation_is_built_from_measured_empty_sources():
         inputs["policy"],
         [],
         [],
-        active_source_add_obligations=[],
     )
     assert result["allocation"] == expected
     assert result["source_state"]["reimbursement_obligations"] == []
@@ -216,7 +215,6 @@ def test_allocation_is_built_from_measured_empty_sources():
         "allocation_champion_rewards",
         {"epoch_id": 100, "include_paid": False},
     ) in reader.calls
-    assert ("allocation_source_add_rewards", {"epoch_id": 100}) in reader.calls
 
 
 def test_expired_legacy_paid_champion_does_not_reopen_history():
@@ -455,357 +453,8 @@ def test_measured_no_burn_source_requires_finalized_authority(monkeypatch):
     ) in reader.calls
 
 
-def test_unreceipted_source_add_reward_fails_closed():
-    resolver = CoordinatorAllocationSourceV2(
-        reader=FakeReader(
-            {
-                "chain_realized_settlement_activation": [
-                    _chain_realized_activation()
-                ],
-                "allocation_source_add_rewards": [
-                    {
-                        "reward_ref": "source_add_reward:" + "1" * 16,
-                        "adapter_id": "adapter:test",
-                        "miner_hotkey": "miner",
-                        "leg": 1,
-                        "reward_kind": "source_acceptance",
-                        "alpha_percent": 1.0,
-                        "reward_epochs": 20,
-                        "start_epoch": 100,
-                        "current_reward_status": "active",
-                        "desired_alpha_percent": 1.0,
-                        "epoch_count": 20,
-                    }
-                ]
-            }
-        ),
-        chain_source=FakeChainSource(),
-        config_supplier=_config,
-        network_supplier=lambda: "finney",
-    )
-
-    with pytest.raises(
-        CoordinatorAllocationSourceV2Error,
-        match="receipt link is missing or ambiguous",
-    ):
-        resolver.resolve(
-            payload={"epoch": 100, "netuid": 71},
-            context=_context(),
-        )
 
 
-def test_resolve_reuses_exact_frontier_decisions_and_requires_new_ones(
-    monkeypatch,
-):
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes(
-        serialization.Encoding.Raw,
-        serialization.PublicFormat.Raw,
-    ).hex()
-    boot = create_boot_identity(
-        body=build_boot_identity_body(
-            role="gateway_coordinator",
-            physical_role="gateway_coordinator",
-            commit_sha="a" * 40,
-            pcr0="b" * 96,
-            build_manifest_hash="sha256:" + "c" * 64,
-            dependency_lock_hash="sha256:" + "d" * 64,
-            config_hash="sha256:" + "e" * 64,
-            boot_nonce="1" * 32,
-            signing_pubkey=public_key,
-            transport_pubkey="2" * 64,
-            transport_certificate_hash="sha256:" + "3" * 64,
-            attestation_user_data_hash="sha256:" + "4" * 64,
-            issued_at="2026-08-02T18:00:00Z",
-        ),
-        attestation_document_b64=base64.b64encode(b"attestation").decode("ascii"),
-    )
-
-    def signed_receipt(*, purpose, job_id, epoch_id, input_root, output_root, artifact_root):
-        body = build_execution_receipt_body(
-            role="gateway_coordinator",
-            purpose=purpose,
-            job_id=job_id,
-            epoch_id=epoch_id,
-            sequence=0,
-            commit_sha="a" * 40,
-            pcr0="b" * 96,
-            build_manifest_hash="sha256:" + "c" * 64,
-            dependency_lock_hash="sha256:" + "d" * 64,
-            config_hash="sha256:" + "e" * 64,
-            boot_identity_hash=boot["boot_identity_hash"],
-            input_root=input_root,
-            output_root=output_root,
-            transport_root_hash=EMPTY_TRANSPORT_ROOT,
-            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
-            artifact_root=artifact_root,
-            parent_receipt_hashes=(),
-            status="succeeded",
-            failure_code=None,
-            issued_at="2026-08-02T18:00:00Z",
-        )
-        return create_signed_execution_receipt(
-            body=body,
-            enclave_pubkey=public_key,
-            sign_digest=key.sign,
-        )
-
-    source_rows = []
-    checkpoints = []
-    decision_receipts = {}
-    for index in range(302):
-        row = {
-            "reward_ref": "source_add_reward:%016x" % index,
-            "adapter_id": "adapter:%016x" % index,
-            "miner_hotkey": "miner",
-            "leg": 1,
-            "reward_kind": "source_acceptance",
-            "alpha_percent": 1.0,
-            "reward_epochs": 20,
-            "start_epoch": 100 if index < 252 else 101,
-            "current_reward_status": "active",
-            "desired_alpha_percent": 1.0,
-            "epoch_count": 20,
-            "created_at": "2026-08-01T00:00:00.000000Z",
-        }
-        decision_hash = sha256_json(
-            allocation_source.source_add_reward_row_projection_v2(
-                "source_add_leg1",
-                {**row, "initial_reward_status": "active"},
-            )
-        )
-        source_rows.append(row)
-        if index < 252:
-            checkpoints.append(
-                build_reward_settlement_checkpoint_v2(
-                    reward_kind="source_add",
-                    source_id=row["reward_ref"],
-                    obligation_hash=decision_hash,
-                    start_epoch=100,
-                    epoch_count=20,
-                    desired_alpha_percent=1,
-                    applied_alpha_percent=0,
-                    realized_alpha_percent=0,
-                    excess_alpha_percent=0,
-                )
-            )
-        else:
-            receipt = signed_receipt(
-                purpose="research_lab.reward_decision.v2",
-                job_id="reward-decision:%d" % index,
-                epoch_id=101,
-                input_root="sha256:" + "%064x" % (1000 + index),
-                output_root=decision_hash,
-                artifact_root="sha256:" + "%064x" % (2000 + index),
-            )
-            decision_receipts[(row["reward_ref"], decision_hash)] = receipt
-
-    first_frontier = build_allocation_settlement_frontier_v2(
-        mode="legacy_full_history_bootstrap",
-        netuid=71,
-        allocation_epoch=98,
-        predecessor_frontier_hash=None,
-        reward_checkpoints=checkpoints,
-    )
-    latest_frontier = build_allocation_settlement_frontier_v2(
-        mode="bounded_delta_v1",
-        netuid=71,
-        allocation_epoch=100,
-        predecessor_frontier_hash=first_frontier["frontier_hash"],
-        reward_checkpoints=checkpoints,
-    )
-
-    def frontier_authority(frontier, digit):
-        allocation = {"allocation_hash": "sha256:" + digit * 64}
-        source_state = {"settlement_frontier": frontier}
-        source_state_hash = sha256_json(source_state)
-        artifact_hashes = sorted(
-            set(frontier_artifact_hashes_v2(frontier)) | {source_state_hash}
-        )
-        receipt = signed_receipt(
-            purpose="research_lab.allocation.v2",
-            job_id="allocation-frontier:%s" % frontier["allocation_epoch"],
-            epoch_id=frontier["allocation_epoch"],
-            input_root="sha256:" + "6" * 64,
-            output_root=sha256_json({"allocation": allocation}),
-            artifact_root=merkle_root(
-                artifact_hashes,
-                domain="leadpoet-artifact-v2",
-            ),
-        )
-        result = {
-            "allocation": allocation,
-            "source_state": source_state,
-            "source_state_hash": source_state_hash,
-        }
-        execution = {
-            "schema_version": "leadpoet.attested_execution_result.v2",
-            "receipt_hash": receipt["receipt_hash"],
-            "role": "gateway_coordinator",
-            "operation": "research_lab_allocation",
-            "purpose": "research_lab.allocation.v2",
-            "job_id": receipt["job_id"],
-            "sequence": receipt["sequence"],
-            "epoch_id": frontier["allocation_epoch"],
-            "release_hash": "sha256:" + "7" * 64,
-            "result_doc": result,
-            "result_hash": sha256_json(result),
-            "artifact_hashes": artifact_hashes,
-            "artifact_root": receipt["artifact_root"],
-            "input_root": receipt["input_root"],
-            "output_root": receipt["output_root"],
-        }
-        row = {
-            "schema_version": frontier["schema_version"],
-            "netuid": 71,
-            "allocation_epoch": frontier["allocation_epoch"],
-            "settled_through_epoch": frontier["settled_through_epoch"],
-            "frontier_hash": frontier["frontier_hash"],
-            "predecessor_frontier_hash": frontier[
-                "predecessor_frontier_hash"
-            ],
-            "source_receipt_hash": receipt["receipt_hash"],
-            "source_state_hash": source_state_hash,
-            "frontier_doc": frontier,
-        }
-        return row, execution, receipt
-
-    first_row, first_execution, first_receipt = frontier_authority(
-        first_frontier, "8"
-    )
-    latest_row, latest_execution, latest_receipt = frontier_authority(
-        latest_frontier, "9"
-    )
-    executions = {
-        first_receipt["receipt_hash"]: first_execution,
-        latest_receipt["receipt_hash"]: latest_execution,
-    }
-    receipts = {
-        first_receipt["receipt_hash"]: first_receipt,
-        latest_receipt["receipt_hash"]: latest_receipt,
-        **{
-            receipt["receipt_hash"]: receipt
-            for receipt in decision_receipts.values()
-        },
-    }
-    class FrontierRewardReader(FakeReader):
-        def read(self, *, policy_id, parameters, **_kwargs):
-            self.calls.append((policy_id, dict(parameters)))
-            if policy_id == "allocation_source_add_rewards":
-                return [dict(row) for row in source_rows]
-            if policy_id == "allocation_settlement_frontier_activation":
-                return [{
-                    "schema_version": (
-                        "leadpoet.research_lab_allocation_"
-                        "settlement_frontier_activation.v2"
-                    ),
-                    "netuid": 71,
-                    "first_allocation_epoch": 98,
-                    "first_frontier_hash": first_frontier["frontier_hash"],
-                    "source_receipt_hash": first_receipt["receipt_hash"],
-                }]
-            if policy_id == "allocation_settlement_frontiers":
-                return [dict(latest_row)]
-            if policy_id == "allocation_settlement_frontier_by_epoch":
-                return [dict(first_row)]
-            if policy_id == "attested_execution_result_by_receipt":
-                return [dict(executions[parameters["receipt_hash"]])]
-            if policy_id == "attested_business_artifact_by_ref":
-                receipt = decision_receipts.get(
-                    (parameters["artifact_ref"], parameters["artifact_hash"])
-                )
-                return ([{
-                    "artifact_hash": parameters["artifact_hash"],
-                    "receipt_hash": receipt["receipt_hash"],
-                }] if receipt else [])
-            if policy_id == "attested_receipt_by_hash":
-                receipt = receipts.get(parameters["receipt_hash"])
-                return ([{
-                    "receipt_hash": receipt["receipt_hash"],
-                    "role": receipt["role"],
-                    "purpose": receipt["purpose"],
-                    "epoch_id": receipt["epoch_id"],
-                    "output_root": receipt["output_root"],
-                    "boot_identity_hash": receipt["boot_identity_hash"],
-                    "receipt_doc": dict(receipt),
-                }] if receipt else [])
-            if policy_id == "chain_realized_settlement_activation":
-                return [_chain_realized_activation(first_epoch_id=101)]
-            return []
-
-    class Epoch101ChainSource(FakeChainSource):
-        def read_finalized_metagraph(self, **kwargs):
-            result = super().read_finalized_metagraph(**kwargs)
-            result["workflow_epoch_id"] = 101
-            result["header"]["block"] = 101 * 360 + 10
-            return result
-
-    reader = FrontierRewardReader()
-    resolver = CoordinatorAllocationSourceV2(
-        reader=reader,
-        chain_source=Epoch101ChainSource(),
-        config_supplier=_config,
-        network_supplier=lambda: "finney",
-    )
-    declared_roots = (
-        first_receipt["receipt_hash"],
-        latest_receipt["receipt_hash"],
-        *sorted(receipt["receipt_hash"] for receipt in decision_receipts.values()),
-    )
-    assert len(declared_roots) == 52
-    context = _context(declared_roots)
-    context.epoch_id = 101
-    context.external_receipt_graphs = [
-        build_receipt_graph(
-            root_receipt_hash=root,
-            boot_identities=[boot],
-            receipts=[receipts[root]],
-            transport_attempts=[],
-        )
-        for root in declared_roots
-    ]
-
-    result = resolver.resolve(
-        payload={"epoch": 101, "netuid": 71},
-        context=context,
-    )
-
-    assert len(result["source_state"]["source_add_obligations"]) == 302
-    assert result["allocation"] == allocate_research_lab_epoch(
-        101,
-        result["allocation_inputs"]["policy"],
-        [],
-        [],
-        active_source_add_obligations=result["source_state"][
-            "source_add_obligations"
-        ],
-    )
-
-    omitted = _context(tuple(root for root in declared_roots if root != next(
-        iter(decision_receipts.values())
-    )["receipt_hash"]))
-    omitted.epoch_id = 101
-    omitted.external_receipt_graphs = [
-        build_receipt_graph(
-            root_receipt_hash=root,
-            boot_identities=[boot],
-            receipts=[receipts[root]],
-            transport_attempts=[],
-        )
-        for root in omitted.parent_receipt_hashes
-    ]
-    with pytest.raises(
-        CoordinatorAllocationSourceV2Error,
-        match="receipt is not a declared source",
-    ):
-        resolver.resolve(payload={"epoch": 101, "netuid": 71}, context=omitted)
-
-    source_rows[0] = {**source_rows[0], "miner_hotkey": "changed-miner"}
-    with pytest.raises(
-        CoordinatorAllocationSourceV2Error,
-        match="allocation settlement reward identity changed",
-    ):
-        resolver.resolve(payload={"epoch": 101, "netuid": 71}, context=context)
 
 
 def test_champion_decision_reuses_only_its_exact_frontier_checkpoint(
@@ -881,7 +530,6 @@ def test_champion_decision_reuses_only_its_exact_frontier_checkpoint(
             epoch=101,
             netuid=71,
             champion_rows=[{**row, "island": "specialist"}],
-            source_add_rows=[],
             history=[],
             predecessor=build_allocation_settlement_frontier_v2(
                 mode="legacy_full_history_bootstrap",
@@ -893,41 +541,6 @@ def test_champion_decision_reuses_only_its_exact_frontier_checkpoint(
         )
 
 
-def test_source_add_obligation_carries_immutable_creation_time(monkeypatch):
-    resolver = CoordinatorAllocationSourceV2(
-        reader=FakeReader(),
-        chain_source=FakeChainSource(),
-        config_supplier=_config,
-        network_supplier=lambda: "finney",
-    )
-    monkeypatch.setattr(resolver, "_require_reward_receipt", lambda **_kwargs: None)
-
-    obligations, skipped = resolver._source_add(
-        epoch=100,
-        rows=[
-            {
-                "reward_ref": "source_add_reward:" + "f" * 16,
-                "adapter_id": "adapter:fifo",
-                "miner_hotkey": "miner",
-                "leg": 1,
-                "reward_kind": "source_acceptance",
-                "alpha_percent": 1.0,
-                "reward_epochs": 20,
-                "start_epoch": 100,
-                "current_reward_status": "active",
-                "desired_alpha_percent": 1.0,
-                "epoch_count": 20,
-                "created_at": "2026-08-01T00:00:00.123456Z",
-            }
-        ],
-        paid_by_reward={},
-        hotkey_uids={"miner": 1},
-        context=_context(),
-        required_parents=set(),
-    )
-
-    assert skipped == []
-    assert obligations[0]["created_at"] == "2026-08-01T00:00:00.123456Z"
 
 
 def test_business_receipt_lookup_binds_the_expected_artifact_hash(monkeypatch):
@@ -1828,37 +1441,11 @@ def test_declared_root_lookup_still_rejects_conflicting_graphs(monkeypatch):
         )
 
 
-def test_first_source_add_epoch_has_no_settlement_history():
-    reader = FakeReader()
-    resolver = CoordinatorAllocationSourceV2(
-        reader=reader,
-        chain_source=FakeChainSource(),
-        config_supplier=_config,
-        network_supplier=lambda: "finney",
-    )
-
-    assert (
-        resolver._finalized_champion_history(
-            epoch=100,
-            netuid=71,
-            champion_rows=[
-                {
-                    "reward_kind": "source_add_leg1",
-                    "start_epoch": 100,
-                }
-            ],
-            context=_context(),
-            required_parents=set(),
-        )
-        == []
-    )
-    assert reader.calls == []
 
 
 @pytest.mark.parametrize(
     ("champion_rows", "history_start"),
     (
-        ([{"reward_kind": "source_add_leg1", "start_epoch": 100}], None),
         ([], 100),
     ),
 )
@@ -1919,7 +1506,7 @@ def test_actual_settlement_history_validates_activation():
             netuid=71,
             champion_rows=[
                 {
-                    "reward_kind": "source_add_leg1",
+                    "reward_kind": "champion",
                     "start_epoch": 100,
                 }
             ],

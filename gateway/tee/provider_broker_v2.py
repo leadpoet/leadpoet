@@ -44,11 +44,7 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_transport_attempt,
 )
-from gateway.tee.source_add_runtime_v2 import (
-    source_add_dynamic_job_slot,
-    source_add_dynamic_retry_policy_hash,
-    validate_source_add_runtime_route_v2,
-)
+
 PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
 PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION = "leadpoet.provider_transport_health.v2"
 PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION = (
@@ -2065,8 +2061,7 @@ class ProviderBrokerV2:
         purpose = str(record.get("purpose") or "")
         http_status = int(record.get("http_status") or 0)
         if provider_id not in self._provider_terminal_counts:
-            # Dynamic SOURCE_ADD identities are intentionally excluded from
-            # this fixed-shape, non-secret production health projection.
+            # Keep this non-secret production health projection fixed-shape.
             return
         if (
             route not in _TRANSPORT_ROUTES
@@ -2456,9 +2451,7 @@ class ProviderBrokerV2:
         } | set(self.job_credential_slot_ref_hashes)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}", normalized_job_id):
             raise ProviderBrokerV2Error("job credential lease id is invalid")
-        if normalized_slot not in expected_slots and not source_add_dynamic_job_slot(
-            normalized_slot
-        ):
+        if normalized_slot not in expected_slots:
             raise ProviderBrokerV2Error("job credential slot is not measured")
         expected_hash = str(credential_value_hash_expected or "").lower()
         if not _HASH_RE.fullmatch(expected_hash):
@@ -2553,11 +2546,10 @@ class ProviderBrokerV2:
         provider_id = str(request.get("provider_id") or "")
         parsed = urlsplit(str(request.get("url") or ""))
         method = str(request.get("method") or "").upper()
-        route, _dynamic_route = self._route(
+        route = self._route(
             provider_id,
             parsed,
             method=method,
-            dynamic_route=request.get("dynamic_route"),
         )
         if route.allowed_methods and method not in route.allowed_methods:
             raise ProviderBrokerV2Error(
@@ -2632,60 +2624,10 @@ class ProviderBrokerV2:
         parsed: Any,
         *,
         method: str,
-        dynamic_route: Optional[Mapping[str, Any]] = None,
-    ) -> Tuple[ProviderRouteV2, Optional[Dict[str, Any]]]:
-        normalized_dynamic = None
-        if dynamic_route is not None:
-            if provider_id in self.routes:
-                raise ProviderBrokerV2Error(
-                    "dynamic provider route collides with a measured builtin"
-                )
-            try:
-                normalized_dynamic = validate_source_add_runtime_route_v2(
-                    dynamic_route
-                )
-            except Exception as exc:
-                raise ProviderBrokerV2Error(
-                    "dynamic provider route is invalid"
-                ) from exc
-            if normalized_dynamic["provider_id"] != provider_id:
-                raise ProviderBrokerV2Error(
-                    "dynamic provider identity differs from request"
-                )
-            auth_kind = normalized_dynamic["auth_kind"]
-            credential_location = (
-                "header" if auth_kind in {"header", "bearer"} else auth_kind
-            )
-            credential_name = normalized_dynamic["auth_name"]
-            credential_prefix = "Bearer " if auth_kind == "bearer" else ""
-            route = ProviderRouteV2(
-                provider_id=provider_id,
-                hosts=(normalized_dynamic["destination_host"],),
-                path_prefixes=(),
-                credential_slot=normalized_dynamic["credential_slot"],
-                credential_location=(
-                    credential_location if auth_kind != "none" else "none"
-                ),
-                credential_name=credential_name,
-                credential_prefix=credential_prefix,
-                allowed_methods=tuple(
-                    sorted(
-                        {
-                            item["method"]
-                            for item in normalized_dynamic["allowed_routes"]
-                        }
-                    )
-                ),
-                allowed_route_pairs=tuple(
-                    (item["method"], item["path"])
-                    for item in normalized_dynamic["allowed_routes"]
-                ),
-                job_scoped_only=bool(normalized_dynamic["credential_slot"]),
-            )
-        else:
-            route = self.routes.get(provider_id)
-            if route is None:
-                raise ProviderBrokerV2Error("provider route is not measured")
+    ) -> ProviderRouteV2:
+        route = self.routes.get(provider_id)
+        if route is None:
+            raise ProviderBrokerV2Error("provider route is not measured")
         if route.egress_policy not in _EGRESS_POLICIES:
             raise ProviderBrokerV2Error(
                 "provider route egress policy is invalid"
@@ -2707,7 +2649,7 @@ class ProviderBrokerV2:
             for prefix in route.path_prefixes
         ):
             raise ProviderBrokerV2Error("provider path differs from measured route")
-        return route, normalized_dynamic
+        return route
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         owner_token = object()
@@ -2739,15 +2681,7 @@ class ProviderBrokerV2:
         request_fields = (
             frozenset(request) if isinstance(request, Mapping) else frozenset()
         )
-        accepted_fields = {
-            frozenset(required),
-            frozenset(required | {"dynamic_route"}),
-            frozenset(required | {"max_response_bytes", "artifact_mode"}),
-            frozenset(
-                required
-                | {"dynamic_route", "max_response_bytes", "artifact_mode"}
-            ),
-        }
+        accepted_fields = {frozenset(required)}
         if request_fields not in accepted_fields:
             raise ProviderBrokerV2Error("provider request fields are invalid")
         if request["schema_version"] != PROVIDER_BROKER_SCHEMA_VERSION:
@@ -2757,42 +2691,15 @@ class ProviderBrokerV2:
         method = str(request["method"] or "").upper()
         if not re.fullmatch(r"[A-Z]{3,12}", method):
             raise ProviderBrokerV2Error("provider method is invalid")
-        route, dynamic_route = self._route(
+        route = self._route(
             provider_id,
             parsed,
             method=method,
-            dynamic_route=(
-                request.get("dynamic_route")
-                if "dynamic_route" in request
-                else None
-            ),
         )
         if route.allowed_methods and method not in route.allowed_methods:
             raise ProviderBrokerV2Error("provider method differs from measured route")
         max_response_bytes = MAX_RESPONSE_BODY_BYTES
         artifact_mode = "encrypted_body"
-        if "max_response_bytes" in request or "artifact_mode" in request:
-            source_add_provenance_summary = (
-                dynamic_route is None
-                and str(request.get("purpose") or "")
-                == "research_lab.source_add_provenance.v2"
-                and provider_id in {"scrapingdog", "wayback"}
-            )
-            if dynamic_route is None and not source_add_provenance_summary:
-                raise ProviderBrokerV2Error(
-                    "bounded hash-only artifacts require a measured SOURCE_ADD route"
-                )
-            max_response_bytes = request.get("max_response_bytes")
-            artifact_mode = str(request.get("artifact_mode") or "")
-            if (
-                isinstance(max_response_bytes, bool)
-                or not isinstance(max_response_bytes, int)
-                or not 1 <= max_response_bytes <= 1024 * 1024
-                or artifact_mode != "hash_only"
-            ):
-                raise ProviderBrokerV2Error(
-                    "dynamic provider artifact policy is invalid"
-                )
         headers = request["headers"]
         if not isinstance(headers, Mapping):
             raise ProviderBrokerV2Error("provider headers must be an object")
@@ -2811,11 +2718,7 @@ class ProviderBrokerV2:
         if not isinstance(timeout_ms, int) or timeout_ms <= 0:
             raise ProviderBrokerV2Error("provider timeout is invalid")
         retry_policy_hash = str(request["retry_policy_hash"] or "").lower()
-        expected_retry_policy_hash = (
-            source_add_dynamic_retry_policy_hash(dynamic_route)
-            if dynamic_route is not None
-            else self.retry_policy_hashes.get(provider_id)
-        )
+        expected_retry_policy_hash = self.retry_policy_hashes.get(provider_id)
         if retry_policy_hash != expected_retry_policy_hash:
             raise ProviderBrokerV2Error("provider retry policy hash mismatch")
         logical_operation_id = str(request["logical_operation_id"] or "")
@@ -2908,15 +2811,6 @@ class ProviderBrokerV2:
                 return dict(completed["result"])
 
         outbound_headers = {str(k): str(v) for k, v in headers.items()}
-        if dynamic_route is not None:
-            static_headers = dynamic_route.get("request_headers") or {}
-            for static_name, static_value in static_headers.items():
-                outbound_headers = {
-                    name: value
-                    for name, value in outbound_headers.items()
-                    if name.lower() != str(static_name).lower()
-                }
-                outbound_headers[str(static_name)] = str(static_value)
         # Bind the default response framing at the measured transport boundary.
         # Built-in routes may select the stricter checksum-delimited gzip
         # profile below; callers and dynamic routes cannot select an encoding.
@@ -3027,11 +2921,6 @@ class ProviderBrokerV2:
             "artifact_mode": artifact_mode,
             "retry_policy_hash": retry_policy_hash,
             "egress_proxy_ref_hash": egress_proxy_ref_hash,
-            "dynamic_route_hash": (
-                str(dynamic_route["route_hash"])
-                if dynamic_route is not None
-                else ""
-            ),
         }
         try:
             request_artifact_bytes = canonical_json(request_artifact_doc).encode("utf-8")

@@ -67,7 +67,6 @@ from research_lab.eval.provider_evidence_cache import (
     canonical_request_fingerprint,
     load_evidence_cache,
 )
-from research_lab.source_add_identity import normalize_source_add_domain
 from gateway.research_lab.provider_capabilities import (
     EffectiveProviderCapabilities,
     LiveTextModelCatalog,
@@ -446,7 +445,7 @@ def load_provider_registry_with_capabilities(
     *,
     strict_remote: bool = False,
 ) -> tuple[list[ProviderRegistryEntry], EffectiveProviderCapabilities]:
-    """Load private capabilities + ready SOURCE_ADD rows over continuity routes."""
+    """Load private capabilities over continuity routes."""
 
     static_entries = _load_static_provider_registry(path)
     if capability_catalog_enabled():
@@ -459,7 +458,6 @@ def load_provider_registry_with_capabilities(
             [entry.to_dict() for entry in static_entries],
             strict_remote=False,
             private_row_loader=lambda: None,
-            source_row_loader=lambda: (),
         )
     return _entries_from_capabilities(capabilities), capabilities
 
@@ -469,46 +467,6 @@ def load_provider_registry(path: str = "") -> list[ProviderRegistryEntry]:
 
     entries, _capabilities = load_provider_registry_with_capabilities(path)
     return entries
-
-
-def reserved_builtin_provider_ids_sync(path: str = "") -> set[str]:
-    """Provider IDs that SOURCE_ADD may never replace."""
-
-    static_ids = {entry.id for entry in _load_static_provider_registry(path)}
-    try:
-        _entries, capabilities = load_provider_registry_with_capabilities(path)
-    except Exception:
-        return static_ids
-    return static_ids | {
-        str(item.get("id") or "")
-        for item in capabilities.providers
-        if str(item.get("origin") or "") == "builtin"
-    }
-
-
-def reserved_builtin_provider_domains_sync(path: str = "") -> set[str]:
-    """API hosts already supplied by the exact built-in provider catalog."""
-
-    static_entries = _load_static_provider_registry(path)
-    domains = {
-        normalize_source_add_domain(entry.base_url)
-        for entry in static_entries
-        if normalize_source_add_domain(entry.base_url)
-    }
-    _entries, capabilities = load_provider_registry_with_capabilities(
-        path,
-        strict_remote=True,
-    )
-    domains.update(
-        domain
-        for item in capabilities.providers
-        if str(item.get("origin") or "") == "builtin"
-        for domain in (
-            normalize_source_add_domain(str(item.get("base_url") or "")),
-        )
-        if domain
-    )
-    return domains
 
 
 def _key_split_enabled(override: bool | None = None) -> bool:
@@ -542,14 +500,6 @@ def resolve_provider_credential(
         value = (os.getenv(env_name) or "").strip()
         if value:
             return value, env_name
-    try:
-        from gateway.research_lab.source_add_catalog import decrypt_source_add_registry_credential
-
-        credential, source_ref = decrypt_source_add_registry_credential(entry)
-        if credential:
-            return credential, source_ref
-    except Exception as exc:  # noqa: BLE001 - caller handles missing credential
-        logger.warning("source_add_registry_credential_decrypt_failed provider=%s error=%s", entry.id, str(exc)[:200])
     return "", ""
 
 
@@ -1499,7 +1449,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         fingerprint = canonical_request_fingerprint(self.command, upstream_url, request_body or None)
         enforce_route = (
             self.enforcement_mode == "enforce"
-            or entry.origin == "source_add"
             or route_reason in {"unsafe_route", "blocked_route"}
         )
         if not route_allowed and enforce_route:
@@ -1946,7 +1895,6 @@ def serve_evidence_proxy(
             [entry.to_dict() for entry in entries],
             strict_remote=False,
             private_row_loader=lambda: None,
-            source_row_loader=lambda: (),
         )
     else:
         entries, capabilities = load_provider_registry_with_capabilities(registry_path)

@@ -12,7 +12,6 @@ from gateway.tee.coordinator_allocation_source_v2 import (
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.reward_executor_v2 import (
     champion_reward_row_projection_v2,
-    source_add_reward_row_projection_v2,
 )
 from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
 from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
@@ -283,12 +282,6 @@ class CoordinatorAllocationFrontierBootstrapV2:
             id_fields=("source_id", "champion_reward_id"),
             label="champion",
         )
-        source_add_state = self._obligation_index(
-            source_state.get("source_add_obligations", []),
-            count=source_state.get("source_add_obligation_count", 0),
-            id_fields=("source_id", "source_add_reward_id"),
-            label="source add",
-        )
         champion_rows = [
             self._read_exact_reward(
                 policy_id="champion_reward_by_id",
@@ -300,26 +293,13 @@ class CoordinatorAllocationFrontierBootstrapV2:
             )
             for source_id in sorted(champion_state)
         ]
-        source_add_rows = [
-            self._read_exact_reward(
-                policy_id="source_add_reward_by_ref",
-                parameters={"reward_ref": source_id},
-                source_id=source_id,
-                identity_field="reward_ref",
-                label="source add",
-                context=context,
-            )
-            for source_id in sorted(source_add_state)
-        ]
         required_parents: Set[str] = {requested_receipt}
         checkpoints = self._reward_checkpoints(
             source_state=source_state,
             source_epoch=source_epoch,
             champion_rows=champion_rows,
-            source_add_rows=source_add_rows,
             enable_champ_cap=enable_champ_cap,
             champion_state=champion_state,
-            source_add_state=source_add_state,
             context=context,
             required_parents=required_parents,
         )
@@ -393,10 +373,8 @@ class CoordinatorAllocationFrontierBootstrapV2:
         source_state: Mapping[str, Any],
         source_epoch: int,
         champion_rows: Sequence[Mapping[str, Any]],
-        source_add_rows: Sequence[Mapping[str, Any]],
         enable_champ_cap: bool,
         champion_state: Mapping[str, Mapping[str, Any]],
-        source_add_state: Mapping[str, Mapping[str, Any]],
         context: ExecutionContextV2,
         required_parents: Set[str],
     ) -> list[Dict[str, Any]]:
@@ -405,7 +383,7 @@ class CoordinatorAllocationFrontierBootstrapV2:
             raise CoordinatorAllocationFrontierBootstrapV2Error(
                 "allocation source skipped state is unavailable"
             )
-        for field in ("champions", "source_add"):
+        for field in ("champions",):
             values = skipped.get(field, [])
             if not isinstance(values, list) or values:
                 raise CoordinatorAllocationFrontierBootstrapV2Error(
@@ -445,51 +423,6 @@ class CoordinatorAllocationFrontierBootstrapV2:
                 "champion source state is absent from measured rewards"
             )
 
-        seen_source_add: set[str] = set()
-        for raw_row in source_add_rows:
-            row = dict(raw_row)
-            source_id = str(row.get("reward_ref") or "")
-            if not source_id or source_id in seen_source_add:
-                raise CoordinatorAllocationFrontierBootstrapV2Error(
-                    "source-add bootstrap source is duplicated"
-                )
-            seen_source_add.add(source_id)
-            projection = source_add_reward_row_projection_v2(
-                "source_add_leg%d" % int(row.get("leg") or 0),
-                {**row, "initial_reward_status": "active"},
-            )
-            self._require_reward_receipt(
-                artifact_kind="source_add_reward_decision",
-                artifact_ref=source_id,
-                expected_output_root=sha256_json(projection),
-                context=context,
-                required_parents=required_parents,
-            )
-            checkpoints.append(
-                self._checkpoint_from_source_state(
-                    reward_kind="source_add",
-                    source_id=source_id,
-                    row={
-                        **row,
-                        "start_epoch": row.get("start_epoch"),
-                        "epoch_count": (
-                            row.get("epoch_count") or row.get("reward_epochs")
-                        ),
-                        "desired_alpha_percent": (
-                            row.get("desired_alpha_percent")
-                            or row.get("alpha_percent")
-                        ),
-                    },
-                    obligation=source_add_state.get(source_id),
-                    obligation_hash=sha256_json(projection),
-                    source_epoch=source_epoch,
-                    champ_cap_enabled=True,
-                )
-            )
-        if set(source_add_state).difference(seen_source_add):
-            raise CoordinatorAllocationFrontierBootstrapV2Error(
-                "source-add source state is absent from measured rewards"
-            )
         return checkpoints
 
     def _read_exact_reward(

@@ -166,7 +166,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
             descriptor = vault.seal(
                 f"provider-{job_index}-{artifact_index}".encode(),
                 job_id=f"scoring-job-{job_index}",
-                purpose="research_lab.source_add_judge.v2",
+                purpose="research_lab.company_score.v2",
                 artifact_kind="provider_response",
             )
             if artifact_index == 0:
@@ -189,7 +189,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
             vault.seal(
                 b"failed checkpoint",
                 job_id="scoring-job-0",
-                purpose="research_lab.source_add_judge.v2",
+                purpose="research_lab.company_score.v2",
                 artifact_kind="provider_response",
             )
             raise RuntimeError("checkpoint failed")
@@ -212,7 +212,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
     recovered = vault.seal(
         b"recovered checkpoint",
         job_id="scoring-job-recovery",
-        purpose="research_lab.source_add_judge.v2",
+        purpose="research_lab.company_score.v2",
         artifact_kind="provider_response",
     )
     assert recovered["persisted"] is False

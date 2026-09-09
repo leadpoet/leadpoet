@@ -139,7 +139,7 @@ runs one exact forward transition and should prove:
 - [ ] Primary and audit validators receive byte-identical vectors.
 - [ ] Parsing, verification, SDK signing, submission, finalization,
   `LastUpdate`, reveal/readback, and cleanup complete.
-- [ ] Arena round recovery, shared ICP scoring, SOURCE_ADD, settlement, and
+- [ ] Arena round recovery, shared ICP scoring, settlement, and
   protected workflows satisfy the candidate-derived behavioral contract.
 - [ ] Every declared stage appears once as `passed`; no critical stage is
   `failed` or `unexercised`.

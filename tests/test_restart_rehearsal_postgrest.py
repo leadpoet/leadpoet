@@ -13,10 +13,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     Handler,
     LocalPostgRESTState,
     MigrationBackedLabArenaRPC,
-    SOURCE_ADD_CONTROL_COLUMNS,
     _matches_filter,
-    _source_add_claim_control_contract,
-    _source_add_claim_control_contract_v2,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
     DisposablePostgres,
@@ -24,9 +21,6 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
 )
 from tests.restart_rehearsal.verify_evidence import (
     verify_lab_arena_guard_boundary_denial,
-)
-from gateway.tee.supabase_schema_preflight_v2 import (
-    _verify_source_add_claim_control_contract_v2,
 )
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
@@ -269,136 +263,9 @@ def test_postgrest_boundary_imports_candidate_source_tree() -> None:
     ) in script
 
 
-def test_postgrest_boundary_implements_claim_control_contract() -> None:
-    contract = _source_add_claim_control_contract_v2(ROOT)
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def getcode(self) -> int:
-            return 200
-
-        def read(self) -> bytes:
-            return json.dumps(contract).encode("utf-8")
-
-    def opener(request, *, timeout):
-        assert timeout == 1.0
-        assert request.full_url.endswith(
-            "/rpc/research_lab_source_add_claim_control_contract_v2"
-        )
-        assert request.data == b"{}"
-        return Response()
-
-    assert _verify_source_add_claim_control_contract_v2(
-        headers={},
-        supabase_url="http://127.0.0.1:1",
-        opener=opener,
-        timeout_seconds=1.0,
-    ) == contract
-    assert "response = _source_add_claim_control_contract_v2(" in (
-        inspect.getsource(Handler._dispatch)
-    )
 
 
 @pytest.mark.parametrize("pre_restart_paused", [False, True])
-def test_postgrest_boundary_persists_source_add_restart_guard(
-    tmp_path: Path,
-    pre_restart_paused: bool,
-) -> None:
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-    durable_path = tmp_path / "durable.json"
-    columns = {
-        "research_lab_source_add_control": SOURCE_ADD_CONTROL_COLUMNS,
-        "research_lab_source_add_work_items": frozenset({"work_status"}),
-    }
-
-    def new_state() -> LocalPostgRESTState:
-        return LocalPostgRESTState(
-            state_root=state_root,
-            fixture={},
-            source_root=ROOT,
-            tables=set(columns),
-            rpcs={
-                "research_lab_source_add_restart_guard_state_v1",
-                "research_lab_source_add_restart_guard_state_v2",
-                "research_lab_source_add_acquire_restart_guard_v1",
-                "research_lab_source_add_acquire_restart_guard_v2",
-                "research_lab_source_add_restart_quiescence_v1",
-                "research_lab_source_add_release_restart_guard_v1",
-                "research_lab_source_add_release_restart_guard_v2",
-                "research_lab_source_add_set_paused",
-            },
-            relation_columns=columns,
-            durable_state_path=durable_path,
-            durable_schema_sha="3" * 40,
-        )
-
-    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
-    guard_id = "source_add_restart_guard:" + "a" * 64
-    owner_id = "source_add_restart_owner:" + "b" * 64
-    state = new_state()
-    state.set_source_add_paused(
-        {
-            "p_actor_ref": "operator:source-add-rehearsal",
-            "p_paused": pre_restart_paused,
-            "p_reason": "source_add_rehearsal_prestate",
-        },
-        now=now,
-    )
-    assert state.source_add_restart_guard_state({}, now=now, version=2)[
-        "guard_generation"
-    ] == 0
-    acquired = state.acquire_source_add_restart_guard(
-        {
-            "p_actor_ref": "gateway-restart:" + "c" * 64,
-            "p_expected_generation": 0,
-            "p_guard_id": guard_id,
-            "p_lease_seconds": 300,
-            "p_owner_id": owner_id,
-        },
-        now=now,
-        version=2,
-    )
-    assert acquired["guard_generation"] == 1
-    assert acquired["restore_paused"] is pre_restart_paused
-    guarded = new_state().source_add_restart_guard_state(
-        {}, now=now, version=2
-    )
-    assert guarded["paused"] is True
-    assert guarded["restore_paused"] is pre_restart_paused
-    assert new_state().source_add_restart_quiescence(
-        {
-            "p_guard_generation": 1,
-            "p_guard_id": guard_id,
-            "p_owner_id": owner_id,
-        },
-        now=now,
-    )["quiescent"] is True
-    released = new_state().release_source_add_restart_guard(
-        {
-            "p_actor_ref": "gateway-restart:" + "c" * 64,
-            "p_guard_generation": 1,
-            "p_guard_id": guard_id,
-            "p_owner_id": owner_id,
-        },
-        now=now,
-        version=2,
-    )
-    assert released["released"] is True
-    assert released["paused"] is pre_restart_paused
-    assert released["restored_pre_restart_state"] is True
-    final = new_state().source_add_restart_guard_state(
-        {}, now=now, version=2
-    )
-    assert final["paused"] is pre_restart_paused
-    assert final["guard_active"] is False
-    assert final["guard_generation"] == 1
-    assert final["restore_paused"] is None
 
 
 def _maintenance_lease_state(tmp_path: Path) -> LocalPostgRESTState:

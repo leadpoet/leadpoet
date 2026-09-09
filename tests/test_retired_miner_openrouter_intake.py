@@ -45,24 +45,24 @@ def test_scoring_controls_are_retired_but_reward_helpers_remain() -> None:
     ):
         assert not hasattr(maintenance, name)
     assert callable(maintenance.reconcile_champion_reward_statuses)
-    assert callable(maintenance.reconcile_source_add_reward_statuses)
+    assert not hasattr(maintenance, "reconcile_source_add_reward_statuses")
 
 
-def test_source_add_ingress_and_host_provider_provisioning_remain_exposed() -> None:
-    assert rpc_method_allowed(
+def test_source_ingress_is_removed_but_shared_provider_provisioning_remains() -> None:
+    assert not rpc_method_allowed(
         COORDINATOR_ROLE, "v2_get_source_add_ingress_recipient"
     )
-    assert rpc_method_allowed(
+    assert not rpc_method_allowed(
         COORDINATOR_ROLE, "v2_seal_source_add_ingress_credential"
     )
     assert rpc_method_allowed(
         COORDINATOR_ROLE, "v2_provision_encrypted_secret"
     )
-    assert rpc_method_allowed(
+    assert not rpc_method_allowed(
         COORDINATOR_ROLE, "v2_provision_job_sealed_source_add_secret"
     )
-    assert hasattr(TEEClient, "v2_get_source_add_ingress_recipient")
-    assert hasattr(TEEClient, "v2_seal_source_add_ingress_credential")
+    assert not hasattr(TEEClient, "v2_get_source_add_ingress_recipient")
+    assert not hasattr(TEEClient, "v2_seal_source_add_ingress_credential")
     assert hasattr(TEEClient, "v2_provision_encrypted_secret")
-    assert hasattr(TEEClient, "v2_provision_job_sealed_source_add_secret")
+    assert not hasattr(TEEClient, "v2_provision_job_sealed_source_add_secret")
     assert "openrouter" in expected_provider_credential_slots()

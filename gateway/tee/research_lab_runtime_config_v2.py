@@ -1,7 +1,7 @@
 """Secret-free runtime settings for current gateway enclave work.
 
 The document contains normal qualification behavior, provider preflight,
-SOURCE_ADD, retained reward allocation, and the shared chain/provider
+retained reward allocation and the shared chain/provider
 boundary. It intentionally contains no model repository, autoresearch,
 code-edit, private holdout, or miner-credential configuration.
 """
@@ -45,13 +45,13 @@ PROVIDER_PREFLIGHT_BEHAVIOR_ENV_NAMES = (
 
 ADDITIONAL_QUALIFICATION_BEHAVIOR_ENV_NAMES = (
     "INTENT_URL_PREFILTER_ENABLED",
+    "RESEARCH_LAB_LLM_INCLUDE_REASONING",
     "RESEARCH_LAB_INTENT_CORROBORATION_RESCUE",
     "RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE",
     "VERIFIER_SEMANTIC_GATE_MODELS",
     "VERIFIER_SEMANTIC_GATES_MODE",
 )
 
-SOURCE_ADD_BEHAVIOR_ENV_NAMES = ("RESEARCH_LAB_LLM_INCLUDE_REASONING",)
 
 LAB_ARENA_REWARD_BEHAVIOR_ENV_NAMES = (
     "LAB_ARENA_REWARDS_ENABLED",
@@ -70,7 +70,6 @@ BEHAVIOR_ENV_NAMES = tuple(
         set(SCORING_CONFIG_ENV_NAMES)
         | set(PROVIDER_PREFLIGHT_BEHAVIOR_ENV_NAMES)
         | set(ADDITIONAL_QUALIFICATION_BEHAVIOR_ENV_NAMES)
-        | set(SOURCE_ADD_BEHAVIOR_ENV_NAMES)
         | set(LAB_ARENA_REWARD_BEHAVIOR_ENV_NAMES)
         | set(PRODUCTION_PARITY_ENV_NAMES)
     )

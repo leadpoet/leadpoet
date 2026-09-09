@@ -1289,61 +1289,6 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
                 str(params.get("credential_slot") or "")
             )
         }
-    if method == "v2_get_source_add_ingress_recipient":
-        if not isinstance(params, dict) or set(params) != {
-            "miner_hotkey",
-            "adapter_ref",
-            "credential_ref",
-        }:
-            raise ValueError("V2 SOURCE_ADD ingress recipient fields are invalid")
-        return {
-            "result": get_v2_kms_recipient().source_add_ingress_recipient_request(
-                miner_hotkey=str(params.get("miner_hotkey") or ""),
-                adapter_ref=str(params.get("adapter_ref") or ""),
-                credential_ref=str(params.get("credential_ref") or ""),
-            )
-        }
-    if method == "v2_seal_source_add_ingress_credential":
-        if not isinstance(params, dict) or set(params) != {
-            "request_id",
-            "ciphertext_b64",
-        }:
-            raise ValueError("V2 SOURCE_ADD ingress ciphertext fields are invalid")
-        from gateway.tee.source_add_credential_ingress_v2 import (
-            seal_source_add_ingress_credential_v2,
-        )
-
-        request_id = str(params.get("request_id") or "").lower()
-        ciphertext_b64 = str(params.get("ciphertext_b64") or "")
-        from leadpoet_canonical.attested_v2 import sha256_bytes
-
-        try:
-            ciphertext_hash = sha256_bytes(
-                base64.b64decode(ciphertext_b64, validate=True)
-            )
-        except Exception as exc:
-            raise ValueError("V2 SOURCE_ADD ingress ciphertext is invalid") from exc
-        cache_key = ("source_add", request_id)
-        with v2_ingress_seal_cache_lock:
-            existing = v2_ingress_seal_cache.get(cache_key)
-            if existing is not None:
-                if existing["ciphertext_hash"] != ciphertext_hash:
-                    raise ValueError("V2 SOURCE_ADD ingress ciphertext changed")
-                envelope = dict(existing["credential_envelope"])
-            else:
-                lease = get_v2_kms_recipient().unwrap_source_add_ingress_credential(
-                    request_id=request_id,
-                    ciphertext_b64=ciphertext_b64,
-                )
-                envelope = seal_source_add_ingress_credential_v2(
-                    lease,
-                    vault=get_v2_artifact_vault(),
-                )
-                v2_ingress_seal_cache[cache_key] = {
-                    "ciphertext_hash": ciphertext_hash,
-                    "credential_envelope": dict(envelope),
-                }
-        return {"result": {"credential_envelope": envelope}}
     if method == "v2_provision_encrypted_secret":
         if not isinstance(params, dict) or set(params) != {
             "credential_slot",
@@ -1408,25 +1353,6 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
                 credential_value_hash_expected=lease[
                     "credential_value_hash"
                 ],
-            )
-        }
-    if method == "v2_provision_job_sealed_source_add_secret":
-        if not isinstance(params, dict) or set(params) != {"envelope"}:
-            raise ValueError("V2 sealed SOURCE_ADD job credential fields are invalid")
-        from gateway.tee.source_add_credential_ingress_v2 import (
-            unseal_source_add_job_credential_v2,
-        )
-
-        lease = unseal_source_add_job_credential_v2(
-            params.get("envelope") or {},
-            vault=get_v2_artifact_vault(),
-        )
-        return {
-            "result": get_v2_provider_broker().provision_job_credential(
-                job_id=lease["job_id"],
-                slot=lease["credential_slot"],
-                credential=lease["credential"],
-                credential_value_hash_expected=lease["credential_value_hash"],
             )
         }
     if method == "v2_release_job_credentials":
@@ -1890,13 +1816,6 @@ def get_v2_coordinator_job_manager():
         from gateway.tee.coordinator_legacy_settlement_v2 import (
             CoordinatorLegacySettlementSourceV2,
         )
-        from gateway.tee.coordinator_source_add_v2 import (
-            CoordinatorSourceAddFunctionalProbeV2,
-            CoordinatorSourceAddProvenanceV2,
-        )
-        from gateway.tee.coordinator_reward_source_v2 import (
-            CoordinatorRewardSourceV2,
-        )
         from gateway.tee.qualification_admission_v2 import (
             CoordinatorQualificationAdmissionV2,
         )
@@ -1960,20 +1879,6 @@ def get_v2_coordinator_job_manager():
         qualification_admission = CoordinatorQualificationAdmissionV2(
             source_reader
         )
-        source_add_provenance = CoordinatorSourceAddProvenanceV2(
-            execute_provider=get_v2_provider_broker().execute,
-            retry_policy_hash=retry_hashes["scrapingdog"],
-            wayback_retry_policy_hash=retry_hashes["wayback"],
-        )
-        source_add_functional_probe = CoordinatorSourceAddFunctionalProbeV2(
-            reader=source_reader,
-            execute_provider=get_v2_provider_broker().execute,
-        )
-        reward_source = CoordinatorRewardSourceV2(
-            reader=source_reader,
-            chain_source=chain_source,
-            config_supplier=runtime.research_lab_config,
-        )
         v2_coordinator_job_manager = ExecutionJobManagerV2(
             boot_identity_supplier=runtime.boot_identity,
             sign_digest=sign_data,
@@ -2004,21 +1909,6 @@ def get_v2_coordinator_job_manager():
                         )
                     )
                 ),
-                source_add_provenance_resolver=lambda payload, context: (
-                    source_add_provenance.resolve(
-                        payload=payload,
-                        context=context,
-                    )
-                ),
-                source_add_functional_probe_resolver=lambda payload, context: (
-                    source_add_functional_probe.resolve(
-                        payload=payload,
-                        context=context,
-                    )
-                ),
-                reward_source_resolver=lambda payload, context: (
-                    reward_source.resolve(payload=payload, context=context)
-                ),
                 legacy_settlement_source_resolver=lambda payload, context: (
                     legacy_settlement_source.resolve(
                         payload=payload,
@@ -2048,9 +1938,6 @@ def get_v2_coordinator_job_manager():
                             context=context,
                         )
                     )
-                ),
-                source_add_catalog_resolver=lambda payload, context: (
-                    reward_source.catalog_snapshot(payload=payload, context=context)
                 ),
             ),
             worker_count=1,

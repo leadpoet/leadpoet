@@ -75,7 +75,6 @@ def _snapshot(**overrides):
             "allocation_hash": HASH,
             "lab_cap_percent": 20.0,
             "unallocated_percent": 20.0,
-            "source_add_allocations": [],
             "reimbursement_allocations": [],
             "champion_allocations": [],
             "queued_champion_allocations": [],

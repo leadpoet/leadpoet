@@ -159,9 +159,7 @@ def _source_row_with_champion(*, epoch: int = 200) -> dict:
         "settlement_frontier": None,
         "champion_obligation_count": 1,
         "champion_obligations": [obligation],
-        "source_add_obligation_count": 0,
-        "source_add_obligations": [],
-        "skipped": {"champions": [], "source_add": []},
+        "skipped": {"champions": []},
     }
     result["source_state_hash"] = sha256_json(result["source_state"])
     row["result_doc"] = result
@@ -176,77 +174,10 @@ def _source_row_with_champion(*, epoch: int = 200) -> dict:
     return row
 
 
-def _source_add_reward_id() -> str:
-    return "source_add_reward:0123456789abcdef"
 
 
-def _source_add_reward_row() -> dict:
-    return {
-        "reward_ref": _source_add_reward_id(),
-        "adapter_id": "adapter:frontier",
-        "miner_hotkey": "5FfrontierSourceAdd",
-        "leg": 1,
-        "reward_kind": "source_acceptance",
-        "alpha_percent": 1.0,
-        "reward_epochs": 20,
-        "start_epoch": 180,
-        "current_reward_status": "partially_paid",
-        "trigger_evidence_doc": {"functional_probe_passed": True},
-        "public_label": "Source acceptance reward",
-        "desired_alpha_percent": 1.0,
-        "epoch_count": 20,
-    }
 
 
-def _source_row_with_source_add(*, epoch: int = 200) -> dict:
-    row = _source_row(epoch=epoch, receipt=1)
-    source_id = _source_add_reward_id()
-    obligation = {
-        "uid": 15,
-        "miner_uid": 15,
-        "miner_hotkey": "5FfrontierSourceAdd",
-        "source_id": source_id,
-        "source_add_reward_id": source_id,
-        "adapter_id": "adapter:frontier",
-        "leg": 1,
-        "reward_kind": "source_acceptance",
-        "status": "active",
-        "start_epoch": 180,
-        "epoch_count": 20,
-        "nominal_end_epoch": 200,
-        "improvement_points": 0.0,
-        "threshold_points": 0.0,
-        "desired_alpha_percent": 1.0,
-        "total_due_alpha_percent": 20.0,
-        "paid_alpha_percent_to_date": 4.0,
-        "remaining_alpha_percent": 16.0,
-        "current_epoch_desired_alpha_percent": 1.0,
-        "champ_cap_enabled": True,
-        "replay_status": "extended_replay",
-    }
-    result = deepcopy(row["result_doc"])
-    result["source_state"] = {
-        "epoch": epoch,
-        "netuid": 71,
-        "policy": {"enable_champ_cap": True},
-        "settlement_frontier": None,
-        "champion_obligation_count": 0,
-        "champion_obligations": [],
-        "source_add_obligation_count": 1,
-        "source_add_obligations": [obligation],
-        "skipped": {"champions": [], "source_add": []},
-    }
-    result["source_state_hash"] = sha256_json(result["source_state"])
-    row["result_doc"] = result
-    row["result_hash"] = sha256_json(result)
-    row["artifact_hashes"] = sorted(
-        {result["source_state_hash"], sha256_json(result["allocation"])}
-    )
-    row["artifact_root"] = merkle_root(
-        row["artifact_hashes"],
-        domain="leadpoet-artifact-v2",
-    )
-    return row
 
 
 class _FakeReader:
@@ -374,63 +305,11 @@ def test_measured_bootstrap_uses_exact_signed_reward_identities(monkeypatch) -> 
         {"champion_reward_id": _champion_reward_id()},
     ) in reader.calls
     assert all(
-        policy_id not in {"allocation_champion_rewards", "allocation_source_add_rewards"}
+        policy_id != "allocation_champion_rewards"
         for policy_id, _parameters in reader.calls
     )
 
 
-def test_measured_bootstrap_uses_exact_signed_source_add_identity(monkeypatch) -> None:
-    source_row = _source_row_with_source_add()
-    reward_row = _source_add_reward_row()
-    reward_receipt_hash = _sha(2)
-    reader = _FakeReader(
-        {
-            "allocation_settlement_frontier_activation": [],
-            "allocation_settlement_frontiers": [],
-            "latest_attested_allocation_execution_results": [source_row],
-            "source_add_reward_by_ref": [reward_row],
-        }
-    )
-    resolver = CoordinatorAllocationFrontierBootstrapV2(reader)
-    monkeypatch.setattr(
-        resolver,
-        "_validate_source_receipt",
-        lambda **_kwargs: None,
-    )
-
-    def require_reward_receipt(**kwargs) -> None:
-        assert kwargs["artifact_kind"] == "source_add_reward_decision"
-        assert kwargs["artifact_ref"] == _source_add_reward_id()
-        kwargs["required_parents"].add(reward_receipt_hash)
-
-    monkeypatch.setattr(resolver, "_require_reward_receipt", require_reward_receipt)
-    context = ExecutionContextV2(
-        job_id="allocation-frontier-bootstrap:200",
-        purpose=ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
-        epoch_id=200,
-        parent_receipt_hashes=(source_row["receipt_hash"], reward_receipt_hash),
-    )
-
-    result = resolver.resolve(
-        payload={
-            "schema_version": (
-                ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_REQUEST_SCHEMA_VERSION
-            ),
-            "netuid": 71,
-            "through_epoch": 200,
-            "allocation_source_receipt_hash": source_row["receipt_hash"],
-        },
-        context=context,
-    )
-
-    checkpoint = result["frontier"]["reward_checkpoints"][0]
-    assert checkpoint["reward_kind"] == "source_add"
-    assert checkpoint["source_id"] == _source_add_reward_id()
-    assert checkpoint["applied_alpha_percent"] == "4.000000"
-    assert (
-        "source_add_reward_by_ref",
-        {"reward_ref": _source_add_reward_id()},
-    ) in reader.calls
 
 
 def test_measured_bootstrap_rejects_unrepresentable_skipped_rewards(
@@ -542,7 +421,6 @@ async def test_host_graph_selection_is_derived_only_from_signed_source(
     monkeypatch,
 ) -> None:
     champion_id = _champion_reward_id()
-    source_add_id = "source_add_reward:0123456789abcdef"
     source_graph = {"root_receipt_hash": _sha(1)}
     source = {
         "result": {
@@ -552,13 +430,6 @@ async def test_host_graph_selection_is_derived_only_from_signed_source(
                     {
                         "source_id": champion_id,
                         "champion_reward_id": champion_id,
-                    }
-                ],
-                "source_add_obligation_count": 1,
-                "source_add_obligations": [
-                    {
-                        "source_id": source_add_id,
-                        "source_add_reward_id": source_add_id,
                     }
                 ],
             }
@@ -573,9 +444,6 @@ async def test_host_graph_selection_is_derived_only_from_signed_source(
             ("champion_reward_decision", champion_id): {
                 "root_receipt_hash": _sha(2)
             },
-            ("source_add_reward_decision", source_add_id): {
-                "root_receipt_hash": _sha(3)
-            },
         }
 
     monkeypatch.setattr(host_bootstrap, "validate_receipt_graph", lambda _value: None)
@@ -587,13 +455,11 @@ async def test_host_graph_selection_is_derived_only_from_signed_source(
     assert requested == [
         {
             ("champion_reward_decision", champion_id),
-            ("source_add_reward_decision", source_add_id),
         }
     ]
     assert [graph["root_receipt_hash"] for graph in graphs] == [
         _sha(1),
         _sha(2),
-        _sha(3),
     ]
 
 

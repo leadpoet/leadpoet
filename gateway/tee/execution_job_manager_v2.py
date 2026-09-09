@@ -88,7 +88,6 @@ _ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
         ("attest_weight_input", "research_lab.allocation.v2"),
         ("attest_weight_input", "research_lab.champion_input.v2"),
         ("attest_weight_input", "research_lab.reimbursement_input.v2"),
-        ("attest_weight_input", "research_lab.source_add_reward_input.v2"),
         ("attest_weight_input", "research_lab.anomaly_adjustment_input.v2"),
         ("attest_weight_publication", "gateway.weights.publication.v2"),
         _ALLOCATION_FRONTIER_BOOTSTRAP_SCOPE,

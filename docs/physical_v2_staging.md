@@ -52,11 +52,10 @@ attestation and targets 5-10 minutes. It:
    Arena, ICP, settlement, retry, and cleanup contracts.
 
 The candidate contract's independent source commitments include the exact
-miner signing helpers, intake models and routes, and SOURCE_ADD miner helper.
+miner signing helpers and active intake models and routes.
 Both lanes verify those commitments
 against the candidate Git blobs and checkout. This prevents stale evidence
-without changing measured runtime identity or PCR0. The full lane exercises
-SOURCE_ADD admission through the candidate's measured provider path.
+without changing measured runtime identity or PCR0.
 
 No production rows are copied in the fast lane, and no database dump is
 uploaded as an artifact. The schema archive is destroyed on every exit path;
@@ -91,36 +90,13 @@ release succeeds. It dynamically:
 11. hash-binds that verified allocation document into the exact candidate
     primary/audit signing and submission path, then requires both validators
     to consume the same canonical vector through the strict non-forwarding
-    chain boundary; and
-12. creates one in-memory ephemeral miner identity and exercises the exact
-    candidate SOURCE_ADD HTTP request models, signatures,
-    routes, measured credential verification, PostgREST/RPC calls, and durable
-    writes against the clone.
+    chain boundary.
 
 The Arena uses the organizer's runtime API keys for billable provider calls.
 The clone secret excludes OpenRouter management credentials. OpenRouter
 requests require `data_collection=deny` and `zdr=true`; the lane does not
 change workspace logging or create, rotate, or delete provider keys.
 Production Supabase and the chain remain read-only.
-
-SOURCE_ADD intentionally has a different production contract: miners submit
-credential-free source proposals, while an operator adds any provider
-credential later through the measured administration path. The lane first
-makes one bounded read-only request to BuiltWith's official Domain API, using
-its documented `Authorization: API ...` header so the key never enters a URL,
-to prove the configured credential. It then submits the BuiltWith metadata
-through the exact credential-free miner route. It requires `provenance_queued` plus one
-unclaimed queue item, proves no downstream SOURCE_ADD work ran, and verifies
-that both the retired public credential-recipient route and direct credential
-injection still fail closed. Accepting the BuiltWith key in a miner request
-would be staging-only behavior and is deliberately forbidden.
-
-The ephemeral hotkey has no chain identity. The only isolated intake adapter
-therefore replaces the external registration lookup for that one exact
-in-memory hotkey; all signatures, ban checks, request validation, enclave
-attestation, provider authentication, persistence, and fail-closed behavior
-remain production code. It rejects every other hotkey and never reaches a
-chain write.
 
 The workflow immediately deletes its instance, volume, security group,
 CloudFront distribution, run secret, and local database dump. The transient
@@ -306,10 +282,8 @@ runner; no additional copy is created.
 - The candidate date is a future unconsumed UTC date inside the clone, avoiding
   deletion or rewriting of copied production daily state.
 - The externally reachable candidate gateway keeps miner submissions disabled.
-  Only the bounded in-process intake phase enables the production routes, only
-  after rebenchmark and weight evidence is complete, and only against the
-  disposable clone. SOURCE_ADD dispatch, paid loops, Git/model mutation,
-  promotion, fulfillment, and telemetry remain disabled.
+  Arena admissions run only against the disposable clone. Production model
+  mutation, promotion, fulfillment, and telemetry remain disabled.
 - Production Finney is read-only. The adapter cannot forward the final chain
   RPC and cannot fabricate receipts or success.
 - Every identity, source archive, release artifact, allocation, and evidence

@@ -19,7 +19,7 @@ from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
     _basis,
     _publish,
 )
-from tests.test_source_add_end_to_end_postgres import SCRIPTS
+from tests.postgres_migration_harness import SCRIPTS
 
 
 @pytest.fixture()

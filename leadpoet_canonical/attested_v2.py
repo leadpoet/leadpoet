@@ -56,16 +56,19 @@ ROLE_PURPOSES = {
             "research_lab.chain_weight_observation.v1",
             "research_lab.chain_realized_epoch_settlement.v1",
             "research_lab.subnet_epoch_cutover.v2",
+            # Historical receipts remain verifiable after the runtime is retired.
             "research_lab.source_add_provenance.v2",
             "research_lab.source_add_functional_probe.v2",
             "research_lab.source_add_catalog_snapshot.v2",
             "research_lab.source_add_credential.v2",
+            # Historical weight receipts remain verifiable; no runtime operation
+            # is registered for this retired purpose.
+            "research_lab.source_add_reward_input.v2",
             "research_lab.openrouter_credential.v2",
             "research_lab.openrouter_credit_preflight.v2",
             "research_lab.allocation.v2",
             "research_lab.champion_input.v2",
             "research_lab.reimbursement_input.v2",
-            "research_lab.source_add_reward_input.v2",
             "research_lab.sourcing_input.v2",
             "research_lab.fulfillment_input.v2",
             "research_lab.leaderboard_input.v2",

@@ -228,7 +228,6 @@ _FORCED_KEYS = {
     "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
     "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED",
     "ENABLE_FULFILLMENT",
-    "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED",
 }
 
 
@@ -461,7 +460,6 @@ def build_gateway_environment(
         "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
         # Intake is exercised explicitly after the rebenchmark and weight
         # proofs. Nothing may claim its queued provenance work in this run.
-        "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED": "false",
         "RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED": "false",

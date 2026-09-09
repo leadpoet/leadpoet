@@ -1750,7 +1750,16 @@ def run_launch(config: Mapping[str, Any], *, confirm_instance_id: str) -> Dict[s
         )
         runner.start(
             "gateway_application",
-            [config["python_bin"], "-u", "-m", "gateway.main"],
+            [
+                config["python_bin"],
+                "-u",
+                "-m",
+                "scripts.run_temporary_testnet401_chain_bound_gateway",
+                "--chain-profile",
+                validator["chain_profile"],
+                "--hotkey-config",
+                validator["hotkey_config"],
+            ],
             env=gateway_env,
             cwd=repo_root,
         )
@@ -1778,6 +1787,10 @@ def run_launch(config: Mapping[str, Any], *, confirm_instance_id: str) -> Dict[s
                 str(Path(config["runtime_root"]) / "validator-state"),
                 "--readiness-file",
                 str(validator_poll_readiness_path),
+                "--chain-profile",
+                validator["chain_profile"],
+                "--hotkey-config",
+                validator["hotkey_config"],
             ],
             env=validator_env,
             cwd=repo_root,

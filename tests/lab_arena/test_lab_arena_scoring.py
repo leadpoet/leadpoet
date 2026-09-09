@@ -28,6 +28,29 @@ def company(index: int, bucket: str = "51-200") -> dict:
     return {"company_name": "Co %d" % index, "company_website": "https://co%d.example.com" % index, "industry": "Software", "employee_count": bucket, "country": "United States", "intent_signals": []}
 
 
+def scored_company(index: int, *, name: str | None = None, bucket: str = "51-200") -> dict:
+    return {
+        "company_name": name if name is not None else "Scored Co %d" % index,
+        "company_website": "https://scored%d.example.com" % index,
+        "company_linkedin": "https://www.linkedin.com/company/scored-co-%d" % index,
+        "industry": "Software",
+        "employee_count": bucket,
+        "company_stage": "Series A",
+        "country": "United States",
+        "state": "",
+        "fit_summary": "The company matches the requested software profile.",
+        "fit_evidence_urls": ["https://scored%d.example.com/about" % index],
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "The company announced a funding round.",
+            "date": "2026-09-01",
+            "why_now": "The recent funding creates a timely opportunity.",
+            "url": "https://scored%d.example.com/news/funding" % index,
+            "snippet": "The company announced new funding.",
+        }],
+    }
+
+
 def public_company(company_linkedin: str) -> dict:
     return {
         "company_name": "Acme",
@@ -496,6 +519,297 @@ def test_judge_infrastructure_failures_retry_then_raise_never_zero():
 
     with pytest.raises(scoring.ScoringError):
         scoring.score_work_item(item, icp=_ICPS[0], companies=[company(1)], scorer=broken)
+
+
+def test_retry_retains_first_terminal_company_results_and_calls_only_pending():
+    companies = [scored_company(index) for index in range(3)]
+    calls = []
+    first = breakdown(51.0)
+    second = breakdown(52.0)
+    third = breakdown(53.0)
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        if len(calls) == 1:
+            return [first, unavailable, unavailable]
+        if len(calls) == 2:
+            return [second, unavailable]
+        return [third]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-retained-order"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1", "Scored Co 2"],
+        ["Scored Co 1", "Scored Co 2"],
+        ["Scored Co 2"],
+    ]
+    assert result == [first, second, third]
+
+
+def test_retry_retains_terminal_mismatch_zero_while_other_company_recovers():
+    companies = [scored_company(0), scored_company(1)]
+    calls = []
+    mismatch = breakdown(0.0, "Company fit mismatch: industry")
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    recovered = breakdown(61.0)
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        return [mismatch, unavailable] if len(calls) == 1 else [recovered]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-retained-zero"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+
+    assert calls == [["Scored Co 0", "Scored Co 1"], ["Scored Co 1"]]
+    assert result == [mismatch, recovered]
+
+
+def test_retry_pending_subset_preserves_bucket_skip_cap_and_original_order():
+    companies = [
+        scored_company(0),
+        scored_company(1, bucket="10,001+"),
+        scored_company(2),
+        # This duplicate is after the cap and must not disable safe retention.
+        scored_company(3, name="Scored Co 0"),
+    ]
+    calls = []
+    first = breakdown(71.0)
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    recovered = breakdown(73.0)
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        return [first, unavailable] if len(calls) == 1 else [recovered]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-retained-cap"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+        max_scored_companies=2,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1", "Scored Co 2", "Scored Co 0"],
+        ["Scored Co 2"],
+    ]
+    assert result == [first, recovered]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("Duplicate", "Duplicate"),
+        (" Duplicate ", "duplicate"),
+    ],
+)
+def test_duplicate_names_keep_whole_item_retry_and_duplicate_guard(names):
+    companies = [
+        scored_company(0, name=names[0]),
+        scored_company(1, name=names[1]),
+        scored_company(2, name="Unique"),
+    ]
+    calls = []
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    duplicate = breakdown(0.0, "Duplicate company")
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        if len(calls) == 1:
+            return [breakdown(11.0), duplicate, unavailable]
+        return [breakdown(22.0), duplicate, breakdown(33.0)]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-duplicate-fallback"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+
+    expected_names = [*names, "Unique"]
+    assert calls == [expected_names, expected_names]
+    assert result == [breakdown(22.0), duplicate, breakdown(33.0)]
+
+
+def test_duplicate_fallback_preserves_real_seen_company_gate(monkeypatch):
+    from qualification.competition_models import CompetitionCompany
+    from qualification.scoring import lead_scorer
+    from qualification.scoring.competition import CompetitionCompanyScorer
+    from qualification.scoring.pre_checks import check_duplicate_company
+
+    companies = [
+        scored_company(0, name="Alpha Systems"),
+        scored_company(1, name="Alpha Systems"),
+        scored_company(2, name="Beta Systems"),
+    ]
+    for row in companies:
+        validated = CompetitionCompany.model_validate(row)
+        assert CompetitionCompany.model_validate_json(
+            json.dumps(validated.model_dump(mode="json"))
+        ) == validated
+
+    beta_calls = {"n": 0}
+    duplicate_reasons = []
+
+    async def score_company(*, company, seen_companies, **kwargs):
+        duplicate = check_duplicate_company(company.company_name, seen_companies)
+        if not duplicate.passed:
+            duplicate_reasons.append(duplicate.reason)
+            return breakdown(0.0, duplicate.reason)
+        seen_companies.add(company.company_name.lower().strip())
+        if company.company_name == "Beta Systems":
+            beta_calls["n"] += 1
+            if beta_calls["n"] == 1:
+                return breakdown(0.0, "Company fit unavailable: provider timeout")
+        return breakdown(60.0)
+
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent", score_company
+    )
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-real-duplicate-fallback"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=CompetitionCompanyScorer().score_with_breakdowns,
+    )
+
+    assert beta_calls["n"] == 2
+    assert len(duplicate_reasons) == 2
+    assert [row["final_score"] for row in result] == [60.0, 0.0, 60.0]
+    assert "Duplicate company" in result[1]["failure_reason"]
+
+
+def test_missing_name_keeps_whole_item_retry_behavior():
+    companies = [scored_company(0, name=""), scored_company(1)]
+    calls = []
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        if len(calls) == 1:
+            return [breakdown(11.0), unavailable]
+        return [breakdown(22.0), breakdown(33.0)]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-missing-name-fallback"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+
+    assert calls == [["", "Scored Co 1"], ["", "Scored Co 1"]]
+    assert [row["final_score"] for row in result] == [22.0, 33.0]
+
+
+def test_malformed_whole_item_count_fails_before_duplicate_fallback_retry():
+    companies = [
+        scored_company(0, name="Duplicate"),
+        scored_company(1, name=" duplicate "),
+    ]
+    calls = []
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        return [breakdown(0.0, "Company fit unavailable: provider timeout")]
+
+    with pytest.raises(
+        scoring.ScoringError,
+        match="scorer returned 1 breakdowns for 2 scored companies",
+    ):
+        scoring.score_work_item(
+            {"scored_run_id": "run-malformed-duplicate-fallback"},
+            icp=_ICPS[0],
+            companies=companies,
+            scorer=scorer,
+        )
+    assert calls == [["Duplicate", " duplicate "]]
+
+
+def test_retry_rejects_malformed_pending_count_before_result_association():
+    companies = [scored_company(0), scored_company(1)]
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    calls = []
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        if len(calls) == 1:
+            return [breakdown(41.0), unavailable]
+        return [breakdown(42.0), breakdown(99.0)]
+
+    with pytest.raises(
+        scoring.ScoringError,
+        match="scorer returned 2 breakdowns for 1 scored companies",
+    ):
+        scoring.score_work_item(
+            {"scored_run_id": "run-malformed-pending"},
+            icp=_ICPS[0],
+            companies=companies,
+            scorer=scorer,
+        )
+    assert calls == [["Scored Co 0", "Scored Co 1"], ["Scored Co 1"]]
+
+
+def test_retry_keeps_retained_results_across_batch_exception():
+    companies = [scored_company(0), scored_company(1)]
+    first = breakdown(81.0)
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    recovered = breakdown(82.0)
+    calls = []
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        if len(calls) == 1:
+            return [first, unavailable]
+        if len(calls) == 2:
+            raise RuntimeError("transient judge process failure")
+        return [recovered]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-retained-after-exception"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+        ["Scored Co 1"],
+    ]
+    assert result == [first, recovered]
+
+
+def test_retry_exhaustion_never_fabricates_zero_for_unresolved_company():
+    companies = [scored_company(0), scored_company(1)]
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    calls = []
+
+    def scorer(batch, icp, is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        return [breakdown(91.0), unavailable] if len(calls) == 1 else [unavailable]
+
+    with pytest.raises(scoring.ScoringError, match="infrastructure failure"):
+        scoring.score_work_item(
+            {"scored_run_id": "run-unresolved-exhausted"},
+            icp=_ICPS[0],
+            companies=companies,
+            scorer=scorer,
+        )
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+        ["Scored Co 1"],
+    ]
 
 
 def test_judge_accepts_nonempty_score_with_unavailable_extra_evidence():

@@ -235,6 +235,23 @@ def _run_scorer(scorer: Scorer, companies: Sequence[Mapping[str, Any]], icp: Map
     return [dict(item) for item in result]
 
 
+def _has_unique_scored_company_names(
+    companies: Sequence[Mapping[str, Any]], scored_indexes: Sequence[int],
+) -> bool:
+    """Whether company-local retries cannot change the duplicate-name gate."""
+
+    names: List[str] = []
+    for index in scored_indexes:
+        company = companies[index]
+        if not isinstance(company, Mapping):
+            return False
+        name = company.get("company_name")
+        if not isinstance(name, str) or not name.strip():
+            return False
+        names.append(name.lower().strip())
+    return bool(names) and len(names) == len(set(names))
+
+
 def score_work_item(
     item: Mapping[str, Any],
     *,
@@ -246,11 +263,14 @@ def score_work_item(
 ) -> List[Dict[str, Any]]:
     """Score one distinct output once: the first-N slice in model order.
 
-    A judge infrastructure failure inside a breakdown retries the whole item;
-    exhaustion raises ``ScoringError`` (the service cancels if the window
-    closes) and never creates a miner zero. The scorer must return exactly one
-    breakdown per company it scores under the bucket-skip rule the verifier
-    recomputes; any other count is a scorer contract failure.
+    For scored companies with unique, nonempty names, keep each company's
+    first terminal breakdown and retry only unresolved companies. Duplicate or
+    missing names keep whole-item retries because the scorer's duplicate gate
+    depends on batch order. Exhaustion raises ``ScoringError`` (the service
+    cancels if the window closes) and never creates a miner zero. The scorer
+    must return exactly one breakdown per company it scores under the
+    bucket-skip rule the verifier recomputes; any other count is a scorer
+    contract failure before any result is retained.
     """
 
     from qualification.scoring.competition import (
@@ -259,20 +279,47 @@ def score_work_item(
 
     sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
     scored_indexes, _skipped = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
+    retain_terminal = _has_unique_scored_company_names(sliced, scored_indexes)
+    retained: List[Optional[Dict[str, Any]]] = [None] * len(scored_indexes)
+    unresolved = list(range(len(scored_indexes)))
     last_error: Optional[BaseException] = None
-    for _attempt in range(max(1, int(max_retries))):
+    for attempt in range(max(1, int(max_retries))):
+        if retain_terminal and attempt > 0:
+            invoked_positions = list(unresolved)
+            invoked_companies = [
+                sliced[scored_indexes[position]] for position in invoked_positions
+            ]
+        else:
+            invoked_positions = list(range(len(scored_indexes)))
+            invoked_companies = sliced
         try:
-            breakdowns = _run_scorer(scorer, sliced, icp)
-        except Exception as exc:  # judge/provider failure: retry the work item
+            breakdowns = _run_scorer(scorer, invoked_companies, icp)
+        except Exception as exc:  # judge/provider failure: retry unresolved input
             last_error = exc
             continue
+        if len(breakdowns) != len(invoked_positions):
+            raise ScoringError(
+                "scorer returned %d breakdowns for %d scored companies"
+                % (len(breakdowns), len(invoked_positions))
+            )
         failed = [item_row for item_row in breakdowns if scorer_breakdown_has_retryable_infrastructure_failure(item_row)]
+        if not retain_terminal:
+            if failed:
+                last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
+                continue
+            return breakdowns
+        for position, breakdown in zip(invoked_positions, breakdowns):
+            if not scorer_breakdown_has_retryable_infrastructure_failure(breakdown):
+                retained[position] = breakdown
+        unresolved = [
+            position for position, breakdown in enumerate(retained)
+            if breakdown is None
+        ]
+        if not unresolved:
+            return [dict(breakdown) for breakdown in retained if breakdown is not None]
         if failed:
             last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
             continue
-        if len(breakdowns) != len(scored_indexes):
-            raise ScoringError("scorer returned %d breakdowns for %d scored companies" % (len(breakdowns), len(scored_indexes)))
-        return breakdowns
     raise ScoringError("run %s could not be scored: %s: %s" % (item.get("scored_run_id"), type(last_error).__name__ if last_error else "unknown", str(last_error or "")[:240]))
 
 

@@ -22,6 +22,7 @@ from uuid import uuid4
 
 import pytest
 
+from lab_arena import contracts
 from gateway.tee import gateway_miner_maintenance_restart_v1 as maintenance
 from gateway.tee.release_manifest_v2 import build_local_release_identity
 from gateway.tee.topology import ROLE_SPECS, topology_hash
@@ -735,7 +736,7 @@ def test_full_releases_only_its_ready_arena_guard_and_preserves_operator_pause(
     assert len(observed_hosts) == request_count
 
 
-def test_full_clone_normalizes_only_idle_nonpaused_migration_190_guard_state():
+def test_full_clone_atomically_recovers_expired_leases_and_normalizes_guard():
     database = database_with_lab_arena_migration()
     psycopg2, dsn = next(database)
     admin = psycopg2.connect(**dsn)
@@ -757,9 +758,16 @@ def test_full_clone_normalizes_only_idle_nonpaused_migration_190_guard_state():
         @staticmethod
         def _psql(sql: str, *, timeout: int = 120) -> str:
             assert timeout == 45
-            with admin.cursor() as cursor:
-                cursor.execute(sql)
-                return str(cursor.fetchone()[0])
+            try:
+                with admin.cursor() as cursor:
+                    cursor.execute(sql)
+                    return str(cursor.fetchone()[0])
+            except psycopg2.Error as exc:
+                with admin.cursor() as cursor:
+                    cursor.execute("ROLLBACK")
+                raise full_host.ProductionParityError(
+                    "parity PostgreSQL probe failed"
+                ) from exc
 
     def rpc(function: str, *values):
         with admin.cursor() as cursor:
@@ -856,10 +864,16 @@ def test_full_clone_normalizes_only_idle_nonpaused_migration_190_guard_state():
         )
         normalized = state()
         assert evidence == {
-            "schema_version": "leadpoet.production_parity_clone_arena_state.v1",
+            "schema_version": "leadpoet.production_parity_clone_arena_state.v2",
+            "outcome": "normalized",
             "control_count": 1,
             "operator_paused": False,
-            "current_leased_count": 0,
+            "initial_leased_count": 0,
+            "expired_eligible_count": 0,
+            "affected_round_count": 0,
+            "expired_count": 0,
+            "retried_count": 0,
+            "remaining_leased_count": 0,
             "normalization_count": 1,
             "guard_generation": generation,
             "guard_cleared": True,
@@ -881,23 +895,389 @@ def test_full_clone_normalizes_only_idle_nonpaused_migration_190_guard_state():
             == history_before["control"]["updated_at"]
         )
 
-        assert claim(store, "arena-2099-01-11", runners[0])[0]["status"] == "leased"
+        idempotent = full_host._normalize_full_parity_clone_arena_restart_state(
+            CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+        )
+        assert idempotent["initial_leased_count"] == 0
+        assert idempotent["guard_generation"] == generation
+
+        financial_round = "arena-2099-01-12"
+        second_round = "arena-2099-01-13"
+        financial_runners, _ = open_round(
+            store,
+            financial_round,
+            participants=1,
+            runners=1,
+            prefix="full-clone-financial",
+            stage_1_icps=4,
+        )
+        second_runners, _ = open_round(
+            store,
+            second_round,
+            participants=1,
+            runners=1,
+            prefix="full-clone-second",
+            stage_1_icps=2,
+        )
+        accepted, accepted_token, *_ = claim(
+            store, financial_round, financial_runners[0], parallelism=4
+        )
+        accepted_hash = hash_lease_token(accepted_token)
+        settled_identity = contracts.provider_call_identity(
+            attempt=1,
+            assignment_id=accepted["assignment_id"],
+            icp_position=accepted["icp_position"],
+            action_sequence=0,
+            operation_id="openrouter.chat",
+            request_hash=contracts.document_hash({"call": "settled"}),
+        )
+        assert store.reserve_call(
+            run_id=accepted["run_id"],
+            lease_token_hash=accepted_hash,
+            call_identity=settled_identity,
+            operation_id="openrouter.chat",
+            provider="openrouter",
+            funding_source="miner_key",
+            amount_microusd=1000,
+            call_doc={},
+        )["status"] == "reserved"
+        assert store.mark_dispatched(
+            run_id=accepted["run_id"],
+            lease_token_hash=accepted_hash,
+            call_identity=settled_identity,
+        )["status"] == "dispatched"
+        assert store.settle_call(
+            run_id=accepted["run_id"],
+            lease_token_hash=accepted_hash,
+            call_identity=settled_identity,
+            actual_microusd=700,
+            terminal_response={"status": 200},
+        )["status"] == "settled"
+        assert complete(
+            store,
+            accepted["run_id"],
+            accepted_hash,
+            "accepted",
+            output_ref="arena/full-clone-normalization/settled.json",
+        )["status"] == "accepted"
+
+        expired_runs = []
+        open_call_identities = []
+        for index, (round_id, runner) in enumerate(
+            (
+                (financial_round, financial_runners[0]),
+                (second_round, second_runners[0]),
+            )
+        ):
+            leased, lease_token, *_ = claim(
+                store, round_id, runner, parallelism=4
+            )
+            lease_hash = hash_lease_token(lease_token)
+            call_identity = contracts.provider_call_identity(
+                attempt=1,
+                assignment_id=leased["assignment_id"],
+                icp_position=leased["icp_position"],
+                action_sequence=0,
+                operation_id="openrouter.chat",
+                request_hash=contracts.document_hash({"open": index}),
+            )
+            assert store.reserve_call(
+                run_id=leased["run_id"],
+                lease_token_hash=lease_hash,
+                call_identity=call_identity,
+                operation_id="openrouter.chat",
+                provider="openrouter",
+                funding_source="miner_key",
+                amount_microusd=900 + (index * 200),
+                call_doc={},
+            )["status"] == "reserved"
+            if index == 1:
+                assert store.mark_dispatched(
+                    run_id=leased["run_id"],
+                    lease_token_hash=lease_hash,
+                    call_identity=call_identity,
+                )["status"] == "dispatched"
+            expired_runs.append(leased["run_id"])
+            open_call_identities.append(call_identity)
+
+        acquired = rpc(
+            "lab_arena_acquire_restart_guard_v1",
+            guard,
+            owner,
+            generation,
+            600,
+            CANDIDATE_COMMIT,
+            "all",
+            "source-environment-restart",
+        )
+        recovery_generation = acquired["guard_generation"]
         with admin.cursor() as cursor:
             cursor.execute(
                 "UPDATE public.lab_arena_runs "
                 "SET lease_expires_at = NOW() - INTERVAL '1 minute' "
-                "WHERE status = 'leased'"
+                "WHERE run_id = ANY(%s)",
+                (expired_runs,),
             )
-        leased_before = state()
-        with pytest.raises(
-            full_host.FullParityError,
-            match="contains active Arena leases",
+            cursor.execute(
+                "SELECT pg_catalog.to_jsonb(runs) "
+                "FROM public.lab_arena_runs AS runs WHERE run_id = %s",
+                (accepted["run_id"],),
+            )
+            accepted_before = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(ledger) "
+                "ORDER BY ledger.entry_id) FROM public.lab_arena_ledger AS ledger "
+                "WHERE run_id = %s",
+                (accepted["run_id"],),
+            )
+            settled_before = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(rounds) "
+                "ORDER BY rounds.round_id) FROM public.lab_arena_rounds AS rounds "
+                "WHERE round_id = ANY(%s)",
+                ([financial_round, second_round],),
+            )
+            rounds_before = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT restart_scope, restart_phase, "
+                "pg_catalog.jsonb_array_length(captured_leases) "
+                "FROM public.lab_arena_restart_claim_control WHERE singleton"
+            )
+            assert cursor.fetchone() == ("all", "draining", 2)
+
+        recovered = full_host._normalize_full_parity_clone_arena_restart_state(
+            CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+        )
+        assert recovered == {
+            "schema_version": "leadpoet.production_parity_clone_arena_state.v2",
+            "outcome": "normalized",
+            "control_count": 1,
+            "operator_paused": False,
+            "initial_leased_count": 2,
+            "expired_eligible_count": 2,
+            "affected_round_count": 2,
+            "expired_count": 2,
+            "retried_count": 2,
+            "remaining_leased_count": 0,
+            "normalization_count": 1,
+            "guard_generation": recovery_generation,
+            "guard_cleared": True,
+        }
+        recovered_state = state()
+        assert recovered_state["control"]["guard_generation"] == recovery_generation
+        assert recovered_state["control"]["captured_leases"] == []
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_catalog.to_jsonb(runs) "
+                "FROM public.lab_arena_runs AS runs WHERE run_id = %s",
+                (accepted["run_id"],),
+            )
+            assert cursor.fetchone()[0] == accepted_before
+            cursor.execute(
+                "SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(ledger) "
+                "ORDER BY ledger.entry_id) FROM public.lab_arena_ledger AS ledger "
+                "WHERE run_id = %s",
+                (accepted["run_id"],),
+            )
+            assert cursor.fetchone()[0] == settled_before
+            cursor.execute(
+                "SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(rounds) "
+                "ORDER BY rounds.round_id) FROM public.lab_arena_rounds AS rounds "
+                "WHERE round_id = ANY(%s)",
+                ([financial_round, second_round],),
+            )
+            assert cursor.fetchone()[0] == rounds_before
+            cursor.execute(
+                "SELECT entry_kind, amount_microusd FROM public.lab_arena_ledger "
+                "WHERE call_identity = %s ORDER BY entry_id DESC LIMIT 1",
+                (open_call_identities[0],),
+            )
+            assert cursor.fetchone() == ("recovery", 0)
+            cursor.execute(
+                "SELECT entry_kind, amount_microusd FROM public.lab_arena_ledger "
+                "WHERE call_identity = %s ORDER BY entry_id DESC LIMIT 1",
+                (open_call_identities[1],),
+            )
+            assert cursor.fetchone() == ("uncertain", 1100)
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.lab_arena_runs "
+                "WHERE run_id = ANY(%s) AND status = 'failed' "
+                "AND terminal_cause = 'lease_expired'",
+                (expired_runs,),
+            )
+            assert cursor.fetchone()[0] == 2
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.lab_arena_runs "
+                "WHERE round_id = ANY(%s) AND status = 'pending' AND attempt = 2",
+                ([financial_round, second_round],),
+            )
+            assert cursor.fetchone()[0] == 2
+
+        future_runs = []
+        for round_id, runner in (
+            (financial_round, financial_runners[0]),
+            (second_round, second_runners[0]),
         ):
-            full_host._normalize_full_parity_clone_arena_restart_state(
-                CloneDatabase(),
-                candidate_sha=CANDIDATE_COMMIT,
+            leased, *_ = claim(store, round_id, runner, parallelism=4)
+            assert leased["status"] == "leased"
+            future_runs.append(leased["run_id"])
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET lease_expires_at = "
+                "CASE WHEN run_id = %s THEN NOW() + INTERVAL '5 minutes' "
+                "ELSE NULL END WHERE run_id = ANY(%s)",
+                (future_runs[0], future_runs),
             )
-        assert state() == leased_before
+            cursor.execute(
+                "UPDATE public.lab_arena_restart_claim_control "
+                "SET operator_paused = TRUE, pause_reason = 'operator' "
+                "WHERE singleton"
+            )
+        paused_with_leases = state()
+        with pytest.raises(
+            full_host.CloneArenaNormalizationFailure,
+            match="preserves an operator Arena pause",
+        ) as paused_failure:
+            full_host._normalize_full_parity_clone_arena_restart_state(
+                CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+            )
+        assert paused_failure.value.category == "clone_arena_operator_paused"
+        assert state() == paused_with_leases
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_restart_claim_control "
+                "SET operator_paused = FALSE, pause_reason = '' WHERE singleton"
+            )
+        future_before = state()
+        with pytest.raises(
+            full_host.CloneArenaNormalizationFailure,
+            match="contains an unexpired Arena lease",
+        ) as future_failure:
+            full_host._normalize_full_parity_clone_arena_restart_state(
+                CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+            )
+        assert future_failure.value.category == "clone_arena_lease_not_expired"
+        assert state() == future_before
+
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET lease_expires_at = "
+                "NOW() - INTERVAL '1 minute' WHERE run_id = ANY(%s)",
+                (future_runs,),
+            )
+        full_host._normalize_full_parity_clone_arena_restart_state(
+            CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+        )
+
+        first_bad_round = "arena-2099-01-14"
+        second_bad_round = "arena-2099-01-15"
+        first_bad_runners, _ = open_round(
+            store, first_bad_round, participants=1, runners=1,
+            prefix="full-clone-bad-first", stage_1_icps=1,
+        )
+        second_bad_runners, _ = open_round(
+            store, second_bad_round, participants=1, runners=1,
+            prefix="full-clone-bad-second", stage_1_icps=1,
+        )
+        first_bad, *_ = claim(store, first_bad_round, first_bad_runners[0])
+        second_bad, *_ = claim(store, second_bad_round, second_bad_runners[0])
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET lease_expires_at = "
+                "NOW() - INTERVAL '1 minute' WHERE run_id = ANY(%s)",
+                ([first_bad["run_id"], second_bad["run_id"]],),
+            )
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET status = 'stage1_closed' "
+                "WHERE round_id = %s",
+                (second_bad_round,),
+            )
+        bad_before = state()
+        with pytest.raises(
+            full_host.CloneArenaNormalizationFailure,
+            match="Arena recovery failed",
+        ) as recovery_failure:
+            full_host._normalize_full_parity_clone_arena_restart_state(
+                CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+            )
+        assert recovery_failure.value.category == "clone_arena_recovery_failed"
+        assert state() == bad_before
+
+        assert (
+            store.cancel_round(first_bad_round, "fixture cleanup")["status"]
+            == "cancelled"
+        )
+        assert (
+            store.cancel_round(second_bad_round, "fixture cleanup")["status"]
+            == "cancelled"
+        )
+        invalid_round = "arena-2099-01-16"
+        invalid_runners, _ = open_round(
+            store, invalid_round, participants=1, runners=1,
+            prefix="full-clone-invalid-rpc", stage_1_icps=1,
+        )
+        invalid_run, *_ = claim(store, invalid_round, invalid_runners[0])
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET lease_expires_at = "
+                "NOW() - INTERVAL '1 minute' WHERE run_id = %s",
+                (invalid_run["run_id"],),
+            )
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_functiondef("
+                "'public.lab_arena_expire_leases(text)'::REGPROCEDURE)"
+            )
+            expiry_definition = cursor.fetchone()[0]
+
+        invalid_before = state()
+        try:
+            for invalid_result in (
+                "pg_catalog.jsonb_build_object('expired', 1, 'retried', 0)",
+                "pg_catalog.jsonb_build_object("
+                "'status', NULL, 'expired', 1, 'retried', 0)",
+            ):
+                with admin.cursor() as cursor:
+                    cursor.execute(
+                        "CREATE OR REPLACE FUNCTION "
+                        "public.lab_arena_expire_leases(p_round_id TEXT) RETURNS JSONB "
+                        "LANGUAGE plpgsql VOLATILE SECURITY DEFINER "
+                        "SET search_path = pg_catalog, public AS $invalid$ "
+                        "BEGIN RETURN %s; END; $invalid$" % invalid_result
+                    )
+                with pytest.raises(
+                    full_host.CloneArenaNormalizationFailure,
+                    match="Arena recovery failed",
+                ):
+                    full_host._normalize_full_parity_clone_arena_restart_state(
+                        CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+                    )
+                assert state() == invalid_before
+
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "CREATE OR REPLACE FUNCTION "
+                    "public.lab_arena_expire_leases(p_round_id TEXT) RETURNS JSONB "
+                    "LANGUAGE plpgsql VOLATILE SECURITY DEFINER "
+                    "SET search_path = pg_catalog, public AS $invalid$ BEGIN "
+                    "UPDATE public.lab_arena_runs SET status = 'failed', "
+                    "terminal_cause = 'lease_expired', "
+                    "terminal_doc = pg_catalog.jsonb_build_object('fixture', TRUE) "
+                    "WHERE round_id = p_round_id AND status = 'leased'; "
+                    "RETURN pg_catalog.jsonb_build_object("
+                    "'status', 'ok', 'expired', 1, 'retried', 2); "
+                    "END; $invalid$"
+                )
+            with pytest.raises(
+                full_host.CloneArenaNormalizationFailure,
+                match="Arena recovery failed",
+            ):
+                full_host._normalize_full_parity_clone_arena_restart_state(
+                    CloneDatabase(), candidate_sha=CANDIDATE_COMMIT
+                )
+            assert state() == invalid_before
+        finally:
+            with admin.cursor() as cursor:
+                cursor.execute(expiry_definition)
     finally:
         store._transport.close()
         admin.close()

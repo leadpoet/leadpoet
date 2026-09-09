@@ -1259,6 +1259,37 @@ class CompletionDocumentApi(FakeApi):
         return self.responses.pop(0)
 
 
+def completion_envelope(*, output, timestamp):
+    body = {
+        "run_id": "r-complete",
+        "lease_token": "lease-token",
+        "result": {
+            "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+            "resource_summary": {
+                "wall_seconds": 1.0,
+                "cpu_seconds": 1.0,
+                "max_rss_bytes": 1024,
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "provider_call_count": 1,
+            },
+            "started_at": "2026-09-02T01:00:00Z",
+            "finished_at": "2026-09-02T01:00:01Z",
+            "terminal_status": "accepted",
+        },
+        "output": output,
+    }
+    return contracts.build_signed_request(
+        scope=contracts.SCOPE_COMPLETE,
+        round_id=ROUND,
+        hotkey=RUNNER.ss58_address,
+        body=body,
+        timestamp=timestamp,
+        request_id="a" * 32,
+        sign_message=sign,
+    )
+
+
 @pytest.mark.parametrize("failures, expect_abandoned", [(1, 0), (2, 0), (3, 1)])
 def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(tmp_path, failures, expect_abandoned):
     """Two retries cover a lost response or a transient Arena failure; a third failure fails closed."""
@@ -1291,11 +1322,12 @@ def test_accounting_open_retries_the_original_completion_until_accepted(
         BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
     )
     assert sum(config.accounting_open_retry_seconds) >= rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert sum(config.accounting_open_retry_seconds) == 352.0
     assert (
         sum(config.accounting_open_retry_seconds)
-        < contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
+        + (len(config.accounting_open_retry_seconds) + 1) * rn.API_TIMEOUT_SECONDS
+        < contracts.LEASE_TTL_SECONDS
     )
-    assert sum(config.accounting_open_retry_seconds) < contracts.LEASE_TTL_SECONDS
     config.accounting_open_retry_seconds = (0.0,)
     runner_ = rn.Runner(config)
 
@@ -1312,6 +1344,131 @@ def test_accounting_open_retries_the_original_completion_until_accepted(
         "Lab Arena completion status: accepted",
     ]
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"companies": [valid_company(1)]},
+        {
+            "schema_version": "leadpoet.lab_arena.scoring_output.v1",
+            "scored_run_id": "r1",
+            "breakdowns": [{"final_score": 71.0, "failure_reason": ""}],
+        },
+    ],
+    ids=("execution", "score"),
+)
+def test_finished_nonempty_output_survives_a_300_second_accounting_settlement(
+    tmp_path, monkeypatch, output
+):
+    now = [int(datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc).timestamp())]
+    start = now[0]
+
+    class LateSettlementApi(FakeApi):
+        def complete(self, envelope):
+            self.completions.append(envelope)
+            if now[0] - start < 301:
+                return {"status": "accounting_open", "open_calls": 1}
+            return {"status": "accepted"}
+
+    api = LateSettlementApi([])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.clock = lambda: datetime.fromtimestamp(now[0], tz=timezone.utc)
+    sleeps = []
+
+    def advance(delay):
+        sleeps.append(delay)
+        now[0] += int(delay)
+
+    monkeypatch.setattr(rn.time, "sleep", advance)
+    runner_ = rn.Runner(config)
+    original = completion_envelope(output=output, timestamp=start)
+
+    assert runner_._complete_with_retries(original) == {"status": "accepted"}
+    assert sum(sleeps) == 352.0
+    assert len(api.completions) == 11
+    assert all(item["request_id"] == original["request_id"] for item in api.completions)
+    assert all(item["body"] == original["body"] for item in api.completions)
+    assert all(item["body"]["output"] for item in api.completions)
+    assert [item["timestamp"] for item in api.completions] == [start] * 9 + [
+        start + 292,
+        start + 292,
+    ]
+    assert all(
+        verify(item["hotkey"], item["signature"], contracts.signed_request_message(item))
+        for item in api.completions
+    )
+
+
+@pytest.mark.parametrize("clock_offset", (-271, 271))
+def test_completion_refreshes_a_future_or_past_signature_before_the_attempt(
+    tmp_path, clock_offset
+):
+    signed_at = int(datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc).timestamp())
+    api = CompletionDocumentApi([], [{"status": "accepted"}])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.clock = lambda: datetime.fromtimestamp(
+        signed_at + clock_offset, tz=timezone.utc
+    )
+    runner_ = rn.Runner(config)
+    original = completion_envelope(
+        output={"companies": [valid_company(1)]}, timestamp=signed_at
+    )
+
+    assert runner_._complete_with_retries(original) == {"status": "accepted"}
+    assert len(api.completion_attempts) == 1
+    refreshed = api.completion_attempts[0]
+    assert refreshed["timestamp"] == signed_at + clock_offset
+    assert refreshed["request_id"] == original["request_id"]
+    assert refreshed["body"] == original["body"]
+    assert refreshed["signature"] != original["signature"]
+
+
+def test_accounting_open_default_retry_budget_is_fixed(tmp_path, monkeypatch):
+    api = CompletionDocumentApi(
+        [], [{"status": "accounting_open", "open_calls": 1}] * 11
+    )
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    now = [int(config.clock().timestamp())]
+    config.clock = lambda: datetime.fromtimestamp(now[0], tz=timezone.utc)
+    sleeps = []
+
+    def advance(delay):
+        sleeps.append(delay)
+        now[0] += int(delay)
+
+    monkeypatch.setattr(rn.time, "sleep", advance)
+    runner_ = rn.Runner(config)
+
+    with pytest.raises(rn.RunnerError, match="remained accounting_open"):
+        runner_._complete_with_retries(
+            completion_envelope(
+                output={"companies": [valid_company(1)]}, timestamp=now[0]
+            )
+        )
+    assert sleeps == list(config.accounting_open_retry_seconds)
+    assert sum(sleeps) == 352.0
+    assert len(api.completion_attempts) == 11
+
+
+@pytest.mark.parametrize("status", ("accepted", "failed", "stale", "rejected"))
+def test_terminal_completion_status_is_not_retried(tmp_path, monkeypatch, status):
+    api = CompletionDocumentApi([], [{"status": status}])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    monkeypatch.setattr(
+        rn.time,
+        "sleep",
+        lambda _delay: pytest.fail("terminal completion response was retried"),
+    )
+    runner_ = rn.Runner(config)
+
+    assert runner_._complete_with_retries(
+        completion_envelope(
+            output={"companies": [valid_company(1)]},
+            timestamp=int(config.clock().timestamp()),
+        )
+    ) == {"status": status}
+    assert len(api.completion_attempts) == 1
 
 
 def test_accounting_open_retry_exhaustion_abandons_without_logging_the_envelope(

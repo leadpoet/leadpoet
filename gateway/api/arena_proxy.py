@@ -24,7 +24,11 @@ _MAX_COMPLETION_REQUEST_BYTES = (2 * 1_048_576) + 65_536
 _SIDECAR_URL = "http://127.0.0.1:8792"
 _TESTNET_SIDECAR_URL = "http://127.0.0.1:8793"
 _FORWARDED_REQUEST_HEADERS = ("content-type", "x-lab-arena-lease")
-_FORWARDED_RESPONSE_HEADERS = ("content-type", "cache-control")
+_FORWARDED_RESPONSE_HEADERS = (
+    "content-type",
+    "cache-control",
+    "x-content-type-options",
+)
 
 
 def _arena_enabled() -> bool:
@@ -41,6 +45,17 @@ def _is_public_benchmark_path(arena_path: str) -> bool:
         and parts[:2] == ["v1", "rounds"]
         and parts[2] not in {"", ".", ".."}
         and parts[3] == "benchmark"
+    )
+
+
+def _is_public_results_path(arena_path: str) -> bool:
+    parts = arena_path.split("/")
+    return (
+        len(parts) == 5
+        and parts[:2] == ["v1", "rounds"]
+        and parts[2] not in {"", ".", ".."}
+        and parts[3] == "results"
+        and parts[4] not in {"", ".", ".."}
     )
 
 
@@ -105,6 +120,11 @@ async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
         raise HTTPException(status_code=404, detail="arena path invalid")
     if request.method == "GET" and _is_public_benchmark_path(arena_path):
         raise HTTPException(status_code=403, detail="testnet benchmark is private")
+    if request.method == "GET" and _is_public_results_path(arena_path):
+        # The current testnet worker predates the ten-ICP disclosure boundary
+        # and can return all twenty results. Keep it private until the worker
+        # serves the current allow-listed result projection.
+        raise HTTPException(status_code=403, detail="testnet results are private")
     return await _proxy_request(arena_path, request, testnet=True)
 
 

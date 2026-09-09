@@ -701,11 +701,22 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_submissions", filters={"submission_id": submission_id}, limit=1)
         return rows[0] if rows else None
 
-    def list_submissions(self, round_id: str, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_submissions(
+        self,
+        round_id: str,
+        *,
+        status: Optional[str] = None,
+        columns: str = "*",
+    ) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {"round_id": round_id}
         if status:
             filters["status"] = status
-        return self._transport.select("lab_arena_submissions", filters=filters, order="created_at")
+        return self._transport.select(
+            "lab_arena_submissions",
+            filters=filters,
+            order="created_at",
+            columns=columns,
+        )
 
     # -- stages and assignments -------------------------------------------
 

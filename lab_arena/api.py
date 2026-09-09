@@ -73,6 +73,21 @@ def _lease_header(value: Optional[str]) -> str:
 def create_app(service: ArenaService) -> FastAPI:
     app = FastAPI(title="Leadpoet Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
+    async def no_store_public_call(call: Any, *args: Any) -> JSONResponse:
+        headers = {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        }
+        try:
+            content = await run_in_threadpool(call, *args)
+        except ServiceError as exc:
+            return JSONResponse(
+                status_code=exc.status,
+                content={"status": "rejected", "code": exc.code},
+                headers=headers,
+            )
+        return JSONResponse(content=content, headers=headers)
+
     @app.exception_handler(ServiceError)
     async def _service_error(request: Request, exc: ServiceError) -> JSONResponse:
         content = {"status": "rejected", "code": exc.code}
@@ -90,6 +105,10 @@ def create_app(service: ArenaService) -> FastAPI:
     async def current() -> Any:
         return await run_in_threadpool(service.public_current)
 
+    @app.get("/arena/v1/competition")
+    async def competition() -> Any:
+        return await run_in_threadpool(service.public_competition)
+
     @app.get("/arena/v1/signing-key")
     async def signing_key() -> Any:
         return await run_in_threadpool(service.signing_key_document)
@@ -106,12 +125,24 @@ def create_app(service: ArenaService) -> FastAPI:
         return await run_in_threadpool(service.public_round, round_id)
 
     @app.get("/arena/v1/rounds/{round_id}/benchmark")
-    async def round_benchmark(round_id: str) -> Any:
-        return await run_in_threadpool(service.public_benchmark, round_id)
+    async def round_benchmark(round_id: str) -> JSONResponse:
+        return await no_store_public_call(service.public_benchmark, round_id)
+
+    @app.get("/arena/v1/rounds/{round_id}/submissions")
+    async def round_submissions(round_id: str) -> Any:
+        return await run_in_threadpool(service.public_submissions, round_id)
 
     @app.get("/arena/v1/rounds/{round_id}/results/{submission_id}")
-    async def round_results(round_id: str, submission_id: str) -> Any:
-        return await run_in_threadpool(service.public_results, round_id, submission_id)
+    async def round_results(round_id: str, submission_id: str) -> JSONResponse:
+        return await no_store_public_call(
+            service.public_results, round_id, submission_id
+        )
+
+    @app.get("/arena/v1/submissions/{submission_id}/code")
+    async def submission_code(submission_id: str) -> JSONResponse:
+        return await no_store_public_call(
+            service.public_submission_code, submission_id
+        )
 
     # -- miner --------------------------------------------------------------
 

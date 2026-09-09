@@ -33,6 +33,9 @@ class StubService:
     def public_current(self):
         return {"mode": "shadow", "round": None, "king": None}
 
+    def public_competition(self):
+        return {"mode": "shadow", "network_name": "test", "netuid": 401}
+
     def signing_key_document(self):
         return {"schema_version": contracts.SIGNING_KEY_DOCUMENT_SCHEMA_VERSION, "public_key_hash": contracts.document_hash("k")}
 
@@ -49,6 +52,18 @@ class StubService:
 
     def public_results(self, round_id, submission_id):
         return {"round_id": round_id, "submission_id": submission_id}
+
+    def public_submissions(self, round_id):
+        return {"round_id": round_id, "submissions": []}
+
+    def public_submission_code(self, submission_id):
+        if submission_id != "sub-1":
+            raise ServiceError("submission_missing", 404)
+        return {
+            "submission_id": submission_id,
+            "files": [{"path": "harness.py", "content": "pass\n"}],
+            "truncated": False,
+        }
 
     def submission_status(self, submission_id):
         row = self.store.get_submission(submission_id)
@@ -101,6 +116,7 @@ def client():
 def test_public_routes(client):
     http, _service = client
     assert http.get("/arena/v1/current").json()["mode"] == "shadow"
+    assert http.get("/arena/v1/competition").json()["network_name"] == "test"
     assert http.get("/arena/v1/signing-key").json()["schema_version"] == contracts.SIGNING_KEY_DOCUMENT_SCHEMA_VERSION
     assert http.get("/arena/v1/recipient").status_code == 404
     assert http.get("/arena/v1/reward-basis", params={"epoch": 24801}).json()["effective_reward_epoch"] == 24801
@@ -108,8 +124,23 @@ def test_public_routes(client):
     assert http.get("/arena/v1/rounds/arena-2026-09-02").json()["status"] == "open"
     missing = http.get("/arena/v1/rounds/arena-2026-01-01")
     assert missing.status_code == 404 and missing.json() == {"status": "rejected", "code": "round_missing"}
-    assert http.get("/arena/v1/rounds/arena-2026-09-02/benchmark").status_code == 403
-    assert http.get("/arena/v1/rounds/arena-2026-09-02/results/sub-1").json()["submission_id"] == "sub-1"
+    benchmark = http.get("/arena/v1/rounds/arena-2026-09-02/benchmark")
+    assert benchmark.status_code == 403
+    assert benchmark.headers["cache-control"] == "no-store"
+    assert benchmark.headers["x-content-type-options"] == "nosniff"
+    results = http.get("/arena/v1/rounds/arena-2026-09-02/results/sub-1")
+    assert results.json()["submission_id"] == "sub-1"
+    assert results.headers["cache-control"] == "no-store"
+    assert results.headers["x-content-type-options"] == "nosniff"
+    assert http.get("/arena/v1/rounds/arena-2026-09-02/submissions").json()["submissions"] == []
+    code = http.get("/arena/v1/submissions/sub-1/code")
+    assert code.json()["files"][0]["path"] == "harness.py"
+    assert code.headers["cache-control"] == "no-store"
+    assert code.headers["x-content-type-options"] == "nosniff"
+    missing_code = http.get("/arena/v1/submissions/nope/code")
+    assert missing_code.status_code == 404
+    assert missing_code.headers["cache-control"] == "no-store"
+    assert missing_code.headers["x-content-type-options"] == "nosniff"
     assert http.get("/arena/v1/submissions/sub-1").json() == {
         "submission_id": "sub-1", "status": "accepted", "rejection_rule": None,
     }

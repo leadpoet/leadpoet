@@ -684,6 +684,12 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
         ).stdout
 
     harness.service._config.baseline_source_fetcher = promoted_baseline
+    winner_row = harness.service.store.get_submission(winner_submission_id)
+    accepted_at = datetime.fromisoformat(str(winner_row["accepted_at"]).replace("Z", "+00:00"))
+    harness.clock.now = accepted_at + timedelta(hours=24) - timedelta(microseconds=1)
+    assert harness.service.promote_pending_baselines() == {"status": "source_private", "promoted": 0}
+    assert harness.service.store.get_round(round_id)["baseline_promoted_at"] is None
+    harness.clock.now = accepted_at + timedelta(hours=24)
     assert harness.service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
     promoted_source = promoted_baseline("", source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
     with tarfile.open(fileobj=io.BytesIO(promoted_source), mode="r:gz") as archive:
@@ -719,8 +725,11 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
         "final_ranking"
     ][0]["submission_id"]
     public = harness.service.public_results(harness.round_id, winner)
-    assert len(public["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
-    assert len(public["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
+    assert len(public["scores"]["stage_1"]) + len(public["scores"]["stage_2"]) == 10
+    disclosed = harness.service.public_benchmark(harness.round_id)
+    assert {item["icp_position"] for item in disclosed["icps"]} == {
+        item["icp_position"] for item in public["scores"]["stage_1"] + public["scores"]["stage_2"]
+    }
     assert public["submission_scores"]["final"] is not None
     assert_canary_absent(harness, connect)
 
@@ -785,12 +794,11 @@ def test_driver_discovers_an_older_live_round_through_unrelated_history_and_publ
     assert len(score_runs) == contracts.BENCHMARK_ICP_COUNT
     assert all(run["status"] == "accepted" for run in execute_runs + score_runs)
     public = service.public_results(harness.round_id, participants[0]["submission_id"])
-    assert len(public["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
-    assert len(public["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
+    assert len(public["scores"]["stage_1"]) + len(public["scores"]["stage_2"]) == 10
     assert {
         item["icp_position"]
         for item in public["scores"]["stage_1"] + public["scores"]["stage_2"]
-    } == set(range(contracts.BENCHMARK_ICP_COUNT))
+    } == set(service._public_icp_disclosure(published)["public_positions"])
     assert all(service.store.get_round(round_id)["status"] == "cancelled" for round_id in history_ids)
     assert_canary_absent(harness, connect)
 
@@ -867,10 +875,12 @@ def test_partially_successful_baseline_publishes_a_numeric_mean(connect, tmp_pat
     )
     assert isinstance(public["submission_scores"]["final"], float)
     scores = public["scores"]["stage_1"] + public["scores"]["stage_2"]
-    assert len(scores) == contracts.BENCHMARK_ICP_COUNT
-    assert sum(float(item["per_icp_score"]) == 0.0 for item in scores) == 19
+    assert len(scores) == 10
+    assert sum(float(item["per_icp_score"]) == 0.0 for item in scores) == 9
+    # Final ranking still uses all 20 scores; only the public view is filtered.
+    all_runs = [item for item in harness.service.store.list_runs(harness.round_id, submission_id=baseline["submission_id"], kind="execute") if item.get("per_icp_score") is not None]
     expected = verify.stage_score(
-        [float(item["per_icp_score"]) for item in scores], len(scores)
+        [float(item["per_icp_score"]) for item in all_runs], len(all_runs)
     )
     assert public["submission_scores"]["final"] == expected
 
@@ -1437,13 +1447,11 @@ def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evi
         for job in public["judge_jobs"]
         if job["run_id"] == accepted["run_id"]
     ]
-    assert matching_public_jobs, (accepted, public["judge_jobs"])
-    public_job = matching_public_jobs[0]
-    assert public_job["evidence_status"] == "available"
-    assert any(
-        evidence["run_id"] == accepted["run_id"]
-        for evidence in public["judge_evidence"]
-    )
+    # Cancellation before all baseline scores preserves evidence internally,
+    # but cannot disclose any ICP or its judge evidence publicly.
+    assert matching_public_jobs == []
+    assert public["judge_evidence"] == []
+    assert public["public_icp_status"] == "pending"
     execution_runs = store.list_runs(
         harness.round_id, stage=1, kind="execute"
     )
@@ -1711,6 +1719,9 @@ def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_
         ).stdout
 
     service._config.baseline_source_fetcher = promoted_baseline
+    winner_row = service.store.get_submission(first["publication_doc"]["king_decision"]["winner_submission_id"])
+    accepted_at = datetime.fromisoformat(str(winner_row["accepted_at"]).replace("Z", "+00:00"))
+    harness.clock.now = accepted_at + timedelta(hours=24)
     assert service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
     # Next day: the prior winner submits fresh source under the same hotkey.
     harness.chain.epoch = 30040
@@ -2138,8 +2149,7 @@ def test_result_writes_retry_after_transient_object_store_failures(connect, tmp_
         "final_ranking"
     ][0]["submission_id"]
     results = harness.service.public_results(harness.round_id, winner)
-    assert len(results["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
-    assert len(results["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
+    assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 10
     attempts = harness.service.store.list_runs(harness.round_id)
     assert all(int(run["attempt"]) == 1 for run in attempts)
     assert_canary_absent(harness, connect)

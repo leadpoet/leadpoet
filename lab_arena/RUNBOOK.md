@@ -1,8 +1,21 @@
-# Research Lab Arena operator guide
+# Open Source Agent Competition operator guide
 
 The Arena is a simple agent-bundle competition. Each round uses the current
 daily set of twenty qualification ICPs: ten in stage 1 and ten in stage 2.
 The baseline and miners use that one set and one scoring path.
+
+Once all twenty baseline scores are complete, the seven lowest-scoring and
+three highest-scoring ICPs are public. The other ten remain private. Ties use
+the ICP's original position. This read-only split uses baseline scores only;
+it does not change the stage schedule or the scoring of miner submissions.
+No ICP is disclosed while the baseline score set is incomplete.
+
+Submitted source stays private until twenty-four hours after acceptance.
+The server records this time, and both the code preview and winner promotion
+to public Git branches enforce the delay. Old submissions without this time
+use their freeze time as a conservative fallback. Provider credentials are
+never part of the public preview. The CLI's public-rerun consent covers this
+source disclosure.
 
 ## Competition boundary
 

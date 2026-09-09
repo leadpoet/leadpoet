@@ -43,7 +43,11 @@ def test_proxy_forwards_only_the_arena_request(monkeypatch):
         return httpx.Response(
             202,
             content=b'{"status":"accepted"}',
-            headers={"content-type": "application/json", "x-private": "no"},
+            headers={
+                "content-type": "application/json",
+                "x-content-type-options": "nosniff",
+                "x-private": "no",
+            },
         )
 
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
@@ -71,6 +75,7 @@ def test_proxy_forwards_only_the_arena_request(monkeypatch):
         },
     }
     assert "x-private" not in response.headers
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_proxy_refuses_oversized_and_invalid_paths(monkeypatch):
@@ -189,7 +194,7 @@ def test_testnet_benchmark_is_private_and_never_reaches_sidecar(monkeypatch):
     ).status_code == 404
 
 
-def test_benchmark_guard_preserves_mainnet_and_private_testnet_routes(monkeypatch):
+def test_testnet_privacy_guards_preserve_mainnet_and_private_worker_routes(monkeypatch):
     observed = []
 
     async def forward(method, path, *, query, body, headers, testnet=False):
@@ -207,9 +212,11 @@ def test_benchmark_guard_preserves_mainnet_and_private_testnet_routes(monkeypatc
     assert client.post(
         "/testnet/arena/v1/runs/claim", content=b'{"signed":"claim"}'
     ).status_code == 200
-    assert client.get(
+    blocked_results = client.get(
         "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/results/submission-1"
-    ).status_code == 200
+    )
+    assert blocked_results.status_code == 403
+    assert blocked_results.json() == {"detail": "testnet results are private"}
     assert observed == [
         (
             "GET",
@@ -223,13 +230,6 @@ def test_benchmark_guard_preserves_mainnet_and_private_testnet_routes(monkeypatc
             "v1/runs/claim",
             "",
             b'{"signed":"claim"}',
-            True,
-        ),
-        (
-            "GET",
-            "v1/rounds/arena-2026-09-05-testnet2/results/submission-1",
-            "",
-            b"",
             True,
         ),
     ]

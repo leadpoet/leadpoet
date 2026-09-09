@@ -7,7 +7,8 @@ SET LOCAL statement_timeout = '30s';
 -- The table lock serializes this one-time configuration repair with cutoff
 -- and source registration. The write-once trigger is restored in this same
 -- transaction; any error rolls back both the data and trigger state.
-LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
+-- Permit read-only snapshots while serializing configuration writes.
+LOCK TABLE public.lab_arena_rounds IN SHARE ROW EXCLUSIVE MODE;
 ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_rounds_write_once;
 
 DO $daily_capacity$
@@ -100,8 +101,7 @@ END;
 $submission_capacity$;
 ALTER FUNCTION public.lab_arena_submission_capacity_v1() OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_submission_capacity_v1() FROM PUBLIC;
-DROP TRIGGER IF EXISTS lab_arena_submission_capacity ON public.lab_arena_submissions;
-CREATE TRIGGER lab_arena_submission_capacity
+CREATE OR REPLACE TRIGGER lab_arena_submission_capacity
   BEFORE INSERT OR UPDATE OF status ON public.lab_arena_submissions
   FOR EACH ROW EXECUTE FUNCTION public.lab_arena_submission_capacity_v1();
 REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;

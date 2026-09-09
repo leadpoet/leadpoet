@@ -161,3 +161,22 @@ def test_upgrade_leaves_operator_limited_round_unchanged(connect, tmp_path):
     apply_migration(connect)
     assert harness.service.store.get_round(before["round_id"])["configuration_doc"] == before
     assert harness.service.store.list_submissions(before["round_id"]) == submissions
+
+
+def test_capacity_migration_can_run_during_read_only_snapshot(connect, tmp_path):
+    harness, before = old_round(connect, tmp_path, "snapshot", 1)
+    snapshot = connect()
+    try:
+        with snapshot.cursor() as cursor:
+            cursor.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            cursor.execute("SELECT round_id FROM public.lab_arena_rounds LIMIT 1")
+            cursor.execute("SELECT submission_id FROM public.lab_arena_submissions LIMIT 1")
+        # These SELECTs retain ACCESS SHARE until rollback, as the production
+        # parity export does. Neither configuration repair nor trigger update
+        # needs to block that read-only workload.
+        apply_migration(connect)
+        assert harness.service.store.get_round(before["round_id"])["configuration_doc"]["max_challengers"] == 8
+        apply_migration(connect)
+    finally:
+        snapshot.rollback()
+        snapshot.close()

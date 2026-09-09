@@ -28,7 +28,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1623,7 +1623,7 @@ class Runner:
         )
 
     def run_once(self, *, max_claims: int = 1000) -> int:
-        """Claim while a local slot is free; return the number of leases taken."""
+        """Refill free local slots until no lease remains or ``max_claims`` is met."""
 
         if not self._pinned:
             try:
@@ -1631,13 +1631,19 @@ class Runner:
             except RunnerError:
                 return 0  # the Arena or the round is unavailable: poll again later
         taken = 0
-        futures = []
+        futures = set()
         for round_id in list(self._round_ids):
             # Oldest round first: its deadline is nearer. Each round is claimed
-            # until it has nothing to lease or the local slots are full.
+            # until it has nothing to lease or this call reaches its claim cap.
             while taken < max_claims:
                 if not self._slots.acquire(blocking=False):
-                    break
+                    done, futures = wait(
+                        futures,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        future.result()
+                    continue
                 try:
                     response = self.claim_one(round_id)
                 except RunnerError:
@@ -1647,7 +1653,7 @@ class Runner:
                     self._slots.release()
                     break
                 taken += 1
-                futures.append(self._pool.submit(self._run_lease, response))
+                futures.add(self._pool.submit(self._run_lease, response))
         for future in futures:
             future.result()
         return taken

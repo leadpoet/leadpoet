@@ -445,7 +445,7 @@ def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_
     assert api.completions[0]["body"]["output"] is None
 
 
-def test_local_slots_bound_claims_and_images_export_once(tmp_path):
+def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
     leases = [lease("r%d" % i, i) for i in range(5)]
     api = FakeApi(leases)
     exports = []
@@ -454,12 +454,54 @@ def test_local_slots_bound_claims_and_images_export_once(tmp_path):
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
     config.image_cache = cache
     runner_ = rn.Runner(config)
-    assert runner_.run_once() == 3  # three local slots, then the loop waits for completions
+    assert runner_.run_once(max_claims=3) == 3
     assert exports == [IMAGE]
     assert len(api.source_requests) == 1
     assert runner_.run_once() == 2 and len(api.completions) == 5
     assert runner_.run_once() == 0
     assert all(c["body"]["declared_parallelism"] == 3 for c in api.claims)
+
+
+def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):
+    api = FakeApi([lease("slow", 0), lease("quick", 1), lease("queued", 2)])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(
+        make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=2)
+    )
+    slow_release = threading.Event()
+    queued_started = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def run_lease(run_lease):
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            if run_lease["run_id"] == "slow":
+                assert slow_release.wait(timeout=3)
+            elif run_lease["run_id"] == "queued":
+                queued_started.set()
+        finally:
+            with state_lock:
+                active -= 1
+            runner_._slots.release()
+
+    runner_._run_lease = run_lease
+    try:
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            result = caller.submit(runner_.run_once, max_claims=3)
+            assert queued_started.wait(timeout=2)
+            assert not result.done()
+            slow_release.set()
+            assert result.result(timeout=2) == 3
+        assert max_active == 2
+        assert [item["body"]["declared_parallelism"] for item in api.claims] == [2, 2, 2]
+    finally:
+        slow_release.set()
+        runner_.close()
 
 
 @pytest.mark.parametrize("failure", ("http_500", "read_timeout"))

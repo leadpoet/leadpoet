@@ -110,9 +110,11 @@ and another round's submission ID does not grant access.
 Provider calls made while a round is running can incur the miner's upstream
 charges even if a later infrastructure failure cancels the round. A cancelled
 round does not publish a ranking and does not automatically refund provider
-charges. Arena reward activation is a separate setting: disabling rewards
-prevents champion allocation, while scoring and competition execution remain
-separate configuration behavior.
+charges. When a required judge assignment exhausts its infrastructure retries,
+the driver cancels the remaining work; already dispatched provider calls can
+still incur charges. Arena reward activation is a separate setting: disabling
+rewards prevents champion allocation, while scoring and competition execution
+remain separate configuration behavior.
 
 ## Operator setup
 

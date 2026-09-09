@@ -1377,6 +1377,50 @@ class ArenaService:
         runs = self._store.list_runs(round_id, stage=stage, kind="score")
         return all(run["status"] in ("accepted", "failed") for run in runs)
 
+    def _scoring_has_exhausted_judge_failure(
+        self,
+        round_row: Mapping[str, Any],
+        stage: int,
+        runs: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        """Return whether a required score can no longer succeed.
+
+        An accepted attempt always wins. An active attempt means the assignment
+        can still succeed. Rows outside the committed plan cannot end a round.
+        """
+
+        plan = self._load_scoring_plan(round_row, stage)
+        runs_by_scored_run: Dict[str, List[Mapping[str, Any]]] = {}
+        planned_run_ids = {
+            str(item["scored_run_id"]) for item in plan["work_items"]
+        }
+        for run in runs:
+            scored_run_id = str(run.get("scored_run_id") or "")
+            if scored_run_id in planned_run_ids:
+                runs_by_scored_run.setdefault(scored_run_id, []).append(run)
+
+        for scored_run_id in planned_run_ids:
+            attempts = runs_by_scored_run.get(scored_run_id, [])
+            if any(run.get("status") == "accepted" for run in attempts):
+                continue
+            if any(
+                run.get("status") not in ("accepted", "failed")
+                for run in attempts
+            ):
+                continue
+            if not attempts:
+                continue
+            latest = max(attempts, key=lambda run: int(run.get("attempt") or 0))
+            if (
+                int(latest.get("attempt") or 0)
+                >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+                and latest.get("status") == "failed"
+                and str(latest.get("terminal_cause") or "")
+                in contracts.INFRASTRUCTURE_TERMINAL_CAUSES
+            ):
+                return True
+        return False
+
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return self._store.close_scoring(round_id, stage)
 
@@ -2129,8 +2173,20 @@ class ArenaService:
             if status in ("stage1_scoring", "stage2_scoring"):
                 stage = 1 if status == "stage1_scoring" else 2
                 self._store.expire_leases(round_id)
+                scoring_runs = self._store.list_runs(
+                    round_id, stage=stage, kind="score"
+                )
+                if self._scoring_has_exhausted_judge_failure(
+                    round_row, stage, scoring_runs
+                ):
+                    return self._store.cancel_round(
+                        round_id, CANCEL_REASONS["scoring_incomplete"]
+                    )
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
-                if now >= _parse_iso(window) or self.scoring_is_complete(round_id, stage):
+                if now >= _parse_iso(window) or all(
+                    run["status"] in ("accepted", "failed")
+                    for run in scoring_runs
+                ):
                     return self.close_scoring(round_id, stage)
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_judged", "stage2_judged"):

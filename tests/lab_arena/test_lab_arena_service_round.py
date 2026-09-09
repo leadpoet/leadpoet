@@ -28,7 +28,12 @@ from lab_arena import broker as br, contracts, driver as arena_driver, runner as
 
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
-from lab_arena.store import ArenaStore, PsycopgTransport
+from lab_arena.store import (
+    ArenaStore,
+    PsycopgTransport,
+    hash_lease_token,
+    new_lease_token,
+)
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
@@ -1166,12 +1171,12 @@ def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(conne
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.run_stage_with_runners(2)
 
-    closed = harness.service.advance_round(harness.round_id)
     cancelled = harness.service.advance_round(harness.round_id)
+    terminal = harness.service.advance_round(harness.round_id)
 
     row = harness.service.store.get_round(harness.round_id)
-    assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged"
     assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert terminal == {"status": "terminal", "round_status": "cancelled"}
     assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
     assert row["publication_doc"] is None and not row["finalists"]
     score_runs = harness.service.store.list_runs(
@@ -1190,6 +1195,157 @@ def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(conne
         kind="execute",
     )
     assert all(run["per_icp_score"] is None for run in execute_runs)
+
+
+def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evidence(
+    connect, tmp_path
+):
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["EarlyCancelFail", "EarlyCancelVisible"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=23, epoch=30423)
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    store = harness.service.store
+    round_participants = store.get_round(harness.round_id)["participants"]
+    failing = next(
+        participant
+        for participant in round_participants
+        if harness.flavors[participant["submission_id"]] == "EarlyCancelFail"
+    )
+    visible = next(
+        participant
+        for participant in round_participants
+        if harness.flavors[participant["submission_id"]] == "EarlyCancelVisible"
+    )
+
+    def claim_for(participant, runner_index):
+        token = new_lease_token()
+        request_id = contracts.new_request_id()
+        result = store.claim_assignment(
+            round_id=harness.round_id,
+            runner_hotkey=harness.runner_keys[runner_index],
+            declared_parallelism=1,
+            slot_ceiling=1,
+            excluded_miner_hotkeys=[
+                row["miner_hotkey"]
+                for row in round_participants
+                if row["submission_id"] != participant["submission_id"]
+            ],
+            request_id=request_id,
+            request_hash=contracts.document_hash({"request_id": request_id}),
+            lease_token_hash=hash_lease_token(token),
+        )
+        assert result["status"] == "leased", result
+        return result, token
+
+    accepted, accepted_token = claim_for(visible, 0)
+    accepted_ref = "arena/%s/outputs/%s.json" % (
+        harness.round_id,
+        accepted["run_id"],
+    )
+    scored_execution = store.get_run(accepted["scored_run_id"])
+    companies = json.loads(
+        harness.objects.get(scored_execution["output_ref"]).decode("utf-8")
+    )["companies"]
+    assert companies
+    icp = harness.service.benchmark_icps(harness.round_id)[
+        int(accepted["icp_position"])
+    ]
+    harness.objects.put(
+        accepted_ref,
+        json.dumps(
+            scoring.build_scoring_output(
+                accepted["scored_run_id"],
+                deterministic_scorer(companies, icp, False),
+            )
+        ).encode("utf-8"),
+    )
+    assert store.complete_attempt(
+        run_id=accepted["run_id"],
+        lease_token_hash=hash_lease_token(accepted_token),
+        result={"terminal_status": "accepted"},
+        terminal_cause="accepted",
+        output_ref=accepted_ref,
+    )["status"] == "accepted"
+
+    first, first_token = claim_for(failing, 0)
+    first_failure = store.complete_attempt(
+        run_id=first["run_id"],
+        lease_token_hash=hash_lease_token(first_token),
+        result={"terminal_status": "judge_error"},
+        terminal_cause="judge_error",
+        output_ref="",
+    )
+    assert first_failure["confirmation_attempt"] == 2
+    assert harness.service.advance_round(harness.round_id) == {
+        "status": "waiting",
+        "round_status": "stage1_scoring",
+    }
+
+    second, second_token = claim_for(failing, 1)
+    assert second["assignment_id"] == first["assignment_id"]
+    assert int(second["attempt"]) == contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+    assert store.complete_attempt(
+        run_id=second["run_id"],
+        lease_token_hash=hash_lease_token(second_token),
+        result={"terminal_status": "judge_error"},
+        terminal_cause="judge_error",
+        output_ref="",
+    )["status"] == "failed"
+    assert store.list_runs(
+        harness.round_id, stage=1, status="pending", kind="score"
+    )
+
+    cancelled = harness.service.advance_round(harness.round_id)
+
+    assert cancelled["status"] == "cancelled"
+    row = store.get_round(harness.round_id)
+    assert row["status"] == "cancelled"
+    assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
+    assert not store.list_runs(harness.round_id, stage=1, status="pending")
+    assert not store.list_runs(harness.round_id, stage=1, status="leased")
+    post_cancel_token = new_lease_token()
+    post_cancel_request_id = contracts.new_request_id()
+    post_cancel = store.claim_assignment(
+        round_id=harness.round_id,
+        runner_hotkey=harness.runner_keys[0],
+        declared_parallelism=1,
+        slot_ceiling=1,
+        excluded_miner_hotkeys=[],
+        request_id=post_cancel_request_id,
+        request_hash=contracts.document_hash(
+            {"request_id": post_cancel_request_id}
+        ),
+        lease_token_hash=hash_lease_token(post_cancel_token),
+    )
+    assert post_cancel == {"status": "stage_closed", "round_status": "cancelled"}
+
+    accepted_after = store.get_run(accepted["run_id"])
+    assert accepted_after["status"] == "accepted"
+    assert accepted_after["output_ref"] == accepted_ref
+    public = harness.service.public_results(
+        harness.round_id, accepted["submission_id"]
+    )
+    matching_public_jobs = [
+        job
+        for job in public["judge_jobs"]
+        if job["run_id"] == accepted["run_id"]
+    ]
+    assert matching_public_jobs, (accepted, public["judge_jobs"])
+    public_job = matching_public_jobs[0]
+    assert public_job["evidence_status"] == "available"
+    assert any(
+        evidence["run_id"] == accepted["run_id"]
+        for evidence in public["judge_evidence"]
+    )
+    execution_runs = store.list_runs(
+        harness.round_id, stage=1, kind="execute"
+    )
+    assert len(execution_runs) == contracts.STAGE_1_ICP_COUNT * participants
+    assert all(run["status"] == "accepted" for run in execution_runs)
 
 
 @pytest.mark.parametrize(
@@ -1337,12 +1493,12 @@ def test_persistent_final_judge_failure_cancels_without_partial_final_scores(con
     ).replace(tzinfo=timezone.utc)
     assert harness.clock.now < final_scoring_close
 
-    closed = harness.service.advance_round(harness.round_id)
     cancelled = harness.service.advance_round(harness.round_id)
+    terminal = harness.service.advance_round(harness.round_id)
 
     row = harness.service.store.get_round(harness.round_id)
-    assert closed["status"] == "closed" and closed["round_status"] == "stage2_judged"
     assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
+    assert terminal == {"status": "terminal", "round_status": "cancelled"}
     assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
     assert row["finalists"] == finalists_before
     assert row["publication_doc"] is None

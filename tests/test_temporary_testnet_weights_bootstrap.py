@@ -279,6 +279,14 @@ def test_native_launch_order_keeps_validator_after_full_gateway_launch():
     )
 
 
+def test_native_application_launchers_bind_test_chain_before_imports():
+    source = Path(bootstrap.__file__).read_text(encoding="utf-8")
+    assert "scripts.run_temporary_testnet401_chain_bound_gateway" in source
+    assert source.count('"--chain-profile"') >= 2
+    assert source.count('"--hotkey-config"') >= 2
+    assert '[config["python_bin"], "-u", "-m", "gateway.main"]' not in source
+
+
 def test_fresh_epoch_authority_is_created_after_measured_boot_before_apps():
     source = Path(bootstrap.__file__).read_text(encoding="utf-8")
     stages = bootstrap.launch_sequence_names()

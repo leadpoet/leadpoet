@@ -54,6 +54,8 @@ def build_native_validator(
     wallet_hotkey: str,
     wallet_path: Path,
     state_path: Path,
+    chain_profile_path: Path,
+    hotkey_config_path: Path,
 ):
     if os.environ.get("BITTENSOR_NETWORK") != NETWORK or os.environ.get(
         "BITTENSOR_NETUID"
@@ -61,6 +63,16 @@ def build_native_validator(
         raise RuntimeError("temporary validator environment is not testnet401")
     state_path.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chdir(state_path)
+
+    from scripts.run_temporary_testnet401_chain_bound_gateway import (
+        configure_temporary_testnet401_chain_source,
+    )
+
+    configure_temporary_testnet401_chain_source(
+        profile_path=chain_profile_path,
+        hotkey_config_path=hotkey_config_path,
+        role="validator",
+    )
 
     from neurons import validator as validator_module
 
@@ -163,12 +175,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--wallet-path", type=Path, required=True)
     parser.add_argument("--state-path", type=Path, required=True)
     parser.add_argument("--readiness-file", type=Path, required=True)
+    parser.add_argument("--chain-profile", type=Path, required=True)
+    parser.add_argument("--hotkey-config", type=Path, required=True)
     args = parser.parse_args(argv)
     validator_module, validator = build_native_validator(
         wallet_name=args.wallet_name,
         wallet_hotkey=args.wallet_hotkey,
         wallet_path=args.wallet_path,
         state_path=args.state_path,
+        chain_profile_path=args.chain_profile,
+        hotkey_config_path=args.hotkey_config,
     )
     asyncio.run(
         run_weight_only_loop(

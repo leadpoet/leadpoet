@@ -497,7 +497,7 @@ def test_claim_and_guard_acquisition_are_serialized_without_deadlock(database):
 
 @pytest.mark.parametrize("guard_wins", [True, False])
 def test_old_claim_queued_before_first_round_read_is_rejected_or_captured(guard_wins):
-    migrations = DEFAULT_MIGRATIONS[:-1]
+    migrations = DEFAULT_MIGRATIONS[:DEFAULT_MIGRATIONS.index(LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION)]
     database = database_with_lab_arena_migration(migrations)
     psycopg2, dsn = next(database)
     store = _store(psycopg2, dsn)
@@ -579,7 +579,7 @@ def test_old_claim_queued_before_first_round_read_is_rejected_or_captured(guard_
 
 
 def test_first_install_nowait_never_deadlocks_live_completion():
-    migrations = DEFAULT_MIGRATIONS[:-1]
+    migrations = DEFAULT_MIGRATIONS[:DEFAULT_MIGRATIONS.index(LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION)]
     database = database_with_lab_arena_migration(migrations)
     psycopg2, dsn = next(database)
     store = _store(psycopg2, dsn)
@@ -628,7 +628,7 @@ def test_first_install_nowait_never_deadlocks_live_completion():
 
 
 def test_restart_guard_privileges_ignore_permissive_default_function_grants():
-    migrations = DEFAULT_MIGRATIONS[:-1]
+    migrations = DEFAULT_MIGRATIONS[:DEFAULT_MIGRATIONS.index(LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION)]
     database = database_with_lab_arena_migration(migrations)
     psycopg2, dsn = next(database)
     admin = psycopg2.connect(**dsn)

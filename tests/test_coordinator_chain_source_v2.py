@@ -22,6 +22,8 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from leadpoet_canonical.chain_source_v2 import (
+    ChainSourceV2Error,
+    chain_source_boundary_for_profile_v2,
     last_update_storage_key,
     reveal_period_epochs_storage_key,
     ss58_encode_account_id,
@@ -36,6 +38,44 @@ from leadpoet_canonical.chain_source_v2 import (
 HASH = "sha256:" + "a" * 64
 OWNER = bytes.fromhex("924620afb270acb1ee27bd034aa9e97108ef276da5079db982883cd70294741a")
 MINER = bytes.fromhex("74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383")
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "wss://entrypoint-finney.opentensor.ai:8443",
+        "wss://entrypoint-finney.opentensor.ai:not-a-port",
+        "wss://user:password@entrypoint-finney.opentensor.ai:443",
+        "wss://entrypoint-finney.opentensor.ai:443/rpc",
+        "wss://entrypoint-finney.opentensor.ai:443?query=value",
+        "wss://entrypoint-finney.opentensor.ai:443#fragment",
+    ),
+)
+def test_chain_source_boundary_rejects_endpoint_authority_suffixes(endpoint):
+    profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    profile["chain_endpoint"] = endpoint
+
+    with pytest.raises(ChainSourceV2Error, match="outside measured policy"):
+        chain_source_boundary_for_profile_v2(profile)
+
+
+def test_chain_source_boundary_retains_measured_test_network_support():
+    profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    boundary = chain_source_boundary_for_profile_v2(profile)
+
+    assert boundary["chain_host"] == "test.finney.opentensor.ai"
+    assert boundary["chain_archive_host"] == "test.finney.opentensor.ai"
 
 
 def _selective_fixture(block, *, last_field=76):

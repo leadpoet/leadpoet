@@ -36,17 +36,24 @@ dependencies read-only. It rejects URLs, local paths, nested requirements,
 VCS dependencies, and source builds. The common trusted scorer image supplies
 Python for every agent; it is not a miner image or a miner identity.
 
-The organizer supplies one host key for each provider:
+The organizer supplies host provider keys for execution and judging of the
+public baseline:
 
 - `LAB_ARENA_OPENROUTER_API_KEY`
 - `LAB_ARENA_SCRAPINGDOG_API_KEY`
 - `LAB_ARENA_DEEPLINE_API_KEY`
 
-The OpenRouter key is shared by bundle calls and judge calls. Only the
-organizer configures provider keys on the host. The broker
-permits any model in the organizer-fetched OpenRouter catalog that has usable
-pricing. It still enforces the fixed call, token, cost, privacy, and time
-limits. The trusted judge can use only its configured judge models.
+The host keys are used for baseline traffic. A competing model's
+OpenRouter runtime key and Deepline key are submitted separately, encrypted in
+the gateway vault, and attached to that submission's execution and judge calls. The
+matching OpenRouter management key is used for admission validation and then
+discarded. The miner funds those upstream calls. The validator receives an
+opaque runtime lease and cannot read the credentials; submitted code receives
+provider access only through the broker transport.
+
+The broker permits any model in the organizer-fetched OpenRouter catalog that
+has usable pricing. It still enforces the fixed call, token, cost, privacy, and
+time limits. The trusted judge can use only its configured judge models.
 
 A shared provider account failure, rate limit, or provider server failure is
 an infrastructure failure. It does not give a miner a score of zero. A real
@@ -102,13 +109,30 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/185-lab-arena-miner-credentials.sql`,
 `scripts/187-lab-arena-promotion-threshold.sql`, and
 `scripts/188-lab-arena-baseline-promotion.sql`,
-`scripts/189-lab-arena-round-network-scope.sql`, and
-`scripts/190-lab-arena-restart-claim-drain.sql` with the database owner
+`scripts/189-lab-arena-round-network-scope.sql`,
+`scripts/190-lab-arena-restart-claim-drain.sql`, and
+`scripts/193-lab-arena-upload-recovery.sql`, then
+`scripts/194-lab-arena-open-scorer-refresh.sql` with the database owner
 before service startup. Then check the service wiring:
+
+`scripts/191-lab-arena-upload-recovery.sql` remains byte-identical only because
+an earlier production snapshot records that applied path. Do not apply it to a
+new database. Migration 193 is the current forward upload-recovery migration.
 
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only
 ```
+
+Migration 193 adds safe replacement of unfinished uploads and accurate
+`execution_incomplete:stageN:count` / `scoring_incomplete:stageN:count`
+cancellation labels. It preserves historical results and source objects.
+Deploy its matching service after applying the migration. Source admission
+still uses the existing upload MD5 and server-assigned submission ID.
+
+Migration 194 refreshes only the trusted scorer digest and pinned reference
+when an existing open round atomically commits its benchmark. This lets a
+deployed scorer fix apply before any work is created. The committed scorer
+pin and every other round setting remain immutable.
 
 Start the service:
 

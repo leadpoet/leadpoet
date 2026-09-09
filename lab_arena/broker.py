@@ -321,6 +321,33 @@ class ProviderResponse:
     body: bytes
 
 
+def _response_contains_credential(response: ProviderResponse, secret: str) -> bool:
+    """Catch literal and JSON-escaped echoes before adaptation or persistence."""
+
+    if secret.encode("utf-8") in response.body or any(
+        secret in name or secret in value for name, value in response.headers.items()
+    ):
+        return True
+    try:
+        # Keep duplicate object members, too: a client can inspect the raw
+        # response even when its usual JSON decoder would discard a member.
+        parsed = json.loads(response.body, object_pairs_hook=list)
+    except (UnicodeDecodeError, ValueError):
+        # Non-JSON text still has the literal check above. The operation's
+        # existing sanitizer decides whether the response format is allowed.
+        return False
+    except RecursionError:
+        return True  # Fail closed if a structured response cannot be inspected.
+    pending = [parsed]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str) and secret in value:
+            return True
+        if isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return False
+
+
 class ProviderTransport(Protocol):
     def send(self, *, method: str, url: str, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> ProviderResponse: ...
 
@@ -655,7 +682,7 @@ class Broker:
                 response = self._transport.send(method=outbound.target.method, url=url, headers=headers, body=outbound.body, timeout_seconds=timeout_seconds)
                 # A provider must not echo its authorization secret into a
                 # stored response or back to untrusted submitted code.
-                if secret.encode("utf-8") in response.body:
+                if _response_contains_credential(response, secret):
                     response = ProviderResponse(
                         502,
                         {"content-type": "application/json"},

@@ -15,9 +15,10 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlparse
 
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
@@ -43,6 +44,15 @@ except ModuleNotFoundError as exc:
     from tests.restart_rehearsal.fixture_contract import (
         load_rehearsal_current_settlement_epoch_id,
         validate_rehearsal_finalized_authority_epochs,
+    )
+
+try:
+    from postgres_v2_contract_probe import DisposablePostgres
+except ModuleNotFoundError as exc:
+    if exc.name != "postgres_v2_contract_probe":
+        raise
+    from tests.restart_rehearsal.postgres_v2_contract_probe import (
+        DisposablePostgres,
     )
 
 
@@ -106,9 +116,151 @@ SENSITIVE_DOCUMENT_RE = re.compile(
     r"authorization|proxy-authorization|://[^/]+:[^/@]+@)",
     re.IGNORECASE,
 )
+LAB_ARENA_RESTART_RPC_PARAMETERS = {
+    "lab_arena_restart_guard_state_v1": (),
+    "lab_arena_acquire_restart_guard_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_expected_generation", "bigint"),
+        ("p_lease_seconds", "integer"),
+        ("p_candidate_commit", "text"),
+        ("p_restart_scope", "text"),
+        ("p_actor_ref", "text"),
+    ),
+    "lab_arena_restart_quiescence_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+    ),
+    "lab_arena_retarget_restart_guard_v1": (
+        ("p_current_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_expected_generation", "bigint"),
+        ("p_new_guard_id", "text"),
+        ("p_new_candidate_commit", "text"),
+        ("p_restart_scope", "text"),
+        ("p_lease_seconds", "integer"),
+        ("p_actor_ref", "text"),
+    ),
+    "lab_arena_authorize_restart_phase_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_phase", "text"),
+    ),
+    "lab_arena_mark_restart_ready_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_phase", "text"),
+    ),
+    "lab_arena_abort_restart_guard_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_actor_ref", "text"),
+    ),
+    "lab_arena_release_restart_guard_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_actor_ref", "text"),
+    ),
+}
 CONTROL_QUERY_FIELDS = frozenset(
     {"columns", "limit", "offset", "on_conflict", "order", "select"}
 )
+
+
+class MigrationBackedLabArenaRPC:
+    """Expose migration-190 SQL functions through the local HTTP boundary."""
+
+    def __init__(self, path: Path, *, candidate_sha: str):
+        self.database: DisposablePostgres | None = None
+        try:
+            self.database = DisposablePostgres.attach(
+                path,
+                candidate_sha=candidate_sha,
+            )
+            function_names = ",".join(
+                "'" + name + "'"
+                for name in sorted(LAB_ARENA_RESTART_RPC_PARAMETERS)
+            )
+            observed = self.database.psql(
+                f"""
+                SELECT p.proname || '(' ||
+                       pg_get_function_identity_arguments(p.oid) || ')'
+                FROM pg_proc AS p
+                JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname IN ({function_names})
+                ORDER BY p.proname;
+                """,
+                tuples_only=True,
+            ).stdout.splitlines()
+            expected = sorted(
+                f"{name}({', '.join(f'{field} {kind}' for field, kind in parameters)})"
+                for name, parameters in LAB_ARENA_RESTART_RPC_PARAMETERS.items()
+            )
+            if (
+                sorted(line.strip() for line in observed if line.strip())
+                != expected
+            ):
+                raise ValueError(
+                    "migration-backed Lab Arena RPC catalog differs"
+                )
+        except BaseException:
+            if self.database is not None:
+                self.database.stop()
+            raise
+
+    def call(
+        self,
+        name: str,
+        body: Any,
+        *,
+        database_role: str,
+    ) -> dict[str, Any]:
+        parameters = LAB_ARENA_RESTART_RPC_PARAMETERS.get(name)
+        if parameters is None or not isinstance(body, Mapping):
+            raise ValueError("Lab Arena restart RPC differs")
+        if self.database is None:
+            raise ValueError("migration-backed Lab Arena restart RPC is unavailable")
+        if database_role not in {"anon", "lab_arena_service", "service_role"}:
+            raise ValueError("Lab Arena restart database role differs")
+        expected = {field for field, _ in parameters}
+        if set(body) != expected:
+            raise ValueError("Lab Arena restart RPC parameters differ")
+        encoded = json.dumps(dict(body), sort_keys=True, separators=(",", ":"))
+        if "$leadpoet$" in encoded:
+            raise ValueError("Lab Arena restart RPC payload differs")
+        arguments = ",".join(
+            f"(payload->>'{field}')::{kind}" for field, kind in parameters
+        )
+        sql = (
+            f"SET ROLE {database_role};\n"
+            f"WITH input AS (SELECT $leadpoet${encoded}$leadpoet$::jsonb AS payload) "
+            f"SELECT public.{name}({arguments})::text FROM input;\n"
+        )
+        result = self.database.psql(
+            sql,
+            tuples_only=True,
+            quiet=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError("migration-backed Lab Arena restart RPC rejected")
+        try:
+            value = json.loads(result.stdout.strip())
+        except json.JSONDecodeError as exc:
+            raise ValueError("migration-backed Lab Arena restart RPC differs") from exc
+        if not isinstance(value, Mapping):
+            raise ValueError("migration-backed Lab Arena restart RPC differs")
+        return dict(value)
+
+    def stop(self) -> None:
+        if self.database is not None:
+            self.database.stop()
 
 
 def _candidate_source_add_leg1_authority(
@@ -616,6 +768,12 @@ def _migration_schema_contract(
         "183-lab-arena-miner-reward-basis.sql",
         "184-lab-arena-scoring-failure-isolation.sql",
         "185-lab-arena-miner-credentials.sql",
+        "187-lab-arena-promotion-threshold.sql",
+        "188-lab-arena-baseline-promotion.sql",
+        "189-lab-arena-round-network-scope.sql",
+        "190-lab-arena-restart-claim-drain.sql",
+        "193-lab-arena-upload-recovery.sql",
+        "194-lab-arena-open-scorer-refresh.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -3283,12 +3441,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self) -> bool:
+    def _database_role(self) -> str | None:
         apikey = self.headers.get("apikey", "")
         authorization = self.headers.get("authorization", "")
-        return apikey in {"rehearsal-public", "rehearsal-secret"} and (
-            authorization == f"Bearer {apikey}"
-        )
+        if (apikey, authorization) == (
+            "rehearsal-secret",
+            "Bearer rehearsal.header.signature",
+        ):
+            return "lab_arena_service"
+        if (apikey, authorization) == (
+            "rehearsal-public",
+            "Bearer rehearsal-public",
+        ):
+            return "anon"
+        if (apikey, authorization) == (
+            "rehearsal-secret",
+            "Bearer rehearsal-secret",
+        ):
+            return "service_role"
+        return None
+
+    def _authorized(self) -> bool:
+        return self._database_role() is not None
 
     def _body(self) -> Any:
         size = int(self.headers.get("content-length", "0") or 0)
@@ -3351,7 +3525,20 @@ class Handler(BaseHTTPRequestHandler):
                 target=name,
             )
             response: Any = []
-            if name == (
+            if name in LAB_ARENA_RESTART_RPC_PARAMETERS:
+                if self.server.lab_arena_rpc is None:
+                    raise ValueError(
+                        "migration-backed Lab Arena restart RPC is unavailable"
+                    )
+                database_role = self._database_role()
+                if database_role is None:
+                    raise ValueError("Lab Arena restart database role differs")
+                response = self.server.lab_arena_rpc.call(
+                    name,
+                    body,
+                    database_role=database_role,
+                )
+            elif name == (
                 "research_lab_stateful_subnet_epoch_cutover_public_state_v1"
             ):
                 response = self.server.state.cutover_state
@@ -3889,9 +4076,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._dispatch()
         except (KeyError, TypeError, ValueError) as exc:
+            expected_denial = (
+                self.command == "POST"
+                and urlparse(self.path).path
+                == "/rest/v1/rpc/lab_arena_restart_guard_state_v1"
+                and self._database_role() == "anon"
+                and str(exc)
+                == "migration-backed Lab Arena restart RPC rejected"
+            )
             self.server.state.record(
-                status="rejected",
-                operation="request_validation",
+                status="expected_denial" if expected_denial else "rejected",
+                operation="authorization" if expected_denial else "request_validation",
                 method=self.command,
                 path=self.path,
                 error_type=type(exc).__name__,
@@ -3907,8 +4102,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class LocalPostgRESTServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], state: LocalPostgRESTState):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        state: LocalPostgRESTState,
+        *,
+        lab_arena_rpc: MigrationBackedLabArenaRPC | None = None,
+    ):
         self.state = state
+        self.lab_arena_rpc = lab_arena_rpc
         super().__init__(address, Handler)
 
 
@@ -3922,6 +4124,7 @@ def main() -> int:
     parser.add_argument("--schema-contract", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--durable-state", type=Path)
+    parser.add_argument("--postgres-connection", type=Path)
     args = parser.parse_args()
     fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
     if fixture.get("sanitization", {}).get("contains_production_credentials"):
@@ -3939,42 +4142,68 @@ def main() -> int:
     tables.update(relation_columns)
     rpcs.update(migration_rpcs)
     args.state_root.mkdir(parents=True, exist_ok=True)
-    state = LocalPostgRESTState(
-        state_root=args.state_root,
-        fixture=fixture,
-        source_root=args.source_root,
-        tables=tables,
-        rpcs=rpcs,
-        relation_columns=relation_columns,
-        seed_rows=seed_rows,
-        durable_state_path=args.durable_state,
-        durable_schema_sha=args.candidate_sha,
-    )
-    durable_identity = state.durable_state_identity()
-    server = LocalPostgRESTServer((args.host, args.port), state)
-    (args.state_root / "local-postgrest.ready").write_text(
-        json.dumps(
-            {
-                "schema_version": "leadpoet.local_postgrest.v1",
-                "host": args.host,
-                "port": args.port,
-                "tables": len(tables),
-                "rpcs": len(rpcs),
-                "migration_backed_relations": len(relation_columns),
-                "durable_schema_sha": args.candidate_sha,
-                "durable_revision": durable_identity["revision"],
-                "durable_state_hash": durable_identity["state_hash"],
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    state.record(status="ready", operation="service_start")
+    lab_arena_rpc = None
+
+    def stop_server(_signal: int, _frame: Any) -> None:
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop_server)
+    signal.signal(signal.SIGINT, stop_server)
     try:
+        if args.postgres_connection is not None:
+            lab_arena_rpc = MigrationBackedLabArenaRPC(
+                args.postgres_connection,
+                candidate_sha=args.candidate_sha,
+            )
+            missing_lab_arena_rpcs = (
+                set(LAB_ARENA_RESTART_RPC_PARAMETERS) - migration_rpcs
+            )
+            if missing_lab_arena_rpcs:
+                raise RuntimeError(
+                    "migration-backed Lab Arena restart RPCs are incomplete"
+                )
+        state = LocalPostgRESTState(
+            state_root=args.state_root,
+            fixture=fixture,
+            source_root=args.source_root,
+            tables=tables,
+            rpcs=rpcs,
+            relation_columns=relation_columns,
+            seed_rows=seed_rows,
+            durable_state_path=args.durable_state,
+            durable_schema_sha=args.candidate_sha,
+        )
+        durable_identity = state.durable_state_identity()
+        server = LocalPostgRESTServer(
+            (args.host, args.port),
+            state,
+            lab_arena_rpc=lab_arena_rpc,
+        )
+        (args.state_root / "local-postgrest.ready").write_text(
+            json.dumps(
+                {
+                    "schema_version": "leadpoet.local_postgrest.v1",
+                    "host": args.host,
+                    "port": args.port,
+                    "tables": len(tables),
+                    "rpcs": len(rpcs),
+                    "migration_backed_relations": len(relation_columns),
+                    "durable_schema_sha": args.candidate_sha,
+                    "durable_revision": durable_identity["revision"],
+                    "durable_state_hash": durable_identity["state_hash"],
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state.record(status="ready", operation="service_start")
         server.serve_forever(poll_interval=0.1)
     finally:
-        server.server_close()
+        if "server" in locals():
+            server.server_close()
+        if lab_arena_rpc is not None:
+            lab_arena_rpc.stop()
     return 0
 
 

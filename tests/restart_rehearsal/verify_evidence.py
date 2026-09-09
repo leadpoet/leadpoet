@@ -139,6 +139,25 @@ def require_order(values: list[str], required: list[str]) -> None:
             ) from exc
 
 
+def verify_lab_arena_guard_boundary_denial(rows: list[dict]) -> None:
+    denials = [row for row in rows if row.get("status") == "expected_denial"]
+    expected = {
+        "status": "expected_denial",
+        "operation": "authorization",
+        "method": "POST",
+        "path": "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+        "error_type": "ValueError",
+        "error": "migration-backed Lab Arena restart RPC rejected",
+    }
+    if len(denials) != 1 or any(
+        denials[0].get(name) != value for name, value in expected.items()
+    ):
+        raise SystemExit(
+            "migration-backed Lab Arena public denial evidence differs: "
+            f"{denials!r}"
+        )
+
+
 def _first_event(
     rows: list[dict],
     predicate,
@@ -1473,6 +1492,8 @@ def main() -> int:
     rejected = [row for row in rows if row.get("status") == "rejected"]
     if rejected:
         raise SystemExit(f"contract adapter rejected operations: {rejected!r}")
+    if component in {"gateway", "validator"} and scenario == "production_success":
+        verify_lab_arena_guard_boundary_denial(rows)
     verify_rehearsal_integrity(
         rows,
         from_sha=from_sha,

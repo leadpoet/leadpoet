@@ -51,3 +51,21 @@ def test_retired_image_and_manual_envelope_commands_are_absent():
             assert exc.code == 2
         else:  # pragma: no cover
             raise AssertionError("retired command remained available")
+
+
+def test_scripted_submission_formats_real_failure(monkeypatch, capsys):
+    args = MINER["build_parser"]().parse_args(["submit-model", "--source", "./agent"])
+    globals_ = MINER["submit_source"].__globals__
+    monkeypatch.setitem(globals_, "submission_credentials_from_environment", lambda: {
+        "openrouter_api_key": "openrouter-execution-secret",
+        "openrouter_management_key": "openrouter-management-secret",
+        "deepline_api_key": "deepline-execution-secret",
+    })
+    monkeypatch.setitem(globals_, "_keypair", lambda _args: object())
+    monkeypatch.setitem(globals_, "submit_agent_source", lambda **_kwargs: (_ for _ in ()).throw(
+        MINER["MinerSubmissionError"]("source_upload_failed", "http_403\nopenrouter-execution-secret")
+    ))
+    assert MINER["submit_source"](args) == 2
+    rendered = capsys.readouterr().err
+    assert "source_upload_failed (http_403\\x0a[REDACTED])" in rendered
+    assert "TypeError" not in rendered

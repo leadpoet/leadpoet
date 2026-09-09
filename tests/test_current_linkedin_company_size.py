@@ -202,6 +202,18 @@ def test_invalid_requested_profile_url_never_calls_exa(monkeypatch):
     [
         {"error": "upstream unavailable", "results": []},
         {
+            "statuses": [
+                {
+                    "status": "error",
+                    "error": {
+                        "httpStatusCode": 504,
+                        "tag": "CRAWL_LIVECRAWL_TIMEOUT",
+                    },
+                }
+            ],
+            "results": [],
+        },
+        {
             "status": "error",
             "results": [
                 {
@@ -236,15 +248,6 @@ def test_invalid_requested_profile_url_never_calls_exa(monkeypatch):
                 {
                     "url": "https://linkedin.com/company/other",
                     "text": "## About\nCompany size 11-50 employees",
-                }
-            ],
-        },
-        {
-            "statuses": [{"status": "success"}],
-            "results": [
-                {
-                    "url": "https://linkedin.com/company/acme",
-                    "text": "## About\nView all 89 employees",
                 }
             ],
         },
@@ -286,11 +289,174 @@ def test_exa_contents_envelope_or_source_failure_is_unavailable(monkeypatch, bod
     ) is None
 
 
+def test_successful_exact_profile_without_company_size_is_insufficient(
+    monkeypatch,
+):
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            return {
+                "statuses": [{"status": "success", "source": "crawled"}],
+                "results": [
+                    {
+                        "url": "https://linkedin.com/company/acme",
+                        "text": "Acme builds workflow software.\nView all employees",
+                    }
+                ],
+            }
+
+    class Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme"
+        )
+    ) == {
+        "outcome": "insufficient_evidence",
+        "url": "https://linkedin.com/company/acme",
+    }
+
+
+@pytest.mark.parametrize(
+    ("status_id", "expected"),
+    [
+        (
+            "https://linkedin.com/company/acme",
+            {
+                "outcome": "insufficient_evidence",
+                "url": "https://linkedin.com/company/acme",
+            },
+        ),
+        ("https://linkedin.com/company/other", None),
+    ],
+)
+def test_exact_profile_not_found_requires_requested_identity(
+    monkeypatch,
+    status_id,
+    expected,
+):
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            return {
+                "statuses": [
+                    {
+                        "id": status_id,
+                        "status": "error",
+                        "error": {
+                            "httpStatusCode": 404,
+                            "tag": "CRAWL_NOT_FOUND",
+                        },
+                    }
+                ],
+                "results": [],
+            }
+
+    class Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme"
+        )
+    ) == expected
+
+
+def test_exact_profile_empty_text_is_insufficient(monkeypatch):
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            return {
+                "statuses": [{"status": "success", "source": "crawled"}],
+                "results": [
+                    {
+                        "url": "https://linkedin.com/company/acme",
+                        "text": "",
+                    }
+                ],
+            }
+
+    class Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme"
+        )
+    ) == {
+        "outcome": "insufficient_evidence",
+        "url": "https://linkedin.com/company/acme",
+    }
+
+
 @pytest.mark.parametrize(
     ("sonar_size", "sonar_matches", "current_size", "expected"),
     [
         ("1", False, "11-50", COMPANY_FIT_MATCH),
         ("11-50", True, "51-200", COMPANY_FIT_MISMATCH),
+        ("1-10", True, "11-50", COMPANY_FIT_MATCH),
+        (None, None, "51-200", COMPANY_FIT_MISMATCH),
     ],
 )
 def test_current_profile_replaces_stale_linkedin_match_or_mismatch(
@@ -381,8 +547,66 @@ def test_failed_refresh_clears_stale_size_and_is_reused_on_schema_repair(monkeyp
         "lead_scorer_reverify_schema_repair",
     ]
     assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert result.details["failure_class"] == (
+        "employee_size_verification_failed"
+    )
     assert original_verdict["observed_employee_count"] == "1"
     assert original_verdict["employee_size_matches"] is False
+
+
+@pytest.mark.parametrize(
+    ("observed_size", "size_matches"),
+    [
+        ("1", False),
+        ("1-10", True),
+        (None, None),
+    ],
+)
+def test_successful_profile_without_size_is_reused_as_insufficient(
+    monkeypatch,
+    observed_size,
+    size_matches,
+):
+    provider_calls = []
+    fetches = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return _verdict(
+            observed_size=observed_size,
+            size_matches=size_matches,
+        ), ""
+
+    async def fetch(url):
+        fetches.append(url)
+        return {
+            "outcome": "insufficient_evidence",
+            "url": url,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == "insufficient_fit_evidence"
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert fetches == ["https://www.linkedin.com/company/acme"]
 
 
 def test_repair_reuses_successful_refresh_and_non_linkedin_evidence_is_unchanged(

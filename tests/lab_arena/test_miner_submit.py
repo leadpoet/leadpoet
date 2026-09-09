@@ -88,7 +88,8 @@ class _Session:
             },
         )
 
-    def put(self, url, data, headers, timeout):
+    def put(self, url, data, headers, timeout, allow_redirects):
+        assert allow_redirects is False
         self.uploads.append((url, data.read(), dict(headers), timeout))
         return _Response(self.upload_status)
 
@@ -131,6 +132,17 @@ def test_source_validation_checks_syntax_without_importing_code(tmp_path):
     (source / "harness.py").write_text("def run_icp(:\n", encoding="utf-8")
     with pytest.raises(MinerSubmissionError, match="harness_invalid"):
         validate_agent_source(source)
+
+
+def test_local_source_error_path_redacts_submitted_credentials(tmp_path):
+    source = _agent_source(tmp_path)
+    secret = CREDENTIALS["openrouter_api_key"]
+    (source / secret).write_text("loader\n", encoding="utf-8")
+    with pytest.raises(MinerSubmissionError) as caught:
+        validate_agent_source(source, forbidden_values=CREDENTIALS.values())
+    rendered = caught.value.format_for_cli(forbidden_values=CREDENTIALS.values())
+    assert secret not in rendered
+    assert "source_contains_credentials" in rendered
 
 
 def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path):
@@ -292,6 +304,27 @@ def test_interactive_submission_keeps_credentials_out_of_input_and_output(monkey
     assert all(secret not in rendered for secret in CREDENTIALS.values())
 
 
+def test_interactive_submission_formats_real_failure_without_type_error(monkeypatch):
+    output = []
+    monkeypatch.setattr(
+        miner_submit,
+        "submit_agent_source",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            MinerSubmissionError("source_upload_failed", "http_403\nsecret")
+        ),
+    )
+    answers = iter(("./agent", "yes"))
+    secrets = iter(CREDENTIALS.values())
+    assert not miner_submit.run_interactive_submission(
+        _Keypair(), "https://arena.example",
+        input_fn=lambda _prompt: next(answers), output_fn=output.append,
+        getpass_fn=lambda _prompt: next(secrets), environ={},
+    )
+    rendered = "\n".join(output)
+    assert "source_upload_failed (http_403\\x0asecret)" in rendered
+    assert "TypeError" not in rendered
+
+
 def test_server_error_text_is_not_propagated():
     secret = "server-echoed-secret"
     response = _Response(
@@ -321,6 +354,68 @@ def test_unknown_error_code_is_never_echoed():
     assert "server-echoed-secret" not in str(caught.value)
 
 
+def test_upload_error_reports_status_known_code_and_bounded_request_id_without_xml(tmp_path):
+    class Response:
+        status_code = 403
+        text = "<Error><Code>AccessDenied</Code><Message>secret-value</Message></Error>"
+        headers = {"x-amz-request-id": "ABCDEF0123456789"}
+
+    class Session:
+        def put(self, *_args, **_kwargs):
+            return Response()
+
+    archive = tmp_path / "upload-fixture"
+    archive.write_bytes(b"fixture")
+    with pytest.raises(MinerSubmissionError) as caught:
+        miner_submit._upload_source(
+            Session(), archive, "https://uploads.example/private", {},
+        )
+    assert caught.value.code == "source_upload_failed"
+    assert str(caught.value) == "http_403 code=AccessDenied request_id=ABCDEF0123456789"
+    assert "secret-value" not in str(caught.value)
+    assert "Message" not in str(caught.value)
+
+
+def test_error_formatter_redacts_controls_and_credentials():
+    error = MinerSubmissionError(
+        "source_upload_failed",
+        "http_403 code=AccessDenied\nsecret-value",
+    )
+    rendered = error.format_for_cli(forbidden_values=("secret-value",))
+    assert "secret-value" not in rendered
+    assert "\\x0a" in rendered
+
+
+def test_find_open_round_retries_transient_502_then_succeeds(monkeypatch):
+    responses = iter((_Response(502, {}), _Response(200, {
+        "open_round": {"round_id": "arena-2026-09-04", "status": "open"}
+    })))
+    calls = []
+    monkeypatch.setattr(miner_submit.time, "sleep", calls.append)
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return next(responses)
+    assert miner_submit.find_open_round("https://arena.example", session=Session()) == "arena-2026-09-04"
+    assert calls == [1]
+
+
+def test_find_open_round_reports_final_502_and_does_not_retry_4xx(monkeypatch):
+    calls = []
+    monkeypatch.setattr(miner_submit.time, "sleep", calls.append)
+    class Session:
+        def __init__(self):
+            self.count = 0
+        def get(self, *_args, **_kwargs):
+            self.count += 1
+            return _Response(502 if self.count == 1 else 400, {})
+    session = Session()
+    with pytest.raises(MinerSubmissionError) as caught:
+        miner_submit.find_open_round("https://arena.example", session=session)
+    assert caught.value.code == "arena_request_failed"
+    assert session.count == 2
+    assert calls == [1]
+
+
 def test_cli_rejects_submitted_credentials_embedded_in_source_before_upload(tmp_path):
     source = _agent_source(tmp_path)
     (source / "agent.py").write_text(
@@ -340,6 +435,7 @@ def test_cli_rejects_submitted_credentials_embedded_in_source_before_upload(tmp_
             now=lambda: NOW,
         )
     assert caught.value.code == "source_contains_credentials"
+    assert "agent.py" in caught.value.detail
     assert session.posts == []
     assert session.uploads == []
 

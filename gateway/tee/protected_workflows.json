@@ -3877,7 +3877,7 @@
       "symbol": "_REVEAL_PERIOD_METADATA_DEFAULTS_V2"
     },
     {
-      "ast_sha256": "sha256:6ee33a1eeaa8f1caee2c81862db72870578c2ec43ef02559154e4abb297ac656",
+      "ast_sha256": "sha256:626a02f67f85d200b0911b30f623eb31d54874d7f262b8d3c186799cdc8eced1",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "chain_source_boundary_for_profile_v2"
     },
@@ -4372,7 +4372,7 @@
       "symbol": "_decision_from_observed_employee_size"
     },
     {
-      "ast_sha256": "sha256:ed9f1f3f313eb3dbe433b43f431e3eb8ddfdf638019cf63b3fc8b6f4503f6a3b",
+      "ast_sha256": "sha256:20f03f4bf5ee689b45b630c5359f50abcf84f0087a9157ac58e0e2b009d8590e",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
@@ -4515,11 +4515,6 @@
       "ast_sha256": "sha256:ea0b70f78f8229c5db7c643eba72b5c98a6dd15146fabae09ced5ab40d344e8e",
       "path": "research_lab/eval/provider_evidence_cache.py",
       "symbol": "canonical_request_fingerprint"
-    },
-    {
-      "ast_sha256": "sha256:cfe8b5b76b33b1f86d1973f60a3be684780bef991b88f0a8ce1b0fe1ae6c4d70",
-      "path": "research_lab/eval/provider_evidence_cache.py",
-      "symbol": "icp_evidence_cache_key"
     },
     {
       "ast_sha256": "sha256:f521c55ca17b5616ce6306c72e5cbf8d1ec465494840896dd342f943f79147b7",
@@ -4692,7 +4687,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:29ce13eb6555b488b583127adef3e370b325e1a9a6ae2718cb8ed2be8b170226",
-  "protected_source_commit": "e29e9c2e3cd9f47c4dd4961e5e819d558e82aadc",
+  "manifest_hash": "sha256:8beca098bd6577987502683ab9ba4f76f646e713c50f3ac8f7b2b30255818978",
+  "protected_source_commit": "70991f8d8c97b436733eacb6c19244a8ea3838d3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

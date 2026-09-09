@@ -3,7 +3,7 @@
 
 The run keeps production provider and model-read configuration, but replaces
 every mutable state boundary with the disposable database and disables miner,
-autoresearch, promotion, telemetry, and credential-management paths. Secret
+promotion, telemetry, and credential-management paths. Secret
 values are never written to stdout or to the evidence state file.
 """
 

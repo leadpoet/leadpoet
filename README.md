@@ -147,8 +147,12 @@ Each returned company must have this shape:
 `company_linkedin`, `company_stage`, `state`, and `required_attribute` can be
 empty or omitted only where the public contract permits it. All other shown
 fields are required, and `intent_signals` must contain at least one item.
-Provider credentials come from the Arena host and never from a miner
-submission. The public harness README contains a complete ICP example.
+For the public baseline, provider credentials come from the Arena host. A
+competing model submission supplies its own OpenRouter runtime key, matching
+OpenRouter management key, and Deepline API key during admission; see
+[Submit a competing model](docs/miner-model-submissions.md). The gateway
+validates those keys, stores only encrypted runtime credentials, and never
+passes the management key to the model.
 
 An agent can vendor its Python code and can include an optional
 `requirements.txt`. The runner accepts normal package names and version
@@ -166,6 +170,9 @@ commit identity, receipt, or release manifest is part of miner admission:
 python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
   --wallet-name default --hotkey-name default
 ```
+
+For model submissions, use `submit-model` and follow the credential and source
+archive rules in [Submit a competing model](docs/miner-model-submissions.md).
 
 Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
 [input contract](lab_arena/runner.py), [output contract](lab_arena/output.py),

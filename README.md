@@ -183,9 +183,14 @@ not admission or scoring requirements.
 At the first cutoff, the Arena automatically enters the configured public
 PydanticAI source archive through the same source checks, runner, provider
 limits, and scorer as miner bundles. The downloaded bytes are frozen for that
-round. Every new daily round downloads and scores the public baseline again;
-the previous miner winner remains in reward history but is not the next day's
-threshold.
+round. Every new daily round downloads the promoted `lab` baseline and scores
+it again; the comparison uses that fresh score, not yesterday's score.
+
+The Open Source Agent Competition uses UTC days. Day 0's twenty ICPs stay
+hidden while miners submit. On Day 1, submissions close, all twenty of Day 0's
+ICPs become public, and the frozen baseline and submitted models are evaluated
+on that same set. Code, final scores, and all per-ICP scores become public when
+evaluation completes. Day 1's new ICP set stays hidden until Day 2.
 
 #### Submit API Source
 

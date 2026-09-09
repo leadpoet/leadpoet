@@ -99,6 +99,39 @@ def test_round_summary_does_not_mistake_ranked_baseline_for_champion():
     assert "runner_hotkeys" not in serialized
 
 
+def test_round_summary_names_submission_bank_and_evaluation_days():
+    row = _published_round()
+    row.update(icp_set_date="2026-09-08", evaluation_date="2026-09-09")
+    summary = public_dashboard.round_summary(row)
+    assert summary["icp_set_date"] == "2026-09-08"
+    assert summary["evaluation_date"] == "2026-09-09"
+    assert summary["public_at"] == "2026-09-09T00:00:00Z"
+
+
+def test_open_round_dates_are_planned_but_no_scores_are_disclosed():
+    row = _published_round()
+    row.update(status="open", participants=None, publication_doc=None)
+    summary = public_dashboard.round_summary(row)
+    assert summary["icp_set_date"] == "2026-09-08"
+    assert summary["evaluation_date"] == "2026-09-09"
+    assert summary["baseline"] is None
+    assert summary["champion"] is None
+
+
+@pytest.mark.parametrize("status", ["stage1_scored", "stage2", "scored", "cancelled"])
+def test_intermediate_scores_are_not_read_or_released(status):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Unpublished score rows must not be read")
+    service = SimpleNamespace(_store=SimpleNamespace(list_runs=forbidden))
+    assert public_dashboard._stage1_scores(service, {"status": status}) == {}
+
+
+def test_missing_final_score_is_not_labelled_scored_but_real_zero_is():
+    common = {"raw_status": "frozen", "round_status": "published", "is_champion": False}
+    assert public_dashboard._submission_lifecycle(**common, final_score=None) == "scoring_failed"
+    assert public_dashboard._submission_lifecycle(**common, final_score=0.0) == "scored"
+
+
 def test_round_summary_projects_only_the_crowned_miner_and_promotion_state():
     pending = public_dashboard.round_summary(_published_round(outcome="crowned"))
     promoted = public_dashboard.round_summary(
@@ -267,9 +300,9 @@ def test_open_submissions_disclose_only_accepted_intake_as_queued():
             "final_score": None,
             "is_champion": False,
             "code": {
-                "available": True,
-                "available_at": "2026-09-11T01:05:00Z",
-                "url": "/arena/v1/submissions/sub-queued/code",
+                "available": False,
+                "available_at": None,
+                "url": None,
             },
         }
     ]
@@ -398,14 +431,14 @@ def test_public_code_service_hook_checks_round_scope_and_translates_denial(monke
     monkeypatch.setattr(
         source_disclosure,
         "public_source_code",
-        lambda _objects, row, _now_value: {"submission_id": row["submission_id"]},
+        lambda _objects, row, _now_value, **_kwargs: {"submission_id": row["submission_id"]},
     )
     assert ArenaService.public_submission_code(service, "sub-miner") == {
         "submission_id": "sub-miner"
     }
     assert checked == ["arena-2026-09-09"]
 
-    def deny(_objects, _row, _now_value):
+    def deny(_objects, _row, _now_value, **_kwargs):
         raise source_disclosure.SourceDisclosureError("source_not_public", 403)
 
     monkeypatch.setattr(source_disclosure, "public_source_code", deny)

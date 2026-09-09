@@ -1,21 +1,24 @@
 # Open Source Agent Competition operator guide
 
-The Arena is a simple agent-bundle competition. Each round uses the current
-daily set of twenty qualification ICPs: ten in stage 1 and ten in stage 2.
-The baseline and miners use that one set and one scoring path.
+The Arena is a simple agent-bundle competition with a UTC daily cycle:
 
-Once all twenty baseline scores are complete, the seven lowest-scoring and
-three highest-scoring ICPs are public. The other ten remain private. Ties use
-the ICP's original position. This read-only split uses baseline scores only;
-it does not change the stage schedule or the scoring of miner submissions.
-No ICP is disclosed while the baseline score set is incomplete.
+1. Day 0: generate twenty ICPs, keep them private, and accept model submissions.
+2. Day 1: close Day 0 submissions and reveal all twenty of Day 0's ICPs.
+   Evaluate the frozen baseline and every accepted model on that same set.
+3. Publish the source, final score, and all twenty per-ICP scores as soon as
+   evaluation is complete. There is no additional 24-hour source delay.
 
-Submitted source stays private until twenty-four hours after acceptance.
-The server records this time, and both the code preview and winner promotion
-to public Git branches enforce the delay. Old submissions without this time
-use their freeze time as a conservative fallback. Provider credentials are
-never part of the public preview. The CLI's public-rerun consent covers this
-source disclosure.
+Day 1 also starts a new hidden set and submission window for Day 2. The existing
+two ten-ICP batches are execution details; new rounds do not eliminate models
+between them. The round ID names the evaluation day. `icp_set_date` names the
+previous submission day's bank, which remains fixed during restart and retry.
+Historical rounds retain their actual bank date; they are not relabelled as a
+previous-day evaluation.
+
+Code previews and promotion to public Git branches use the same completed
+evaluation gate. Queued, incomplete, and cancelled evaluations do not release
+submitted code. Provider credentials are never public. The CLI's public-rerun
+consent covers source disclosure.
 
 ## Competition boundary
 
@@ -258,9 +261,9 @@ recovery. A later `lab` promotion affects the next round snapshot only. The
 operator log reports the archive's ordinary Git commit comment when GitHub
 provides it. A live round created before this policy can still show its old
 creation-time URL, but an unfrozen download uses `lab`; an already stored or
-registered bundle is not replaced. A finalist must score at least **1.0 point**
+registered bundle is not replaced. A model must score at least **1.0 point**
 above the daily baseline mean on the existing 0–100 scale. A tie or a smaller
-gain does not crown a new miner. The highest qualifying finalist wins.
+gain does not crown a new miner. The highest qualifying model wins.
 
 The gateway publishes that winner's accepted source to both `main` and `lab`
 with one atomic Git push. The new commit preserves both branches' history and

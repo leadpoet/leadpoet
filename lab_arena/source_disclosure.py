@@ -1,17 +1,16 @@
-"""Time-limited source privacy and a bounded, read-only code preview."""
+"""Publish evaluated submissions as bounded, read-only source previews."""
 
 from __future__ import annotations
 
 import io
 import tarfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 from urllib.parse import quote
 
-from lab_arena import source_bundle
+from lab_arena import icp_disclosure, source_bundle
 
-DISCLOSURE_DELAY = timedelta(hours=24)
 MAX_PREVIEW_BYTES = 2 * 1024 * 1024
 MAX_PREVIEW_FILE_BYTES = 256 * 1024
 MAX_PREVIEW_FILES = 100
@@ -38,29 +37,42 @@ def _timestamp(value: Any) -> datetime | None:
         return None
 
 
-def disclosure_status(submission: Mapping[str, Any], now: datetime) -> dict:
-    """Do not use the upload reservation time as the submission time.
+def disclosure_status(
+    submission: Mapping[str, Any], now: datetime, *,
+    round_row: Mapping[str, Any] | None = None,
+) -> dict:
+    """Only a completed, published evaluation releases its frozen source.
 
-    Old frozen rows have no acceptance timestamp. Their freeze time is a
-    conservative upper bound; old accepted rows retain their last update time.
-    Missing or malformed timestamps keep the source private.
+    A late Day 0 submission can be released on Day 1 without waiting another
+    24 hours. Upload age alone never releases an unscored submission.
     """
-    submitted = _timestamp(submission.get("accepted_at"))
-    if submitted is None:
-        if submission.get("status") == "frozen":
-            submitted = _timestamp(submission.get("frozen_at"))
-        elif submission.get("status") == "accepted":
-            submitted = _timestamp(submission.get("updated_at"))
-    available_at = submitted + DISCLOSURE_DELAY if submitted is not None else None
+    row = round_row or {}
+    publication = row.get("publication_doc") or {}
+    submission_id = str(submission.get("submission_id") or "")
+    participant_ids = {
+        str(item.get("submission_id") or "")
+        for item in publication.get("participants") or []
+        if isinstance(item, Mapping)
+    }
+    available_at = _timestamp(row.get("published_at")) if row.get("status") == "published" else None
+    metadata = icp_disclosure.disclosure_metadata(row)
+    public_at = _timestamp(metadata.get("public_at")) if metadata else None
+    # Historical rounds evaluated on their bank's creation day. Their source
+    # becomes eligible on the new next-day boundary, not permanently private.
+    if row.get("icp_set_date") is None and available_at is not None and public_at is not None:
+        available_at = max(available_at, public_at)
     allowed = (
-        submission.get("status") in ("accepted", "frozen")
+        submission.get("status") == "frozen"
+        and submission.get("round_id") == row.get("round_id")
+        and submission_id in participant_ids
         and (submission.get("consent") or {}).get("public_rerun") is True
         and bool(submission.get("source_ref"))
         and available_at is not None
+        and public_at is not None
+        and available_at >= public_at
         and now.tzinfo is not None
         and now.astimezone(timezone.utc) >= available_at
     )
-    submission_id = str(submission.get("submission_id") or "")
     return {
         "available": bool(allowed),
         "available_at": available_at.isoformat().replace("+00:00", "Z") if available_at else None,
@@ -68,9 +80,12 @@ def disclosure_status(submission: Mapping[str, Any], now: datetime) -> dict:
     }
 
 
-def public_source_code(objects: Any, submission: Mapping[str, Any], now: datetime) -> dict:
+def public_source_code(
+    objects: Any, submission: Mapping[str, Any], now: datetime, *,
+    round_row: Mapping[str, Any] | None = None,
+) -> dict:
     """Read validated source as inert text. Never extract, import, or run it."""
-    if not disclosure_status(submission, now)["available"]:
+    if not disclosure_status(submission, now, round_row=round_row)["available"]:
         raise SourceDisclosureError("source_not_public")
     payload = objects.get_bounded(
         str(submission["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES

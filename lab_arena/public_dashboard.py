@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from lab_arena import contracts, source_disclosure, verify
+from lab_arena import contracts, icp_disclosure, source_disclosure, verify
 
 
 PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/pydantic-harness/tree/lab"
@@ -20,7 +20,7 @@ MAX_RECENT_ROUND_LIMIT = 100
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at"
+    "baseline_promoted_at,icp_set_date,evaluation_date"
 )
 
 
@@ -131,6 +131,7 @@ def round_summary(row: Mapping[str, Any]) -> dict:
     configuration = configuration if isinstance(configuration, Mapping) else {}
     schedule = configuration.get("schedule")
     schedule = schedule if isinstance(schedule, Mapping) else {}
+    disclosure = icp_disclosure.disclosure_metadata(row) or {}
     baseline, champion = _baseline_and_champion(row)
     if champion is None or row.get("promotion_required") is not True:
         promotion_status = "not_required"
@@ -147,6 +148,9 @@ def round_summary(row: Mapping[str, Any]) -> dict:
         "created_at": _timestamp(row.get("created_at")),
         "submission_open": _timestamp(schedule.get("submission_open")),
         "submission_cutoff": _timestamp(schedule.get("submission_cutoff")),
+        "icp_set_date": disclosure.get("icp_set_date"),
+        "evaluation_date": disclosure.get("evaluation_date"),
+        "public_at": disclosure.get("public_at"),
         "published_at": _timestamp(row.get("published_at")),
         "cancel_reason": str(row.get("cancel_reason")) if row.get("cancel_reason") else None,
         "participant_count": len(_participants(row)),
@@ -201,21 +205,9 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
     }
 
 
-_STAGE_1_SCORED_STATUSES = frozenset(
-    {
-        "stage1_scored",
-        "stage2",
-        "stage2_closed",
-        "stage2_scoring",
-        "stage2_judged",
-        "scored",
-        "published",
-    }
-)
-
-
 def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
-    if str(row.get("status") or "") not in _STAGE_1_SCORED_STATUSES:
+    # Intermediate scores must not escape before evaluation is published.
+    if row.get("status") != "published":
         return {}
     selected: Dict[tuple[str, int], Mapping[str, Any]] = {}
     for run in service._store.list_runs(str(row["round_id"]), stage=1, kind="execute"):
@@ -241,13 +233,16 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
 
 
 def _submission_lifecycle(
-    *, raw_status: str, round_status: str, is_champion: bool
+    *, raw_status: str, round_status: str, is_champion: bool,
+    final_score: Optional[float],
 ) -> str:
     if round_status == "open" and raw_status == "accepted":
         return "queued"
     if round_status == "cancelled":
         return "cancelled"
     if round_status == "published":
+        if final_score is None:
+            return "scoring_failed"
         return "champion" if is_champion else "scored"
     if round_status == "scored":
         return "scored"
@@ -305,6 +300,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
             and champion_id == submission_id
         )
         final = final_scores.get(submission_id) or {}
+        final_score = _score(final.get("final_score"))
         submissions.append(
             {
                 "submission_id": submission_id,
@@ -314,12 +310,15 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                     raw_status=raw_status,
                     round_status=round_status,
                     is_champion=is_champion,
+                    final_score=final_score,
                 ),
                 "submitted_at": _submitted_at(submission),
                 "stage1_score": stage1_scores.get(submission_id),
-                "final_score": _score(final.get("final_score")),
+                "final_score": final_score,
                 "is_champion": is_champion,
-                "code": source_disclosure.disclosure_status(submission, service.now()),
+                "code": source_disclosure.disclosure_status(
+                    submission, service.now(), round_row=row
+                ),
             }
         )
     return {"round_id": round_id, "submissions": submissions}

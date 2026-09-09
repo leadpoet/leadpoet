@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -15,10 +16,13 @@ RUN_ID = "pp-123456-1"
 INSTANCE_ID = "i-0123456789abcdef0"
 EPOCH_ID = 22_060
 LAST_UPDATE = 7_959_901
+LIVE_WEIGHTS_HASH = (
+    "511b5b11f38fe37c09587b584b84c4b55a9cbe8981f895ddd6fce29644592e09"
+)
 HASHES = {
     "authority_hash": "sha256:" + "1" * 64,
     "bundle_hash": "sha256:" + "2" * 64,
-    "weights_hash": "sha256:" + "3" * 64,
+    "weights_hash": LIVE_WEIGHTS_HASH,
     "weight_submission_event_hash": "sha256:" + "4" * 64,
     "weight_finalization_event_hash": "sha256:" + "5" * 64,
 }
@@ -182,6 +186,157 @@ def test_independent_proof_rejects_reveal_before_commit():
             candidate_sha=CANDIDATE,
             epoch_id=EPOCH_ID,
         )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        "sha256:" + LIVE_WEIGHTS_HASH,
+        LIVE_WEIGHTS_HASH[:-1],
+        "g" * 64,
+    ),
+)
+def test_proof_requires_raw_canonical_live_weights_hash(invalid):
+    automatic = _automatic()
+    automatic["weights_hash"] = invalid
+    status = _status_result()
+    status["receipt"]["evidence"]["automatic_chain_proof"] = automatic
+    with pytest.raises(
+        proof.TemporaryWeightProofError,
+        match="automatic native weights hash is invalid",
+    ):
+        proof._automatic_status_proof(status, epoch_id=EPOCH_ID)
+
+    independent = _independent()
+    independent["weights_hash"] = invalid
+    with pytest.raises(
+        proof.TemporaryWeightProofError,
+        match="independent proof weights hash is invalid",
+    ):
+        proof._independent_proof(
+            json.dumps(independent, sort_keys=True) + "\n",
+            candidate_sha=CANDIDATE,
+            epoch_id=EPOCH_ID,
+        )
+
+
+def test_proof_accepts_exact_public_live_weights_hash():
+    assert (
+        proof._automatic_status_proof(_status_result(), epoch_id=EPOCH_ID)[
+            "weights_hash"
+        ]
+        == LIVE_WEIGHTS_HASH
+    )
+    assert (
+        proof._independent_proof(
+            json.dumps(_independent(), sort_keys=True) + "\n",
+            candidate_sha=CANDIDATE,
+            epoch_id=EPOCH_ID,
+        )["weights_hash"]
+        == LIVE_WEIGHTS_HASH
+    )
+
+
+def test_every_static_proof_failure_has_an_allowlisted_reason_code():
+    source = (ROOT / "scripts/temporary_testnet401_weight_proof.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    messages = {
+        node.exc.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "TemporaryWeightProofError"
+        and node.exc.args
+        and isinstance(node.exc.args[0], ast.Constant)
+        and isinstance(node.exc.args[0].value, str)
+    }
+    assert messages == set(proof.PROOF_FAILURE_REASON_CODES)
+
+
+def test_main_redacts_arbitrary_exception_text(monkeypatch, tmp_path, capsys):
+    canary = "secret-canary-must-not-appear"
+
+    class Session:
+        def __init__(self, **_kwargs):
+            raise RuntimeError(canary)
+
+    monkeypatch.setattr(proof.boto3.session, "Session", Session)
+    state = tmp_path / "proof.json"
+    result = proof.main(
+        [
+            "--region",
+            proof.REGION,
+            "--run-id",
+            RUN_ID,
+            "--candidate-sha",
+            CANDIDATE,
+            "--instance-id",
+            INSTANCE_ID,
+            "--epoch-id",
+            str(EPOCH_ID),
+            "--state",
+            str(state),
+        ]
+    )
+    captured = capsys.readouterr()
+    receipt = json.loads(state.read_text(encoding="utf-8"))
+    assert result == 1
+    assert receipt == {
+        "schema_version": proof.SCHEMA_VERSION,
+        "status": "failed",
+        "failure_type": "UnexpectedProofError",
+        "reason_code": "unexpected_proof_error",
+    }
+    assert canary not in captured.out
+    assert canary not in captured.err
+    assert canary not in state.read_text(encoding="utf-8")
+
+
+def test_known_proof_failure_emits_only_its_allowlisted_reason():
+    canary = "independent proof fields differ"
+    assert proof._failure_receipt(proof.TemporaryWeightProofError(canary)) == {
+        "schema_version": proof.SCHEMA_VERSION,
+        "status": "failed",
+        "failure_type": "TemporaryWeightProofError",
+        "reason_code": "independent_fields_differ",
+    }
+
+
+def test_ssm_failure_preserves_only_bounded_redacted_identity():
+    canary = "secret-canary-must-not-appear"
+    safe = {
+        "schema_version": "leadpoet.temporary_testnet401_ssm_failure.v1",
+        "ssm_command_id": "12345678-1234-1234-1234-123456789abc",
+        "ssm_status": "Failed",
+        "response_code": 1,
+        "error_categories": ["RuntimeError", canary],
+        "source_locations": [
+            {"file": "verify_temporary_testnet_weights.py", "line": 530},
+            {"file": canary, "line": 1},
+        ],
+        "shell_locations": [],
+        "raw_output": canary,
+    }
+    error = proof.TemporaryHostError(
+        "fixed temporary SSM stage failed " + json.dumps(safe)
+    )
+    receipt = proof._failure_receipt(error)
+    assert receipt["reason_code"] == "ssm_stage_failed"
+    assert receipt["ssm_failure"] == {
+        "schema_version": "leadpoet.temporary_testnet401_ssm_failure.v1",
+        "ssm_command_id": "12345678-1234-1234-1234-123456789abc",
+        "ssm_status": "Failed",
+        "response_code": 1,
+        "error_categories": ["RuntimeError"],
+        "source_locations": [
+            {"file": "verify_temporary_testnet_weights.py", "line": 530}
+        ],
+        "shell_locations": [],
+    }
+    assert canary not in json.dumps(receipt)
 
 
 def test_run_requires_last_update_to_advance_and_returns_joined_proof(monkeypatch):

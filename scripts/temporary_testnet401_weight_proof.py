@@ -51,6 +51,7 @@ EXPECTED_PROFILE_HASH = (
 EXPECTED_PROFILE_SPEC_VERSION = 455
 EXPECTED_REVEALED_WEIGHTS = [[0, 65_535], [11, 21_845]]
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RAW_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 RESULT_FIELDS = frozenset(
     {
         "status",
@@ -83,6 +84,162 @@ RESULT_FIELDS = frozenset(
 
 class TemporaryWeightProofError(TemporaryHostError):
     """The fixed independent proof did not match the retained native evidence."""
+
+
+PROOF_FAILURE_REASON_CODES = {
+    "testnet401 proof epoch is invalid": "proof_epoch_invalid",
+    "prior testnet401 LastUpdate is invalid": "prior_last_update_invalid",
+    "fixed proof verifier is unavailable": "proof_verifier_unavailable",
+    "fixed proof verifier identity differs": "proof_verifier_identity_differs",
+    "fixed log reader is unavailable": "log_reader_unavailable",
+    "fixed log reader identity differs": "log_reader_identity_differs",
+    "testnet401 proof candidate is invalid": "proof_candidate_invalid",
+    "retained native status is not ready": "native_status_not_ready",
+    "automatic native proof does not match the epoch": (
+        "automatic_native_epoch_differs"
+    ),
+    "automatic native proof hashes are invalid": (
+        "automatic_native_hashes_invalid"
+    ),
+    "automatic native weights hash is invalid": (
+        "automatic_native_weights_hash_invalid"
+    ),
+    "independent proof output is invalid": "independent_output_invalid",
+    "independent proof fields differ": "independent_fields_differ",
+    "independent proof identity differs": "independent_identity_differs",
+    "independent proof hashes are invalid": "independent_hashes_invalid",
+    "independent proof weights hash is invalid": (
+        "independent_weights_hash_invalid"
+    ),
+    "independent proof blocks are invalid": "independent_blocks_invalid",
+    "independent reveal event is invalid": "independent_reveal_event_invalid",
+    "independent reveal event bounds differ": (
+        "independent_reveal_bounds_differ"
+    ),
+    "native and independent proof hashes differ": "proof_hash_join_differs",
+    "native and independent chain readback differs": (
+        "chain_readback_join_differs"
+    ),
+    "automatic validator log evidence is invalid": "validator_log_invalid",
+    "automatic validator log evidence differs": "validator_log_differs",
+    "automatic validator log marker order differs": (
+        "validator_log_marker_order_differs"
+    ),
+    "temporary proof AWS identity differs": "aws_identity_differs",
+    "automatic validator log hashes differ": "validator_log_hash_join_differs",
+    "finalized LastUpdate did not advance after the prior proof": (
+        "last_update_did_not_advance"
+    ),
+}
+
+
+def _safe_ssm_failure(exc: BaseException) -> dict[str, Any] | None:
+    prefix = "fixed temporary SSM stage failed "
+    raw = str(exc)
+    if not raw.startswith(prefix):
+        return None
+    try:
+        value = json.loads(raw[len(prefix) :])
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version")
+        != "leadpoet.temporary_testnet401_ssm_failure.v1"
+    ):
+        return None
+    safe: dict[str, Any] = {
+        "schema_version": value["schema_version"],
+        "ssm_command_id": (
+            str(value.get("ssm_command_id"))
+            if re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                str(value.get("ssm_command_id") or ""),
+            )
+            else "invalid"
+        ),
+        "ssm_status": (
+            value.get("ssm_status")
+            if value.get("ssm_status")
+            in {
+                "Success", "Failed", "Cancelled", "TimedOut", "Cancelling",
+                "Undeliverable", "Terminated", "Unknown",
+            }
+            else "Unknown"
+        ),
+        "response_code": (
+            value.get("response_code")
+            if isinstance(value.get("response_code"), int)
+            and not isinstance(value.get("response_code"), bool)
+            and -1 <= value["response_code"] <= 255
+            else -1
+        ),
+    }
+    categories = {
+        "AccessDenied", "NoSuchKey", "ModuleNotFoundError", "ImportError",
+        "FileNotFoundError", "PermissionError", "No space left on device",
+        "AssertionError", "RuntimeError", "ValueError", "command not found",
+        "unbound variable", "Killed", "Terminated", "Segmentation fault",
+        "timed out",
+    }
+    safe["error_categories"] = sorted(
+        {
+            item
+            for item in value.get("error_categories", [])
+            if isinstance(item, str) and item in categories
+        }
+    )
+    for field in ("source_locations", "shell_locations"):
+        safe[field] = [
+            {"file": item["file"], "line": item["line"]}
+            for item in value.get(field, [])[-8:]
+            if isinstance(item, Mapping)
+            and set(item) == {"file", "line"}
+            and re.fullmatch(r"[A-Za-z0-9_]+\.(?:py|sh)", str(item["file"]))
+            and isinstance(item["line"], int)
+            and not isinstance(item["line"], bool)
+            and 1 <= item["line"] <= 999_999
+        ]
+    return safe
+
+
+def _failure_receipt(exc: BaseException) -> dict[str, Any]:
+    """Classify failures without returning exception text or remote output."""
+
+    if isinstance(exc, TemporaryWeightProofError):
+        failure_type = "TemporaryWeightProofError"
+        reason_code = PROOF_FAILURE_REASON_CODES.get(
+            str(exc), "unclassified_temporary_weight_proof_error"
+        )
+    elif isinstance(exc, ClientError):
+        failure_type = "ClientError"
+        reason_code = "aws_client_error"
+    elif isinstance(exc, BotoCoreError):
+        failure_type = "BotoCoreError"
+        reason_code = "aws_transport_error"
+    elif isinstance(exc, OSError):
+        failure_type = "OSError"
+        reason_code = "local_io_error"
+    elif isinstance(exc, TemporaryHostError):
+        failure_type = "TemporaryHostError"
+        reason_code = (
+            "ssm_stage_failed"
+            if _safe_ssm_failure(exc) is not None
+            else "temporary_host_error"
+        )
+    else:
+        failure_type = "UnexpectedProofError"
+        reason_code = "unexpected_proof_error"
+    result: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "failed",
+        "failure_type": failure_type,
+        "reason_code": reason_code,
+    }
+    ssm_failure = _safe_ssm_failure(exc)
+    if ssm_failure is not None:
+        result["ssm_failure"] = ssm_failure
+    return result
 
 
 def _epoch_id(value: Any) -> int:
@@ -228,12 +385,15 @@ def _automatic_status_proof(
     required_hashes = (
         "authority_hash",
         "bundle_hash",
-        "weights_hash",
         "weight_submission_event_hash",
         "weight_finalization_event_hash",
     )
     if any(HASH_RE.fullmatch(str(proof.get(name) or "")) is None for name in required_hashes):
         raise TemporaryWeightProofError("automatic native proof hashes are invalid")
+    if RAW_HASH_RE.fullmatch(str(proof.get("weights_hash") or "")) is None:
+        raise TemporaryWeightProofError(
+            "automatic native weights hash is invalid"
+        )
     return dict(proof)
 
 
@@ -263,12 +423,15 @@ def _independent_proof(
     for name in (
         "authority_hash",
         "bundle_hash",
-        "weights_hash",
         "weight_submission_event_hash",
         "weight_finalization_event_hash",
     ):
         if HASH_RE.fullmatch(str(value.get(name) or "")) is None:
             raise TemporaryWeightProofError("independent proof hashes are invalid")
+    if RAW_HASH_RE.fullmatch(str(value.get("weights_hash") or "")) is None:
+        raise TemporaryWeightProofError(
+            "independent proof weights hash is invalid"
+        )
     for name in (
         "commit_inclusion_block",
         "revealed_last_update_block",
@@ -488,15 +651,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             now=datetime.now(timezone.utc).replace(microsecond=0),
         )
         _write(args.state, result)
-    except (BotoCoreError, ClientError, OSError, TemporaryHostError) as exc:
-        _write(
-            args.state,
-            {
-                "schema_version": SCHEMA_VERSION,
-                "status": "failed",
-                "failure_type": type(exc).__name__,
-            },
-        )
+    except Exception as exc:
+        _write(args.state, _failure_receipt(exc))
         print("ERROR: fixed temporary testnet401 proof failed", file=sys.stderr)
         return 1
     return 0

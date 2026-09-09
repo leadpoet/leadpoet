@@ -99,12 +99,9 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[194] == ["194-lab-arena-open-scorer-refresh.sql"]
     assert numbered[197] == ["197-lab-arena-reward-chain-scope.sql"]
     assert numbered[199] == ["199-lab-arena-source-disclosure-time.sql"]
-    arena_frontier = max(
-        int(path.name.split("-", 1)[0])
-        for path in SCRIPTS.glob("*-lab-arena-*.sql")
-    )
     assert numbered[200] == ["200-lab-arena-next-day-icp-disclosure.sql"]
-    assert arena_frontier == 200
+    assert numbered[201] == ["201-lab-arena-daily-capacity.sql"]
+    assert all(len(paths) == 1 for paths in numbered.values()), numbered
 
 
 def test_reward_chain_scope_migration_scopes_every_reward_history_read():

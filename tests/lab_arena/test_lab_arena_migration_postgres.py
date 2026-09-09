@@ -31,6 +31,7 @@ from lab_arena.store import (
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     LAB_ARENA_NEXT_DAY_ICP_MIGRATION,
+    LAB_ARENA_SOURCE_DISCLOSURE_MIGRATION,
     database_with_lab_arena_migration,
 )
 from tests.postgres_migration_harness import SCRIPTS
@@ -281,7 +282,12 @@ def test_next_day_icp_migration_is_repeatable(superuser):
 
 
 def test_next_day_icp_migration_requires_source_disclosure_migration():
-    database = database_with_lab_arena_migration(DEFAULT_MIGRATIONS[:-2])
+    prerequisite_index = DEFAULT_MIGRATIONS.index(
+        LAB_ARENA_SOURCE_DISCLOSURE_MIGRATION
+    )
+    database = database_with_lab_arena_migration(
+        DEFAULT_MIGRATIONS[:prerequisite_index]
+    )
     connection = None
     try:
         psycopg2, dsn = next(database)

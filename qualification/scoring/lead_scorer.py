@@ -430,22 +430,13 @@ def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
             rf".{{0,60}}\b{label}\b",
             re.I,
         ),
-        re.compile(
-            rf"\b{label}\b.{{0,45}}\b(?:round|funding|financing|investment)\b",
-            re.I,
-        ),
     )
 
 
 _VENTURE_STAGE_PROOF_PATTERNS = {
     "seed": (
         re.compile(
-            r"\b(?:pre[- ]seed|seed)(?:[- ]stage|\s+(?:round|funding|"
-            r"financing|investment|capital))\b",
-            re.I,
-        ),
-        re.compile(
-            r"\b(?:raised|closed|secured|completed|announced)\b.{0,40}"
+            r"\b(?:raised|closed|secured|completed|announced|received)\b.{0,40}"
             r"\b(?:pre[- ]seed|seed)\b",
             re.I,
         ),
@@ -553,7 +544,11 @@ def _has_affirmed_stage_proof(
 
 
 def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
-    """Require the quote itself to prove the reported funding/ownership stage."""
+    """Sanity-check that a quote names evidence specific to the reported stage.
+
+    This guard rejects bare category keywords and obvious uncertainty. It does
+    not replace the web verifier's independent company-attribution check.
+    """
 
     text = str(quote or "").strip()
     if not text:

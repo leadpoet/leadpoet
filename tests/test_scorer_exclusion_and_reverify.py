@@ -564,6 +564,13 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             COMPANY_FIT_MATCH,
         ),
         (
+            "Seed",
+            "Seed",
+            True,
+            "Acme received Seed funding from Northstar Ventures.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
             "Series B",
             "Series B",
             True,
@@ -701,6 +708,16 @@ def test_stage_decision_requires_category_specific_proof(
             "Private Equity",
             False,
             "Acme received a minority investment from a private-equity firm.",
+        ),
+        (
+            "Seed",
+            True,
+            "Acme provides seed capital to early-stage startups.",
+        ),
+        (
+            "Series A",
+            True,
+            "Acme provides technology for Series A funding rounds.",
         ),
     ],
 )

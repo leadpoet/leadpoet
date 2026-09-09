@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from importlib import import_module
 import logging
+import math
 import os
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
+from pydantic import ValidationError
 from qualification.competition_models import CompetitionCompany
 from qualification.employee_buckets import (
     normalize_employee_count_bucket,
@@ -33,13 +35,42 @@ _PENALIZABLE_FAILURE_MARKERS = (
     "data quality issue",
     "missing industry",
     "company verification failed",
-    "intent fabrication detected",
 )
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
+_MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS = "model_contract_incompatible"
+_NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
+    "insufficient_fit_evidence",
+    _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS,
+})
 
 
 class CompetitionScorerInputError(ValueError):
     """A company or ICP does not satisfy the public competition boundary."""
+
+
+def _model_contract_incompatible_breakdown() -> dict[str, Any]:
+    """Return a safe zero when one public company cannot enter the judge model."""
+
+    return {
+        "icp_fit": 0.0,
+        "decision_maker": 0.0,
+        "intent_signal_raw": 0.0,
+        "time_decay_multiplier": 1.0,
+        "intent_signal_final": 0.0,
+        "cost_penalty": 0.0,
+        "time_penalty": 0.0,
+        "final_score": 0.0,
+        "failure_reason": "company model contract incompatible",
+        "intent_signals_detail": None,
+        "verifier_gate_receipts": [
+            {
+                "gate": "company_fit",
+                "decision": "unavailable",
+                "reason": "company_model_contract_incompatible",
+                "failure_class": _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS,
+            }
+        ],
+    }
 
 
 def _text(value: Any) -> str:
@@ -196,6 +227,7 @@ def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
         "country": row["country"],
         "state": row["state"],
         "description": row["fit_summary"][:500],
+        "fit_evidence_urls": row["fit_evidence_urls"],
         "intent_signals": signals,
         "required_attribute": row.get("required_attribute"),
     }
@@ -271,7 +303,12 @@ class CompetitionCompanyScorer:
             ) or normalize_observed_employee_count_bucket(observed, default=None)
             if not bucket or bucket not in allowed_buckets:
                 continue
-            company_model = company_type(**_normalized_company(company))
+            normalized_company = _normalized_company(company)
+            try:
+                company_model = company_type(**normalized_company)
+            except ValidationError:
+                breakdowns.append(_model_contract_incompatible_breakdown())
+                continue
             result = await score_company(
                 company=company_model,
                 icp=icp_model,
@@ -300,19 +337,13 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 isinstance(receipt, Mapping)
                 and str(receipt.get("decision") or "") == "unavailable"
                 and str(receipt.get("failure_class") or "")
-                != "model_contract_incompatible"
+                not in _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES
             ):
                 return True
     details = breakdown.get("intent_signals_detail")
     if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
-        for detail in details:
-            verdict = detail.get("judge_verdict") if isinstance(detail, Mapping) else None
-            if isinstance(verdict, Mapping) and (
-                str(verdict.get("decision") or "") == "rejected_verifier_error"
-                or bool(verdict.get("error_class"))
-                or str(verdict.get("pipeline_decision") or "") == "unavailable"
-            ):
-                return True
+        if intent_unavailability_requires_retry(details):
+            return True
     reason = str(breakdown.get("failure_reason") or "").strip().lower()
     return bool(reason) and any(
         marker in reason
@@ -332,6 +363,74 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
             "http 429",
             "no_openrouter_key",
         )
+    )
+
+
+def _intent_detail_is_unavailable(detail: Any) -> bool:
+    if not isinstance(detail, Mapping):
+        return False
+    verdict = detail.get("judge_verdict")
+    return isinstance(verdict, Mapping) and (
+        str(verdict.get("decision") or "") == "rejected_verifier_error"
+        or bool(verdict.get("error_class"))
+        or str(verdict.get("pipeline_decision") or "") == "unavailable"
+    )
+
+
+def has_verified_primary_intent(details: Sequence[Any]) -> bool:
+    """Return whether structured details contain a usable primary score."""
+
+    rejected_statuses = {"contradicted", "unable_to_verify", "wrong_entity"}
+    for detail in details:
+        if not isinstance(detail, Mapping):
+            continue
+        index = detail.get("matched_icp_signal")
+        score = detail.get("after_decay")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index != 0
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or float(score) <= 0.0
+        ):
+            continue
+        verdict = detail.get("judge_verdict")
+        if (
+            not isinstance(verdict, Mapping)
+            or str(verdict.get("decision") or "") != "verified"
+            or bool(verdict.get("error_class"))
+            or str(verdict.get("pipeline_decision") or "")
+            in {"reject", "unavailable"}
+        ):
+            continue
+        trace = verdict.get("verification_trace")
+        intent_verdict = (
+            trace.get("intent_verdict") if isinstance(trace, Mapping) else None
+        )
+        evaluations = (
+            intent_verdict.get("signal_evaluations")
+            if isinstance(intent_verdict, Mapping)
+            else None
+        )
+        if isinstance(evaluations, Sequence) and not isinstance(
+            evaluations, (str, bytes)
+        ) and any(
+            isinstance(evaluation, Mapping)
+            and str(evaluation.get("signal_status") or "") in rejected_statuses
+            for evaluation in evaluations
+        ):
+            continue
+        return True
+    return False
+
+
+def intent_unavailability_requires_retry(details: Sequence[Any]) -> bool:
+    """Retry unavailable intent evidence unless a primary verdict scored."""
+
+    return any(_intent_detail_is_unavailable(detail) for detail in details) and not (
+        has_verified_primary_intent(details)
     )
 
 
@@ -364,7 +463,7 @@ def count_penalizable_false_positives(
                 marker in reason for marker in _PENALIZABLE_FAILURE_MARKERS
             ):
                 gate_failures += 1
-            continue
+                continue
         if not icp_has_intent_signals:
             continue
         details = row.get("intent_signals_detail")

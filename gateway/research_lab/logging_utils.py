@@ -53,7 +53,6 @@ def runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
         category = "runtime_provider_error"
 
     return {
-        "error_class": "PrivateModelRuntimeError" if "privatemodelruntimeerror" in lowered else "RuntimeError",
         "provider": provider,
         "status": status,
         "category": category,

@@ -23,11 +23,34 @@ from gateway.tee.active_release_requirements_v2 import (
     build_active_release_requirements_v2,
 )
 from gateway.tee.topology import ROLE_SPECS
-from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+from tests.test_release_channel_v2 import (
+    _gateway_manifest,
+    _local_gateway_manifest,
+    _local_validator_manifest,
+    _validator_manifest,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "restart_attested_release_local.sh"
+
+
+def _test_candidate_ref(suffix: str = "") -> str:
+    return os.environ.get("LEADPOET_TEST_CANDIDATE_REF", "origin/main") + suffix
+
+
+def test_arena_restart_guard_release_follows_joined_readiness() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    final_checks = source.rindex('verify_gateway_release "$gateway_evidence"')
+    runner_proof = source.index("verify_validator_arena_runner_process", final_checks)
+    finalized = source.index("finalize_deploy_readiness", runner_proof)
+    released = source.index("release_lab_arena_restart_guard", finalized)
+    success = source.index("SUCCESS: gateway and validator are aligned", released)
+
+    assert final_checks < runner_proof < finalized < released < success
+    assert "durable exact-owner active release invocation identity" in source
+    assert '"$branch_commit:scripts/lab_arena_restart_claim_guard.py"' in source
+    assert 'guard_discovery_action="discover"' in source
 
 
 def _fake_readiness_observations(tmp_path: Path, commit: str) -> tuple[Path, Path]:
@@ -148,13 +171,42 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert 'sys.path.append(str(site_packages))' in source
     assert "leadpoet.local_readiness_python.v1" in source
     assert "pure readiness imports loaded the validator wallet dependency" in source
-    assert source.count("run_local_readiness_python ") == 9
+    readiness_callers = set()
+    current_function = ""
+    for line in source.splitlines():
+        function = re.fullmatch(r"([a-zA-Z0-9_]+)\(\) \{", line)
+        if function is not None:
+            current_function = function.group(1)
+        if "run_local_readiness_python " in line:
+            readiness_callers.add(current_function)
+    assert {
+        "preflight_local_readiness_python",
+        "invalidate_deploy_readiness",
+        "validate_validator_initial_release_requirements",
+        "validate_gateway_final_release_authority",
+        "fetch_and_install_gateway_counterpart_lineage",
+        "bind_component_validator_to_gateway_release_authority",
+        "authorize_validator_lab_arena_restart",
+        "mark_validator_lab_arena_ready",
+        "prepare_and_publish_paired_local_release_channel",
+        "verify_gateway_release",
+        "verify_validator_release",
+        "finalize_deploy_readiness",
+    } <= readiness_callers
     assert 'PYTHONPATH="$ROOT" python3' not in source
     assert "/health/v2-authority" in source
     assert "attestation = get('/attest')" in source
     assert "/weights/v2/release-evidence/" in source
     assert "fetch_locked_release_identity_cache" in source
     assert "identity_cache_from_release_channel" in source
+    assert "fetch_prior_release_channel_v2" in source
+    for name in (
+        "LEADPOET_LOCAL_RELEASE_COMMIT_SHA",
+        "LEADPOET_LOCAL_GATEWAY_RELEASE",
+        "LEADPOET_LOCAL_VALIDATOR_RELEASE",
+        "LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE",
+    ):
+        assert f"-u {name}" in source
     assert "active gateway release differs from auditor release evidence" in source
     assert "verify_v2_runtime_ready(clients)" in source
     assert "processes[0].joinpath('environ')" in source
@@ -216,6 +268,17 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert r'bash \"$gateway_restart_entrypoint_root/gw_restart.sh\"' in source
     assert r'bash \"\$authority_root/validator_restart.sh\"' in source
     assert r"""bash \"\$authority_root/validator_restart.sh\" --commit '$commit'""" in source
+    assert (
+        r'test -r \"\$authority_root/scripts/manage_owned_process_group.py\"'
+        in source
+    )
+    assert (
+        r'test ! -L \"\$authority_root/scripts/manage_owned_process_group.py\"'
+        in source
+    )
+    assert source.count(
+        r'hash-object --no-filters \"\$authority_root/scripts/manage_owned_process_group.py\"'
+    ) == 2
     assert "git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit'" in source
     assert "gateway-restart-controller-bootstrap" in source
     assert "--validator-hotkey-config '$VALIDATOR_V2_HOTKEY_CONFIG_PATH'" in source
@@ -264,11 +327,14 @@ GATEWAY_REPO_ROOT='/home/ec2-user/leadpoet_repo'
 PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT='/controller/current'
 PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT='/controller'
 GATEWAY_RESTART='/home/ec2-user/gw_restart.sh'
+LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY='202cd66a41f17f3030bcf6889d381cd3ecfd8f1c'
 RELEASE_PREFIX='weights/v2/release-evidence'
 gateway_handoff_file='/tmp/handoff'
 gateway_handoff_nonce='{'2' * 64}'
 gateway_validator_requirements_remote='/tmp/validator-requirements.json'
 gateway_counterpart_lineage_remote='/tmp/counterpart-lineage.json'
+gateway_local_gateway_release_remote='/tmp/gateway-local-gateway-release.json'
+gateway_local_validator_release_remote='/tmp/gateway-local-validator-release.json'
 active_release_restart_invocation_id='restart-fixture'
 paired_gateway_handoff_file='/tmp/leadpoet-gateway-paired-restart.fixture.ready'
 paired_gateway_handoff_nonce='{'4' * 64}'
@@ -485,6 +551,8 @@ gateway_handoff_file=''
 gateway_handoff_nonce=''
 gateway_validator_requirements_remote='/tmp/validator-requirements.json'
 gateway_counterpart_lineage_remote='/tmp/counterpart-lineage.json'
+gateway_local_gateway_release_remote='/tmp/gateway-local-gateway-release.json'
+gateway_local_validator_release_remote='/tmp/gateway-local-validator-release.json'
 active_release_restart_invocation_id='restart-fixture'
 paired_gateway_handoff_file='/tmp/leadpoet-gateway-paired-restart.fixture.ready'
 paired_gateway_handoff_nonce='{'4' * 64}'
@@ -587,7 +655,7 @@ def test_attested_release_restart_operator_requires_local_python(
     local_python_args: list[str],
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     result = subprocess.run(
@@ -859,6 +927,7 @@ def _fake_operator_commands(
     events = tmp_path / "events"
     barrier = tmp_path / "barrier"
     gateway_handoff = tmp_path / "gateway-handoff"
+    arena_permit = tmp_path / "arena-permit"
     gateway_started = tmp_path / "gateway-started"
     gateway_complete = tmp_path / "gateway-complete"
     gateway_observation, validator_observation = _fake_readiness_observations(
@@ -868,6 +937,22 @@ def _fake_operator_commands(
         gateway_release_manifest=_gateway_manifest(commit),
         validator_release_manifest=_validator_manifest(commit),
     )
+    gateway_host_gateway_release = tmp_path / "gateway-host-gateway-release.json"
+    gateway_host_validator_release = tmp_path / "gateway-host-validator-release.json"
+    validator_host_gateway_release = tmp_path / "validator-host-gateway-release.json"
+    validator_host_validator_release = tmp_path / "validator-host-validator-release.json"
+    validator_host_divergent_release = tmp_path / "validator-host-divergent-release.json"
+    for path, value in (
+        (gateway_host_gateway_release, _local_gateway_manifest(commit, observation="a")),
+        (gateway_host_validator_release, _local_validator_manifest(commit, observation="b")),
+        (validator_host_gateway_release, _local_gateway_manifest(commit, observation="c")),
+        (validator_host_validator_release, _local_validator_manifest(commit, observation="d")),
+        (
+            validator_host_divergent_release,
+            _local_validator_manifest(commit, observation="d", pcr0="9" * 96),
+        ),
+    ):
+        path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="ascii")
     active_requirements = build_active_release_requirements_v2(
         candidate_commit_sha=commit,
         authority_commit_sha=commit,
@@ -930,19 +1015,32 @@ for arg in "$@"; do
     cat "$FAKE_OPERATOR_EXACT_HELPER"
     exit 0
   fi
+  if [[ " $* " == *" show "* ]] \
+      && [[ "$arg" == *":scripts/lab_arena_restart_claim_guard.py" ]]; then
+    cat "$FAKE_OPERATOR_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py"
+    exit 0
+  fi
 done
+if [[ " $* " == *" rev-parse --verify origin/main^{{commit}} "* ]]; then
+  printf '%s\\n' "$FAKE_OPERATOR_CONTROLLER_COMMIT"
+  exit 0
+fi
 if [[ " $* " == *" rev-parse "* ]]; then
   case "$last_arg" in
     "$FAKE_OPERATOR_SELECTED_COMMIT:"gateway/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_observability/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/lab_arena_restart_claim_guard.py|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/lab_arena_restart_guard_handoff.py|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"gateway/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_observability/*|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/lab_arena_restart_claim_guard.py|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/lab_arena_restart_guard_handoff.py|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_CONTROLLER_COMMIT:"validator_tee/*)
       printf '%s\\n' "$FAKE_OPERATOR_SOURCE_BLOB"
@@ -956,6 +1054,8 @@ if [[ " $* " == *" hash-object --no-filters "* ]]; then
     "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_observability/*|\
     "$FAKE_OPERATOR_REPO_ROOT/"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_REPO_ROOT/"scripts/lab_arena_restart_claim_guard.py|\
+    "$FAKE_OPERATOR_REPO_ROOT/"scripts/lab_arena_restart_guard_handoff.py|\
     "$FAKE_OPERATOR_REPO_ROOT/"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_REPO_ROOT/"validator_tee/*)
       if [ -e "$FAKE_OPERATOR_SOURCE_DRIFT_MARKER" ]; then
@@ -980,7 +1080,97 @@ command="${!#}"
 record() {
   printf '%s\\n' "$1" >> "$FAKE_OPERATOR_EVENTS"
 }
+guard_state() {
+  local phase="$1" scope="$2" generation="${3:-7}" document_kind="${4:-state}"
+  "$FAKE_OPERATOR_REAL_PYTHON" - "$phase" "$scope" "$generation" "$document_kind" <<'PY'
+import json, os, sys
+from datetime import datetime, timedelta, timezone
+from scripts.lab_arena_restart_claim_guard import _commitments, _identity
+
+phase, scope, raw_generation, document_kind = sys.argv[1:]
+generation = int(raw_generation)
+candidate = os.environ["FAKE_OPERATOR_SELECTED_COMMIT"]
+guard, owner = _identity(candidate, "restart-fixture")
+guard_commitment, owner_commitment = _commitments(guard, owner)
+value = {
+    "schema_version": "leadpoet.lab_arena.restart_guard_state.v1",
+    "paused": True, "operator_paused": False,
+    "guard_present": True, "guard_active": True,
+    "guard_commitment": guard_commitment,
+    "owner_commitment": owner_commitment,
+    "guard_generation": generation,
+    "guard_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    "candidate_commit": candidate,
+    "restart_scope": scope,
+    "restart_phase": phase,
+    "drain": {
+        "schema_version": "leadpoet.lab_arena.restart_drain_state.v1",
+        "captured_count": 1, "accepted_receipt_count": 1,
+        "reported_terminal_receipt_count": 0, "still_leased_count": 0,
+        "lost_or_mutated_count": 0, "current_leased_count": 0,
+        "pending_retry_count": 0, "preserved": True,
+    },
+}
+if document_kind == "quiescence":
+    # The real drain action returns the flattened migration-190 RPC document.
+    value = {
+        **value["drain"],
+        "schema_version": "leadpoet.lab_arena.restart_quiescence.v1",
+        **{key: value[key] for key in (
+            "guard_active", "guard_generation", "restart_scope", "restart_phase"
+        )},
+    }
+print(json.dumps(value, sort_keys=True))
+PY
+}
 case "$command" in
+  *lab_arena_restart_guard_handoff.py*validate-request*)
+    if [ "${FAKE_HANDOFF_SOURCE_DRIFT:-0}" = "1" ]; then
+      record arena_guard_handoff_source_drift
+      exit 74
+    fi
+    record arena_guard_request_validated
+    ;;
+  *lab_arena_restart_claim_guard.py*"'drain'"*)
+    record arena_guard_drained
+    if [[ "$command" == *"--scope all"* ]]; then
+      guard_state gateway_ready all 7 "${FAKE_ARENA_DRAIN_DOCUMENT_KIND:-quiescence}"
+    else
+      guard_state draining validator 7 "${FAKE_ARENA_DRAIN_DOCUMENT_KIND:-quiescence}"
+    fi
+    ;;
+  *lab_arena_restart_claim_guard.py*"'authorize'"*)
+    record arena_guard_validator_authorized
+    if [[ "$command" == *"--scope all"* ]]; then
+      guard_state validator_destructive all "${FAKE_ARENA_AUTHORIZATION_GENERATION:-7}"
+    else
+      guard_state validator_destructive validator "${FAKE_ARENA_AUTHORIZATION_GENERATION:-7}"
+    fi
+    ;;
+  *lab_arena_restart_claim_guard.py*"'ready'"*)
+    record arena_guard_validator_ready
+    if [[ "$command" == *"--scope all"* ]]; then
+      guard_state validator_ready all
+    else
+      guard_state validator_ready validator
+    fi
+    ;;
+  *restart*claim*guard*"'discover'"*|*restart*claim*guard*"'state'"*)
+    record arena_guard_discovery
+    if [ "${FAKE_GUARD_DISCOVERY_FAIL:-0}" = "1" ]; then
+      exit 73
+    fi
+    printf '%s\n' "$FAKE_GUARD_DISCOVERY_JSON"
+    ;;
+  *lab_arena_restart_claim_guard.py*" mode "*)
+    record arena_mode_verified
+    ;;
+  *lab_arena_restart_claim_guard.py*" release "*)
+    record arena_guard_released
+    ;;
+  *"test -s"*gateway-v2-release-requirements.json*"cat --"*)
+    cat "$FAKE_GATEWAY_ACTIVE_RELEASE_REQUIREMENTS"
+    ;;
   *"readlink --"*restart-controller*)
     printf 'releases/%s\n' "$FAKE_OPERATOR_SELECTED_COMMIT"
     ;;
@@ -1023,6 +1213,19 @@ case "$command" in
     record validator_captured
     if [[ "$decoded" == *"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=''"* ]]; then
       record validator_image_prepared
+      printf '%s\n' "Validator pre-shutdown checks complete; awaiting canonical Lab Arena guard permit"
+      record arena_guard_request_published
+      for _permit_wait in $(seq 1 500); do
+        if [ -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+          record arena_guard_permit_consumed
+          break
+        fi
+        sleep 0.01
+      done
+      if [ ! -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+        record arena_guard_permit_timeout
+        exit 79
+      fi
       record validator_activation
       record validator_complete
       exit 0
@@ -1043,6 +1246,19 @@ case "$command" in
       if [ -e "$FAKE_OPERATOR_BARRIER" ]; then
         marker="$(cat "$FAKE_OPERATOR_BARRIER")"
         if [ "$marker" = "$FAKE_VALIDATOR_COMMIT" ]; then
+          printf '%s\\n' "Validator pre-shutdown checks complete; awaiting canonical Lab Arena guard permit"
+          record arena_guard_request_published
+          for _permit_wait in $(seq 1 500); do
+            if [ -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+              record arena_guard_permit_consumed
+              break
+            fi
+            sleep 0.01
+          done
+          if [ ! -e "$FAKE_OPERATOR_ARENA_PERMIT" ]; then
+            record arena_guard_permit_timeout
+            exit 79
+          fi
           record validator_activation
           record validator_complete
           exit 0
@@ -1096,6 +1312,50 @@ case "$command" in
     fi
     touch "$FAKE_OPERATOR_GATEWAY_HANDOFF"
     ;;
+  *leadpoet-validator-arena-guard-permit*"mv -f --"*)
+    record arena_guard_permit_installed
+    touch "$FAKE_OPERATOR_ARENA_PERMIT"
+    ;;
+  *release_channel_v2*--ensure*)
+    if [ "${FAKE_AMBIENT_LOCAL_RELEASE:-0}" = "1" ]; then
+      for name in \
+        LEADPOET_LOCAL_RELEASE_COMMIT_SHA \
+        LEADPOET_LOCAL_GATEWAY_RELEASE \
+        LEADPOET_LOCAL_VALIDATOR_RELEASE \
+        LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE; do
+        if [[ "$command" != *"-u $name"* ]]; then
+          record ambient_release_override_not_cleared
+          exit 80
+        fi
+        export "$name=ambient-short-circuit"
+      done
+      env \
+        -u LEADPOET_LOCAL_RELEASE_COMMIT_SHA \
+        -u LEADPOET_LOCAL_GATEWAY_RELEASE \
+        -u LEADPOET_LOCAL_VALIDATOR_RELEASE \
+        -u LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE \
+        bash -c '
+          test -z "${LEADPOET_LOCAL_RELEASE_COMMIT_SHA+x}"
+          test -z "${LEADPOET_LOCAL_GATEWAY_RELEASE+x}"
+          test -z "${LEADPOET_LOCAL_VALIDATOR_RELEASE+x}"
+          test -z "${LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE+x}"
+        '
+      record ambient_release_overrides_cleared
+    fi
+    if [ "${FAKE_EXISTING_RELEASE_CHANNEL:-0}" = "1" ]; then
+      record existing_release_channel_fetched
+      printf '%s\n' present
+    else
+      printf '%s\n' absent
+    fi
+    ;;
+  *release_channel_v2*--publish*)
+    if [ "${FAKE_RELEASE_CHANNEL_PUBLISH_FAIL:-0}" = "1" ]; then
+      record paired_release_publication_failed
+      exit 79
+    fi
+    record paired_release_published
+    ;;
   *leadpoet-validator-active-release-requirements*|*leadpoet-gateway-active-release*|*leadpoet-validator-counterpart-release-lineage*|*leadpoet-validator-recovery-*)
     record active_release_authority_installed
     ;;
@@ -1117,6 +1377,9 @@ case "$command" in
     ;;
   *gateway_exact_release_ready*)
     record gateway_verified
+    if [ "${FAKE_PUBLISHED_CHANNEL_MISSING:-0}" = "1" ]; then
+      exit 76
+    fi
     if [ "${FAKE_GATEWAY_VERIFY_FAIL:-0}" = "1" ]; then
       exit 74
     fi
@@ -1124,6 +1387,9 @@ case "$command" in
     ;;
   *validator_exact_release_ready*)
     record validator_verified
+    if [ "${FAKE_PUBLISHED_CHANNEL_MISSING:-0}" = "1" ]; then
+      exit 76
+    fi
     if [ "${FAKE_VALIDATOR_VERIFY_FAIL:-0}" = "1" ]; then
       exit 75
     fi
@@ -1146,7 +1412,7 @@ case "$command" in
     record gateway_active_probe
     ;;
   *"rm -f --"*)
-    rm -f "$FAKE_OPERATOR_BARRIER" "$FAKE_OPERATOR_GATEWAY_HANDOFF"
+    rm -f "$FAKE_OPERATOR_BARRIER" "$FAKE_OPERATOR_GATEWAY_HANDOFF" "$FAKE_OPERATOR_ARENA_PERMIT"
     record barrier_cleanup
     ;;
   *)
@@ -1165,9 +1431,35 @@ set -euo pipefail
 source_path="${@: -2:1}"
 destination_path="${@: -1}"
 case "$destination_path" in
-  *:*) ;;
+  *:*)
+    if [[ "$destination_path" == *leadpoet-paired-local-release-channel* ]]; then
+      printf '%s\n' paired_release_verified >> "$FAKE_OPERATOR_EVENTS"
+    fi
+    ;;
   *)
     case "$source_path" in
+      *leadpoet-gateway-host-gateway-release*)
+        cp "$FAKE_GATEWAY_HOST_GATEWAY_RELEASE" "$destination_path"
+        ;;
+      *leadpoet-gateway-host-validator-release*)
+        cp "$FAKE_GATEWAY_HOST_VALIDATOR_RELEASE" "$destination_path"
+        ;;
+      *leadpoet-existing-gateway-release*)
+        cp "$FAKE_EXISTING_GATEWAY_RELEASE" "$destination_path"
+        ;;
+      *leadpoet-existing-validator-release*)
+        cp "$FAKE_EXISTING_VALIDATOR_RELEASE" "$destination_path"
+        ;;
+      *gateway-v2-release-manifest.json*)
+        cp "$FAKE_VALIDATOR_HOST_GATEWAY_RELEASE" "$destination_path"
+        ;;
+      *validator-v2-release-manifest.json*)
+        if [ "${FAKE_PAIRED_RELEASE_MANIFEST_MISMATCH:-0}" = "1" ]; then
+          cp "$FAKE_VALIDATOR_HOST_DIVERGENT_RELEASE" "$destination_path"
+        else
+          cp "$FAKE_VALIDATOR_HOST_VALIDATOR_RELEASE" "$destination_path"
+        fi
+        ;;
       *leadpoet-validator-active-release-requirements*)
         cp "$FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS" "$destination_path"
         ;;
@@ -1252,6 +1544,7 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
                 f"FAKE_OPERATOR_EVENTS={events}",
                 f"FAKE_OPERATOR_BARRIER={barrier}",
                 f"FAKE_OPERATOR_GATEWAY_HANDOFF={gateway_handoff}",
+                f"FAKE_OPERATOR_ARENA_PERMIT={arena_permit}",
                 f"FAKE_OPERATOR_GATEWAY_STARTED={gateway_started}",
                 f"FAKE_OPERATOR_GATEWAY_COMPLETE={gateway_complete}",
                 f"FAKE_GATEWAY_COMMIT={commit}",
@@ -1263,6 +1556,13 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
                 f"FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS={initial_requirements}",
                 f"FAKE_GATEWAY_ACTIVE_RELEASE_REQUIREMENTS={final_requirements}",
                 f"FAKE_GATEWAY_ACTIVE_RELEASE_LINEAGE={final_lineage}",
+                f"FAKE_GATEWAY_HOST_GATEWAY_RELEASE={gateway_host_gateway_release}",
+                f"FAKE_GATEWAY_HOST_VALIDATOR_RELEASE={gateway_host_validator_release}",
+                f"FAKE_EXISTING_GATEWAY_RELEASE={gateway_host_gateway_release}",
+                f"FAKE_EXISTING_VALIDATOR_RELEASE={gateway_host_validator_release}",
+                f"FAKE_VALIDATOR_HOST_GATEWAY_RELEASE={validator_host_gateway_release}",
+                f"FAKE_VALIDATOR_HOST_VALIDATOR_RELEASE={validator_host_validator_release}",
+                f"FAKE_VALIDATOR_HOST_DIVERGENT_RELEASE={validator_host_divergent_release}",
                 f"FAKE_OPERATOR_SITE_ROOT={tmp_path}",
                 f"FAKE_OPERATOR_REAL_PYTHON={real_python}",
                 f"FAKE_OPERATOR_REAL_VENV={real_venv}",
@@ -1330,7 +1630,7 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1356,13 +1656,25 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         "validator_captured",
         "gateway_start",
         "validator_image_prepared",
+        "paired_release_verified",
+        "paired_release_published",
+        "paired_gateway_handoff_released",
+        "gateway_destructive_started",
         "gateway_complete",
         "barrier_released",
+        "arena_guard_request_published",
+        "arena_guard_request_validated",
+        "arena_guard_drained",
+        "arena_guard_validator_authorized",
+        "arena_guard_permit_installed",
+        "arena_guard_permit_consumed",
         "validator_activation",
         "validator_complete",
         "gateway_verified",
         "validator_verified",
+        "arena_guard_validator_ready",
         "readiness_finalized",
+        "arena_guard_released",
     ]
     positions = {event: observed.index(event) for event in required}
     assert (
@@ -1371,20 +1683,205 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         < positions["validator_captured"]
         < positions["gateway_start"]
         < positions["validator_image_prepared"]
+        < positions["paired_release_verified"]
+        < positions["paired_release_published"]
+        < positions["paired_gateway_handoff_released"]
+        < positions["gateway_destructive_started"]
         < positions["gateway_complete"]
     )
     assert (
         positions["gateway_complete"]
         < positions["barrier_released"]
+        < positions["arena_guard_request_published"]
+        < positions["arena_guard_request_validated"]
+        < positions["arena_guard_drained"]
+        < positions["arena_guard_validator_authorized"]
+        < positions["arena_guard_permit_installed"]
+        < positions["arena_guard_permit_consumed"]
         < positions["validator_activation"]
         < positions["validator_complete"]
         < positions["gateway_verified"]
         < positions["validator_verified"]
+        < positions["arena_guard_validator_ready"]
         < positions["readiness_finalized"]
+        < positions["arena_guard_released"]
     )
     assert "barrier_before_gateway" not in observed
     assert "validator_forward_handoff" not in observed
     assert "SUCCESS: gateway and validator are aligned" in result.stdout
+
+
+def test_operator_fails_closed_when_guard_ownership_read_is_unavailable(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment.pop("LEADPOET_ACTIVE_RELEASE_RESTART_INVOCATION_ID")
+    environment["FAKE_GUARD_DISCOVERY_FAIL"] = "1"
+    environment["FAKE_GUARD_DISCOVERY_JSON"] = "{}"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit), check=False, capture_output=True,
+        text=True, timeout=30, env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "ownership is ambiguous" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_discovery" in observed
+    assert "readiness_invalidated" not in observed
+
+
+def test_operator_retains_owner_when_durable_guard_target_is_an_ancestor(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    old_candidate = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", f"{commit}^"], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment.pop("LEADPOET_ACTIVE_RELEASE_RESTART_INVOCATION_ID")
+    environment["FAKE_GUARD_DISCOVERY_JSON"] = json.dumps({
+        "schema_version": "leadpoet.lab_arena.restart_guard_state.v1",
+        "guard_present": True,
+        "candidate_commit": old_candidate,
+    })
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit), check=False, capture_output=True,
+        text=True, timeout=30, env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Reusing durable exact-owner" in result.stdout
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_discovery" in observed
+    assert observed.index("readiness_finalized") < observed.index("arena_guard_released")
+
+
+@pytest.mark.parametrize(
+    ("failure_flag", "failure_event"),
+    [
+        ("FAKE_RELEASE_CHANNEL_PUBLISH_FAIL", "paired_release_publication_failed"),
+        ("FAKE_PAIRED_RELEASE_MANIFEST_MISMATCH", None),
+    ],
+)
+def test_paired_operator_aborts_before_handoff_when_channel_is_not_durable(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+    failure_flag: str,
+    failure_event: str | None,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment[failure_flag] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    observed = events.read_text(encoding="utf-8").splitlines()
+    if failure_event is not None:
+        assert failure_event in observed
+    assert "paired_gateway_handoff_released" not in observed
+    assert "gateway_destructive_started" not in observed
+    assert "gateway_complete" not in observed
+    assert "validator_activation" not in observed
+    assert "validator_cancelled" in observed
+    assert "gateway_cancelled" in observed
+
+
+def test_paired_operator_accepts_existing_full_channel_only_after_role_check(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_EXISTING_RELEASE_CHANNEL"] = "1"
+    environment["FAKE_AMBIENT_LOCAL_RELEASE"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "existing_release_channel_fetched" in observed
+    assert "ambient_release_overrides_cleared" in observed
+    assert "ambient_release_override_not_cleared" not in observed
+    assert "paired_release_published" not in observed
+    assert "paired_gateway_handoff_released" in observed
+    assert observed.index("existing_release_channel_fetched") < observed.index(
+        "paired_gateway_handoff_released"
+    )
+    assert "Accepted existing immutable full release channel" in result.stdout
+
+
+@pytest.mark.parametrize("component", ["gateway", "validator"])
+def test_single_component_requires_exact_immutable_channel_before_restart(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+    component: str,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_PUBLISHED_CHANNEL_MISSING"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", component),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode == 76
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "readiness_invalidated" not in observed
+    assert "gateway_start" not in observed
+    assert "validator_start" not in observed
 
 
 def test_operator_rejects_non_venv_local_python_before_ssh(
@@ -1392,7 +1889,7 @@ def test_operator_rejects_non_venv_local_python_before_ssh(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1429,7 +1926,7 @@ def test_operator_rejects_local_python_retarget_before_final_readiness(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1459,7 +1956,7 @@ def test_operator_rejects_candidate_source_drift_before_final_readiness(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1489,7 +1986,7 @@ def test_operator_rejects_initial_candidate_source_drift_before_ssh(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1519,7 +2016,7 @@ def test_gateway_only_operator_rejects_mismatched_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1550,7 +2047,7 @@ def test_gateway_only_operator_requires_healthy_matching_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1595,7 +2092,7 @@ def test_gateway_only_operator_rejects_unhealthy_matching_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1625,7 +2122,7 @@ def test_validator_only_operator_rejects_mismatched_gateway(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1656,7 +2153,7 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1679,8 +2176,18 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
         "gateway_verified",
         "readiness_invalidated",
         "validator_start",
+        "arena_guard_request_published",
+        "arena_guard_request_validated",
+        "arena_guard_drained",
+        "arena_guard_validator_authorized",
+        "arena_guard_permit_installed",
+        "arena_guard_permit_consumed",
+        "validator_activation",
         "validator_complete",
         "validator_verified",
+        "arena_guard_validator_ready",
+        "readiness_finalized",
+        "arena_guard_released",
     ]
     positions = [observed.index(event) for event in required]
     assert positions == sorted(positions)
@@ -1691,11 +2198,106 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     assert observed.index("readiness_invalidated") < observed.index(
         "validator_start"
     )
-    assert len(observed) - 1 - observed[::-1].index(
-        "gateway_verified"
-    ) < observed.index(
-        "readiness_finalized"
+    assert observed.index("validator_verified") < observed.index(
+        "arena_guard_validator_ready"
+    ) < observed.index("readiness_finalized") < observed.index(
+        "arena_guard_released"
     )
+
+
+def test_validator_only_operator_rejects_wrong_drain_document_before_authorization(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_ARENA_DRAIN_DOCUMENT_KIND"] = "state"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "Arena restart drain state version is invalid" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_drained" in observed
+    assert "arena_guard_validator_authorized" not in observed
+    assert "arena_guard_permit_installed" not in observed
+    assert "validator_activation" not in observed
+    assert "arena_guard_released" not in observed
+
+
+def test_validator_only_operator_rejects_changed_guard_generation_before_shutdown(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_ARENA_AUTHORIZATION_GENERATION"] = "8"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_validator_authorized" in observed
+    assert "arena_guard_permit_installed" not in observed
+    assert "validator_activation" not in observed
+    assert "arena_guard_validator_ready" not in observed
+    assert "arena_guard_released" not in observed
+
+
+def test_validator_only_operator_rejects_handoff_source_drift_before_shutdown(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()], text=True
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_HANDOFF_SOURCE_DRIFT"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "arena_guard_request_published" in observed
+    assert "arena_guard_handoff_source_drift" in observed
+    assert "arena_guard_drained" not in observed
+    assert "arena_guard_validator_authorized" not in observed
+    assert "arena_guard_permit_installed" not in observed
+    assert "validator_activation" not in observed
 
 
 def test_validator_only_operator_recovers_missing_runtime_from_gateway_pair(
@@ -1703,11 +2305,11 @@ def test_validator_only_operator_recovers_missing_runtime_from_gateway_pair(
     dependency_complete_readiness_python: Path,
 ) -> None:
     controller_commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main^"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref("^")],
         text=True,
     ).strip()
     assert controller_commit != commit
@@ -1745,7 +2347,7 @@ def test_validator_only_operator_rejects_unknown_runtime_probe_failure(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1830,7 +2432,7 @@ def test_validator_only_operator_rejects_unhealthy_matching_gateway(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1860,7 +2462,7 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1917,7 +2519,7 @@ def test_paired_operator_cancels_gateway_when_validator_exits_after_liveness_han
     dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(
@@ -1970,7 +2572,7 @@ def test_paired_operator_final_probe_failure_leaves_resume_blocked(
     failed_event: str,
 ) -> None:
     commit = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        ["git", "-C", str(ROOT), "rev-parse", _test_candidate_ref()],
         text=True,
     ).strip()
     bin_dir, events = _fake_operator_commands(

@@ -49,9 +49,6 @@ from gateway.tee.coordinator_source_add_v2 import (
     OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
     OP_SOURCE_ADD_PROVENANCE_V2,
 )
-from gateway.tee.provider_outcome_v2 import (
-    validate_provider_outcome_snapshot_v2,
-)
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
     attest_subnet_epoch_cutover_v2,
@@ -69,7 +66,6 @@ OP_ATTEST_QUALIFICATION_ADMISSION = "attest_qualification_admission"
 OP_ATTEST_WEIGHT_INPUT = "attest_weight_input"
 OP_ATTEST_WEIGHT_PUBLICATION = "attest_weight_publication"
 OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2 = "source_add_catalog_snapshot_v2"
-OP_PROVIDER_OUTCOME_SNAPSHOT_V2 = "provider_outcome_snapshot_v2"
 OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
     "attest_legacy_finalized_allocation_v2"
 )
@@ -215,9 +211,6 @@ COORDINATOR_OPERATIONS_V2 = {
     OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2: frozenset(
         {"research_lab.source_add_catalog_snapshot.v2"}
     ),
-    OP_PROVIDER_OUTCOME_SNAPSHOT_V2: frozenset(
-        {"research_lab.provider_outcome_snapshot.v2"}
-    ),
     OP_ATTEST_ARTIFACT_PERSISTENCE: frozenset(
         {"leadpoet.artifact_persistence.v2"}
     ),
@@ -259,7 +252,7 @@ def coordinator_failed_parent_graph_policy_v2(
     payload: Mapping[str, Any],
     graph: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    """Authorize one exact failed autoresearch root for terminal lineage only."""
+    """Permit failed source ancestry only when persisting its artifacts."""
 
     root_hash = str(graph.get("root_receipt_hash") or "")
     receipts = {
@@ -284,27 +277,7 @@ def coordinator_failed_parent_graph_policy_v2(
             raise ValueError("artifact persistence failed source differs")
         return tuple(sorted(failed_hashes))
 
-    if failed_hashes != {root_hash}:
-        raise ValueError("failed reward ancestry must be the direct graph root")
-
-    if operation != OP_RESEARCH_LAB_REWARD_DECISION:
-        raise ValueError("failed receipt ancestry is unauthorized for operation")
-    if payload.get("decision_kind") != "reimbursement":
-        raise ValueError("failed receipt ancestry is reimbursement-only")
-    decision_payload = payload.get("decision_payload")
-    terminal_result = (
-        decision_payload.get("autoresearch_result")
-        if isinstance(decision_payload, Mapping)
-        else None
-    )
-    if (
-        root.get("purpose") != "research_lab.candidate_decision.v2"
-        or not isinstance(terminal_result, Mapping)
-        or terminal_result.get("status") != "failed"
-        or root.get("output_root") != sha256_json(dict(terminal_result))
-    ):
-        raise ValueError("failed reimbursement ancestry does not bind terminal result")
-    return (root_hash,)
+    raise ValueError("failed receipt ancestry is unauthorized for operation")
 
 
 class CoordinatorExecutorV2:
@@ -355,7 +328,6 @@ class CoordinatorExecutorV2:
         source_add_catalog_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
-        provider_outcome_supplier: Optional[Callable[[], Mapping[str, Any]]] = None,
     ) -> None:
         self._artifact_evidence_supplier = artifact_evidence_supplier
         self._weight_source_resolver = weight_source_resolver
@@ -382,7 +354,6 @@ class CoordinatorExecutorV2:
             chain_realized_settlement_resolver
         )
         self._source_add_catalog_resolver = source_add_catalog_resolver
-        self._provider_outcome_supplier = provider_outcome_supplier
 
     async def __call__(
         self,
@@ -587,36 +558,6 @@ class CoordinatorExecutorV2:
                     str(output["runtime_catalog_hash"]),
                 ),
             )
-        if operation == OP_PROVIDER_OUTCOME_SNAPSHOT_V2:
-            if set(payload) != {"schema_version"} or payload.get(
-                "schema_version"
-            ) != "leadpoet.provider_outcome_snapshot_request.v2":
-                raise ValueError("provider outcome snapshot request is invalid")
-            if self._provider_outcome_supplier is None:
-                raise ValueError("measured provider outcome state is unavailable")
-            supplied = self._provider_outcome_supplier()
-            if not isinstance(supplied, Mapping) or set(supplied) != {
-                "snapshot",
-                "transport_attempts",
-                "evidence_artifact_hashes",
-            }:
-                raise ValueError("provider outcome snapshot evidence is invalid")
-            output = validate_provider_outcome_snapshot_v2(
-                supplied["snapshot"]
-            )
-            attempts = supplied["transport_attempts"]
-            artifacts = supplied["evidence_artifact_hashes"]
-            if not isinstance(attempts, list) or not isinstance(artifacts, list):
-                raise ValueError("provider outcome snapshot evidence is invalid")
-            return ExecutionResultV2(
-                output=output,
-                artifact_hashes=(
-                    str(output["provider_outcome_digest_hash"]),
-                    str(output["source_state_hash"]),
-                    *[str(item) for item in artifacts],
-                ),
-                transport_attempts=tuple(dict(item) for item in attempts),
-            )
         if operation == OP_RESEARCH_LAB_REWARD_DECISION:
             decision_kind = str(payload.get("decision_kind") or "")
             measured_payload = payload
@@ -624,8 +565,6 @@ class CoordinatorExecutorV2:
                 "champion_migration",
                 "source_add_migration",
                 "source_add_leg1",
-                "source_add_leg2",
-                "reimbursement",
             }:
                 if self._reward_source_resolver is None:
                     raise ValueError("measured reward source is unavailable")
@@ -740,14 +679,9 @@ class CoordinatorExecutorV2:
                     "reward migration cannot inherit host-selected ancestry"
                 )
             return
-        expected_purpose = {
-            "champion": "research_lab.promotion_decision.v2",
-            "source_add_leg1": "research_lab.source_add_provenance.v2",
-            "source_add_leg2": "research_lab.source_add_judge.v2",
-            "reimbursement": "research_lab.candidate_decision.v2",
-        }.get(kind)
-        if expected_purpose is None:
+        if kind != "source_add_leg1":
             raise ValueError("reward ancestry kind is unsupported")
+        expected_purpose = "research_lab.source_add_provenance.v2"
         try:
             graphs = list(context.external_receipt_authority_graphs())
         except ExecutionJobV2Error as exc:
@@ -771,17 +705,7 @@ class CoordinatorExecutorV2:
             or root_hash not in context.parent_receipt_hashes
         ):
             raise ValueError("reward decision parent purpose is invalid")
-        bound_result = None
-        if kind == "champion":
-            promotion_decision = decision_payload.get("promotion_decision")
-            if isinstance(promotion_decision, Mapping):
-                bound_result = {"decision": dict(promotion_decision)}
-        elif kind == "source_add_leg1":
-            bound_result = decision_payload.get("provenance_result")
-        elif kind == "source_add_leg2":
-            bound_result = decision_payload.get("judge_result")
-        elif kind == "reimbursement":
-            bound_result = decision_payload.get("autoresearch_result")
+        bound_result = decision_payload.get("provenance_result")
         if bound_result is not None and (
             not isinstance(bound_result, Mapping)
             or root.get("output_root") != sha256_json(dict(bound_result))

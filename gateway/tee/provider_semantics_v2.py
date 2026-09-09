@@ -17,10 +17,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
 from gateway.research_lab.provider_evidence_proxy import (
-    BUDGET_SOFT_STOP_HEADER,
-    BUDGET_SOFT_STOP_RESPONSE_HEADER,
     REPLAY_ONLY_HEADER,
-    _budget_soft_stop_body,
     _openrouter_chat_completion_path,
     _openrouter_generation_id_from_headers,
     _openrouter_request_with_usage_metadata,
@@ -40,7 +37,6 @@ from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from gateway.tee.provider_evidence_v2 import (
     create_signed_provider_evidence_record,
 )
-from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
 from gateway.tee.source_add_runtime_v2 import (
     validate_source_add_runtime_route_v2,
 )
@@ -87,18 +83,11 @@ _FAIL_CLOSED_REQUEST_SCHEMA_VERSION = (
     "leadpoet.provider_semantics_fail_closed_request.v2"
 )
 _PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
-_OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
-_OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.01
-_OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS = 0.25
-_OUTCOME_CHECKPOINT_BATCH_MAX = 32
 _SEMANTICS_HEALTH_STAGES = (
     "provider_transport",
     "provider_cache_lookup",
     "provider_cache_write",
-    "provider_outcome_restore",
-    "provider_outcome_append",
 )
-TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
     "scrapingdog": "sd",
@@ -118,24 +107,6 @@ def _truthy(value: Any) -> bool:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _outcome_conflict_backoff_seconds(
-    *,
-    job_id: str,
-    purpose: str,
-    conflict_attempt: int,
-) -> float:
-    exponential = min(
-        _OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS,
-        _OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS
-        * (2 ** min(max(0, int(conflict_attempt)), 8)),
-    )
-    digest = sha256_bytes(
-        ("%s:%s:%d" % (job_id, purpose, int(conflict_attempt))).encode("utf-8")
-    )
-    fraction = int(digest.split(":", 1)[1][:8], 16) / 0xFFFFFFFF
-    return exponential * (1.0 + fraction)
 
 
 def _header(headers: Mapping[str, Any], name: str) -> str:
@@ -178,8 +149,6 @@ class ProviderSemanticsAuthorityV2:
         artifact_transaction: Optional[Callable[[], Any]] = None,
         clock: Callable[[], str] = _timestamp,
         sleeper: Callable[[float], None] = time.sleep,
-        outcome_ledger: Optional[ProviderOutcomeLedgerV2] = None,
-        outcome_store: Any = None,
     ) -> None:
         if cache_store is None:
             raise ProviderSemanticsV2Error("provider semantics cache is required")
@@ -210,51 +179,16 @@ class ProviderSemanticsAuthorityV2:
         self._sign_digest = sign_digest
         self._clock = clock
         self._sleep = sleeper
-        self._outcome_store = outcome_store
-        self._outcome_persist_lock = threading.RLock()
-        self._outcome_batch_condition = threading.Condition(
-            self._outcome_persist_lock
-        )
-        self._outcome_pending: list[Dict[str, Any]] = []
-        self._outcome_flushing = False
-        self._outcome_checkpoint_hash = ""
-        self._outcome_checkpoint_day = ""
-        self._outcome_restore_artifacts: set[str] = set()
         self._stage_health_lock = threading.RLock()
         self._stage_counts = {
             stage: {"started": 0, "succeeded": 0, "failed": 0}
             for stage in _SEMANTICS_HEALTH_STAGES
         }
         self._last_stage_failure = None  # type: Optional[Dict[str, Any]]
-        if outcome_ledger is not None:
-            self._outcome_ledger = outcome_ledger
-        elif outcome_store is not None:
-            utc_day = str(clock() or "")[:10]
-            with self._track_stage("provider_outcome_restore"):
-                restored = outcome_store.load_latest(
-                    utc_day=utc_day,
-                    job_id="provider-outcome-restore-%s" % utc_day,
-                    purpose="research_lab.provider_outcome_state.v2",
-                )
-            self._outcome_restore_artifacts = set(
-                str(item) for item in restored.get("evidence_artifact_hashes") or ()
-            )
-            initial_document = restored.get("state_document") if restored.get("found") else None
-            self._outcome_checkpoint_hash = str(
-                restored.get("checkpoint_hash") or ""
-            )
-            self._outcome_checkpoint_day = utc_day if self._outcome_checkpoint_hash else ""
-            self._outcome_ledger = ProviderOutcomeLedgerV2(
-                clock=clock,
-                initial_document=initial_document,
-            )
-        else:
-            self._outcome_ledger = ProviderOutcomeLedgerV2(clock=clock)
         self._cache: Dict[tuple[str, ...], Dict[str, Any]] = {}
         self._inflight: Dict[tuple[str, ...], threading.Event] = {}
         self._cost_ledgers: Dict[tuple[str, str], ProviderCostLedger] = {}
         self._live_calls: Dict[tuple[str, str], int] = {}
-        self._tree_live_calls: Dict[tuple[str, str], int] = {}
         self._cache_day = ""
         self._lock = threading.RLock()
         self._semantic_owner_state = threading.local()
@@ -318,38 +252,6 @@ class ProviderSemanticsAuthorityV2:
                 with self._terminal_transaction(), self._artifact_transaction():
                     result = dict(self._execute(request))
                     prior_result = dict(result)
-                    persistence = self._record_provider_outcome(request, result)
-                    if persistence:
-                        result["additional_transport_attempts"] = [
-                            *[
-                                dict(item)
-                                for item in result.get(
-                                    "additional_transport_attempts"
-                                )
-                                or ()
-                            ],
-                            *[
-                                dict(item)
-                                for item in persistence["transport_attempts"]
-                            ],
-                        ]
-                        result["evidence_artifact_hashes"] = sorted(
-                            {
-                                *[
-                                    str(item)
-                                    for item in result.get(
-                                        "evidence_artifact_hashes"
-                                    )
-                                    or ()
-                                ],
-                                *[
-                                    str(item)
-                                    for item in persistence[
-                                        "evidence_artifact_hashes"
-                                    ]
-                                ],
-                            }
-                        )
                     return result
             except Exception as exc:
                 # The model may catch a provider transport failure and retry.
@@ -375,8 +277,8 @@ class ProviderSemanticsAuthorityV2:
                         prior_result=retained_prior_result,
                     )
         finally:
-            # Exact semantic replays are not released until the terminal,
-            # encrypted cache work, and durable provider outcome all commit.
+            # Exact semantic replays are not released until the terminal and
+            # encrypted cache work commit.
             try:
                 self._release_semantic_owner()
             finally:
@@ -574,8 +476,8 @@ class ProviderSemanticsAuthorityV2:
                         )
                     self._semantic_owner_state.owner = (cache_key, event)
                     break
-            # The owner includes encrypted cache readback and durable outcome
-            # work after the upstream HTTP call.  Wait on the same bounded
+            # The owner includes encrypted cache readback after the upstream
+            # HTTP call. Wait on the same bounded
             # completion contract as an exact inter-enclave replay, not the
             # shorter provider network timeout.
             if not event.wait(REPLAY_WAIT_SECONDS):
@@ -658,88 +560,33 @@ class ProviderSemanticsAuthorityV2:
                 )
             if ledger.should_block_paid_call():
                 reason = ledger.block_reason()
-                soft_stop = reason == "cost_cap_reached" and _truthy(
-                    _header(headers, BUDGET_SOFT_STOP_HEADER)
-                )
-                status = 200 if soft_stop else 402
-                evidence = "budget_soft_stop" if soft_stop else "blocked"
                 event_doc = ledger.block_event(
                     provider=provider,
                     endpoint=redacted_endpoint(provider, normalized["url"]),
                     request_fingerprint=fingerprint,
                     reason=reason,
-                    status_code=status,
-                    evidence=evidence,
                 ).to_doc()
-                body = (
-                    _budget_soft_stop_body(provider, normalized["url"])
-                    if soft_stop
-                    else canonical_json(
-                        {
-                            "error": (
-                                "research_lab_provider_cost_cap_exceeded"
-                                if reason == "cost_cap_reached"
-                                else "research_lab_provider_cost_tracking_failed"
-                            ),
-                            "provider": provider,
-                            "endpoint": redacted_endpoint(provider, normalized["url"]),
-                        }
-                    ).encode("utf-8")
-                )
+                body = canonical_json(
+                    {
+                        "error": (
+                            "research_lab_provider_cost_cap_exceeded"
+                            if reason == "cost_cap_reached"
+                            else "research_lab_provider_cost_tracking_failed"
+                        ),
+                        "provider": provider,
+                        "endpoint": redacted_endpoint(provider, normalized["url"]),
+                    }
+                ).encode("utf-8")
                 return self._local_response(
                     normalized,
                     parsed=parsed,
                     body=body,
-                    status=status,
-                    evidence=evidence,
+                    status=402,
+                    evidence="blocked",
                     cost_event=event_doc,
-                    extra_headers=(
-                        {BUDGET_SOFT_STOP_RESPONSE_HEADER: "1"}
-                        if soft_stop
-                        else {}
-                    ),
                     additional_attempts=lookup_attempts,
                     additional_artifacts=lookup_artifacts,
                 )
-            raw_tree_call_cap = _header(
-                headers, TREE_PROVIDER_CALL_CAP_HEADER
-            ).strip()
-            if raw_tree_call_cap:
-                try:
-                    tree_call_cap = int(raw_tree_call_cap)
-                except ValueError as exc:
-                    raise ProviderSemanticsV2Error(
-                        "tree provider call cap is invalid"
-                    ) from exc
-                scope = _header(headers, "X-Research-Lab-Cost-Scope").strip()
-                if not scope or tree_call_cap < 1 or tree_call_cap > 10_000:
-                    raise ProviderSemanticsV2Error(
-                        "tree provider call cap scope is invalid"
-                    )
-                tree_call_key = (day, scope)
-                with self._lock:
-                    used_tree_calls = self._tree_live_calls.get(tree_call_key, 0)
-                    if used_tree_calls < tree_call_cap:
-                        self._tree_live_calls[tree_call_key] = used_tree_calls + 1
-                if used_tree_calls >= tree_call_cap:
-                    event_doc = ledger.block_event(
-                        provider=provider,
-                        endpoint=redacted_endpoint(provider, normalized["url"]),
-                        request_fingerprint=fingerprint,
-                        reason="provider_call_cap_reached",
-                        status_code=402,
-                        evidence="blocked",
-                    ).to_doc()
-                    return self._local_response(
-                        normalized,
-                        parsed=parsed,
-                        body=b'{"error":"research_lab_tree_provider_call_cap_exceeded"}',
-                        status=402,
-                        evidence="blocked",
-                        cost_event=event_doc,
-                        additional_attempts=lookup_attempts,
-                        additional_artifacts=lookup_artifacts,
-                    )
             return self._live(
                 normalized,
                 original_body=original_body,
@@ -774,337 +621,6 @@ class ProviderSemanticsAuthorityV2:
     def _load_provider_cache(self, **kwargs: Any) -> Mapping[str, Any]:
         with self._track_stage("provider_cache_lookup"):
             return self._cache_store.load(**kwargs)
-
-    def provider_outcome_snapshot(self) -> Dict[str, Any]:
-        return self._outcome_ledger.snapshot()
-
-    def provider_outcome_snapshot_evidence(self) -> Dict[str, Any]:
-        artifacts = set(self._outcome_restore_artifacts)
-        if self._outcome_checkpoint_hash:
-            artifacts.add(self._outcome_checkpoint_hash)
-        return {
-            "snapshot": self.provider_outcome_snapshot(),
-            # The checkpoint restore happened under its own restore job. Its
-            # authenticated artifacts remain provenance for this snapshot,
-            # but its transport attempts cannot be rebound to a new job.
-            "transport_attempts": [],
-            "evidence_artifact_hashes": sorted(artifacts),
-        }
-
-    def _record_provider_outcome(
-        self,
-        request: Mapping[str, Any],
-        result: Mapping[str, Any],
-    ) -> Dict[str, Any] | None:
-        provider_id = str(request.get("provider_id") or "")
-        dynamic_route = request.get("dynamic_route")
-        provider = _LEGACY_PROVIDER_IDS.get(provider_id)
-        if provider is None and isinstance(dynamic_route, Mapping):
-            provider = str(dynamic_route.get("provider_id") or "")
-        if not provider:
-            return None
-        terminal_status = str(result.get("terminal_status") or "")
-        evidence = str(result.get("evidence") or "")
-        status = result.get("http_status")
-        if terminal_status == "transport_failure":
-            evidence = "error"
-            status = 502
-        if not evidence:
-            evidence = "recorded" if terminal_status == "authenticated_response" else "error"
-        try:
-            normalized_status = int(status or 0)
-        except (TypeError, ValueError) as exc:
-            raise ProviderSemanticsV2Error(
-                "provider outcome status is invalid"
-            ) from exc
-        cost_event: Dict[str, Any] = {}
-        encoded_cost = _header(
-            dict(result.get("headers") or {}),
-            "X-Research-Lab-Provider-Cost-Event",
-        )
-        if encoded_cost:
-            try:
-                decoded = base64.b64decode(encoded_cost, validate=True)
-                parsed_cost = json.loads(decoded.decode("utf-8"))
-            except Exception as exc:
-                raise ProviderSemanticsV2Error(
-                    "provider outcome cost event is invalid"
-                ) from exc
-            if not isinstance(parsed_cost, Mapping):
-                raise ProviderSemanticsV2Error(
-                    "provider outcome cost event is not an object"
-                )
-            cost_event = dict(parsed_cost)
-        record_arguments = {
-            "provider_id": provider,
-            "endpoint_class": redacted_endpoint(
-                provider,
-                str(request.get("url") or ""),
-            ),
-            "evidence": evidence,
-            "status": normalized_status,
-            "live_call": (
-                terminal_status in {"authenticated_response", "transport_failure"}
-                and evidence
-                not in {
-                    "hit",
-                    "blocked",
-                    "budget_soft_stop",
-                    "quota_exhausted",
-                    "replay_miss",
-                }
-            ),
-            "cost_event": cost_event,
-        }
-        if self._outcome_store is None:
-            with self._outcome_persist_lock:
-                self._outcome_ledger.record(**record_arguments)
-            return None
-        return self._enqueue_provider_outcome(
-            record_arguments=record_arguments,
-            job_id=str(request.get("job_id") or ""),
-            purpose=str(request.get("purpose") or ""),
-        )
-
-    def _enqueue_provider_outcome(
-        self,
-        *,
-        record_arguments: Mapping[str, Any],
-        job_id: str,
-        purpose: str,
-    ) -> Dict[str, Any]:
-        pending: Dict[str, Any] = {
-            "record_arguments": dict(record_arguments),
-            "job_id": str(job_id),
-            "purpose": str(purpose),
-            "done": False,
-            "result": None,
-            "error": None,
-        }
-        with self._outcome_batch_condition:
-            self._outcome_pending.append(pending)
-            leader = not self._outcome_flushing
-            if leader:
-                self._outcome_flushing = True
-        if leader:
-            self._flush_provider_outcomes()
-
-        deadline = time.monotonic() + REPLAY_WAIT_SECONDS
-        with self._outcome_batch_condition:
-            while not pending["done"]:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not self._outcome_batch_condition.wait(
-                    remaining
-                ):
-                    raise ProviderSemanticsV2Error(
-                        "provider outcome checkpoint batch wait timed out"
-                    )
-            if pending["error"] is not None:
-                raise pending["error"]
-            result = pending["result"]
-        if not isinstance(result, Mapping):
-            raise ProviderSemanticsV2Error(
-                "provider outcome checkpoint batch result is invalid"
-            )
-        return dict(result)
-
-    def _flush_provider_outcomes(self) -> None:
-        while True:
-            with self._outcome_batch_condition:
-                if not self._outcome_pending:
-                    self._outcome_flushing = False
-                    self._outcome_batch_condition.notify_all()
-                    return
-                supports_batch = callable(
-                    getattr(self._outcome_store, "persist_batch", None)
-                )
-                batch_size = _OUTCOME_CHECKPOINT_BATCH_MAX if supports_batch else 1
-                first = self._outcome_pending[0]
-                scope = (first["job_id"], first["purpose"])
-                batch = []
-                remaining = []
-                for item in self._outcome_pending:
-                    if (
-                        len(batch) < batch_size
-                        and (item["job_id"], item["purpose"]) == scope
-                    ):
-                        batch.append(item)
-                    else:
-                        remaining.append(item)
-                self._outcome_pending = remaining
-            try:
-                with self._track_stage("provider_outcome_append"):
-                    result = self._persist_provider_outcome_batch(batch)
-            except BaseException as exc:
-                # One exhausted measured persistence attempt is systemic for
-                # the shared daily lineage. Fail every queued caller together
-                # instead of starting an identical retry storm per request.
-                with self._outcome_batch_condition:
-                    failed = [*batch, *self._outcome_pending]
-                    self._outcome_pending.clear()
-                    self._outcome_flushing = False
-                    for item in failed:
-                        item["error"] = exc
-                        item["done"] = True
-                    self._outcome_batch_condition.notify_all()
-                return
-            with self._outcome_batch_condition:
-                # One measured Supabase operation commits the entire batch.
-                # Publish that transport/evidence terminal once to the shared
-                # execution scope; repeating it on every provider result would
-                # make the job reject a duplicated transport-attempt hash.
-                for index, item in enumerate(batch):
-                    item["result"] = (
-                        dict(result)
-                        if index == 0
-                        else {
-                            **result,
-                            "transport_attempts": [],
-                            "evidence_artifact_hashes": [],
-                        }
-                    )
-                    item["done"] = True
-                self._outcome_batch_condition.notify_all()
-
-    def _persist_provider_outcome_batch(
-        self,
-        batch: list[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        if not batch or len(batch) > _OUTCOME_CHECKPOINT_BATCH_MAX:
-            raise ProviderSemanticsV2Error(
-                "provider outcome checkpoint batch size is invalid"
-            )
-        batch_timestamp = str(self._clock() or "")
-        batch_day = batch_timestamp[:10]
-        base_document = self._outcome_ledger.state_document()
-        base_checkpoint_hash = (
-            self._outcome_checkpoint_hash
-            if self._outcome_checkpoint_day == batch_day
-            else ""
-        )
-        attempts: list[Dict[str, Any]] = []
-        artifacts: set[str] = set()
-        first_job_id = str(batch[0]["job_id"])
-        first_purpose = str(batch[0]["purpose"])
-
-        for conflict_attempt in range(_OUTCOME_APPEND_CONFLICT_ATTEMPTS):
-            if str(base_document.get("utc_day") or "") == batch_day:
-                candidate = ProviderOutcomeLedgerV2(
-                    clock=lambda: batch_timestamp,
-                    initial_document=base_document,
-                )
-            else:
-                candidate = ProviderOutcomeLedgerV2(
-                    clock=lambda: batch_timestamp,
-                )
-            documents = [
-                candidate.record(**dict(item["record_arguments"]))
-                for item in batch
-            ]
-            transitions = [
-                {
-                    "document": document,
-                    "job_id": str(item["job_id"]),
-                    "purpose": str(item["purpose"]),
-                }
-                for item, document in zip(batch, documents)
-            ]
-            persist_batch = getattr(self._outcome_store, "persist_batch", None)
-            if callable(persist_batch):
-                persisted = dict(
-                    persist_batch(
-                        transitions,
-                        previous_checkpoint_hash=base_checkpoint_hash,
-                        job_id=first_job_id,
-                        purpose=first_purpose,
-                        attempt_number=conflict_attempt,
-                    )
-                )
-            else:
-                persisted = dict(
-                    self._outcome_store.persist(
-                        documents[0],
-                        previous_checkpoint_hash=base_checkpoint_hash,
-                        job_id=first_job_id,
-                        purpose=first_purpose,
-                        attempt_number=conflict_attempt,
-                    )
-                )
-            attempts.extend(
-                dict(item)
-                for item in persisted.get("transport_attempts") or ()
-            )
-            artifacts.update(
-                str(item)
-                for item in persisted.get("evidence_artifact_hashes") or ()
-            )
-            status = str(persisted.get("status") or "persisted")
-            if status == "persisted":
-                final_document = documents[-1]
-                self._outcome_ledger.restore(final_document)
-                self._outcome_checkpoint_hash = str(
-                    persisted["checkpoint_hash"]
-                )
-                self._outcome_checkpoint_day = batch_day
-                return {
-                    **persisted,
-                    "transport_attempts": attempts,
-                    "evidence_artifact_hashes": sorted(artifacts),
-                }
-            if status not in {"busy", "conflict"}:
-                raise ProviderSemanticsV2Error(
-                    "provider outcome checkpoint status is invalid"
-                )
-            if conflict_attempt + 1 >= _OUTCOME_APPEND_CONFLICT_ATTEMPTS:
-                break
-            self._sleep(
-                _outcome_conflict_backoff_seconds(
-                    job_id=first_job_id,
-                    purpose=first_purpose,
-                    conflict_attempt=conflict_attempt,
-                )
-            )
-            if status == "busy":
-                continue
-            head_document = persisted.get("head_state_document")
-            head_checkpoint_hash = str(
-                persisted.get("head_checkpoint_hash") or ""
-            )
-            if isinstance(head_document, Mapping) and head_checkpoint_hash:
-                base_document = dict(head_document)
-                base_checkpoint_hash = head_checkpoint_hash
-                continue
-            restored = dict(
-                self._outcome_store.load_latest(
-                    utc_day=batch_day,
-                    job_id=first_job_id,
-                    purpose=first_purpose,
-                    operation_suffix=(
-                        "batch-reconcile-%d-%d"
-                        % (int(documents[-1]["sequence"]), conflict_attempt)
-                    ),
-                )
-            )
-            attempts.extend(
-                dict(item)
-                for item in restored.get("transport_attempts") or ()
-            )
-            artifacts.update(
-                str(item)
-                for item in restored.get("evidence_artifact_hashes") or ()
-            )
-            if restored.get("found"):
-                base_document = dict(restored["state_document"])
-                base_checkpoint_hash = str(restored["checkpoint_hash"])
-        self._outcome_ledger.restore(base_document)
-        if base_checkpoint_hash:
-            self._outcome_checkpoint_hash = base_checkpoint_hash
-            self._outcome_checkpoint_day = str(
-                base_document.get("utc_day") or ""
-            )
-        raise ProviderSemanticsV2Error(
-            "provider outcome checkpoint contention did not converge"
-        )
 
     def _live(
         self,
@@ -1694,5 +1210,4 @@ class ProviderSemanticsAuthorityV2:
         self._cache.clear()
         self._cost_ledgers.clear()
         self._live_calls.clear()
-        self._tree_live_calls.clear()
         self._cache_day = day

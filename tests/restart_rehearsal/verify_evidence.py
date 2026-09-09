@@ -24,13 +24,11 @@ with redirect_stdout(sys.stderr):
 
     if __package__:
         from .postgres_v2_contract_probe import (
-            EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
             EXPECTED_APPLIED_MIGRATIONS,
             EXPECTED_POSTGRES_CONTRACT_CHECKS,
         )
     else:
         from postgres_v2_contract_probe import (
-            EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
             EXPECTED_APPLIED_MIGRATIONS,
             EXPECTED_POSTGRES_CONTRACT_CHECKS,
         )
@@ -139,6 +137,25 @@ def require_order(values: list[str], required: list[str]) -> None:
             raise SystemExit(
                 f"required rehearsal event is missing or out of order: {expected}"
             ) from exc
+
+
+def verify_lab_arena_guard_boundary_denial(rows: list[dict]) -> None:
+    denials = [row for row in rows if row.get("status") == "expected_denial"]
+    expected = {
+        "status": "expected_denial",
+        "operation": "authorization",
+        "method": "POST",
+        "path": "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+        "error_type": "ValueError",
+        "error": "migration-backed Lab Arena restart RPC rejected",
+    }
+    if len(denials) != 1 or any(
+        denials[0].get(name) != value for name, value in expected.items()
+    ):
+        raise SystemExit(
+            "migration-backed Lab Arena public denial evidence differs: "
+            f"{denials!r}"
+        )
 
 
 def _first_event(
@@ -912,13 +929,6 @@ def verify_migration_backed_database_contract(
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"
         )
-    if (
-        document.get("atomic_credit_resume")
-        != EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
-    ):
-        raise SystemExit(
-            "migration-backed atomic credit resume evidence is missing"
-        )
     if document.get("compact_weight_settlement_contract") != {
         "schema_version": (
             "leadpoet.research_lab_compact_weight_settlement_contract.v1"
@@ -933,35 +943,14 @@ def verify_migration_backed_database_contract(
         raise SystemExit(
             "migration-backed compact weight settlement contract is missing"
         )
-    if document.get("provider_outcome_contention_contract") != {
-        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
-        "lock_contention_status": "busy",
-        "stale_lineage_status": "conflict",
-        "candidate_checkpoint_hash": True,
-        "conflict_head_checkpoint_row": "encrypted_or_null",
+    if document.get("provider_evidence_cache") != {
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "insert_status": "inserted",
+        "replay_status": "existing",
+        "durable_row_exact": True,
     }:
         raise SystemExit(
-            "migration-backed provider outcome contract evidence is missing"
-        )
-    if document.get("provider_persistence_batch") != {
-        "batch_size": 5,
-        "durable_count": 5,
-        "batch_replay_exact": True,
-        "batch_conflict_head_exact": True,
-        "cache_put_exact": True,
-        "cache_replay_exact": True,
-        "schema": {
-            "schema_version": (
-                "leadpoet.provider_persistence_batch_contract.v1"
-            ),
-            "cache_put": "atomic_exact_row",
-            "outcome_append": "atomic_contiguous_batch",
-            "outcome_batch_max": 32,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
-    }:
-        raise SystemExit(
-            "migration-backed provider persistence batch evidence is missing"
+            "migration-backed provider evidence cache evidence is missing"
         )
     if document.get("maintenance_lease") != {
         "schema_version": "leadpoet.maintenance_lease_contract.v1",
@@ -973,19 +962,6 @@ def verify_migration_backed_database_contract(
     }:
         raise SystemExit(
             "migration-backed maintenance lease evidence is missing"
-        )
-    provider_append = document.get("provider_outcome_append")
-    if (
-        not isinstance(provider_append, dict)
-        or provider_append.get("accepted_count") != 1
-        or provider_append.get("rejected_count") != 1
-        or provider_append.get("row_count") != 3
-        or provider_append.get("contention_rollback_delta") != 0
-        or provider_append.get("durable_head_conflict_verified") is not True
-        or provider_append.get("empty_head_conflict_verified") is not True
-    ):
-        raise SystemExit(
-            "migration-backed provider outcome append evidence is missing"
         )
     relations = document.get("relations")
     if (
@@ -1516,6 +1492,8 @@ def main() -> int:
     rejected = [row for row in rows if row.get("status") == "rejected"]
     if rejected:
         raise SystemExit(f"contract adapter rejected operations: {rejected!r}")
+    if component in {"gateway", "validator"} and scenario == "production_success":
+        verify_lab_arena_guard_boundary_denial(rows)
     verify_rehearsal_integrity(
         rows,
         from_sha=from_sha,

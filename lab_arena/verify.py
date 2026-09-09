@@ -54,6 +54,7 @@ STAGE_DENOMINATORS = (STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT - STAGE_1_ICP_COUNT
 MAX_COMPANIES_PER_ICP = 5
 ACCEPTED_CAUSE = "accepted"
 ZERO_ROW_CAUSES = tuple(cause for cause in TERMINAL_CAUSES if cause != ACCEPTED_CAUSE)
+PROMOTION_THRESHOLD_POINTS = Fraction(1, 1)
 
 # ---------------------------------------------------------------------------
 # Small guards
@@ -182,7 +183,7 @@ def per_icp_score(
     breakdowns: Sequence[Mapping[str, Any]],
     policy: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """One ICP through ``compute_evaluation_aggregates`` with the scorer policy.
+    """Score one ICP through the shared competition evaluator and policy.
 
     ``sum(final scores clamped to 0..100) / N - penalty / N``, floored at the
     policy floor, where the penalty is the Lab's false-positive counters over
@@ -376,15 +377,17 @@ def king_decision(
     finalists_final_scores: Sequence[Mapping[str, Any]],
     king_entry: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Choose a miner only when it strictly beats the daily baseline.
+    """Choose a miner only when it beats the daily baseline by one point.
 
     Entries are ``{"submission_id", "hotkey", "final_score"}``
     where ``final_score`` is ``None`` for a participant with no valid
     full daily ICP result. Contenders are challengers with any valid score.
     The highest contender (ties by stable submission ID) is crowned only when
     both it and the organizer baseline have valid scores and the contender's
-    score is strictly higher. A tie, no contender, or no valid baseline score
-    records ``no_king``. The baseline is a threshold, never a champion.
+    score is at least exactly 1.0 point higher. A smaller margin, no
+    contender, or no valid baseline score records ``no_king``. Decimal score
+    text is compared as exact rational values, so the boundary is
+    deterministic. The baseline is a threshold, never a champion.
     """
 
     contenders = []  # type: List[Dict[str, Any]]
@@ -410,7 +413,8 @@ def king_decision(
     if (
         king["final_score"] is not None
         and best is not None
-        and best["final_score"] > king["final_score"]
+        and Fraction(repr(best["final_score"]))
+        >= Fraction(repr(king["final_score"])) + PROMOTION_THRESHOLD_POINTS
     ):
         return _decision("crowned", best, best["submission_id"])
     return _decision("no_king", None, None)

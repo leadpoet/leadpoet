@@ -897,7 +897,7 @@ def test_dynamic_source_add_route_is_selected_from_measured_job_catalog():
     row = {
         "adapter_id": "adapter:public-source",
         "miner_hotkey": "miner-one",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "registry_provider_id": "public_source",
         "credential_envelope": {},
         "provision_doc": {

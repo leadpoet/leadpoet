@@ -64,6 +64,10 @@ from scripts.materialize_production_parity_secrets import (  # noqa: E402
     SecretMaterializationError,
     _parse_environment_document,
 )
+from scripts.gateway_restart_timing_diagnostic import (  # noqa: E402
+    GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS,
+    GATEWAY_RESTART_TIMING_STAGES,
+)
 
 
 CRITICAL_STAGES = (
@@ -153,6 +157,86 @@ SAFE_REHEARSAL_ERROR_TYPES = frozenset(
         "ValueError",
     }
 )
+SAFE_REHEARSAL_ERROR_CATEGORIES = frozenset(
+    {
+        "connection_refused",
+        "database_shutting_down",
+        "docker_unavailable",
+        "gateway_launcher",
+        "permission",
+        "postgrest",
+        "resource_disk",
+        "resource_oom",
+        "schema",
+        "timeout",
+        "validator_launcher",
+    }
+)
+SAFE_REHEARSAL_CONTRACT_KINDS = frozenset(
+    {
+        "adapter",
+        "aws",
+        "ctr",
+        "curl",
+        "docker",
+        "getconf",
+        "nitro",
+        "nsenter",
+        "pip",
+        "python",
+        "python-inline",
+        "python-module",
+        "sudo",
+        "systemctl",
+    }
+)
+GATEWAY_BOOTSTRAP_ERROR_PREFIXES = (
+    ("ERROR: gateway restart authority controller is invalid", "controller_authority"),
+    ("ERROR: paired gateway destructive handoff authority is incomplete", "paired_handoff_incomplete"),
+    ("ERROR: paired gateway destructive handoff authority is invalid", "paired_handoff_invalid"),
+    ("ERROR: paired gateway restart requires a destructive handoff", "paired_handoff_missing"),
+    ("ERROR: gateway restart timing ledger must not be a symlink", "timing_ledger_symlink"),
+    ("ERROR: gateway restart timing ledger is unavailable", "timing_ledger_unavailable"),
+    ("ERROR: gateway restart timing ledger is empty", "timing_ledger_empty"),
+    ("ERROR: gateway restart timing ledger name is invalid", "timing_ledger_name"),
+    ("ERROR: gateway restart timing ledger epoch differs from active restart", "timing_ledger_epoch"),
+    ("ERROR: gateway restart timing ledger PID differs from active restart", "timing_ledger_pid"),
+    ("ERROR: gateway restart timing ledger is outside the canonical directory", "timing_ledger_directory"),
+    ("ERROR: gateway release supersession counters are invalid", "release_supersession"),
+    ("ERROR: another gateway restart is already running", "restart_lock_held"),
+    ("ERROR: gateway restart lock recovery lost a concurrency race", "restart_lock_race"),
+    ("ERROR: flock is required for gateway Git deployments", "flock_unavailable"),
+    ("ERROR: re-executed gateway restart lost the deployment lock", "deployment_lock_lost"),
+    ("ERROR: gateway restart inherited delegated AWS authority:", "delegated_aws_authority"),
+    ("ERROR: gateway restart AWS region differs from us-east-1", "aws_region"),
+    ("ERROR: gateway restart instance-role-only authority differs", "instance_role_authority"),
+    ("ERROR: emergency Docker lock helper is unavailable", "emergency_lock_helper"),
+    ("ERROR: emergency Docker cleanup could not acquire its operation lock", "emergency_cleanup_lock"),
+    ("ERROR: guarded emergency Docker cleanup failed closed", "emergency_cleanup"),
+    ("ERROR: hydrated/cloned env missing SUPABASE_SERVICE_ROLE_KEY", "service_role_missing"),
+    ("ERROR: configured gateway Python is unavailable:", "python_unavailable"),
+    ("ERROR: gateway V2 requires Python 3.11 or newer; observed", "python_version"),
+    ("ERROR: one-time cutover restart-start capture is missing", "cutover_capture_missing"),
+    ("ERROR: GATEWAY_STATEFUL_CUTOVER_CEREMONY must be 0 or 1", "cutover_flag"),
+    ("ERROR: RESEARCH_LAB_TEE_PROTOCOL must be v2; V1 authority is retired", "tee_protocol"),
+    ("ERROR: gateway Git deployment helper is missing:", "git_helper_missing"),
+)
+GATEWAY_BOOTSTRAP_ERROR_WITH_DETAIL_IDENTIFIERS = frozenset(
+    {
+        "delegated_aws_authority",
+        "git_helper_missing",
+        "python_unavailable",
+        "python_version",
+    }
+)
+SAFE_GATEWAY_BOOTSTRAP_OBSERVATION_IDENTIFIERS = frozenset(
+    identifier for _, identifier in GATEWAY_BOOTSTRAP_ERROR_PREFIXES
+) | {
+    "contract_error",
+    "exception",
+    "secret_path_missing",
+    "secret_path_not_absolute",
+}
 SAFE_WORKFLOW_PROJECTION_ERROR_TYPES = SAFE_REHEARSAL_ERROR_TYPES | {
     "None",
     "OtherError",
@@ -883,9 +967,13 @@ class _DockerDatabase:
 DO $$ BEGIN CREATE ROLE anon NOLOGIN INHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE authenticated NOLOGIN INHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE service_role NOLOGIN INHERIT BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE lab_arena_owner NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE lab_arena_service NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER ROLE anon WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE authenticated WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE service_role WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
+ALTER ROLE lab_arena_owner WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE lab_arena_service WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
@@ -935,6 +1023,18 @@ SELECT json_build_object(
       AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
       AND rolbypassrls
   ),
+  'arena_service_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'lab_arena_service'
+      AND NOT rolcanlogin AND NOT rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND NOT rolbypassrls
+  ),
+  'arena_owner_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'lab_arena_owner'
+      AND NOT rolcanlogin AND NOT rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND NOT rolbypassrls
+  ),
   'auth_schema', to_regnamespace('auth') IS NOT NULL,
   'extensions_schema', to_regnamespace('extensions') IS NOT NULL,
   'pgcrypto_extension', EXISTS (
@@ -958,6 +1058,8 @@ SELECT json_build_object(
             "anon_role",
             "authenticated_role",
             "service_role",
+            "arena_owner_role",
+            "arena_service_role",
             "auth_schema",
             "extensions_schema",
             "pgcrypto_extension",
@@ -1456,22 +1558,6 @@ def _image_build_failure_diagnostics(
 
 def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
-    contract_kinds = {
-        "adapter",
-        "aws",
-        "ctr",
-        "curl",
-        "docker",
-        "getconf",
-        "nitro",
-        "nsenter",
-        "pip",
-        "python",
-        "python-inline",
-        "python-module",
-        "sudo",
-        "systemctl",
-    }
     for raw_line in output_tail.splitlines():
         if len(diagnostics) >= 32:
             break
@@ -1479,6 +1565,16 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
         if not line or len(line) > 2048 or SECRET_LIKE_DIAGNOSTIC_RE.search(line):
             continue
         projected: dict[str, Any] | None = None
+        match = re.match(
+            r"REHEARSAL_TIME_BUDGET_EXCEEDED "
+            r"profile=(prepush|unaccelerated)(?: |$)",
+            line,
+        )
+        if match:
+            projected = {
+                "marker": "time_budget",
+                "profile": match.group(1),
+            }
         match = re.fullmatch(
             r"REHEARSAL_FAILURE_DIAGNOSTICS "
             r"component=(gateway|validator|workflow) status=([0-9]{1,3})",
@@ -1490,6 +1586,31 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
                 "component": match.group(1),
                 "status": int(match.group(2)),
             }
+        if projected is None:
+            process_exit = re.fullmatch(
+                r"REHEARSAL_POSTGREST_STARTUP "
+                r"component=(gateway|validator) outcome=process_exit "
+                r"returncode=([0-9]{1,3})",
+                line,
+            )
+            readiness_timeout = re.fullmatch(
+                r"REHEARSAL_POSTGREST_STARTUP "
+                r"component=(gateway|validator) outcome=readiness_timeout",
+                line,
+            )
+            if process_exit and 0 <= int(process_exit.group(2)) <= 255:
+                projected = {
+                    "marker": "postgrest_startup",
+                    "component": process_exit.group(1),
+                    "outcome": "process_exit",
+                    "returncode": int(process_exit.group(2)),
+                }
+            elif readiness_timeout:
+                projected = {
+                    "marker": "postgrest_startup",
+                    "component": readiness_timeout.group(1),
+                    "outcome": "readiness_timeout",
+                }
         if projected is None:
             match = re.fullmatch(
                 r"REHEARSAL_EVIDENCE_NORMALIZATION_FAILED "
@@ -1609,7 +1730,7 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
                     )
         if projected is None:
             match = re.match(r"REHEARSAL CONTRACT ERROR \[([a-z-]+)\]:", line)
-            if match and match.group(1) in contract_kinds:
+            if match and match.group(1) in SAFE_REHEARSAL_CONTRACT_KINDS:
                 projected = {
                     "marker": "contract_error",
                     "kind": match.group(1),
@@ -1621,6 +1742,384 @@ def _rehearsal_output_diagnostics(output_tail: str) -> list[dict[str, Any]]:
                 projected["category"] = category
         if projected is not None and projected not in diagnostics:
             diagnostics.append(projected)
+    return diagnostics
+
+
+def _rehearsal_postgrest_startup_diagnostics(
+    *streams: str,
+) -> list[dict[str, Any]]:
+    """Retain fixed startup outcomes even when later output exceeds the tail."""
+
+    diagnostics: list[dict[str, Any]] = []
+    for stream in streams:
+        for raw_line in stream.splitlines():
+            for projected in _rehearsal_output_diagnostics(raw_line):
+                if (
+                    projected.get("marker") == "postgrest_startup"
+                    and projected not in diagnostics
+                ):
+                    diagnostics.append(projected)
+            if len(diagnostics) >= 4:
+                return diagnostics
+    return diagnostics
+
+
+def _gateway_bootstrap_line_observation(line: str) -> dict[str, Any] | None:
+    """Project one source-reviewed bootstrap line without its free text."""
+
+    if not line or len(line) > 2048:
+        return None
+    for prefix, identifier in GATEWAY_BOOTSTRAP_ERROR_PREFIXES:
+        if line == prefix or (
+            identifier in GATEWAY_BOOTSTRAP_ERROR_WITH_DETAIL_IDENTIFIERS
+            and line.startswith(prefix + " ")
+        ):
+            return {
+                "marker": "gateway_bootstrap_observation",
+                "identifier": identifier,
+                "source_scope": "gateway_source",
+            }
+    secret_path = re.fullmatch(
+        r"ERROR: (?:GATEWAY_PRIVATE_KEY_PATH|ARWEAVE_KEYFILE_PATH) "
+        r"must be configured as an absolute path for Git-checkout deployment",
+        line,
+    )
+    if secret_path is not None:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "secret_path_not_absolute",
+            "source_scope": "gateway_source",
+        }
+    missing_secret = re.fullmatch(
+        r"ERROR: configured (?:GATEWAY_PRIVATE_KEY_PATH|ARWEAVE_KEYFILE_PATH) "
+        r"file does not exist",
+        line,
+    )
+    if missing_secret is not None:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "secret_path_missing",
+            "source_scope": "gateway_source",
+        }
+    contract_error = re.match(r"REHEARSAL CONTRACT ERROR \[([a-z-]+)\]:", line)
+    if contract_error and contract_error.group(1) in SAFE_REHEARSAL_CONTRACT_KINDS:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "contract_error",
+            "kind": contract_error.group(1),
+            "source_scope": "interleaved_component_stream",
+        }
+    exception = re.match(r"([A-Za-z][A-Za-z0-9_]*):", line)
+    if exception and exception.group(1) in SAFE_REHEARSAL_ERROR_TYPES:
+        return {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "exception",
+            "error_type": exception.group(1),
+            "source_scope": "interleaved_component_stream",
+        }
+    return None
+
+
+def _rehearsal_gateway_bootstrap_observations(
+    *streams: str,
+    candidate_sha: str,
+) -> list[dict[str, Any]]:
+    """Retain fixed observations from one exact terminal bootstrap failure."""
+
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+        return []
+    for stream in streams:
+        active = False
+        invalid = False
+        terminal_failure = False
+        bootstrap_failure = False
+        timing_diagnostic_count = 0
+        observations: list[dict[str, Any]] = []
+        for raw_line in stream.splitlines():
+            line = raw_line.strip()
+            start = re.fullmatch(
+                r"REHEARSAL_START component=gateway from=([0-9a-f]{40}) "
+                r"candidate=([0-9a-f]{40}) transition=(forward|rollback) "
+                r"scenario=([a-z0-9_]{1,64}) scope=exact",
+                line,
+            )
+            if start is not None:
+                if active or invalid or start.group(2) != candidate_sha:
+                    invalid = True
+                    active = False
+                else:
+                    active = True
+                    invalid = False
+                    terminal_failure = False
+                    bootstrap_failure = False
+                    timing_diagnostic_count = 0
+                    observations = []
+                continue
+            if not active:
+                continue
+            if line == f"REHEARSAL_SUCCESS component=gateway candidate={candidate_sha}":
+                active = False
+                invalid = False
+                observations = []
+                continue
+            failure = re.fullmatch(
+                r"REHEARSAL_FAILURE_DIAGNOSTICS component=gateway "
+                r"status=([1-9][0-9]{0,2})",
+                line,
+            )
+            if failure is not None and int(failure.group(1)) <= 255:
+                terminal_failure = True
+                continue
+            if terminal_failure and line.startswith(
+                "REHEARSAL_GATEWAY_RESTART_TIMING "
+            ):
+                timing_diagnostic_count += 1
+                timing = re.fullmatch(
+                    r"REHEARSAL_GATEWAY_RESTART_TIMING "
+                    r"candidate=([0-9a-f]{40}) stage=([a-z0-9_]{1,64}) "
+                    r"status=([a-z]{1,16}) "
+                    r"elapsed_seconds=([0-9]+(?:\.[0-9]{1,3})?)",
+                    line,
+                )
+                elapsed = float(timing.group(4)) if timing is not None else -1
+                bootstrap_failure = (
+                    timing is not None
+                    and timing_diagnostic_count == 1
+                    and timing.group(1) == candidate_sha
+                    and timing.group(2) == "bootstrap"
+                    and timing.group(3) == "failed"
+                    and 0
+                    <= elapsed
+                    <= GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS
+                )
+                continue
+            if line == "ERROR: exact gateway launcher failed":
+                if (
+                    not invalid
+                    and terminal_failure
+                    and bootstrap_failure
+                    and observations
+                ):
+                    return observations[:8]
+                active = False
+                observations = []
+                continue
+            if not terminal_failure:
+                observation = _gateway_bootstrap_line_observation(line)
+                if observation is not None and observation not in observations:
+                    observations.append(observation)
+    return []
+
+
+def _rehearsal_component_failure_diagnostics(
+    *streams: str,
+    candidate_sha: str,
+) -> list[dict[str, Any]]:
+    """Retain only fixed diagnostics from complete component failure blocks."""
+
+    diagnostics: list[dict[str, Any]] = []
+    for stream in streams:
+        active_component: str | None = None
+        active_diagnostics: list[dict[str, Any]] = []
+        timing_diagnostic_count = 0
+        for raw_line in stream.splitlines():
+            line = raw_line.strip()
+            start = re.fullmatch(
+                r"REHEARSAL_FAILURE_DIAGNOSTICS "
+                r"component=(gateway|validator) status=([0-9]{1,3})",
+                line,
+            )
+            if start is not None and 1 <= int(start.group(2)) <= 255:
+                active_component = start.group(1)
+                active_diagnostics = [
+                    {
+                        "marker": "component_failure",
+                        "component": active_component,
+                        "status": int(start.group(2)),
+                    }
+                ]
+                timing_diagnostic_count = 0
+                continue
+            if active_component is None:
+                continue
+            timing = None
+            if line.startswith("REHEARSAL_GATEWAY_RESTART_TIMING "):
+                timing_diagnostic_count += 1
+                timing = re.fullmatch(
+                    r"REHEARSAL_GATEWAY_RESTART_TIMING "
+                    r"candidate=([0-9a-f]{40}) stage=([a-z0-9_]{1,64}) "
+                    r"status=([a-z]{1,16}) "
+                    r"elapsed_seconds=([0-9]+(?:\.[0-9]{1,3})?)",
+                    line,
+                )
+                elapsed = float(timing.group(4)) if timing is not None else -1
+                if (
+                    timing is not None
+                    and active_component == "gateway"
+                    and timing_diagnostic_count == 1
+                    and timing.group(1) == candidate_sha
+                    and timing.group(2) in GATEWAY_RESTART_TIMING_STAGES
+                    and timing.group(3) == "failed"
+                    and 0 <= elapsed <= GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS
+                ):
+                    active_diagnostics.append(
+                        {
+                            "marker": "gateway_restart_timing",
+                            "final_stage": timing.group(2),
+                            "final_status": timing.group(3),
+                            "elapsed_seconds": round(elapsed, 3),
+                        }
+                    )
+                else:
+                    active_diagnostics = [
+                        item
+                        for item in active_diagnostics
+                        if item.get("marker") != "gateway_restart_timing"
+                    ]
+                continue
+            for projected in _rehearsal_output_diagnostics(line):
+                if (
+                    projected.get("marker")
+                    in {"contract_error", "error", "http"}
+                    and projected not in active_diagnostics
+                    and len(active_diagnostics) < 16
+                ):
+                    active_diagnostics.append(projected)
+            if line != f"ERROR: exact {active_component} launcher failed":
+                continue
+            for projected in active_diagnostics:
+                if projected not in diagnostics and len(diagnostics) < 32:
+                    diagnostics.append(projected)
+            active_component = None
+            active_diagnostics = []
+    return diagnostics
+
+
+def _retained_component_failure_diagnostics(
+    markers: Any,
+) -> list[dict[str, Any]]:
+    """Sanitize component details for the durable Fast failure projection."""
+
+    if not isinstance(markers, list):
+        return []
+    diagnostics: list[dict[str, Any]] = []
+    for item in markers:
+        if not isinstance(item, Mapping):
+            continue
+        marker = item.get("marker")
+        projected: dict[str, Any] | None = None
+        if (
+            marker == "component_failure"
+            and item.get("component") in {"gateway", "validator"}
+            and type(item.get("status")) is int
+            and 1 <= item["status"] <= 255
+        ):
+            projected = {
+                "marker": marker,
+                "component": item["component"],
+                "status": item["status"],
+            }
+        elif (
+            marker == "gateway_bootstrap_observation"
+            and isinstance(item.get("identifier"), str)
+            and item["identifier"] in SAFE_GATEWAY_BOOTSTRAP_OBSERVATION_IDENTIFIERS
+        ):
+            projected = {
+                "marker": marker,
+                "identifier": item["identifier"],
+            }
+            expected_scope = (
+                "interleaved_component_stream"
+                if item["identifier"] in {"contract_error", "exception"}
+                else "gateway_source"
+            )
+            if item.get("source_scope") != expected_scope:
+                projected = None
+            else:
+                projected["source_scope"] = expected_scope
+            if projected is not None and item["identifier"] == "contract_error":
+                if (
+                    not isinstance(item.get("kind"), str)
+                    or item["kind"] not in SAFE_REHEARSAL_CONTRACT_KINDS
+                ):
+                    projected = None
+                else:
+                    projected["kind"] = item["kind"]
+            elif projected is not None and item["identifier"] == "exception":
+                if (
+                    not isinstance(item.get("error_type"), str)
+                    or item["error_type"] not in SAFE_REHEARSAL_ERROR_TYPES
+                ):
+                    projected = None
+                else:
+                    projected["error_type"] = item["error_type"]
+        elif (
+            marker == "gateway_restart_timing"
+            and isinstance(item.get("final_stage"), str)
+            and item["final_stage"] in GATEWAY_RESTART_TIMING_STAGES
+            and item.get("final_status") == "failed"
+            and type(item.get("elapsed_seconds")) in {int, float}
+            and 0
+            <= float(item["elapsed_seconds"])
+            <= GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS
+        ):
+            projected = {
+                "marker": marker,
+                "final_stage": item["final_stage"],
+                "final_status": item["final_status"],
+                "elapsed_seconds": round(float(item["elapsed_seconds"]), 3),
+            }
+        elif (
+            marker == "http"
+            and item.get("endpoint") in {"/research-lab/status", "/attest"}
+            and isinstance(item.get("status"), str)
+            and re.fullmatch(
+                r"curl_failed|[1-5][0-9]{2}",
+                item["status"],
+            )
+            is not None
+        ):
+            projected = {
+                "marker": marker,
+                "endpoint": item["endpoint"],
+                "status": item["status"],
+            }
+        elif marker == "error" and item.get(
+            "category"
+        ) in SAFE_REHEARSAL_ERROR_CATEGORIES:
+            projected = {
+                "marker": marker,
+                "category_hint": item["category"],
+            }
+        elif marker == "contract_error" and item.get(
+            "kind"
+        ) in SAFE_REHEARSAL_CONTRACT_KINDS:
+            projected = {
+                "marker": marker,
+                "kind": item["kind"],
+            }
+        elif (
+            marker == "postgrest_startup"
+            and item.get("component") in {"gateway", "validator"}
+            and item.get("outcome") in {"process_exit", "readiness_timeout"}
+        ):
+            projected = {
+                "marker": marker,
+                "component": item["component"],
+                "outcome": item["outcome"],
+            }
+            returncode = item.get("returncode")
+            if item["outcome"] == "process_exit":
+                if type(returncode) is not int or not 0 <= returncode <= 255:
+                    projected = None
+                else:
+                    projected["returncode"] = returncode
+            elif returncode is not None:
+                projected = None
+        if projected is not None and projected not in diagnostics:
+            diagnostics.append(projected)
+        if len(diagnostics) >= 16:
+            break
     return diagnostics
 
 
@@ -1703,7 +2202,8 @@ def _rehearsal_failure_diagnostics(
         and item.get("status") == "failed"
         for item in phase_diagnostics
     )
-    output_diagnostics = [
+    output_diagnostics: list[dict[str, Any]] = []
+    for diagnostic in [
         # The controller reserves stderr for its phase lifecycle. Stdout may
         # contain arbitrary action output and is never phase authority.
         *phase_diagnostics,
@@ -1711,14 +2211,34 @@ def _rehearsal_failure_diagnostics(
             stderr_text,
             exact_image_build_failed=exact_image_build_failed,
         ),
+        *_rehearsal_postgrest_startup_diagnostics(stdout_text, stderr_text),
+        *_rehearsal_gateway_bootstrap_observations(
+            stdout_text,
+            stderr_text,
+            candidate_sha=candidate_sha,
+        ),
+        *_rehearsal_component_failure_diagnostics(
+            stdout_text,
+            stderr_text,
+            candidate_sha=candidate_sha,
+        ),
         *_rehearsal_output_diagnostics(output_tail),
-    ]
+    ]:
+        if diagnostic not in output_diagnostics:
+            output_diagnostics.append(diagnostic)
     if output_diagnostics:
         projection["output_markers"] = output_diagnostics
-    # The rehearsal emits this fixed-format authority marker to stderr before
-    # outer cleanup. Cleanup can exceed the bounded diagnostic tail, so locate
-    # the marker in the captured stderr while keeping projected output bounded.
-    matches = re.findall(
+    projection["timeout"] = any(
+        item.get("marker") == "time_budget" for item in output_diagnostics
+    )
+    # The rehearsal emits fixed-format authority markers to stderr before outer
+    # cleanup. Cleanup can exceed the bounded diagnostic tail, so locate the
+    # marker in captured stderr while keeping projected output bounded.
+    bounded_matches = re.findall(
+        r"(?:^|\n)REHEARSAL_BOUNDED_FAILURE_PROJECTION ([^\s]+)",
+        stderr_text,
+    )
+    matches = bounded_matches or re.findall(
         r"(?:^|\n)REHEARSAL_BATCH_FAILURE_EVIDENCE ([^\s]+)",
         stderr_text,
     )
@@ -1749,9 +2269,19 @@ def _rehearsal_failure_diagnostics(
             or document.get("status") != "failed"
             or not isinstance(document.get("stages"), list)
             or len(document["stages"]) > 64
+            or (
+                "timeout" in document
+                and type(document.get("timeout")) is not bool
+            )
         ):
             return projection
         stages: list[dict[str, Any]] = []
+        summary_error_type = document.get("error_type")
+        if (
+            isinstance(summary_error_type, str)
+            and summary_error_type in SAFE_REHEARSAL_ERROR_TYPES
+        ):
+            projection["error_type"] = summary_error_type
         for item in document["stages"]:
             if not isinstance(item, Mapping) or item.get("status") not in {
                 "failed",
@@ -1828,6 +2358,7 @@ def _rehearsal_failure_diagnostics(
                     item["status"] == "unexercised" for item in stages
                 ),
                 "stages": stages,
+                "timeout": projection["timeout"] or document.get("timeout") is True,
             }
         )
     except (OSError, TypeError, ValueError, UnicodeDecodeError):
@@ -1858,6 +2389,7 @@ def _rehearsal_timeout_diagnostics(
         result, candidate_sha=candidate_sha
     )
     projection["parent_watchdog_timeout_seconds"] = int(exc.timeout)
+    projection["timeout"] = True
     return projection
 
 
@@ -1884,18 +2416,22 @@ def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
         diagnostics = _rehearsal_timeout_diagnostics(
             exc, candidate_sha=candidate_sha
         )
-        raise ProductionParityError(
+        error = ProductionParityError(
             "candidate-derived N-1 rehearsal parent watchdog timed out: "
             + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
-        ) from None
+        )
+        setattr(error, "_rehearsal_failure_diagnostics", diagnostics)
+        raise error from None
     if result.returncode != 0:
         diagnostics = _rehearsal_failure_diagnostics(
             result, candidate_sha=candidate_sha
         )
-        raise ProductionParityError(
+        error = ProductionParityError(
             "candidate-derived N-1 rehearsal failed: "
             + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
         )
+        setattr(error, "_rehearsal_failure_diagnostics", diagnostics)
+        raise error
     evidence = _load_json(
         evidence_path, description="joined restart rehearsal evidence"
     )
@@ -1907,6 +2443,82 @@ def _run_rehearsal(*, base_sha: str, candidate_sha: str) -> dict[str, Any]:
     ):
         raise ProductionParityError("joined restart rehearsal identity differs")
     return evidence
+
+
+def _write_rehearsal_failure_projection(
+    path: Path,
+    *,
+    candidate_sha: str,
+    diagnostics: Mapping[str, Any],
+) -> None:
+    """Write only the bounded diagnostic contract used by CI retention."""
+
+    stages = diagnostics.get("stages")
+    safe_stages: list[dict[str, Any]] = []
+    if isinstance(stages, list):
+        for item in stages:
+            if not isinstance(item, Mapping):
+                continue
+            stage = item.get("stage")
+            status = item.get("status")
+            if (
+                not isinstance(stage, str)
+                or not _safe_rehearsal_stage(stage)
+                or status not in {"failed", "unexercised"}
+            ):
+                continue
+            projected: dict[str, Any] = {
+                "stage": stage,
+                "status": status,
+            }
+            error_type = item.get("error_type")
+            if error_type in SAFE_REHEARSAL_ERROR_TYPES:
+                projected["error_type"] = error_type
+            returncode = item.get("returncode")
+            if type(returncode) is int and -255 <= returncode <= 255:
+                projected["returncode"] = returncode
+            duration = item.get("duration_seconds")
+            if type(duration) in {int, float} and 0 <= float(duration) <= 3600:
+                projected["duration_seconds"] = round(float(duration), 3)
+            safe_stages.append(projected)
+    markers = diagnostics.get("output_markers")
+    safe_markers = sorted(
+        {
+            str(item.get("marker"))
+            for item in markers
+            if isinstance(item, Mapping)
+            and re.fullmatch(r"[a-z_]{1,64}", str(item.get("marker") or ""))
+        }
+    )[:32] if isinstance(markers, list) else []
+    component_diagnostics = _retained_component_failure_diagnostics(markers)
+    projection = {
+        "candidate_sha": candidate_sha,
+        "output_markers": safe_markers,
+        "returncode": (
+            diagnostics.get("returncode")
+            if type(diagnostics.get("returncode")) is int
+            and -255 <= diagnostics["returncode"] <= 255
+            else None
+        ),
+        "schema_version": "leadpoet.fast_rehearsal_failure_projection.v1",
+        "stages": safe_stages,
+        "status": "failed",
+        "timeout": diagnostics.get("timeout") is True,
+    }
+    if component_diagnostics:
+        projection["component_failure_diagnostics"] = component_diagnostics
+    error_type = diagnostics.get("error_type")
+    if isinstance(error_type, str) and error_type in SAFE_REHEARSAL_ERROR_TYPES:
+        projection["error_type"] = error_type
+    encoded = json.dumps(projection, sort_keys=True, indent=2) + "\n"
+    if len(encoded.encode("utf-8")) > 16_384:
+        projection.pop("component_failure_diagnostics", None)
+        projection["output_markers"] = []
+        projection["stages"] = []
+        projection["truncated"] = True
+        encoded = json.dumps(projection, sort_keys=True, indent=2) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(encoded, encoding="utf-8")
 
 
 def _run_database_lane(
@@ -2348,6 +2960,18 @@ def run_fast_lane(
     ledger_path.write_text(
         json.dumps(final, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
+    rehearsal_error = failures.get("rehearsal")
+    rehearsal_diagnostics = (
+        getattr(rehearsal_error, "_rehearsal_failure_diagnostics", None)
+        if rehearsal_error is not None
+        else None
+    )
+    if isinstance(rehearsal_diagnostics, Mapping):
+        _write_rehearsal_failure_projection(
+            ledger_path.with_name("rehearsal-failure-projection.json"),
+            candidate_sha=contract["candidate_sha"],
+            diagnostics=rehearsal_diagnostics,
+        )
     return final
 
 

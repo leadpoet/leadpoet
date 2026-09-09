@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 from pathlib import Path
 
 import pytest
@@ -52,8 +53,24 @@ def test_gateway_secret_parser_reports_names_without_values():
     assert secret["SUPABASE_URL"] == "https://x.supabase.co"
     assert secret["unrelated.lowercase-key"] == "ignored"
     with pytest.raises(SCRIPT.ConfigurationError) as error:
-        SCRIPT._require_secret_names(secret, SCRIPT.REQUIRED_ORGANIZER_KEYS)
+        SCRIPT._require_secret_names(secret, tuple(SCRIPT.ORGANIZER_KEY_ALIASES))
     assert "private-value" not in str(error.value)
+
+
+def test_provider_key_aliases_accept_legacy_gateway_names_without_exposing_values():
+    assert SCRIPT._secret_alias(
+        {"OPENROUTER_API_KEY": "private-value"},
+        "LAB_ARENA_OPENROUTER_API_KEY",
+    ) == "private-value"
+    with pytest.raises(SCRIPT.ConfigurationError) as error:
+        SCRIPT._secret_alias(
+            {
+                "LAB_ARENA_OPENROUTER_API_KEY": "first",
+                "OPENROUTER_API_KEY": "second",
+            },
+            "LAB_ARENA_OPENROUTER_API_KEY",
+        )
+    assert "first" not in str(error.value) and "second" not in str(error.value)
 
 
 def test_parser_fixes_shadow_limits_and_requires_explicit_resources():
@@ -78,3 +95,44 @@ def test_parser_fixes_shadow_limits_and_requires_explicit_resources():
     assert args.scoring_cap_usd == 10_000_000
     assert args.runner_hotkey == SCRIPT.DEFAULT_RUNNER
     assert args.miner_hotkey == SCRIPT.DEFAULT_MINER
+
+
+@pytest.mark.parametrize("service_key", ("", "sb_secret_example"))
+def test_managed_transport_uses_arena_environment_without_network(monkeypatch, service_key):
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_JWT", "header.payload.signature")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", service_key)
+    args = type("Args", (), {"arena_environment_file": None})()
+
+    transport = SCRIPT._managed_postgrest_transport(args)
+    try:
+        assert "header.payload.signature" not in repr(transport)
+        assert "example.supabase.co" in repr(transport)
+        assert ("Authorization" in transport._headers) is not bool(service_key)
+        assert transport._headers["apikey"] == (service_key or "anon")
+    finally:
+        transport.close()
+
+
+def test_managed_driver_is_pinned_and_does_not_create_daily_rounds():
+    calls = []
+
+    class Service:
+        def advance_round(self, round_id):
+            calls.append(("advance", round_id))
+            return {"status": "waiting"}
+
+        def ensure_daily_round(self):
+            calls.append(("ensure",))
+            raise AssertionError("managed driver must not create a daily round")
+
+    assert SCRIPT._advance_pinned(Service(), "arena-2026-09-07-e2e1") == (
+        "advanced arena-2026-09-07-e2e1:waiting"
+    )
+    assert calls == [("advance", "arena-2026-09-07-e2e1")]
+
+
+def test_serve_pins_the_runtime_service_to_the_requested_round():
+    source = inspect.getsource(SCRIPT._serve)
+    assert "pinned_round_id=round_id" in source

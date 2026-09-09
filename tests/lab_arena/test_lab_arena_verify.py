@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from leadpoet_verifier.research_evaluation import compute_evaluation_aggregates
 from qualification.scoring import competition as evaluator
 
 from lab_arena import contracts, scoring, verify
@@ -115,30 +114,11 @@ def test_per_icp_score_matches_the_shared_evaluation_math():
         _junk(),
         _breakdown(30.0, details=[_signal(1, 30.0)]),
     ]
-    gate, primary = evaluator.count_penalizable_false_positives(
-        breakdowns, icp_has_intent_signals=True
-    )
-    expected = compute_evaluation_aggregates(
-        [{
-            "icp_ref": "current",
-            "icp_company_goal": 5,
-            "base_company_scores": [],
-            "candidate_company_scores": [80.0, 60.0, 40.0, 0.0, 30.0],
-            "candidate_fp_gate_count": gate,
-            "candidate_fp_unverified_primary_count": primary,
-        }],
-        leads_per_icp_normalizer=5,
-        fp_penalty_points=10.0,
-        fp_unverified_primary_penalty_points=10.0,
-        fp_penalty_icp_floor=0.0,
-    )["per_icp_results"][0]["candidate_per_icp_score"]
-
     result = verify.per_icp_score(icp, breakdowns, POLICY)
-    assert expected == 38.0
-    assert result["per_icp_score"] == expected
+    assert result["per_icp_score"] == 38.0
     assert (result["fp_gate_count"], result["fp_unverified_primary_count"]) == (1, 1)
     redacted = [verify.redact_breakdown(item) for item in breakdowns]
-    assert verify.per_icp_score(icp, redacted, POLICY)["per_icp_score"] == expected
+    assert verify.per_icp_score(icp, redacted, POLICY)["per_icp_score"] == 38.0
     with pytest.raises(ArenaContractError):
         verify.per_icp_score(icp, ["not-an-object"], POLICY)
 
@@ -221,6 +201,52 @@ def test_ranking_finalist_cut_and_king_decisions_do_not_use_image_identity():
     assert [row["submission_id"] for row in final] == ["c", "king", "a", "b"]
     assert [row["is_baseline"] for row in final] == [False, True, False, False]
     assert all("is_king" not in row for row in final)
+
+
+@pytest.mark.parametrize(
+    ("challenger_score", "expected_outcome"),
+    [
+        (75.0, "no_king"),
+        (75.000001, "no_king"),
+        (75.999999, "no_king"),
+        (76.0, "crowned"),
+    ],
+)
+def test_king_decision_uses_exact_one_point_promotion_boundary(
+    challenger_score: float, expected_outcome: str
+):
+    decision = verify.king_decision(
+        [_entry("challenger", challenger_score)],
+        _entry("baseline", 75.0, True),
+    )
+    assert decision["outcome"] == expected_outcome
+
+
+def test_king_decision_applies_threshold_to_highest_valid_finalist():
+    decision = verify.king_decision(
+        [
+            _entry("invalid", None),
+            _entry("lower", 79.0),
+            _entry("largest-b", 80.0),
+            _entry("largest-a", 80.0),
+        ],
+        _entry("baseline", 79.0, True),
+    )
+    assert decision["outcome"] == "crowned"
+    assert decision["winner_submission_id"] == "largest-a"
+
+
+def test_king_decision_requires_a_valid_baseline_for_promotion():
+    decision = verify.king_decision(
+        [_entry("challenger", 100.0)],
+        _entry("baseline", None, True),
+    )
+    assert decision == {
+        "outcome": "no_king",
+        "king_submission_id": None,
+        "king_hotkey": "",
+        "winner_submission_id": None,
+    }
 
 
 def _walk_keys(value: Any) -> set:

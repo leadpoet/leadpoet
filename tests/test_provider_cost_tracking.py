@@ -501,44 +501,94 @@ def test_ledger_allows_final_success_to_exceed_cap_then_blocks_later_call():
     assert summary_after_second["blocked_call_count"] == 1
 
 
-def test_cost_cap_block_event_can_be_soft_stop_status():
+def test_cost_cap_block_event_is_hard_stop_by_default():
     ledger = ProviderCostLedger(scope="scope-cap", cap_usd=Decimal("0.50"))
     event = ledger.block_event(
         provider="exa",
         endpoint="/search",
         request_fingerprint="b" * 64,
         reason="cost_cap_reached",
-        status_code=200,
-        evidence="budget_soft_stop",
     )
 
-    assert event.status_code == 200
-    assert event.evidence == "budget_soft_stop"
+    assert event.status_code == 402
+    assert event.evidence == "blocked"
     assert event.cap_blocked
     assert not event.billable
     assert event.cost_usd == Decimal("0")
 
 
-def test_proxy_budget_soft_stop_body_is_provider_shaped_and_not_error_status():
-    exa_body = json.loads(
-        provider_evidence_proxy._budget_soft_stop_body(
-            "exa",
-            "https://api.exa.ai/search",
-        ).decode("utf-8")
-    )
-    assert exa_body["research_lab_budget_exhausted"] is True
-    assert exa_body["results"] == []
-    assert exa_body["costDollars"] == 0
+@pytest.mark.parametrize("legacy_header", [False, True])
+def test_proxy_cost_cap_returns_uncached_402(legacy_header):
+    class CountingProvider(BaseHTTPRequestHandler):
+        calls = 0
 
-    openrouter_body = json.loads(
-        provider_evidence_proxy._budget_soft_stop_body(
-            "or",
-            "https://openrouter.ai/api/v1/chat/completions",
-        ).decode("utf-8")
-    )
-    assert openrouter_body["research_lab_budget_exhausted"] is True
-    assert openrouter_body["choices"][0]["message"]["content"] == "[]"
-    assert openrouter_body["usage"]["total_tokens"] == 0
+        def log_message(self, *args):  # noqa: ANN001
+            pass
+
+        def do_POST(self):  # noqa: N802
+            type(self).calls += 1
+            self.send_response(500)
+            self.end_headers()
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), CountingProvider)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    proxy = None
+    try:
+        upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}/search"
+        proxy, store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=[
+                provider_evidence_proxy.ProviderRegistryEntry(
+                    id="exa",
+                    base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
+                    auth_kind="none",
+                )
+            ],
+        )
+        body = b'{"query":"blocked"}'
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/exa/search",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "former-soft-stop",
+                "X-Research-Lab-Cost-Cap-Usd": "0",
+                **({"X-Research-Lab-Budget-Soft-Stop": "1"} if legacy_header else {}),
+            },
+            method="POST",
+        )
+
+        with pytest.raises(urllib.error.HTTPError) as blocked_error:
+            urllib.request.urlopen(request, timeout=5)
+
+        assert blocked_error.value.code == 402
+        assert json.loads(blocked_error.value.read()) == {
+            "endpoint": "/search",
+            "error": "research_lab_provider_cost_cap_exceeded",
+            "provider": "exa",
+        }
+        assert blocked_error.value.headers.get(
+            "X-Research-Lab-Budget-Soft-Stopped"
+        ) is None
+        event = decode_cost_event_header(
+            blocked_error.value.headers.get("X-Research-Lab-Provider-Cost-Event")
+        )
+        assert event is not None
+        assert event["status_code"] == 402
+        assert event["evidence"] == "blocked"
+        assert CountingProvider.calls == 0
+        fingerprint = provider_evidence_proxy.canonical_request_fingerprint(
+            "POST", upstream_url, body
+        )
+        assert store.lookup(fingerprint) is None
+        assert fingerprint not in store._inflight
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+        upstream.shutdown()
+        upstream.server_close()
 
 
 def test_openrouter_missing_cost_zero_event_does_not_block_later_paid_calls():

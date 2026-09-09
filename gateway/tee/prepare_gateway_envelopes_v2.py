@@ -98,17 +98,6 @@ _SPECIAL_PROFILES = {
             *_BOOT_SOURCES["scrapingdog"],
         ),
     ),
-    "stale_parent_openrouter.json": (
-        "openrouter",
-        _BOOT_SOURCES["openrouter"],
-    ),
-    "source_add_judge_openrouter.json": (
-        "openrouter",
-        (
-            "RESEARCH_LAB_V2_SOURCE_ADD_JUDGE_OPENROUTER_API_KEY",
-            *_BOOT_SOURCES["openrouter"],
-        ),
-    ),
 }
 
 
@@ -931,7 +920,6 @@ def install_gateway_envelopes_v2(
             "truelist.json",
             "benchmark_*.json",
             "stale_parent_*.json",
-            "source_add_judge_*.json",
             "autoresearch_proxy_*.json",
             "scoring_proxy_*.json",
             "gateway-v2-env-transition.json",

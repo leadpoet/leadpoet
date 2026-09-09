@@ -41,6 +41,9 @@ class FakeService:
             raise self._reward_error
         return {"activated": self._activated}
 
+    def promote_pending_baselines(self):
+        return {"promoted": 0}
+
     def ensure_daily_round(self):
         self.ensured += 1
         if self._ensure_error is not None:

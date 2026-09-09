@@ -822,8 +822,20 @@ def test_exact_operator_python_c_shape_reaches_only_verified_helper(
         b"import sys\n"
         b"Path(sys.argv[1]).write_text(' '.join(sys.argv[2:]), encoding='utf-8')\n"
     )
+    process_helper = repository / "scripts/manage_owned_process_group.py"
+    process_helper.write_bytes(
+        (source_repository / "scripts/manage_owned_process_group.py").read_bytes()
+    )
+    process_helper.chmod(0o600)
     subprocess.run(
-        ["git", "-C", str(repository), "add", "scripts/gateway_git_deploy.py"],
+        [
+            "git",
+            "-C",
+            str(repository),
+            "add",
+            "scripts/gateway_git_deploy.py",
+            "scripts/manage_owned_process_group.py",
+        ],
         check=True,
     )
     subprocess.run(
@@ -841,6 +853,7 @@ def test_exact_operator_python_c_shape_reaches_only_verified_helper(
         ],
         check=True,
     )
+
     commit = subprocess.check_output(
         ["git", "-C", str(repository), "rev-parse", "HEAD"],
         text=True,
@@ -849,7 +862,10 @@ def test_exact_operator_python_c_shape_reaches_only_verified_helper(
         relative_path: subprocess.check_output(
             ["git", "-C", str(repository), "show", f"{commit}:{relative_path}"]
         )
-        for relative_path in verifier.CONTROLLER_FILES
+        for relative_path in (
+            *verifier.CONTROLLER_FILES,
+            *verifier.OPTIONAL_CONTROLLER_FILES,
+        )
     }
     controller_root = tmp_path / "restart-controller" / "gateway"
     release = controller_root / "releases" / commit
@@ -930,6 +946,36 @@ def test_exact_operator_python_c_shape_reaches_only_verified_helper(
 
     assert result.returncode == 0, result.stderr
     assert sentinel.read_text(encoding="utf-8") == "prepare exact-argv"
+
+
+def test_missing_optional_helper_rejects_unknown_controller_in_shallow_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, current, host_restart, _release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+        controller_commit=CANDIDATE_COMMIT,
+    )
+    monkeypatch.setattr(
+        verifier,
+        "_git_is_ancestor",
+        lambda _repository, _ancestor, descendant: (
+            descendant != verifier.LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY
+        ),
+    )
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="optional helper is required",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=repository,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+            expected_controller_commit=CANDIDATE_COMMIT,
+        )
 
 
 @pytest.mark.skipif(

@@ -15,6 +15,8 @@ receipt or restart authority is persisted. A failed restart remains paused.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
@@ -32,6 +34,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Iterator, Mapping, Optional, Sequence
+from urllib.parse import urlsplit
 import uuid
 
 from gateway.tee.disable_gateway_miner_submissions_secret import (
@@ -61,6 +64,8 @@ from gateway.tee.supabase_schema_preflight_v2 import (
 from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.production_parity_boundary_v2 import (
     PRODUCTION_SUPABASE_ORIGIN,
+    ProductionParityBoundaryV2Error,
+    validate_production_parity_boundary_document_v2,
 )
 from scripts.gateway_git_deploy import (
     DEFAULT_BRANCH,
@@ -77,12 +82,21 @@ CANONICAL_GATEWAY_RESTART_LOCK_PATH = Path(
 CANONICAL_GATEWAY_ENV_PATH = Path(
     "/home/ec2-user/.config/leadpoet/gateway.env"
 )
+PRODUCTION_PARITY_ISOLATION_MARKER = Path(
+    "/run/leadpoet-production-parity/early-boot-isolated"
+)
+PRODUCTION_PARITY_WORK_ROOT = Path("/opt/leadpoet-production-parity")
+PRODUCTION_PARITY_SECRET_PREFIX = (
+    "leadpoet/staging/production-parity/runs"
+)
 PROOF_FD_ENV_NAME = "GATEWAY_MINER_MAINTENANCE_PROOF_FD"
 PROOF_FD_NUMBER = 190
 CONTROLLER_WRAPPER_FD_NUMBER = 191
 CONTROLLER_GIT_HELPER_FD_NUMBER = 192
 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER = 193
 CONTROLLER_MEMORY_GUARD_FD_NUMBER = 194
+CONTROLLER_PROCESS_HELPER_FD_NUMBER = 195
+CONTROLLER_PROCESS_HELPER_PATH = "scripts/manage_owned_process_group.py"
 MAX_PROOF_BYTES = 32 * 1024
 MAX_RUNTIME_STATUS_BYTES = 256 * 1024
 DEFAULT_RUNTIME_STATUS_URL = "http://127.0.0.1:8000/research-lab/status"
@@ -166,6 +180,8 @@ _RESTART_AUTHORITY_NAMES = frozenset(
         "GATEWAY_GIT_HELPER",
         "GATEWAY_EXACT_COMMIT_HELPER",
         "GATEWAY_HOST_MEMORY_GUARD_PATH",
+        "GATEWAY_CONTROLLER_PROCESS_HELPER",
+        "LAB_ARENA_PROCESS_HELPER",
     }
 )
 _PROOF_FIELDS = frozenset(
@@ -190,6 +206,7 @@ _PROOF_FIELDS = frozenset(
         "controller_git_helper_sha256",
         "controller_exact_commit_helper_sha256",
         "controller_memory_guard_sha256",
+        "controller_process_helper_sha256",
         "pre_hydration_live_process_commitment",
         "restart_invocation_id",
         "prepared_at",
@@ -311,6 +328,7 @@ def _source_add_control_request(
     payload: Optional[Mapping[str, Any]] = None,
     connection_factory: Any = http.client.HTTPSConnection,
     timeout_seconds: float = SOURCE_ADD_CONTROL_TIMEOUT_SECONDS,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> Any:
     if (
         method not in {"GET", "POST"}
@@ -322,10 +340,26 @@ def _source_add_control_request(
         raise GatewayMinerMaintenanceRestartError(
             "SOURCE_ADD pause request is invalid"
         )
-    hostname = PRODUCTION_SUPABASE_ORIGIN.removeprefix("https://")
-    if not hostname or "/" in hostname:
+    parsed_origin = urlsplit(str(supabase_origin))
+    try:
+        port = parsed_origin.port
+    except ValueError as exc:
         raise GatewayMinerMaintenanceRestartError(
-            "production SOURCE_ADD pause origin is invalid"
+            "SOURCE_ADD pause origin is invalid"
+        ) from exc
+    hostname = str(parsed_origin.hostname or "").lower()
+    if (
+        parsed_origin.scheme.lower() != "https"
+        or not hostname
+        or port not in (None, 443)
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+        or parsed_origin.path not in ("", "/")
+        or parsed_origin.query
+        or parsed_origin.fragment
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD pause origin is invalid"
         )
     encoded = None
     headers = {
@@ -343,7 +377,7 @@ def _source_add_control_request(
         headers["Content-Length"] = str(len(encoded))
     connection = connection_factory(
         hostname,
-        443,
+        port or 443,
         timeout=float(timeout_seconds),
     )
     try:
@@ -429,6 +463,7 @@ def _read_source_add_control(
     *,
     service_role_key: str,
     connection_factory: Any = http.client.HTTPSConnection,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> dict[str, Any]:
     result = _source_add_control_request(
         method="GET",
@@ -439,6 +474,7 @@ def _read_source_add_control(
         ),
         service_role_key=service_role_key,
         connection_factory=connection_factory,
+        supabase_origin=supabase_origin,
     )
     return _normalized_source_add_control(result)
 
@@ -447,6 +483,7 @@ def _require_source_add_admission_control_contract(
     *,
     service_role_key: str,
     connection_factory: Any = http.client.HTTPSConnection,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> None:
     result = _source_add_control_request(
         method="POST",
@@ -454,6 +491,7 @@ def _require_source_add_admission_control_contract(
         service_role_key=service_role_key,
         payload={},
         connection_factory=connection_factory,
+        supabase_origin=supabase_origin,
     )
     if result != {
         "schema_version": "leadpoet.source_add_admission_control_contract.v1",
@@ -471,9 +509,10 @@ def _require_source_add_claim_control_contract(
     *,
     service_role_key: str,
     connection_factory: Any = http.client.HTTPSConnection,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> None:
     expected_url = (
-        f"{PRODUCTION_SUPABASE_ORIGIN}/rest/v1/rpc/"
+        f"{supabase_origin}/rest/v1/rpc/"
         f"{SOURCE_ADD_CLAIM_CONTROL_CONTRACT_RPC}"
     )
 
@@ -495,13 +534,14 @@ def _require_source_add_claim_control_contract(
             service_role_key=service_role_key,
             payload={},
             connection_factory=connection_factory,
+            supabase_origin=supabase_origin,
         )
         return _SourceAddClaimControlContractResponse(value)
 
     try:
         contract = _verify_source_add_claim_control_contract_v2(
             headers={},
-            supabase_url=PRODUCTION_SUPABASE_ORIGIN,
+            supabase_url=supabase_origin,
             opener=opener,
             timeout_seconds=SOURCE_ADD_CONTROL_TIMEOUT_SECONDS,
         )
@@ -807,6 +847,7 @@ def _read_source_add_restart_guard_state(
     *,
     service_role_key: str,
     connection_factory: Any = http.client.HTTPSConnection,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> dict[str, Any]:
     return _normalized_source_add_restart_guard_state(
         _source_add_control_request(
@@ -815,6 +856,7 @@ def _read_source_add_restart_guard_state(
             service_role_key=service_role_key,
             payload={},
             connection_factory=connection_factory,
+            supabase_origin=supabase_origin,
         )
     )
 
@@ -826,6 +868,7 @@ def _read_source_add_restart_quiescence(
     owner_id: str,
     guard_generation: int,
     connection_factory: Any = http.client.HTTPSConnection,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> dict[str, Any]:
     return _normalized_source_add_quiescence(
         _source_add_control_request(
@@ -838,6 +881,7 @@ def _read_source_add_restart_quiescence(
                 "p_owner_id": owner_id,
             },
             connection_factory=connection_factory,
+            supabase_origin=supabase_origin,
         )
     )
 
@@ -851,11 +895,13 @@ def _require_owned_source_add_guard_state(
     expected_owner_generation_commitment: Optional[str] = None,
     expected_restore_paused: Optional[Any] = None,
     connection_factory: Any = http.client.HTTPSConnection,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     identity = _source_add_restart_guard_identity(restart_invocation_id)
     state = _read_source_add_restart_guard_state(
         service_role_key=service_role_key,
         connection_factory=connection_factory,
+        supabase_origin=supabase_origin,
     )
     generation = _source_add_guard_generation(
         state["guard_generation"],
@@ -1096,11 +1142,13 @@ def _acquire_source_add_restart_guard(
     expected_guard_generation: Optional[Any] = None,
     expected_owner_generation_commitment: Optional[str] = None,
     connection_factory: Any = http.client.HTTPSConnection,
+    supabase_origin: str = PRODUCTION_SUPABASE_ORIGIN,
 ) -> dict[str, Any]:
     identity = _source_add_restart_guard_identity(restart_invocation_id)
     before = _read_source_add_restart_guard_state(
         service_role_key=service_role_key,
         connection_factory=connection_factory,
+        supabase_origin=supabase_origin,
     )
     before_generation = int(before["guard_generation"])
     before_has_guard = bool(before["guard_commitment"])
@@ -1176,6 +1224,7 @@ def _acquire_source_add_restart_guard(
                     "p_owner_id": identity["owner_id"],
                 },
                 connection_factory=connection_factory,
+                supabase_origin=supabase_origin,
             )
         )
     except _SourceAddAuthorityRejected:
@@ -1192,6 +1241,7 @@ def _acquire_source_add_restart_guard(
             reconciled = _read_source_add_restart_guard_state(
                 service_role_key=service_role_key,
                 connection_factory=connection_factory,
+                supabase_origin=supabase_origin,
             )
             if (
                 reconciled["paused"] is not True
@@ -1647,6 +1697,199 @@ def _require_fixed_bootstrap_authority(
         raise GatewayMinerMaintenanceRestartError(
             "miner-maintenance bootstrap authority differs from production"
         )
+
+
+def _require_production_parity_clone_service_role_key(token: str) -> None:
+    """Reject a token whose visible claims are not clone-service-role claims."""
+
+    try:
+        encoded_header, encoded_payload, encoded_signature = token.split(".")
+        header = json.loads(
+            base64.b64decode(
+                encoded_header + "=" * (-len(encoded_header) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        )
+        payload = json.loads(
+            base64.b64decode(
+                encoded_payload + "=" * (-len(encoded_payload) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        )
+        signature = base64.b64decode(
+            encoded_signature + "=" * (-len(encoded_signature) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        if (
+            not isinstance(header, Mapping)
+            or not isinstance(payload, Mapping)
+            or isinstance(payload.get("iat"), bool)
+            or isinstance(payload.get("exp"), bool)
+        ):
+            raise ValueError("clone token claims are invalid")
+        issued_at = int(payload.get("iat"))
+        expires_at = int(payload.get("exp"))
+    except (
+        binascii.Error,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD clone credential is invalid"
+        ) from exc
+    now = int(time.time())
+    if (
+        header != {"alg": "HS256", "typ": "JWT"}
+        or payload.get("aud") != "authenticated"
+        or payload.get("iss") != "leadpoet-production-parity"
+        or payload.get("role") != "service_role"
+        or expires_at - issued_at != 172_805
+        or issued_at > now
+        or expires_at <= now
+        or len(signature) != 32
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD clone credential identity differs"
+        )
+
+
+def _production_parity_clone_authority(
+    environment: Mapping[str, str],
+    *,
+    deploy_commit: str,
+) -> Optional[dict[str, str]]:
+    """Return a clone-only authority after every isolation check succeeds."""
+
+    try:
+        boundary = validate_production_parity_boundary_document_v2(
+            environment,
+            network=str(environment.get("BITTENSOR_NETWORK") or ""),
+            netuid=int(environment.get("BITTENSOR_NETUID") or 0),
+        )
+    except (ProductionParityBoundaryV2Error, TypeError, ValueError) as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD boundary is invalid"
+        ) from exc
+    if boundary.get("mode") != "production-parity":
+        return None
+
+    run_id = str(boundary.get("run_id") or "")
+    origin = str(boundary.get("supabase_origin") or "").rstrip("/")
+    expected_secret_id = f"{PRODUCTION_PARITY_SECRET_PREFIX}/{run_id}/gateway"
+    expected_environment_path = (
+        PRODUCTION_PARITY_WORK_ROOT / run_id / "runtime" / "gateway.env"
+    )
+    configured_environment_path = Path(
+        str(environment.get("GATEWAY_ENV_FILE") or "")
+    )
+    service_role_key = str(
+        environment.get("SUPABASE_SERVICE_ROLE_KEY") or ""
+    )
+    if (
+        str(environment.get("GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT") or "")
+        != "full-parity"
+        or str(environment.get("LEADPOET_GATEWAY_ENV_SECRET_ID") or "")
+        != expected_secret_id
+        or configured_environment_path != expected_environment_path
+        or str(environment.get("SUPABASE_URL") or "").rstrip("/") != origin
+        or origin == PRODUCTION_SUPABASE_ORIGIN
+        or str(environment.get("LEADPOET_PARITY_CANDIDATE_SHA") or "").lower()
+        != str(deploy_commit).lower()
+        or not service_role_key
+        or len(service_role_key.encode("utf-8")) > 64 * 1024
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in service_role_key
+        )
+        or str(
+            environment.get("LEADPOET_AWS_INSTANCE_ROLE_ONLY") or "true"
+        ).lower()
+        != "true"
+        or str(
+            environment.get("RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED")
+            or ""
+        ).lower()
+        != "false"
+        or any(str(environment.get(name) or "") for name in _FORBIDDEN_AWS_ENV_NAMES)
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD isolation authority differs"
+        )
+
+    marker_descriptor: Optional[int] = None
+    try:
+        marker_parent = PRODUCTION_PARITY_ISOLATION_MARKER.parent.lstat()
+        marker_descriptor = os.open(
+            PRODUCTION_PARITY_ISOLATION_MARKER,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        marker = os.fstat(marker_descriptor)
+        marker_value = os.read(marker_descriptor, 32)
+    except OSError as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD isolation proof is unavailable"
+        ) from exc
+    finally:
+        if marker_descriptor is not None:
+            os.close(marker_descriptor)
+    if (
+        not stat.S_ISDIR(marker_parent.st_mode)
+        or stat.S_IMODE(marker_parent.st_mode) != 0o700
+        or marker_parent.st_uid != os.geteuid()
+        or not stat.S_ISREG(marker.st_mode)
+        or marker.st_uid != os.geteuid()
+        or stat.S_IMODE(marker.st_mode) & 0o022
+        or marker_value != b"isolated\n"
+        or marker.st_size != len(marker_value)
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD isolation proof differs"
+        )
+    environment_payload = _read_hydrated_gateway_environment(
+        configured_environment_path
+    )
+    try:
+        hydrated_environment, _format = _parse_environment(
+            environment_payload.decode("utf-8")
+        )
+    except (UnicodeDecodeError, GatewayMinerSubmissionsDisableError) as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD hydrated environment is invalid"
+        ) from exc
+    bound_names = {
+        "BITTENSOR_NETWORK",
+        "BITTENSOR_NETUID",
+        "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
+        "LEADPOET_PARITY_CANDIDATE_SHA",
+        "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE",
+        "LEADPOET_PRODUCTION_PARITY_MODE",
+        "LEADPOET_PRODUCTION_PARITY_RUN_ID",
+        "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN",
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED",
+        "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_URL",
+    }
+    if any(
+        not isinstance(hydrated_environment.get(name), str)
+        or hydrated_environment.get(name) != environment.get(name)
+        for name in bound_names
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD hydrated environment differs"
+        )
+    _require_production_parity_clone_service_role_key(service_role_key)
+    return {
+        "run_id": run_id,
+        "supabase_origin": origin,
+        "service_role_key": service_role_key,
+    }
 
 
 def _resolve_bootstrap_secrets_client(secrets_client: Any) -> Any:
@@ -2720,6 +2963,30 @@ def _verified_installed_controller_bundle(
         expected_mode=0o600,
         label="installed N-1 memory guard",
     )
+    process_helper_tree_row = _run_git(
+        repo_root,
+        "ls-tree",
+        controller_commit,
+        "--",
+        CONTROLLER_PROCESS_HELPER_PATH,
+    ).split()
+    if (
+        len(process_helper_tree_row) < 3
+        or process_helper_tree_row[0] != "100644"
+        or process_helper_tree_row[-1] != CONTROLLER_PROCESS_HELPER_PATH
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller process helper Git authority is unavailable"
+        )
+    controller_process_helper = _run_git_bytes(
+        repo_root,
+        "show",
+        f"{controller_commit}:{CONTROLLER_PROCESS_HELPER_PATH}",
+    )
+    if not 2 <= len(controller_process_helper) <= 4 * 1024 * 1024:
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller process helper is out of bounds"
+        )
     host_restart = _read_exact_installed_file(
         Path(host_restart_path),
         expected_mode=0o700,
@@ -2750,6 +3017,21 @@ def _verified_installed_controller_bundle(
     ):
         raise GatewayMinerMaintenanceRestartError(
             "installed N-1 controller bytes differ from Git authority"
+        )
+    installed_process_helper = resolved / CONTROLLER_PROCESS_HELPER_PATH
+    try:
+        installed_process_helper.lstat()
+    except FileNotFoundError as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller process helper is unavailable"
+        ) from exc
+    if _read_exact_installed_file(
+        installed_process_helper,
+        expected_mode=0o600,
+        label="installed N-1 process helper",
+    ) != controller_process_helper:
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 process helper bytes differ from Git authority"
         )
     if host_restart != controller_restart:
         compatible_host_commits = {
@@ -2802,6 +3084,7 @@ def _verified_installed_controller_bundle(
         "exact_commit_helper": controller_exact_restart,
         "memory_guard": controller_memory_guard,
     }
+    payloads["process_helper"] = controller_process_helper
     return {
         "controller_commit": controller_commit,
         "payloads": payloads,
@@ -2810,27 +3093,6 @@ def _verified_installed_controller_bundle(
             for name, payload in payloads.items()
         },
     }
-
-
-def _verify_installed_controller(
-    *,
-    repo_root: Path,
-    controller_current: Path,
-    host_restart_path: Path,
-    expected_commit: str,
-    host_restart_is_open_fd: bool = False,
-) -> str:
-    """Return the exact verified controller commit for compatibility callers."""
-
-    bundle = _verified_installed_controller_bundle(
-        repo_root=repo_root,
-        controller_current=controller_current,
-        host_restart_path=host_restart_path,
-        expected_commit=expected_commit,
-        host_restart_is_open_fd=host_restart_is_open_fd,
-    )
-    return str(bundle["controller_commit"])
-
 
 def _validate_candidate_identity(
     *,
@@ -2994,6 +3256,7 @@ def _proof_body(
             commitments["exact_commit_helper"]
         ),
         "controller_memory_guard_sha256": str(commitments["memory_guard"]),
+        "controller_process_helper_sha256": str(commitments["process_helper"]),
         "pre_hydration_live_process_commitment": str(
             live_process_commitment
         ),
@@ -3027,6 +3290,7 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
         "controller_git_helper_sha256",
         "controller_exact_commit_helper_sha256",
         "controller_memory_guard_sha256",
+        "controller_process_helper_sha256",
         "pre_hydration_live_process_commitment",
     )
     if (
@@ -3094,6 +3358,7 @@ def _require_reserved_memfd_numbers_available() -> None:
         CONTROLLER_GIT_HELPER_FD_NUMBER,
         CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
         CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+        CONTROLLER_PROCESS_HELPER_FD_NUMBER,
     ):
         try:
             os.fstat(descriptor)
@@ -3424,6 +3689,8 @@ def _verify_proof_against_state(
             != str(commitments["exact_commit_helper"])
             or validated["controller_memory_guard_sha256"]
             != str(commitments["memory_guard"])
+            or validated["controller_process_helper_sha256"]
+            != str(commitments["process_helper"])
         ):
             raise GatewayMinerMaintenanceRestartError(
                 "verified N-1 controller differs from the invocation proof"
@@ -3986,19 +4253,32 @@ def _install_controller_bundle_memfds(
         ("git_helper", CONTROLLER_GIT_HELPER_FD_NUMBER),
         ("exact_commit_helper", CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER),
         ("memory_guard", CONTROLLER_MEMORY_GUARD_FD_NUMBER),
+        ("process_helper", CONTROLLER_PROCESS_HELPER_FD_NUMBER),
     )
-    for name, descriptor in assignments:
-        payload = payloads.get(name)
-        if not isinstance(payload, bytes):
-            raise GatewayMinerMaintenanceRestartError(
-                "verified N-1 controller bundle is incomplete"
+    installed_descriptors: list[int] = []
+    try:
+        for name, descriptor in assignments:
+            payload = payloads.get(name)
+            if not isinstance(payload, bytes):
+                raise GatewayMinerMaintenanceRestartError(
+                    "verified N-1 controller bundle is incomplete"
+                )
+            # Reserve cleanup ownership before sealing.  The sealing helper can
+            # fail after dup2 has installed the target descriptor.
+            installed_descriptors.append(descriptor)
+            _seal_payload_at_fd_number(
+                payload=payload,
+                fd_number=descriptor,
+                name="leadpoet-" + name.replace("_", "-"),
+                max_bytes=4 * 1024 * 1024,
             )
-        _seal_payload_at_fd_number(
-            payload=payload,
-            fd_number=descriptor,
-            name="leadpoet-" + name.replace("_", "-"),
-            max_bytes=4 * 1024 * 1024,
-        )
+    except Exception:
+        for descriptor in installed_descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
 
 
 def _controller_exec_environment(
@@ -4105,6 +4385,7 @@ def bootstrap_gateway_miner_maintenance_restart(
             CONTROLLER_GIT_HELPER_FD_NUMBER,
             CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
             CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+            CONTROLLER_PROCESS_HELPER_FD_NUMBER,
         ):
             os.set_inheritable(descriptor, True)
         _require_canonical_restart_lock_fd()
@@ -4128,6 +4409,12 @@ def bootstrap_gateway_miner_maintenance_restart(
                 ),
                 "GATEWAY_HOST_MEMORY_GUARD_PATH": (
                     f"/proc/self/fd/{CONTROLLER_MEMORY_GUARD_FD_NUMBER}"
+                ),
+                "GATEWAY_CONTROLLER_PROCESS_HELPER": (
+                    f"/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}"
+                ),
+                "LAB_ARENA_PROCESS_HELPER": (
+                    f"/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}"
                 ),
                 "LEADPOET_GATEWAY_ENV_SECRET_ID": GATEWAY_SECRET_ID,
                 "AWS_REGION": EXPECTED_AWS_REGION,
@@ -4167,6 +4454,7 @@ def bootstrap_gateway_miner_maintenance_restart(
                 CONTROLLER_GIT_HELPER_FD_NUMBER,
                 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
                 CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+                CONTROLLER_PROCESS_HELPER_FD_NUMBER,
             ):
                 try:
                     os.close(descriptor)
@@ -4226,17 +4514,240 @@ def _fetch_runtime_status(
     return _load_json_bytes(payload, label="running Research Lab status")
 
 
+def _production_parity_clone_quiescence(
+    *,
+    authority: Mapping[str, str],
+    restart_invocation_id: str,
+    acquire: bool,
+    connection_factory: Any,
+) -> dict[str, str]:
+    origin = str(authority["supabase_origin"])
+    service_role_key = str(authority["service_role_key"])
+    _require_source_add_admission_control_contract(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    _require_source_add_claim_control_contract(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    if acquire:
+        _acquire_source_add_restart_guard(
+            service_role_key=service_role_key,
+            restart_invocation_id=restart_invocation_id,
+            allow_takeover=True,
+            connection_factory=connection_factory,
+            supabase_origin=origin,
+        )
+    guard, guard_state = _require_owned_source_add_guard_state(
+        service_role_key=service_role_key,
+        restart_invocation_id=restart_invocation_id,
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    generation = int(guard_state["guard_generation"])
+    quiescence = _read_source_add_restart_quiescence(
+        service_role_key=service_role_key,
+        guard_id=guard["guard_id"],
+        owner_id=guard["owner_id"],
+        guard_generation=generation,
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    if (
+        quiescence["paused"] is not True
+        or quiescence["guard_active"] is not True
+        or quiescence["guard_matches"] is not True
+        or quiescence["owner_matches"] is not True
+        or quiescence["generation_matches"] is not True
+        or quiescence["guard_commitment"] != guard["guard_commitment"]
+        or quiescence["owner_commitment"] != guard["owner_commitment"]
+        or quiescence["guard_generation"] != generation
+        or quiescence["owner_generation_commitment"]
+        != guard_state["owner_generation_commitment"]
+        or quiescence["quiescent"] is not True
+        or _source_add_guard_expiry(
+            quiescence["guard_expires_at"],
+            label="production-parity SOURCE_ADD guard expiry is invalid",
+        )
+        <= datetime.now(timezone.utc)
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD clone is not quiescent"
+        )
+    return {
+        "status": "quiescent",
+        "source_add_restart_guard_commitment": guard["guard_commitment"],
+        "source_add_restart_guard_generation": str(generation),
+        "source_add_restart_guard_owner_generation_commitment": str(
+            guard_state["owner_generation_commitment"]
+        ),
+        "source_add_restart_guard_restore_paused": (
+            "true" if guard_state["restore_paused"] else "false"
+        ),
+        "source_add_quiescence_commitment": _source_add_quiescence_commitment(
+            quiescence
+        ),
+    }
+
+
+def _release_production_parity_clone_guard(
+    *,
+    authority: Mapping[str, str],
+    restart_invocation_id: str,
+    connection_factory: Any,
+) -> dict[str, str]:
+    origin = str(authority["supabase_origin"])
+    service_role_key = str(authority["service_role_key"])
+    guard, guard_state = _require_owned_source_add_guard_state(
+        service_role_key=service_role_key,
+        restart_invocation_id=restart_invocation_id,
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    generation = int(guard_state["guard_generation"])
+    released = _normalized_source_add_restart_guard_release(
+        _source_add_control_request(
+            method="POST",
+            path=f"/rest/v1/rpc/{SOURCE_ADD_RELEASE_RESTART_GUARD_RPC}",
+            service_role_key=service_role_key,
+            payload={
+                "p_actor_ref": guard["actor_ref"],
+                "p_guard_generation": generation,
+                "p_guard_id": guard["guard_id"],
+                "p_owner_id": guard["owner_id"],
+            },
+            connection_factory=connection_factory,
+            supabase_origin=origin,
+        )
+    )
+    expected_owner_generation = _source_add_owner_generation_commitment(
+        guard["owner_commitment"], generation
+    )
+    if (
+        released["guard_generation"] != generation
+        or released["owner_generation_commitment"]
+        != expected_owner_generation
+        or released["paused"] is not guard_state["restore_paused"]
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD guard release differs"
+        )
+    control = _read_source_add_control(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    if control["paused"] is not released["paused"]:
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD clone restoration differs"
+        )
+    return {
+        "status": (
+            "released_restored_paused"
+            if released["paused"]
+            else "released_restored_active"
+        ),
+        "source_add_control_commitment": _source_add_control_commitment(
+            control
+        ),
+        "source_add_restart_guard_generation": str(generation),
+        "source_add_restart_guard_owner_generation_commitment": (
+            expected_owner_generation
+        ),
+        "source_add_restart_guard_restore_paused": (
+            "true" if released["paused"] else "false"
+        ),
+    }
+
+
+def _force_production_parity_clone_paused(
+    *,
+    authority: Mapping[str, str],
+    restart_invocation_id: str,
+    connection_factory: Any,
+) -> None:
+    origin = str(authority["supabase_origin"])
+    service_role_key = str(authority["service_role_key"])
+    identity = _source_add_restart_guard_identity(restart_invocation_id)
+    _source_add_control_request(
+        method="POST",
+        path=f"/rest/v1/rpc/{SOURCE_ADD_PAUSE_RPC}",
+        service_role_key=service_role_key,
+        payload={
+            "p_actor_ref": identity["actor_ref"],
+            "p_paused": True,
+            "p_reason": "production_parity_restart_completion_failed",
+        },
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    control = _read_source_add_control(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+        supabase_origin=origin,
+    )
+    if control["paused"] is not True:
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD fail-closed pause is not durable"
+        )
+
+
+def _require_production_parity_runtime_source_add_restored(
+    runtime_status: Mapping[str, Any], *, expected_paused: bool
+) -> None:
+    source_add = runtime_status.get("source_add")
+    control = source_add.get("control") if isinstance(source_add, Mapping) else None
+    if (
+        not isinstance(source_add, Mapping)
+        or not isinstance(control, Mapping)
+        or control.get("paused") is not expected_paused
+        or control.get("unavailable") is not False
+        or source_add.get("dispatcher_enabled") is not False
+        or source_add.get("intake_enabled") is not False
+        or source_add.get("effective_dispatcher_enabled") is not False
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "production-parity SOURCE_ADD runtime isolation differs"
+        )
+
+
 def verify_gateway_miner_maintenance_shutdown_quiescence(
     *,
     deploy_commit: str,
     parent_environment: Mapping[str, str],
     secrets_client: Any = None,
+    connection_factory: Any = None,
 ) -> dict[str, str]:
     """Recheck the guarded zero-lease state at the destructive boundary."""
 
     commit = str(deploy_commit).lower()
     if not _COMMIT_RE.fullmatch(commit):
         raise GatewayMinerMaintenanceRestartError("candidate commit is invalid")
+    parity_authority = _production_parity_clone_authority(
+        parent_environment,
+        deploy_commit=commit,
+    )
+    if parity_authority is not None:
+        _require_disabled_parent_environment(parent_environment)
+        clone_connection_factory = (
+            connection_factory or http.client.HTTPSConnection
+        )
+        result = _production_parity_clone_quiescence(
+            authority=parity_authority,
+            restart_invocation_id=str(
+                parent_environment.get("GATEWAY_RESTART_INVOCATION_ID") or ""
+            ),
+            acquire=True,
+            connection_factory=clone_connection_factory,
+        )
+        return {
+            **result,
+            "status": "shutdown_quiescence_verified",
+            "authority": "production_parity_clone",
+        }
     _require_fixed_bootstrap_authority(parent_environment)
     _require_disabled_parent_environment(parent_environment)
     if secrets_client is None:
@@ -4347,11 +4858,6 @@ def verify_gateway_miner_maintenance_shutdown_quiescence(
     }
 
 
-def _require_runtime_miner_disabled(runtime_status: Mapping[str, Any]) -> None:
-    if runtime_status.get("miner_submissions_enabled") is not False:
-        raise GatewayMinerMaintenanceRestartError(
-            "running gateway has miner submissions enabled"
-        )
 
 
 def verify_gateway_miner_maintenance_runtime_state(
@@ -4362,12 +4868,85 @@ def verify_gateway_miner_maintenance_runtime_state(
     runtime_status: Mapping[str, Any],
     secrets_client: Any = None,
     hydrated_environment_path: Path = CANONICAL_GATEWAY_ENV_PATH,
+    connection_factory: Any = None,
+    runtime_status_provider: Any = None,
 ) -> dict[str, str]:
-    """Recheck the exact false state against the activated live runtime."""
+    """Verify the active SOURCE_ADD guard and restore its durable state."""
+
+    commit = str(deploy_commit).lower()
+    if not _COMMIT_RE.fullmatch(commit):
+        raise GatewayMinerMaintenanceRestartError("candidate commit is invalid")
+    parity_authority = _production_parity_clone_authority(
+        runtime_environment,
+        deploy_commit=commit,
+    )
+    if parity_authority is not None:
+        if not _TREE_RE.fullmatch(str(candidate_tree_hash).lower()):
+            raise GatewayMinerMaintenanceRestartError(
+                "candidate tree hash is invalid"
+            )
+        _require_disabled_parent_environment(runtime_environment)
+        _require_runtime_source_add_closed(runtime_status)
+        restart_invocation_id = str(
+            runtime_environment.get("GATEWAY_RESTART_INVOCATION_ID") or ""
+        )
+        clone_connection_factory = (
+            connection_factory or http.client.HTTPSConnection
+        )
+        try:
+            quiescence = _production_parity_clone_quiescence(
+                authority=parity_authority,
+                restart_invocation_id=restart_invocation_id,
+                acquire=False,
+                connection_factory=clone_connection_factory,
+            )
+            released = _release_production_parity_clone_guard(
+                authority=parity_authority,
+                restart_invocation_id=restart_invocation_id,
+                connection_factory=clone_connection_factory,
+            )
+            restored_paused = _source_add_expected_restore_paused(
+                released["source_add_restart_guard_restore_paused"],
+                label=(
+                    "production-parity SOURCE_ADD restoration result is invalid"
+                ),
+            )
+            status_provider = runtime_status_provider or _fetch_runtime_status
+            _require_production_parity_runtime_source_add_restored(
+                status_provider(),
+                expected_paused=restored_paused,
+            )
+        except (
+            GatewayMinerMaintenanceRestartError,
+            GatewayMinerSubmissionsDisableError,
+        ):
+            try:
+                _force_production_parity_clone_paused(
+                    authority=parity_authority,
+                    restart_invocation_id=restart_invocation_id,
+                    connection_factory=clone_connection_factory,
+                )
+            except (
+                GatewayMinerMaintenanceRestartError,
+                GatewayMinerSubmissionsDisableError,
+            ) as pause_exc:
+                raise GatewayMinerMaintenanceRestartError(
+                    "production-parity SOURCE_ADD restart completion failed "
+                    "and the clone fail-closed pause could not be verified"
+                ) from pause_exc
+            raise
+        return {
+            **quiescence,
+            "authority": "production_parity_clone",
+            "source_add_control_commitment": released[
+                "source_add_control_commitment"
+            ],
+            "runtime_status": "disabled",
+            "source_add_restart_guard_status": released["status"],
+        }
 
     _require_fixed_bootstrap_authority(runtime_environment)
     _require_disabled_parent_environment(runtime_environment)
-    _require_runtime_miner_disabled(runtime_status)
     _require_runtime_source_add_closed(runtime_status)
     secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
     result = verify_gateway_miner_maintenance_state(

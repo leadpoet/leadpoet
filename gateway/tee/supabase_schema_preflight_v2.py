@@ -57,11 +57,6 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ("artifact_master_key_ref_hash",),
     ),
     (
-        "scripts/125-research-lab-artifact-key-lineage.sql",
-        "research_lab_provider_outcome_checkpoints_v2",
-        ("artifact_master_key_ref_hash",),
-    ),
-    (
         "scripts/126-research-lab-chain-realized-settlement.sql",
         "research_lab_finalized_weight_vector_candidates_v1",
         (
@@ -496,24 +491,8 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_attested_transport_terminal_contract_v2",
     ),
     (
-        "scripts/133-research-lab-provider-outcome-contention-status.sql",
-        "append_research_lab_provider_outcome_checkpoint_v2",
-    ),
-    (
-        "scripts/133-research-lab-provider-outcome-contention-status.sql",
-        "research_lab_provider_outcome_contention_contract_v2",
-    ),
-    (
-        "scripts/134-research-lab-provider-outcome-head-contention.sql",
-        "research_lab_provider_outcome_contention_contract_v3",
-    ),
-    (
         "scripts/144-research-lab-provider-persistence-batches.sql",
         "put_research_lab_provider_evidence_cache_v2",
-    ),
-    (
-        "scripts/144-research-lab-provider-persistence-batches.sql",
-        "append_research_lab_provider_outcome_checkpoints_v2",
     ),
     (
         "scripts/144-research-lab-provider-persistence-batches.sql",
@@ -766,7 +745,6 @@ def _source_add_leg1_release_environment_policy_v1(
 ) -> Dict[str, Any]:
     expected = {
         "RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT": Decimal("0.2"),
-        "RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT": Decimal("0.0"),
         "RESEARCH_LAB_REWARD_EPOCHS": Decimal("20"),
         "RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY": Decimal("50"),
     }
@@ -788,9 +766,6 @@ def _source_add_leg1_release_environment_policy_v1(
         "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
         "leg1_alpha_percent": float(
             observed["RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT"]
-        ),
-        "leg2_alpha_percent": float(
-            observed["RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT"]
         ),
         "reward_epochs": int(observed["RESEARCH_LAB_REWARD_EPOCHS"]),
         "daily_cap": int(
@@ -1489,10 +1464,18 @@ SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256 = (
 )
 
 SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
-    "sha256:6c09aa3c6b82b3fe666c6739c4f71a51ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
+    "sha256:aede4ca669ce104486bf59c8d6b924ccdabcdecc95fa2a7b1369968383144274"
 )
 
 SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:f17fab75262f612bf6aa5ca1dc4cb7dfe60d08f4b4cbf7b95fa5e7ea28084fb3"
+)
+
+# Migrations 175 and 176 expose the historical v3/v4 function authority.
+# Migration 186 rewrites the active SOURCE_ADD predicates and publishes the
+# current v4 authority. Keep the historical v3 value separate from the active
+# post-186 v4 value.
+SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:fe7df9f9336217f3e738f420fae0d9720959042080df431c1bcb2d4baa8ee954"
 )
 
@@ -1658,7 +1641,7 @@ def _verify_source_add_post_accept_leg1_contract_v3(
             "research_lab_source_add_provenance_leg1_authority_v1"
         ),
         "function_authority_sha256": (
-            SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+            SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256
         ),
         "trigger_authority_sha256": (
             SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256

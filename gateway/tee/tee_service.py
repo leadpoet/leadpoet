@@ -161,8 +161,6 @@ v2_provider_broker = None
 v2_provider_broker_lock = Lock()
 v2_provider_cache_store = None
 v2_provider_cache_store_lock = Lock()
-v2_provider_outcome_store = None
-v2_provider_outcome_store_lock = Lock()
 v2_provider_semantics_authority = None
 vsock_rpc_transport_health_lock = Lock()
 vsock_rpc_cleanup_attempt_count = 0
@@ -186,8 +184,6 @@ v2_kms_recipient = None
 v2_kms_recipient_lock = Lock()
 v2_artifact_vault = None
 v2_artifact_vault_lock = Lock()
-v2_inter_enclave_artifact_ingest = None
-v2_inter_enclave_artifact_ingest_lock = Lock()
 v2_artifact_persistence_verifier = None
 v2_artifact_persistence_verifier_lock = Lock()
 v2_ingress_seal_cache = {}
@@ -1625,26 +1621,6 @@ def get_v2_provider_cache_store():
         return v2_provider_cache_store
 
 
-def get_v2_provider_outcome_store():
-    global v2_provider_outcome_store
-    with v2_provider_outcome_store_lock:
-        if v2_provider_outcome_store is not None:
-            return v2_provider_outcome_store
-        from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
-        from gateway.tee.rpc_authority import active_enclave_role
-
-        if active_enclave_role() != "gateway_coordinator":
-            raise RuntimeError("provider outcome store is coordinator-only")
-        v2_provider_outcome_store = ProviderOutcomeStoreV2(
-            broker=get_v2_provider_broker(),
-            vault=get_v2_artifact_vault(),
-            origin=_v2_supabase_origin(
-                get_v2_runtime_identity().runtime_configuration()["configuration"]
-            ),
-        )
-        return v2_provider_outcome_store
-
-
 def get_v2_provider_semantics_authority():
     global v2_provider_semantics_authority
     with v2_provider_semantics_authority_lock:
@@ -1662,7 +1638,6 @@ def get_v2_provider_semantics_authority():
             artifact_transaction=get_v2_artifact_vault().transient_artifact_transaction,
             boot_identity_supplier=get_v2_runtime_identity().boot_identity,
             sign_digest=sign_data,
-            outcome_store=get_v2_provider_outcome_store(),
         )
         return v2_provider_semantics_authority
 
@@ -1747,21 +1722,6 @@ def get_v2_artifact_vault():
     return v2_artifact_vault
 
 
-def get_v2_inter_enclave_artifact_ingest():
-    global v2_inter_enclave_artifact_ingest
-    with v2_inter_enclave_artifact_ingest_lock:
-        if v2_inter_enclave_artifact_ingest is None:
-            from gateway.tee.inter_enclave_artifact_v2 import (
-                InterEnclaveArtifactIngestV2,
-            )
-            from gateway.tee.rpc_authority import active_enclave_role
-
-            if active_enclave_role() != "gateway_coordinator":
-                raise RuntimeError("artifact ingestion is coordinator-only")
-            v2_inter_enclave_artifact_ingest = InterEnclaveArtifactIngestV2(
-                vault=get_v2_artifact_vault(),
-            )
-        return v2_inter_enclave_artifact_ingest
 
 
 def get_v2_artifact_persistence_verifier():
@@ -1813,24 +1773,6 @@ def execute_v2_provider_request(request: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def seal_v2_inter_enclave_artifact(
-    *,
-    plaintext: bytes,
-    job_id: str,
-    purpose: str,
-    artifact_kind: str,
-) -> Dict[str, Any]:
-    from gateway.tee.inter_enclave_artifact_v2 import (
-        seal_artifact_over_attested_tls_v2,
-    )
-
-    return seal_artifact_over_attested_tls_v2(
-        client=get_v2_inter_enclave_client(),
-        plaintext=plaintext,
-        job_id=job_id,
-        purpose=purpose,
-        artifact_kind=artifact_kind,
-    )
 
 
 def _gateway_ancestry_manager_kwargs(runtime: Any) -> Dict[str, Any]:
@@ -2110,9 +2052,6 @@ def get_v2_coordinator_job_manager():
                 source_add_catalog_resolver=lambda payload, context: (
                     reward_source.catalog_snapshot(payload=payload, context=context)
                 ),
-                provider_outcome_supplier=(
-                    get_v2_provider_semantics_authority().provider_outcome_snapshot_evidence
-                ),
             ),
             worker_count=1,
             configured_worker_count=0,
@@ -2256,22 +2195,6 @@ def handle_inter_enclave_rpc(
         if peer["physical_role"] != "gateway_scoring":
             raise ValueError("provider caller role is not authorized")
         return get_v2_provider_semantics_authority().execute(params)
-    if method in {
-        "artifact_seal_begin",
-        "artifact_seal_chunk",
-        "artifact_seal_finish",
-        "artifact_seal_cancel",
-    }:
-        if active_enclave_role() != "gateway_coordinator":
-            raise ValueError("artifact ingestion is coordinator-only")
-        ingest = get_v2_inter_enclave_artifact_ingest()
-        action = {
-            "artifact_seal_begin": ingest.begin,
-            "artifact_seal_chunk": ingest.put_chunk,
-            "artifact_seal_finish": ingest.finish,
-            "artifact_seal_cancel": ingest.cancel,
-        }[method]
-        return action(params, peer=peer)
     raise ValueError("inter-enclave method is not authorized")
 
 

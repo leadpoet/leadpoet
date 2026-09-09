@@ -12,7 +12,8 @@
 # sitecustomize, and the scorer entrypoint as the image ENTRYPOINT. A runner
 # mounts /input, /output, and the worker socket exactly as for a miner's
 # image. The judge has no network and reaches the web only through the
-# broker with the organizer's shared provider keys.
+# gateway broker with miner keys for challengers and organizer keys for the
+# baseline. The validator and judge image never receive those key values.
 
 ARG BASE_IMAGE=python:3.11-slim
 FROM ${BASE_IMAGE}

@@ -130,15 +130,16 @@ runs one exact forward transition and should prove:
   137.
 - [ ] Credential-envelope and provider preflight paths complete without
   plaintext fallback.
-- [ ] Signed private-model oldest -> newest-reviewed -> oldest transition,
-  pointer/source alignment,
-  exact contract/parity pairing, and KMS verification complete; hybrid,
-  unknown, and tampered artifacts fail closed.
+- [ ] Arena admits the public `lab` baseline and a miner source bundle through
+  the standard interface, freezes the round ICPs and source, and runs both
+  through the same scorer. Persistence and lease recovery preserve completed
+  work. Invalid submissions and infrastructure failures follow their defined
+  failure paths.
 - [ ] Gateway builds one canonical bundle.
 - [ ] Primary and audit validators receive byte-identical vectors.
 - [ ] Parsing, verification, SDK signing, submission, finalization,
   `LastUpdate`, reveal/readback, and cleanup complete.
-- [ ] Git-tree replacement, conditional-ICP policy, settlement authority, and
+- [ ] Arena round recovery, shared ICP scoring, SOURCE_ADD, settlement, and
   protected workflows satisfy the candidate-derived behavioral contract.
 - [ ] Every declared stage appears once as `passed`; no critical stage is
   `failed` or `unexercised`.
@@ -223,9 +224,11 @@ exact active candidate. The worktree may contain no additional files,
 including ignored or untracked files, and the interpreter must provide the
 candidate's declared dependencies.
 
-Obtain `FINALIZED_EPOCH_ID` from the first candidate-associated
-`GET /weights/current/71` publication after the completed official baseline,
-retain that epoch, and wait for its compact authority to finalize and reveal.
+Obtain `FINALIZED_EPOCH_ID` from the candidate's first automatic primary
+weight-submission event after the completed official baseline. Retain that
+epoch and wait for `/weights/v2/published-compact/71/{epoch_id}` to finalize
+and reveal. The probe must verify its authority against the candidate's
+immutable release identity.
 Obtain `AUDITOR_HOTKEYS` only from the authoritative active public-auditor
 deployment inventory joined one-to-one to post-restart tracked
 `startup_ready` records. Do not infer configured auditors from IPs, UIDs,

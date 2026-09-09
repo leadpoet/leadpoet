@@ -22,7 +22,7 @@ from research_lab.source_add import (
 logger = logging.getLogger(__name__)
 
 PROVISION_STATUS_APPROVED_PENDING = "approved_pending_provision"
-PROVISION_STATUS_ELIGIBLE = "provisioned_autoresearch_eligible"
+PROVISION_STATUS_ELIGIBLE = "provisioned"
 PROVISION_STATUS_DISABLED = "disabled"
 PROVISION_STATUSES = {
     PROVISION_STATUS_APPROVED_PENDING,

@@ -23,7 +23,6 @@ from gateway.research_lab.provider_evidence_proxy import (
     serve_evidence_proxy,
     validate_provider_registry_entries,
 )
-from gateway.research_lab.provider_outcome_digest import load_provider_outcome_sidecar
 from research_lab.eval.provider_evidence_cache import canonical_request_fingerprint
 
 
@@ -275,7 +274,6 @@ def proxy_server(tmp_path):
     """A running proxy with a test registry, ledger file, and token map."""
 
     ledger_path = tmp_path / "ledger.jsonl"
-    outcome_sidecar_path = tmp_path / "provider_outcomes.json"
     token_map_path = tmp_path / "tokens.json"
     token_map_path.write_text(
         json.dumps({"tok-123": {"caller_kind": "loop_probe", "run_id": "run-9"}}), encoding="utf-8"
@@ -296,12 +294,10 @@ def proxy_server(tmp_path):
         port=0,
         registry=registry,
         usage_ledger_path=str(ledger_path),
-        outcome_sidecar_path=str(outcome_sidecar_path),
         caller_context={"caller_kind": "spawn_default", "worker": "w0"},
         caller_token_map_path=str(token_map_path),
         key_split=False,
     )
-    server.test_outcome_sidecar_path = outcome_sidecar_path
     try:
         yield server, store, server.server_address[1], ledger_path
     finally:
@@ -363,18 +359,12 @@ class TestProxyEndToEnd:
         monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
         assert _request(port, "/exa/search?q=one")[0] == 200
         assert _request(port, "/exa/search?q=one")[0] == 200
-        server.usage_ledger.close()
 
         assert len(upstream_calls) == 1
-        sidecar = load_provider_outcome_sidecar(
-            str(server.test_outcome_sidecar_path),
-            stale_seconds=3600,
-        )
-        exa = sidecar["providers"]["exa"]
-        assert exa["call_count"] == 2
-        assert exa["live_call_count"] == 1
-        assert exa["cache_hit_count"] == 1
-        assert exa["measured_spend_microusd"] == 7000
+        rows = _ledger_rows(_ledger_path)
+        assert [row["evidence"] for row in rows] == ["recorded", "hit"]
+        assert rows[0]["est_cost_microusd"] == 7000
+        assert rows[1]["est_cost_microusd"] == 0
 
     def test_worker_issued_token_overrides_spawn_context(self, proxy_server):
         _server, store, port, ledger_path = proxy_server

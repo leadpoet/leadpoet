@@ -120,9 +120,9 @@ def _add_source_add_parser(sub) -> None:
     provision.add_argument(
         "--status",
         dest="provision_status",
-        choices=("approved_pending_provision", "provisioned_autoresearch_eligible"),
+        choices=("approved_pending_provision", "provisioned"),
         default="approved_pending_provision",
-        help="Persisted status; the legacy eligible value remains for DB compatibility",
+        help="Persisted SOURCE_ADD provisioning status",
     )
     provision.add_argument("--probe-endpoint-json", action="append", required=True)
     provision.add_argument("--cost-model-json", default="{}")

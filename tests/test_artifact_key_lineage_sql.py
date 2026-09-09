@@ -10,7 +10,5 @@ def test_artifact_key_lineage_preserves_rows_and_scopes_uniqueness():
     assert "artifact_master_key_ref_hash" in SQL
     assert "research_lab_provider_evidence_cache_v2_key_day_request_key" in SQL
     assert "research_lab_provider_evidence_cache_v2_legacy_day_request_key" in SQL
-    assert "research_lab_provider_outcome_checkpoints_v2_key_day_sequence_key" in SQL
-    assert "research_lab_provider_outcome_checkpoints_v2_legacy_day_sequence_key" in SQL
     assert SQL.count("WHERE artifact_master_key_ref_hash IS NULL") == 2
     assert "UPDATE public." not in SQL

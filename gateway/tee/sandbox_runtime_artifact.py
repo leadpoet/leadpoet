@@ -1,4 +1,4 @@
-"""Verify the offline gVisor artifact and write its measured rootfs marker."""
+"""Verify the offline gVisor artifact used by the Arena runner."""
 
 from __future__ import annotations
 
@@ -13,14 +13,12 @@ from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_
 
 
 LOCK_SCHEMA_VERSION = "leadpoet.runsc_runtime_lock.v2"
-ROOTFS_SCHEMA_VERSION = "leadpoet.model_sandbox_rootfs.v2"
-EXPECTED_PYTHON_VERSION = "3.9.24"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 
 
 class SandboxRuntimeArtifactError(RuntimeError):
-    """The gVisor artifact or measured rootfs marker differs from its lock."""
+    """The gVisor artifact differs from its lock."""
 
 
 def load_runsc_lock(path: Path) -> Dict[str, Any]:
@@ -83,73 +81,17 @@ def verify_runsc_artifact(*, lock_path: Path, artifact_path: Path) -> Dict[str, 
     }
 
 
-def build_rootfs_manifest(
-    *,
-    lock_path: Path,
-    requirements_lock_path: Path,
-    python_version: str,
-) -> Dict[str, Any]:
-    lock = load_runsc_lock(lock_path)
-    if str(python_version) != EXPECTED_PYTHON_VERSION:
-        raise SandboxRuntimeArtifactError("sandbox Python version differs")
-    try:
-        requirements = requirements_lock_path.read_bytes()
-    except OSError as exc:
-        raise SandboxRuntimeArtifactError(
-            "scoring dependency lock is unavailable"
-        ) from exc
-    return {
-        "schema_version": ROOTFS_SCHEMA_VERSION,
-        "python_version": EXPECTED_PYTHON_VERSION,
-        "runsc_version": lock["version"],
-        "runsc_sha256": lock["sha256"],
-        "runsc_lock_hash": sha256_json(lock),
-        "requirements_lock_hash": sha256_bytes(requirements),
-        "rootfs_path": "/",
-    }
-
-
-def write_rootfs_manifest(
-    *,
-    lock_path: Path,
-    requirements_lock_path: Path,
-    python_version: str,
-    output_path: Path,
-) -> Dict[str, Any]:
-    manifest = build_rootfs_manifest(
-        lock_path=lock_path,
-        requirements_lock_path=requirements_lock_path,
-        python_version=python_version,
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(canonical_json(manifest) + "\n", encoding="utf-8")
-    return manifest
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     verify = subparsers.add_parser("verify")
     verify.add_argument("--lock", required=True, type=Path)
     verify.add_argument("--artifact", required=True, type=Path)
-    marker = subparsers.add_parser("write-rootfs-manifest")
-    marker.add_argument("--lock", required=True, type=Path)
-    marker.add_argument("--requirements-lock", required=True, type=Path)
-    marker.add_argument("--python-version", required=True)
-    marker.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
-    if args.command == "verify":
-        result = verify_runsc_artifact(
-            lock_path=args.lock,
-            artifact_path=args.artifact,
-        )
-    else:
-        result = write_rootfs_manifest(
-            lock_path=args.lock,
-            requirements_lock_path=args.requirements_lock,
-            python_version=args.python_version,
-            output_path=args.output,
-        )
+    result = verify_runsc_artifact(
+        lock_path=args.lock,
+        artifact_path=args.artifact,
+    )
     print(canonical_json(result))
     return 0
 

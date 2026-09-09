@@ -701,7 +701,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["source_add_leg1_release_policy"] == {
         "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
         "leg1_alpha_percent": 0.2,
-        "leg2_alpha_percent": 0.0,
         "reward_epochs": 20,
         "daily_cap": 50,
     }
@@ -809,8 +808,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/128-research-lab-chain-settlement-transport-purposes.sql",
         "scripts/129-research-lab-attested-local-transport.sql",
         "scripts/132-research-lab-champion-lifetime-credit.sql",
-        "scripts/133-research-lab-provider-outcome-contention-status.sql",
-        "scripts/134-research-lab-provider-outcome-head-contention.sql",
         "scripts/144-research-lab-provider-persistence-batches.sql",
         "scripts/145-research-lab-source-add-admission-control.sql",
         "scripts/149-research-lab-compact-weight-settlement-authority.sql",
@@ -1165,7 +1162,6 @@ def test_source_add_automatic_provenance_leg1_contract_rejects_policy_drift(
     ("name", "value"),
     (
         ("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", "0.5"),
-        ("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", "5"),
         ("RESEARCH_LAB_REWARD_EPOCHS", "21"),
         ("RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY", "100"),
         ("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", "nan"),
@@ -1506,87 +1502,14 @@ def test_required_supabase_v2_schema_requires_transport_terminal_migration() -> 
         )
 
 
-def test_required_supabase_v2_schema_requires_provider_outcome_append_migration() -> None:
-    required_function = "append_research_lab_provider_outcome_checkpoint_v2"
-
-    def opener(request, *, timeout):
-        del timeout
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                )
-                if function_name != required_function
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if (
-            "research_lab_chain_realized_settlement_activation_v1"
-            in request.full_url
-            and "limit=2" in request.full_url
-        ):
-            return _SchemaResponse(body=_chain_realized_activation_response())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"append_research_lab_provider_outcome_checkpoint_v2.*"
-            r"133-research-lab-provider-outcome-contention-status"
-        ),
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "https://project.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            },
-            opener=opener,
-        )
 
 
-def test_required_supabase_v2_schema_requires_provider_outcome_head_contract() -> None:
-    required_function = "research_lab_provider_outcome_contention_contract_v3"
-
-    def opener(request, *, timeout):
-        del timeout
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                )
-                if function_name != required_function
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if (
-            "research_lab_chain_realized_settlement_activation_v1"
-            in request.full_url
-            and "limit=2" in request.full_url
-        ):
-            return _SchemaResponse(body=_chain_realized_activation_response())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"research_lab_provider_outcome_contention_contract_v3.*"
-            r"134-research-lab-provider-outcome-head-contention"
-        ),
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "https://project.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            },
-            opener=opener,
-        )
 
 
 @pytest.mark.parametrize(
     "required_function",
     (
         "put_research_lab_provider_evidence_cache_v2",
-        "append_research_lab_provider_outcome_checkpoints_v2",
         "research_lab_provider_persistence_batch_contract_v1",
     ),
 )

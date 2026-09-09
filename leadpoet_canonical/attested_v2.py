@@ -47,8 +47,6 @@ ROLE_PURPOSES = {
         {
             "research_lab.admission.v2",
             "research_lab.provider_evidence.v2",
-            "research_lab.provider_outcome_snapshot.v2",
-            "research_lab.provider_outcome_state.v2",
             "research_lab.active_private_model.v2",
             "leadpoet.artifact_persistence.v2",
             "research_lab.ranking.v2",

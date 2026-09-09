@@ -81,7 +81,6 @@ ALWAYS_COMMITTED_PATHS = (
     "gateway/tee/provider_broker_v2.py",
     "gateway/tee/provider_client_v2.py",
     "gateway/tee/supabase_source_v2.py",
-    "gateway/tee/provider_outcome_store_v2.py",
     "gateway/tee/rpc_authority.py",
     "gateway/tee/provider_evidence_cache_store_v2.py",
     "gateway/tee/runtime_identity_v2.py",

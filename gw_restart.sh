@@ -7,6 +7,7 @@ GATEWAY_ROOT="${GATEWAY_ROOT:-$LEADPOET_REPO_ROOT/gateway}"
 GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
 LAB_ARENA_SERVICE_LOG_FILE="${LAB_ARENA_SERVICE_LOG_FILE:-$GATEWAY_LOG_ROOT/lab_arena_service.log}"
+LAB_ARENA_SERVICE_STATE_FILE="${LAB_ARENA_SERVICE_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-service-process.json}"
 GATEWAY_PRIVATE_KEY_PATH="${GATEWAY_PRIVATE_KEY_PATH:-$GATEWAY_LOG_ROOT/secrets/gateway_private_key.pem}"
 ARWEAVE_KEYFILE_PATH="${ARWEAVE_KEYFILE_PATH:-$GATEWAY_LOG_ROOT/secrets/arweave_keyfile.json}"
 GATEWAY_RESTART_GIT_SSH_COMMAND="${GATEWAY_RESTART_GIT_SSH_COMMAND:-}"
@@ -20,6 +21,7 @@ ENV_CLONE="/tmp/gw_env_clone.sh"
 ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
+LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY="202cd66a41f17f3030bcf6889d381cd3ecfd8f1c"
 HISTORICAL_THREE_ROLE_TOPOLOGY_HASH="sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
 HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB="f79cf108e4a98ca950a0087d786958f92c5f691f"
 GATEWAY_HISTORICAL_TOPOLOGY_HASH=""
@@ -28,7 +30,15 @@ GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-us
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
 GATEWAY_RESTART_AUTHORITY_ROOT="${GATEWAY_RESTART_AUTHORITY_ROOT:-}"
 GATEWAY_RESTART_AUTHORITY_COMMIT="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
+if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
+  GATEWAY_CONTROLLER_PROCESS_HELPER="$GATEWAY_RESTART_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+else
+  GATEWAY_CONTROLLER_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$LEADPOET_REPO_ROOT/scripts/manage_owned_process_group.py}"
+fi
+LAB_ARENA_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
+GATEWAY_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_SERVICE_STATE_FILE"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
+GATEWAY_ACTIVE_RELEASE_COMPONENT="${GATEWAY_ACTIVE_RELEASE_COMPONENT:-gateway}"
 GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="${GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="${GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT:-standalone}"
 GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE:-}"
@@ -67,6 +77,8 @@ GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
+PREPARED_GATEWAY_SHA="${PREPARED_GATEWAY_SHA:-}"
+LAB_ARENA_RESTART_GUARD_GENERATION="${LAB_ARENA_RESTART_GUARD_GENERATION:-}"
 GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN=""
 GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT=""
 GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE=""
@@ -85,6 +97,13 @@ case "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" in
   0|1) ;;
   *)
     echo "ERROR: GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+case "$GATEWAY_ACTIVE_RELEASE_COMPONENT" in
+  gateway|all) ;;
+  *)
+    echo "ERROR: GATEWAY_ACTIVE_RELEASE_COMPONENT must be gateway or all" >&2
     exit 2
     ;;
 esac
@@ -208,9 +227,84 @@ wait_for_gateway_v2_authority() {
 }
 
 stop_lab_arena_service() {
-  pkill -TERM -f "scripts/run_lab_arena_service[.]py" 2>/dev/null || true
-  sleep 1
-  pkill -KILL -f "scripts/run_lab_arena_service[.]py" 2>/dev/null || true
+  local process_helper="${1:-$GATEWAY_CONTROLLER_PROCESS_HELPER}"
+  if ! verify_controller_process_helper "$process_helper"; then
+    echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
+    return 1
+  fi
+  "$GATEWAY_PYTHON_BIN" "$process_helper" stop \
+    --state-file "$GATEWAY_CONTROLLER_PROCESS_STATE_FILE" \
+    --cwd "$LEADPOET_REPO_ROOT" \
+    --uid "$(id -u)" \
+    -- \
+    "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
+    --environment-file "$GATEWAY_ENV_FILE" \
+    --host 127.0.0.1 --port 8792
+}
+
+verify_controller_process_helper() {
+  local process_helper="${1:-}"
+  if [ "$process_helper" = "/proc/self/fd/195" ]; then
+    "$GATEWAY_PYTHON_BIN" - "$process_helper" <<'PY'
+import fcntl
+import hashlib
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+if path != "/proc/self/fd/195":
+    raise SystemExit("controller process helper descriptor path is invalid")
+required_seals = sum(
+    int(getattr(fcntl, name))
+    for name in ("F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL")
+)
+try:
+    original = os.fstat(195)
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(original.st_mode)
+            or original.st_uid != os.geteuid()
+            or original.st_gid != os.getegid()
+            or stat.S_IMODE(original.st_mode) != 0o400
+            or not os.get_inheritable(195)
+            or os.readlink(path) != "/memfd:leadpoet-process-helper (deleted)"
+            or (original.st_dev, original.st_ino) != (opened.st_dev, opened.st_ino)
+            or int(fcntl.fcntl(195, fcntl.F_GET_SEALS)) & required_seals
+            != required_seals
+        ):
+            raise SystemExit("controller process helper descriptor identity is unsafe")
+        if os.environ.get("GATEWAY_MINER_MAINTENANCE_PROOF_FD") != "190":
+            raise SystemExit("controller process helper proof descriptor is unavailable")
+        proof = os.fstat(190)
+        if (
+            not stat.S_ISREG(proof.st_mode)
+            or proof.st_uid != os.geteuid()
+            or proof.st_gid != os.getegid()
+            or stat.S_IMODE(proof.st_mode) != 0o400
+            or not os.get_inheritable(190)
+            or int(fcntl.fcntl(190, fcntl.F_GET_SEALS)) & required_seals
+            != required_seals
+        ):
+            raise SystemExit("controller process helper proof identity is unsafe")
+        process_payload = os.pread(195, 4 * 1024 * 1024 + 1, 0)
+        proof_payload = os.pread(190, 32 * 1024 + 1, 0)
+        document = json.loads(proof_payload.decode("ascii"))
+        expected = document.get("controller_process_helper_sha256")
+        observed = "sha256:" + hashlib.sha256(process_payload).hexdigest()
+        if expected != observed:
+            raise SystemExit("controller process helper proof commitment differs")
+    finally:
+        os.close(descriptor)
+except OSError as exc:
+    raise SystemExit("controller process helper descriptor is unavailable") from exc
+PY
+    return $?
+  fi
+  [ -r "$process_helper" ] && [ ! -L "$process_helper" ]
 }
 
 start_lab_arena_service() {
@@ -231,17 +325,41 @@ start_lab_arena_service() {
     echo "ERROR: Lab Arena service entrypoint is unavailable" >&2
     return 1
   fi
+  if ! verify_controller_process_helper "$GATEWAY_CONTROLLER_PROCESS_HELPER"; then
+    echo "ERROR: verified controller Lab Arena process helper is unavailable" >&2
+    return 1
+  fi
   mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    -u PREPARED_GATEWAY_SHA \
+    -u LAB_ARENA_RESTART_GUARD_GENERATION \
     setsid "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
       --environment-file "$GATEWAY_ENV_FILE" \
       --host 127.0.0.1 --port 8792 \
       > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
-      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   pid="$!"
+  if ! "$GATEWAY_PYTHON_BIN" "$GATEWAY_CONTROLLER_PROCESS_HELPER" record \
+      --state-file "$GATEWAY_CONTROLLER_PROCESS_STATE_FILE" \
+      --cwd "$LEADPOET_REPO_ROOT" \
+      --uid "$(id -u)" \
+      --launch-pgid "$pid" \
+      --discover-timeout-seconds 5 \
+      -- \
+      "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
+      --environment-file "$GATEWAY_ENV_FILE" \
+      --host 127.0.0.1 --port 8792; then
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    echo "ERROR: Lab Arena service ownership could not be recorded" >&2
+    return 1
+  fi
   for attempt in $(seq 1 30); do
     if ! kill -0 "$pid" 2>/dev/null; then
       tail -120 "$LAB_ARENA_SERVICE_LOG_FILE" >&2 || true
@@ -256,11 +374,80 @@ start_lab_arena_service() {
     fi
     sleep 2
   done
-  kill "$pid" 2>/dev/null || true
+  stop_lab_arena_service || true
   wait "$pid" 2>/dev/null || true
   tail -120 "$LAB_ARENA_SERVICE_LOG_FILE" >&2 || true
   echo "ERROR: Lab Arena service did not become ready" >&2
   return 1
+}
+
+run_lab_arena_restart_guard() {
+  local source_root="$1"
+  shift
+  local guard_args=("$@" --environment-file "$GATEWAY_ENV_FILE")
+  local -a guard_environment=(
+    env
+    -u LAB_ARENA_SUPABASE_URL
+    -u LAB_ARENA_SUPABASE_ANON_KEY
+    -u LAB_ARENA_SERVICE_KEY
+    -u LAB_ARENA_SERVICE_JWT
+  )
+  if [ ! -r "$source_root/scripts/lab_arena_restart_claim_guard.py" ]; then
+    echo "ERROR: exact Lab Arena restart guard helper is unavailable" >&2
+    return 1
+  fi
+  "${guard_environment[@]}" PYTHONPATH="$source_root" "$GATEWAY_PYTHON_BIN" \
+    "$source_root/scripts/lab_arena_restart_claim_guard.py" "${guard_args[@]}" \
+    --candidate "$PREPARED_GATEWAY_SHA" \
+    --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+}
+
+validate_post_activate_arena_guard_authority() {
+  if ! [[ "$PREPARED_GATEWAY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: post-activation Lab Arena guard candidate is invalid" >&2
+    return 1
+  fi
+  if ! [[ "$LAB_ARENA_RESTART_GUARD_GENERATION" =~ ^[1-9][0-9]{0,18}$ ]] \
+      || { [ "${#LAB_ARENA_RESTART_GUARD_GENERATION}" -eq 19 ] \
+        && [[ "$LAB_ARENA_RESTART_GUARD_GENERATION" > "9223372036854775807" ]]; }; then
+    echo "ERROR: post-activation Lab Arena guard generation is invalid" >&2
+    return 1
+  fi
+}
+
+bind_activated_gateway_guard_candidate() {
+  GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"
+  GATEWAY_DEPLOY_BRANCH="$(deployment_field branch)"
+  GATEWAY_DEPLOY_REMOTE="$(deployment_field remote_url)"
+  if [ "$PREPARED_GATEWAY_SHA" != "$GATEWAY_DEPLOY_SHA" ] \
+      || [ "$(git -C "$LEADPOET_REPO_ROOT" rev-parse HEAD)" != "$GATEWAY_DEPLOY_SHA" ]; then
+    echo "ERROR: canonical gateway checkout, prepared guard candidate, and activated deployment differ" >&2
+    return 1
+  fi
+}
+
+abort_lab_arena_restart_guard_before_destructive() {
+  local source_root
+  if [ -z "$LAB_ARENA_RESTART_GUARD_GENERATION" ] \
+      || [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" = "1" ]; then
+    return 0
+  fi
+  source_root="${GATEWAY_PREFLIGHT_TREE:-$LEADPOET_REPO_ROOT}"
+  run_lab_arena_restart_guard "$source_root" abort \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" >/dev/null 2>&1 || true
+  LAB_ARENA_RESTART_GUARD_GENERATION=""
+}
+
+drain_lab_arena_for_restart() {
+  local source_root="$1" report
+  report="$(run_lab_arena_restart_guard "$source_root" drain \
+    --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT")" || return 1
+  LAB_ARENA_RESTART_GUARD_GENERATION="$(
+    "$GATEWAY_PYTHON_BIN" -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$report"
+  )" || return 1
+  echo "Lab Arena claims paused and existing leases have durable completion receipts"
 }
 
 # The N-1 controller can carry a stale process environment across the exact
@@ -339,6 +526,10 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   GATEWAY_RESTART_CONTROLLER_ROOT
   GATEWAY_RESTART_AUTHORITY_ROOT
   GATEWAY_RESTART_AUTHORITY_COMMIT
+  GATEWAY_CONTROLLER_PROCESS_HELPER
+  GATEWAY_CONTROLLER_PROCESS_STATE_FILE
+  LAB_ARENA_PROCESS_HELPER
+  LAB_ARENA_SERVICE_STATE_FILE
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID
   GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED
   GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT
@@ -717,12 +908,15 @@ start_gateway_offline_artifact_prepare() {
   # cannot outlive the candidate tree.  Keep this release-independent work at
   # low CPU and I/O priority while the attestation runner is building.
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -746,7 +940,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${prepare_command[@]}" \
     >"$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" \
@@ -870,6 +1064,7 @@ follow_superseding_gateway_release() {
     GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
     GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
     GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
     GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
     GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
     GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
@@ -1058,9 +1253,12 @@ exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -1084,7 +1282,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${checkpoint_command[@]}" \
     >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   GATEWAY_ANCESTRY_CHECKPOINT_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_ANCESTRY_CHECKPOINT_PID" \
@@ -1588,6 +1786,9 @@ validate_gateway_aws_authority() {
 on_gateway_restart_exit() {
   local status="$?"
   local -a active_release_cleanup_paths=()
+  if [ "$status" -ne 0 ]; then
+    abort_lab_arena_restart_guard_before_destructive
+  fi
   if [ "$status" -ne 0 ]; then
     record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
       >/dev/null 2>&1 || true
@@ -2363,6 +2564,8 @@ install_successful_restart_script() {
     "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py"
   install -m 600 "$controller_source_root/gateway/tee/host_memory_guard_v2.py" \
     "$temporary_dir/gateway/tee/host_memory_guard_v2.py"
+  install -m 600 "$controller_source_root/scripts/manage_owned_process_group.py" \
+    "$temporary_dir/scripts/manage_owned_process_group.py"
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
     if [ ! -d "$release_dir" ] \
         || [ -L "$release_dir" ] \
@@ -2377,6 +2580,27 @@ install_successful_restart_script() {
         || ! cmp -s "$temporary_dir/gateway/tee/host_memory_guard_v2.py" "$release_dir/gateway/tee/host_memory_guard_v2.py"; then
       rm -rf -- "$temporary_dir"
       echo "ERROR: installed gateway restart controller release differs from the exact candidate" >&2
+      return 1
+    fi
+    if [ -e "$release_dir/scripts/manage_owned_process_group.py" ] \
+        || [ -L "$release_dir/scripts/manage_owned_process_group.py" ]; then
+      if [ -L "$release_dir/scripts/manage_owned_process_group.py" ] \
+          || [ "$(stat -c '%u:%g:%a' "$release_dir/scripts/manage_owned_process_group.py")" != "$(id -u):$(id -g):600" ] \
+          || ! cmp -s "$temporary_dir/scripts/manage_owned_process_group.py" \
+              "$release_dir/scripts/manage_owned_process_group.py"; then
+        rm -rf -- "$temporary_dir"
+        echo "ERROR: installed gateway restart controller process helper differs from the exact candidate" >&2
+        return 1
+      fi
+    elif ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
+        "$controller_sha" "$LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY" \
+        || ! git -C "$LEADPOET_REPO_ROOT" cat-file -e \
+        "$controller_sha:scripts/manage_owned_process_group.py" \
+        || ! git -C "$LEADPOET_REPO_ROOT" show \
+        "$controller_sha:scripts/manage_owned_process_group.py" \
+        | cmp -s - "$temporary_dir/scripts/manage_owned_process_group.py"; then
+      rm -rf -- "$temporary_dir"
+      echo "ERROR: installed gateway restart controller lacks a bounded exact process helper transition" >&2
       return 1
     fi
     rm -rf -- "$temporary_dir"
@@ -2696,6 +2920,10 @@ acquire_gateway_restart_lock() {
 }
 
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
+  # Fresh preparation never trusts guard authority inherited from a caller.
+  # The exact drain below establishes and replaces this value.
+  PREPARED_GATEWAY_SHA=""
+  LAB_ARENA_RESTART_GUARD_GENERATION=""
   mkdir -p \
     "$(dirname "$GATEWAY_RESTART_LOCK_FILE")" \
     "$(dirname "$GATEWAY_RESTART_RECOVERY_LOCK_FILE")" \
@@ -2716,6 +2944,7 @@ if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
     export GATEWAY_RESTART_LOCK_HELD=1
   fi
 elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
+  validate_post_activate_arena_guard_authority || exit 1
   if [ "${GATEWAY_RESTART_LOCK_HELD:-0}" != "1" ] || [ ! -e "/proc/$$/fd/9" ]; then
     echo "ERROR: post-activation gateway restart lost the deployment lock" >&2
     exit 1
@@ -2836,6 +3065,9 @@ restart_only_keys = {
     "GATEWAY_RESTART_AUTHORITY_ROOT",
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "PREPARED_GATEWAY_SHA",
+    "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -2844,6 +3076,8 @@ restart_only_keys = {
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
+    "GATEWAY_CONTROLLER_PROCESS_HELPER",
+    "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
@@ -2972,6 +3206,9 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_ROOT",
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "PREPARED_GATEWAY_SHA",
+    "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -3001,6 +3238,8 @@ skip_keys = {
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
+    "GATEWAY_CONTROLLER_PROCESS_HELPER",
+    "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
@@ -3132,6 +3371,9 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_ROOT",
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "PREPARED_GATEWAY_SHA",
+    "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
@@ -3161,6 +3403,8 @@ skip_keys = {
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
+    "GATEWAY_CONTROLLER_PROCESS_HELPER",
+    "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
@@ -3852,6 +4096,14 @@ if ! prepare_gateway_active_release_lineage; then
   exit 1
 fi
 
+GATEWAY_DEPLOY_STAGE="lab_arena_claim_drain"
+export GATEWAY_DEPLOY_STAGE
+if ! drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"; then
+  echo "ERROR: Lab Arena leases did not drain before gateway shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 echo "Rechecking guarded SOURCE_ADD quiescence at the destructive boundary"
 GATEWAY_DEPLOY_STAGE="source_add_shutdown_quiescence"
 export GATEWAY_DEPLOY_STAGE
@@ -3869,6 +4121,22 @@ if ! (
   exit 1
 fi
 
+GATEWAY_DEPLOY_STAGE="lab_arena_destructive_authorization"
+export GATEWAY_DEPLOY_STAGE
+if ! run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+    --phase gateway_destructive >/dev/null; then
+  echo "ERROR: Lab Arena drain changed before gateway shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
+GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
+if ! verify_controller_process_helper "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"; then
+  echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
 echo "Stopping existing gateway and Research Lab worker processes"
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
 export GATEWAY_DESTRUCTIVE_PHASE_STARTED
@@ -3884,7 +4152,7 @@ pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
-stop_lab_arena_service
+stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
@@ -3952,6 +4220,7 @@ exec env \
   GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
   GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+  GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
   GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
   GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
   GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
@@ -3972,6 +4241,8 @@ exec env \
   GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH:-unknown}-$$}" \
   GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}" \
   GATEWAY_DESTRUCTIVE_PHASE_STARTED="$GATEWAY_DESTRUCTIVE_PHASE_STARTED" \
+  PREPARED_GATEWAY_SHA="$PREPARED_GATEWAY_SHA" \
+  LAB_ARENA_RESTART_GUARD_GENERATION="$LAB_ARENA_RESTART_GUARD_GENERATION" \
   GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
   GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
   GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
@@ -4001,14 +4272,8 @@ exec env \
   bash "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" "$@"
 fi
 
-GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"
-GATEWAY_DEPLOY_BRANCH="$(deployment_field branch)"
-GATEWAY_DEPLOY_REMOTE="$(deployment_field remote_url)"
+bind_activated_gateway_guard_candidate || exit 1
 record_gateway_restart_timing "candidate_activated"
-if [ "$(git -C "$LEADPOET_REPO_ROOT" rev-parse HEAD)" != "$GATEWAY_DEPLOY_SHA" ]; then
-  echo "ERROR: canonical gateway checkout does not match activated deployment" >&2
-  exit 1
-fi
 echo "Cleaning stale read-only gateway vsock probes"
 "$GATEWAY_PYTHON_BIN" \
   "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
@@ -4224,6 +4489,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -4234,7 +4500,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
     >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   TEE_EGRESS_FORWARDER_PID="$!"
   sleep 2
   if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
@@ -4249,9 +4515,12 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+    -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
     -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
     -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
     -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -4262,7 +4531,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
     >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
@@ -4420,7 +4689,7 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
-unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
+unset RESEARCH_LAB_EVIDENCE_PROXY_URL
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
 
@@ -4444,9 +4713,14 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_GIT_HELPER \
   -u GATEWAY_EXACT_COMMIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+  -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+  -u LAB_ARENA_PROCESS_HELPER \
   -u GATEWAY_RESTART_AUTHORITY_ROOT \
   -u GATEWAY_RESTART_AUTHORITY_COMMIT \
   -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+  -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
+  -u PREPARED_GATEWAY_SHA \
+  -u LAB_ARENA_RESTART_GUARD_GENERATION \
   -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
   -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
   -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
@@ -4456,7 +4730,7 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
   > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
-  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
 
 GATEWAY_LAUNCHER_PID="$!"
 GATEWAY_PID=""
@@ -4507,6 +4781,12 @@ GATEWAY_DEPLOY_STAGE="lab_arena_service_start"
 export GATEWAY_DEPLOY_STAGE
 start_lab_arena_service
 record_gateway_restart_timing "lab_arena_service_ready"
+if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" ready \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+    --phase gateway_ready >/dev/null; then
+  echo "ERROR: Lab Arena gateway readiness could not be recorded" >&2
+  exit 1
+fi
 echo "Verifying the exact HTTP handoff consumed by automatic validator weights"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"
 export GATEWAY_DEPLOY_STAGE
@@ -4554,10 +4834,11 @@ GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
 if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
-  exec 190>&- 191>&- 192>&- 193>&- 194>&-
+  exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-
   unset GATEWAY_MINER_MAINTENANCE_PROOF_FD
   unset GATEWAY_GIT_HELPER GATEWAY_EXACT_COMMIT_HELPER
   unset GATEWAY_HOST_MEMORY_GUARD_PATH
+  unset GATEWAY_CONTROLLER_PROCESS_HELPER LAB_ARENA_PROCESS_HELPER
 fi
 GATEWAY_DEPLOY_COMPLETED=1
 rm -f "$GATEWAY_DEPLOY_PLAN_FILE" || true

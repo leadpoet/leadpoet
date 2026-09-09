@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import gzip
 import io
 import json
@@ -17,7 +18,7 @@ import tempfile
 import tarfile
 import threading
 import time
-from datetime import datetime, timezone
+from unittest.mock import Mock
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,6 +26,7 @@ import pytest
 import httpx
 from bittensor_wallet import Keypair
 
+from lab_arena import broker as br
 from lab_arena import contracts, runner as rn, runtime, shim, source_bundle
 from lab_arena.output import output_document_from_bytes
 
@@ -113,6 +115,8 @@ class FakeApi:
 
     def provider(self, run_id, lease_token, frame):
         self.provider_frames.append(dict(frame))
+        if self.broker_documents:
+            return self.broker_documents.pop(0)
         call = {"call_identity": contracts.document_hash(["call", frame["action_sequence"]]), "operation_id": frame["operation_id"], "reserved_microusd": 5000, "actual_microusd": 5000, "outcome": "settled", "status": 200, "request_hash": contracts.document_hash(frame["parameters"]), "response_hash": contracts.document_hash("resp")}
         body = json.dumps({"results": [{"url": "https://co1.example.com"}]}).encode()
         return {"status": 200, "headers": {"content-type": "application/json", "content-length": str(len(body))}, "body_b64": base64.b64encode(body).decode(), "call": call}
@@ -340,6 +344,103 @@ def test_model_failures_map_to_terminal_causes_with_no_output_hash(tmp_path, kin
     rn.Runner(make_config(tmp_path, api, sandbox)).run_once()
     result = api.completions[0]["body"]["result"]
     assert result["terminal_status"] == expected
+    assert api.completions[0]["body"]["output"] is None
+
+
+def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path):
+    class HostFailureRuntime:
+        @staticmethod
+        def run_icp(_spec, **_kwargs):
+            raise runtime.RuntimeHostError(
+                "runsc exited before sandbox creation completed"
+            )
+
+    api = FakeApi([lease()])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, HostFailureRuntime()))
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 1
+    assert api.completions == []
+    assert runner_.completed[0]["error"] == "RuntimeHostError"
+
+
+def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_error(tmp_path):
+    """Regression boundary only: this in-process test is not an end-to-end provider run."""
+
+    store = Mock()
+    store.reserve_call.return_value = {"status": "reserved"}
+    store.mark_dispatched.return_value = {"status": "dispatched"}
+    store.settle_call.return_value = {"status": "settled"}
+    transport = Mock()
+    transport.send.return_value = br.ProviderResponse(
+        200,
+        {"content-type": "application/json"},
+        b'{"error":{"code":429,"message":"upstream temporarily rate-limited"}}',
+    )
+    price_table = br.validate_price_table({
+        "schema_version": br.PRICE_TABLE_SCHEMA_VERSION,
+        "fetched_at": "2026-09-02T00:00:00Z",
+        "source": br.OPENROUTER_MODELS_URL,
+        "models": {
+            "openai/gpt-4o-mini": {
+                "prompt": "0.00000015", "completion": "0.0000006", "request": "0",
+                "image": "0", "web_search": "0", "internal_reasoning": "0",
+            }
+        },
+    })
+    provider_broker = br.Broker(
+        store=store,
+        key_for=lambda _provider: "sk-or-v1-" + "k" * 40,
+        price_table=price_table,
+        transport=transport,
+        funding_source_for=lambda _context: "miner_key",
+        credential_for=lambda _context, _provider: "sk-or-v1-" + "k" * 40,
+    )
+    broker_result = provider_broker.execute(
+        br.RunContext(
+            run_id="r1", assignment_id=lease()["assignment_id"], icp_position=0,
+            lease_token_hash=contracts.document_hash("tok-r1"), miner_hotkey=MINER,
+            submission_id="s1", stage=1, round_id=ROUND,
+        ),
+        operation_id="openrouter.chat",
+        parameters={
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "find fintech companies"}],
+            "max_tokens": 32,
+        },
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+    assert broker_result.status == 502
+    assert broker_result.call["error_code"] == "provider_unavailable"
+
+    class ProviderFailureRuntime(BridgingRuntime):
+        def run_icp(self, spec, **_):
+            self.specs.append(spec)
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                status, _headers, body = shim.dispatch(
+                    "openrouter.chat",
+                    {
+                        "model": "openai/gpt-4o-mini",
+                        "messages": [{"role": "user", "content": "find fintech companies"}],
+                        "max_tokens": 32,
+                    },
+                    5000,
+                )
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            assert status == 502 and json.loads(body) == {"error": {"code": "provider_unavailable"}}
+            return runtime.fake_result(exit_code=1, output_bytes=None, stderr=b"model raised provider error")
+
+    api = FakeApi([lease()], broker_documents=[broker_result.to_document()])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, ProviderFailureRuntime()))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "provider_error"
+    assert result["resource_summary"]["provider_call_count"] == 1
     assert api.completions[0]["body"]["output"] is None
 
 
@@ -883,6 +984,157 @@ def test_judge_failures_map_to_judge_causes_with_no_output(tmp_path, output, tim
     assert api.completions[0]["body"].get("output") in (None, {})
 
 
+def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
+    from lab_arena import scoring
+
+    detail = (
+        "Bearer bearer-secret https://provider.example/path?api_key=query-secret&mode=raw "
+        "api_key=plain-secret OPENAI_API_KEY=env-secret sk-proj-secret-value "
+        '{"api_key":"opaque-deepline-value","OPENAI_API_KEY":"opaque-env-value",'
+        '"password":"opaque-password","private_key":"opaque-private-key"}'
+    )
+    output = scoring.build_scoring_failure("r1", "judge_error", detail)
+    api = FakeApi([scoring_lease(run_id="r9")])
+    sandbox = BridgingRuntime(output=output, calls=0)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+
+    assert runner_.run_once() == 1
+
+    captured = capsys.readouterr()
+    assert "Lab Arena judge diagnostic:" in captured.err
+    assert "run_id=r9" in captured.err
+    assert "event=scoring_failure" in captured.err
+    assert "error_class=judge_error" in captured.err
+    assert "https://[redacted]/path?[redacted]" in captured.err
+    assert "Bearer [redacted]" in captured.err
+    assert "api_key=[redacted]" in captured.err
+    assert '"api_key":[redacted]' in captured.err
+    assert '"OPENAI_API_KEY":[redacted]' in captured.err
+    assert '"password":[redacted]' in captured.err
+    assert '"private_key":[redacted]' in captured.err
+    assert "bearer-secret" not in captured.err
+    assert "query-secret" not in captured.err
+    assert "plain-secret" not in captured.err
+    assert "env-secret" not in captured.err
+    assert "secret-value" not in captured.err
+    assert "opaque-deepline-value" not in captured.err
+    assert "opaque-env-value" not in captured.err
+    assert "opaque-password" not in captured.err
+    assert "opaque-private-key" not in captured.err
+    assert "\x00" not in rn._safe_judge_diagnostic_text("before\x00after")
+    assert len(rn._safe_judge_diagnostic_text("x" * 301)) == 300
+    assert api.completions[0]["body"].get("output") in (None, {})
+    assert set(api.completions[0]["body"]["result"]) == {
+        "schema_version",
+        "resource_summary",
+        "started_at",
+        "finished_at",
+        "terminal_status",
+    }
+
+
+@pytest.mark.parametrize(
+    ("detail", "safe_fragment", "secrets"),
+    [
+        (
+            'provider={"api_key":"opaque-deepline-value",'
+            '"OPENAI_API_KEY":"opaque-env-value"}',
+            '"api_key":[redacted]',
+            ("opaque-deepline-value", "opaque-env-value"),
+        ),
+        (
+            "password=opaque-password private_key=opaque-private-key",
+            "password=[redacted]",
+            ("opaque-password", "opaque-private-key"),
+        ),
+        (
+            "https://web-user:web-password@provider.example/path",
+            "https://[redacted]/path",
+            ("web-user", "web-password"),
+        ),
+        (
+            "postgresql://db-user:db-password@db.example/database",
+            "postgresql://[redacted]/database",
+            ("db-user", "db-password"),
+        ),
+        (
+            "https://partial-user:partial-password",
+            "https://[redacted]",
+            ("partial-user", "partial-password"),
+        ),
+    ],
+)
+def test_judge_diagnostic_logger_redacts_credential_forms(
+    capsys, detail, safe_fragment, secrets
+):
+    rn._log_judge_diagnostic(
+        "credential-test",
+        event="scoring_failure",
+        error_class="judge_error",
+        detail=detail,
+    )
+
+    diagnostic = capsys.readouterr().err
+    assert safe_fragment in diagnostic
+    assert all(secret not in diagnostic for secret in secrets)
+
+
+@pytest.mark.parametrize(
+    ("result", "event", "error_class"),
+    [
+        (
+            runtime.fake_result(
+                output_bytes=None,
+                output_error="unbounded output api_key=never-log-this",
+            ),
+            "output_error",
+            "SandboxOutputError",
+        ),
+        (
+            runtime.fake_result(output_bytes=b"not-json"),
+            "output_parse_error",
+            "ScoringError",
+        ),
+    ],
+)
+def test_judge_prevalidation_failure_logs_safe_class_without_output(
+    tmp_path, capsys, result, event, error_class
+):
+    api = FakeApi([scoring_lease(run_id="prevalidation")])
+    sandbox = runtime.FakeRuntime([result])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+
+    assert runner_.run_once() == 1
+
+    captured = capsys.readouterr()
+    assert f"event={event}" in captured.err
+    assert f"error_class={error_class}" in captured.err
+    assert "never-log-this" not in captured.err
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
+def test_accepted_judge_output_does_not_log_payload(tmp_path, capsys):
+    from lab_arena import scoring
+
+    output = scoring.build_scoring_output(
+        "r1",
+        [{"final_score": 71.0, "failure_reason": "Bearer accepted-secret"}],
+    )
+    api = FakeApi([scoring_lease(run_id="accepted")])
+    sandbox = BridgingRuntime(output=output, calls=0)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+
+    assert runner_.run_once() == 1
+
+    captured = capsys.readouterr()
+    assert "Lab Arena judge diagnostic:" not in captured.err
+    assert "accepted-secret" not in captured.err
+    assert api.completions[0]["body"]["output"] == output
+
+
 class RefusingApi(FakeApi):
     """The broker refuses a scoring call under its external quota."""
 
@@ -1007,6 +1259,37 @@ class CompletionDocumentApi(FakeApi):
         return self.responses.pop(0)
 
 
+def completion_envelope(*, output, timestamp):
+    body = {
+        "run_id": "r-complete",
+        "lease_token": "lease-token",
+        "result": {
+            "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+            "resource_summary": {
+                "wall_seconds": 1.0,
+                "cpu_seconds": 1.0,
+                "max_rss_bytes": 1024,
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "provider_call_count": 1,
+            },
+            "started_at": "2026-09-02T01:00:00Z",
+            "finished_at": "2026-09-02T01:00:01Z",
+            "terminal_status": "accepted",
+        },
+        "output": output,
+    }
+    return contracts.build_signed_request(
+        scope=contracts.SCOPE_COMPLETE,
+        round_id=ROUND,
+        hotkey=RUNNER.ss58_address,
+        body=body,
+        timestamp=timestamp,
+        request_id="a" * 32,
+        sign_message=sign,
+    )
+
+
 @pytest.mark.parametrize("failures, expect_abandoned", [(1, 0), (2, 0), (3, 1)])
 def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(tmp_path, failures, expect_abandoned):
     """Two retries cover a lost response or a transient Arena failure; a third failure fails closed."""
@@ -1039,11 +1322,12 @@ def test_accounting_open_retries_the_original_completion_until_accepted(
         BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
     )
     assert sum(config.accounting_open_retry_seconds) >= rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert sum(config.accounting_open_retry_seconds) == 352.0
     assert (
         sum(config.accounting_open_retry_seconds)
-        < contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
+        + (len(config.accounting_open_retry_seconds) + 1) * rn.API_TIMEOUT_SECONDS
+        < contracts.LEASE_TTL_SECONDS
     )
-    assert sum(config.accounting_open_retry_seconds) < contracts.LEASE_TTL_SECONDS
     config.accounting_open_retry_seconds = (0.0,)
     runner_ = rn.Runner(config)
 
@@ -1060,6 +1344,131 @@ def test_accounting_open_retries_the_original_completion_until_accepted(
         "Lab Arena completion status: accepted",
     ]
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"companies": [valid_company(1)]},
+        {
+            "schema_version": "leadpoet.lab_arena.scoring_output.v1",
+            "scored_run_id": "r1",
+            "breakdowns": [{"final_score": 71.0, "failure_reason": ""}],
+        },
+    ],
+    ids=("execution", "score"),
+)
+def test_finished_nonempty_output_survives_a_300_second_accounting_settlement(
+    tmp_path, monkeypatch, output
+):
+    now = [int(datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc).timestamp())]
+    start = now[0]
+
+    class LateSettlementApi(FakeApi):
+        def complete(self, envelope):
+            self.completions.append(envelope)
+            if now[0] - start < 301:
+                return {"status": "accounting_open", "open_calls": 1}
+            return {"status": "accepted"}
+
+    api = LateSettlementApi([])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.clock = lambda: datetime.fromtimestamp(now[0], tz=timezone.utc)
+    sleeps = []
+
+    def advance(delay):
+        sleeps.append(delay)
+        now[0] += int(delay)
+
+    monkeypatch.setattr(rn.time, "sleep", advance)
+    runner_ = rn.Runner(config)
+    original = completion_envelope(output=output, timestamp=start)
+
+    assert runner_._complete_with_retries(original) == {"status": "accepted"}
+    assert sum(sleeps) == 352.0
+    assert len(api.completions) == 11
+    assert all(item["request_id"] == original["request_id"] for item in api.completions)
+    assert all(item["body"] == original["body"] for item in api.completions)
+    assert all(item["body"]["output"] for item in api.completions)
+    assert [item["timestamp"] for item in api.completions] == [start] * 9 + [
+        start + 292,
+        start + 292,
+    ]
+    assert all(
+        verify(item["hotkey"], item["signature"], contracts.signed_request_message(item))
+        for item in api.completions
+    )
+
+
+@pytest.mark.parametrize("clock_offset", (-271, 271))
+def test_completion_refreshes_a_future_or_past_signature_before_the_attempt(
+    tmp_path, clock_offset
+):
+    signed_at = int(datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc).timestamp())
+    api = CompletionDocumentApi([], [{"status": "accepted"}])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.clock = lambda: datetime.fromtimestamp(
+        signed_at + clock_offset, tz=timezone.utc
+    )
+    runner_ = rn.Runner(config)
+    original = completion_envelope(
+        output={"companies": [valid_company(1)]}, timestamp=signed_at
+    )
+
+    assert runner_._complete_with_retries(original) == {"status": "accepted"}
+    assert len(api.completion_attempts) == 1
+    refreshed = api.completion_attempts[0]
+    assert refreshed["timestamp"] == signed_at + clock_offset
+    assert refreshed["request_id"] == original["request_id"]
+    assert refreshed["body"] == original["body"]
+    assert refreshed["signature"] != original["signature"]
+
+
+def test_accounting_open_default_retry_budget_is_fixed(tmp_path, monkeypatch):
+    api = CompletionDocumentApi(
+        [], [{"status": "accounting_open", "open_calls": 1}] * 11
+    )
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    now = [int(config.clock().timestamp())]
+    config.clock = lambda: datetime.fromtimestamp(now[0], tz=timezone.utc)
+    sleeps = []
+
+    def advance(delay):
+        sleeps.append(delay)
+        now[0] += int(delay)
+
+    monkeypatch.setattr(rn.time, "sleep", advance)
+    runner_ = rn.Runner(config)
+
+    with pytest.raises(rn.RunnerError, match="remained accounting_open"):
+        runner_._complete_with_retries(
+            completion_envelope(
+                output={"companies": [valid_company(1)]}, timestamp=now[0]
+            )
+        )
+    assert sleeps == list(config.accounting_open_retry_seconds)
+    assert sum(sleeps) == 352.0
+    assert len(api.completion_attempts) == 11
+
+
+@pytest.mark.parametrize("status", ("accepted", "failed", "stale", "rejected"))
+def test_terminal_completion_status_is_not_retried(tmp_path, monkeypatch, status):
+    api = CompletionDocumentApi([], [{"status": status}])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    monkeypatch.setattr(
+        rn.time,
+        "sleep",
+        lambda _delay: pytest.fail("terminal completion response was retried"),
+    )
+    runner_ = rn.Runner(config)
+
+    assert runner_._complete_with_retries(
+        completion_envelope(
+            output={"companies": [valid_company(1)]},
+            timestamp=int(config.clock().timestamp()),
+        )
+    ) == {"status": status}
+    assert len(api.completion_attempts) == 1
 
 
 def test_accounting_open_retry_exhaustion_abandons_without_logging_the_envelope(

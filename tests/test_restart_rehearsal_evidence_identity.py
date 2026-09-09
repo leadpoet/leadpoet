@@ -12,6 +12,7 @@ from typing import Optional
 import pytest
 
 from Leadpoet.utils.subnet_epoch import read_subnet_epoch_snapshot
+import validator_tee.host.verify_chain_signing_profile_v2 as signing_profile_verifier
 from tests.restart_rehearsal.verify_evidence import (
     _verify_production_identity,
 )
@@ -133,6 +134,28 @@ def test_gateway_enclave_uses_the_exact_transition_target_tree() -> None:
     assert '"/source/gateway"' not in service
 
 
+def test_legacy_rollout_installs_candidate_controller_before_bootstrap() -> None:
+    launcher = (
+        ROOT / "tests/restart_rehearsal/run_inside.sh"
+    ).read_text(encoding="utf-8")
+    install = launcher.index(
+        'CANDIDATE_CONTROLLER_RELEASE="$CONTROLLER_ROOT/releases/$CANDIDATE_SHA"'
+    )
+    bootstrap = launcher.index(
+        'bash "$MINER_BOOTSTRAP_ROOT/candidate/gw_restart.sh"'
+    )
+    assert install < bootstrap
+    assert 'test -d "$CONTROLLER_RELEASE"' in launcher[install:bootstrap]
+    assert (
+        'test "$(readlink "$CONTROLLER_ROOT/current")" = "releases/$CANDIDATE_SHA"'
+        in launcher[install:bootstrap]
+    )
+    assert (
+        '"$CANDIDATE_SHA:scripts/manage_owned_process_group.py"'
+        in launcher[install:bootstrap]
+    )
+
+
 def test_gateway_provider_adapter_tracks_production_transport_interface() -> None:
     production = ast.parse(
         (ROOT / "gateway/tee/provider_broker_v2.py").read_text(encoding="utf-8")
@@ -202,6 +225,7 @@ def test_local_chain_adapter_supports_exact_historical_epoch_search(
             ).value
             for name in (
                 "Tempo",
+                "RevealPeriodEpochs",
                 "LastEpochBlock",
                 "PendingEpochAt",
                 "SubnetEpochIndex",
@@ -228,6 +252,88 @@ def test_local_chain_adapter_supports_exact_historical_epoch_search(
     assert substrate.get_block_number(captured_current_hash) == (
         rehearsal_boundary.CURRENT_BLOCK
     )
+
+
+@pytest.mark.parametrize("use_keyword_arguments", [False, True])
+def test_local_chain_query_accepts_real_and_keyword_sdk_call_forms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    use_keyword_arguments: bool,
+) -> None:
+    monkeypatch.setattr(rehearsal_boundary, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_boundary,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    substrate = rehearsal_boundary._LocalSubstrate()
+    block_hash = rehearsal_boundary._block_hash(
+        rehearsal_boundary.CURRENT_BLOCK
+    )
+
+    if use_keyword_arguments:
+        result = substrate.query(
+            module="SubtensorModule",
+            storage_function="Tempo",
+            params=[71],
+            block_hash=block_hash,
+        )
+    else:
+        result = substrate.query(
+            "SubtensorModule",
+            "Tempo",
+            [71],
+            block_hash=block_hash,
+        )
+
+    assert result.value == rehearsal_boundary._subnet_epoch_state_at(
+        rehearsal_boundary.CURRENT_BLOCK
+    )["Tempo"]
+
+
+def test_local_chain_signing_profile_read_matches_full_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(rehearsal_boundary, "SOURCE_ROOT", ROOT)
+    monkeypatch.setattr(rehearsal_boundary, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_boundary,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    monkeypatch.setattr(
+        signing_profile_verifier.bt,
+        "Subtensor",
+        rehearsal_boundary._LocalSubtensor,
+    )
+
+    live = signing_profile_verifier.read_live_chain_signing_state(
+        "finney",
+        71,
+    )
+    profile = rehearsal_boundary._local_chain_signing_profile()
+    schedule = rehearsal_boundary._subnet_epoch_state_at(
+        rehearsal_boundary.CURRENT_BLOCK
+    )
+    verified = signing_profile_verifier.verify_chain_signing_profile_v2(
+        profile=profile,
+        runtime_version=live["runtime_version"],
+        genesis_hash=live["genesis_hash"],
+        call_metadata=live["call_metadata"],
+        tempo=live["tempo"],
+        subnet_reveal_period_epochs=live["subnet_reveal_period_epochs"],
+    )
+
+    assert live["netuid"] == 71
+    assert live["tempo"] == schedule["Tempo"] == profile["tempo"]
+    assert (
+        live["subnet_reveal_period_epochs"]
+        == schedule["RevealPeriodEpochs"]
+        == profile["subnet_reveal_period_epochs"]
+        == 1
+    )
+    assert verified["status"] == "ready"
 
 
 def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:

@@ -15,9 +15,10 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlparse
 
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
@@ -43,6 +44,15 @@ except ModuleNotFoundError as exc:
     from tests.restart_rehearsal.fixture_contract import (
         load_rehearsal_current_settlement_epoch_id,
         validate_rehearsal_finalized_authority_epochs,
+    )
+
+try:
+    from postgres_v2_contract_probe import DisposablePostgres
+except ModuleNotFoundError as exc:
+    if exc.name != "postgres_v2_contract_probe":
+        raise
+    from tests.restart_rehearsal.postgres_v2_contract_probe import (
+        DisposablePostgres,
     )
 
 
@@ -106,31 +116,151 @@ SENSITIVE_DOCUMENT_RE = re.compile(
     r"authorization|proxy-authorization|://[^/]+:[^/@]+@)",
     re.IGNORECASE,
 )
-EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE = {
-    "event_id": "40000000-0000-0000-0000-000000000147",
-    "event_hash": "sha256:" + "2" * 64,
-    "identical_replay": True,
-    "concurrent_replay_serialized": True,
-    "differing_replay_rejected": True,
-    "invalid_arguments_rejected": True,
-    "stale_head_rejected": True,
-    "empty_head_rejected": True,
-    "wrong_paused_head_rejected": True,
-    "rpc_security_contract_valid": True,
-    "queue_capacity_guard_exercised": True,
-    "hotkey_capacity_guard_exercised": True,
-    "row_counts": {
-        "resumed_run": 2,
-        "empty_run": 0,
-        "wrong_paused_run": 1,
-        "capacity_closed_run": 1,
-        "hotkey_capacity_closed_run": 1,
-        "concurrent_run": 2,
-    },
+LAB_ARENA_RESTART_RPC_PARAMETERS = {
+    "lab_arena_restart_guard_state_v1": (),
+    "lab_arena_acquire_restart_guard_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_expected_generation", "bigint"),
+        ("p_lease_seconds", "integer"),
+        ("p_candidate_commit", "text"),
+        ("p_restart_scope", "text"),
+        ("p_actor_ref", "text"),
+    ),
+    "lab_arena_restart_quiescence_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+    ),
+    "lab_arena_retarget_restart_guard_v1": (
+        ("p_current_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_expected_generation", "bigint"),
+        ("p_new_guard_id", "text"),
+        ("p_new_candidate_commit", "text"),
+        ("p_restart_scope", "text"),
+        ("p_lease_seconds", "integer"),
+        ("p_actor_ref", "text"),
+    ),
+    "lab_arena_authorize_restart_phase_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_phase", "text"),
+    ),
+    "lab_arena_mark_restart_ready_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_phase", "text"),
+    ),
+    "lab_arena_abort_restart_guard_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_actor_ref", "text"),
+    ),
+    "lab_arena_release_restart_guard_v1": (
+        ("p_guard_id", "text"),
+        ("p_owner_id", "text"),
+        ("p_guard_generation", "bigint"),
+        ("p_actor_ref", "text"),
+    ),
 }
 CONTROL_QUERY_FIELDS = frozenset(
     {"columns", "limit", "offset", "on_conflict", "order", "select"}
 )
+
+
+class MigrationBackedLabArenaRPC:
+    """Expose migration-190 SQL functions through the local HTTP boundary."""
+
+    def __init__(self, path: Path, *, candidate_sha: str):
+        self.database: DisposablePostgres | None = None
+        try:
+            self.database = DisposablePostgres.attach(
+                path,
+                candidate_sha=candidate_sha,
+            )
+            function_names = ",".join(
+                "'" + name + "'"
+                for name in sorted(LAB_ARENA_RESTART_RPC_PARAMETERS)
+            )
+            observed = self.database.psql(
+                f"""
+                SELECT p.proname || '(' ||
+                       pg_get_function_identity_arguments(p.oid) || ')'
+                FROM pg_proc AS p
+                JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname IN ({function_names})
+                ORDER BY p.proname;
+                """,
+                tuples_only=True,
+            ).stdout.splitlines()
+            expected = sorted(
+                f"{name}({', '.join(f'{field} {kind}' for field, kind in parameters)})"
+                for name, parameters in LAB_ARENA_RESTART_RPC_PARAMETERS.items()
+            )
+            if (
+                sorted(line.strip() for line in observed if line.strip())
+                != expected
+            ):
+                raise ValueError(
+                    "migration-backed Lab Arena RPC catalog differs"
+                )
+        except BaseException:
+            if self.database is not None:
+                self.database.stop()
+            raise
+
+    def call(
+        self,
+        name: str,
+        body: Any,
+        *,
+        database_role: str,
+    ) -> dict[str, Any]:
+        parameters = LAB_ARENA_RESTART_RPC_PARAMETERS.get(name)
+        if parameters is None or not isinstance(body, Mapping):
+            raise ValueError("Lab Arena restart RPC differs")
+        if self.database is None:
+            raise ValueError("migration-backed Lab Arena restart RPC is unavailable")
+        if database_role not in {"anon", "lab_arena_service", "service_role"}:
+            raise ValueError("Lab Arena restart database role differs")
+        expected = {field for field, _ in parameters}
+        if set(body) != expected:
+            raise ValueError("Lab Arena restart RPC parameters differ")
+        encoded = json.dumps(dict(body), sort_keys=True, separators=(",", ":"))
+        if "$leadpoet$" in encoded:
+            raise ValueError("Lab Arena restart RPC payload differs")
+        arguments = ",".join(
+            f"(payload->>'{field}')::{kind}" for field, kind in parameters
+        )
+        sql = (
+            f"SET ROLE {database_role};\n"
+            f"WITH input AS (SELECT $leadpoet${encoded}$leadpoet$::jsonb AS payload) "
+            f"SELECT public.{name}({arguments})::text FROM input;\n"
+        )
+        result = self.database.psql(
+            sql,
+            tuples_only=True,
+            quiet=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError("migration-backed Lab Arena restart RPC rejected")
+        try:
+            value = json.loads(result.stdout.strip())
+        except json.JSONDecodeError as exc:
+            raise ValueError("migration-backed Lab Arena restart RPC differs") from exc
+        if not isinstance(value, Mapping):
+            raise ValueError("migration-backed Lab Arena restart RPC differs")
+        return dict(value)
+
+    def stop(self) -> None:
+        if self.database is not None:
+            self.database.stop()
 
 
 def _candidate_source_add_leg1_authority(
@@ -604,11 +734,7 @@ def _migration_schema_contract(
             "migration-backed schema contract differs from candidate"
         )
     expected_final_migrations = [
-        "130-research-lab-provider-outcome-append.sql",
-        "131-research-lab-provider-outcome-backpressure.sql",
         "132-research-lab-champion-lifetime-credit.sql",
-        "133-research-lab-provider-outcome-contention-status.sql",
-        "134-research-lab-provider-outcome-head-contention.sql",
         "136-research-lab-ancestry-checkpoint-sidecars.sql",
         "137-research-lab-allocation-settlement-frontier.sql",
         "138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql",
@@ -634,12 +760,20 @@ def _migration_schema_contract(
         "176-research-lab-source-add-provenance-origin-repair.sql",
         "177-research-lab-source-add-provenance-authority-acl.sql",
         "178-research-lab-source-add-miner-status.sql",
+        "186-research-lab-source-add-provisioned-status.sql",
         "179-lab-arena-v1.sql",
         "180-lab-arena-daily-competition.sql",
         "181-lab-arena-source-submissions.sql",
         "182-lab-arena-source-execution.sql",
         "183-lab-arena-miner-reward-basis.sql",
         "184-lab-arena-scoring-failure-isolation.sql",
+        "185-lab-arena-miner-credentials.sql",
+        "187-lab-arena-promotion-threshold.sql",
+        "188-lab-arena-baseline-promotion.sql",
+        "189-lab-arena-round-network-scope.sql",
+        "190-lab-arena-restart-claim-drain.sql",
+        "193-lab-arena-upload-recovery.sql",
+        "194-lab-arena-open-scorer-refresh.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -658,13 +792,6 @@ def _migration_schema_contract(
     ):
         raise RuntimeError(
             "migration-backed schema contract checks are incomplete"
-        )
-    if (
-        document.get("atomic_credit_resume")
-        != EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
-    ):
-        raise RuntimeError(
-            "migration-backed atomic credit resume evidence is incomplete"
         )
     raw_relations = document.get("relations")
     if not isinstance(raw_relations, dict) or not raw_relations:
@@ -711,7 +838,6 @@ def _migration_schema_contract(
         "research_lab_chain_realized_epoch_settlements_v1",
         "research_lab_chain_realized_settlement_activation_v1",
         "research_lab_chain_realized_obligation_credits_v1",
-        "research_lab_provider_outcome_checkpoints_v2",
         "research_lab_attested_ancestry_checkpoints_v2",
         "research_lab_attested_ancestry_activations_v2",
         "research_lab_allocation_settlement_frontiers_v2",
@@ -734,11 +860,7 @@ def _migration_schema_contract(
         "research_lab_acquire_maintenance_lease",
         "research_lab_attested_transport_purpose_contract_v2",
         "research_lab_attested_transport_terminal_contract_v2",
-        "append_research_lab_provider_outcome_checkpoint_v2",
-        "research_lab_provider_outcome_contention_contract_v2",
-        "research_lab_provider_outcome_contention_contract_v3",
         "put_research_lab_provider_evidence_cache_v2",
-        "append_research_lab_provider_outcome_checkpoints_v2",
         "research_lab_provider_persistence_batch_contract_v1",
         "persist_research_lab_chain_realized_lifetime_settlement_v2",
         "research_lab_champion_lifetime_credit_contract_v1",
@@ -749,7 +871,6 @@ def _migration_schema_contract(
         "persist_research_lab_allocation_frontier_bootstrap_v2",
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
         "research_lab_allocation_frontier_bootstrap_contract_v2",
-        "resume_research_lab_credit_blocked_run_v1",
         "research_lab_compact_weight_settlement_contract_v1",
         "research_lab_source_add_provider_origin_contract_v1",
         "research_lab_source_add_duplicate_privacy_contract_v1",
@@ -785,36 +906,6 @@ def _migration_schema_contract(
     return relations, set(raw_rpcs)
 
 
-def _migration_provider_outcome_contract(
-    path: Path,
-    *,
-    candidate_sha: str,
-) -> dict[str, Any]:
-    document = json.loads(path.read_text(encoding="utf-8"))
-    contract = document.get("provider_outcome_contention_contract")
-    append_evidence = document.get("provider_outcome_append")
-    expected_contract = {
-        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
-        "lock_contention_status": "busy",
-        "stale_lineage_status": "conflict",
-        "candidate_checkpoint_hash": True,
-        "conflict_head_checkpoint_row": "encrypted_or_null",
-    }
-    if (
-        document.get("candidate_sha") != candidate_sha
-        or contract != expected_contract
-        or not isinstance(append_evidence, dict)
-        or append_evidence.get("accepted_count") != 1
-        or append_evidence.get("rejected_count") != 1
-        or append_evidence.get("row_count") != 3
-        or append_evidence.get("contention_rollback_delta") != 0
-        or append_evidence.get("durable_head_conflict_verified") is not True
-        or append_evidence.get("empty_head_conflict_verified") is not True
-    ):
-        raise RuntimeError(
-            "migration-backed provider outcome contract is incomplete"
-        )
-    return dict(contract)
 
 
 def _source_add_claim_control_contract() -> dict[str, Any]:
@@ -1221,7 +1312,6 @@ class LocalPostgRESTState:
         rpcs: set[str],
         relation_columns: dict[str, frozenset[str]] | None = None,
         seed_rows: dict[str, list[dict[str, Any]]] | None = None,
-        provider_outcome_contract: dict[str, Any] | None = None,
         durable_state_path: Path | None = None,
         durable_schema_sha: str = "",
     ):
@@ -1232,9 +1322,6 @@ class LocalPostgRESTState:
         self.rpcs = rpcs
         self.relation_columns = dict(relation_columns or {})
         self.lock = threading.Lock()
-        self.provider_outcome_contract = dict(
-            provider_outcome_contract or {}
-        )
         self.durable_state_path = durable_state_path
         self.durable_schema_sha = durable_schema_sha
         self.source_add_post_accept_leg1_function_authority = (
@@ -1270,9 +1357,6 @@ class LocalPostgRESTState:
             )
         )
         self.durable_revision = 0
-        self._provider_outcome_locks: dict[
-            tuple[str, str], threading.Lock
-        ] = {}
         self.rows: dict[str, list[dict[str, Any]]] = {
             name: [] for name in tables
         }
@@ -2020,18 +2104,6 @@ class LocalPostgRESTState:
             "state_hash": document["state_hash"],
         }
 
-    def _provider_outcome_lock(
-        self,
-        key_ref_hash: str,
-        utc_day: str,
-    ) -> threading.Lock:
-        identity = (key_ref_hash, utc_day)
-        with self.lock:
-            lock = self._provider_outcome_locks.get(identity)
-            if lock is None:
-                lock = threading.Lock()
-                self._provider_outcome_locks[identity] = lock
-            return lock
 
     def acquire_maintenance_lease(
         self,
@@ -2134,351 +2206,7 @@ class LocalPostgRESTState:
                 "expires_at": row["expires_at"],
             }
 
-    def append_provider_outcome_checkpoint(
-        self,
-        body: Any,
-    ) -> dict[str, Any]:
-        if self.provider_outcome_contract.get("schema_version") != (
-            "leadpoet.provider_outcome_contention_contract.v3"
-        ):
-            raise ValueError(
-                "provider outcome migration contract is unavailable"
-            )
-        if not isinstance(body, dict) or set(body) != {"checkpoint_row"}:
-            raise ValueError("provider outcome checkpoint RPC body is invalid")
-        row = body.get("checkpoint_row")
-        table = "research_lab_provider_outcome_checkpoints_v2"
-        relation_columns = self.relation_columns.get(table)
-        expected_columns = (
-            relation_columns - {"created_at"}
-            if relation_columns is not None
-            else None
-        )
-        if (
-            not isinstance(row, dict)
-            or expected_columns is None
-            or set(row) != set(expected_columns)
-            or row.get("schema_version")
-            != "leadpoet.provider_outcome_checkpoint_row.v2"
-            or not isinstance(row.get("sequence"), int)
-            or isinstance(row.get("sequence"), bool)
-            or int(row["sequence"]) <= 0
-            or not isinstance(row.get("encrypted_checkpoint_doc"), dict)
-        ):
-            raise ValueError(
-                "provider outcome checkpoint fields are invalid"
-            )
-        key_ref_hash = str(row.get("artifact_master_key_ref_hash") or "")
-        utc_day = str(row.get("utc_day") or "")
-        checkpoint_hash = str(row.get("checkpoint_hash") or "")
-        previous_hash = str(row.get("previous_checkpoint_hash") or "")
-        hash_fields = {
-            "artifact_master_key_ref_hash",
-            "checkpoint_hash",
-            "state_document_hash",
-            "checkpoint_artifact_id",
-        }
-        try:
-            parsed_day = date.fromisoformat(utc_day)
-        except ValueError as exc:
-            raise ValueError(
-                "provider outcome checkpoint identity is invalid"
-            ) from exc
-        if (
-            not HASH_RE.fullmatch(key_ref_hash)
-            or not DAY_RE.fullmatch(utc_day)
-            or parsed_day.isoformat() != utc_day
-            or not HASH_RE.fullmatch(checkpoint_hash)
-            or (
-                previous_hash
-                and not HASH_RE.fullmatch(previous_hash)
-            )
-            or any(
-                not HASH_RE.fullmatch(str(row.get(field) or ""))
-                for field in hash_fields
-            )
-        ):
-            raise ValueError(
-                "provider outcome checkpoint identity is invalid"
-            )
 
-        lineage_lock = self._provider_outcome_lock(key_ref_hash, utc_day)
-        if not lineage_lock.acquire(blocking=False):
-            return {
-                "status": str(
-                    self.provider_outcome_contract[
-                        "lock_contention_status"
-                    ]
-                ),
-                "checkpoint_hash": checkpoint_hash,
-            }
-        try:
-            with self.lock:
-                rows = self.rows[table]
-                existing = next(
-                    (
-                        stored
-                        for stored in rows
-                        if stored.get("checkpoint_hash") == checkpoint_hash
-                    ),
-                    None,
-                )
-                if existing is not None:
-                    durable = {
-                        field: value
-                        for field, value in existing.items()
-                        if field != "created_at"
-                    }
-                    if durable != row:
-                        raise ValueError(
-                            "provider outcome checkpoint hash already "
-                            "identifies another row"
-                        )
-                    return {
-                        "status": "existing",
-                        "checkpoint_hash": checkpoint_hash,
-                    }
-                lineage = [
-                    stored
-                    for stored in rows
-                    if (
-                        stored.get("artifact_master_key_ref_hash")
-                        == key_ref_hash
-                        and stored.get("utc_day") == utc_day
-                    )
-                ]
-                current = (
-                    max(lineage, key=lambda stored: int(stored["sequence"]))
-                    if lineage
-                    else None
-                )
-                current_row = (
-                    {
-                        field: value
-                        for field, value in current.items()
-                        if field != "created_at"
-                    }
-                    if current is not None
-                    else None
-                )
-                sequence = int(row["sequence"])
-                expected_sequence = (
-                    int(current["sequence"]) + 1
-                    if current is not None
-                    else 1
-                )
-                expected_previous = (
-                    str(current["checkpoint_hash"])
-                    if current is not None
-                    else ""
-                )
-                if (
-                    sequence != expected_sequence
-                    or previous_hash != expected_previous
-                ):
-                    return {
-                        "status": str(
-                            self.provider_outcome_contract[
-                                "stale_lineage_status"
-                            ]
-                        ),
-                        "checkpoint_hash": checkpoint_hash,
-                        "head_checkpoint_row": current_row,
-                    }
-                stored = dict(row)
-                stored["created_at"] = "2026-07-25T00:00:00+00:00"
-                rows.append(stored)
-                self._write_durable_state_locked(mutated=True)
-                durable = {
-                    field: value
-                    for field, value in stored.items()
-                    if field != "created_at"
-                }
-                if durable != row:
-                    raise ValueError(
-                        "provider outcome checkpoint durable insert differs"
-                    )
-            return {
-                "status": "inserted",
-                "checkpoint_hash": checkpoint_hash,
-            }
-        finally:
-            lineage_lock.release()
-
-    def append_provider_outcome_checkpoints(
-        self,
-        body: Any,
-    ) -> dict[str, Any]:
-        if not isinstance(body, dict) or set(body) != {"checkpoint_rows"}:
-            raise ValueError("provider outcome checkpoint batch RPC body is invalid")
-        proposed = body.get("checkpoint_rows")
-        table = "research_lab_provider_outcome_checkpoints_v2"
-        relation_columns = self.relation_columns.get(table)
-        expected_columns = (
-            relation_columns - {"created_at"}
-            if relation_columns is not None
-            else None
-        )
-        if (
-            not isinstance(proposed, list)
-            or not 1 <= len(proposed) <= 32
-            or expected_columns is None
-        ):
-            raise ValueError("provider outcome checkpoint batch is invalid")
-        key_ref_hash = ""
-        utc_day = ""
-        previous_sequence = 0
-        previous_hash = ""
-        seen_hashes = set()
-        for index, row in enumerate(proposed):
-            if (
-                not isinstance(row, dict)
-                or set(row) != set(expected_columns)
-                or row.get("schema_version")
-                != "leadpoet.provider_outcome_checkpoint_row.v2"
-                or not isinstance(row.get("sequence"), int)
-                or isinstance(row.get("sequence"), bool)
-                or int(row["sequence"]) <= 0
-                or not isinstance(row.get("encrypted_checkpoint_doc"), dict)
-            ):
-                raise ValueError(
-                    "provider outcome checkpoint batch row fields are invalid"
-                )
-            row_key = str(row.get("artifact_master_key_ref_hash") or "")
-            row_day = str(row.get("utc_day") or "")
-            row_hash = str(row.get("checkpoint_hash") or "")
-            row_previous = str(row.get("previous_checkpoint_hash") or "")
-            if (
-                not HASH_RE.fullmatch(row_key)
-                or not DAY_RE.fullmatch(row_day)
-                or date.fromisoformat(row_day).isoformat() != row_day
-                or not HASH_RE.fullmatch(row_hash)
-                or (row_previous and not HASH_RE.fullmatch(row_previous))
-                or any(
-                    not HASH_RE.fullmatch(str(row.get(field) or ""))
-                    for field in {
-                        "state_document_hash",
-                        "checkpoint_artifact_id",
-                    }
-                )
-                or row_hash in seen_hashes
-            ):
-                raise ValueError(
-                    "provider outcome checkpoint batch identity is invalid"
-                )
-            if index == 0:
-                key_ref_hash = row_key
-                utc_day = row_day
-            elif (
-                row_key != key_ref_hash
-                or row_day != utc_day
-                or int(row["sequence"]) != previous_sequence + 1
-                or row_previous != previous_hash
-            ):
-                raise ValueError(
-                    "provider outcome checkpoint batch lineage is invalid"
-                )
-            previous_sequence = int(row["sequence"])
-            previous_hash = row_hash
-            seen_hashes.add(row_hash)
-
-        final_hash = str(proposed[-1]["checkpoint_hash"])
-        lineage_lock = self._provider_outcome_lock(key_ref_hash, utc_day)
-        if not lineage_lock.acquire(blocking=False):
-            return {
-                "status": "busy",
-                "checkpoint_hash": final_hash,
-                "checkpoint_count": len(proposed),
-            }
-        try:
-            with self.lock:
-                rows = self.rows[table]
-                existing = [
-                    next(
-                        (
-                            stored
-                            for stored in rows
-                            if stored.get("checkpoint_hash")
-                            == row["checkpoint_hash"]
-                        ),
-                        None,
-                    )
-                    for row in proposed
-                ]
-                if all(item is not None for item in existing):
-                    if any(
-                        {
-                            field: value
-                            for field, value in durable.items()
-                            if field != "created_at"
-                        }
-                        != row
-                        for durable, row in zip(existing, proposed)
-                    ):
-                        raise ValueError(
-                            "provider outcome checkpoint batch replay differs"
-                        )
-                    return {
-                        "status": "existing",
-                        "checkpoint_hash": final_hash,
-                        "checkpoint_count": len(proposed),
-                    }
-                if any(item is not None for item in existing):
-                    raise ValueError(
-                        "provider outcome checkpoint batch is partially durable"
-                    )
-                lineage = [
-                    stored
-                    for stored in rows
-                    if stored.get("artifact_master_key_ref_hash") == key_ref_hash
-                    and stored.get("utc_day") == utc_day
-                ]
-                current = (
-                    max(lineage, key=lambda stored: int(stored["sequence"]))
-                    if lineage
-                    else None
-                )
-                current_row = (
-                    {
-                        field: value
-                        for field, value in current.items()
-                        if field != "created_at"
-                    }
-                    if current is not None
-                    else None
-                )
-                expected_sequence = (
-                    int(current["sequence"]) + 1 if current is not None else 1
-                )
-                expected_previous = (
-                    str(current["checkpoint_hash"])
-                    if current is not None
-                    else ""
-                )
-                first = proposed[0]
-                if (
-                    int(first["sequence"]) != expected_sequence
-                    or str(first["previous_checkpoint_hash"])
-                    != expected_previous
-                ):
-                    return {
-                        "status": "conflict",
-                        "checkpoint_hash": final_hash,
-                        "checkpoint_count": len(proposed),
-                        "head_checkpoint_row": current_row,
-                    }
-                for row in proposed:
-                    stored = dict(row)
-                    stored["created_at"] = "2026-07-25T00:00:00+00:00"
-                    rows.append(stored)
-                self._write_durable_state_locked(mutated=True)
-            return {
-                "status": "inserted",
-                "checkpoint_hash": final_hash,
-                "checkpoint_count": len(proposed),
-            }
-        finally:
-            lineage_lock.release()
 
     def put_provider_evidence_cache(self, body: Any) -> dict[str, Any]:
         if not isinstance(body, dict) or set(body) != {"cache_row"}:
@@ -3713,12 +3441,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self) -> bool:
+    def _database_role(self) -> str | None:
         apikey = self.headers.get("apikey", "")
         authorization = self.headers.get("authorization", "")
-        return apikey in {"rehearsal-public", "rehearsal-secret"} and (
-            authorization == f"Bearer {apikey}"
-        )
+        if (apikey, authorization) == (
+            "rehearsal-secret",
+            "Bearer rehearsal.header.signature",
+        ):
+            return "lab_arena_service"
+        if (apikey, authorization) == (
+            "rehearsal-public",
+            "Bearer rehearsal-public",
+        ):
+            return "anon"
+        if (apikey, authorization) == (
+            "rehearsal-secret",
+            "Bearer rehearsal-secret",
+        ):
+            return "service_role"
+        return None
+
+    def _authorized(self) -> bool:
+        return self._database_role() is not None
 
     def _body(self) -> Any:
         size = int(self.headers.get("content-length", "0") or 0)
@@ -3781,7 +3525,20 @@ class Handler(BaseHTTPRequestHandler):
                 target=name,
             )
             response: Any = []
-            if name == (
+            if name in LAB_ARENA_RESTART_RPC_PARAMETERS:
+                if self.server.lab_arena_rpc is None:
+                    raise ValueError(
+                        "migration-backed Lab Arena restart RPC is unavailable"
+                    )
+                database_role = self._database_role()
+                if database_role is None:
+                    raise ValueError("Lab Arena restart database role differs")
+                response = self.server.lab_arena_rpc.call(
+                    name,
+                    body,
+                    database_role=database_role,
+                )
+            elif name == (
                 "research_lab_stateful_subnet_epoch_cutover_public_state_v1"
             ):
                 response = self.server.state.cutover_state
@@ -3863,51 +3620,6 @@ class Handler(BaseHTTPRequestHandler):
                     settlement_hash=response["settlement_hash"],
                     credit_count=response["credit_count"],
                 )
-            elif name == "append_research_lab_provider_outcome_checkpoint_v2":
-                response = (
-                    self.server.state.append_provider_outcome_checkpoint(body)
-                )
-                checkpoint_row = (
-                    body.get("checkpoint_row")
-                    if isinstance(body, dict)
-                    else None
-                )
-                self.server.state.record(
-                    status="ok",
-                    operation="provider_outcome_checkpoint_appended",
-                    method=self.command,
-                    target=name,
-                    result_status=response["status"],
-                    checkpoint_hash=response["checkpoint_hash"],
-                    sequence=(
-                        checkpoint_row.get("sequence")
-                        if isinstance(checkpoint_row, dict)
-                        else None
-                    ),
-                )
-            elif name == "append_research_lab_provider_outcome_checkpoints_v2":
-                response = (
-                    self.server.state.append_provider_outcome_checkpoints(body)
-                )
-                checkpoint_rows = (
-                    body.get("checkpoint_rows")
-                    if isinstance(body, dict)
-                    else None
-                )
-                self.server.state.record(
-                    status="ok",
-                    operation="provider_outcome_checkpoint_batch_appended",
-                    method=self.command,
-                    target=name,
-                    result_status=response["status"],
-                    checkpoint_hash=response["checkpoint_hash"],
-                    checkpoint_count=response["checkpoint_count"],
-                    sequences=(
-                        [row.get("sequence") for row in checkpoint_rows]
-                        if isinstance(checkpoint_rows, list)
-                        else []
-                    ),
-                )
             elif name == "put_research_lab_provider_evidence_cache_v2":
                 response = self.server.state.put_provider_evidence_cache(body)
                 self.server.state.record(
@@ -3928,9 +3640,6 @@ class Handler(BaseHTTPRequestHandler):
                         "leadpoet.provider_persistence_batch_contract.v1"
                     ),
                     "cache_put": "atomic_exact_row",
-                    "outcome_append": "atomic_contiguous_batch",
-                    "outcome_batch_max": 32,
-                    "conflict_head_checkpoint_row": "encrypted_or_null",
                 }
             elif name == (
                 "research_lab_compact_weight_settlement_contract_v1"
@@ -4292,22 +4001,6 @@ class Handler(BaseHTTPRequestHandler):
                     target
                 ),
             )
-            if target == "research_lab_provider_outcome_checkpoints_v2":
-                self.server.state.record(
-                    status="ok",
-                    operation="provider_outcome_checkpoint_readback",
-                    method=self.command,
-                    target=target,
-                    row_count=len(response),
-                    checkpoint_hashes=[
-                        str(row.get("checkpoint_hash") or "")
-                        for row in response
-                    ],
-                    sequences=[
-                        int(row.get("sequence") or 0)
-                        for row in response
-                    ],
-                )
         elif self.command == "POST":
             body = self._body()
             incoming = body if isinstance(body, list) else [body]
@@ -4383,9 +4076,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._dispatch()
         except (KeyError, TypeError, ValueError) as exc:
+            expected_denial = (
+                self.command == "POST"
+                and urlparse(self.path).path
+                == "/rest/v1/rpc/lab_arena_restart_guard_state_v1"
+                and self._database_role() == "anon"
+                and str(exc)
+                == "migration-backed Lab Arena restart RPC rejected"
+            )
             self.server.state.record(
-                status="rejected",
-                operation="request_validation",
+                status="expected_denial" if expected_denial else "rejected",
+                operation="authorization" if expected_denial else "request_validation",
                 method=self.command,
                 path=self.path,
                 error_type=type(exc).__name__,
@@ -4401,8 +4102,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class LocalPostgRESTServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], state: LocalPostgRESTState):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        state: LocalPostgRESTState,
+        *,
+        lab_arena_rpc: MigrationBackedLabArenaRPC | None = None,
+    ):
         self.state = state
+        self.lab_arena_rpc = lab_arena_rpc
         super().__init__(address, Handler)
 
 
@@ -4416,16 +4124,13 @@ def main() -> int:
     parser.add_argument("--schema-contract", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--durable-state", type=Path)
+    parser.add_argument("--postgres-connection", type=Path)
     args = parser.parse_args()
     fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
     if fixture.get("sanitization", {}).get("contains_production_credentials"):
         raise RuntimeError("local PostgREST fixture contains credentials")
     tables, rpcs = _schema_contract(args.source_root)
     relation_columns, migration_rpcs = _migration_schema_contract(
-        args.schema_contract,
-        candidate_sha=args.candidate_sha,
-    )
-    provider_outcome_contract = _migration_provider_outcome_contract(
         args.schema_contract,
         candidate_sha=args.candidate_sha,
     )
@@ -4437,43 +4142,68 @@ def main() -> int:
     tables.update(relation_columns)
     rpcs.update(migration_rpcs)
     args.state_root.mkdir(parents=True, exist_ok=True)
-    state = LocalPostgRESTState(
-        state_root=args.state_root,
-        fixture=fixture,
-        source_root=args.source_root,
-        tables=tables,
-        rpcs=rpcs,
-        relation_columns=relation_columns,
-        seed_rows=seed_rows,
-        provider_outcome_contract=provider_outcome_contract,
-        durable_state_path=args.durable_state,
-        durable_schema_sha=args.candidate_sha,
-    )
-    durable_identity = state.durable_state_identity()
-    server = LocalPostgRESTServer((args.host, args.port), state)
-    (args.state_root / "local-postgrest.ready").write_text(
-        json.dumps(
-            {
-                "schema_version": "leadpoet.local_postgrest.v1",
-                "host": args.host,
-                "port": args.port,
-                "tables": len(tables),
-                "rpcs": len(rpcs),
-                "migration_backed_relations": len(relation_columns),
-                "durable_schema_sha": args.candidate_sha,
-                "durable_revision": durable_identity["revision"],
-                "durable_state_hash": durable_identity["state_hash"],
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    state.record(status="ready", operation="service_start")
+    lab_arena_rpc = None
+
+    def stop_server(_signal: int, _frame: Any) -> None:
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop_server)
+    signal.signal(signal.SIGINT, stop_server)
     try:
+        if args.postgres_connection is not None:
+            lab_arena_rpc = MigrationBackedLabArenaRPC(
+                args.postgres_connection,
+                candidate_sha=args.candidate_sha,
+            )
+            missing_lab_arena_rpcs = (
+                set(LAB_ARENA_RESTART_RPC_PARAMETERS) - migration_rpcs
+            )
+            if missing_lab_arena_rpcs:
+                raise RuntimeError(
+                    "migration-backed Lab Arena restart RPCs are incomplete"
+                )
+        state = LocalPostgRESTState(
+            state_root=args.state_root,
+            fixture=fixture,
+            source_root=args.source_root,
+            tables=tables,
+            rpcs=rpcs,
+            relation_columns=relation_columns,
+            seed_rows=seed_rows,
+            durable_state_path=args.durable_state,
+            durable_schema_sha=args.candidate_sha,
+        )
+        durable_identity = state.durable_state_identity()
+        server = LocalPostgRESTServer(
+            (args.host, args.port),
+            state,
+            lab_arena_rpc=lab_arena_rpc,
+        )
+        (args.state_root / "local-postgrest.ready").write_text(
+            json.dumps(
+                {
+                    "schema_version": "leadpoet.local_postgrest.v1",
+                    "host": args.host,
+                    "port": args.port,
+                    "tables": len(tables),
+                    "rpcs": len(rpcs),
+                    "migration_backed_relations": len(relation_columns),
+                    "durable_schema_sha": args.candidate_sha,
+                    "durable_revision": durable_identity["revision"],
+                    "durable_state_hash": durable_identity["state_hash"],
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state.record(status="ready", operation="service_start")
         server.serve_forever(poll_interval=0.1)
     finally:
-        server.server_close()
+        if "server" in locals():
+            server.server_close()
+        if lab_arena_rpc is not None:
+            lab_arena_rpc.stop()
     return 0
 
 

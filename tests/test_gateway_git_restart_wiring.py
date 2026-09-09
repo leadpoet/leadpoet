@@ -34,6 +34,217 @@ def _shell_function_source(script: str, name: str) -> str:
     raise AssertionError(f"unterminated shell function: {name}")
 
 
+def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    drain = script.index('drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"')
+    authorize = script.index("--phase gateway_destructive", drain)
+    destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1", authorize)
+    ready = script.index("--phase gateway_ready", destructive)
+
+    assert drain < authorize < destructive < ready
+    assert "abort_lab_arena_restart_guard_before_destructive" in _shell_function_source(
+        script, "on_gateway_restart_exit"
+    )
+    assert "-u GATEWAY_ACTIVE_RELEASE_COMPONENT" in script
+
+
+def _run_post_activate_guard_reexec(
+    tmp_path: Path, *, candidate: str, generation: str,
+    plan_candidate: str | None = None, head_candidate: str | None = None,
+    invocation: str = "restart-fixture",
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    start = script.index('GATEWAY_DEPLOY_STAGE="restart_reexec"')
+    end = script.index('\nfi\n\nbind_activated_gateway_guard_candidate', start)
+    reexec = script[start:end]
+    validate = _shell_function_source(
+        script, "validate_post_activate_arena_guard_authority"
+    )
+    bind_candidate = _shell_function_source(
+        script, "bind_activated_gateway_guard_candidate"
+    )
+    run_guard = _shell_function_source(script, "run_lab_arena_restart_guard")
+    initialization = "\n".join((
+        'PREPARED_GATEWAY_SHA="${PREPARED_GATEWAY_SHA:-}"',
+        'LAB_ARENA_RESTART_GUARD_GENERATION="${LAB_ARENA_RESTART_GUARD_GENERATION:-}"',
+    ))
+    assert initialization in script
+
+    authority = tmp_path / "authority"
+    helper = authority / "scripts" / "lab_arena_restart_claim_guard.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("# exact test helper\n", encoding="utf-8")
+    helper_output = tmp_path / "helper-argv"
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/bash\n"
+        "printf '%s\\n' \"$@\" > \"$FAKE_HELPER_OUTPUT\"\n"
+        "printf '%s\\n' '{}'\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    canonical_env = tmp_path / "gateway.env"
+    canonical_env.write_text(
+        "LAB_ARENA_SUPABASE_URL=https://arena.invalid\n"
+        "LAB_ARENA_SUPABASE_ANON_KEY=test-anon\n"
+        "LAB_ARENA_SERVICE_KEY=sb_secret_test\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "post-activate-target.sh"
+    target.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        + f"ENV_CLONE={shlex.quote(str(tmp_path / 'missing-env-clone'))}\n"
+        + f"GATEWAY_ENV_FILE={shlex.quote(str(canonical_env))}\n"
+        + initialization
+        + "\n"
+        + validate
+        + "\n"
+        + bind_candidate
+        + "\n"
+        + run_guard
+        + "\n"
+        + "deployment_field() {\n"
+        + '  case "$1" in target_sha) printf \'%s\\n\' "$FAKE_PLAN_SHA" ;; '
+        + "branch) printf '%s\\n' main ;; remote_url) printf '%s\\n' test ;; esac\n"
+        + "}\n"
+        + "git() { printf '%s\\n' \"$FAKE_HEAD_SHA\"; }\n"
+        + "validate_post_activate_arena_guard_authority\n"
+        + "bind_activated_gateway_guard_candidate\n"
+        + 'test "$GATEWAY_ACTIVE_RELEASE_COMPONENT" = all\n'
+        + 'run_lab_arena_restart_guard "$GATEWAY_RESTART_AUTHORITY_ROOT" ready '
+        + '--generation "$LAB_ARENA_RESTART_GUARD_GENERATION" '
+        + '--phase gateway_ready >/dev/null\n'
+        + "printf '%s\\n' \"$PREPARED_GATEWAY_SHA\" "
+        + "\"$LAB_ARENA_RESTART_GUARD_GENERATION\" "
+        + "\"$GATEWAY_ACTIVE_RELEASE_COMPONENT\"\n",
+        encoding="utf-8",
+    )
+    target.chmod(0o755)
+
+    referenced = sorted(set(re.findall(r"\$([A-Z][A-Z0-9_]*)", reexec)))
+    values = {name: "fixture" for name in referenced}
+    values.update({
+        "GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT": str(target),
+        "GATEWAY_RESTART_AUTHORITY_ROOT": str(authority),
+        "GATEWAY_PYTHON_BIN": str(python),
+        "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID": invocation,
+        "GATEWAY_ACTIVE_RELEASE_COMPONENT": "all",
+        "PREPARED_GATEWAY_SHA": candidate,
+        "LAB_ARENA_RESTART_GUARD_GENERATION": generation,
+    })
+    assignments = "\n".join(
+        f"{name}={shlex.quote(value)}" for name, value in values.items()
+    )
+    driver = tmp_path / "reexec-driver.sh"
+    driver.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        + assignments
+        + "\nexport LAB_ARENA_SUPABASE_URL=https://arena.invalid\n"
+        + "export LAB_ARENA_SUPABASE_ANON_KEY=test-anon\n"
+        + "export LAB_ARENA_SERVICE_KEY=test-service\n"
+        + f"export FAKE_HELPER_OUTPUT={shlex.quote(str(helper_output))}\n"
+        + f"export FAKE_PLAN_SHA={shlex.quote(plan_candidate if plan_candidate is not None else candidate)}\n"
+        + f"export FAKE_HEAD_SHA={shlex.quote(head_candidate if head_candidate is not None else candidate)}\n"
+        + reexec
+        + "\n",
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+    completed = subprocess.run(
+        ["bash", str(driver)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return completed, helper_output
+
+
+def test_gateway_post_activate_reexec_preserves_exact_arena_guard_authority(
+    tmp_path: Path,
+) -> None:
+    candidate = "a" * 40
+    completed, helper_output = _run_post_activate_guard_reexec(
+        tmp_path, candidate=candidate, generation="7"
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [candidate, "7", "all"]
+    helper_argv = helper_output.read_text(encoding="utf-8")
+    assert f"--candidate\n{candidate}\n" in helper_argv
+    assert "--invocation\nrestart-fixture\n" in helper_argv
+    assert "--generation\n7\n" in helper_argv
+    assert "--phase\ngateway_ready\n" in helper_argv
+
+
+@pytest.mark.parametrize(
+    ("candidate", "generation", "diagnostic"),
+    [
+        ("", "7", "guard candidate is invalid"),
+        ("not-a-commit", "7", "guard candidate is invalid"),
+        ("a" * 40, "", "guard generation is invalid"),
+        ("a" * 40, "0", "guard generation is invalid"),
+        ("a" * 40, "9223372036854775808", "guard generation is invalid"),
+    ],
+)
+def test_gateway_post_activate_reexec_rejects_invalid_arena_guard_authority(
+    tmp_path: Path, candidate: str, generation: str, diagnostic: str,
+) -> None:
+    completed, helper_output = _run_post_activate_guard_reexec(
+        tmp_path, candidate=candidate, generation=generation
+    )
+
+    assert completed.returncode != 0
+    assert diagnostic in completed.stderr
+    assert not helper_output.exists()
+
+
+@pytest.mark.parametrize("mismatch", ["plan", "head"])
+def test_gateway_post_activate_reexec_rejects_candidate_binding_mismatch(
+    tmp_path: Path, mismatch: str,
+) -> None:
+    candidate = "a" * 40
+    kwargs = {
+        "plan_candidate": "b" * 40 if mismatch == "plan" else candidate,
+        "head_candidate": "b" * 40 if mismatch == "head" else candidate,
+    }
+    completed, helper_output = _run_post_activate_guard_reexec(
+        tmp_path, candidate=candidate, generation="7", **kwargs
+    )
+
+    assert completed.returncode != 0
+    assert "prepared guard candidate, and activated deployment differ" in completed.stderr
+    assert not helper_output.exists()
+
+
+def test_gateway_prepare_discards_caller_arena_guard_authority() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    prepare = script.index('if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then')
+    clear_candidate = script.index('PREPARED_GATEWAY_SHA=""', prepare)
+    clear_generation = script.index('LAB_ARENA_RESTART_GUARD_GENERATION=""', prepare)
+    acquire_lock = script.index("acquire_gateway_restart_lock", prepare)
+    drain = script.index('drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"')
+
+    assert prepare < clear_candidate < clear_generation < acquire_lock < drain
+    initialized = script.index(
+        'LAB_ARENA_RESTART_GUARD_GENERATION="${LAB_ARENA_RESTART_GUARD_GENERATION:-}"'
+    )
+    first_guard_call = script.index("run_lab_arena_restart_guard()", initialized)
+    assert 'LAB_ARENA_RESTART_GUARD_GENERATION=""' not in script[
+        initialized:first_guard_call
+    ]
+    reexec = script[
+        script.index('GATEWAY_DEPLOY_STAGE="restart_reexec"'):
+        script.index('\nfi\n\nbind_activated_gateway_guard_candidate')
+    ]
+    assert 'PREPARED_GATEWAY_SHA="$PREPARED_GATEWAY_SHA"' in reexec
+    assert (
+        'LAB_ARENA_RESTART_GUARD_GENERATION='
+        '"$LAB_ARENA_RESTART_GUARD_GENERATION"'
+    ) in reexec
+    assert 'GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT"' in reexec
+
+
 def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
@@ -207,7 +418,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"',
             'echo "Installing Python dependencies"',
             'echo "Relaunching gateway with cloned runtime env"',
-            'unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH',
+            'unset RESEARCH_LAB_EVIDENCE_PROXY_URL',
             'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
             'for attempt in $(seq 1 120)',
             'curl -fsS http://localhost:8000/health',
@@ -248,13 +459,17 @@ def test_gateway_restart_installs_preselected_release_lineage_after_activation()
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     reexec = script.index("GATEWAY_RESTART_PHASE=post_activate")
-    candidate = script.index('GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"')
+    candidate = script.index("bind_activated_gateway_guard_candidate || exit 1")
     revalidate = script.index(
         "if ! ensure_activated_gateway_release_lineage;", candidate
     )
     enclave_build = script.index('echo "Building/restarting TEE enclave"')
 
     assert reexec < candidate < revalidate < enclave_build
+    candidate_binding = _shell_function_source(
+        script, "bind_activated_gateway_guard_candidate"
+    )
+    assert 'GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"' in candidate_binding
     assert "rev-parse --verify 'origin/main^{commit}'" in script
     assert "merge-base --is-ancestor" in script
     assert '"$GATEWAY_DEPLOY_SHA" "$authority_commit"' in script
@@ -2680,10 +2895,7 @@ def test_gateway_restart_disables_the_retired_host_provider_proxy() -> None:
     assert 'pkill -9 -f "gateway.research_lab.provider_evidence_proxy"' in script
     assert '"$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_evidence_proxy' not in script
     assert "legacy_v1" not in script
-    assert (
-        "unset RESEARCH_LAB_EVIDENCE_PROXY_URL "
-        "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"
-    ) in script
+    assert "unset RESEARCH_LAB_EVIDENCE_PROXY_URL" in script
 
 
 def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
@@ -2696,7 +2908,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
     )
     readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
@@ -2721,7 +2933,7 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
         '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script

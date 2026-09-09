@@ -190,7 +190,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
                 b"failed checkpoint",
                 job_id="scoring-job-0",
                 purpose="research_lab.source_add_judge.v2",
-                artifact_kind="provider_outcome_checkpoint",
+                artifact_kind="provider_response",
             )
             raise RuntimeError("checkpoint failed")
     assert vault.transient_capacity_state()["transient_artifact_count"] == (
@@ -213,7 +213,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
         b"recovered checkpoint",
         job_id="scoring-job-recovery",
         purpose="research_lab.source_add_judge.v2",
-        artifact_kind="provider_outcome_checkpoint",
+        artifact_kind="provider_response",
     )
     assert recovered["persisted"] is False
     assert vault.transient_capacity_state()["transient_artifact_count"] == (
@@ -233,7 +233,7 @@ def test_transient_transaction_discards_only_failed_thread_artifacts() -> None:
                     b"failed checkpoint",
                     job_id="shared-job",
                     purpose="research_lab.provider_preflight.v2",
-                    artifact_kind="provider_outcome_checkpoint",
+                    artifact_kind="provider_response",
                 )
                 failing_sealed.set()
                 assert successful_sealed.wait(timeout=2.0)

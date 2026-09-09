@@ -52,7 +52,7 @@ def _source_row(*, auth_kind: str = "header", request_headers=None) -> dict:
     return {
         "adapter_id": "adapter:source-one",
         "miner_hotkey": "miner-hotkey-one",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "provision_status": "provisioned",
         "registry_provider_id": "source_one",
         "credential_envelope": envelope if auth_kind != "none" else {},
         "provision_doc": {

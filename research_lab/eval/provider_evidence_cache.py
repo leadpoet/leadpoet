@@ -91,18 +91,6 @@ def canonical_request_fingerprint(method: str, url: str, body: bytes | str | Non
     return digest.hexdigest()
 
 
-def icp_evidence_cache_key(canonical_icp: Mapping[str, Any]) -> str:
-    """Cache-file key for one ICP.
-
-    Both sides derive this from the exact payload the runner sends the
-    container (``canonicalize_private_model_icp`` output): the worker names
-    each per-ICP cache file with this key, and the runner picks the file for
-    the ICP in its stdin payload by recomputing it.
-    """
-    encoded = json.dumps(dict(canonical_icp), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
 def _entry_request_is_complete(entry: Mapping[str, Any]) -> bool:
     """True when the recorded request reproduces the raw request faithfully.
 

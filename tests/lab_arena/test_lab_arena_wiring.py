@@ -67,6 +67,22 @@ def test_public_baseline_download_is_https_and_byte_bounded(monkeypatch):
         wiring.fetch_public_source_archive("http://example.test/source.tar.gz", 10)
 
 
+def test_daily_baseline_environment_allows_only_promoted_lab(monkeypatch):
+    monkeypatch.delenv("LAB_ARENA_BASELINE_SOURCE_URL", raising=False)
+    assert wiring._baseline_source_url_from_environment("live") == wiring.DEFAULT_BASELINE_SOURCE_URL
+    monkeypatch.setenv("LAB_ARENA_BASELINE_SOURCE_URL", wiring.DEFAULT_BASELINE_SOURCE_URL)
+    assert wiring._baseline_source_url_from_environment("live") == wiring.DEFAULT_BASELINE_SOURCE_URL
+    monkeypatch.setenv(
+        "LAB_ARENA_BASELINE_SOURCE_URL",
+        "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
+    )
+    with pytest.raises(ServiceError, match="not the promoted lab source"):
+        wiring._baseline_source_url_from_environment("live")
+    assert wiring._baseline_source_url_from_environment("shadow").endswith(
+        "/main.tar.gz"
+    )
+
+
 def test_banned_hotkeys_snapshot_must_be_a_json_list(tmp_path, monkeypatch):
     path = tmp_path / "banned.json"
     path.write_text(json.dumps({"not": "a list"}))
@@ -175,3 +191,49 @@ def test_service_requires_at_least_one_runner_hotkey(monkeypatch):
         "runner-one",
         "runner-two",
     )
+
+
+def test_promoter_keeps_github_token_out_of_repository_and_command(monkeypatch, tmp_path):
+    import base64
+
+    monkeypatch.delenv("LAB_ARENA_GIT_SSH_KEY_PATH", raising=False)
+    monkeypatch.setenv("LAB_ARENA_GITHUB_TOKEN", "unit-test-placeholder")
+    monkeypatch.setenv("LAB_ARENA_PROMOTION_WORK_DIR", str(tmp_path / "cache"))
+    promoter = wiring.baseline_promoter_from_environment()
+    assert promoter.repo_url == "https://github.com/leadpoet/pydantic-harness.git"
+    assert promoter.work_dir == tmp_path / "cache"
+    assert "unit-test-placeholder" not in promoter.repo_url
+    assert promoter._environment["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+    encoded = promoter._environment["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+    assert base64.b64decode(encoded) == b"x-access-token:unit-test-placeholder"
+
+
+def test_promoter_ssh_credentials_are_repo_scoped_and_require_private_permissions(monkeypatch, tmp_path):
+    import shlex
+
+    monkeypatch.delenv("LAB_ARENA_GITHUB_TOKEN", raising=False)
+    path = tmp_path / "key with spaces"
+    path.write_text("unit-test-placeholder")
+    monkeypatch.setenv("LAB_ARENA_GIT_SSH_KEY_PATH", str(path))
+    path.chmod(0o644)
+    with pytest.raises(ServiceError, match="promotion_ssh_key_permissions_invalid"):
+        wiring.baseline_promoter_from_environment()
+    path.chmod(0o600)
+    promoter = wiring.baseline_promoter_from_environment()
+    assert promoter.repo_url == "git@github.com:leadpoet/pydantic-harness.git"
+    command = shlex.split(promoter._environment["GIT_SSH_COMMAND"])
+    assert command[:3] == ["ssh", "-i", str(path)]
+    assert "StrictHostKeyChecking=yes" in command
+    assert "IdentitiesOnly=yes" in command
+    link = tmp_path / "link"
+    link.symlink_to(path)
+    monkeypatch.setenv("LAB_ARENA_GIT_SSH_KEY_PATH", str(link))
+    with pytest.raises(ServiceError, match="promotion_ssh_key_invalid"):
+        wiring.baseline_promoter_from_environment()
+
+
+def test_promoter_rejects_ambiguous_credentials(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_GIT_SSH_KEY_PATH", "/unused/key")
+    monkeypatch.setenv("LAB_ARENA_GITHUB_TOKEN", "unit-test-placeholder")
+    with pytest.raises(ServiceError, match="promotion_credentials_ambiguous"):
+        wiring.baseline_promoter_from_environment()

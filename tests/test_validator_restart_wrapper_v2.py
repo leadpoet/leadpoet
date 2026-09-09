@@ -7,6 +7,48 @@ import sys
 import pytest
 
 
+def test_validator_restart_requires_controller_permit_before_shutdown() -> None:
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    boundary = script.index('VALIDATOR_DEPLOY_STAGE="lab_arena_guard_handoff"')
+    request = script.index("write_lab_arena_restart_guard_request", boundary)
+    permit = script.index("wait_for_lab_arena_restart_guard_permit", request)
+    destructive = script.index("VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1", permit)
+    process_proof = script.index('"$VALIDATOR_CONTROLLER_PROCESS_HELPER" verify', destructive)
+
+    assert request < permit < destructive < process_proof
+    assert "lab_arena_restart_claim_guard.py' drain" not in script
+    assert "lab_arena_restart_claim_guard.py' authorize" not in script
+    assert "lab_arena_restart_claim_guard.py' ready" not in script
+    assert "LAB_ARENA_SUPABASE_URL" not in script
+
+    write_function = script[
+        script.index("write_lab_arena_restart_guard_request()"):
+        script.index("verify_lab_arena_restart_guard_handoff_sources()")
+    ]
+    permit_function = script[
+        script.index("wait_for_lab_arena_restart_guard_permit()"):
+        script.index("while [ \"$#\" -gt 0 ]")
+    ]
+    assert write_function.index("verify_lab_arena_restart_guard_handoff_sources") \
+        < write_function.index("write-request")
+    assert permit_function.index("verify_lab_arena_restart_guard_handoff_sources") \
+        < permit_function.index("validate-permit")
+
+
+def test_direct_validator_restart_requires_canonical_guard_handoff() -> None:
+    result = subprocess.run(
+        ["bash", "validator_restart.sh", "--commit", "1" * 40],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "requires the canonical controller Lab Arena guard permit" in result.stderr
+    assert "Pulling latest GitHub main" not in result.stdout
+
+
 def test_restart_preserves_all_tracked_diffs_before_pull():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     preserve = script.index("preserving tracked local validator checkout changes")
@@ -443,6 +485,17 @@ def _handoff_environment(prefix: str) -> dict[str, str]:
     }
 
 
+def _arena_guard_environment(tmp_path: Path) -> dict[str, str]:
+    # These tests stop before reading a permit. Supply only the controller
+    # metadata needed to reach the specific handoff or re-exec boundary.
+    prefix = f"/tmp/leadpoet-{tmp_path.parent.name}-{tmp_path.name}"
+    return {
+        "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT": prefix + "-guard-request.json",
+        "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT": prefix + "-guard-permit.json",
+        "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE": "a" * 64,
+    }
+
+
 def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
     tmp_path: Path,
 ) -> None:
@@ -454,6 +507,7 @@ def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
         }
     )
     clean_env = {key: value for key, value in os.environ.items() if key not in names}
+    clean_env.update(_arena_guard_environment(tmp_path))
     clean_env["VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED"] = "1"
     missing = subprocess.run(
         ["bash", "validator_restart.sh"],
@@ -800,6 +854,7 @@ def _run_forward_restart_fixture(
     handoff_prefix = f"/tmp/leadpoet-{tmp_path.name}"
     environment = {
         **os.environ,
+        **_arena_guard_environment(tmp_path),
         "PATH": str(tmp_path / "bin") + os.pathsep + os.environ["PATH"],
         "VALIDATOR_ROOT": str(repo),
         "VALIDATOR_RESTART_CONTROLLER_ROOT": str(tmp_path / "controller"),

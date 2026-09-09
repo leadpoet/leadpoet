@@ -663,6 +663,10 @@ ROUND_CONFIGURATION_FIELDS = (
     F("schema_version", "str", choices=(ROUND_CONFIGURATION_SCHEMA_VERSION,)),
     F("round_id", "str", minimum=6, maximum=64),
     F("mode", "str", choices=("shadow", "live")),
+    # Added without changing the v1 document name so historical rows remain
+    # readable.  The pair is optional only for legacy Finney/netuid 71 rows.
+    F("network_name", "str", required=False, minimum=1, maximum=64),
+    F("netuid", "int", required=False, minimum=1),
     F("rewards_enabled", "bool"),
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
     F("stage_1_icp_count", "int", minimum=1),
@@ -693,6 +697,11 @@ ROUND_CONFIGURATION_FIELDS = (
 
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
+    if ("network_name" in config) != ("netuid" in config):
+        raise ArenaContractError("round network_name and netuid must be supplied together")
+    if "network_name" not in config:
+        config["network_name"] = "finney"
+        config["netuid"] = 71
     if not ROUND_ID_RE.match(config["round_id"]):
         raise ArenaContractError("round_id has an invalid shape")
     if config["stage_1_icp_count"] != STAGE_1_ICP_COUNT or config["stage_2_icp_count"] != STAGE_2_ICP_COUNT:

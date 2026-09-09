@@ -111,26 +111,6 @@ def test_leg1_reward_rejects_noncanonical_provenance_authority(mutation):
         execute_reward_decision_v2(payload)
 
 
-def test_leg2_reward_rejects_nonapproving_signed_judge():
-    payload = {
-        "decision_kind": "source_add_leg2",
-        "decision_payload": {
-            "adapter_id": "adapter:test",
-            "miner_ref": "miner",
-            "start_epoch": 101,
-            "existing_rewards": [],
-            "alpha_percent": 5.0,
-            "reward_epochs": 20,
-            "trigger_evidence": {"llm_judge_passed": True},
-            "judge_result": {
-                "verdict": {"verdict": "not_helped", "source_used": False}
-            },
-        },
-    }
-    with pytest.raises(RewardExecutorV2Error, match="did not approve"):
-        execute_reward_decision_v2(payload)
-
-
 def test_reward_row_projection_hashes_change_for_payout_field_mutation():
     champion = {
         "champion_reward_id": "champion:1",
@@ -360,3 +340,12 @@ def test_historical_source_add_migration_requires_exact_measured_provenance():
                 },
             }
         )
+
+
+@pytest.mark.parametrize("kind", ("champion", "reimbursement"))
+def test_retired_loop_rewards_cannot_issue_new_obligations(kind):
+    with pytest.raises(RewardExecutorV2Error, match="kind is unsupported"):
+        execute_reward_decision_v2({
+            "decision_kind": kind,
+            "decision_payload": {},
+        })

@@ -99,22 +99,3 @@ def _empty_coordinator_provider_profile(
         "credential_ref_hashes": {},
         "envelopes": [],
     }
-
-
-async def load_provider_outcome_snapshot_v2(
-    *,
-    epoch_id: int,
-    sequence: int = 0,
-    execute: Any = execute_coordinator_v2,
-) -> dict[str, Any]:
-    from gateway.tee.coordinator_executor_v2 import OP_PROVIDER_OUTCOME_SNAPSHOT_V2
-
-    return await execute(
-        operation=OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
-        purpose="research_lab.provider_outcome_snapshot.v2",
-        epoch_id=int(epoch_id),
-        sequence=int(sequence),
-        payload={
-            "schema_version": "leadpoet.provider_outcome_snapshot_request.v2",
-        },
-    )

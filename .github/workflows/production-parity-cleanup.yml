@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: Exact production-parity run ID to clean
+        required: false
+        type: string
+      candidate_sha:
+        description: Exact candidate SHA for the selected run
+        required: false
+        type: string
 
 concurrency:
   group: production-parity-cleanup
@@ -32,6 +41,20 @@ jobs:
             refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 
+      - name: Validate exact cleanup selection before credentials
+        env:
+          EXACT_RUN_ID: ${{ inputs.run_id || '' }}
+          EXACT_CANDIDATE_SHA: ${{ inputs.candidate_sha || '' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -n "$EXACT_RUN_ID" ] || [ -n "$EXACT_CANDIDATE_SHA" ]; then
+            printf '%s' "$EXACT_RUN_ID" | \
+              grep -Eq '^pp-[0-9]{1,20}-[0-9]{1,6}$'
+            printf '%s' "$EXACT_CANDIDATE_SHA" | \
+              grep -Eq '^[0-9a-f]{40}$'
+          fi
+
       - name: Set up trusted controller Python
         uses: actions/setup-python@v5
         with:
@@ -55,14 +78,31 @@ jobs:
             "493765492819"
 
       - name: Remove only stale tagged resources
+        env:
+          EXACT_RUN_ID: ${{ inputs.run_id || '' }}
+          EXACT_CANDIDATE_SHA: ${{ inputs.candidate_sha || '' }}
         run: |
           set -Eeuo pipefail
-          python3 scripts/cleanup_production_parity_staging.py \
-            --region "${{ vars.LEADPOET_PARITY_AWS_REGION }}" \
-            --max-age-hours 30 \
-            --apply > "$RUNNER_TEMP/production-parity-cleanup.json"
+          args=(
+            --region "${{ vars.LEADPOET_PARITY_AWS_REGION }}"
+            --max-age-hours 30
+            --apply
+          )
+          if [ -n "$EXACT_RUN_ID" ]; then
+            args+=(
+              --run-id "$EXACT_RUN_ID"
+              --candidate-sha "$EXACT_CANDIDATE_SHA"
+            )
+          fi
+          cleanup_status=0
+          python3 scripts/cleanup_production_parity_staging.py "${args[@]}" \
+            > "$RUNNER_TEMP/production-parity-cleanup.json" || \
+            cleanup_status=$?
+          cat "$RUNNER_TEMP/production-parity-cleanup.json"
+          exit "$cleanup_status"
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: production-parity-cleanup-${{ github.run_id }}
           retention-days: 14

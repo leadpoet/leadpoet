@@ -16,7 +16,6 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
 from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
-from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_probe_job_envelope_v2,
     build_source_add_probe_route_v2,
@@ -36,13 +35,11 @@ from gateway.tee.coordinator_chain_realized_settlement_v1 import (
 )
 from gateway.tee.scoring_executor_v2 import (
     OP_PROVIDER_PREFLIGHT_V2,
-    OP_SOURCE_ADD_LEG2_JUDGE_V2,
     PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
-    SOURCE_ADD_JUDGE_REQUEST_SCHEMA_VERSION,
-    SOURCE_ADD_JUDGE_RESULT_SCHEMA_VERSION,
 )
 from gateway.tee.reward_executor_v2 import (
     OP_RESEARCH_LAB_REWARD_DECISION,
+    champion_reward_row_projection_v2,
     reward_receipt_projection_v2,
     source_add_reward_row_projection_v2,
 )
@@ -214,32 +211,6 @@ async def evaluate_source_add_provenance_v2(
         SourceAddProvenanceResult,
     )
 
-    if legacy_v1_enabled():
-        from gateway.research_lab.source_add_provenance import (
-            evaluate_source_add_provenance,
-        )
-
-        provenance = await asyncio.to_thread(
-            evaluate_source_add_provenance,
-            source_name=source_name,
-            source_kind=source_kind,
-            declared_base_domains=declared_base_domains,
-            source_metadata=source_metadata,
-        )
-        result = {
-            "schema_version": SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
-            "submission_id": str(submission_id),
-            "precheck_status": provenance.precheck_status,
-            "reasons": list(provenance.reasons),
-            "precheck_doc": provenance.to_record_doc(),
-        }
-        return provenance, {
-            "status": "off",
-            "protocol": "legacy_v1",
-            "result": result,
-            "receipt_graph": {},
-        }
-
     outcome = await execute(
         operation=OP_SOURCE_ADD_PROVENANCE_V2,
         purpose="research_lab.source_add_provenance.v2",
@@ -391,10 +362,6 @@ async def evaluate_source_add_functional_probe_v2(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one exact provisional API test through the V2 provider broker."""
 
-    if legacy_v1_enabled():
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD functional probes require V2 coordinator authority"
-        )
     if evaluation_mode not in {"functional_probe", "provisioning_smoke"}:
         raise ResearchLabV2AuthorityError(
             "SOURCE_ADD functional evaluation mode is invalid"
@@ -556,52 +523,8 @@ async def authorize_reward_decision_v2(
 ) -> dict[str, Any]:
     """Require the existing reward kernel to produce one exact signed decision."""
 
-    if legacy_v1_enabled() and decision_kind not in {
-        "champion_migration",
-        "source_add_migration",
-    }:
-        if not isinstance(expected_result, Mapping):
-            raise ResearchLabV2AuthorityError(
-                "legacy reward decisions without a host result must use the legacy kernel"
-            )
-        return {
-            "status": "off",
-            "protocol": "legacy_v1",
-            "result": dict(expected_result),
-            "artifact_link_status": {"status": "off"},
-        }
-
-    allowed_failed = set()
     for graph in parent_graphs:
-        root_hash = str(graph.get("root_receipt_hash") or "")
-        root = next(
-            (
-                item
-                for item in graph.get("receipts") or ()
-                if isinstance(item, Mapping)
-                and item.get("receipt_hash") == root_hash
-            ),
-            None,
-        )
-        graph_allowed = set()
-        if isinstance(root, Mapping) and root.get("status") == "failed":
-            terminal_result = decision_payload.get("autoresearch_result")
-            if (
-                decision_kind != "reimbursement"
-                or not isinstance(terminal_result, Mapping)
-                or terminal_result.get("status") != "failed"
-                or root.get("purpose") != "research_lab.candidate_decision.v2"
-                or root.get("output_root") != sha256_json(dict(terminal_result))
-            ):
-                raise ResearchLabV2AuthorityError(
-                    "failed reward ancestry is not an exact reimbursement terminal"
-                )
-            graph_allowed.add(root_hash)
-            allowed_failed.add(root_hash)
-        validate_receipt_graph(
-            graph,
-            allowed_failed_receipt_hashes=graph_allowed,
-        )
+        validate_receipt_graph(graph)
     execute_kwargs = {
         "operation": OP_RESEARCH_LAB_REWARD_DECISION,
         "purpose": "research_lab.reward_decision.v2",
@@ -620,10 +543,6 @@ async def authorize_reward_decision_v2(
             ),
         ),
     }
-    if allowed_failed:
-        execute_kwargs["allowed_failed_parent_receipt_hashes"] = tuple(
-            sorted(allowed_failed)
-        )
     outcome = await execute(
         **execute_kwargs,
     )
@@ -640,10 +559,6 @@ async def authorize_reward_decision_v2(
     if output_root != sha256_json(expected_projection):
         raise ResearchLabV2AuthorityError("reward decision output root differs")
     resolved_artifact_ref = str(artifact_ref)
-    if not resolved_artifact_ref and decision_kind == "reimbursement":
-        award = actual_result.get("award")
-        if isinstance(award, Mapping):
-            resolved_artifact_ref = str(award.get("award_id") or "")
     if not resolved_artifact_ref:
         raise ResearchLabV2AuthorityError("reward artifact reference is missing")
     link = await _persist_business_links(
@@ -922,162 +837,6 @@ async def classify_historical_champion_allocation_v2(
     }
 
 
-async def judge_source_add_implementation_v2(
-    *,
-    epoch_id: int,
-    candidate: Mapping[str, Any],
-    score_bundle: Mapping[str, Any],
-    provisioned_sources: Sequence[Mapping[str, Any]],
-    timeout_seconds: int = 180,
-    execute: Any = execute_scoring_v2,
-    load_business_graph: Any = None,
-    load_catalog_snapshot: Any = None,
-) -> tuple[Any, dict[str, Any]]:
-    """Run the unchanged SOURCE_ADD Leg 2 judge as measured scoring authority."""
-
-    from gateway.research_lab.source_add_llm_judge import SourceAddJudgeVerdict
-
-    if legacy_v1_enabled():
-        from gateway.research_lab.source_add_llm_judge import (
-            judge_source_add_implementation,
-            openrouter_key_for_source_add_judge,
-        )
-
-        verdict = await judge_source_add_implementation(
-            api_key=openrouter_key_for_source_add_judge(),
-            candidate=candidate,
-            score_bundle=score_bundle,
-            provisioned_sources=provisioned_sources,
-            timeout_seconds=timeout_seconds,
-        )
-        return verdict, {
-            "status": "off",
-            "protocol": "legacy_v1",
-            "result": {"verdict": verdict.to_doc()},
-            "receipt_graph": {},
-        }
-
-    bundle_hash = str(score_bundle.get("score_bundle_hash") or "").lower()
-    if not _HASH_RE.fullmatch(bundle_hash):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge score bundle hash is invalid")
-    if load_business_graph is None:
-        from gateway.research_lab.attested_v2_store import (
-            load_business_artifact_graph_v2,
-        )
-
-        load_business_graph = load_business_artifact_graph_v2
-    promotion_graph = await load_business_graph(
-        artifact_kind="promotion_decision",
-        artifact_ref="score_bundle:" + bundle_hash.split(":", 1)[1],
-        artifact_hash=bundle_hash,
-    )
-    validate_receipt_graph(
-        promotion_graph,
-        required_purposes={"research_lab.promotion_decision.v2"},
-    )
-    if load_catalog_snapshot is None:
-        load_catalog_snapshot = load_source_add_catalog_snapshot_v2
-    catalog_outcome = await load_catalog_snapshot(epoch_id=int(epoch_id))
-    catalog_result = catalog_outcome.get("result")
-    catalog_graph = catalog_outcome.get("receipt_graph")
-    if not isinstance(catalog_result, Mapping) or not isinstance(
-        catalog_graph, Mapping
-    ):
-        raise ResearchLabV2AuthorityError(
-            "SOURCE_ADD catalog snapshot authority is unavailable"
-        )
-    normalized_sources = [
-        dict(item) for item in catalog_result.get("provisioned_sources") or ()
-    ]
-    _assert_equal(
-        normalized_sources,
-        [dict(item) for item in provisioned_sources],
-        "SOURCE_ADD provisioned source snapshot",
-    )
-    outcome = await execute(
-        operation=OP_SOURCE_ADD_LEG2_JUDGE_V2,
-        purpose="research_lab.source_add_judge.v2",
-        epoch_id=int(epoch_id),
-        sequence=0,
-        payload={
-            "schema_version": SOURCE_ADD_JUDGE_REQUEST_SCHEMA_VERSION,
-            "candidate": dict(candidate),
-            "score_bundle": dict(score_bundle),
-            "provisioned_sources": normalized_sources,
-            "timeout_seconds": int(timeout_seconds),
-        },
-        worker_index=_worker_index(),
-        parent_graphs=(promotion_graph, catalog_graph),
-        input_artifact_hashes=(
-            bundle_hash,
-            sha256_json(dict(candidate)),
-            sha256_json(normalized_sources),
-        ),
-        provider_credential_profile="source_add_judge",
-    )
-    result = outcome.get("result")
-    if not isinstance(result, Mapping) or set(result) != {
-        "schema_version",
-        "candidate_id",
-        "score_bundle_hash",
-        "provisioned_sources_hash",
-        "verdict",
-    }:
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge result is invalid")
-    if (
-        result.get("schema_version") != SOURCE_ADD_JUDGE_RESULT_SCHEMA_VERSION
-        or result.get("candidate_id") != str(candidate.get("candidate_id") or "")
-        or result.get("score_bundle_hash") != bundle_hash
-        or result.get("provisioned_sources_hash") != sha256_json(normalized_sources)
-    ):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge result binding differs")
-    verdict_doc = result.get("verdict")
-    if not isinstance(verdict_doc, Mapping) or set(verdict_doc) != {
-        "verdict",
-        "confidence",
-        "source_used",
-        "adapter_id",
-        "registry_provider_id",
-        "evidence_summary",
-        "reason_codes",
-        "model_id",
-        "provider_usage",
-        "judge_doc_hash",
-    }:
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge verdict is invalid")
-    if not _HASH_RE.fullmatch(str(verdict_doc.get("judge_doc_hash") or "")):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge document hash is invalid")
-    reasons = verdict_doc.get("reason_codes")
-    usage = verdict_doc.get("provider_usage")
-    if not isinstance(reasons, list) or not isinstance(usage, Mapping):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge metadata is invalid")
-    verdict = SourceAddJudgeVerdict(
-        verdict=str(verdict_doc.get("verdict") or ""),
-        confidence=float(verdict_doc.get("confidence") or 0.0),
-        source_used=bool(verdict_doc.get("source_used")),
-        adapter_id=str(verdict_doc.get("adapter_id") or ""),
-        registry_provider_id=str(verdict_doc.get("registry_provider_id") or ""),
-        evidence_summary=str(verdict_doc.get("evidence_summary") or ""),
-        reason_codes=tuple(str(item) for item in reasons),
-        model_id=str(verdict_doc.get("model_id") or ""),
-        provider_usage=dict(usage),
-        raw_doc_hash=str(verdict_doc["judge_doc_hash"]),
-    )
-    if verdict.verdict not in {"helped", "not_helped", "uncertain"}:
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge verdict value is invalid")
-    graph = outcome.get("execution_receipt_graph") or outcome.get("receipt_graph")
-    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-    if not isinstance(graph, Mapping) or not isinstance(receipt, Mapping):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge receipt graph is missing")
-    validate_receipt_graph(graph, required_purposes={"research_lab.source_add_judge.v2"})
-    if (
-        graph.get("root_receipt_hash") != receipt.get("receipt_hash")
-        or receipt.get("output_root") != sha256_json(dict(result))
-    ):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge receipt differs")
-    return verdict, dict(outcome)
-
-
 async def load_source_add_catalog_snapshot_v2(
     *,
     epoch_id: int,
@@ -1149,34 +908,6 @@ async def load_source_add_catalog_snapshot_v2(
         required_purposes={"research_lab.source_add_catalog_snapshot.v2"},
     )
     return dict(outcome)
-
-
-async def persist_source_add_judge_reward_link_v2(
-    *,
-    outcome: Mapping[str, Any],
-    reward_ref: str,
-    persist_links: Any = None,
-) -> dict[str, Any]:
-    if legacy_v1_enabled():
-        return {"status": "off", "protocol": "legacy_v1"}
-    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-    result = outcome.get("result")
-    if not isinstance(receipt, Mapping) or not isinstance(result, Mapping):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge authority is incomplete")
-    output_root = str(receipt.get("output_root") or "").lower()
-    if not _HASH_RE.fullmatch(output_root) or output_root != sha256_json(dict(result)):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge output commitment differs")
-    return await _persist_business_links(
-        outcome,
-        (
-            {
-                "artifact_kind": "source_add_reward_judge",
-                "artifact_ref": str(reward_ref),
-                "artifact_hash": output_root,
-            },
-        ),
-        persist_links=persist_links,
-    )
 
 
 async def execute_provider_preflight_v2(
@@ -2614,6 +2345,15 @@ async def _load_allocation_parent_graphs_v2(
         validate_receipt_graph(activation_graph)
         graphs[activation_receipt_hash] = dict(activation_graph)
 
+    prior_reward_checkpoints = {
+        (str(checkpoint["reward_kind"]), str(checkpoint["source_id"])): str(
+            checkpoint["obligation_hash"]
+        )
+        for checkpoint in (
+            prior_frontier.get("reward_checkpoints") if prior_frontier else ()
+        )
+    }
+
     def add_preloaded_receipt_record(
         declared_root: str,
         raw_record: Mapping[str, Any],
@@ -2862,10 +2602,14 @@ async def _load_allocation_parent_graphs_v2(
                     "allocation finalized history netuid differs"
                 )
     for row in champion_rows:
-        add(
-            "champion_reward_decision",
-            str(row.get("champion_reward_id") or ""),
+        reward_id = str(row.get("champion_reward_id") or "")
+        prior_obligation_hash = prior_reward_checkpoints.get(
+            ("champion", reward_id)
         )
+        if prior_obligation_hash is None or prior_obligation_hash != sha256_json(
+            champion_reward_row_projection_v2(row)
+        ):
+            add("champion_reward_decision", reward_id)
     for row in normalized_finalized_history:
         authority_types = set(row.get("authority_types") or ())
         if "native_v2_finalization" in authority_types:
@@ -2902,7 +2646,11 @@ async def _load_allocation_parent_graphs_v2(
             raise ResearchLabV2AuthorityError(
                 "allocation SOURCE_ADD reward identity is invalid"
             ) from exc
-        add_exact("source_add_reward_decision", reward_ref, decision_hash)
+        if (
+            prior_reward_checkpoints.get(("source_add", reward_ref))
+            != decision_hash
+        ):
+            add_exact("source_add_reward_decision", reward_ref, decision_hash)
 
     exact_items = sorted(
         (kind, ref, digest)

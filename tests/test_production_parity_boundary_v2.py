@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 
 import pytest
 
@@ -10,6 +11,7 @@ from gateway.tee.provider_broker_v2 import (
 )
 from gateway.tee.research_lab_runtime_config_v2 import (
     ResearchLabRuntimeConfigV2Error,
+    apply_behavior_environment,
     build_research_lab_execution_config,
 )
 from gateway.tee.supabase_source_v2 import (
@@ -154,3 +156,26 @@ def test_execution_config_binds_clone_origin_into_registry_and_reader():
             record_artifact=lambda _artifact: None,
         )
     assert requests[0]["url"].startswith(PARITY_ORIGIN + "/rest/v1/")
+
+
+def test_execution_config_binds_and_applies_lab_arena_reward_settings(monkeypatch):
+    # Applying this document also changes the parity origin and scoring flags.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    environment = _environment(
+        LAB_ARENA_REWARDS_ENABLED="true",
+        LAB_ARENA_SIGNING_PUBLIC_KEY_HASH=HASH,
+    )
+    execution = build_research_lab_execution_config(
+        environment=environment, network="finney", netuid=71
+    )
+    assert execution["behavior_environment"]["LAB_ARENA_REWARDS_ENABLED"] == "true"
+    assert (
+        execution["behavior_environment"]["LAB_ARENA_SIGNING_PUBLIC_KEY_HASH"]
+        == HASH
+    )
+
+    monkeypatch.delenv("LAB_ARENA_REWARDS_ENABLED", raising=False)
+    monkeypatch.delenv("LAB_ARENA_SIGNING_PUBLIC_KEY_HASH", raising=False)
+    apply_behavior_environment(execution)
+    assert os.environ["LAB_ARENA_REWARDS_ENABLED"] == "true"
+    assert os.environ["LAB_ARENA_SIGNING_PUBLIC_KEY_HASH"] == HASH

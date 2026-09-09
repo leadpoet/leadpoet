@@ -6,9 +6,6 @@ import json
 
 import pytest
 
-from gateway.tee.supabase_schema_preflight_v2 import (
-    SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256,
-)
 from tests.test_source_add_claim_control_postgres import (
     MIGRATIONS as PRE_POLICY_MIGRATIONS,
     _insert_work,
@@ -24,6 +21,9 @@ from tests.test_source_add_end_to_end_postgres import (
 
 
 MIGRATION = "173-research-lab-source-add-leg1-release-policy.sql"
+MIGRATION_173_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:6c09aa3c6b82b3fe666c6739c4f71a51ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
+)
 LATEST_MIGRATIONS = PRE_POLICY_MIGRATIONS + (MIGRATION,)
 
 
@@ -117,7 +117,7 @@ def test_migration_requires_quiescence_is_idempotent_and_preserves_old_reward(
             assert (v1["leg1_alpha_percent"], v1["daily_cap"]) == (1.0, 10)
             assert (v2["leg1_alpha_percent"], v2["daily_cap"]) == (0.2, 50)
             assert v2["function_authority_sha256"] == (
-                SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256
+                MIGRATION_173_FUNCTION_AUTHORITY_SHA256
             )
     finally:
         connection.close()
@@ -143,7 +143,7 @@ def test_v3_economics_and_acl_are_exact_while_v2_remains_rollback_safe(
             assert all(contract["triggers"].values())
             assert all(contract["permissions"].values())
             assert contract["function_authority_sha256"] == (
-                SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256
+                MIGRATION_173_FUNCTION_AUTHORITY_SHA256
             )
             cursor.execute(
                 """

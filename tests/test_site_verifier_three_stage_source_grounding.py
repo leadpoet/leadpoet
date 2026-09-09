@@ -9,8 +9,12 @@ import httpx
 
 from qualification.scoring.intent_verification_three_stage import (
     _apply_guardrails,
+    _canonical_target_absence_receipt,
+    _exa_target_absence_receipt,
+    _fetch_sd_then_exa,
     _rescue_medium_with_corroboration,
     _scrape_exa,
+    _scrape_sd_hardened,
     _search_exa_corroboration,
     verify_three_stage,
 )
@@ -67,6 +71,69 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 self._prev_rescue_flag
             )
         super().tearDown()
+
+    async def _scrape_exa_outcomes(self, url: str, outcomes: list[object]):
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            outcome = outcomes[calls]
+            calls += 1
+            if isinstance(outcome, BaseException):
+                raise outcome
+            status, document = outcome
+            return httpx.Response(status, request=request, json=document)
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+        with (
+            patch.dict(os.environ, {"EXA_API_KEY": "test-key"}),
+            patch(
+                "qualification.scoring.intent_verification_three_stage.httpx.AsyncClient",
+                side_effect=lambda *args, **kwargs: real_async_client(
+                    transport=transport
+                ),
+            ),
+            patch(
+                "qualification.scoring.intent_verification_three_stage.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await _scrape_exa(url)
+        return result, calls
+
+    async def _scrape_exa_document(self, url: str, document: object):
+        return await self._scrape_exa_outcomes(
+            url, [(200, document), (200, document)]
+        )
+
+    async def _verify_empty_fetch(self, url: str, statuses: list[dict]):
+        call = AsyncMock(return_value=supported(url))
+        fetch = AsyncMock(
+            return_value={"results": [], "statuses": statuses}
+        )
+        with (
+            patch(
+                "qualification.scoring.intent_verification_three_stage._call_openrouter",
+                call,
+            ),
+            patch(
+                "qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa",
+                fetch,
+            ),
+        ):
+            result = await verify_three_stage(
+                object(),
+                company_name="Acme",
+                company_linkedin="https://www.linkedin.com/company/acme",
+                company_website="https://acme.com",
+                source_url=url,
+                miner_claim="Acme raised a Series B",
+                target_signal_text="The company recently raised funding",
+                miner_signal_date="2026-07-01",
+                stage1_soft_reject=True,
+            )
+        return result, call, fetch
 
     def test_guardrail_rejects_same_domain_different_evidence_path(self):
         supplied = "https://news.example/exact-article"
@@ -222,6 +289,232 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertIn("Acme", result["content"])
 
+    async def test_exa_preserves_exact_target_not_found_receipt(self):
+        url = "https://news.example/acme-funding"
+        result, calls = await self._scrape_exa_document(url, {
+            "results": [],
+            "statuses": [{
+                "id": url,
+                "status": "error",
+                "error": {
+                    "tag": "CRAWL_NOT_FOUND",
+                    "httpStatusCode": 404,
+                },
+            }],
+        })
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(result, {
+            "ok": False,
+            "stage": "exa_target_not_found",
+            "content": "",
+            "error": "target_not_found",
+            "target_absence": {
+                "id_matches_requested_url": True,
+                "status": "error",
+                "error_tag": "CRAWL_NOT_FOUND",
+                "error_http_status": 404,
+                "confirmed_attempts": 2,
+            },
+        })
+
+    def test_exa_target_not_found_receipt_is_strict(self):
+        url = "https://news.example/acme-funding"
+        exact_status = {
+            "id": url,
+            "status": "error",
+            "error": {
+                "tag": "CRAWL_NOT_FOUND",
+                "httpStatusCode": 404,
+            },
+        }
+        documents = (
+            {"results": {}, "statuses": [exact_status]},
+            {"results": [], "statuses": [{
+                **exact_status,
+                "id": "https://news.example/a-different-page",
+            }]},
+            {"results": [], "statuses": [{
+                **exact_status,
+                "error": {
+                    "tag": "CRAWL_TIMEOUT",
+                    "httpStatusCode": 504,
+                },
+            }]},
+            {"results": [], "statuses": [{
+                **exact_status,
+                "error": {
+                    "tag": "SOURCE_NOT_AVAILABLE",
+                    "httpStatusCode": 403,
+                },
+            }]},
+            {"results": [], "statuses": [exact_status, exact_status]},
+            {"results": [], "statuses": [{
+                **exact_status,
+                "error": {"tag": "CRAWL_NOT_FOUND"},
+            }]},
+            {"results": [], "statuses": [{
+                **exact_status,
+                "error": {
+                    "tag": "CRAWL_NOT_FOUND",
+                    "httpStatusCode": 404.0,
+                },
+            }]},
+        )
+        for document in documents:
+            with self.subTest(document=document):
+                self.assertIsNone(
+                    _exa_target_absence_receipt(document, url)
+                )
+
+        canonical = {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 2,
+        }
+        self.assertEqual(
+            _canonical_target_absence_receipt(canonical), canonical
+        )
+        for field, value in (
+            ("id_matches_requested_url", 1),
+            ("error_http_status", 404.0),
+            ("confirmed_attempts", 2.0),
+        ):
+            with self.subTest(field=field, value=value):
+                self.assertIsNone(_canonical_target_absence_receipt({
+                    **canonical,
+                    field: value,
+                }))
+
+    async def test_exa_requires_matching_absence_on_both_attempts(self):
+        url = "https://news.example/acme-funding"
+        exact_absence = {
+            "results": [],
+            "statuses": [{
+                "id": url,
+                "status": "error",
+                "error": {
+                    "tag": "CRAWL_NOT_FOUND",
+                    "httpStatusCode": 404,
+                },
+            }],
+        }
+        mixed_first_outcomes = (
+            (200, {"results": [], "statuses": [{"status": "pending"}]}),
+            (200, {"results": [{"text": "too short"}], "statuses": []}),
+            (200, {
+                "results": [],
+                "statuses": [{
+                    "id": "https://news.example/a-different-page",
+                    "status": "error",
+                    "error": {
+                        "tag": "CRAWL_NOT_FOUND",
+                        "httpStatusCode": 404,
+                    },
+                }],
+            }),
+            (429, {}),
+            (503, {}),
+            httpx.TimeoutException("timed out"),
+        )
+        for first in mixed_first_outcomes:
+            with self.subTest(first=first):
+                result, calls = await self._scrape_exa_outcomes(
+                    url, [first, (200, exact_absence)]
+                )
+
+                self.assertEqual(calls, 2)
+                self.assertNotIn("target_absence", result)
+
+    async def test_sd_requires_every_attempt_to_return_target_404(self):
+        async def scrape(responses):
+            calls = 0
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                nonlocal calls
+                status, body = responses[calls]
+                calls += 1
+                return httpx.Response(status, request=request, text=body)
+
+            transport = httpx.MockTransport(handler)
+            real_async_client = httpx.AsyncClient
+            with (
+                patch.dict(os.environ, {"SCRAPINGDOG_API_KEY": "test-key"}),
+                patch(
+                    "qualification.scoring.intent_verification_three_stage.httpx.AsyncClient",
+                    side_effect=lambda *args, **kwargs: real_async_client(
+                        transport=transport
+                    ),
+                ),
+            ):
+                return await _scrape_sd_hardened(
+                    "https://news.example/acme-funding"
+                )
+
+        confirmed = await scrape([(404, ""), (404, "")])
+        mixed = await scrape([(200, "short"), (404, "")])
+
+        self.assertEqual(confirmed["stage"], "genuine_404")
+        self.assertNotEqual(mixed["stage"], "genuine_404")
+        self.assertEqual(
+            [item[1] for item in mixed["stage_history"]],
+            ["body_too_short", "http_404"],
+        )
+
+    async def test_fetch_preserves_both_exact_absence_receipts(self):
+        url = "https://news.example/acme-funding"
+        sd = AsyncMock(return_value={
+            "ok": False,
+            "stage": "genuine_404",
+            "content": "",
+            "error": "http_404",
+        })
+        exa = AsyncMock(return_value={
+            "ok": False,
+            "stage": "exa_target_not_found",
+            "content": "",
+            "error": "target_not_found",
+            "target_absence": {
+                "id_matches_requested_url": True,
+                "status": "error",
+                "error_tag": "CRAWL_NOT_FOUND",
+                "error_http_status": 404,
+                "confirmed_attempts": 2,
+            },
+        })
+        with (
+            patch(
+                "qualification.scoring.intent_verification_three_stage._scrape_sd_hardened",
+                sd,
+            ),
+            patch(
+                "qualification.scoring.intent_verification_three_stage._scrape_exa",
+                exa,
+            ),
+        ):
+            result = await _fetch_sd_then_exa([url])
+
+        self.assertEqual(result, {
+            "results": [],
+            "statuses": [{
+                "url": url,
+                "source": "none",
+                "sd_stage": "genuine_404",
+                "sd_error": "http_404",
+                "exa_stage": "exa_target_not_found",
+                "exa_error": "target_not_found",
+                "exa_target_absence": {
+                    "id_matches_requested_url": True,
+                    "status": "error",
+                    "error_tag": "CRAWL_NOT_FOUND",
+                    "error_http_status": 404,
+                    "confirmed_attempts": 2,
+                },
+            }],
+        })
+
     async def test_exa_does_not_retry_a_deterministic_client_error(self):
         calls = 0
 
@@ -304,33 +597,121 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stage_one_approval_cannot_bypass_a_failed_evidence_fetch(self):
         url = "https://news.example/acme-funding"
-        call = AsyncMock(return_value=supported(url))
-        fetch = AsyncMock(return_value={
-            "results": [],
-            "statuses": [{"source": "scrapingdog", "stage": "timeout"},
-                         {"source": "exa_fallback", "stage": "empty"}],
-        })
-        with (
-            patch("qualification.scoring.intent_verification_three_stage._call_openrouter", call),
-            patch("qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa", fetch),
-        ):
-            result = await verify_three_stage(
-                object(),
-                company_name="Acme",
-                company_linkedin="https://www.linkedin.com/company/acme",
-                company_website="https://acme.com",
-                source_url=url,
-                miner_claim="Acme raised a Series B",
-                target_signal_text="The company recently raised funding",
-                miner_signal_date="2026-07-01",
-                stage1_soft_reject=True,
-            )
+        status_cases = (
+            [{"source": "scrapingdog", "stage": "timeout"},
+             {"source": "exa_fallback", "stage": "empty"}],
+            [{
+                "source": "none",
+                "sd_stage": "all_tiers_exhausted:html_empty_body",
+                "exa_stage": "exa_empty",
+            }],
+        )
+        for statuses in status_cases:
+            with self.subTest(statuses=statuses):
+                call = AsyncMock(return_value=supported(url))
+                fetch = AsyncMock(return_value={"results": [], "statuses": statuses})
+                with (
+                    patch("qualification.scoring.intent_verification_three_stage._call_openrouter", call),
+                    patch("qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa", fetch),
+                ):
+                    result = await verify_three_stage(
+                        object(),
+                        company_name="Acme",
+                        company_linkedin="https://www.linkedin.com/company/acme",
+                        company_website="https://acme.com",
+                        source_url=url,
+                        miner_claim="Acme raised a Series B",
+                        target_signal_text="The company recently raised funding",
+                        miner_signal_date="2026-07-01",
+                        stage1_soft_reject=True,
+                    )
+                self.assertEqual(call.await_count, 1)
+                fetch.assert_awaited_once_with([url])
+                self.assertFalse(result["client_ready"])
+                self.assertEqual(result["decision"], "unavailable")
+                self.assertEqual(result["rejection_reason"], "evidence_fetch_failed")
+                self.assertEqual(
+                    result["verdict"]["signal_evaluations"][0]["signal_status"],
+                    "unable_to_verify",
+                )
+
+    async def test_confirmed_source_absence_is_semantic_not_infrastructure(self):
+        url = "https://news.example/acme-funding"
+        statuses = [{
+            "url": url,
+            "source": "none",
+            "sd_stage": "genuine_404",
+            "sd_error": "http_404",
+            "exa_stage": "exa_target_not_found",
+            "exa_error": "target_not_found",
+            "exa_target_absence": {
+                "id_matches_requested_url": True,
+                "status": "error",
+                "error_tag": "CRAWL_NOT_FOUND",
+                "error_http_status": 404,
+                "confirmed_attempts": 2,
+            },
+        }]
+        result, call, _fetch = await self._verify_empty_fetch(url, statuses)
+
         self.assertEqual(call.await_count, 1)
-        fetch.assert_awaited_once_with([url])
         self.assertFalse(result["client_ready"])
-        self.assertEqual(result["decision"], "unavailable")
-        self.assertEqual(result["rejection_reason"], "evidence_fetch_failed")
-        self.assertEqual(result["verdict"]["signal_evaluations"][0]["signal_status"], "unable_to_verify")
+        self.assertEqual(result["decision"], "reject")
+        self.assertEqual(result["rejection_reason"], "evidence_not_found")
+        self.assertEqual(result["scrape"]["result_count"], 0)
+        self.assertEqual(
+            result["scrape"]["statuses"][0]["exa_target_absence"],
+            statuses[0]["exa_target_absence"],
+        )
+
+    async def test_source_absence_requires_both_exact_provider_receipts(self):
+        url = "https://news.example/acme-funding"
+        status_cases = (
+            [{
+                "url": url,
+                "source": "none",
+                "sd_stage": "genuine_404",
+                "sd_error": "http_404",
+                "exa_stage": "exa_no_results",
+            }],
+            [{
+                "url": url,
+                "source": "none",
+                "sd_stage": "all_tiers_exhausted:client_deadline",
+                "exa_stage": "exa_target_not_found",
+                "exa_target_absence": {
+                    "id_matches_requested_url": True,
+                    "status": "error",
+                    "error_tag": "CRAWL_NOT_FOUND",
+                    "error_http_status": 404,
+                    "confirmed_attempts": 2,
+                },
+            }],
+            [{
+                "url": url,
+                "source": "none",
+                "sd_stage": "genuine_404",
+                "sd_error": "http_404",
+                "exa_stage": "exa_target_not_found",
+                "exa_target_absence": {
+                    "id_matches_requested_url": False,
+                    "status": "error",
+                    "error_tag": "CRAWL_NOT_FOUND",
+                    "error_http_status": 404,
+                    "confirmed_attempts": 2,
+                },
+            }],
+        )
+        for statuses in status_cases:
+            with self.subTest(statuses=statuses):
+                result, _call, _fetch = await self._verify_empty_fetch(
+                    url, statuses
+                )
+
+                self.assertEqual(result["decision"], "unavailable")
+                self.assertEqual(
+                    result["rejection_reason"], "evidence_fetch_failed"
+                )
 
     async def test_stage_three_makes_the_terminal_decision_from_fetched_content(self):
         url = "https://news.example/acme-funding"

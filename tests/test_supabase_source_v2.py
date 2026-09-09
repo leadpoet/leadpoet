@@ -883,12 +883,12 @@ def test_exact_finalized_authority_query_rejects_bundle_hash_injection():
         ("reimbursement_queue_events_by_run", "run_id"),
     ),
 )
-def test_reimbursement_uuid_sources_reject_query_injection_before_network(
+def test_retired_loop_sources_reject_requests_before_network(
     policy_id,
     parameter_name,
 ):
     provider = FakeProvider([{"rows": []}])
-    with pytest.raises(SupabaseSourceV2Error, match="UUID"):
+    with pytest.raises(SupabaseSourceV2Error, match="policy"):
         _read(
             provider,
             policy_id=policy_id,

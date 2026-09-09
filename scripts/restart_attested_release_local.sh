@@ -32,6 +32,7 @@ VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
 RELEASE_PREFIX="${LEADPOET_RELEASE_PREFIX:-attested-v2/releases}"
 HISTORICAL_THREE_ROLE_TOPOLOGY_HASH="sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
 HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB="f79cf108e4a98ca950a0087d786958f92c5f691f"
+LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY="202cd66a41f17f3030bcf6889d381cd3ecfd8f1c"
 # Three-second retries allow up to 2.5 hours for the gateway rebuild, plus a
 # five-minute margin for the final bounded release probes.
 VALIDATOR_COORDINATION_ATTEMPTS=3000
@@ -63,6 +64,11 @@ gateway_handoff_file=""
 gateway_handoff_nonce=""
 paired_gateway_handoff_file=""
 paired_gateway_handoff_nonce=""
+validator_arena_guard_request_remote=""
+validator_arena_guard_permit_remote=""
+validator_arena_guard_handoff_nonce=""
+validator_arena_guard_generation=""
+validator_arena_guard_authorized=0
 active_release_restart_invocation_id=""
 active_release_authority_commit=""
 controller_verifier_b64=""
@@ -82,6 +88,13 @@ validator_final_lineage_remote=""
 validator_recovery_requirements_remote=""
 validator_recovery_lineage_remote=""
 validator_missing_runtime_recovery=0
+gateway_counterpart_lineage_remote=""
+gateway_local_gateway_release_remote=""
+gateway_local_validator_release_remote=""
+paired_release_channel_local=""
+paired_release_channel_remote=""
+gateway_existing_gateway_release_remote=""
+gateway_existing_validator_release_remote=""
 validator_initial_requirements_local=""
 gateway_final_requirements_local=""
 gateway_final_lineage_local=""
@@ -120,6 +133,13 @@ cleanup() {
   local failure_marker_command=""
   local gateway_cancel_job=""
   set +e
+  if [ "$status" -ne 0 ] \
+      && [ "$component" = "validator" ] \
+      && [ -n "$validator_arena_guard_generation" ] \
+      && [ "$validator_arena_guard_authorized" != "1" ]; then
+    run_gateway_lab_arena_restart_guard abort \
+      --generation "$validator_arena_guard_generation" >/dev/null 2>&1 || true
+  fi
   if [ -n "$gateway_job" ]; then
     if [ -n "$gateway_job_pgid" ]; then
       kill -TERM -- "-$gateway_job_pgid" 2>/dev/null || true
@@ -229,6 +249,13 @@ cleanup() {
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
       "rm -f -- '$coordination_file'" >/dev/null 2>&1 || true
   fi
+  if [ "$component" != "gateway" ] \
+      && { [ -n "$validator_arena_guard_request_remote" ] \
+        || [ -n "$validator_arena_guard_permit_remote" ]; }; then
+    ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+      "rm -f -- '$validator_arena_guard_request_remote' '$validator_arena_guard_permit_remote' '$validator_arena_guard_permit_remote.tmp'" \
+      >/dev/null 2>&1 || true
+  fi
   if [ -n "$gateway_handoff_file" ]; then
     ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
       "rm -f -- '$gateway_handoff_file'" >/dev/null 2>&1 || true
@@ -244,7 +271,7 @@ cleanup() {
   fi
   if [ -n "${gateway_validator_requirements_remote:-}" ]; then
     ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
-      "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp' '$gateway_counterpart_lineage_remote' '$gateway_counterpart_lineage_remote.tmp'" \
+      "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp' '$gateway_counterpart_lineage_remote' '$gateway_counterpart_lineage_remote.tmp' '$gateway_local_gateway_release_remote' '$gateway_local_validator_release_remote' '$paired_release_channel_remote' '$paired_release_channel_remote.tmp' '$gateway_existing_gateway_release_remote' '$gateway_existing_validator_release_remote'" \
       >/dev/null 2>&1 || true
   fi
   if [ -n "$gateway_validator_requirements_remote" ]; then
@@ -518,6 +545,8 @@ verify_local_readiness_python_binding() {
 
 LOCAL_READINESS_CANDIDATE_PATHS=(
   scripts/restart_attested_release_local.sh
+  scripts/lab_arena_restart_claim_guard.py
+  scripts/lab_arena_restart_guard_handoff.py
   gateway/__init__.py
   gateway/build_info.py
   gateway/deploy_readiness.py
@@ -680,6 +709,8 @@ import gateway.tee.release_lineage_v2 as release_lineage_v2
 import gateway.tee.release_manifest_v2 as release_manifest_v2
 import leadpoet_canonical.attested_v2 as attested_v2
 import leadpoet_canonical.nitro as nitro
+import scripts.lab_arena_restart_claim_guard as arena_restart_claim_guard
+import scripts.lab_arena_restart_guard_handoff as arena_restart_guard_handoff
 import validator_tee
 import validator_tee.host.release_v2 as validator_release_v2
 
@@ -696,6 +727,8 @@ for module in (
     release_manifest_v2,
     attested_v2,
     nitro,
+    arena_restart_claim_guard,
+    arena_restart_guard_handoff,
     validator_tee,
     validator_release_v2,
 ):
@@ -716,6 +749,14 @@ for function in (
     release_channel_v2.validate_historical_release_channel_v2,
     release_lineage_v2.validate_historical_compact_release_lineage_v2,
     release_manifest_v2.validate_historical_release_manifest,
+    arena_restart_claim_guard._commitments,
+    arena_restart_claim_guard._identity,
+    arena_restart_claim_guard._require_drain,
+    arena_restart_claim_guard._require_state,
+    arena_restart_guard_handoff._permit,
+    arena_restart_guard_handoff._validate_permit,
+    arena_restart_guard_handoff._validate_request,
+    arena_restart_guard_handoff._write_document,
     validator_release_v2.validate_validator_release_manifest,
 ):
     if not callable(function):
@@ -765,6 +806,7 @@ validator_observation="$temporary_root/validator-readiness-observation.json"
 validator_evidence="$temporary_root/validator-readiness-evidence.json"
 transition_manifest="$temporary_root/deploy-readiness-transition.json"
 final_manifest="$temporary_root/deploy-readiness-v2.json"
+restart_guard_helper="$temporary_root/lab-arena-restart-claim-guard.py"
 validator_initial_requirements_local="$temporary_root/validator-active-release-requirements.json"
 gateway_final_requirements_local="$temporary_root/gateway-active-release-requirements.json"
 gateway_final_lineage_local="$temporary_root/gateway-active-release-lineage.json"
@@ -800,6 +842,10 @@ if [ "$component" != "validator" ]; then
   done
 fi
 branch_commit="$(git -C "$ROOT" rev-parse --verify origin/main^{commit})"
+git -C "$ROOT" show \
+  "$branch_commit:scripts/lab_arena_restart_claim_guard.py" \
+  > "$restart_guard_helper"
+chmod 600 "$restart_guard_helper"
 git -C "$ROOT" cat-file -e "$commit^{commit}"
 git -C "$ROOT" show \
   origin/main:Leadpoet/utils/exact_commit_restart_v2.py > "$helper"
@@ -835,9 +881,17 @@ validator_initial_requirements_remote="/tmp/leadpoet-validator-active-release-re
 gateway_validator_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
 validator_final_requirements_remote="/tmp/leadpoet-gateway-active-release-requirements.$restart_transfer_id.json"
 validator_final_lineage_remote="/tmp/leadpoet-gateway-active-release-lineage.$restart_transfer_id.json"
+validator_arena_guard_request_remote="/tmp/leadpoet-validator-arena-guard-request.$restart_transfer_id.json"
+validator_arena_guard_permit_remote="/tmp/leadpoet-validator-arena-guard-permit.$restart_transfer_id.json"
 validator_recovery_requirements_remote="/tmp/leadpoet-validator-recovery-requirements.$restart_transfer_id.json"
 validator_recovery_lineage_remote="/tmp/leadpoet-validator-recovery-lineage.$restart_transfer_id.json"
 gateway_counterpart_lineage_remote="/tmp/leadpoet-validator-counterpart-release-lineage.$restart_transfer_id.json"
+gateway_local_gateway_release_remote="/tmp/leadpoet-gateway-host-gateway-release.$restart_transfer_id.json"
+gateway_local_validator_release_remote="/tmp/leadpoet-gateway-host-validator-release.$restart_transfer_id.json"
+paired_release_channel_local="$temporary_root/paired-local-release-channel.json"
+paired_release_channel_remote="/tmp/leadpoet-paired-local-release-channel.$restart_transfer_id.json"
+gateway_existing_gateway_release_remote="/tmp/leadpoet-existing-gateway-release.$restart_transfer_id.json"
+gateway_existing_validator_release_remote="/tmp/leadpoet-existing-validator-release.$restart_transfer_id.json"
 ssh_common=(
   -n
   -o BatchMode=yes
@@ -852,6 +906,97 @@ scp_common=(
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=20
 )
+if [ -z "${LEADPOET_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}" ]; then
+  retained_restart_invocation_id="$(
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "test -s '$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH' && cat -- '$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH'" \
+      2>/dev/null \
+      | python3 -c '
+import json, re, sys
+try:
+    value = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+candidate = value.get("candidate_commit_sha") if isinstance(value, dict) else None
+invocation = value.get("restart_invocation_id") if isinstance(value, dict) else None
+if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40}", candidate) and isinstance(invocation, str) and re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,127}", invocation):
+    print(invocation)
+'
+  )" || retained_restart_invocation_id=""
+  restart_guard_helper_remote="/tmp/leadpoet-restart-claim-guard.$restart_transfer_id.py"
+  if ! scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+      "$restart_guard_helper" \
+      "$GATEWAY_HOST:$restart_guard_helper_remote"; then
+    echo "ERROR: Lab Arena restart ownership helper transport failed" >&2
+    exit 1
+  fi
+  guard_discovery_action="state"
+  guard_discovery_invocation="$active_release_restart_invocation_id"
+  if [ -n "$retained_restart_invocation_id" ]; then
+    guard_discovery_action="discover"
+    guard_discovery_invocation="$retained_restart_invocation_id"
+  fi
+  if ! guard_discovery_report="$(
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "set -Eeuo pipefail
+       chmod 600 '$restart_guard_helper_remote'
+       env -u LAB_ARENA_SUPABASE_URL \\
+         -u LAB_ARENA_SUPABASE_ANON_KEY \\
+         -u LAB_ARENA_SERVICE_KEY -u LAB_ARENA_SERVICE_JWT \\
+         '$GATEWAY_PYTHON_BIN' '$restart_guard_helper_remote' \\
+         '$guard_discovery_action' \\
+         --environment-file '/home/ec2-user/.config/leadpoet/gateway.env' \\
+         --candidate '$commit' \\
+         --invocation '$guard_discovery_invocation'"
+  )"; then
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "rm -f -- '$restart_guard_helper_remote'" >/dev/null 2>&1 || true
+    echo "ERROR: durable Lab Arena restart ownership is ambiguous" >&2
+    exit 1
+  fi
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "rm -f -- '$restart_guard_helper_remote'" >/dev/null 2>&1 || true
+  guard_discovery="$(
+    python3 -c '
+import json, re, sys
+value = json.load(sys.stdin)
+if value.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1" or type(value.get("guard_present")) is not bool:
+    raise SystemExit(1)
+if value["guard_present"]:
+    candidate = value.get("candidate_commit")
+    if not isinstance(candidate, str) or re.fullmatch(r"[0-9a-f]{40}", candidate) is None:
+        raise SystemExit(1)
+    print("present:" + candidate)
+else:
+    print("absent")
+' <<<"$guard_discovery_report"
+  )" || {
+    echo "ERROR: durable Lab Arena restart ownership result is invalid" >&2
+    exit 1
+  }
+  case "$guard_discovery" in
+    absent) ;;
+    present:*)
+      if [ -z "$retained_restart_invocation_id" ]; then
+        echo "ERROR: durable Lab Arena guard has no retained invocation authority" >&2
+        exit 1
+      fi
+      durable_guard_candidate="${guard_discovery#present:}"
+      git -C "$ROOT" cat-file -e "$durable_guard_candidate^{commit}"
+      if ! git -C "$ROOT" merge-base --is-ancestor \
+          "$durable_guard_candidate" "$commit"; then
+        echo "ERROR: durable Lab Arena guard candidate is not an ancestor of the selected release" >&2
+        exit 1
+      fi
+      active_release_restart_invocation_id="$retained_restart_invocation_id"
+      echo "Reusing durable exact-owner active release invocation identity"
+      ;;
+    *)
+      echo "ERROR: durable Lab Arena restart ownership result is invalid" >&2
+      exit 1
+      ;;
+  esac
+fi
 selected_operator_blob="$(
   git -C "$ROOT" rev-parse \
     "$branch_commit:scripts/restart_attested_release_local.sh"
@@ -913,6 +1058,13 @@ if [ "$component" = "all" ]; then
   paired_gateway_handoff_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   if ! [[ "$paired_gateway_handoff_nonce" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: paired gateway handoff nonce generation failed" >&2
+    exit 1
+  fi
+fi
+if [ "$component" != "gateway" ]; then
+  validator_arena_guard_handoff_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  if ! [[ "$validator_arena_guard_handoff_nonce" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: validator Arena guard handoff nonce generation failed" >&2
     exit 1
   fi
 fi
@@ -1172,6 +1324,8 @@ prepare_running_validator_release_requirements() {
     "set -Eeuo pipefail
      umask 077
      cd '$VALIDATOR_REPO_ROOT'
+     git cat-file -e '$branch_commit^{commit}' 2>/dev/null \\
+       || git fetch --no-tags origin '$branch_commit'
      test \"\$(git rev-parse --verify HEAD)\" = '$commit'
      running_commit=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' leadpoet-validator-main | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p')
      test \"\$running_commit\" = '$commit'
@@ -1411,6 +1565,186 @@ install_validator_final_release_authority() {
      mv -f -- '$validator_final_lineage_remote.tmp' '$validator_final_lineage_remote'"
 }
 
+run_gateway_lab_arena_restart_guard() {
+  local action="$1"
+  shift
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "set -Eeuo pipefail
+     test \"\$(git -C '$GATEWAY_REPO_ROOT' rev-parse HEAD)\" = '$commit'
+     test -f '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py'
+     test ! -L '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py'
+     test \"\$(git -C '$GATEWAY_REPO_ROOT' hash-object --no-filters '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py')\" = \"\$(git -C '$GATEWAY_REPO_ROOT' rev-parse '$commit:scripts/lab_arena_restart_claim_guard.py')\"
+     env -u LAB_ARENA_SUPABASE_URL \
+       -u LAB_ARENA_SUPABASE_ANON_KEY \
+       -u LAB_ARENA_SERVICE_KEY -u LAB_ARENA_SERVICE_JWT \
+       PYTHONPATH='$GATEWAY_REPO_ROOT' '$GATEWAY_PYTHON_BIN' \
+       '$GATEWAY_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py' \
+       '$action' \
+       --environment-file '/home/ec2-user/.config/leadpoet/gateway.env' \
+       --candidate '$commit' \
+       --invocation '$active_release_restart_invocation_id' $*"
+}
+
+authorize_validator_lab_arena_restart() {
+  local validator_log="$1"
+  local request_ready=0 request_deadline drain_report authorization_report
+  local permit_local="$temporary_root/leadpoet-validator-arena-guard-permit.json"
+  local validator_authority_commit="${active_release_authority_commit:-$branch_commit}"
+  request_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$request_deadline" ]; do
+    if grep -Fq \
+        "Validator pre-shutdown checks complete; awaiting canonical Lab Arena guard permit" \
+        "$validator_log"; then
+      request_ready=1
+      break
+    fi
+    if ! kill -0 "$validator_job" 2>/dev/null; then
+      report_restart_job_early_exit validator "$validator_job"
+      return 1
+    fi
+    sleep 1
+  done
+  if [ "$request_ready" != "1" ]; then
+    echo "ERROR: validator did not publish its Lab Arena guard request" >&2
+    return 1
+  fi
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     test \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse HEAD)\" = '$commit'
+     for source_path in scripts/lab_arena_restart_claim_guard.py scripts/lab_arena_restart_guard_handoff.py; do
+       test -f '$VALIDATOR_REPO_ROOT/'\"\$source_path\"
+       test ! -L '$VALIDATOR_REPO_ROOT/'\"\$source_path\"
+       test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters '$VALIDATOR_REPO_ROOT/'\"\$source_path\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$commit:'\"\$source_path\")\"
+     done
+     PYTHONPATH='$VALIDATOR_REPO_ROOT' '$VALIDATOR_PYTHON_BIN' \
+       '$VALIDATOR_REPO_ROOT/scripts/lab_arena_restart_guard_handoff.py' \
+       validate-request \
+       --path '$validator_arena_guard_request_remote' \
+       --candidate '$commit' \
+       --invocation '$active_release_restart_invocation_id' \
+       --scope '$component' \
+       --nonce '$validator_arena_guard_handoff_nonce' \
+       --authority-commit '$validator_authority_commit' >/dev/null"
+  drain_report="$(
+    run_gateway_lab_arena_restart_guard drain --scope "$component"
+  )" || return 1
+  local drain_report_file="$temporary_root/leadpoet-validator-arena-drain.json"
+  printf '%s' "$drain_report" > "$drain_report_file"
+  chmod 600 "$drain_report_file"
+  validator_arena_guard_generation="$(
+    run_local_readiness_python \
+      "$drain_report_file" "$component" <<'PY'
+import json
+import sys
+
+from scripts.lab_arena_restart_claim_guard import _require_drain
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = _require_drain(
+        json.load(handle), "leadpoet.lab_arena.restart_quiescence.v1"
+    )
+generation = value.get("guard_generation")
+if (
+    isinstance(generation, bool)
+    or not isinstance(generation, int)
+    or generation <= 0
+    or value.get("restart_scope") != sys.argv[2]
+    or value.get("restart_phase")
+    not in {"draining", "gateway_ready", "validator_destructive"}
+    or value.get("guard_active") is not True
+    or value.get("preserved") is not True
+):
+    raise SystemExit(1)
+print(generation)
+PY
+  )" || return 1
+  authorization_report="$(
+    run_gateway_lab_arena_restart_guard authorize \
+      --scope "$component" \
+      --generation "$validator_arena_guard_generation" \
+      --phase validator_destructive
+  )" || return 1
+  validator_arena_guard_authorized=1
+  local authorization_report_file="$temporary_root/leadpoet-validator-arena-authorization.json"
+  printf '%s' "$authorization_report" > "$authorization_report_file"
+  chmod 600 "$authorization_report_file"
+  rm -f -- "$permit_local"
+  run_local_readiness_python \
+    "$authorization_report_file" "$permit_local" "$commit" \
+    "$active_release_restart_invocation_id" "$component" \
+    "$validator_arena_guard_handoff_nonce" "$validator_authority_commit" \
+    "$validator_arena_guard_generation" <<'PY'
+import argparse
+import json
+from pathlib import Path
+import sys
+
+from scripts.lab_arena_restart_guard_handoff import _permit, _write_document
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    state = json.load(handle)
+args = argparse.Namespace(
+    candidate=sys.argv[3],
+    invocation=sys.argv[4],
+    scope=sys.argv[5],
+    nonce=sys.argv[6],
+    authority_commit=sys.argv[7],
+    expected_generation=int(sys.argv[8]),
+)
+_write_document(Path(sys.argv[2]), _permit(args, state))
+PY
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$permit_local" "$VALIDATOR_HOST:$validator_arena_guard_permit_remote.tmp"
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     test -s '$validator_arena_guard_permit_remote.tmp'
+     chmod 600 '$validator_arena_guard_permit_remote.tmp'
+     mv -f -- '$validator_arena_guard_permit_remote.tmp' '$validator_arena_guard_permit_remote'"
+  echo "Installed exact-generation Lab Arena validator restart permit"
+}
+
+mark_validator_lab_arena_ready() {
+  local ready_report ready_report_file
+  if [ -z "$validator_arena_guard_generation" ]; then
+    echo "ERROR: validator Lab Arena guard generation is unavailable" >&2
+    return 1
+  fi
+  ready_report="$(
+    run_gateway_lab_arena_restart_guard ready \
+      --scope "$component" \
+      --generation "$validator_arena_guard_generation" \
+      --phase validator_ready
+  )" || return 1
+  ready_report_file="$temporary_root/leadpoet-validator-arena-ready.json"
+  printf '%s' "$ready_report" > "$ready_report_file"
+  chmod 600 "$ready_report_file"
+  run_local_readiness_python \
+    "$commit" "$active_release_restart_invocation_id" "$component" \
+    "$validator_arena_guard_generation" "$ready_report_file" <<'PY'
+import json
+import sys
+
+from scripts.lab_arena_restart_claim_guard import _commitments, _identity, _require_state
+
+candidate, invocation, scope, expected_generation, report_path = sys.argv[1:]
+with open(report_path, encoding="utf-8") as handle:
+    value = _require_state(json.load(handle))
+guard, owner = _identity(candidate, invocation)
+guard_commitment, owner_commitment = _commitments(guard, owner)
+if (
+    value.get("candidate_commit") != candidate
+    or value.get("restart_scope") != scope
+    or value.get("restart_phase") != "validator_ready"
+    or value.get("guard_generation") != int(expected_generation)
+    or value.get("guard_commitment") != guard_commitment
+    or value.get("owner_commitment") != owner_commitment
+    or value.get("paused") is not True
+):
+    raise SystemExit("validator Lab Arena ready state differs")
+PY
+  echo "Recorded independently verified Lab Arena validator readiness on the gateway"
+}
+
 install_validator_missing_runtime_recovery_authority() {
   scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
     "$gateway_final_requirements_local" \
@@ -1466,6 +1800,7 @@ run_validator_restart_against_active_gateway() {
   fetch_validator_initial_release_requirements
   fetch_gateway_final_release_authority
   install_validator_final_release_authority
+  authorize_validator_lab_arena_restart "$validator_log"
   local completion_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
   while kill -0 "$validator_job" 2>/dev/null; do
     if [ "$SECONDS" -ge "$completion_deadline" ]; then
@@ -1528,6 +1863,152 @@ publish_paired_gateway_handoff_value() {
     "$remote_command"
 }
 
+prepare_and_publish_paired_local_release_channel() {
+  local gateway_gateway_local="$temporary_root/gateway-host-gateway-release.json"
+  local gateway_validator_local="$temporary_root/gateway-host-validator-release.json"
+  local validator_gateway_local="$temporary_root/validator-host-gateway-release.json"
+  local validator_validator_local="$temporary_root/validator-host-validator-release.json"
+  local existing_channel_state=""
+  local existing_gateway_local=""
+  local existing_validator_local=""
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$gateway_local_gateway_release_remote" \
+    "$gateway_gateway_local"
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$gateway_local_validator_release_remote" \
+    "$gateway_validator_local"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$VALIDATOR_HOST:$VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH" \
+    "$validator_gateway_local"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$VALIDATOR_HOST:$VALIDATOR_LOCAL_RELEASE_PATH" \
+    "$validator_validator_local"
+  chmod 600 \
+    "$gateway_gateway_local" "$gateway_validator_local" \
+    "$validator_gateway_local" "$validator_validator_local"
+  run_local_readiness_python \
+    "$commit" "$gateway_gateway_local" "$gateway_validator_local" \
+    "$validator_gateway_local" "$validator_validator_local" \
+    "$paired_release_channel_local" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from gateway.tee.release_channel_v2 import (
+    build_paired_local_release_channel_v2,
+)
+from leadpoet_canonical.attested_v2 import canonical_json
+
+expected = sys.argv[1]
+inputs = [
+    json.loads(Path(path).read_text(encoding='utf-8'))
+    for path in sys.argv[2:6]
+]
+channel = build_paired_local_release_channel_v2(
+    gateway_host_gateway_manifest=inputs[0],
+    gateway_host_validator_manifest=inputs[1],
+    validator_host_gateway_manifest=inputs[2],
+    validator_host_validator_manifest=inputs[3],
+)
+if channel['commit_sha'] != expected:
+    raise SystemExit('paired local release channel commit differs')
+Path(sys.argv[6]).write_text(
+    canonical_json(channel) + '\n', encoding='ascii'
+)
+PY
+  chmod 600 "$paired_release_channel_local"
+  echo "Verified identical exact role identities from both local release builds"
+  existing_channel_state="$(
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "set -Eeuo pipefail
+     umask 077
+     rm -f -- '$gateway_existing_gateway_release_remote' '$gateway_existing_validator_release_remote'
+     cd '$GATEWAY_REPO_ROOT'
+     if env \
+       -u LEADPOET_LOCAL_RELEASE_COMMIT_SHA \
+       -u LEADPOET_LOCAL_GATEWAY_RELEASE \
+       -u LEADPOET_LOCAL_VALIDATOR_RELEASE \
+       -u LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE \
+       PYTHONPATH='$GATEWAY_REPO_ROOT' '$GATEWAY_PYTHON_BIN' \
+       -m gateway.tee.release_channel_v2 \
+       --ensure --expected-commit '$commit' \
+       --bucket 'leadpoet-attested-v2-artifacts-493765492819' \
+       --prefix '$RELEASE_PREFIX' \
+       --gateway-output '$gateway_existing_gateway_release_remote' \
+       --validator-output '$gateway_existing_validator_release_remote' \
+       >/dev/null; then
+       printf '%s\n' present
+     else
+       status=\$?
+       rm -f -- '$gateway_existing_gateway_release_remote' '$gateway_existing_validator_release_remote'
+       test "\$status" = 75
+       printf '%s\n' absent
+     fi"
+  )"
+  if [ "$existing_channel_state" = "present" ]; then
+    existing_gateway_local="$temporary_root/existing-gateway-release.json"
+    existing_validator_local="$temporary_root/existing-validator-release.json"
+    scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+      "$GATEWAY_HOST:$gateway_existing_gateway_release_remote" \
+      "$existing_gateway_local"
+    scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+      "$GATEWAY_HOST:$gateway_existing_validator_release_remote" \
+      "$existing_validator_local"
+    chmod 600 "$existing_gateway_local" "$existing_validator_local"
+    run_local_readiness_python \
+      "$commit" "$paired_release_channel_local" \
+      "$existing_gateway_local" "$existing_validator_local" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from gateway.tee.release_channel_v2 import (
+    build_release_channel_v2,
+    release_channel_role_identities_v2,
+    validate_release_channel_v2,
+)
+
+expected = sys.argv[1]
+paired = validate_release_channel_v2(
+    json.loads(Path(sys.argv[2]).read_text(encoding='utf-8')),
+    expected_commit=expected,
+)
+existing = build_release_channel_v2(
+    gateway_release_manifest=json.loads(
+        Path(sys.argv[3]).read_text(encoding='utf-8')
+    ),
+    validator_release_manifest=json.loads(
+        Path(sys.argv[4]).read_text(encoding='utf-8')
+    ),
+)
+if release_channel_role_identities_v2(existing) != (
+    release_channel_role_identities_v2(paired)
+):
+    raise SystemExit('existing immutable release channel roles differ')
+PY
+    echo "Accepted existing immutable full release channel with identical roles"
+  elif [ "$existing_channel_state" = "absent" ]; then
+    scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+      "$paired_release_channel_local" \
+      "$GATEWAY_HOST:$paired_release_channel_remote.tmp"
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "set -Eeuo pipefail
+       umask 077
+       chmod 600 '$paired_release_channel_remote.tmp'
+       mv -f -- '$paired_release_channel_remote.tmp' '$paired_release_channel_remote'
+       cd '$GATEWAY_REPO_ROOT'
+       PYTHONPATH='$GATEWAY_REPO_ROOT' '$GATEWAY_PYTHON_BIN' \
+         -m gateway.tee.release_channel_v2 \
+         --publish '$paired_release_channel_remote' \
+         --bucket 'leadpoet-attested-v2-artifacts-493765492819' \
+         --prefix '$RELEASE_PREFIX' >/dev/null"
+    echo "Published paired full release channel before destructive handoff"
+  else
+    echo "ERROR: immutable release channel probe returned invalid state" >&2
+    return 1
+  fi
+}
+
 gateway_active_commit() {
   ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
     "curl -fsS --connect-timeout 5 --max-time 15 \
@@ -1555,6 +2036,64 @@ validator_active_commit() {
      }
      printf '%s\n' \"\$inspect_output\" \
        | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p'"
+}
+
+verify_validator_arena_runner_process() {
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     mode_report=\"\$(
+       env -u LAB_ARENA_MODE PYTHONPATH='$VALIDATOR_REPO_ROOT' \\
+         '$VALIDATOR_PYTHON_BIN' \\
+         '$VALIDATOR_REPO_ROOT/scripts/lab_arena_restart_claim_guard.py' mode \\
+         --environment-file '/home/ec2-user/.config/leadpoet/validator.env' \\
+         --candidate '$commit' \\
+         --invocation '$active_release_restart_invocation_id'
+     )\"
+     mode=\"\$(
+       '$VALIDATOR_PYTHON_BIN' -c '
+import json, sys
+value = json.load(sys.stdin)
+if set(value) != {\"mode\", \"schema_version\"} or value.get(\"schema_version\") != \"leadpoet.lab_arena.restart_mode.v1\" or value.get(\"mode\") not in {\"off\", \"live\", \"shadow\"}:
+    raise SystemExit(1)
+print(value[\"mode\"])
+' <<<\"\$mode_report\"
+     )\"
+     state='/home/ec2-user/.config/leadpoet/lab-arena-runner-process.json'
+     helper='$VALIDATOR_REPO_ROOT/scripts/manage_owned_process_group.py'
+     case \"\$mode\" in
+       off)
+         test ! -e \"\$state\"
+         ! pgrep -f '^$VALIDATOR_PYTHON_BIN -u scripts/run_lab_arena_runner[.]py\$' >/dev/null
+         ;;
+       live|shadow)
+         sudo '$VALIDATOR_PYTHON_BIN' \"\$helper\" verify \\
+           --state-file \"\$state\" --cwd '$VALIDATOR_REPO_ROOT' \\
+           --uid \"\$(sudo id -u)\" -- \\
+           '$VALIDATOR_PYTHON_BIN' -u scripts/run_lab_arena_runner.py
+         ;;
+       *) exit 1 ;;
+     esac"
+}
+
+release_lab_arena_restart_guard() {
+  local host key repo python env_file
+  case "$component" in
+    gateway|validator|all)
+      host="$GATEWAY_HOST"; key="$GATEWAY_KEY"; repo="$GATEWAY_REPO_ROOT"
+      python="$GATEWAY_PYTHON_BIN"; env_file="/home/ec2-user/.config/leadpoet/gateway.env"
+      ;;
+  esac
+  ssh "${ssh_common[@]}" -i "$key" "$host" \
+    "set -Eeuo pipefail
+     env -u LAB_ARENA_SUPABASE_URL \\
+       -u LAB_ARENA_SUPABASE_ANON_KEY \\
+       -u LAB_ARENA_SERVICE_KEY -u LAB_ARENA_SERVICE_JWT \\
+       PYTHONPATH='$repo' '$python' \\
+       '$repo/scripts/lab_arena_restart_claim_guard.py' release \\
+       --environment-file '$env_file' \\
+       --candidate '$commit' \\
+       --invocation '$active_release_restart_invocation_id' >/dev/null"
+  echo "Released the exact-owner Lab Arena restart claim guard"
 }
 
 build_gateway_restart_command() {
@@ -1603,6 +2142,7 @@ build_gateway_restart_command() {
       install -m 600 \"\$authority_root/scripts/gateway_git_deploy.py\" \"\$controller_stage/scripts/gateway_git_deploy.py\"
       install -m 600 \"\$authority_root/Leadpoet/utils/exact_commit_restart_v2.py\" \"\$controller_stage/Leadpoet/utils/exact_commit_restart_v2.py\"
       install -m 600 \"\$authority_root/gateway/tee/host_memory_guard_v2.py\" \"\$controller_stage/gateway/tee/host_memory_guard_v2.py\"
+      install -m 600 \"\$authority_root/scripts/manage_owned_process_group.py\" \"\$controller_stage/scripts/manage_owned_process_group.py\"
       if [ -e \"\$controller_release\" ] || [ -L \"\$controller_release\" ]; then
         test -d \"\$controller_release\" && test ! -L \"\$controller_release\"
         test \"\$(stat -c '%u:%g:%a' \"\$controller_release\")\" = \"\$(id -u):\$(id -g):700\"
@@ -1614,6 +2154,15 @@ build_gateway_restart_command() {
         cmp -s \"\$controller_stage/scripts/gateway_git_deploy.py\" \"\$controller_release/scripts/gateway_git_deploy.py\"
         cmp -s \"\$controller_stage/Leadpoet/utils/exact_commit_restart_v2.py\" \"\$controller_release/Leadpoet/utils/exact_commit_restart_v2.py\"
         cmp -s \"\$controller_stage/gateway/tee/host_memory_guard_v2.py\" \"\$controller_release/gateway/tee/host_memory_guard_v2.py\"
+        if [ -e \"\$controller_release/scripts/manage_owned_process_group.py\" ] || [ -L \"\$controller_release/scripts/manage_owned_process_group.py\" ]; then
+          test ! -L \"\$controller_release/scripts/manage_owned_process_group.py\"
+          test \"\$(stat -c '%u:%g:%a' \"\$controller_release/scripts/manage_owned_process_group.py\")\" = \"\$(id -u):\$(id -g):600\"
+          cmp -s \"\$controller_stage/scripts/manage_owned_process_group.py\" \"\$controller_release/scripts/manage_owned_process_group.py\"
+        else
+          git -C '$GATEWAY_REPO_ROOT' merge-base --is-ancestor '$branch_commit' '$LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY'
+          git -C '$GATEWAY_REPO_ROOT' cat-file -e '$branch_commit:scripts/manage_owned_process_group.py'
+          git -C '$GATEWAY_REPO_ROOT' show '$branch_commit:scripts/manage_owned_process_group.py' | cmp -s - \"\$controller_stage/scripts/manage_owned_process_group.py\"
+        fi
         rm -rf -- \"\$controller_stage\"
       else
         mv -- \"\$controller_stage\" \"\$controller_release\"
@@ -1663,6 +2212,9 @@ build_gateway_restart_command() {
       find \"\$authority_root\" -type f ! \( -perm -100 -o -perm -010 -o -perm -001 \) -exec chmod 400 {} +
       find \"\$authority_root\" -type d -exec chmod 500 {} +
       run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/authority-plan.json\" --materialized-root \"\$authority_root\" --phase prepared_archive --strict-extras >/dev/null
+      test -r \"\$authority_root/scripts/manage_owned_process_group.py\"
+      test ! -L \"\$authority_root/scripts/manage_owned_process_group.py\"
+      test \"\$(git -C '$GATEWAY_REPO_ROOT' hash-object --no-filters \"\$authority_root/scripts/manage_owned_process_group.py\")\" = \"\$(git -C '$GATEWAY_REPO_ROOT' rev-parse '$branch_commit:scripts/manage_owned_process_group.py')\"
 $miner_candidate_prepare
       exec env \\
         LEADPOET_REPO_ROOT='$GATEWAY_REPO_ROOT' \\
@@ -1673,6 +2225,7 @@ $miner_candidate_prepare
         GATEWAY_RESTART_AUTHORITY_ROOT=\"\$authority_root\" \\
         GATEWAY_RESTART_AUTHORITY_COMMIT='$branch_commit' \\
         GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID='$active_release_restart_invocation_id' \\
+        GATEWAY_ACTIVE_RELEASE_COMPONENT='$component' \\
         GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED='$paired_required' \\
         GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE='$paired_gateway_handoff_file' \\
         GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE='$paired_gateway_handoff_nonce' \\
@@ -1681,6 +2234,8 @@ $miner_candidate_prepare
         GATEWAY_V2_RELEASE_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
         RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
         GATEWAY_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
+        GATEWAY_PREPARED_V2_RELEASE_MANIFEST='$gateway_local_gateway_release_remote' \\
+        GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST='$gateway_local_validator_release_remote' \\
         GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS='$gateway_validator_requirements_remote' \\
         GATEWAY_COUNTERPART_RELEASE_LINEAGE='$gateway_counterpart_path' \\
         GATEWAY_V2_RELEASE_REQUIREMENTS='$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH' \\
@@ -1804,10 +2359,14 @@ run_validator_restart() {
     GIT_NO_REPLACE_OBJECTS=1 git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit' | tar -xf - -C \"\$authority_root\"
     test -r \"\$authority_root/validator_restart.sh\"
     test -r \"\$authority_root/gateway/tee/prepare_active_release_lineage_v2.py\"
+    test -r \"\$authority_root/scripts/lab_arena_restart_guard_handoff.py\"
+    test -r \"\$authority_root/scripts/manage_owned_process_group.py\"
+    test ! -L \"\$authority_root/scripts/manage_owned_process_group.py\"
     test -x '$VALIDATOR_PYTHON_BIN'
     test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters \"\$authority_root/validator_restart.sh\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$branch_commit:validator_restart.sh')\"
     find \"\$authority_root\" -type f -exec chmod 400 {} +
     find \"\$authority_root\" -type d -exec chmod 500 {} +
+    test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters \"\$authority_root/scripts/manage_owned_process_group.py\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$branch_commit:scripts/manage_owned_process_group.py')\"
     exec env \\
       VALIDATOR_ROOT='$VALIDATOR_REPO_ROOT' \\
       VALIDATOR_PYTHON_BIN='$VALIDATOR_PYTHON_BIN' \\
@@ -1815,6 +2374,7 @@ run_validator_restart() {
       VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=\"\$authority_root\" \\
       VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$selected_active_release_authority_commit' \\
       VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID='$active_release_restart_invocation_id' \\
+      VALIDATOR_ACTIVE_RELEASE_COMPONENT='$component' \\
       VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1 \\
       VALIDATOR_V2_HOTKEY_CONFIG='$VALIDATOR_V2_HOTKEY_CONFIG_PATH' \\
       VALIDATOR_CHAIN_SIGNING_PROFILE='$VALIDATOR_CHAIN_SIGNING_PROFILE_PATH' \\
@@ -1826,7 +2386,13 @@ run_validator_restart() {
       VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT='$validator_final_lineage_remote' \\
       VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS='$recovery_requirements_environment' \\
       VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE='$recovery_lineage_environment' \\
+      VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT='$validator_arena_guard_request_remote' \\
+      VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT='$validator_arena_guard_permit_remote' \\
+      VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE='$validator_arena_guard_handoff_nonce' \\
+      VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS='$VALIDATOR_COORDINATION_TIMEOUT_SECONDS' \\
       LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \\
+      VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST='$VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH' \\
+      VALIDATOR_V2_RELEASE_MANIFEST='$VALIDATOR_LOCAL_RELEASE_PATH' \\
       VALIDATOR_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
       bash \"\$authority_root/validator_restart.sh\" --commit '$commit'"
   bootstrap_command_b64="$(
@@ -2001,6 +2567,40 @@ else:
     )
     if gateway_release != channel['gateway_release_manifest']:
         raise SystemExit('active gateway release differs from the verified runtime identity')
+from gateway.tee.release_channel_v2 import (
+    build_historical_release_lineage_v2,
+    build_release_lineage_v2,
+    fetch_prior_release_channel_v2,
+)
+published_channel = fetch_prior_release_channel_v2(
+    bucket=(
+        runtime_environment.get('GATEWAY_V2_RELEASE_BUCKET')
+        or 'leadpoet-attested-v2-artifacts-493765492819'
+    ),
+    commit_sha=expected,
+    prefix=(
+        runtime_environment.get('GATEWAY_V2_RELEASE_PREFIX')
+        or 'attested-v2/releases'
+    ),
+)
+if historical_topology_hash is None:
+    active_roles = build_release_lineage_v2(
+        (channel,), current_commit=expected
+    )['releases'][expected]['roles']
+    published_roles = build_release_lineage_v2(
+        (published_channel,), current_commit=expected
+    )['releases'][expected]['roles']
+else:
+    active_roles = build_historical_release_lineage_v2(
+        (channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+    published_roles = build_historical_release_lineage_v2(
+        (published_channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+if published_roles != active_roles:
+    raise SystemExit('active gateway release differs from immutable channel roles')
 if identity_cache_from_release_channel(channel) != fetch_locked_release_identity_cache(
     release
 ):
@@ -2123,7 +2723,7 @@ verify_validator_release() {
   local output="$1"
   ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
     "cd '$VALIDATOR_REPO_ROOT' && PYTHONPATH='$VALIDATOR_REPO_ROOT' \
-      python3 - '$commit' <<'PY'
+      python3 - '$commit' '$historical_topology_hash' <<'PY'
 import json
 import os
 from pathlib import Path
@@ -2131,6 +2731,7 @@ import subprocess
 import sys
 
 expected = sys.argv[1]
+historical_topology_hash = sys.argv[2] or None
 # validator_exact_release_ready: retained as the operator/fault-injection probe label.
 running = subprocess.check_output(
     ['docker', 'inspect', '-f', '{{.State.Running}}', 'leadpoet-validator-main'],
@@ -2185,6 +2786,53 @@ validator_release = json.loads(
         encoding='utf-8'
     )
 )
+from gateway.tee.release_channel_v2 import (
+    build_historical_release_channel_v2,
+    build_historical_release_lineage_v2,
+    build_release_channel_v2,
+    build_release_lineage_v2,
+    fetch_prior_release_channel_v2,
+)
+if historical_topology_hash is None:
+    active_channel = build_release_channel_v2(
+        gateway_release_manifest=gateway_release,
+        validator_release_manifest=validator_release,
+    )
+    active_roles = build_release_lineage_v2(
+        (active_channel,), current_commit=expected
+    )['releases'][expected]['roles']
+else:
+    active_channel = build_historical_release_channel_v2(
+        gateway_release_manifest=gateway_release,
+        validator_release_manifest=validator_release,
+        expected_topology_hash=historical_topology_hash,
+    )
+    active_roles = build_historical_release_lineage_v2(
+        (active_channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+published_channel = fetch_prior_release_channel_v2(
+    bucket=(
+        runtime_environment.get('VALIDATOR_V2_RELEASE_BUCKET')
+        or 'leadpoet-attested-v2-artifacts-493765492819'
+    ),
+    commit_sha=expected,
+    prefix=(
+        runtime_environment.get('VALIDATOR_V2_RELEASE_PREFIX')
+        or 'attested-v2/releases'
+    ),
+)
+if historical_topology_hash is None:
+    published_roles = build_release_lineage_v2(
+        (published_channel,), current_commit=expected
+    )['releases'][expected]['roles']
+else:
+    published_roles = build_historical_release_lineage_v2(
+        (published_channel,), current_commit=expected,
+        expected_topology_hash=historical_topology_hash,
+    )['releases'][expected]['roles']
+if published_roles != active_roles:
+    raise SystemExit('active validator release differs from immutable channel roles')
 lineage = json.loads(
     Path('/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json').read_text(
         encoding='utf-8'
@@ -2288,12 +2936,14 @@ case "$component" in
       exit 1
     fi
     verify_validator_release "$validator_evidence"
+    verify_validator_arena_runner_process
     prepare_running_validator_release_requirements
     install_gateway_validator_release_requirements
     fetch_and_install_gateway_counterpart_lineage
     invalidate_deploy_readiness
     verify_local_readiness_python_binding
     run_gateway_restart
+    verify_validator_arena_runner_process
     fetch_gateway_final_release_authority
     ;;
   validator)
@@ -2422,6 +3072,9 @@ case "$component" in
       echo "ERROR: gateway did not reach its paired pre-shutdown handoff" >&2
       exit 1
     fi
+    if [ -z "$historical_topology_hash" ]; then
+      prepare_and_publish_paired_local_release_channel
+    fi
     publish_paired_gateway_handoff_value "$commit"
 
     while kill -0 "$gateway_job" 2>/dev/null; do
@@ -2450,6 +3103,7 @@ case "$component" in
     install_validator_final_release_authority
     publish_coordination_value "$commit"
     echo "Gateway restart completed; releasing exact-SHA validator activation"
+    authorize_validator_lab_arena_restart "$validator_log"
 
     while kill -0 "$validator_job" 2>/dev/null; do
       if [ "$SECONDS" -ge "$paired_restart_deadline" ]; then
@@ -2471,5 +3125,10 @@ esac
 
 verify_gateway_release "$gateway_evidence"
 verify_validator_release "$validator_evidence"
+if [ "$component" != "gateway" ]; then
+  verify_validator_arena_runner_process
+  mark_validator_lab_arena_ready
+fi
 finalize_deploy_readiness
+release_lab_arena_restart_guard
 echo "SUCCESS: gateway and validator are aligned on attested release $commit"

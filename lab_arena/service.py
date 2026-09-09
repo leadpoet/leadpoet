@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import json
+import logging
 import secrets
 import threading
 import time
@@ -14,14 +17,19 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Proto
 
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, submission_rate_limit, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
-from lab_arena.output import OutputInvalid, validate_output_document
+from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
+
+logger = logging.getLogger(__name__)
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
+ACTIVE_ROUND_STATUSES = tuple(
+    status for status in contracts.ROUND_STATUSES if status not in TERMINAL_STATUSES
+)
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
-DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/lab.tar.gz"
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 240,
@@ -34,6 +42,7 @@ CANCEL_REASONS = {
     "benchmark_invalid": "benchmark_data_invalid",
     "capacity": "runner_capacity",
     "scoring": "scoring_window_closed",
+    "scoring_incomplete": "scoring_incomplete",
     "publication": "publication_sanitizer_failed",
     "operator": "operator",
 }
@@ -42,10 +51,11 @@ CANCEL_REASONS = {
 class ServiceError(RuntimeError):
     """A request or transition failed closed."""
 
-    def __init__(self, code: str, status: int = 400) -> None:
+    def __init__(self, code: str, status: int = 400, *, source_path: str = "") -> None:
         super().__init__(code)
         self.code = code
         self.status = status
+        self.source_path = source_path
 
 
 # ---------------------------------------------------------------------------
@@ -283,15 +293,33 @@ class ServiceConfig:
     defaults: RoundDefaults = field(default_factory=RoundDefaults)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     network_name: str = "finney"
+    netuid: int = 71
+    # Optional process-local ownership boundary for isolated one-round hosts.
+    # It is deliberately not persisted in a round configuration or schema.
+    pinned_round_id: Optional[str] = None
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
+    # Only the host publishes accepted source. Miner code never gets GitHub access.
+    baseline_promoter_factory: Optional[Callable[[], Any]] = None
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
             raise ServiceError("mode_off", 500)
+        try:
+            self.network_name = chain_module.normalize_network_name(self.network_name)
+        except Exception as exc:
+            raise ServiceError("network_name_invalid", 500) from exc
+        if isinstance(self.netuid, bool) or not isinstance(self.netuid, int) or self.netuid < 1:
+            raise ServiceError("netuid_invalid", 500)
+        if self.pinned_round_id is not None and (
+            not isinstance(self.pinned_round_id, str)
+            or not self.pinned_round_id
+            or self.pinned_round_id != self.pinned_round_id.strip()
+        ):
+            raise ServiceError("pinned_round_id_invalid", 500)
 
 
 def _iso(moment: datetime) -> str:
@@ -363,16 +391,50 @@ class ArenaService:
             return self._signer
 
     def _round(self, round_id: str) -> Dict[str, Any]:
+        self._require_round_ownership(round_id)
         row = self._store.get_round(round_id)
         if row is None:
             raise ServiceError("round_missing", 404)
         return self._require_round_mode(row)
 
-    def _require_round_mode(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        """Refuse a round owned by another Arena mode."""
+    def _pinned_round_id(self) -> Optional[str]:
+        return getattr(getattr(self, "_config", None), "pinned_round_id", None)
 
-        if (row.get("configuration_doc") or {}).get("mode") != self._config.mode:
+    def _chain_scope(self) -> Tuple[str, int]:
+        """Return this process's chain pair, with the legacy production default."""
+
+        config = getattr(self, "_config", None)
+        return (
+            str(getattr(config, "network_name", "finney")),
+            int(getattr(config, "netuid", 71)),
+        )
+
+    def _require_round_ownership(self, round_id: str) -> None:
+        pinned_round_id = self._pinned_round_id()
+        if pinned_round_id is not None and round_id != pinned_round_id:
+            raise ServiceError("round_scope_mismatch", 409)
+
+    def _pinned_round(self) -> Optional[Dict[str, Any]]:
+        pinned_round_id = self._pinned_round_id()
+        if pinned_round_id is None:
+            return None
+        row = self._store.get_round(pinned_round_id)
+        if row is None:
+            return None
+        return self._require_round_mode(row)
+
+    def _require_round_mode(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Refuse a round owned by another Arena mode or chain scope."""
+
+        configuration = row.get("configuration_doc") or {}
+        if configuration.get("mode") != self._config.mode:
             raise ServiceError("round_mode_mismatch", 409)
+        # Rows created before schema 189 had no explicit chain pair. They are
+        # permanently interpreted as the original Finney/netuid 71 scope.
+        network_name = configuration.get("network_name", "finney")
+        netuid = configuration.get("netuid", 71)
+        if (network_name, netuid) != self._chain_scope():
+            raise ServiceError("round_network_mismatch", 409)
         return row
 
     def startup_checks(self) -> Dict[str, Any]:
@@ -390,7 +452,7 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (184, 185) if self._config.credential_manager is None else (185,)
+        supported_versions = (194,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
@@ -477,11 +539,14 @@ class ArenaService:
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
         round_id = round_id or round_id_for_cutoff(cutoff)
+        self._require_round_ownership(round_id)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
         document = {
             "schema_version": contracts.ROUND_CONFIGURATION_SCHEMA_VERSION,
             "round_id": round_id,
             "mode": self._config.mode,
+            "network_name": self._config.network_name,
+            "netuid": self._config.netuid,
             "rewards_enabled": bool(defaults.rewards_enabled and self._config.mode == "live"),
             "schedule": self.build_schedule(cutoff),
             "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
@@ -553,8 +618,19 @@ class ArenaService:
     def current_round(self) -> Optional[Dict[str, Any]]:
         """The newest round that is not published or cancelled (operator status)."""
 
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            return row if row is not None and row["status"] not in TERMINAL_STATUSES else None
         # Scan ids and statuses only; a full row can be large at hundreds of participants.
-        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc"):
+        network_name, netuid = self._chain_scope()
+        for row in self._store.list_rounds(
+            statuses=ACTIVE_ROUND_STATUSES,
+            mode=self._config.mode,
+            network_name=network_name,
+            netuid=netuid,
+            limit=20,
+            columns="round_id,status,created_at,configuration_doc",
+        ):
             if row["status"] not in TERMINAL_STATUSES and (row.get("configuration_doc") or {}).get("mode") == self._config.mode:
                 return self._round(row["round_id"])
         return None
@@ -566,12 +642,39 @@ class ArenaService:
         so the driver advances each of them on every tick.
         """
 
-        rows = [
-            row
-            for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc")
-            if row["status"] not in TERMINAL_STATUSES
-            and (row.get("configuration_doc") or {}).get("mode") == self._config.mode
-        ]
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            if row is None or row["status"] in TERMINAL_STATUSES:
+                return []
+            return [{
+                "round_id": row["round_id"],
+                "status": row["status"],
+                "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
+            }]
+
+        network_name, netuid = self._chain_scope()
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        page_size = 20
+        while True:
+            page = self._store.list_rounds(
+                statuses=ACTIVE_ROUND_STATUSES,
+                mode=self._config.mode,
+                network_name=network_name,
+                netuid=netuid,
+                limit=page_size,
+                offset=offset,
+                columns="round_id,status,created_at,configuration_doc",
+            )
+            rows.extend(
+                row
+                for row in page
+                if row["status"] not in TERMINAL_STATUSES
+                and (row.get("configuration_doc") or {}).get("mode") == self._config.mode
+            )
+            if len(page) < page_size:
+                break
+            offset += page_size
         return [
             {
                 "round_id": row["round_id"],
@@ -584,7 +687,18 @@ class ArenaService:
     def open_round(self) -> Optional[Dict[str, Any]]:
         """The round open for submissions, if any (at most one at a time)."""
 
-        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc"):
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            return row if row is not None and row["status"] == "open" else None
+        network_name, netuid = self._chain_scope()
+        for row in self._store.list_rounds(
+            status="open",
+            mode=self._config.mode,
+            network_name=network_name,
+            netuid=netuid,
+            limit=20,
+            columns="round_id,status,created_at,configuration_doc",
+        ):
             if row["status"] == "open" and (row.get("configuration_doc") or {}).get("mode") == self._config.mode:
                 return self._round(row["round_id"])
         return None
@@ -597,6 +711,7 @@ class ArenaService:
         only yields a structured refusal.
         """
 
+        self._require_round_ownership(round_id)
         now = time.monotonic()
         with self._hot_round_lock:
             cached = self._hot_rounds.get(round_id)
@@ -620,6 +735,7 @@ class ArenaService:
 
         validated = self.validate_request(envelope, scope=scope, round_id=None)
         round_id = str(validated["round_id"])
+        self._require_round_ownership(round_id)
         round_row = self._hot_round(round_id) if hot else self._store.get_round(round_id)
         if round_row is None:
             raise ServiceError("round_unknown", 404)
@@ -629,7 +745,15 @@ class ArenaService:
         return validated, round_row
 
     def latest_published_round(self) -> Optional[Dict[str, Any]]:
-        rows = self._store.list_rounds(status="published", limit=200)
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            return row if row is not None and row["status"] == "published" else None
+        network_name, netuid = self._chain_scope()
+        rows = self._store.list_rounds(
+            status="published", mode=self._config.mode,
+            network_name=network_name, netuid=netuid,
+            limit=200
+        )
         return next(
             (row for row in rows if (row.get("configuration_doc") or {}).get("mode") == self._config.mode),
             None,
@@ -655,6 +779,17 @@ class ArenaService:
         return set(str(item) for item in (round_row.get("configuration_doc") or {}).get("banned_hotkeys") or [])
 
     # -- submissions (sections 6, 7, 14.2) -------------------------------------
+
+    def submission_status(self, submission_id: str) -> Dict[str, Any]:
+        row = self._store.get_submission(submission_id)
+        if row is None:
+            raise ServiceError("submission_missing", 404)
+        self._require_round_ownership(str(row.get("round_id") or ""))
+        return {
+            "submission_id": submission_id,
+            "status": row["status"],
+            "rejection_rule": row.get("rejection_rule"),
+        }
 
     def _require_submission_window(self, round_row: Mapping[str, Any]) -> None:
         if round_row["status"] != "open":
@@ -699,6 +834,8 @@ class ArenaService:
             "source_size_bytes": body["source_size_bytes"],
             "consent": dict(body["consent"]),
         }
+        if body.get("source_content_md5") is not None:
+            document["source_content_md5"] = body["source_content_md5"]
         try:
             registration = self._store.register_submission(
                 round_id,
@@ -716,6 +853,16 @@ class ArenaService:
             raise ServiceError("submission_registration_failed", 500)
         submission_id = str(registration.get("submission_id") or submission_id)
         source_ref = str(registration.get("source_ref") or source_ref)
+        if registration.get("submission_status") in ("accepted", "frozen"):
+            # Historical accepted rows predate persisted transport checksums.
+            # Verify their bytes before treating a same-size upload as a retry.
+            checksum = body.get("source_content_md5")
+            if checksum is not None:
+                self._validate_uploaded_source({
+                    "source_ref": source_ref,
+                    "source_size_bytes": body["source_size_bytes"],
+                    "submission_doc": {"source_content_md5": checksum},
+                })
         try:
             upload_arguments = {
                 "size_bytes": int(body["source_size_bytes"]),
@@ -752,12 +899,26 @@ class ArenaService:
             raise ServiceError("source_upload_unavailable", 409) from exc
         if len(payload) != expected_size:
             raise ServiceError("submission_rejected:source_size_mismatch", 400)
+        checksum = (row.get("submission_doc") or {}).get("source_content_md5")
+        if checksum is not None:
+            actual = base64.b64encode(
+                hashlib.md5(payload, usedforsecurity=False).digest()
+            ).decode("ascii")
+            if not hmac.compare_digest(actual, checksum):
+                raise ServiceError("submission_rejected:source_checksum_mismatch", 400)
         try:
             source_bundle.validate_source_archive(
                 payload, forbidden_values=forbidden_values
             )
         except source_bundle.SourceBundleError as exc:
-            raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
+            path = exc.path or ""
+            for value in forbidden_values:
+                if value:
+                    path = path.replace(value, "[REDACTED]")
+            raise ServiceError(
+                "submission_rejected:%s" % exc.code, 400,
+                source_path=path[:source_bundle.MAX_SOURCE_PATH_BYTES],
+            ) from exc
 
     def handle_submission_finalize(
         self, submission_id: str, envelope: Any
@@ -792,6 +953,8 @@ class ArenaService:
                 return {"status": "accepted", "submission_id": submission_id}
             raise ServiceError("submission_credentials_missing", 409)
         if row.get("status") != "uploading":
+            if row.get("rejection_rule") == "source_replaced":
+                raise ServiceError("submission_superseded", 409)
             raise ServiceError("submission_not_uploading", 409)
         self._enforce_submission_request_limit(validated["hotkey"])
         try:
@@ -889,26 +1052,41 @@ class ArenaService:
         ).strip()
         if not hotkey:
             raise ServiceError("baseline_hotkey_missing", 500)
-        if not source_url.startswith("https://"):
-            raise ServiceError("baseline_source_url_invalid", 500)
-        fetcher = self._config.baseline_source_fetcher
-        if fetcher is None:
-            raise ServiceError("baseline_source_fetcher_missing", 500)
         submission_id = "baseline-%s" % round_id.removeprefix("arena-")
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
         row = self._store.get_submission(submission_id)
         if row is None:
+            fetcher = self._config.baseline_source_fetcher
+            if fetcher is None:
+                raise ServiceError("baseline_source_fetcher_missing", 500)
+            selected_source_url = source_url
+            source_observation = "configured_shadow_source"
             try:
                 payload = self._objects.get_bounded(
                     source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
                 )
+                source_observation = "stored_object:%s" % source_ref
             except Exception:
                 try:
+                    if str(configuration.get("mode") or self._config.mode) == "live":
+                        if self._store.pending_promotions():
+                            raise ServiceError("baseline_promotion_pending", 503)
+                        selected_source_url = DEFAULT_BASELINE_SOURCE_URL
+                    source_observation = (
+                        selected_source_url
+                        if selected_source_url == DEFAULT_BASELINE_SOURCE_URL
+                        else "configured_shadow_source"
+                    )
                     payload = bytes(
-                        fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+                        fetcher(
+                            selected_source_url,
+                            source_bundle.MAX_SOURCE_ARCHIVE_BYTES,
+                        )
                     )
                     facts = source_bundle.validate_source_archive(payload)
                     self._objects.put(source_ref, payload)
+                except ServiceError:
+                    raise
                 except source_bundle.SourceBundleError as exc:
                     raise ServiceError(
                         "baseline_source_invalid:%s" % exc.code, 500
@@ -922,6 +1100,12 @@ class ArenaService:
                     raise ServiceError(
                         "baseline_source_invalid:%s" % exc.code, 500
                     ) from exc
+            logger.info(
+                "arena_baseline_source_frozen round_id=%s source=%s source_commit=%s",
+                round_id,
+                source_observation,
+                source_bundle.source_archive_commit(payload) or "unavailable",
+            )
             result = self._store.register_submission(
                 round_id,
                 submission_id,
@@ -1013,6 +1197,18 @@ class ArenaService:
         round_row = self._round(round_id)
         if round_row["status"] != "open":
             return {"status": "existing", "round_status": round_row["status"]}
+        scorer_image = {
+            "scorer_image_digest": self._config.defaults.scorer_image_digest,
+            "scorer_image_reference": self._config.defaults.scorer_image_reference,
+        }
+        refreshed_configuration = {
+            **dict(round_row.get("configuration_doc") or {}),
+            **scorer_image,
+        }
+        try:
+            contracts.validate_round_configuration(refreshed_configuration)
+        except ArenaContractError as exc:
+            raise ServiceError("scorer_image_invalid", 500) from exc
         started = self.now()
         set_id = int(round_id.replace("arena-", "").replace("-", "")[:8])
         source = self._config.daily_icp_source(set_id=set_id, active_at=started)
@@ -1067,7 +1263,7 @@ class ArenaService:
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
-            if exc.code == "baseline_source_not_ready":
+            if exc.code in ("baseline_source_not_ready", "baseline_promotion_pending"):
                 return {"status": "retry", "reason": exc.code, "set_id": set_id}
             raise
         evaluation_date = round_id.replace("arena-", "")[:10]
@@ -1077,6 +1273,7 @@ class ArenaService:
             "participants": participants,
             "benchmark_ref": benchmark_ref,
             "evaluation_date": evaluation_date,
+            **scorer_image,
         })
         return {"status": transition.get("status"), "participants": len(participants)}
 
@@ -1180,6 +1377,50 @@ class ArenaService:
         runs = self._store.list_runs(round_id, stage=stage, kind="score")
         return all(run["status"] in ("accepted", "failed") for run in runs)
 
+    def _scoring_has_exhausted_judge_failure(
+        self,
+        round_row: Mapping[str, Any],
+        stage: int,
+        runs: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        """Return whether a required score can no longer succeed.
+
+        An accepted attempt always wins. An active attempt means the assignment
+        can still succeed. Rows outside the committed plan cannot end a round.
+        """
+
+        plan = self._load_scoring_plan(round_row, stage)
+        runs_by_scored_run: Dict[str, List[Mapping[str, Any]]] = {}
+        planned_run_ids = {
+            str(item["scored_run_id"]) for item in plan["work_items"]
+        }
+        for run in runs:
+            scored_run_id = str(run.get("scored_run_id") or "")
+            if scored_run_id in planned_run_ids:
+                runs_by_scored_run.setdefault(scored_run_id, []).append(run)
+
+        for scored_run_id in planned_run_ids:
+            attempts = runs_by_scored_run.get(scored_run_id, [])
+            if any(run.get("status") == "accepted" for run in attempts):
+                continue
+            if any(
+                run.get("status") not in ("accepted", "failed")
+                for run in attempts
+            ):
+                continue
+            if not attempts:
+                continue
+            latest = max(attempts, key=lambda run: int(run.get("attempt") or 0))
+            if (
+                int(latest.get("attempt") or 0)
+                >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+                and latest.get("status") == "failed"
+                and str(latest.get("terminal_cause") or "")
+                in contracts.INFRASTRUCTURE_TERMINAL_CAUSES
+            ):
+                return True
+        return False
+
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return self._store.close_scoring(round_id, stage)
 
@@ -1194,10 +1435,15 @@ class ArenaService:
         return chosen
 
     def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]) -> List[Dict[str, Any]]:
-        document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+        try:
+            document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise scoring.ScoringError("scoring output is not valid JSON") from exc
         output = scoring.validate_scoring_output_document(document)
         if output["scored_run_id"] != run["scored_run_id"]:
-            raise ServiceError("scoring_output_item_mismatch", 500)
+            raise scoring.ScoringError("scoring output names the wrong execution run")
+        if "breakdowns" not in output:
+            raise scoring.ScoringError("accepted scoring output contains a failure")
         return scoring.validate_breakdowns_for_item(output["breakdowns"], icp=icp, companies=companies, max_scored_companies=int(policy["max_scored_companies"]))
 
     def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
@@ -1224,12 +1470,22 @@ class ArenaService:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
             if run is None:
-                raise ServiceError("scoring_assignment_missing", 500)
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
+                )
             if run["status"] == "accepted":
                 continue
             submission_id = str(item["submission_id"])
-            if submission_id == baseline_id:
-                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+            cause = str(run.get("terminal_cause") or "")
+            # Only explicit miner-account failures may exclude one challenger.
+            # Every other scoring gap belongs to the shared judge path.
+            if submission_id == baseline_id or cause not in (
+                "budget_exhausted",
+                "credential_error",
+            ):
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
+                )
             ineligible.add(submission_id)
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0
@@ -1246,11 +1502,9 @@ class ArenaService:
                     run, icp=icp, companies=companies, policy=policy
                 )
             except scoring.ScoringError:
-                if submission_id == baseline_id:
-                    return self._store.cancel_round(
-                        round_id, CANCEL_REASONS["scoring"]
-                    )
-                ineligible.add(submission_id)
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
+                )
             judge_executions += 1
         if ineligible:
             breakdowns_by_item = {
@@ -1293,7 +1547,9 @@ class ArenaService:
                 (entry for entry in final_entries if entry["is_king"]), None
             )
             if baseline_entry is None or baseline_entry["final_score"] is None:
-                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+                return self._store.cancel_round(
+                    round_id, CANCEL_REASONS["scoring_incomplete"]
+                )
         if stage == 1:
             ranking = verify.stage1_ranking(
                 self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
@@ -1370,7 +1626,9 @@ class ArenaService:
         )
         king_entry = next((e for e in final_entries if e["is_king"]), None)
         if king_entry is None or king_entry["final_score"] is None:
-            return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+            return self._store.cancel_round(
+                round_id, CANCEL_REASONS["scoring_incomplete"]
+            )
         decision = verify.king_decision([e for e in final_entries if not e["is_king"]], king_entry)
         published_at = _iso(self.now())
         publication = {
@@ -1394,6 +1652,85 @@ class ArenaService:
             "king_hotkey": str(decision.get("king_hotkey") or ""),
         }
 
+    def promote_pending_baselines(self) -> Dict[str, Any]:
+        """Finish accepted winners oldest-first before a new baseline or reward.
+
+        Git and PostgreSQL cannot share a transaction. Persist the prepared Git
+        update first, push both branches atomically, then mark completion. A
+        lost response is reconciled against those same branch heads on retry.
+        """
+
+        if self._config.mode != "live":
+            return {"status": "disabled", "promoted": 0}
+        promoted = 0
+        network_name, netuid = self._chain_scope()
+        for row in self._store.pending_promotions(
+            pinned_round_id=self._config.pinned_round_id,
+            network_name=network_name,
+            netuid=netuid,
+        ):
+            result = self.promote_baseline(str(row["round_id"]))
+            if result.get("status") not in ("promoted", "existing"):
+                return {"status": result.get("status", "pending"), "promoted": promoted}
+            promoted += int(result.get("status") == "promoted")
+        return {"status": "ok", "promoted": promoted}
+
+    def promote_baseline(self, round_id: str) -> Dict[str, Any]:
+        """Publish only the stored, scored winner, without executing its source."""
+
+        row = self._round(round_id)
+        if row.get("baseline_promoted_at"):
+            return {"status": "existing"}
+        configuration = row.get("configuration_doc") or {}
+        decision = (row.get("publication_doc") or {}).get("king_decision") or {}
+        if (
+            row.get("status") != "published"
+            or configuration.get("mode") != "live"
+            or not row.get("promotion_required")
+            or decision.get("outcome") != "crowned"
+        ):
+            return {"status": "not_required"}
+        factory = self._config.baseline_promoter_factory
+        if factory is None:
+            raise ServiceError("baseline_promoter_unavailable", 503)
+        submission_id = str(decision.get("winner_submission_id") or "")
+        submission = self._store.get_submission(submission_id)
+        if (
+            not submission
+            or submission.get("round_id") != round_id
+            or submission.get("miner_hotkey") != decision.get("king_hotkey")
+            or submission.get("is_king")
+            or submission.get("status") != "frozen"
+        ):
+            raise ServiceError("promotion_winner_invalid", 500)
+        payload = self._objects.get_bounded(
+            str(submission["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+        )
+        if len(payload) != int(submission["source_size_bytes"]):
+            raise ServiceError("promotion_source_size_mismatch", 500)
+        promoter = factory()
+        plan = row.get("promotion_doc")
+        if plan is None:
+            proposed = promoter.prepare(
+                payload, round_id=round_id, submission_id=submission_id,
+                timestamp=str(row["published_at"]),
+            )
+            prepared = self._store.prepare_promotion(round_id, proposed)
+            if prepared.get("status") not in ("prepared", "existing"):
+                return prepared
+            # Another worker can win the initial prepare. Its stored plan is
+            # authoritative; never silently replace it with a new Git base.
+            row = self._store.get_round(round_id) or {}
+            plan = row.get("promotion_doc")
+        if not isinstance(plan, dict):
+            raise ServiceError("promotion_plan_missing", 500)
+        commit = promoter.publish(
+            payload, plan=plan, round_id=round_id, submission_id=submission_id
+        )
+        if commit != plan["commit"]:
+            raise ServiceError("promotion_commit_mismatch", 500)
+        return self._store.complete_promotion(round_id, plan)
+
     def activate_pending_rewards(self) -> Dict[str, Any]:
         """Activate eligible live rounds oldest-first after publication.
 
@@ -1404,7 +1741,21 @@ class ArenaService:
 
         if self._config.mode != "live":
             return {"status": "disabled", "activated": 0}
-        rows = list(reversed(self._store.list_rounds(status="published", limit=200)))
+        if self._pinned_round_id() is not None:
+            row = self._pinned_round()
+            rows = [row] if row is not None and row["status"] == "published" else []
+        else:
+            network_name, netuid = self._chain_scope()
+            rows = list(
+                reversed(
+                    self._store.list_rounds(
+                        status="published", mode="live",
+                        network_name=network_name,
+                        netuid=netuid,
+                        limit=200
+                    )
+                )
+            )
         pending = [
             row for row in rows
             if (row.get("configuration_doc") or {}).get("mode") == "live"
@@ -1469,9 +1820,19 @@ class ArenaService:
             return {"status": "stale", "round_status": row.get("status")}
         if configuration.get("mode") != "live" or configuration.get("rewards_enabled") is not True:
             return {"status": "disabled"}
+        # A later no-winner round must not activate while an earlier accepted
+        # baseline is still unpublished. This is global, like Git ordering.
+        if self._store.pending_promotions(limit=1):
+            return {"status": "waiting_for_promotion"}
         publication = row.get("publication_doc") or {}
         decision = publication.get("king_decision") or {}
-        prior = self._store.published_reward_bases(limit=200)
+        if (
+            row.get("promotion_required")
+            and decision.get("outcome") == "crowned"
+            and not row.get("baseline_promoted_at")
+        ):
+            return {"status": "waiting_for_promotion"}
+        prior = self._store.published_reward_bases(mode="live", limit=200)
         maximum_epoch = max((int(item["effective_reward_epoch"]) for item in prior if item.get("effective_reward_epoch") is not None), default=-1)
         effective_epoch = max(int(self._config.chain.current_settlement_epoch()) + 1, maximum_epoch + 1)
         usable = self._usable_reward_bases(prior)
@@ -1603,6 +1964,7 @@ class ArenaService:
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
         return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"), round_id=str(run.get("round_id") or ""))
 
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
@@ -1611,6 +1973,7 @@ class ArenaService:
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
         if run.get("kind") != "execute":
             raise ServiceError("run_source_unavailable", 409)
         expected_token_hash = str(run.get("lease_token_hash") or "")
@@ -1810,8 +2173,20 @@ class ArenaService:
             if status in ("stage1_scoring", "stage2_scoring"):
                 stage = 1 if status == "stage1_scoring" else 2
                 self._store.expire_leases(round_id)
+                scoring_runs = self._store.list_runs(
+                    round_id, stage=stage, kind="score"
+                )
+                if self._scoring_has_exhausted_judge_failure(
+                    round_row, stage, scoring_runs
+                ):
+                    return self._store.cancel_round(
+                        round_id, CANCEL_REASONS["scoring_incomplete"]
+                    )
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
-                if now >= _parse_iso(window) or self.scoring_is_complete(round_id, stage):
+                if now >= _parse_iso(window) or all(
+                    run["status"] in ("accepted", "failed")
+                    for run in scoring_runs
+                ):
                     return self.close_scoring(round_id, stage)
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_judged", "stage2_judged"):
@@ -1877,7 +2252,7 @@ class ArenaService:
                 if eligibility:
                     week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
         elif self._config.mode == "live":
-            rows = self._store.published_reward_bases(limit=200)
+            rows = self._store.published_reward_bases(mode="live", limit=200)
             bases = self._usable_reward_bases(rows)
             if bases:
                 governing = max(
@@ -1899,7 +2274,7 @@ class ArenaService:
     def public_reward_basis(self, epoch: int) -> Optional[Dict[str, Any]]:
         if self._config.mode != "live":
             return None
-        rows = self._store.published_reward_bases(limit=200)
+        rows = self._store.published_reward_bases(mode="live", limit=200)
         return rewards.governing_reward_basis(
             self._usable_reward_bases(rows), int(epoch)
         )
@@ -1944,13 +2319,26 @@ class ArenaService:
         if not submission_id or not isinstance(submission_id, str):
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
         row = self._round(round_id)
-        if row["status"] != "published":
+        round_status = str(row["status"])
+        if round_status not in ("published", "cancelled"):
             raise ServiceError("results_not_public", 403)
         publication = row.get("publication_doc") or {}
+        participants = (
+            publication.get("participants") or []
+            if round_status == "published"
+            else [
+                {
+                    "submission_id": item.get("submission_id"),
+                    "miner_hotkey": item.get("miner_hotkey"),
+                    "is_baseline": bool(item.get("is_king")),
+                }
+                for item in (row.get("participants") or [])
+            ]
+        )
         participant = next(
             (
                 item
-                for item in publication.get("participants") or []
+                for item in participants
                 if item.get("submission_id") == submission_id
             ),
             None,
@@ -1959,9 +2347,43 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         runs = [run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")]
         outputs = {}
+        execution_jobs = []
         for run in runs:
+            job = None
+            if round_status == "cancelled":
+                cause = str(run.get("terminal_cause") or "")
+                status = str(run.get("status") or "")
+                job = {
+                    "run_id": run["run_id"],
+                    "stage": int(run["stage"]),
+                    "icp_position": int(run["icp_position"]),
+                    "status": status if status in contracts.ATTEMPT_STATUSES else None,
+                    "terminal_cause": (
+                        cause if cause in contracts.TERMINAL_CAUSES else None
+                    ),
+                    "output_status": "unavailable",
+                }
+                execution_jobs.append(job)
             if run.get("output_ref"):
-                outputs[run["run_id"]] = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+                if round_status == "published":
+                    outputs[run["run_id"]] = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+                    continue
+                try:
+                    raw = self._objects.get_bounded(
+                        str(run["output_ref"]), MAX_OUTPUT_BYTES
+                    )
+                except ArenaContractError:
+                    job["output_status"] = "invalid"
+                    continue
+                except Exception:
+                    continue
+                try:
+                    document = json.loads(raw.decode("utf-8"))
+                    outputs[run["run_id"]] = validate_output_document(document)
+                except (AttributeError, UnicodeDecodeError, ValueError, OutputInvalid):
+                    job["output_status"] = "invalid"
+                    continue
+                job["output_status"] = "available"
         scores = {
             "stage_1": [
                 {"run_id": run["run_id"], "icp_position": run["icp_position"], "per_icp_score": run["per_icp_score"]}
@@ -1976,15 +2398,135 @@ class ArenaService:
         }
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
-        return {
+        run_results = [run["result_doc"] for run in runs if run.get("result_doc")]
+        if round_status == "cancelled":
+            validated_results = []
+            for document in run_results:
+                try:
+                    validated_results.append(contracts.validate_run_result(document))
+                except ArenaContractError:
+                    continue
+            run_results = validated_results
+        result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),
                 "is_baseline": bool(participant.get("is_baseline")),
             },
-            "outputs": outputs, "run_results": [run["result_doc"] for run in runs if run.get("result_doc")],
+            "outputs": outputs, "run_results": run_results,
             "scores": scores,
             "submission_scores": {
                 "stage_1": None if stage1_entry is None else stage1_entry.get("stage1_score"),
                 "final": None if final_entry is None else final_entry.get("final_score"),
             },
         }
+        if round_status == "cancelled":
+            judge = self._cancelled_judge_results(
+                runs,
+                self._store.list_runs(
+                    round_id,
+                    submission_id=submission_id,
+                    kind="score",
+                ),
+            )
+            result.update(
+                {
+                    "round_status": "cancelled",
+                    "cancel_reason": row.get("cancel_reason"),
+                    "incomplete": True,
+                    "submission_scores": {"stage_1": None, "final": None},
+                    "execution_jobs": execution_jobs,
+                    "judge_jobs": judge["jobs"],
+                    "judge_evidence": judge["evidence"],
+                }
+            )
+        return result
+
+    def _cancelled_judge_results(
+        self,
+        execute_runs: Sequence[Mapping[str, Any]],
+        score_runs: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Return safe terminal judge facts without assembling a score."""
+
+        executions = {str(run["run_id"]): run for run in execute_runs}
+        selected: Dict[str, Mapping[str, Any]] = {}
+        for run in score_runs:
+            scored_run_id = str(run.get("scored_run_id") or "")
+            execution = executions.get(scored_run_id)
+            if (
+                run.get("status") not in ("accepted", "failed")
+                or execution is None
+                or int(run.get("stage") or 0) != int(execution.get("stage") or 0)
+                or int(run.get("icp_position") or 0)
+                != int(execution.get("icp_position") or 0)
+            ):
+                continue
+            current = selected.get(scored_run_id)
+            if current is None or (
+                run["status"] == "accepted" and current["status"] != "accepted"
+            ) or (
+                run["status"] == current["status"]
+                and int(run.get("attempt") or 0) > int(current.get("attempt") or 0)
+            ):
+                selected[scored_run_id] = run
+
+        jobs = []
+        evidence = []
+        for scored_run_id, run in sorted(
+            selected.items(),
+            key=lambda item: (
+                int(item[1].get("stage") or 0),
+                int(item[1].get("icp_position") or 0),
+                str(item[1].get("run_id") or ""),
+            ),
+        ):
+            cause = str(run.get("terminal_cause") or "")
+            job = {
+                "run_id": run["run_id"],
+                "scored_run_id": scored_run_id,
+                "stage": int(run["stage"]),
+                "icp_position": int(run["icp_position"]),
+                "status": run["status"],
+                "terminal_cause": (
+                    cause if cause in contracts.TERMINAL_CAUSES else None
+                ),
+                "evidence_status": "unavailable",
+            }
+            jobs.append(job)
+            if run["status"] != "accepted" or not run.get("output_ref"):
+                continue
+            try:
+                raw = self._objects.get_bounded(
+                    str(run["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES
+                )
+            except ArenaContractError:
+                job["evidence_status"] = "invalid"
+                continue
+            except Exception:
+                continue
+            try:
+                document = scoring.scoring_output_from_bytes(raw)
+                if (
+                    document.get("scored_run_id") != scored_run_id
+                    or "breakdowns" not in document
+                ):
+                    raise scoring.ScoringError("judge evidence does not match its run")
+                redacted = [
+                    verify.redact_breakdown(item) for item in document["breakdowns"]
+                ]
+            except (scoring.ScoringError, ArenaContractError):
+                job["evidence_status"] = "invalid"
+                continue
+            execution = executions[scored_run_id]
+            job["evidence_status"] = "available"
+            evidence.append(
+                {
+                    "run_id": run["run_id"],
+                    "scored_run_id": scored_run_id,
+                    "stage": int(run["stage"]),
+                    "icp_position": int(run["icp_position"]),
+                    "per_icp_score": execution.get("per_icp_score"),
+                    "breakdowns": redacted,
+                }
+            )
+        return {"jobs": jobs, "evidence": evidence}

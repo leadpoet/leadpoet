@@ -2089,6 +2089,7 @@ def _exercise_chain_settlement_state_space() -> dict[str, Any]:
 def _exercise_historical_metagraph_layouts() -> dict[str, Any]:
     """Exercise every candidate-declared archive layout through production."""
 
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
     from fixture_contract import (
         load_rehearsal_metagraph_account_ids,
         load_rehearsal_metagraph_hotkeys,
@@ -2097,7 +2098,6 @@ def _exercise_historical_metagraph_layouts() -> dict[str, Any]:
         CHAIN_ARCHIVE_ENDPOINT_URL,
         CoordinatorChainSourceV2,
     )
-    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
     from leadpoet_canonical.attested_v2 import (
         build_transport_attempt,
         sha256_bytes,
@@ -2620,11 +2620,11 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
 def _exercise_settlement_frontier_terminal_retirement() -> dict[str, Any]:
     """Reproduce and close the terminal-obligation frontier transition."""
 
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
     from gateway.tee.coordinator_allocation_source_v2 import (
         CoordinatorAllocationSourceV2,
         CoordinatorAllocationSourceV2Error,
     )
-    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
     from gateway.tee.reward_executor_v2 import (
         champion_reward_row_projection_v2,
         source_add_reward_row_projection_v2,
@@ -2710,7 +2710,12 @@ def _exercise_settlement_frontier_terminal_retirement() -> dict[str, Any]:
         predecessor_frontier_hash=None,
         reward_checkpoints=(champion_checkpoint, source_add_checkpoint),
     )
-    resolver = object.__new__(CoordinatorAllocationSourceV2)
+    resolver = CoordinatorAllocationSourceV2(
+        reader=None,
+        chain_source=None,
+        config_supplier=lambda: None,
+        network_supplier=lambda: "finney",
+    )
     try:
         resolver._build_settlement_frontier(
             epoch=121,
@@ -4510,13 +4515,13 @@ def _coordinator_broker_httpx_evidence_is_complete(value: Any) -> bool:
         set(value)
         == {
             "coordinator_role_authority_bound",
-            "direct_supabase_sidecar_receipt_bound",
+            "direct_supabase_transport_bound",
             "fail_closed_cases",
             "real_broker_external_send_bound",
         }
         and value.get("coordinator_role_authority_bound") is True
         and value.get("real_broker_external_send_bound") is True
-        and value.get("direct_supabase_sidecar_receipt_bound") is True
+        and value.get("direct_supabase_transport_bound") is True
         and isinstance(blocked, Mapping)
         and set(blocked) == set(_BROKER_OWNED_HTTPX_FAIL_CLOSED_CASES)
         and all(
@@ -4532,7 +4537,6 @@ def _exercise_coordinator_broker_owned_httpx_grant() -> dict[str, Any]:
     import httpx
 
     from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
-    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
     from gateway.tee.provider_broker_v2 import (
         BUILTIN_PROVIDER_ROUTES,
         HTTPXProviderTransport,
@@ -4548,7 +4552,6 @@ def _exercise_coordinator_broker_owned_httpx_grant() -> dict[str, Any]:
         BrokeredProviderTransportV2,
         ProviderClientV2Error,
     )
-    from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
     from gateway.tee.rpc_authority import COORDINATOR_ROLE as RPC_COORDINATOR_ROLE
     from gateway.tee.topology import (
         COORDINATOR_ROLE as TOPOLOGY_COORDINATOR_ROLE,
@@ -4556,7 +4559,6 @@ def _exercise_coordinator_broker_owned_httpx_grant() -> dict[str, Any]:
         topology_document,
     )
     from leadpoet_canonical.attested_v2 import (
-        DIRECT_EGRESS_REF_HASH,
         sha256_json,
     )
 
@@ -4679,47 +4681,30 @@ def _exercise_coordinator_broker_owned_httpx_grant() -> dict[str, Any]:
         )
         router.install()
 
-        job_id = "rehearsal:coordinator-broker-httpx"
-        purpose = "research_lab.provider_preflight.v2"
-        outcome_store = ProviderOutcomeStoreV2(
-            broker=broker,
-            vault=vault,
-            sleeper=lambda _seconds: None,
+        broker_result = broker.execute(
+            {
+                "schema_version": "leadpoet.provider_broker.v2",
+                "logical_operation_id": "rehearsal:coordinator-broker-httpx:probe",
+                "job_id": "rehearsal:coordinator-broker-httpx",
+                "purpose": "research_lab.provider_preflight.v2",
+                "provider_id": "supabase",
+                "attempt_number": 0,
+                "method": "GET",
+                "url": (
+                    "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/"
+                    "research_lab_rebenchmark_controls?select=sequence"
+                ),
+                "headers": {},
+                "body_b64": base64.b64encode(b"").decode("ascii"),
+                "timeout_ms": 30_000,
+                "retry_policy_hash": retry_policy_hashes["supabase"],
+            }
         )
-        sidecar = outcome_store.load_latest(
-            utc_day=NOW[:10],
-            job_id=job_id,
-            purpose=purpose,
-            operation_suffix="httpx-grant",
-        )
-        assigned_proxy_hash = sha256_json(
-            {"credential": "coordinator-broker-httpx-assigned-proxy"}
-        )
-        execution_context = ExecutionContextV2(
-            job_id=job_id,
-            purpose=purpose,
-            epoch_id=1,
-            provider_credential_ref_hashes={
-                "egress_proxy": assigned_proxy_hash,
-            },
-        )
-        for attempt in sidecar.get("transport_attempts") or ():
-            execution_context.record_transport(attempt)
-        if (
-            sidecar.get("found") is not False
-            or not external_requests
-            or len(execution_context.transport_attempts)
-            != len(external_requests)
-            or any(
-                attempt["provider_id"] != "supabase"
-                or attempt["egress_proxy_ref_hash"] != DIRECT_EGRESS_REF_HASH
-                or not str(attempt["logical_operation_id"]).startswith(
-                    job_id + ":provider-outcome:"
-                )
-                for attempt in execution_context.transport_attempts
-            )
-        ):
-            raise RuntimeError("broker HTTPX Supabase sidecar evidence differs")
+        if broker_result.get("terminal_status") != "authenticated_response":
+            raise RuntimeError("broker HTTPX Supabase probe failed closed")
+
+        if not external_requests:
+            raise RuntimeError("broker HTTPX Supabase transport was not exercised")
 
         probe_url = str(external_requests[0].url)
 
@@ -4843,7 +4828,7 @@ def _exercise_coordinator_broker_owned_httpx_grant() -> dict[str, Any]:
     evidence = {
         "coordinator_role_authority_bound": True,
         "real_broker_external_send_bound": True,
-        "direct_supabase_sidecar_receipt_bound": True,
+        "direct_supabase_transport_bound": True,
         "fail_closed_cases": blocked,
     }
     if not _coordinator_broker_httpx_evidence_is_complete(evidence):
@@ -5593,6 +5578,7 @@ def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
         "observed_industry": "Software",
         "observed_subindustry": "SaaS",
         "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
         "industry_evidence_url": "https://example.com/about",
         "industry_evidence_quote": "Example builds software.",
         "observed_hq_country": "United States",

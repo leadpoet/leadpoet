@@ -5,17 +5,25 @@ import pytest
 
 from leadpoet_canonical.production_parity import (
     ProductionParityError,
+    migration_delta,
     sha256_bytes,
     verify_contract_checkout,
 )
 from scripts.build_production_parity_contract import (
     ALWAYS_COMMITTED_PATHS,
+    _migration_inventory,
     _source_commitments,
+    _tracked_paths,
     build_contract,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RETAINED_ARENA_BASE_SHA = "1e15195e44e5be2880ccd82b70a25c2c7bcf35de"
+RETAINED_ARENA_UPLOAD_PATH = "scripts/191-lab-arena-upload-recovery.sql"
+RETAINED_ARENA_UPLOAD_SHA256 = (
+    "sha256:42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
+)
 PHYSICAL_STAGING_PATH = "scripts/run_production_parity_full_host.py"
 HOST_RPC_TRANSPORT_PATHS = {
     "gateway/tee/proxy_transport_preflight_v2.py",
@@ -30,10 +38,61 @@ REBENCHMARK_TRANSPORT_EVIDENCE_PATHS = {
     "gateway/tee/execution_job_manager_v2.py",
     "gateway/tee/provider_broker_v2.py",
     "gateway/tee/provider_client_v2.py",
-    "gateway/tee/provider_outcome_store_v2.py",
     "gateway/tee/rpc_authority.py",
     "leadpoet_observability/sentry_operations.py",
 }
+
+
+def test_candidate_retains_real_applied_arena_migration_history() -> None:
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    snapshot = _migration_inventory(
+        ROOT,
+        RETAINED_ARENA_BASE_SHA,
+        _tracked_paths(ROOT, RETAINED_ARENA_BASE_SHA),
+    )
+    candidate = _migration_inventory(
+        ROOT,
+        candidate_sha,
+        _tracked_paths(ROOT, candidate_sha),
+    )
+    retained = next(
+        item for item in snapshot if item["path"] == RETAINED_ARENA_UPLOAD_PATH
+    )
+    assert retained["sha256"] == RETAINED_ARENA_UPLOAD_SHA256
+    delta = migration_delta(
+        snapshot_migrations=snapshot,
+        candidate_migrations=candidate,
+    )
+    delta_paths = {item["path"] for item in delta}
+    assert {
+        "scripts/193-lab-arena-upload-recovery.sql",
+        "scripts/194-lab-arena-open-scorer-refresh.sql",
+    } <= delta_paths
+
+    without_history = [
+        item for item in candidate if item["path"] != RETAINED_ARENA_UPLOAD_PATH
+    ]
+    with pytest.raises(ProductionParityError, match="candidate removed applied migration"):
+        migration_delta(
+            snapshot_migrations=snapshot,
+            candidate_migrations=without_history,
+        )
+
+    rewritten = [dict(item) for item in candidate]
+    next(
+        item for item in rewritten if item["path"] == RETAINED_ARENA_UPLOAD_PATH
+    )["sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(ProductionParityError, match="candidate rewrote applied migration"):
+        migration_delta(
+            snapshot_migrations=snapshot,
+            candidate_migrations=rewritten,
+        )
 
 
 def test_host_rpc_transports_are_exact_candidate_git_blobs() -> None:

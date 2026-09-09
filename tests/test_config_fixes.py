@@ -60,18 +60,15 @@ def test_retired_model_and_loop_environment_has_no_effect(clean_env):
     assert not hasattr(baseline, "conditional_validation_mode")
 
 
-def test_source_add_status_is_current_and_old_loop_intake_stays_closed(clean_env):
+def test_source_add_status_exposes_current_controls(clean_env):
     config = ResearchLabGatewayConfig.from_env()
     status = config.public_status()
 
-    assert status["miner_submissions_enabled"] is False
     assert config.source_add_enabled is True
     assert config.source_add_rewards_enabled is True
     assert config.source_add_dispatcher_enabled is True
     assert config.source_add_functional_probes_enabled is True
-    assert config.source_add_functional_rewards_enabled is True
     assert config.source_add_leg1_alpha_percent == pytest.approx(0.2)
-    assert config.source_add_leg2_alpha_percent == pytest.approx(0.0)
     assert status["source_add"]["enabled"] is True
     assert status["source_add"]["max_per_day_per_hotkey"] == 5
 
@@ -82,7 +79,6 @@ def test_source_add_status_is_current_and_old_loop_intake_stays_closed(clean_env
     assert config.source_add_enabled is False
     assert config.source_add_rewards_enabled is False
     assert config.source_add_dispatcher_enabled is False
-    assert config.public_status()["miner_submissions_enabled"] is False
 
 
 def test_source_add_work_lease_covers_three_probe_deadlines(clean_env):

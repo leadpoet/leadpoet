@@ -871,6 +871,9 @@ def _run_rendered_ssm(
     aws_calls = tmp_path / "aws-calls.jsonl"
     git_calls = tmp_path / "git-calls.jsonl"
     host_python_calls = tmp_path / "host-python-calls.jsonl"
+    dnf_calls = tmp_path / "dnf-calls.txt"
+    rpm_calls = tmp_path / "rpm-calls.txt"
+    docker_calls = tmp_path / "docker-calls.txt"
     aws_stub = fake_bin / "aws"
     aws_stub.write_text(
         """#!/usr/bin/env python3
@@ -942,6 +945,8 @@ elif arguments[:1] == ["-C"]:
         print("https://github.com/leadpoet/leadpoet.git")
     elif operation[:1] == ["rev-parse"]:
         print(os.environ["CANDIDATE_SHA"])
+    elif operation[:2] == ["merge-base", "--is-ancestor"]:
+        pass
     elif operation[:1] == ["checkout"]:
         repo = Path(arguments[1])
         scripts = repo / "scripts"
@@ -990,6 +995,7 @@ esac
     dnf_stub.write_text(
         """#!/bin/sh
 set -eu
+printf '%s\n' "$*" >> "$DNF_CALLS"
 case " $* " in
   *" docker "*)
     cp "$DOCKER_STUB_TEMPLATE" "$DOCKER_STUB_PATH"
@@ -1001,13 +1007,23 @@ exit 0
         encoding="utf-8",
     )
     docker_template = fake_bin / "docker-template"
-    docker_template.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker_template.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DOCKER_CALLS\"\nexit 0\n",
+        encoding="utf-8",
+    )
     docker_stub = fake_bin / "docker"
     if docker_preinstalled:
         shutil.copyfile(docker_template, docker_stub)
+    native_tool_stubs = {
+        name: fake_bin / name
+        for name in ("nitro-cli", "rsync", "jq", "tar", "gzip")
+    }
+    for executable in native_tool_stubs.values():
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     rpm_stub = fake_bin / "rpm"
     rpm_stub.write_text(
-        "#!/bin/sh\nprintf '%s\\n' docker-25.0.13-test\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RPM_CALLS\"\n"
+        "printf '%s\\n' docker-25.0.13-test\n",
         encoding="utf-8",
     )
     systemctl_stub = fake_bin / "systemctl"
@@ -1063,6 +1079,7 @@ else:
         sudo_stub,
         dnf_stub,
         docker_template,
+        *native_tool_stubs.values(),
         rpm_stub,
         systemctl_stub,
         stat_stub,
@@ -1102,6 +1119,8 @@ else:
     command = command.replace("/usr/bin/docker", str(docker_stub))
     command = command.replace("/usr/bin/rpm", str(rpm_stub))
     command = command.replace("/usr/bin/systemctl", str(systemctl_stub))
+    for name, executable in native_tool_stubs.items():
+        command = command.replace(f"/usr/bin/{name}", str(executable))
     command = command.replace("/usr/bin/env -i", "/usr/bin/env")
     if stage is not None:
         assert category is not None
@@ -1142,6 +1161,9 @@ else:
         "FAIL_EVIDENCE_UPLOAD": "1" if upload_fails else "0",
         "GIT_CALLS": str(git_calls),
         "HOST_PYTHON_CALLS": str(host_python_calls),
+        "DNF_CALLS": str(dnf_calls),
+        "RPM_CALLS": str(rpm_calls),
+        "DOCKER_CALLS": str(docker_calls),
         "METADATA_RAW_JSON": metadata_raw_json,
         "DOCKER_STUB_TEMPLATE": str(docker_template),
         "DOCKER_STUB_PATH": str(docker_stub),
@@ -1210,6 +1232,23 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
     assert not list((tmp_path / "work").glob("candidate-bundle-binding.*"))
     assert result.stdout == ""
     assert result.stderr == ""
+    native_packages = (
+        "aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker "
+        "rsync jq tar gzip"
+    )
+    assert (tmp_path / "dnf-calls.txt").read_text(encoding="utf-8").splitlines() == [
+        f"-q -y install {native_packages}",
+        "-q -y install python3.11-pip",
+    ]
+    assert (tmp_path / "rpm-calls.txt").read_text(
+        encoding="utf-8"
+    ).splitlines() == [
+        f"-q {native_packages}",
+        "-qf " + str(tmp_path / "bin" / "docker"),
+    ]
+    assert (tmp_path / "docker-calls.txt").read_text(
+        encoding="utf-8"
+    ).splitlines() == ["buildx version", "info"]
 
 
 def test_rendered_ssm_installs_missing_container_runtime(tmp_path: Path) -> None:
@@ -1316,7 +1355,14 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
             "origin",
             "refs/heads/main:refs/remotes/origin/main",
         ],
-        ["-C", repo, "rev-parse", "origin/main"],
+        [
+            "-C",
+            repo,
+            "merge-base",
+            "--is-ancestor",
+            CANDIDATE_SHA,
+            "origin/main",
+        ],
     ]
     assert all("clone" not in call for call in normalized_calls)
 

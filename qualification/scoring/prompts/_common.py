@@ -21,6 +21,16 @@ from typing import Any, Dict, Iterable, List
 # way around).  Keep these two values in sync.
 MAX_SCRAPED_CHARS = 60_000
 
+# The Arena broker accepts at most 32,000 characters in one OpenRouter
+# message.  The verifier dispatcher can append a small, exact ATS-binding
+# instruction after this shared builder returns, so leave explicit room for
+# it.  Source text and overlong page-title metadata are the only lossy fields:
+# identity, claim, date, requested ICP signal, exact URLs, and the decision
+# rules remain complete.
+FINAL_JUDGE_PROMPT_MAX_CHARS = 31_000
+_LONG_SOURCE_TITLE_MAX_CHARS = 500
+_SOURCE_OMISSION_MARKER = "\n...[source text omitted to fit verifier transport]...\n"
+
 
 def lead_profile(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -164,6 +174,41 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
     reserved STRICTLY for entity-identity mismatch in PART 0."""
 
 
+MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
+    A MARKET_EXPANSION target is supported only when the exact source proves
+    entry or expansion into a new geography, customer market, or clearly
+    distinct commercial segment. Another facility or asset, or added capacity
+    in an existing market, is insufficient unless the exact source explicitly
+    connects it to entry into that new market. Identify the market that is new
+    to this company and quote the source text establishing that fact. A new
+    site address is not by itself a new market. If only an additional facility
+    in an existing market is proved, PART A fails: return contradicted even
+    when the facility-opening claim itself is true. Raising money or entering
+    a capital market is also not entry into a new commercial geography or
+    customer segment. A bond issue, debt offering, equity listing, or other
+    financing event therefore does not satisfy a general MARKET_EXPANSION
+    target unless the exact source separately proves entry into a new customer
+    market. If the target ICP text itself explicitly asks for entry into a
+    financing or capital market, judge that narrower request as written. This does
+    not limit a FINANCING or FUNDING target: corporate debt and other explicit
+    financing events remain valid evidence for those targets. A financial-
+    services company can still satisfy MARKET_EXPANSION when the exact source
+    proves that it began serving a genuinely new customer market."""
+
+
+FUNDING_BLOCK = """  FUNDING / FINANCING — TARGET-COMPANY CAPITAL PROOF:
+    Interpret a broad target such as "announced funding," "raised funding," or
+    "announced a funding round" as capital raised by the target company. It
+    includes the company's own corporate debt or notes as well as equity
+    financing. Do not require equity-round terminology when the target is this
+    broad. If the target ICP text explicitly narrows the requested instrument,
+    round type, or stage (for example equity, Series A, or venture round), apply
+    that narrower requirement as written. Customer loans made by the company,
+    a fund manager's limited-partner fund close, and assets under management
+    are not funding raised by the target company unless the target ICP text
+    explicitly requests that event."""
+
+
 # ──────────────────────────────────────────────────────────────────────
 # PART B — URL SUPPORTS THE CLAIM
 # ──────────────────────────────────────────────────────────────────────
@@ -211,9 +256,15 @@ so structural callers can distinguish entity-mismatch from claim-mismatch."""
 FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
 - Re-apply the PART A check from above BEFORE judging content support: if
   miner_claim does not semantically map to target_icp_signal, return
-  wrong_entity regardless of what the extracted content shows. Do not let a
+  contradicted regardless of what the extracted content shows. Do not let a
   factually-true but orthogonal claim pass just because the URL supports it.
 - Use only the exact source extraction above as supporting evidence.
+- Require semantic fidelity, not verbatim wording. A concise claim can use a
+  faithful umbrella description of a named release or capability when the
+  body proves its concrete function. For example, a release that provides an
+  API for automated reporting can support "reporting API launch." Do not
+  require that standalone wording to appear in the body, and do not accept a
+  broader claim that adds functions the body does not prove.
 - Page titles, navigation menus, headers, and breadcrumbs are NOT evidence.
   Only specific factual claims in the page BODY count.
 - If the body contains explicit negation about the claim ("0 open positions",
@@ -253,7 +304,12 @@ FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
 
 MINER_DATE_CHECK_BLOCK = """Miner-date consistency check (set claim_matches_miner_date) — STEP BY STEP:
 1. Treat miner_signal_date as a HYPOTHESIS to verify, not a fact.
-2. Look for a POST TIMESTAMP in extracted_text.  Allowed forms ONLY:
+2. First use SOURCE PAGE PUBLICATION METADATA when supplied. It was read from
+   exact-source page/provider metadata, independent of miner_signal_date. It
+   dates the page publication, not necessarily an event described by the page.
+   If the claim is about an event and the body explicitly gives a different
+   event date, use that event date for claim consistency instead. Otherwise
+   look for a POST TIMESTAMP in extracted_text. Allowed forms ONLY:
    a) absolute date ("2025-03-15", "March 15, 2025", "Posted on Jan 4, 2026")
    b) anchored relative phrase ("Posted N months ago", "Published N weeks
       ago", "Shared yesterday", "Updated last week")
@@ -287,7 +343,12 @@ def build_verification_prompt(
     the original prompt's whitespace exactly.
     """
     signal = visible_signal(row)
-    parts: List[str] = [PART_0_BLOCK, PART_A_BLOCK, PART_B_BLOCK]
+    parts: List[str] = [PART_0_BLOCK, PART_A_BLOCK]
+    if row.get("_evidence_type") == "MARKET_EXPANSION":
+        parts.append(MARKET_EXPANSION_BLOCK)
+    if row.get("_evidence_type") in {"FUNDING", "FINANCING"}:
+        parts.append(FUNDING_BLOCK)
+    parts.append(PART_B_BLOCK)
     parts.extend(extra_parts)
     body = "\n\n".join(parts)
     return f"""Evaluate this B2B sales lead.
@@ -319,22 +380,13 @@ def build_final_judge_prompt(
     blocks plus the final-judge + miner-date rules.  ``extra_parts``
     is forwarded to ``build_verification_prompt`` unchanged.
     """
-    blocks: List[str] = []
-    for res in (contents.get("results") or []):
-        url = res.get("url") or res.get("id") or ""
-        text = (res.get("text") or "")[:MAX_SCRAPED_CHARS]
-        title = res.get("title") or ""
-        blocks.append(f"URL: {url}\nTITLE: {title}\nCONTENT:\n{text}")
-    if not blocks:
-        blocks = [
-            "NO CONTENT. STATUSES:\n"
-            + json.dumps(contents.get("statuses") or [], indent=2)
-        ]
     from qualification.scoring.evaluation_clock import evaluation_date
 
     today_str = evaluation_date().isoformat()
     verification = build_verification_prompt(row, extra_parts=extra_parts)
-    return f"""{verification}
+
+    def assemble(blocks: List[str]) -> str:
+        return f"""{verification}
 
 {source_name} exact supplied source extraction:
 {chr(10).join(blocks)}
@@ -344,3 +396,79 @@ Today's date: {today_str}
 {FINAL_JUDGE_RULES_BLOCK}
 
 {MINER_DATE_CHECK_BLOCK}"""
+
+    results = list(contents.get("results") or [])
+    if not results:
+        return assemble([
+            "NO CONTENT. STATUSES:\n"
+            + json.dumps(contents.get("statuses") or [], indent=2)
+        ])
+
+    sources = [
+        {
+            "url": res.get("url") or res.get("id") or "",
+            "title": res.get("title") or "",
+            "text": (res.get("text") or "")[:MAX_SCRAPED_CHARS],
+            "source_publication_date": res.get("source_publication_date") or "",
+        }
+        for res in results
+    ]
+
+    def render(source: Dict[str, Any], text: str) -> str:
+        date_line = (
+            f"SOURCE PAGE PUBLICATION METADATA: {source['source_publication_date']}\n"
+            if source["source_publication_date"] else ""
+        )
+        return (
+            f"URL: {source['url']}\nTITLE: {source['title']}\n{date_line}"
+            f"CONTENT:\n{text}"
+        )
+
+    prompt = assemble([render(source, source["text"]) for source in sources])
+    if len(prompt) <= FINAL_JUDGE_PROMPT_MAX_CHARS:
+        return prompt
+
+    # Titles are page metadata, not evidence under FINAL_JUDGE_RULES_BLOCK.
+    # Bound pathological titles before spending the remaining prompt budget on
+    # body evidence. Exact source URLs remain untouched.
+    for source in sources:
+        source["title"] = source["title"][:_LONG_SOURCE_TITLE_MAX_CHARS]
+    empty_prompt = assemble([render(source, "") for source in sources])
+    available = FINAL_JUDGE_PROMPT_MAX_CHARS - len(empty_prompt)
+    if available < 0:
+        raise ValueError(
+            "final judge fixed context exceeds verifier transport limit"
+        )
+
+    excerpts = ["" for _source in sources]
+    pending = [index for index, source in enumerate(sources) if source["text"]]
+    remaining = available
+    for offset, index in enumerate(pending):
+        share = remaining // (len(pending) - offset)
+        excerpts[index] = _balanced_source_excerpt(sources[index]["text"], share)
+        remaining -= len(excerpts[index])
+    prompt = assemble([
+        render(source, excerpts[index]) for index, source in enumerate(sources)
+    ])
+    if len(prompt) > FINAL_JUDGE_PROMPT_MAX_CHARS:
+        raise ValueError("final judge prompt budgeting failed")
+    return prompt
+
+
+def _balanced_source_excerpt(text: str, max_chars: int) -> str:
+    """Keep source context from both ends within one exact character cap."""
+
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= len(_SOURCE_OMISSION_MARKER):
+        return text[:max_chars]
+    evidence_chars = max_chars - len(_SOURCE_OMISSION_MARKER)
+    head_chars = (evidence_chars + 1) // 2
+    tail_chars = evidence_chars - head_chars
+    return (
+        text[:head_chars]
+        + _SOURCE_OMISSION_MARKER
+        + (text[-tail_chars:] if tail_chars else "")
+    )

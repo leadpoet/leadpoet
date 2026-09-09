@@ -243,6 +243,124 @@ def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
         assert len(policies) == 4 and all(name.endswith("_service_read") for _, name in policies)
 
 
+def test_open_commit_refreshes_only_the_scorer_pin_and_legacy_callers_preserve_it(store):
+    new_digest = "sha256:" + "b" * 64
+    new_reference = "registry.example/lab/scorer@" + new_digest
+    round_id = "arena-2026-09-21-refresh"
+    original = round_config(round_id, [hotkey("refresh-runner")])
+    assert store.create_round(round_id, original)["status"] == "created"
+    assert store.list_runs(round_id) == []
+    assert store.transition_round(
+        round_id,
+        "open",
+        "committed",
+        {
+            "participants": [],
+            "benchmark_ref": "arena/%s/benchmark.json" % round_id,
+            "evaluation_date": "2026-09-21",
+            "scorer_image_digest": new_digest,
+            "scorer_image_reference": new_reference,
+        },
+    )["status"] == "ok"
+    refreshed = store.get_round(round_id)
+    assert refreshed["configuration_doc"] == {
+        **original,
+        "scorer_image_digest": new_digest,
+        "scorer_image_reference": new_reference,
+    }
+    assert store.list_runs(round_id) == []
+
+    legacy_id = "arena-2026-09-22-legacy"
+    legacy = round_config(legacy_id, [hotkey("legacy-runner")])
+    assert store.create_round(legacy_id, legacy)["status"] == "created"
+    commit_round(store, legacy_id, [])
+    assert store.get_round(legacy_id)["configuration_doc"] == legacy
+
+
+@pytest.mark.parametrize(
+    ("suffix", "digest", "reference"),
+    [
+        ("shape", "sha256:not-a-digest", "registry.example/scorer@sha256:not-a-digest"),
+        ("pair", "sha256:" + "b" * 64, "registry.example/scorer@sha256:" + "c" * 64),
+    ],
+)
+def test_open_commit_rejects_invalid_scorer_pin(store, suffix, digest, reference):
+    round_id = "arena-2026-09-23-bad" + suffix
+    original = round_config(round_id, [hotkey("bad-scorer-" + suffix)])
+    assert store.create_round(round_id, original)["status"] == "created"
+    with pytest.raises(ArenaStoreError, match="lab_arena_scorer_image_invalid"):
+        store.transition_round(
+            round_id,
+            "open",
+            "committed",
+            {
+                "participants": [],
+                "benchmark_ref": "arena/%s/benchmark.json" % round_id,
+                "evaluation_date": "2026-09-23",
+                "scorer_image_digest": digest,
+                "scorer_image_reference": reference,
+            },
+        )
+    row = store.get_round(round_id)
+    assert row["status"] == "open" and row["configuration_doc"] == original
+    assert store.list_runs(round_id) == []
+
+
+@pytest.mark.parametrize("status", ["committed", "stage1", "published", "cancelled"])
+def test_scorer_pin_cannot_change_after_commit(database, superuser, status):
+    round_id = "arena-2026-09-24-i" + status
+    configuration = round_config(round_id, [hotkey("immutable-" + status)])
+    with superuser.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled) "
+            "VALUES (%s, %s, %s::jsonb, FALSE)",
+            (round_id, status, json.dumps(configuration)),
+        )
+        with pytest.raises(database[0].Error):
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET configuration_doc = "
+                "configuration_doc || %s::jsonb WHERE round_id = %s",
+                (
+                    json.dumps({
+                        "scorer_image_digest": "sha256:" + "b" * 64,
+                        "scorer_image_reference": "registry.example/scorer@sha256:" + "b" * 64,
+                    }),
+                    round_id,
+                ),
+            )
+
+
+def test_open_commit_cannot_change_any_other_configuration_field(database, superuser):
+    round_id = "arena-2026-09-24-otherconfig"
+    configuration = round_config(round_id, [hotkey("other-config")])
+    new_digest = "sha256:" + "b" * 64
+    with superuser.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_rounds (round_id, status, configuration_doc, rewards_enabled) "
+            "VALUES (%s, 'open', %s::jsonb, FALSE)",
+            (round_id, json.dumps(configuration)),
+        )
+        with pytest.raises(database[0].Error, match="round configuration is write-once"):
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET status = 'committed', "
+                "status_generation = status_generation + 1, configuration_doc = "
+                "configuration_doc || %s::jsonb WHERE round_id = %s",
+                (
+                    json.dumps({
+                        "mode": "shadow",
+                        "scorer_image_digest": new_digest,
+                        "scorer_image_reference": "registry.example/scorer@" + new_digest,
+                    }),
+                    round_id,
+                ),
+            )
+        cursor.execute(
+            "SELECT status, configuration_doc FROM public.lab_arena_rounds WHERE round_id = %s",
+            (round_id,),
+        )
+        assert cursor.fetchone() == ("open", configuration)
+
+
 def test_daily_icp_function_is_current_only_and_source_table_is_private(database):
     psycopg2, dsn = database
     now = datetime.now(timezone.utc)
@@ -740,9 +858,39 @@ def _reward_docs(round_id: str, published_at: str, epoch: int, king_key: str, *,
     return basis, {"public_key_hash": key_hash}
 
 
+def _complete_compact_promotion(
+    store: ArenaStore,
+    superuser,
+    round_id: str,
+    published_at: str,
+) -> str:
+    king = store.get_round(round_id)["king_hotkey"]
+    with superuser.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_submissions "
+            "(submission_id, round_id, miner_hotkey, status, is_king) "
+            "VALUES (%s, %s, %s, 'frozen', FALSE)",
+            (round_id + "-winner", round_id, king),
+        )
+    plan = {
+        "commit": "1" * 40,
+        "main_before": "2" * 40,
+        "lab_before": "3" * 40,
+        "timestamp": published_at,
+    }
+    assert store.prepare_promotion(round_id, plan)["status"] == "prepared"
+    assert store.complete_promotion(round_id, plan)["status"] == "promoted"
+    return king
+
+
 def test_compact_publication_is_independent_from_reward_activation(store, superuser):
     round_id = "arena-2026-09-02-pub"
-    _publish_compact(store, superuser, round_id, rewards_enabled=False)
+    published_at = _publish_compact(
+        store,
+        superuser,
+        round_id,
+        rewards_enabled=False,
+    )
     row = store.get_round(round_id)
     assert row["status"] == "published"
     assert row["publication_doc"]["round_id"] == round_id
@@ -751,6 +899,10 @@ def test_compact_publication_is_independent_from_reward_activation(store, superu
     with superuser.cursor() as cursor:
         cursor.execute("SELECT count(*) FROM public.lab_arena_reward_basis_v1 WHERE round_id = %s", (round_id,))
         assert cursor.fetchone()[0] == 0
+    _complete_compact_promotion(store, superuser, round_id, published_at)
+    promoted = store.get_round(round_id)
+    assert promoted["reward_activated_at"] is None
+    assert promoted["reward_basis_doc"] is None
 
 
 def test_reward_activation_is_oldest_first_retry_idempotent_and_mismatch_safe(store, superuser):
@@ -758,8 +910,19 @@ def test_reward_activation_is_oldest_first_retry_idempotent_and_mismatch_safe(st
     second = "arena-2026-09-03-rewardb"
     first_at = _publish_compact(store, superuser, first, rewards_enabled=True)
     second_at = _publish_compact(store, superuser, second, rewards_enabled=True)
-    first_king = store.get_round(first)["king_hotkey"]
-    second_king = store.get_round(second)["king_hotkey"]
+    # New live winners must finish baseline promotion before rewards activate.
+    first_king = _complete_compact_promotion(
+        store,
+        superuser,
+        first,
+        first_at,
+    )
+    second_king = _complete_compact_promotion(
+        store,
+        superuser,
+        second,
+        second_at,
+    )
     first_basis, first_key = _reward_docs(first, first_at, 100, first_king, marker="a")
     second_basis, second_key = _reward_docs(second, second_at, 101, second_king, marker="b")
     assert store.activate_reward(second, second_basis, second_key)["status"] == "waiting_for_older_round"
@@ -1575,7 +1738,7 @@ def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_r
     # Closing with pending scoring work is an infrastructure gap: the round cancels, no miner gets a zero.
     closed = store.close_scoring(round_id, 1)
     assert closed["status"] == "cancelled" and closed["incomplete_assignments"] == 10
-    assert store.get_round(round_id)["cancel_reason"] == "capacity:scoring1:10"
+    assert store.get_round(round_id)["cancel_reason"] == "scoring_incomplete:stage1:10"
 
 
 def test_service_role_statements_locks_and_idle_transactions_are_bounded(superuser, store):

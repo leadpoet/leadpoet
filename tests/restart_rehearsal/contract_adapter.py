@@ -489,6 +489,8 @@ def _git_commit_is_ancestor(
     result = subprocess.run(
         [
             REAL_GIT,
+            "-c",
+            f"safe.directory={repository}",
             "-C",
             str(repository),
             "merge-base",
@@ -560,6 +562,9 @@ def _gateway_secret() -> dict[str, str]:
         "SUPABASE_URL": PRODUCTION_SUPABASE_ORIGIN,
         "SUPABASE_ANON_KEY": "rehearsal-public",
         "SUPABASE_SERVICE_ROLE_KEY": "rehearsal-secret",
+        "LAB_ARENA_SUPABASE_URL": PRODUCTION_SUPABASE_ORIGIN,
+        "LAB_ARENA_SUPABASE_ANON_KEY": "rehearsal-secret",
+        "LAB_ARENA_SERVICE_JWT": "rehearsal.header.signature",
         "OPENROUTER_API_KEY": "rehearsal-openrouter",
         "EXA_API_KEY": "rehearsal-exa",
         "SCRAPINGDOG_API_KEY": "rehearsal-scrapingdog",
@@ -599,7 +604,6 @@ def _gateway_secret() -> dict[str, str]:
         "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
         "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
         "RESEARCH_LAB_RECEIPTS_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
         "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",

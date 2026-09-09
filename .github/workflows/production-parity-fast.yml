@@ -184,6 +184,15 @@ jobs:
             ${{ runner.temp }}/snapshot-manifest.json
             ${{ runner.temp }}/fast-ledger.json
 
+      - name: Upload bounded rehearsal failure projection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-parity-fast-rehearsal-diagnostics-${{ steps.inputs.outputs.candidate }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/rehearsal-failure-projection.json
+
       - name: Destroy confidential snapshot
         if: always()
         shell: bash

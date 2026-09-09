@@ -8,6 +8,7 @@ from gateway.tee.release_channel_v2 import (
     DEFAULT_PREFIX,
     MAX_LINEAGE_RELEASES,
     ReleaseChannelV2Error,
+    build_paired_local_release_channel_v2,
     build_release_channel_v2,
     build_release_lineage_v2,
     cli,
@@ -27,12 +28,14 @@ from gateway.tee.prepare_active_release_lineage_v2 import (
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
     HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+    build_local_release_identity,
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import sha256_json
 from validator_tee.host.release_v2 import (
     build_validator_build_evidence,
+    build_local_validator_release_identity,
     build_validator_release,
     build_validator_release_manifest,
 )
@@ -99,6 +102,43 @@ def _validator_manifest(commit=COMMIT):
         for ordinal in (1, 2, 3)
     ]
     return build_validator_release_manifest(evidence)
+
+
+def _local_gateway_manifest(commit=COMMIT, *, observation="a"):
+    independent = _gateway_manifest(commit)
+    return build_local_release_identity(
+        [
+            {
+                "role": role,
+                "commit_sha": summary["commit_sha"],
+                "pcr0": summary["pcr0"],
+                "image_id": summary["normalized_image_hash"],
+                "eif_hash": _hash(observation),
+                "source_manifest_hash": summary["source_manifest_hash"],
+                "build_identity_hash": summary["build_identity_hash"],
+                "execution_manifest_hash": summary["execution_manifest_hash"],
+                "dependency_lock_hash": summary["dependency_lock_hash"],
+                "dockerfile_hash": summary["dockerfile_hash"],
+                "topology_hash": summary["topology_hash"],
+            }
+            for role, summary in sorted(independent["roles"].items())
+        ]
+    )
+
+
+def _local_validator_manifest(commit=COMMIT, *, observation="b", pcr0=None):
+    source = _validator_manifest(commit)["release"]
+    release = build_validator_release(
+        commit_sha=commit,
+        pcr0=pcr0 or source["pcr0"],
+        app_manifest_hash=source["app_manifest_hash"],
+        dependency_lock_hash=source["dependency_lock_hash"],
+        normalized_image_hash=source["normalized_image_hash"],
+        eif_hash=_hash(observation),
+        dockerfile_hash=source["dockerfile_hash"],
+        base_dockerfile_hash=source["base_dockerfile_hash"],
+    )
+    return build_local_validator_release_identity(release)
 
 
 def _historical_gateway_manifest(commit):
@@ -187,6 +227,18 @@ class _S3:
         }
 
 
+class _LostReplyS3(_S3):
+    def __init__(self):
+        super().__init__()
+        self.fail_once = True
+
+    def put_object(self, **kwargs):
+        super().put_object(**kwargs)
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("simulated lost publication reply")
+
+
 def test_channel_binds_both_independent_release_manifests():
     value = build_release_channel_v2(
         gateway_release_manifest=_gateway_manifest(),
@@ -197,6 +249,46 @@ def test_channel_binds_both_independent_release_manifests():
     tampered["commit_sha"] = "2" * 40
     with pytest.raises(ReleaseChannelV2Error, match="commit"):
         validate_release_channel_v2(tampered)
+
+
+def test_paired_local_channel_accepts_observation_wrapper_differences():
+    paired = build_paired_local_release_channel_v2(
+        gateway_host_gateway_manifest=_local_gateway_manifest(observation="a"),
+        gateway_host_validator_manifest=_local_validator_manifest(
+            observation="b"
+        ),
+        validator_host_gateway_manifest=_local_gateway_manifest(
+            observation="c"
+        ),
+        validator_host_validator_manifest=_local_validator_manifest(
+            observation="d"
+        ),
+    )
+
+    assert paired["gateway_release_manifest"]["roles"] == (
+        _local_gateway_manifest(observation="a")["roles"]
+    )
+    assert paired["validator_release_manifest"]["release"]["eif_hash"] == (
+        _hash("d")
+    )
+
+
+def test_paired_local_channel_rejects_cross_host_role_divergence():
+    divergent = _local_validator_manifest(observation="d", pcr0="9" * 96)
+
+    with pytest.raises(ReleaseChannelV2Error, match="role identities differ"):
+        build_paired_local_release_channel_v2(
+            gateway_host_gateway_manifest=_local_gateway_manifest(
+                observation="a"
+            ),
+            gateway_host_validator_manifest=_local_validator_manifest(
+                observation="b"
+            ),
+            validator_host_gateway_manifest=_local_gateway_manifest(
+                observation="c"
+            ),
+            validator_host_validator_manifest=divergent,
+        )
 
 
 def test_historical_channel_is_valid_only_for_prior_lineage():
@@ -297,6 +389,86 @@ def test_channel_publish_is_immutable_and_fetch_installs_atomically(tmp_path):
         == COMMIT
     )
     assert gateway_output.stat().st_mode & 0o777 == 0o600
+
+
+def test_channel_publish_replays_equivalent_full_channel_without_overwrite():
+    stored = build_release_channel_v2(
+        gateway_release_manifest=_local_gateway_manifest(observation="a"),
+        validator_release_manifest=_local_validator_manifest(observation="b"),
+    )
+    candidate = build_release_channel_v2(
+        gateway_release_manifest=_local_gateway_manifest(observation="c"),
+        validator_release_manifest=_local_validator_manifest(observation="d"),
+    )
+    s3 = _S3()
+    key = release_channel_key(COMMIT)
+    s3.objects[("release-bucket", key)] = (
+        json.dumps(stored, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+
+    result = publish_release_channel_v2(
+        candidate, bucket="release-bucket", s3_client=s3
+    )
+
+    assert result["channel_hash"] == stored["channel_hash"]
+    assert s3.puts == []
+
+
+def test_channel_publish_rejects_existing_role_conflict():
+    stored = build_release_channel_v2(
+        gateway_release_manifest=_local_gateway_manifest(observation="a"),
+        validator_release_manifest=_local_validator_manifest(observation="b"),
+    )
+    candidate = build_release_channel_v2(
+        gateway_release_manifest=_local_gateway_manifest(observation="c"),
+        validator_release_manifest=_local_validator_manifest(
+            observation="d", pcr0="9" * 96
+        ),
+    )
+    s3 = _S3()
+    key = release_channel_key(COMMIT)
+    s3.objects[("release-bucket", key)] = (
+        json.dumps(stored, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+
+    with pytest.raises(ReleaseChannelV2Error, match="different roles"):
+        publish_release_channel_v2(
+            candidate, bucket="release-bucket", s3_client=s3
+        )
+
+
+def test_channel_publish_rejects_malformed_existing_object():
+    candidate = build_release_channel_v2(
+        gateway_release_manifest=_local_gateway_manifest(),
+        validator_release_manifest=_local_validator_manifest(),
+    )
+    s3 = _S3()
+    s3.objects[("release-bucket", release_channel_key(COMMIT))] = b"not-json"
+
+    with pytest.raises(ReleaseChannelV2Error, match="different bytes"):
+        publish_release_channel_v2(
+            candidate, bucket="release-bucket", s3_client=s3
+        )
+    assert s3.puts == []
+
+
+def test_channel_publish_lost_reply_aborts_then_replay_recovers():
+    channel = build_release_channel_v2(
+        gateway_release_manifest=_local_gateway_manifest(),
+        validator_release_manifest=_local_validator_manifest(),
+    )
+    s3 = _LostReplyS3()
+
+    with pytest.raises(ReleaseChannelV2Error, match="publication failed"):
+        publish_release_channel_v2(
+            channel, bucket="release-bucket", s3_client=s3
+        )
+    recovered = publish_release_channel_v2(
+        channel, bucket="release-bucket", s3_client=s3
+    )
+
+    assert recovered["commit_sha"] == COMMIT
+    assert len(s3.puts) == 1
 
 
 def test_candidate_install_does_not_replace_running_release(tmp_path):

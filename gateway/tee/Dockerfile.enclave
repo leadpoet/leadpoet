@@ -37,13 +37,6 @@ WORKDIR /app
 # Copy ENTIRE gateway directory for code_hash verification
 # Build context must be gateway root, not tee/ subdirectory
 COPY _enclave_source/ /app/gateway/
-COPY _enclave_source/tee/runtime/runsc /usr/local/bin/runsc
-RUN python3 /app/gateway/tee/sandbox_runtime_artifact.py verify \
-        --lock /app/gateway/tee/runsc-runtime.lock.json \
-        --artifact /usr/local/bin/runsc \
-    && chmod 0555 /usr/local/bin/runsc \
-    && touch -d @0 /usr/local/bin/runsc
-
 # These packages are imported by Research Lab as top-level modules at runtime.
 # They must be staged into the gateway build context before enclave build so
 # PCR0 and code_hash bind to the same runtime code the host process imports.
@@ -70,19 +63,6 @@ RUN python3 /app/gateway/tee/build_identity.py verify \
     --gateway-root /app/gateway \
     --role "${LEADPOET_ENCLAVE_ROLE}"
 RUN python3 -c "from bittensor_wallet import Keypair; import gateway.qualification.models; import qualification.scoring.lead_scorer; import qualification.scoring.intent_verification_three_stage; import validator_models.automated_checks"
-# Dynamic model inputs are staged under this measured, root-owned parent.
-# The sandbox receives one unpredictable child path and sees the rootfs
-# read-only; mode 0711 prevents it from enumerating concurrent job names.
-RUN install -d -m 0711 -o 0 -g 0 /leadpoet-model-sandboxes \
-    && touch -d @0 /leadpoet-model-sandboxes
-
-RUN python3 /app/gateway/tee/sandbox_runtime_artifact.py write-rootfs-manifest \
-        --lock /app/gateway/tee/runsc-runtime.lock.json \
-        --requirements-lock /app/gateway/tee/requirements-scoring-py39.lock \
-        --python-version 3.9.24 \
-        --output /leadpoet-model-rootfs.manifest.json \
-    && touch -d @0 /leadpoet-model-rootfs.manifest.json
-
 # Create keys directory
 RUN mkdir -p /app/gateway/keys
 

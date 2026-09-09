@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from research_lab.axis_provenance import (
-    AXIS_B,
     STAGE_PROVENANCE,
-    axis_rollup,
     provenance_for_stage,
 )
 
@@ -40,14 +38,3 @@ def test_no_current_stage_is_marked_model_emitted():
         if entry["call_emitter"] == "model"
     ]
     assert model_stages == []
-
-
-def test_axis_rollup_conjunction_semantics():
-    code_call = {"stage": "current_pipeline", "call_emitter": "code"}
-    assert axis_rollup([code_call]) == AXIS_B
-    assert axis_rollup([]) == AXIS_B
-
-
-def test_axis_rollup_ignores_non_control_flow_calls():
-    scorer = {"stage": "scorer_judgment", "call_emitter": "code"}
-    assert axis_rollup([scorer]) == AXIS_B

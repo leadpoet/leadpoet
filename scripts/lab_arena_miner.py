@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     source = commands.add_parser(
         "submit-model",
         aliases=["submit-source"],
-        help="archive, upload, and submit a local model",
+        help="submit a local model; winning source is published as the public baseline",
     )
     source.add_argument("--source", required=True, help="directory with harness.py")
     _common_arguments(source)
@@ -88,7 +88,7 @@ def submit_source(args) -> int:
             credentials=credentials,
         )
     except MinerSubmissionError as exc:
-        print("submission failed: %s" % exc.code, file=sys.stderr)
+        print("submission failed: %s" % exc.format_for_cli(forbidden_values=credentials.values() if 'credentials' in locals() else ()), file=sys.stderr)
         return 2
     print(json.dumps(dict(result), sort_keys=True))
     return 0

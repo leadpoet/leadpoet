@@ -7,7 +7,6 @@ import pytest
 from gateway.research_lab.tee_protocol import (
     V2_PROTOCOL,
     ResearchLabTeeProtocolError,
-    legacy_v1_enabled,
     normalize_tee_protocol,
     research_lab_tee_protocol,
     v2_enabled,
@@ -23,7 +22,6 @@ def test_gateway_protocol_defaults_to_v2_and_normalizes_explicit_aliases(
     monkeypatch.delenv("RESEARCH_LAB_TEE_PROTOCOL", raising=False)
     assert research_lab_tee_protocol() == V2_PROTOCOL
     assert v2_enabled() is True
-    assert legacy_v1_enabled() is False
     assert normalize_tee_protocol("authoritative_v2") == V2_PROTOCOL
     with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
         normalize_tee_protocol("LEGACY_V1_COMPAT")

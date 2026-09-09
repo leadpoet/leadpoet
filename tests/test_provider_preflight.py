@@ -11,7 +11,10 @@ from unittest import mock
 import pytest
 
 from gateway.research_lab import provider_preflight as pp
-from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
+from gateway.research_lab.tee_protocol import (
+    ResearchLabTeeProtocolError,
+    research_lab_tee_protocol,
+)
 
 
 def _http_error(code: int, body: bytes = b"", reason: str = "err") -> urllib.error.HTTPError:
@@ -635,32 +638,10 @@ def test_gate_disabled_preflight_proceeds(monkeypatch):
     assert out["reason"] == "preflight_disabled"
 
 
-def test_legacy_gate_is_rejected_before_host_preflight(monkeypatch):
+def test_legacy_protocol_is_rejected_before_preflight(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1_compat")
-    calls = []
-
-    class LocalPreflight:
-        def check(self, *, force, settings):
-            calls.append((force, settings))
-            return {"healthy": True, "pause_worthy": False, "verdicts": []}
-
-    async def is_paused():
-        return {"paused": False, "reason": ""}
-
-    async def set_paused(**_kwargs):
-        raise AssertionError("healthy legacy preflight must not pause")
-
-    monkeypatch.setattr(pp, "shared_preflight", lambda: LocalPreflight())
     with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
-        asyncio.run(
-            pp.preflight_gate(
-                scope="scoring",
-                actor_ref="worker-1",
-                is_paused=is_paused,
-                set_paused=set_paused,
-            )
-        )
-    assert calls == []
+        research_lab_tee_protocol()
 
 
 def _healthy_authority(**_kwargs):

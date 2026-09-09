@@ -15,13 +15,20 @@ import stat
 import subprocess
 import sys
 import threading
+import traceback
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
 import yaml
+from botocore.exceptions import ClientError
 
+from gateway.tee import prepare_gateway_envelopes_v2 as envelope_prepare
 from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
+from gateway.tee.proxy_transport_preflight_v2 import (
+    WorkerProxyTransportPreflightV2Error,
+    verify_worker_proxy_fleets_v2,
+)
 
 from leadpoet_canonical.production_parity import (
     SNAPSHOT_SCHEMA_VERSION,
@@ -42,6 +49,10 @@ from scripts import production_parity_snapshot as parity_snapshot
 from scripts import run_local_restart_rehearsal as restart_rehearsal
 from scripts import run_production_parity_fast as fast_parity
 from scripts import run_production_parity_full_host as full_host
+from scripts.gateway_restart_timing_diagnostic import (
+    GATEWAY_RESTART_TIMING_STAGES,
+    gateway_restart_timing_diagnostic,
+)
 from scripts.production_parity_snapshot import (
     DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
@@ -76,6 +87,10 @@ from scripts.setup_production_parity_staging import (
 from scripts.resolve_production_parity_controller_requirements import (
     resolve_controller_requirements,
 )
+from tests.test_gateway_restart_preflight_v2 import (
+    _source_add_claim_control_contract_response,
+    _source_add_miner_status_contract_response,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +98,69 @@ SHA = "a" * 40
 HASH = "sha256:" + "b" * 64
 ORIGIN = "https://d111111abcdef8.cloudfront.net"
 PARITY_GATEWAY_PUBLIC_KEY = "c" * 64
+
+# Migration 86 owns this historical SQL constraint.  Keep the fixture local
+# to the parity test: the retired receipt-purpose catalogue must not return to
+# the active schema-preflight runtime contract merely to build an old table.
+_HISTORICAL_ATTESTED_ROLE_PURPOSES = {
+    "gateway_coordinator": (
+        "research_lab.admission.v2",
+        "research_lab.provider_evidence.v2",
+        "leadpoet.artifact_persistence.v2",
+        "research_lab.ranking.v2",
+        "research_lab.promotion_decision.v2",
+        "research_lab.reward_decision.v2",
+        "research_lab.allocation.v2",
+        "research_lab.champion_input.v2",
+        "research_lab.reimbursement_input.v2",
+        "research_lab.source_add_reward_input.v2",
+        "research_lab.sourcing_input.v2",
+        "research_lab.fulfillment_input.v2",
+        "research_lab.leaderboard_input.v2",
+        "research_lab.ban_input.v2",
+        "research_lab.anomaly_adjustment_input.v2",
+        "gateway.weights.publication.v2",
+    ),
+    "gateway_scoring": (
+        "research_lab.private_model_run.v2",
+        "research_lab.candidate_model_run.v2",
+        "research_lab.candidate_test.v2",
+        "research_lab.company_score.v2",
+        "research_lab.candidate_score.v2",
+        "research_lab.baseline_score.v2",
+        "research_lab.benchmark.v2",
+        "research_lab.rebenchmark.v2",
+        "research_lab.confirmation_score.v2",
+        "research_lab.source_add_judge.v2",
+        "qualification.lead_decision.v2",
+        "qualification.email_evidence.v2",
+        "qualification.sourcing_epoch.v2",
+    ),
+    "gateway_autoresearch": (
+        "research_lab.source_inspection.v2",
+        "research_lab.research_plan.v2",
+        "research_lab.patch_draft.v2",
+        "research_lab.patch_validation.v2",
+        "research_lab.candidate_test.v2",
+        "research_lab.candidate_build.v2",
+        "research_lab.candidate_decision.v2",
+        "research_lab.stale_parent_repair.v2",
+        "research_lab.checkpoint.v2",
+        "research_lab.openrouter_guard.v2",
+    ),
+    "validator_weights": (
+        "validator.weight_snapshot.v2",
+        "validator.weights.computed.v2",
+        "validator.chain_state.v2",
+        "validator.metagraph_state.v2",
+        "validator.burn_ownership.v2",
+        "validator.feature_flags.v2",
+        "validator.constants.v2",
+        "validator.hotkey_signature.v2",
+        "validator.set_weights_extrinsic.v2",
+        "validator.weights.finalized.v2",
+    ),
+}
 
 
 def test_setup_targets_the_authoritative_github_repository():
@@ -194,9 +272,6 @@ def _snapshot(*, bypass_rls: bool = True, capture_mode: str = "full") -> dict:
             "largest_relation_bytes": 2_000_000_000,
             "capture_utc_date": "2026-08-15",
             "target_rebenchmark_date": "2026-08-16",
-            "latest_completed_benchmark_date": "2026-08-14",
-            "current_day_rebenchmark_run_count": 1,
-            "current_day_benchmark_bundle_count": 1,
             "source_role": {
                 "role_hash": HASH,
                 "transaction_read_only": True,
@@ -235,6 +310,19 @@ def test_snapshot_binds_real_scale_future_day_and_readonly_role():
     assert value["database"]["source_role"]["bypass_rls"] is True
     assert value["database"]["source_role"]["table_write_capable"] is False
     assert value["database"]["weight_history_scope"]["expected_rows"] == 571
+
+
+def test_snapshot_v5_rejects_v4_instead_of_reinterpreting_old_metadata():
+    document = _snapshot()
+    document["schema_version"] = "leadpoet.production_parity_snapshot.v4"
+    body = {key: item for key, item in document.items() if key != "manifest_hash"}
+    document["manifest_hash"] = sha256_json(body)
+
+    with pytest.raises(ProductionParityError, match="snapshot schema differs"):
+        validate_snapshot_manifest(
+            document,
+            now=datetime(2026, 8, 15, 12, 30, tzinfo=timezone.utc),
+        )
 
 
 def test_schema_only_snapshot_is_explicit_and_cannot_claim_full_data():
@@ -543,9 +631,6 @@ def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(
         "largest_relation_bytes": 48_022_609_920,
         "capture_utc_timestamp": "2026-08-18T12:00:00+00:00",
         "capture_utc_date": "2026-08-18",
-        "latest_completed_benchmark_date": "2026-08-17",
-        "current_day_rebenchmark_run_count": 0,
-        "current_day_benchmark_bundle_count": 0,
         "weight_history_scope": {"netuid": 71},
         "source_role": {
             "role_name": "readonly",
@@ -617,12 +702,186 @@ def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(
     assert archive.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_category", "expected_error_type"),
+    [
+        (
+            subprocess.CompletedProcess(
+                ["pg_dump"], 1, stdout=b"", stderr=b"database unavailable"
+            ),
+            parity_snapshot.SnapshotFailureCategory.DUMP_FAILED,
+            "ProductionParityError",
+        ),
+        (
+            subprocess.TimeoutExpired(["pg_dump"], 3600),
+            parity_snapshot.SnapshotFailureCategory.DUMP_TIMED_OUT,
+            "TimeoutExpired",
+        ),
+    ],
+)
+def test_snapshot_dump_retains_fixed_failure_category_and_cause(
+    monkeypatch,
+    failure: subprocess.CompletedProcess | subprocess.TimeoutExpired,
+    expected_category: parity_snapshot.SnapshotFailureCategory,
+    expected_error_type: str,
+):
+    if isinstance(failure, subprocess.TimeoutExpired):
+        def fail_dump(*_args, **_kwargs):
+            raise failure
+
+        monkeypatch.setattr(parity_snapshot, "_run_postgres", fail_dump)
+    else:
+        monkeypatch.setattr(
+            parity_snapshot,
+            "_run_postgres",
+            lambda *_args, **_kwargs: failure,
+        )
+
+    with pytest.raises(parity_snapshot.SnapshotCaptureFailure) as raised:
+        parity_snapshot._capture_dump(
+            ["pg_dump"],
+            env={},
+            timeout=3600,
+            postgres_image=None,
+            mounts=(),
+        )
+
+    assert raised.value.category is expected_category
+    assert raised.value.__cause__ is not None
+    assert full_host._failure_identity("snapshot-capture", raised.value) == (
+        "snapshot-capture",
+        expected_error_type,
+    )
+
+
+def test_snapshot_postcheck_retains_fixed_failure_category_and_cause(monkeypatch):
+    original = ProductionParityError("secret-bearing database diagnostic")
+
+    def fail_stats(*_args, **_kwargs):
+        raise original
+
+    monkeypatch.setattr(parity_snapshot, "_database_stats", fail_stats)
+
+    with pytest.raises(parity_snapshot.SnapshotCaptureFailure) as raised:
+        parity_snapshot._snapshot_postcheck(
+            env={},
+            postgres_image=None,
+            initial_stats={"capture_utc_date": "2026-09-07"},
+            target_rebenchmark_date=datetime(2026, 9, 8).date(),
+            archive_path=Path("unused.dump"),
+        )
+
+    assert (
+        raised.value.category
+        is parity_snapshot.SnapshotFailureCategory.POSTCHECK_FAILED
+    )
+    assert raised.value.__cause__ is original
+
+
+def test_snapshot_postcheck_removes_archive_when_successful_dump_crosses_utc_day(
+    monkeypatch,
+    tmp_path: Path,
+):
+    archive = tmp_path / "production.dump"
+    archive.write_bytes(b"complete dump")
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_database_stats",
+        lambda *_args, **_kwargs: {
+            "capture_utc_timestamp": "2026-09-08T00:01:00+00:00",
+            "capture_utc_date": "2026-09-08",
+        },
+    )
+
+    with pytest.raises(parity_snapshot.SnapshotCaptureFailure) as raised:
+        parity_snapshot._snapshot_postcheck(
+            env={},
+            postgres_image=None,
+            initial_stats={"capture_utc_date": "2026-09-07"},
+            target_rebenchmark_date=datetime(2026, 9, 8).date(),
+            archive_path=archive,
+        )
+
+    assert (
+        raised.value.category
+        is parity_snapshot.SnapshotFailureCategory.TARGET_DAY_BOUNDARY
+    )
+    assert raised.value.__cause__ is None
+    assert not archive.exists()
+
+
+def test_full_failure_document_projects_only_typed_allowlisted_snapshot_category():
+    secret = "must-not-escape-snapshot-failure"
+    typed = parity_snapshot.SnapshotCaptureFailure(
+        parity_snapshot.SnapshotFailureCategory.DUMP_FAILED,
+        secret,
+    )
+    evidence: dict[str, object] = {}
+
+    full_host._record_failure_identity(evidence, "snapshot-capture", typed)
+
+    assert evidence == {
+        "status": "failed",
+        "failure_stage": "snapshot-capture",
+        "error_type": "ProductionParityError",
+        "failure_category": "snapshot_dump_failed",
+    }
+    assert secret not in json.dumps(evidence)
+
+    untyped: dict[str, object] = {}
+    full_host._record_failure_identity(
+        untyped,
+        "snapshot-capture",
+        ProductionParityError(secret),
+    )
+    assert "failure_category" not in untyped
+
+    unallowlisted = parity_snapshot.SnapshotCaptureFailure.__new__(
+        parity_snapshot.SnapshotCaptureFailure
+    )
+    ProductionParityError.__init__(unallowlisted, secret)
+    unallowlisted.category = "secret-bearing-category"
+    forged: dict[str, object] = {}
+    full_host._record_failure_identity(forged, "snapshot-capture", unallowlisted)
+    assert "failure_category" not in forged
+    assert secret not in json.dumps(forged)
+
+
+def test_full_failure_document_projects_only_fixed_clone_arena_category():
+    secret = "must-not-escape-clone-arena-failure"
+    typed = full_host.CloneArenaNormalizationFailure(
+        "clone_arena_lease_not_expired", secret
+    )
+    evidence: dict[str, object] = {}
+
+    full_host._record_failure_identity(
+        evidence, "clone-arena-normalization", typed
+    )
+
+    assert evidence == {
+        "status": "failed",
+        "failure_stage": "clone-arena-normalization",
+        "error_type": "FullParityError",
+        "failure_category": "clone_arena_lease_not_expired",
+    }
+    assert secret not in json.dumps(evidence)
+
+    wrong_stage: dict[str, object] = {}
+    full_host._record_failure_identity(wrong_stage, "snapshot-restore", typed)
+    assert "failure_category" not in wrong_stage
+
+    typed.category = ["secret-bearing-category"]
+    malformed: dict[str, object] = {}
+    full_host._record_failure_identity(
+        malformed, "clone-arena-normalization", typed
+    )
+    assert "failure_category" not in malformed
+    assert secret not in json.dumps(malformed)
+
+
 def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
     observed = {}
     value = {
-        "latest_completed_benchmark_date": None,
-        "current_day_rebenchmark_run_count": 0,
-        "current_day_benchmark_bundle_count": 0,
         "source_role": {
             "role_name": "readonly",
             "transaction_read_only": True,
@@ -647,9 +906,9 @@ def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
     stats = parity_snapshot._database_stats({})
 
     assert "lab_arena_rounds" not in observed["sql"]
-    assert stats["latest_completed_benchmark_date"] is None
-    assert stats["current_day_rebenchmark_run_count"] == 0
-    assert stats["current_day_benchmark_bundle_count"] == 0
+    assert "latest_completed_benchmark_date" not in stats
+    assert "current_day_rebenchmark_run_count" not in stats
+    assert "current_day_benchmark_bundle_count" not in stats
 
 
 def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
@@ -1095,7 +1354,11 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
         "scripts/178-research-lab-source-add-miner-status.sql"
     )
+    provisioned_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
+        "scripts/186-research-lab-source-add-provisioned-status.sql"
+    )
     assert miner_status_migration["sha256"] in sql
+    assert provisioned_status_migration["sha256"] in sql
     assert (
         "public.research_lab_source_add_admit_v3"
         "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
@@ -1168,9 +1431,6 @@ def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypa
             "largest_relation_bytes": 1,
             "capture_utc_timestamp": "2026-09-04T00:00:00+00:00",
             "capture_utc_date": "2026-09-04",
-            "latest_completed_benchmark_date": None,
-            "current_day_rebenchmark_run_count": 0,
-            "current_day_benchmark_bundle_count": 0,
             "weight_history_scope": None,
             "source_role": {
                 "role_name": "readonly",
@@ -1192,9 +1452,9 @@ def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypa
     )
 
     assert "FROM public.lab_arena_rounds" not in observed["sql"]
-    assert result["latest_completed_benchmark_date"] is None
-    assert result["current_day_rebenchmark_run_count"] == 0
-    assert result["current_day_benchmark_bundle_count"] == 0
+    assert "latest_completed_benchmark_date" not in result
+    assert "current_day_rebenchmark_run_count" not in result
+    assert "current_day_benchmark_bundle_count" not in result
 
 
 def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
@@ -1224,6 +1484,9 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
     miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
         "scripts/178-research-lab-source-add-miner-status.sql"
     )
+    provisioned_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
+        "scripts/186-research-lab-source-add-provisioned-status.sql"
+    )
     readback = {
         "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(
@@ -1234,6 +1497,7 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
         "migration_176_sha256": provenance_origin_repair_migration["sha256"],
         "migration_177_sha256": provenance_authority_acl_migration["sha256"],
         "migration_178_sha256": miner_status_migration["sha256"],
+        "migration_186_sha256": provisioned_status_migration["sha256"],
         "function_signature_count": len(expectations),
         "service_role_function_count": sum(
             privileges["service_role_callable"]
@@ -1385,6 +1649,8 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
         "anon_role",
         "authenticated_role",
         "service_role",
+        "arena_owner_role",
+        "arena_service_role",
         "auth_schema",
         "extensions_schema",
         "pgcrypto_extension",
@@ -1406,6 +1672,12 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
     bootstrap = observed[0]
     for role in ("anon", "authenticated", "service_role"):
         assert f"CREATE ROLE {role} NOLOGIN INHERIT" in bootstrap
+    assert "CREATE ROLE lab_arena_owner NOLOGIN NOINHERIT" in bootstrap
+    assert "CREATE ROLE lab_arena_service NOLOGIN NOINHERIT" in bootstrap
+    assert (
+        "ALTER ROLE lab_arena_owner WITH NOLOGIN NOINHERIT NOSUPERUSER "
+        "NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;"
+    ) in bootstrap
     assert "CREATE SCHEMA IF NOT EXISTS auth" in bootstrap
     assert "CREATE SCHEMA IF NOT EXISTS extensions" in bootstrap
     assert "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions" in bootstrap
@@ -1496,6 +1768,29 @@ def test_disposable_clone_proves_restored_deterministic_uuid(monkeypatch):
 
     assert database.verify_snapshot_restore() == {"deterministic_uuid_repeatable": True}
     assert "research_lab_deterministic_uuid" in observed[0]
+
+
+def test_full_clone_arena_normalization_rejects_nonclone_before_sql(monkeypatch):
+    database = fast_parity._DockerDatabase(
+        candidate_sha=SHA,
+        postgres_image="postgres@sha256:" + "c" * 64,
+        postgrest_image="postgrest@sha256:" + "d" * 64,
+    )
+    database.target_dsn = "postgresql://postgres:x@db.example/leadpoet_parity_test"
+    monkeypatch.setattr(
+        database,
+        "_psql",
+        lambda *_args, **_kwargs: pytest.fail("non-clone target must fail before SQL"),
+    )
+
+    with pytest.raises(
+        FullParityError,
+        match="Full parity clone database identity is invalid",
+    ):
+        full_host._normalize_full_parity_clone_arena_restart_state(
+            database,
+            candidate_sha=SHA,
+        )
 
 
 def test_database_lane_retains_primary_failure_and_cleanup_evidence(
@@ -2225,6 +2520,839 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
 
 
 @pytest.mark.parametrize(
+    ("timing_record", "restart_outcome", "expected_timing"),
+    [
+        (
+            {
+                "stage": "v2_runtime_bootstrap",
+                "status": "failed",
+                "elapsed_seconds": 9321.1254,
+            },
+            "exited",
+            {
+                "final_stage": "v2_runtime_bootstrap",
+                "final_status": "failed",
+                "elapsed_seconds": 9321.125,
+            },
+        ),
+        (
+            {
+                "stage": "must_not_survive",
+                "status": ["failed", "must-not-survive"],
+                "elapsed_seconds": 12,
+            },
+            "exited",
+            None,
+        ),
+        (
+            {
+                "stage": "local_release_build",
+                "status": "failed",
+                "elapsed_seconds": 10800,
+            },
+            "timed_out",
+            {
+                "final_stage": "local_release_build",
+                "final_status": "failed",
+                "elapsed_seconds": 10800.0,
+            },
+        ),
+        (
+            {
+                "stage": "git_prepared_tree_verification",
+                "status": "failed",
+                "elapsed_seconds": 259.607,
+            },
+            "epoch_gate",
+            {
+                "final_stage": "git_prepared_tree_verification",
+                "final_status": "failed",
+                "elapsed_seconds": 259.607,
+            },
+        ),
+        (
+            {
+                "stage": "v2_credential_envelope_preparation",
+                "status": "failed",
+                "elapsed_seconds": 312.913,
+            },
+            "exited",
+            {
+                "final_stage": "v2_credential_envelope_preparation",
+                "final_status": "failed",
+                "elapsed_seconds": 312.913,
+            },
+        ),
+    ],
+)
+def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+    timing_record,
+    restart_outcome,
+    expected_timing,
+):
+    marker = tmp_path / "early-boot-isolated"
+    marker.write_text("isolated\n", encoding="utf-8")
+    work_root = tmp_path / "encrypted-root-volume"
+    output = tmp_path / "evidence" / "full.json"
+
+    class Database:
+        target_dsn = "postgresql://postgres:x@127.0.0.1/leadpoet_parity_test"
+        jwt_secret = "clone-jwt"
+
+        start = staticmethod(lambda: None)
+        prepare_snapshot_restore = staticmethod(lambda: {"verified": True})
+        verify_snapshot_restore = staticmethod(lambda: {"verified": True})
+        start_postgrest = staticmethod(lambda: ("http://127.0.0.1:3001", None))
+        cleanup = staticmethod(lambda: {"status": "removed"})
+
+    class PrefixAdapter:
+        start = staticmethod(
+            lambda: {
+                "listen_host": "0.0.0.0",
+                "listen_port": 3000,
+                "path_prefix": "/rest/v1",
+            }
+        )
+        cleanup = staticmethod(lambda: "removed")
+
+    def fake_run(command, **kwargs):
+        assert command[0:2] == ["bash", str(full_host.ROOT / "gw_restart.sh")]
+        timing_dir = Path(kwargs["env"]["GATEWAY_RESTART_TIMING_DIR"])
+        timing_dir.mkdir(parents=True)
+        (timing_dir / "gateway-1-2.jsonl").write_text(
+            json.dumps(
+                {
+                    "schema_version": "leadpoet.gateway_restart_timing.v1",
+                    **timing_record,
+                    "commit_sha": "b" * 40,
+                    "ignored_free_text": "must-not-survive",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if timing_record.get("stage") == "local_release_build":
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "ERROR: prepared offline scoring wheelhouse is unavailable: "
+                "/private/must-not-survive\n"
+                "GatewayPCR0BuildError: nitro-cli failed with exit code 127: "
+                "must-not-survive\n"
+                "ERROR: exact local runtime identity build failed\n",
+                encoding="utf-8",
+            )
+        if timing_record.get("stage") == "v2_credential_envelope_preparation":
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "Traceback (most recent call last):\n"
+                '  File "/run/candidate/gateway/tee/prepare_gateway_envelopes_v2.py", '
+                'line 965, in main\n'
+                '  File "/run/candidate/gateway/tee/supabase_schema_preflight_v2.py", '
+                'line 1926, in verify_required_supabase_v2_schema\n'
+                "SupabaseSchemaPreflightV2Error: must-not-survive\n",
+                encoding="utf-8",
+            )
+        if restart_outcome == "timed_out":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if restart_outcome == "epoch_gate":
+            # Earlier log context must not become a guessed cause for a safe
+            # epoch-gate stop that leaves both production runtimes healthy.
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "ERROR: rsync is required to stage attested runtime packages\n"
+                "RuntimeError: enclave relay unavailable\n"
+                "RestartEpochGateError: production restart may start only at "
+                "official subnet epoch block 300 or earlier; observed 312\n",
+                encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(command, 75)
+
+    monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
+    monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
+    monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
+    monkeypatch.setattr(
+        full_host,
+        "_materialize_run_owned_runtime_identity",
+        lambda path: (
+            path.parent.joinpath("sensitive.txt").write_text(
+                "must-not-survive", encoding="utf-8"
+            )
+            and {
+                "gateway_private_key_path": "/run/parity/gateway-private.pem",
+                "gateway_public_key": PARITY_GATEWAY_PUBLIC_KEY,
+                "gateway_public_key_hash": "sha256:" + "1" * 64,
+                "arweave_keyfile_path": "/run/parity/arweave.json",
+                "arweave_address_hash": "sha256:" + "2" * 64,
+            }
+        ),
+    )
+    monkeypatch.setattr(full_host.boto3, "client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(full_host, "_DockerDatabase", lambda **_kwargs: Database())
+    monkeypatch.setattr(full_host, "capture", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        full_host,
+        "build_contract",
+        lambda **_kwargs: {"contract_hash": HASH},
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_secret_value",
+        lambda *_args, **_kwargs: "postgresql://reader:x@db.example/postgres",
+    )
+    monkeypatch.setattr(
+        full_host,
+        "capture_snapshot",
+        lambda **_kwargs: {
+            "capture_mode": "full",
+            "database": {"target_rebenchmark_date": "2026-08-19"},
+        },
+    )
+    monkeypatch.setattr(full_host, "restore_snapshot", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        full_host,
+        "_normalize_full_parity_clone_arena_restart_state",
+        lambda *_args, **_kwargs: {"guard_cleared": True},
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_ClonePostgrestPrefixAdapter",
+        lambda **_kwargs: PrefixAdapter(),
+    )
+    monkeypatch.setattr(full_host, "_wait_https_origin", lambda _origin: None)
+    monkeypatch.setattr(
+        full_host,
+        "create_gateway_secret",
+        lambda **_kwargs: {"secret_id": "run-secret"},
+    )
+    monkeypatch.setattr(full_host, "delete_gateway_secret", lambda **_kwargs: "removed")
+    monkeypatch.setattr(full_host, "_run", fake_run)
+
+    expected_exception = (
+        subprocess.TimeoutExpired
+        if restart_outcome == "timed_out"
+        else FullParityError
+    )
+    with pytest.raises(expected_exception):
+        full_host.run_full(
+            region="us-east-1",
+            run_id="pp-test-1",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            production_gateway_secret_id="gateway-secret",
+            readonly_dsn_secret_id="readonly-secret",
+            miner_intake_secret_id="miner-secret",
+            supabase_origin=ORIGIN,
+            artifact_bucket="parity-artifacts",
+            postgres_image="postgres@sha256:" + "c" * 64,
+            postgrest_image="postgrest@sha256:" + "d" * 64,
+            output=output,
+            timeout_seconds=20_000,
+        )
+
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    expected = (
+        {"outcome": "timed_out", "timeout_seconds": 10800}
+        if restart_outcome == "timed_out"
+        else {"outcome": "exited", "returncode": 75}
+    )
+    if expected_timing is not None:
+        expected["timing"] = expected_timing
+    if expected_timing is not None and (
+        expected_timing["final_stage"] == "local_release_build"
+    ):
+        expected["observations"] = [
+            {
+                "marker": "local_release_build_observation",
+                "identifier": "offline_wheelhouse_unavailable",
+            },
+            {
+                "marker": "local_release_build_observation",
+                "identifier": "command_failed",
+                "command": "nitro-cli",
+                "returncode": 127,
+            },
+            {
+                "marker": "local_release_build_observation",
+                "identifier": "local_runtime_identity_build_failed",
+            },
+        ]
+    if expected_timing is not None and (
+        expected_timing["final_stage"] == "v2_credential_envelope_preparation"
+    ):
+        expected["observations"] = [
+            {
+                "marker": "credential_envelope_preparation_observation",
+                "phase": "schema_preflight",
+                "exception_class": "SupabaseSchemaPreflightV2Error",
+            }
+        ]
+    assert evidence["gateway_restart_diagnostic"] == expected
+    assert evidence["cleanup"]["work"] == "removed"
+    assert not (work_root / "pp-test-1" / "runtime").exists()
+    assert "must-not-survive" not in output.read_text(encoding="utf-8")
+
+
+def test_local_release_build_observations_match_canonical_error_sources(
+    tmp_path: Path,
+):
+    stage_source = (full_host.ROOT / "gateway/tee/stage_attested_runtime.sh").read_text(
+        encoding="utf-8"
+    )
+    builder_source = (
+        full_host.ROOT / "validator_tee/host/gateway_pcr0_builder.py"
+    ).read_text(encoding="utf-8")
+    fixed_lines = [
+        "ERROR: rsync is required to stage attested runtime packages",
+        "ERROR: git is required to stage a clean attested runtime commit",
+        "ERROR: offline scoring wheelhouse contains an unexpected entry",
+        "GatewayPCR0BuildError: nitro-cli output did not contain a valid PCR0",
+    ]
+    combined_source = stage_source + builder_source
+    assert all(
+        line.replace("GatewayPCR0BuildError: ", "") in combined_source
+        for line in fixed_lines
+    )
+    assert '"%s failed with exit code %s%s"' in builder_source
+
+    log_path = tmp_path / "gateway-restart.log"
+    log_path.write_text(
+        "\n".join(
+            fixed_lines
+            + [
+                "GatewayPCR0BuildError: docker failed with exit code 125: private-output",
+                "GatewayPCR0BuildError: docker failed with exit code 256: private-output",
+                "FileNotFoundError: [Errno 2] No such file or directory: 'nitro-cli'",
+                "/private/build.sh: line 390: nitro-cli: command not found",
+                "GatewayPCR0BuildError: unknown-tool failed with exit code 1: private-output",
+                "PRIVATE_TOKEN=must-not-survive",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    observations = full_host._local_release_build_observations(log_path)
+
+    assert observations == [
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "required_executable_missing",
+            "executable": "rsync",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "required_executable_missing",
+            "executable": "git",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "offline_wheelhouse_unexpected_entry",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "nitro_measurement_missing",
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "command_failed",
+            "command": "docker",
+            "returncode": 125,
+        },
+        {
+            "marker": "local_release_build_observation",
+            "identifier": "required_executable_missing",
+            "executable": "nitro-cli",
+        },
+    ]
+    assert "must-not-survive" not in json.dumps(observations)
+
+
+def test_local_release_build_observations_reject_symlink(tmp_path: Path):
+    target = tmp_path / "private.log"
+    target.write_text(
+        "ERROR: rsync is required to stage attested runtime packages\n",
+        encoding="utf-8",
+    )
+    link = tmp_path / "gateway-restart.log"
+    link.symlink_to(target)
+
+    assert full_host._local_release_build_observations(link) == []
+
+
+def test_local_release_build_observations_do_not_block_on_fifo(tmp_path: Path):
+    fifo = tmp_path / "gateway-restart.log"
+    os.mkfifo(fifo)
+
+    assert full_host._local_release_build_observations(fifo) == []
+
+
+def _credential_cli_environment() -> dict[str, str]:
+    return {
+        "SUPABASE_URL": "http://127.0.0.1:1",
+        "SUPABASE_SERVICE_ROLE_KEY": "must-not-survive-service-role",
+        "RESEARCH_LAB_V2_OPENROUTER_API_KEY": "must-not-survive-openrouter",
+        "RESEARCH_LAB_V2_EXA_API_KEY": "must-not-survive-exa",
+        "RESEARCH_LAB_V2_SCRAPINGDOG_API_KEY": "must-not-survive-scrapingdog",
+        "RESEARCH_LAB_V2_DEEPLINE_API_KEY": "must-not-survive-deepline",
+        "TRUELIST_API_KEY": "must-not-survive-truelist",
+        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
+            "https://must-not-survive-proxy.example"
+        ),
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "1",
+    }
+
+
+def _capture_failure_traceback(log_path: Path, function) -> None:
+    try:
+        function()
+    except Exception:  # noqa: BLE001 - exercise real CLI traceback projection
+        with log_path.open("w", encoding="utf-8") as handle:
+            traceback.print_exc(file=handle)
+    else:
+        pytest.fail("controlled credential CLI boundary did not fail")
+
+
+def _credential_cli_args(env_path: Path, output_dir: Path) -> list[str]:
+    return [
+        "--install",
+        "--env-file",
+        str(env_path),
+        "--kms-key-id",
+        "alias/gateway-v2",
+        "--deploy-commit",
+        "a" * 40,
+        "--output-dir",
+        str(output_dir),
+    ]
+
+
+def test_credential_envelope_observations_classify_executed_cli_boundaries(
+    monkeypatch,
+    tmp_path: Path,
+):
+    environment = _credential_cli_environment()
+    env_path = tmp_path / "gateway.env.json"
+    env_path.write_text(json.dumps(environment), encoding="utf-8")
+    original_install = envelope_prepare.install_gateway_envelopes_v2
+
+    scenarios = []
+
+    missing_log = tmp_path / "environment-load.log"
+    _capture_failure_traceback(
+        missing_log,
+        lambda: envelope_prepare.main(
+            _credential_cli_args(tmp_path / "missing.env", tmp_path / "env-out")
+        ),
+    )
+    scenarios.append(
+        (
+            missing_log,
+            "environment_load",
+            "GatewayEnvelopePreparationV2Error",
+            {"reason": "environment_unavailable"},
+        )
+    )
+
+    schema_log = tmp_path / "schema.log"
+    with monkeypatch.context() as context:
+        def unavailable_schema(*_args, **_kwargs):
+            raise OSError("must-not-survive-schema-failure")
+
+        def schema_failure(environment):
+            return schema_preflight.verify_required_supabase_v2_schema(
+                environment,
+                opener=unavailable_schema,
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            schema_failure,
+        )
+        _capture_failure_traceback(
+            schema_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(env_path, tmp_path / "schema-out")
+            ),
+        )
+    scenarios.append(
+        (
+            schema_log,
+            "schema_preflight",
+            "SupabaseSchemaPreflightV2Error",
+            {
+                "reason": "schema_table_probe_failed",
+                "schema_object": "validator_sourcing_epoch_inputs_v2",
+            },
+        )
+    )
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            lambda _environment: {"status": "ready"},
+        )
+
+        def proxy_failure(*_args, **_kwargs):
+            raise WorkerProxyTransportPreflightV2Error(
+                "must-not-survive-proxy-failure"
+            )
+
+        def install_with_proxy_failure(**kwargs):
+            return original_install(
+                **kwargs,
+                proxy_fleet_probe=lambda fleets: verify_worker_proxy_fleets_v2(
+                    fleets,
+                    verify_proxy=proxy_failure,
+                ),
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "install_gateway_envelopes_v2",
+            install_with_proxy_failure,
+        )
+        proxy_log = tmp_path / "proxy.log"
+        _capture_failure_traceback(
+            proxy_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(env_path, tmp_path / "proxy-out")
+            ),
+        )
+    scenarios.append(
+        (
+            proxy_log,
+            "proxy_preflight",
+            "GatewayEnvelopePreparationV2Error",
+            {"reason": "proxy_connect_failed"},
+        )
+    )
+
+    class SuccessfulKMS:
+        requests = 0
+
+        def encrypt(self, **_request):
+            self.requests += 1
+            return {
+                "KeyId": "arn:aws:kms:us-east-1:123:key/test",
+                "CiphertextBlob": f"ciphertext-{self.requests}".encode(),
+            }
+
+    missing_credential = dict(environment)
+    missing_credential.pop("TRUELIST_API_KEY")
+    missing_credential_path = tmp_path / "missing-credential.env.json"
+    missing_credential_path.write_text(
+        json.dumps(missing_credential), encoding="utf-8"
+    )
+    with monkeypatch.context() as context:
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            lambda _environment: {"status": "ready"},
+        )
+
+        def install_with_missing_credential(**kwargs):
+            kwargs.pop("kms_client", None)
+            return original_install(
+                **kwargs,
+                kms_client=SuccessfulKMS(),
+                proxy_fleet_probe=lambda fleets: fleets,
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "install_gateway_envelopes_v2",
+            install_with_missing_credential,
+        )
+        envelope_log = tmp_path / "envelope.log"
+        _capture_failure_traceback(
+            envelope_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(
+                    missing_credential_path,
+                    tmp_path / "envelope-out",
+                )
+            ),
+        )
+    scenarios.append(
+        (
+            envelope_log,
+            "envelope_install",
+            "GatewayEnvelopePreparationV2Error",
+            {"reason": "credential_unavailable"},
+        )
+    )
+
+    class FailingKMS:
+        def encrypt(self, **_request):
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "AccessDeniedException",
+                        "Message": "must-not-survive-kms-message",
+                    }
+                },
+                "Encrypt",
+            )
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            envelope_prepare,
+            "verify_required_supabase_v2_schema",
+            lambda _environment: {"status": "ready"},
+        )
+
+        def install_with_kms_failure(**kwargs):
+            kwargs.pop("kms_client", None)
+            return original_install(
+                **kwargs,
+                kms_client=FailingKMS(),
+                proxy_fleet_probe=lambda fleets: fleets,
+            )
+
+        context.setattr(
+            envelope_prepare,
+            "install_gateway_envelopes_v2",
+            install_with_kms_failure,
+        )
+        kms_log = tmp_path / "kms.log"
+        _capture_failure_traceback(
+            kms_log,
+            lambda: envelope_prepare.main(
+                _credential_cli_args(env_path, tmp_path / "kms-out")
+            ),
+        )
+    scenarios.append(
+        (
+            kms_log,
+            "kms",
+            "ClientError",
+            {
+                "aws_error_code": "AccessDeniedException",
+                "aws_operation": "Encrypt",
+            },
+        )
+    )
+
+    for log_path, phase, exception_class, extra in scenarios:
+        assert full_host._credential_envelope_observations(log_path) == [
+            {
+                "marker": "credential_envelope_preparation_observation",
+                "phase": phase,
+                "exception_class": exception_class,
+                **extra,
+            }
+        ]
+    assert "must-not-survive" not in json.dumps(
+        [
+            observation
+            for log_path, *_rest in scenarios
+            for observation in full_host._credential_envelope_observations(log_path)
+        ],
+        sort_keys=True,
+    )
+
+
+def test_credential_envelope_observations_reject_unsafe_log_boundaries(
+    tmp_path: Path,
+):
+    missing = tmp_path / "missing.log"
+    assert full_host._credential_envelope_observations(missing) == []
+
+    target = tmp_path / "private.log"
+    target.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/prepare_gateway_envelopes_v2.py", '
+        "line 131, in load_environment_file\n"
+        "GatewayEnvelopePreparationV2Error: must-not-survive\n",
+        encoding="utf-8",
+    )
+    symlink = tmp_path / "gateway.log"
+    symlink.symlink_to(target)
+    assert full_host._credential_envelope_observations(symlink) == []
+
+    fifo = tmp_path / "gateway.fifo"
+    os.mkfifo(fifo)
+    assert full_host._credential_envelope_observations(fifo) == []
+
+    oversized = tmp_path / "oversized.log"
+    oversized.write_bytes(
+        target.read_bytes()
+        + b"x" * (full_host._GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES + 1024)
+    )
+    assert full_host._credential_envelope_observations(oversized) == []
+    oversized.write_bytes(
+        b"x" * (full_host._GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES + 1024)
+        + b"\n"
+        + target.read_bytes()
+    )
+    assert full_host._credential_envelope_observations(oversized) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "environment_load",
+            "exception_class": "GatewayEnvelopePreparationV2Error",
+        }
+    ]
+
+
+def test_credential_envelope_observations_drop_messages_and_unknown_aws_fields(
+    tmp_path: Path,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/utils/tee_kms_provision_v2.py", '
+        "line 65, in build_provider_envelope_v2\n"
+        "botocore.exceptions.ClientError: An error occurred (PrivateSecretCode) "
+        "when calling the Decrypt operation: must-not-survive\n",
+        encoding="utf-8",
+    )
+
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "kms",
+            "exception_class": "ClientError",
+        }
+    ]
+    assert "must-not-survive" not in json.dumps(
+        full_host._credential_envelope_observations(log_path)
+    )
+
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/utils/tee_kms_provision_v2.py", '
+        "line 65, in build_provider_envelope_v2\n"
+        "botocore.exceptions.ClientError: An error occurred "
+        "(AccessDeniedException) when calling the Encrypt operation: "
+        "must-not-survive\n"
+        "unrelated command output\n"
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/prepare_gateway_envelopes_v2.py", '
+        "line 131, in load_environment_file\n"
+        "GatewayEnvelopePreparationV2Error: gateway source environment "
+        "is unavailable\n",
+        encoding="utf-8",
+    )
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "environment_load",
+            "exception_class": "GatewayEnvelopePreparationV2Error",
+            "reason": "environment_unavailable",
+        }
+    ]
+
+
+@pytest.mark.parametrize("exception_class", ["ImportError", "ModuleNotFoundError"])
+def test_credential_envelope_observations_classify_module_load_without_name(
+    tmp_path: Path,
+    exception_class: str,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/prepare_gateway_envelopes_v2.py", '
+        "line 1, in <module>\n"
+        f"{exception_class}: must-not-survive-private-module-name\n",
+        encoding="utf-8",
+    )
+
+    observation = full_host._credential_envelope_observations(log_path)
+    assert observation == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "credential_module_load",
+            "exception_class": exception_class,
+        }
+    ]
+    assert "must-not-survive" not in json.dumps(observation)
+
+
+def test_credential_envelope_observations_retain_allowlisted_schema_probe(
+    tmp_path: Path,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/supabase_schema_preflight_v2.py", '
+        "line 777, in _verify_compact_weight_settlement_contract_v1\n"
+        "SupabaseSchemaPreflightV2Error: compact weight settlement schema "
+        "contract differs must-not-survive\n",
+        encoding="utf-8",
+    )
+
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "schema_preflight",
+            "exception_class": "SupabaseSchemaPreflightV2Error",
+            "probe": "research_lab_compact_weight_settlement_contract_v1",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        (
+            "required Supabase V2 schema is unavailable for "
+            "validator_sourcing_epoch_inputs_v2; apply "
+            "scripts/92-validator-sourcing-attested-v2.sql before restart "
+            "(HTTP 404)",
+            {
+                "reason": "schema_table_unavailable",
+                "schema_object": "validator_sourcing_epoch_inputs_v2",
+                "http_status": 404,
+            },
+        ),
+        (
+            "required Supabase V2 RPC is unavailable for "
+            "persist_research_lab_chain_realized_settlement_v1; apply "
+            "scripts/126-research-lab-chain-realized-settlement.sql before restart",
+            {
+                "reason": "rpc_unavailable",
+                "rpc": "persist_research_lab_chain_realized_settlement_v1",
+            },
+        ),
+        (
+            "required Supabase V2 schema is unavailable for private_secret_table; "
+            "apply scripts/999-private-secret.sql before restart (HTTP 418)",
+            {},
+        ),
+    ],
+)
+def test_credential_envelope_observations_retain_required_schema_identity(
+    tmp_path: Path,
+    message: str,
+    detail: dict,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/supabase_schema_preflight_v2.py", '
+        "line 1926, in verify_required_supabase_v2_schema\n"
+        f"SupabaseSchemaPreflightV2Error: {message}\n",
+        encoding="utf-8",
+    )
+
+    assert full_host._credential_envelope_observations(log_path) == [
+        {
+            "marker": "credential_envelope_preparation_observation",
+            "phase": "schema_preflight",
+            "exception_class": "SupabaseSchemaPreflightV2Error",
+            **detail,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         (("archive", "persisted"), True),
@@ -2758,7 +3886,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             statements.append(f'CREATE TABLE public."{table}" ({definitions});')
 
         clauses = []
-        for role, purposes in schema_preflight.ROLE_PURPOSES.items():
+        for role, purposes in _HISTORICAL_ATTESTED_ROLE_PURPOSES.items():
             encoded_purposes = ", ".join(
                 f"'{purpose}'::text" for purpose in sorted(purposes)
             )
@@ -2934,6 +4062,12 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "research_lab_source_add_post_accept_leg1_contract_v4": (
                 source_add_provenance_leg1_contract
             ),
+            "research_lab_source_add_claim_control_contract_v2": json.loads(
+                _source_add_claim_control_contract_response()
+            ),
+            "research_lab_source_add_miner_status_contract_v1": json.loads(
+                _source_add_miner_status_contract_response()
+            ),
         }
         for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:
             assert re.fullmatch(r"[a-z_][a-z0-9_]*", function_name)
@@ -2960,7 +4094,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
         supabase_url, service_role_key = database.start_postgrest()
         assert database._psql(
             "SELECT has_schema_privilege('service_role','extensions','USAGE')::text;"
-        ).strip() == "t"
+        ).strip() in {"t", "true"}
         result = schema_preflight.verify_required_supabase_v2_schema(
             {
                 "SUPABASE_URL": supabase_url,
@@ -2980,7 +4114,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             == "0"
         )
         assert result["status"] == "ready"
-        assert result["data_probe_count"] == 4
+        assert result["data_probe_count"] == 6
         assert (
             result["chain_realized_settlement_activation_http_probe_count"] == 0
         )
@@ -2994,7 +4128,6 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "source_finalized_block": activation["source_finalized_block"],
         }
         assert result["compact_weight_settlement_contract"] == compact_contract
-        assert result["candidate_hybrid_purpose_contract"]["constraint_valid"] is True
         assert (
             result["source_add_provider_origin_contract"]
             == source_add_origin_contract
@@ -3218,6 +4351,736 @@ def test_rehearsal_failure_diagnostics_retain_marker_before_long_cleanup(
     assert "stdout" not in diagnostics
     assert "stderr" not in diagnostics
     assert len(encoded) < 4096
+
+
+def test_gateway_failure_diagnostics_survive_later_validator_output(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "e" * 40
+    durable_root = tmp_path / (
+        f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-gateway"
+    )
+    durable_root.mkdir()
+    (durable_root / "failure-summary.json").write_text(
+        json.dumps(
+            {
+                "candidate_sha": candidate_sha,
+                "status": "failed",
+                "stages": [
+                    {
+                        "stage": "gateway-forward-1",
+                        "status": "failed",
+                        "error_type": "CalledProcessError",
+                        "returncode": 17,
+                        "duration_seconds": 37.081,
+                    },
+                    {
+                        "stage": "evidence-join-prepush",
+                        "status": "unexercised",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fast_parity.tempfile, "gettempdir", lambda: str(tmp_path))
+    secret = "must-not-escape-early-gateway-diagnostic"
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=(
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=17\n"
+            "REHEARSAL_HTTP_DIAGNOSTIC endpoint=/research-lab/status status=503\n"
+            "REHEARSAL CONTRACT ERROR [docker]: launcher command failed\n"
+            "ERROR: process terminated out of memory\n"
+            f"ERROR: bearer token={secret} permission denied\n"
+            "ERROR: exact gateway launcher failed\n"
+            + (f"validator output {secret}\n" * 1024)
+        ),
+        stderr=(
+            "REHEARSAL_PREPUSH_PHASE phase=gateway-runtime "
+            "status=started duration_seconds=0.0\n"
+            "REHEARSAL_PREPUSH_PHASE phase=gateway-runtime "
+            "status=failed duration_seconds=37.081\n"
+            "REHEARSAL_STAGE_FAILED_CONTINUING stage=gateway-forward-1 "
+            "error_type=CalledProcessError duration_seconds=37.081 "
+            "error='launcher failed'\n"
+            f"REHEARSAL_BATCH_FAILURE_EVIDENCE {durable_root}\n"
+        ),
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert diagnostics["stages"] == [
+        {
+            "stage": "gateway-forward-1",
+            "status": "failed",
+            "error_type": "CalledProcessError",
+            "returncode": 17,
+            "duration_seconds": 37.081,
+        },
+        {
+            "stage": "evidence-join-prepush",
+            "status": "unexercised",
+        },
+    ]
+    assert {
+        "marker": "component_failure",
+        "component": "gateway",
+        "status": 17,
+    } in diagnostics["output_markers"]
+    assert {
+        "marker": "http",
+        "endpoint": "/research-lab/status",
+        "status": "503",
+    } in diagnostics["output_markers"]
+    assert {"marker": "error", "category": "resource_oom"} in diagnostics[
+        "output_markers"
+    ]
+    assert {"marker": "error", "category": "gateway_launcher"} in diagnostics[
+        "output_markers"
+    ]
+    assert {"marker": "contract_error", "kind": "docker"} in diagnostics[
+        "output_markers"
+    ]
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert secret not in encoded
+    assert "stdout" not in diagnostics
+    assert "stderr" not in diagnostics
+    assert "validator output" not in encoded
+    assert "permission denied" not in encoded
+    assert len(encoded) < 4096
+
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert retained["stages"] == [
+        {
+            "stage": "gateway-forward-1",
+            "status": "failed",
+            "error_type": "CalledProcessError",
+            "returncode": 17,
+            "duration_seconds": 37.081,
+        },
+        {
+            "stage": "evidence-join-prepush",
+            "status": "unexercised",
+        },
+    ]
+    assert retained["timeout"] is False
+    assert retained["component_failure_diagnostics"] == [
+        {
+            "marker": "component_failure",
+            "component": "gateway",
+            "status": 17,
+        },
+        {
+            "marker": "http",
+            "endpoint": "/research-lab/status",
+            "status": "503",
+        },
+        {"marker": "contract_error", "kind": "docker"},
+        {"marker": "error", "category_hint": "resource_oom"},
+        {"marker": "error", "category_hint": "gateway_launcher"},
+    ]
+    retained_encoded = json.dumps(retained, sort_keys=True)
+    assert secret not in retained_encoded
+    assert "validator output" not in retained_encoded
+
+
+@pytest.mark.parametrize(
+    "final_stage",
+    [
+        "lab_arena_claim_drain",
+        "lab_arena_destructive_authorization",
+        "v2_credential_envelope_preparation",
+    ],
+)
+def test_gateway_failure_retains_candidate_bound_timing_from_real_emitter(
+    tmp_path: Path,
+    final_stage: str,
+) -> None:
+    candidate_sha = "c" * 40
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function_start = restart.index("record_gateway_restart_timing() {")
+    function_end = restart.index(
+        "\nemit_gateway_restart_sentry_summary()", function_start
+    )
+    timing_function = restart[function_start:function_end]
+    timing_dir = tmp_path / "timings"
+    timing_file = timing_dir / "gateway-1700000000-123.jsonl"
+    emitted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "set -euo pipefail\n"
+                + timing_function
+                + "\nGATEWAY_RESTART_STARTED_EPOCH=$(date -u +%s)\n"
+                + f"GATEWAY_RESTART_TIMING_DIR={timing_dir!s}\n"
+                + f"GATEWAY_RESTART_TIMING_FILE={timing_file!s}\n"
+                + f"GATEWAY_DEPLOY_SHA={candidate_sha}\n"
+                + f'record_gateway_restart_timing "{final_stage}" "failed"\n'
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert f"GATEWAY_RESTART_TIMING stage={final_stage}" in emitted.stdout
+    run_inside = (ROOT / "tests/restart_rehearsal/run_inside.sh").read_text(
+        encoding="utf-8"
+    )
+    diagnostic_start = run_inside.index("emit_gateway_restart_timing_diagnostic() {")
+    diagnostic_end = run_inside.index("\n}", diagnostic_start) + 2
+    diagnostic_function = run_inside[diagnostic_start:diagnostic_end]
+    diagnostic_function = diagnostic_function.replace(
+        "/usr/bin/python3.11", str(Path(sys.executable).resolve())
+    ).replace("/source", str(ROOT))
+    projected = subprocess.run(
+        [
+            "bash",
+            "-c",
+            diagnostic_function + "\nemit_gateway_restart_timing_diagnostic",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={
+            **os.environ,
+            "CANDIDATE_SHA": candidate_sha,
+            "GATEWAY_RESTART_TIMING_DIR": str(timing_dir),
+        },
+    )
+    elapsed_match = re.search(
+        r"elapsed_seconds=([0-9]+(?:\.[0-9]+)?)", projected.stderr
+    )
+    assert elapsed_match is not None
+    elapsed_seconds = float(elapsed_match.group(1))
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=(
+            f"REHEARSAL_START component=gateway from={'b' * 40} "
+            f"candidate={candidate_sha} transition=forward "
+            "scenario=production_success scope=exact\n"
+        ),
+        stderr=(
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=1\n"
+            + projected.stderr
+            + "ERROR: exact gateway launcher failed\n"
+            + ("later validator output must not survive\n" * 512)
+            + "REHEARSAL_TIME_BUDGET_EXCEEDED "
+            "profile=prepush elapsed_seconds=608\n"
+        ),
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert {
+        "marker": "gateway_restart_timing",
+        "final_stage": final_stage,
+        "final_status": "failed",
+        "elapsed_seconds": elapsed_seconds,
+    } in diagnostics["output_markers"]
+    assert {"marker": "time_budget", "profile": "prepush"} in diagnostics[
+        "output_markers"
+    ]
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert "later validator output" not in encoded
+    projection_path = tmp_path / "failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert retained["timeout"] is True
+    assert {
+        "marker": "gateway_restart_timing",
+        "final_stage": final_stage,
+        "final_status": "failed",
+        "elapsed_seconds": elapsed_seconds,
+    } in retained["component_failure_diagnostics"]
+
+
+def _gateway_aws_authority_source_error() -> str:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function_start = restart.index("validate_gateway_aws_authority() {")
+    function_end = restart.index("\non_gateway_restart_exit()", function_start)
+    emitted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            restart[function_start:function_end]
+            + "\nAWS_PROFILE=must-not-survive\nvalidate_gateway_aws_authority",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert emitted.returncode == 1
+    assert emitted.stdout == ""
+    return emitted.stderr.strip()
+
+
+def _gateway_bootstrap_failure_stream(
+    observation: str,
+    *,
+    start_candidate: str = "c" * 40,
+    timing: str | None = None,
+    before_start: str = "",
+    after_observation: str = "",
+) -> str:
+    candidate_sha = "c" * 40
+    timing = timing or (
+        "REHEARSAL_GATEWAY_RESTART_TIMING "
+        f"candidate={candidate_sha} stage=bootstrap status=failed "
+        "elapsed_seconds=7.454"
+    )
+    return (
+        before_start
+        + f"REHEARSAL_START component=gateway from={'b' * 40} "
+        + f"candidate={start_candidate} transition=forward "
+        + "scenario=production_success scope=exact\n"
+        + observation
+        + "\n"
+        + after_observation
+        + "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=1\n"
+        + timing
+        + "\nERROR: exact gateway launcher failed\n"
+    )
+
+
+def test_gateway_bootstrap_observation_survives_interleaving_and_full_tail(
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "c" * 40
+    source_error = _gateway_aws_authority_source_error()
+    stream = _gateway_bootstrap_failure_stream(
+        source_error,
+        after_observation=(
+            f"REHEARSAL_START component=validator from={'b' * 40} "
+            f"candidate={candidate_sha} transition=forward\n"
+        ),
+    )
+    stream += ("later validator output must not survive\n" * 512)
+    stream += "REHEARSAL_TIME_BUDGET_EXCEEDED profile=prepush elapsed_seconds=608\n"
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        subprocess.CompletedProcess(["rehearsal"], 1, stdout=stream, stderr=""),
+        candidate_sha=candidate_sha,
+    )
+
+    observation = {
+        "marker": "gateway_bootstrap_observation",
+        "identifier": "delegated_aws_authority",
+        "source_scope": "gateway_source",
+    }
+    assert observation in diagnostics["output_markers"]
+    assert {"marker": "time_budget", "profile": "prepush"} in diagnostics[
+        "output_markers"
+    ]
+    projection_path = tmp_path / "failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert observation in retained["component_failure_diagnostics"]
+    encoded = json.dumps(retained, sort_keys=True)
+    assert "must-not-survive" not in encoded
+    assert "AWS_PROFILE" not in encoded
+    assert "later validator output" not in encoded
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        _gateway_bootstrap_failure_stream(
+            "ERROR: gateway restart AWS region differs from us-east-1",
+            start_candidate="d" * 40,
+        ),
+        (
+            f"REHEARSAL_START component=validator from={'b' * 40} "
+            f"candidate={'c' * 40} transition=forward\n"
+            + _gateway_bootstrap_failure_stream("").split("\n", 1)[1]
+        ),
+        _gateway_bootstrap_failure_stream(
+            "",
+            before_start="ERROR: gateway restart AWS region differs from us-east-1\n",
+        ),
+        _gateway_bootstrap_failure_stream(
+            "ERROR: gateway restart AWS region differs from us-east-1",
+            after_observation=(
+                f"REHEARSAL_SUCCESS component=gateway candidate={'c' * 40}\n"
+            ),
+        ),
+        _gateway_bootstrap_failure_stream(
+            "ERROR: gateway restart AWS region differs from us-east-1 trailing-data"
+        ),
+    ],
+)
+def test_gateway_bootstrap_observation_requires_exact_terminal_failure(
+    stream: str,
+) -> None:
+    observations = fast_parity._rehearsal_gateway_bootstrap_observations(
+        stream,
+        candidate_sha="c" * 40,
+    )
+    assert observations == []
+
+
+@pytest.mark.parametrize(
+    "timing",
+    [
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'d' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds=7.454",
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=git_prepare status=failed elapsed_seconds=7.454",
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds="
+        f"{fast_parity.GATEWAY_RESTART_TIMING_MAX_ELAPSED_SECONDS + 1}",
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds=7.454\n"
+        f"REHEARSAL_GATEWAY_RESTART_TIMING candidate={'c' * 40} "
+        "stage=bootstrap status=failed elapsed_seconds=8.000",
+    ],
+)
+def test_gateway_bootstrap_observation_requires_one_valid_timing(
+    timing: str,
+) -> None:
+    stream = _gateway_bootstrap_failure_stream(
+        "ERROR: gateway restart AWS region differs from us-east-1",
+        timing=timing,
+    )
+    assert fast_parity._rehearsal_gateway_bootstrap_observations(
+        stream,
+        candidate_sha="c" * 40,
+    ) == []
+
+
+def test_gateway_bootstrap_observation_projects_safe_interleaved_kinds() -> None:
+    secret = "must-not-survive-bootstrap-observation"
+    stream = _gateway_bootstrap_failure_stream(
+        f"REHEARSAL CONTRACT ERROR [aws]: {secret}\nRuntimeError: {secret}"
+    )
+    observations = fast_parity._rehearsal_gateway_bootstrap_observations(
+        stream,
+        candidate_sha="c" * 40,
+    )
+
+    assert observations == [
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "contract_error",
+            "kind": "aws",
+            "source_scope": "interleaved_component_stream",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "exception",
+            "error_type": "RuntimeError",
+            "source_scope": "interleaved_component_stream",
+        },
+    ]
+    assert secret not in json.dumps(observations, sort_keys=True)
+
+
+def test_gateway_bootstrap_observation_allowlist_matches_restart_source() -> None:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    for prefix, _identifier in fast_parity.GATEWAY_BOOTSTRAP_ERROR_PREFIXES:
+        assert prefix in restart
+
+
+def test_retained_gateway_bootstrap_observation_rejects_malformed_fields() -> None:
+    markers = [
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": ["aws_region"],
+            "source_scope": "gateway_source",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "contract_error",
+            "kind": {"aws": True},
+            "source_scope": "interleaved_component_stream",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "exception",
+            "error_type": ["RuntimeError"],
+            "source_scope": "interleaved_component_stream",
+        },
+        {
+            "marker": "gateway_bootstrap_observation",
+            "identifier": "attacker_controlled",
+            "source_scope": "gateway_source",
+        },
+    ]
+
+    assert fast_parity._retained_component_failure_diagnostics(markers) == []
+
+
+@pytest.mark.parametrize(
+    "timing_marker",
+    [
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'d' * 40} stage=lab_arena_claim_drain "
+            "status=failed elapsed_seconds=12.0"
+        ),
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=attacker_controlled "
+            "status=failed elapsed_seconds=12.0"
+        ),
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=v2_credential_envelope_preparation "
+            "status=failed elapsed_seconds=12.0 raw=must-not-survive"
+        ),
+        (
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=lab_arena_claim_drain "
+            "status=reached elapsed_seconds=10.0\n"
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={'c' * 40} stage=lab_arena_claim_drain "
+            "status=failed elapsed_seconds=12.0"
+        ),
+    ],
+)
+def test_gateway_failure_rejects_foreign_or_unsafe_timing_marker(
+    timing_marker: str,
+) -> None:
+    candidate_sha = "c" * 40
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=(
+            "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=1\n"
+            + timing_marker
+            + "\nERROR: exact gateway launcher failed\n"
+        ),
+        stderr="",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert all(
+        marker.get("marker") != "gateway_restart_timing"
+        for marker in diagnostics["output_markers"]
+    )
+    assert "must-not-survive" not in json.dumps(diagnostics, sort_keys=True)
+
+
+def test_gateway_timing_marker_without_failed_gateway_is_ignored() -> None:
+    candidate_sha = "c" * 40
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        0,
+        stdout=(
+            "REHEARSAL_GATEWAY_RESTART_TIMING "
+            f"candidate={candidate_sha} stage=completed "
+            "status=passed elapsed_seconds=12.0\n"
+        ),
+        stderr="",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert "output_markers" not in diagnostics
+    assert diagnostics["timeout"] is False
+
+
+def test_gateway_restart_timing_allowlist_covers_active_deploy_stages() -> None:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    active_stages = set(
+        re.findall(r'^GATEWAY_DEPLOY_STAGE="([a-z0-9_]+)"$', restart, re.MULTILINE)
+    )
+
+    assert active_stages
+    assert active_stages <= GATEWAY_RESTART_TIMING_STAGES
+    assert "lab_arena_claim_drain" in active_stages
+    assert "lab_arena_destructive_authorization" in active_stages
+    assert "v2_credential_envelope_preparation" in active_stages
+
+
+@pytest.mark.parametrize(
+    ("stage", "commit_sha", "accepted"),
+    [
+        ("bootstrap", None, True),
+        ("git_prepare", None, True),
+        ([], None, False),
+        ("v2_runtime_bootstrap", None, False),
+        ("git_prepare", "d" * 40, False),
+        ("v2_runtime_bootstrap", "c" * 40, True),
+    ],
+)
+def test_gateway_restart_timing_candidate_binding_preserves_early_diagnostics(
+    tmp_path: Path,
+    stage: object,
+    commit_sha: str | None,
+    accepted: bool,
+) -> None:
+    timing_dir = tmp_path / "timings"
+    timing_dir.mkdir()
+    (timing_dir / "gateway-1-2.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "leadpoet.gateway_restart_timing.v1",
+                "stage": stage,
+                "status": "failed",
+                "elapsed_seconds": 12.0,
+                "commit_sha": commit_sha,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    diagnostic = gateway_restart_timing_diagnostic(
+        timing_dir,
+        expected_candidate_sha="c" * 40,
+    )
+
+    assert (diagnostic is not None) is accepted
+
+
+def test_retained_gateway_timing_rejects_malformed_types() -> None:
+    retained = fast_parity._retained_component_failure_diagnostics(
+        [
+            {
+                "marker": "gateway_restart_timing",
+                "final_stage": ["lab_arena_claim_drain"],
+                "final_status": "failed",
+                "elapsed_seconds": 12.0,
+            },
+            {
+                "marker": "gateway_restart_timing",
+                "final_stage": "lab_arena_claim_drain",
+                "final_status": "failed",
+                "elapsed_seconds": "12.0",
+            },
+        ]
+    )
+
+    assert retained == []
+
+
+@pytest.mark.parametrize(
+    ("component", "outcome", "returncode"),
+    [
+        ("gateway", "process_exit", 23),
+        ("gateway", "readiness_timeout", None),
+        ("validator", "process_exit", 42),
+        ("validator", "readiness_timeout", None),
+    ],
+)
+def test_postgrest_startup_diagnostic_survives_beyond_output_tail(
+    component: str,
+    outcome: str,
+    returncode: int | None,
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "e" * 40
+    marker = (
+        "REHEARSAL_POSTGREST_STARTUP "
+        f"component={component} outcome={outcome}"
+    )
+    expected = {
+        "marker": "postgrest_startup",
+        "component": component,
+        "outcome": outcome,
+    }
+    if returncode is not None:
+        marker += f" returncode={returncode}"
+        expected["returncode"] = returncode
+    secret = "must-not-escape-postgrest-startup"
+    result = subprocess.CompletedProcess(
+        ["rehearsal"],
+        1,
+        stdout=marker + "\n" + (f"later output {secret}\n" * 1024),
+        stderr="",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result,
+        candidate_sha=candidate_sha,
+    )
+
+    assert expected in diagnostics["output_markers"]
+    encoded = json.dumps(diagnostics, sort_keys=True)
+    assert secret not in encoded
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    retained = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert expected in retained["component_failure_diagnostics"]
+    assert secret not in json.dumps(retained, sort_keys=True)
+
+
+def test_postgrest_startup_diagnostic_rejects_noncanonical_fields() -> None:
+    secret = "must-not-escape-postgrest-marker"
+    diagnostics = fast_parity._rehearsal_output_diagnostics(
+        "\n".join(
+            [
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=process_exit returncode=23",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=validator outcome=readiness_timeout",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=workflow outcome=process_exit returncode=23",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=process_exit returncode=256",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=process_exit",
+                "REHEARSAL_POSTGREST_STARTUP "
+                "component=gateway outcome=readiness_timeout returncode=1",
+                "REHEARSAL_POSTGREST_STARTUP "
+                f"component=gateway outcome=process_exit returncode=1 raw={secret}",
+            ]
+        )
+    )
+
+    assert diagnostics == [
+        {
+            "marker": "postgrest_startup",
+            "component": "gateway",
+            "outcome": "process_exit",
+            "returncode": 23,
+        },
+        {
+            "marker": "postgrest_startup",
+            "component": "validator",
+            "outcome": "readiness_timeout",
+        },
+    ]
+    assert secret not in json.dumps(diagnostics, sort_keys=True)
 
 
 def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
@@ -3702,9 +5565,194 @@ def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
     assert "candidate-derived N-1 rehearsal failed" in message
     assert "parent watchdog timed out" not in message
     assert '"failure_summary_available":true' in message
+    assert '"timeout":true' in message
     assert '"stage":"time-budget"' in message
     assert '"stage":"evidence-join-prepush"' in message
     assert secret not in message
+    diagnostics = getattr(raised.value, "_rehearsal_failure_diagnostics")
+    assert diagnostics["timeout"] is True
+
+
+def test_rehearsal_failure_projection_drops_raw_diagnostics(
+    tmp_path: Path,
+) -> None:
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha="f" * 40,
+        diagnostics={
+            "output_markers": [
+                {"marker": "stage_failure", "raw": "secret"},
+                {"marker": "time_budget", "raw": "secret"},
+                {
+                    "marker": "component_failure",
+                    "component": "gateway",
+                    "status": 17,
+                    "raw": "secret",
+                },
+                {
+                    "marker": "http",
+                    "endpoint": "/attest",
+                    "status": "503",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "error",
+                    "category": "resource_oom",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "error",
+                    "category": "attacker-controlled",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "contract_error",
+                    "kind": "docker",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "contract_error",
+                    "kind": "attacker-controlled",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "gateway",
+                    "outcome": "process_exit",
+                    "returncode": 23,
+                    "raw": "secret",
+                },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "validator",
+                    "outcome": "readiness_timeout",
+                    "raw": "secret",
+                },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "gateway",
+                    "outcome": "readiness_timeout",
+                    "returncode": 1,
+                    "raw": "secret",
+                },
+                {
+                    "marker": "postgrest_startup",
+                    "component": "gateway",
+                    "outcome": "attacker-controlled",
+                    "returncode": 1,
+                    "raw": "secret",
+                },
+            ],
+            "returncode": 1,
+            "stages": [
+                {
+                    "command": ["docker", "--token", "secret"],
+                    "duration_seconds": 12.3456,
+                    "error": "secret",
+                    "error_type": "CalledProcessError",
+                    "returncode": 17,
+                    "stage": "gateway-forward-1",
+                    "status": "failed",
+                }
+            ],
+            "timeout": True,
+        },
+    )
+
+    encoded = projection_path.read_text(encoding="utf-8")
+    projection = json.loads(encoded)
+    assert "secret" not in encoded
+    assert projection["output_markers"] == [
+        "component_failure",
+        "contract_error",
+        "error",
+        "http",
+        "postgrest_startup",
+        "stage_failure",
+        "time_budget",
+    ]
+    assert projection["component_failure_diagnostics"] == [
+        {
+            "marker": "component_failure",
+            "component": "gateway",
+            "status": 17,
+        },
+        {"marker": "http", "endpoint": "/attest", "status": "503"},
+        {"marker": "error", "category_hint": "resource_oom"},
+        {"marker": "contract_error", "kind": "docker"},
+        {
+            "marker": "postgrest_startup",
+            "component": "gateway",
+            "outcome": "process_exit",
+            "returncode": 23,
+        },
+        {
+            "marker": "postgrest_startup",
+            "component": "validator",
+            "outcome": "readiness_timeout",
+        },
+    ]
+    assert projection["stages"] == [
+        {
+            "duration_seconds": 12.346,
+            "error_type": "CalledProcessError",
+            "returncode": 17,
+            "stage": "gateway-forward-1",
+            "status": "failed",
+        }
+    ]
+    assert projection["timeout"] is True
+
+
+def test_empty_stage_error_type_reaches_retained_projection_without_raw_text(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidate_sha = "e" * 40
+    durable_root = tmp_path / (
+        f"leadpoet-rehearsal-failure-{candidate_sha[:12]}-full-path-empty"
+    )
+    durable_root.mkdir()
+    secret = "do-not-retain-this-exception-text"
+    (durable_root / "failure-summary.json").write_text(
+        json.dumps(
+            {
+                "candidate_sha": candidate_sha,
+                "status": "failed",
+                "error_type": "RuntimeError",
+                "error": secret,
+                "stages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fast_parity.tempfile, "gettempdir", lambda: str(tmp_path))
+    result = fast_parity.subprocess.CompletedProcess(
+        args=["rehearsal"],
+        returncode=1,
+        stdout="",
+        stderr=f"REHEARSAL_BOUNDED_FAILURE_PROJECTION {durable_root}\n",
+    )
+
+    diagnostics = fast_parity._rehearsal_failure_diagnostics(
+        result, candidate_sha=candidate_sha
+    )
+    assert diagnostics["error_type"] == "RuntimeError"
+    assert diagnostics["stages"] == []
+    assert secret not in json.dumps(diagnostics)
+
+    projection_path = tmp_path / "rehearsal-failure-projection.json"
+    fast_parity._write_rehearsal_failure_projection(
+        projection_path,
+        candidate_sha=candidate_sha,
+        diagnostics=diagnostics,
+    )
+    encoded = projection_path.read_text(encoding="utf-8")
+    projection = json.loads(encoded)
+    assert projection["error_type"] == "RuntimeError"
+    assert projection["stages"] == []
+    assert secret not in encoded
 
 
 @pytest.mark.parametrize(
@@ -4066,9 +6114,6 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
             "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
                 "/production/provider-evidence.jsonl"
             ),
-            "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH": (
-                "/production/provider-outcomes.jsonl"
-            ),
             "RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX": (
                 "s3://production/signatures"
             ),
@@ -4144,16 +6189,8 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["ENABLE_FULFILLMENT"] == "false"
     assert environment["BITTENSOR_NETWORK"] == "finney"
     assert environment["BITTENSOR_NETUID"] == "71"
-    assert environment["RESEARCH_LAB_SCORING_WORKER_ENABLED"] == "true"
     assert environment["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] == "false"
-    assert environment["RESEARCH_LAB_PAID_LOOPS_ENABLED"] == "false"
-    assert environment["RESEARCH_LAB_HOSTED_RUNS_ENABLED"] == "true"
-    assert environment["RESEARCH_LAB_HOSTED_WORKER_ENABLED"] == "true"
-    assert environment["RESEARCH_LAB_HOSTED_WORKER_DRY_RUN"] == "true"
-    assert environment["RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS"] == "0"
     assert environment["RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED"] == "false"
-    assert environment["RESEARCH_LAB_AUTO_PROMOTION_ENABLED"] == "false"
-    assert environment["RESEARCH_LAB_AUTO_COMMIT_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED"] == "false"
     assert environment["DISABLE_BACKGROUND_TASKS"] == "true"
     assert environment["GATEWAY_STATEFUL_CUTOVER_CEREMONY"] == "0"
@@ -4170,7 +6207,6 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["RESEARCH_LAB_EVIDENCE_PROXY_URL"] == ""
     assert environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR"] == ""
     assert environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"] == ""
-    assert environment["RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"] == ""
     assert environment["RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX"] == ""
     assert environment["RESEARCH_LAB_SCORING_CACHE_DIR"] == (
         production_parity_scoring_cache_dir(run_id="pp-1-1")
@@ -4275,11 +6311,6 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
         {
             "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
                 "/production/provider-evidence.jsonl"
-            )
-        },
-        {
-            "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH": (
-                "/production/provider-outcomes.jsonl"
             )
         },
         {
@@ -4524,7 +6555,7 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence():
         "daily_icp_set_id": 20260904,
         "baseline_source_url": (
             "https://github.com/leadpoet/pydantic-harness/"
-            "archive/refs/heads/main.tar.gz"
+            "archive/refs/heads/lab.tar.gz"
         ),
         "baseline_final_score": 72.5,
         "icp_results": [
@@ -4774,7 +6805,6 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
                     "chain_registration_boundary": "strict-ephemeral-hotkey",
                     "source_add": {
                         "admitted": True,
-                        "global_miner_submissions_enabled": False,
                         "source_add_paused": False,
                     },
                 }

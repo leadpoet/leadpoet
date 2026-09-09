@@ -6,6 +6,7 @@ import ast
 import gzip
 import io
 import os
+import re
 import stat
 import tarfile
 import zlib
@@ -22,13 +23,15 @@ IGNORED_DIRECTORY_NAMES = frozenset({".git", ".pytest_cache", ".venv", "__pycach
 ALLOWED_ENV_TEMPLATE_NAMES = frozenset(
     {".env.example", ".env.sample", ".env.template"}
 )
+GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class SourceBundleError(ValueError):
     """The submitted source does not meet the small public boundary."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, path: str | None = None) -> None:
         self.code = code
+        self.path = path
         super().__init__(code)
 
 
@@ -77,6 +80,21 @@ def _environment_file_forbidden(name: str) -> bool:
     )
 
 
+def validate_publishable_path(name: str) -> None:
+    """Source may become public code, but must not install Git automation.
+
+    Workflows could run with repository credentials on promotion. Git metadata
+    and export attributes could alter the exact source that tomorrow downloads.
+    """
+
+    parts = tuple(part.lower() for part in PurePosixPath(name).parts)
+    if (
+        ".git" in parts or ".gitattributes" in parts
+        or any(parts[index:index + 2] == (".github", "workflows") for index in range(len(parts)))
+    ):
+        raise SourceBundleError("source_git_automation_forbidden")
+
+
 def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
     files: List[Tuple[Path, str, os.stat_result]] = []
     total = 0
@@ -93,6 +111,7 @@ def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
         if not stat.S_ISREG(details.st_mode):
             raise SourceBundleError("source_entry_type_invalid")
         name = relative.as_posix()
+        validate_publishable_path(name)
         try:
             encoded_name = name.encode("utf-8")
         except UnicodeError as exc:
@@ -100,7 +119,7 @@ def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
         if not name or len(encoded_name) > MAX_SOURCE_PATH_BYTES:
             raise SourceBundleError("source_path_invalid")
         if _environment_file_forbidden(name):
-            raise SourceBundleError("source_contains_credentials")
+            raise SourceBundleError("source_contains_credentials", path=name)
         total += int(details.st_size)
         if total > MAX_SOURCE_UNPACKED_BYTES:
             raise SourceBundleError("source_unpacked_too_large")
@@ -184,7 +203,7 @@ def _read_member_for_validation(
         if forbidden_values:
             window = overlap + chunk
             if any(value in window for value in forbidden_values):
-                raise SourceBundleError("source_contains_credentials")
+                raise SourceBundleError("source_contains_credentials", path=member.name)
             overlap = window[-overlap_size:] if overlap_size else b""
     if handle.read(1):
         raise SourceBundleError("source_archive_invalid")
@@ -214,12 +233,13 @@ def _safe_members(
         if len(encoded_name) > MAX_SOURCE_PATH_BYTES or member.name in names:
             raise SourceBundleError("source_path_invalid")
         names.add(member.name)
+        validate_publishable_path(member.name)
         if member.isdir():
             continue
         if not member.isfile():
             raise SourceBundleError("source_entry_type_invalid")
         if _environment_file_forbidden(member.name):
-            raise SourceBundleError("source_contains_credentials")
+            raise SourceBundleError("source_contains_credentials", path=member.name)
         total += int(member.size)
         if total > MAX_SOURCE_UNPACKED_BYTES:
             raise SourceBundleError("source_unpacked_too_large")
@@ -275,6 +295,31 @@ def validate_source_archive(
         "source_size_bytes": len(payload),
         "source_root": harness_name.rsplit("/", 1)[0] if "/" in harness_name else "",
     }
+
+
+def source_archive_commit(data: bytes) -> str:
+    """Return GitHub's ordinary archive commit comment when it is present.
+
+    This is diagnostic source metadata. Archive validation and frozen object
+    bytes remain the source authority when the comment is absent.
+    """
+
+    payload = bytes(data)
+    if not 1 <= len(payload) <= MAX_SOURCE_ARCHIVE_BYTES:
+        return ""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            comments = [archive.pax_headers.get("comment")]
+            comments.extend(
+                member.pax_headers.get("comment") for member in archive
+            )
+    except (OSError, EOFError, tarfile.TarError, zlib.error):
+        return ""
+    commits = {
+        value for value in comments
+        if isinstance(value, str) and GIT_COMMIT_RE.fullmatch(value)
+    }
+    return next(iter(commits)) if len(commits) == 1 else ""
 
 
 def extract_source_archive(data: bytes, target_dir: str | Path) -> Dict[str, Any]:

@@ -16,7 +16,6 @@ from gateway.research_lab.source_add_workflow import (
     source_add_work_id,
 )
 from gateway.tee.supabase_schema_preflight_v2 import (
-    SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256,
 )
@@ -42,6 +41,9 @@ from tests.test_source_add_end_to_end_postgres import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = "175-research-lab-source-add-provenance-leg1.sql"
+MIGRATION_175_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:fe7df9f9336217f3e738f420fae0d9720959042080df431c1bcb2d4baa8ee954"
+)
 PRE_MIGRATIONS = (
     "72-research-lab-source-experiments.sql",
     "74-research-lab-source-add-provenance-precheck.sql",
@@ -497,6 +499,7 @@ def _provision_after_leg1(
     *,
     reject_current_builtin: bool = False,
     allow_unrewarded: bool = False,
+    stop_before_rpc: bool = False,
 ) -> tuple[str, tuple] | None:
     submission_id = case["record"]["submission_id"]
     adapter_id = case["record"]["adapter_id"]
@@ -832,6 +835,8 @@ def _provision_after_leg1(
                 %s::JSONB,%s::JSONB
             )
         """
+        if stop_before_rpc:
+            return rejection_sql, rejection_args
         assert _scalar(cursor, rejection_sql, rejection_args) == {
             "status": "not_eligible"
         }
@@ -1035,7 +1040,7 @@ def test_migration_175_full_provenance_leg1_contract(pre_migration_database):
             assert contract["leg1_alpha_percent"] == 0.2
             assert contract["leg1_reward_epochs"] == 20
             assert contract["function_authority_sha256"] == (
-                SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+                MIGRATION_175_FUNCTION_AUTHORITY_SHA256
             )
             assert contract["trigger_authority_sha256"] == (
                 SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256

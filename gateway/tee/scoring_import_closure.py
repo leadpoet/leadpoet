@@ -34,7 +34,6 @@ MANIFEST_RELATIVE_PATH = "_attested_runtime/scoring_import_closure.json"
 MEASURED_DATA_PATHS = (
     "gateway/api/role_patterns.json",
     "gateway/tee/protected_workflows.json",
-    "gateway/tee/runsc-runtime.lock.json",
     "gateway/tee/topology.json",
     "gateway/utils/area_city_mappings.json",
     "gateway/utils/english_word_cities.txt",
@@ -95,7 +94,6 @@ ROLE_ENTRYPOINT_MODULES = {
         "gateway.tee.egress_proxy",
         "gateway.tee.execution_job_manager_v2",
         "gateway.tee.inter_enclave_tls",
-        "gateway.tee.inter_enclave_artifact_v2",
         "gateway.tee.kms_recipient_v2",
         "gateway.tee.mtls_identity",
         "gateway.tee.provider_broker_v2",
@@ -115,7 +113,6 @@ ROLE_ENTRYPOINT_MODULES = {
     + DYNAMIC_IMPORT_MODULES
     + (
         "gateway.tee.execution_job_manager_v2",
-        "gateway.tee.inter_enclave_artifact_v2",
         "gateway.tee.mtls_identity",
         "gateway.tee.provider_client_v2",
         "gateway.tee.rpc_authority",

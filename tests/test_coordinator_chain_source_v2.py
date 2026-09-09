@@ -22,6 +22,8 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from leadpoet_canonical.chain_source_v2 import (
+    ChainSourceV2Error,
+    chain_source_boundary_for_profile_v2,
     last_update_storage_key,
     reveal_period_epochs_storage_key,
     ss58_encode_account_id,
@@ -36,6 +38,44 @@ from leadpoet_canonical.chain_source_v2 import (
 HASH = "sha256:" + "a" * 64
 OWNER = bytes.fromhex("924620afb270acb1ee27bd034aa9e97108ef276da5079db982883cd70294741a")
 MINER = bytes.fromhex("74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383")
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "wss://entrypoint-finney.opentensor.ai:8443",
+        "wss://entrypoint-finney.opentensor.ai:not-a-port",
+        "wss://user:password@entrypoint-finney.opentensor.ai:443",
+        "wss://entrypoint-finney.opentensor.ai:443/rpc",
+        "wss://entrypoint-finney.opentensor.ai:443?query=value",
+        "wss://entrypoint-finney.opentensor.ai:443#fragment",
+    ),
+)
+def test_chain_source_boundary_rejects_endpoint_authority_suffixes(endpoint):
+    profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    profile["chain_endpoint"] = endpoint
+
+    with pytest.raises(ChainSourceV2Error, match="outside measured policy"):
+        chain_source_boundary_for_profile_v2(profile)
+
+
+def test_chain_source_boundary_retains_measured_test_network_support():
+    profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    boundary = chain_source_boundary_for_profile_v2(profile)
+
+    assert boundary["chain_host"] == "test.finney.opentensor.ai"
+    assert boundary["chain_archive_host"] == "test.finney.opentensor.ai"
 
 
 def _selective_fixture(block, *, last_field=76):
@@ -371,6 +411,7 @@ def test_stateful_coordinator_rejects_skipped_cutover_index():
     (
         (1, 452, None),
         (None, 452, None),
+        (None, 455, None),
         (1, 440, "metadata is invalid"),
         (1, 436, "not explicitly supported"),
         (2, 452, "reveal period differs"),
@@ -390,6 +431,21 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
             chain_source_module,
             "resolve_reveal_period_metadata_default_v2",
             lambda **_kwargs: 1,
+        )
+    runtime_455_metadata_hash = (
+        "sha256:74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7"
+    )
+    if runtime_spec_version == 455:
+        # Exercise the coordinator's real reviewed-default resolver without
+        # embedding the 334 KiB public runtime metadata in this unit fixture.
+        monkeypatch.setattr(
+            chain_source_module,
+            "decode_runtime_metadata_commitment",
+            lambda _value: {
+                "metadata_hash": runtime_455_metadata_hash,
+                "metadata_version": 14,
+                "metadata_bytes": 334_642,
+            },
         )
 
     def block_hash(block):
@@ -523,7 +579,11 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
         reveal_period_epochs_storage_key(netuid=71)
     )
     assert result["reveal_period_storage_override"] == reveal_period_override
-    assert result["reveal_period_metadata_hash"] == sha256_bytes(b"meta\x0e")
+    assert result["reveal_period_metadata_hash"] == (
+        runtime_455_metadata_hash
+        if runtime_spec_version == 455
+        else sha256_bytes(b"meta\x0e")
+    )
     assert result["reveal_period_runtime_spec_version"] == runtime_spec_version
     assert result["chain_signing_profile"]["network"] == "finney"
     assert result["chain_signing_profile_hash"] == sha256_json(

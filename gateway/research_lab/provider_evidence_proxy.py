@@ -29,11 +29,9 @@ silent ``QUALIFICATION_*`` fallback.
 
 Cost caps: paid live calls are metered per cost scope (the
 ``X-Research-Lab-Cost-Scope`` header, e.g. one ICP) against
-``RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP``; a scope over its cap gets a
-typed zero-cost soft stop for private-model traffic before any upstream
-contact, and every response carries the cost event headers so the
-container-side trace tee can attribute spend. Non-model/debug callers can
-still receive the hard 402 behavior by omitting the soft-stop header.
+``RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP``; a scope over its cap receives
+an HTTP 402 refusal before any upstream contact, and every response carries
+the cost event headers so the container-side trace tee can attribute spend.
 """
 
 from __future__ import annotations
@@ -80,10 +78,6 @@ from gateway.research_lab.provider_capabilities import (
     normalize_candidate_route,
     provider_request_allowed,
 )
-from gateway.research_lab.provider_outcome_digest import (
-    PROVIDER_OUTCOME_SIDECAR_ENV,
-    ProviderOutcomeSidecarAccumulator,
-)
 
 PROXY_URL_ENV = "RESEARCH_LAB_EVIDENCE_PROXY_URL"
 REGISTRY_PATH_ENV = "RESEARCH_LAB_PROVIDER_REGISTRY_PATH"
@@ -93,8 +87,6 @@ CALLER_TOKEN_HEADER = "X-Research-Lab-Caller-Token"
 # W4: a request carrying this header replays from tape/day-cache only — a miss
 # returns 409 instead of a live upstream call (probe live-flag off).
 REPLAY_ONLY_HEADER = "X-Research-Lab-Replay-Only"
-BUDGET_SOFT_STOP_HEADER = "X-Research-Lab-Budget-Soft-Stop"
-BUDGET_SOFT_STOP_RESPONSE_HEADER = "X-Research-Lab-Budget-Soft-Stopped"
 REQUEST_TIMEOUT_MS_HEADER = "X-Research-Lab-Request-Timeout-Ms"
 REQUEST_PENDING_EVIDENCE = "request_pending"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 180.0
@@ -111,13 +103,6 @@ OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
 logger = logging.getLogger(__name__)
 
 _VALID_AUTH_KINDS = ("header", "query", "bearer", "none")
-_MEASURED_PROVIDER_COST_SOURCES = {
-    "exa_cost_dollars",
-    "openrouter_response_usage",
-    "openrouter_generation_reconciliation",
-    "deepline_response_cost",
-}
-
 # Legacy fallback env chains, used ONLY while the key split is off. With
 # RESEARCH_LAB_PROVIDER_KEY_SPLIT on, lab traffic authenticates exclusively
 # from lab-scoped keys and a missing key is a hard, attributed failure —
@@ -269,59 +254,6 @@ def _openrouter_request_with_usage_metadata(request_body: bytes) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
-
-
-def _truthy_header(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _budget_soft_stop_body(provider: str, upstream_url: str) -> bytes:
-    """Provider-shaped empty payload for private-model budget exhaustion.
-
-    This is intentionally synthetic and is never written to the evidence day
-    cache. The goal is to let the private model stop paid work and return any
-    companies it already has instead of crashing on a hard HTTP 402.
-    """
-
-    try:
-        path = urllib.parse.urlsplit(str(upstream_url or "")).path
-    except Exception:
-        path = ""
-    base = {
-        "research_lab_budget_exhausted": True,
-        "research_lab_provider_cost_cap_blocked": True,
-    }
-    if provider == "or":
-        doc: dict[str, Any] = {
-            **base,
-            "id": "research-lab-budget-soft-stop",
-            "object": "chat.completion",
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "[]"},
-                }
-            ],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }
-    elif provider == "exa":
-        doc = {**base, "results": [], "data": [], "costDollars": 0}
-        if path.startswith("/agent/runs/"):
-            doc.update({"status": "completed", "object": "agent.run"})
-    elif provider == "sd":
-        doc = {**base, "results": [], "data": [], "organic_results": [], "answer": ""}
-    elif provider == "deepline":
-        doc = {
-            **base,
-            "status": "completed",
-            "result": None,
-            "data": [],
-            "billing": {"credits": 0, "cost_usd": 0},
-        }
-    else:
-        doc = {**base, "results": [], "data": []}
-    return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _openrouter_generation_id_from_headers(headers: Mapping[str, Any]) -> str:
@@ -973,14 +905,11 @@ class ProviderUsageLedger:
     accumulate in memory so per-day quotas are enforceable either way.
     """
 
-    def __init__(self, path: str = "", *, outcome_sidecar_path: str = "") -> None:
+    def __init__(self, path: str = "") -> None:
         self._path = str(path or "")
         self._lock = threading.Lock()
         self._live_day = _utc_day()
         self._live_calls: dict[str, int] = {}
-        self._outcomes = ProviderOutcomeSidecarAccumulator(
-            outcome_sidecar_path or os.getenv(PROVIDER_OUTCOME_SIDECAR_ENV) or ""
-        )
 
     def _roll_day_locked(self) -> None:
         today = _utc_day()
@@ -1003,28 +932,11 @@ class ProviderUsageLedger:
         status: int,
         est_cost_microusd: int,
         caller: Mapping[str, Any] | None,
-        outcome_evidence: str = "",
-        live_call: bool | None = None,
-        sidecar_spend_microusd: int | None = None,
-        sidecar_spend_kind: str = "estimated",
     ) -> None:
         with self._lock:
             self._roll_day_locked()
             if evidence == "recorded":
                 self._live_calls[provider_id] = self._live_calls.get(provider_id, 0) + 1
-            self._outcomes.record(
-                provider_id=provider_id,
-                endpoint_class=endpoint_class,
-                evidence=outcome_evidence or evidence,
-                status=int(status),
-                live_call=(evidence == "recorded" if live_call is None else bool(live_call)),
-                spend_microusd=(
-                    int(est_cost_microusd)
-                    if sidecar_spend_microusd is None
-                    else int(sidecar_spend_microusd)
-                ),
-                spend_kind=sidecar_spend_kind,
-            )
             if self._path:
                 row = {
                     "schema_version": "1.0",
@@ -1049,8 +961,9 @@ class ProviderUsageLedger:
                     )
 
     def close(self) -> None:
-        self._outcomes.close()
+        """Keep the server shutdown hook while retaining no sidecar state."""
 
+        return None
 
 def _endpoint_class(rest: str) -> str:
     """Path-only endpoint class: no query strings, bounded length."""
@@ -1431,7 +1344,6 @@ class ProviderRegistryState:
 
 class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
     registry_state: ProviderRegistryState
-    usage_ledger: ProviderUsageLedger
 
     def handle_error(self, request, client_address) -> None:
         # Recycled/timing-out worker clients drop their sockets mid-request;
@@ -1448,14 +1360,7 @@ class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
         registry_state = getattr(self, "registry_state", None)
         if registry_state is not None:
             registry_state.stop()
-        try:
-            super().server_close()
-        finally:
-            # ThreadingHTTPServer waits for active handlers in server_close;
-            # flush only after no request can append another outcome.
-            usage_ledger = getattr(self, "usage_ledger", None)
-            if usage_ledger is not None:
-                usage_ledger.close()
+        super().server_close()
 
 
 _HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}
@@ -1530,10 +1435,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         status: int,
         live_cost: bool,
         est_cost_microusd: int | None = None,
-        outcome_evidence: str = "",
-        live_call: bool | None = None,
-        sidecar_spend_microusd: int | None = None,
-        sidecar_spend_kind: str = "estimated",
     ) -> None:
         if est_cost_microusd is None:
             est_cost_microusd = entry.est_cost_microusd() if live_cost else 0
@@ -1545,10 +1446,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             status=status,
             est_cost_microusd=est_cost_microusd,
             caller=self._caller(),
-            outcome_evidence=outcome_evidence,
-            live_call=live_call,
-            sidecar_spend_microusd=sidecar_spend_microusd,
-            sidecar_spend_kind=sidecar_spend_kind,
         )
 
     def _request_deadline(self, *, started: float) -> float:
@@ -1747,18 +1644,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 if block_reason == "cost_cap_reached"
                 else "research_lab_provider_cost_tracking_failed"
             )
-            soft_stop = block_reason == "cost_cap_reached" and _truthy_header(
-                self.headers.get(BUDGET_SOFT_STOP_HEADER)
-            )
-            status_code = 200 if soft_stop else 402
-            evidence_label = "budget_soft_stop" if soft_stop else "blocked"
             event = cost_ledger.block_event(
                 provider=entry.id,
                 endpoint=endpoint,
                 request_fingerprint=fingerprint,
                 reason=block_reason,
-                status_code=status_code,
-                evidence=evidence_label,
             )
             body = json.dumps(
                 {
@@ -1771,12 +1661,8 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             ).encode("utf-8")
             if is_leader:
                 self.store.release_lead(fingerprint)
-            self._ledger_row(entry, rest, fingerprint, evidence=evidence_label, status=status_code, live_cost=False)
-            headers = event.to_headers()
-            if soft_stop:
-                body = _budget_soft_stop_body(entry.id, upstream_url)
-                headers[BUDGET_SOFT_STOP_RESPONSE_HEADER] = "1"
-            self._respond(status_code, body, evidence=evidence_label, headers=headers)
+            self._ledger_row(entry, rest, fingerprint, evidence="blocked", status=402, live_cost=False)
+            self._respond(402, body, evidence="blocked", headers=event.to_headers())
             return
         # Live call: enforce the per-day quota before touching the upstream.
         if entry.per_day_quota > 0 and self.ledger.live_calls_today(entry.id) >= entry.per_day_quota:
@@ -1943,8 +1829,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 evidence="error",
                 status=502,
                 live_cost=False,
-                live_call=True,
-                sidecar_spend_microusd=0,
             )
             self._respond(502, b'{"error":"upstream unreachable"}', evidence="error", headers=event.to_headers())
             return
@@ -2015,13 +1899,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 measured_microusd = max(0, int(Decimal(estimate.cost_usd) * 1_000_000))
             except Exception:
                 measured_microusd = None
-        sidecar_spend_microusd = 0
-        if estimate.billable and 200 <= status < 300:
-            sidecar_spend_microusd = (
-                measured_microusd
-                if measured_microusd is not None
-                else max(0, entry.est_cost_microusd())
-            )
         self._ledger_row(
             entry,
             rest,
@@ -2030,14 +1907,6 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             status=status,
             live_cost=True,
             est_cost_microusd=measured_microusd,
-            outcome_evidence=evidence_label,
-            live_call=True,
-            sidecar_spend_microusd=sidecar_spend_microusd,
-            sidecar_spend_kind=(
-                "measured"
-                if estimate.cost_source in _MEASURED_PROVIDER_COST_SOURCES
-                else "estimated"
-            ),
         )
         self._respond(status, body, evidence=evidence_label, headers=event.to_headers())
 
@@ -2063,7 +1932,6 @@ def serve_evidence_proxy(
     registry_refresh_seconds: int | None = None,
     enforcement_mode: str | None = None,
     model_catalog: LiveTextModelCatalog | None = None,
-    outcome_sidecar_path: str = "",
 ) -> tuple[ThreadingHTTPServer, EvidenceStore, threading.Thread]:
     """Start the proxy; returns (server, store, thread). Caller owns shutdown.
 
@@ -2101,9 +1969,6 @@ def serve_evidence_proxy(
     store = EvidenceStore(baseline_dir=baseline_dir, day_cache_path=day_cache_path)
     ledger = ProviderUsageLedger(
         usage_ledger_path or os.getenv(USAGE_LEDGER_PATH_ENV) or "",
-        outcome_sidecar_path=(
-            outcome_sidecar_path or os.getenv(PROVIDER_OUTCOME_SIDECAR_ENV) or ""
-        ),
     )
     handler = type(
         "BoundProxyHandler",
@@ -2123,7 +1988,6 @@ def serve_evidence_proxy(
     )
     server = _CapabilityAwareHTTPServer((host, port), handler)
     server.registry_state = registry_state
-    server.usage_ledger = ledger
     registry_state.start()
     thread = threading.Thread(target=server.serve_forever, name="evidence-proxy", daemon=True)
     thread.start()
@@ -2140,10 +2004,6 @@ def main() -> int:
     parser.add_argument("--day-cache", default=os.getenv("RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE") or "")
     parser.add_argument("--registry", default=os.getenv(REGISTRY_PATH_ENV) or "")
     parser.add_argument("--usage-ledger", default=os.getenv(USAGE_LEDGER_PATH_ENV) or "")
-    parser.add_argument(
-        "--outcome-sidecar",
-        default=os.getenv(PROVIDER_OUTCOME_SIDECAR_ENV) or "",
-    )
     parser.add_argument(
         "--caller-token-map",
         default=os.getenv("RESEARCH_LAB_PROXY_CALLER_TOKEN_MAP") or "",
@@ -2166,7 +2026,6 @@ def main() -> int:
         registry_path=args.registry,
         dynamic_registry=True,
         usage_ledger_path=args.usage_ledger,
-        outcome_sidecar_path=args.outcome_sidecar,
         caller_context=caller_context,
         caller_token_map_path=args.caller_token_map,
     )

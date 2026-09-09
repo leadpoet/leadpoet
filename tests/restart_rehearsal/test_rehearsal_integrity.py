@@ -46,7 +46,6 @@ from tests.restart_rehearsal.fixture_contract import (
     load_rehearsal_metagraph_hotkeys,
 )
 from tests.restart_rehearsal.gateway_boundary_service import (
-    EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE as GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE,
     LocalPostgRESTServer,
     LocalPostgRESTState,
     RUNTIME_TABLES,
@@ -55,7 +54,6 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _direct_provider_store_tables,
     _measured_query_tables,
     _migration_seed_rows,
-    _migration_provider_outcome_contract,
     _migration_schema_contract,
     _schema_contract,
     _source_add_claim_control_contract,
@@ -73,20 +71,10 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
     DisposablePostgres,
     EVENT_PROJECTIONS_MIGRATION,
-    EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
     EXPECTED_APPLIED_MIGRATIONS,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
     EXPECTED_POSTGRES_CONTRACT_CHECKS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
-    HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
-    MAINTENANCE_PAUSE_MIGRATION,
-    PAUSED_CAPACITY_AGING_MIGRATION,
-    PROVIDER_OUTCOME_APPEND_MIGRATION,
-    PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
-    PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
-    PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
-    QUEUE_CAPACITY_GUARD_MIGRATION,
-    RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
     SOURCE_CATALOG_RESULT_REPLAY_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
@@ -148,23 +136,12 @@ def python39_import_event_loop():
         )
 
 
-def _provider_persistence_batch_fixture() -> dict[str, Any]:
+def _provider_evidence_cache_fixture() -> dict[str, Any]:
     return {
-        "batch_size": 5,
-        "durable_count": 5,
-        "batch_replay_exact": True,
-        "batch_conflict_head_exact": True,
-        "cache_put_exact": True,
-        "cache_replay_exact": True,
-        "schema": {
-            "schema_version": (
-                "leadpoet.provider_persistence_batch_contract.v1"
-            ),
-            "cache_put": "atomic_exact_row",
-            "outcome_append": "atomic_contiguous_batch",
-            "outcome_batch_max": 32,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "insert_status": "inserted",
+        "replay_status": "existing",
+        "durable_row_exact": True,
     }
 
 
@@ -325,8 +302,6 @@ def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
     }
 
 
-def _atomic_credit_resume_fixture() -> dict[str, Any]:
-    return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
 
 
 def _source_add_miner_status_contract_fixture() -> dict[str, Any]:
@@ -528,6 +503,85 @@ def test_gateway_cli_secret_matches_initial_durable_secret(
     assert current["SUPABASE_URL"] == (
         "https://qplwoislplkcegvdmbim.supabase.co"
     )
+
+
+def test_gateway_lineage_uses_exact_command_local_git_trust(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    assert contract_adapter._git_commit_is_ancestor.__kwdefaults__ == {
+        "repository": Path("/source")
+    }
+    repository = tmp_path / "source"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    git = ["git", "-C", str(repository)]
+    subprocess.run([*git, "config", "user.name", "Leadpoet Rehearsal"], check=True)
+    subprocess.run(
+        [*git, "config", "user.email", "restart-rehearsal@leadpoet.invalid"],
+        check=True,
+    )
+    commits = []
+    for message in ("first", "second"):
+        subprocess.run(
+            [*git, "commit", "--allow-empty", "-q", "-m", message],
+            check=True,
+        )
+        commits.append(
+            subprocess.run(
+                [*git, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    first, second = commits
+    global_config = tmp_path / "global-git-config"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    real_run = subprocess.run
+    commands: list[list[str]] = []
+
+    def capture_run(command, **kwargs):
+        commands.append(list(command))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(contract_adapter.subprocess, "run", capture_run)
+
+    assert contract_adapter._git_commit_is_ancestor(
+        first,
+        second,
+        repository=repository,
+    )
+    assert not contract_adapter._git_commit_is_ancestor(
+        second,
+        first,
+        repository=repository,
+    )
+    with pytest.raises(
+        ValueError,
+        match="gateway miner-maintenance lineage is unavailable",
+    ):
+        contract_adapter._git_commit_is_ancestor(
+            "f" * 40,
+            second,
+            repository=repository,
+        )
+
+    assert commands
+    for command in commands:
+        assert command[:5] == [
+            contract_adapter.REAL_GIT,
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+        ]
+        assert "safe.directory=*" not in command
+        assert "--global" not in command
+    assert not global_config.exists()
 
 
 def _receipt_graph_seed_contract() -> tuple[
@@ -1418,7 +1472,6 @@ def test_gateway_rehearsal_discovers_candidate_direct_provider_tables() -> None:
     source_root = Path(__file__).resolve().parents[2]
     assert _direct_provider_store_tables(source_root) >= {
         "research_lab_provider_evidence_cache_v2",
-        "research_lab_provider_outcome_checkpoints_v2",
     }
 
 
@@ -1597,7 +1650,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_chain_realized_epoch_settlements_v1",
             "research_lab_chain_realized_settlement_activation_v1",
             "research_lab_chain_realized_obligation_credits_v1",
-            "research_lab_provider_outcome_checkpoints_v2",
             "research_lab_attested_ancestry_checkpoints_v2",
             "research_lab_attested_ancestry_activations_v2",
             "research_lab_allocation_settlement_frontiers_v2",
@@ -1643,11 +1695,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_acquire_maintenance_lease",
             "research_lab_attested_transport_purpose_contract_v2",
             "research_lab_attested_transport_terminal_contract_v2",
-            "append_research_lab_provider_outcome_checkpoint_v2",
-            "research_lab_provider_outcome_contention_contract_v2",
-            "research_lab_provider_outcome_contention_contract_v3",
             "put_research_lab_provider_evidence_cache_v2",
-            "append_research_lab_provider_outcome_checkpoints_v2",
             "research_lab_provider_persistence_batch_contract_v1",
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
             "research_lab_champion_lifetime_credit_contract_v1",
@@ -1662,7 +1710,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_allocation_frontier_historical_source_contract_v1",
             "research_lab_source_catalog_replay_contract_v2",
             "research_lab_compact_checkpoint_graph_contract_v1",
-            "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_source_add_provider_origin_contract_v1",
@@ -1697,7 +1744,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_candidate_append_waterfall_receipt_v1",
             "research_lab_candidate_append_waterfall_metric_v1",
         ],
-        "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
             _compact_weight_settlement_contract_fixture()
         ),
@@ -1712,15 +1758,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "checks": {
             name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
         },
-        "provider_outcome_contention_contract": {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v3"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-            "candidate_checkpoint_hash": True,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,
@@ -1729,15 +1766,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "expired_holder_replaced": True,
             "invalid_ttl_rejected": True,
         },
-        "provider_outcome_append": {
-            "accepted_count": 1,
-            "rejected_count": 1,
-            "row_count": 3,
-            "contention_rollback_delta": 0,
-            "durable_head_conflict_verified": True,
-            "empty_head_conflict_verified": True,
-        },
-        "provider_persistence_batch": _provider_persistence_batch_fixture(),
+        "provider_evidence_cache": _provider_evidence_cache_fixture(),
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
@@ -1783,16 +1812,12 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     ] == frozenset(EXPECTED_FINALIZED_VIEW_COLUMNS)
     assert "research_lab_attested_transport_purpose_contract_v2" in rpcs
     assert "research_lab_attested_transport_terminal_contract_v2" in rpcs
-    assert "append_research_lab_provider_outcome_checkpoint_v2" in rpcs
-    assert "research_lab_provider_outcome_contention_contract_v2" in rpcs
-    assert "research_lab_provider_outcome_contention_contract_v3" in rpcs
     assert (
         "persist_research_lab_chain_realized_lifetime_settlement_v2"
         in rpcs
     )
     assert "research_lab_champion_lifetime_credit_contract_v1" in rpcs
     assert "research_lab_active_model_replay_contract_v2" in rpcs
-    assert "resume_research_lab_credit_blocked_run_v1" in rpcs
     assert "persist_research_lab_ancestry_checkpoint_v2" in rpcs
     assert "research_lab_ancestry_disclosure_lookup_contract_v1" in rpcs
     assert "leadpoet_production_parity_reader_contract_v1" in rpcs
@@ -1805,10 +1830,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         candidate_sha=COMMIT,
         relation_columns=relation_columns,
     ) == contract["seed_rows"]
-    assert _migration_provider_outcome_contract(
-        path,
-        candidate_sha=COMMIT,
-    ) == contract["provider_outcome_contention_contract"]
     with pytest.raises(RuntimeError, match="differs from candidate"):
         _migration_schema_contract(path, candidate_sha="2" * 40)
 
@@ -1818,20 +1839,6 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     ][:-1]
     path.write_text(json.dumps(stale_migrations), encoding="utf-8")
     with pytest.raises(RuntimeError, match="final migration order"):
-        _migration_schema_contract(path, candidate_sha=COMMIT)
-
-    missing_atomic_resume = json.loads(json.dumps(contract))
-    missing_atomic_resume.pop("atomic_credit_resume")
-    path.write_text(json.dumps(missing_atomic_resume), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="atomic credit resume evidence"):
-        _migration_schema_contract(path, candidate_sha=COMMIT)
-
-    missing_atomic_resume_rpc = json.loads(json.dumps(contract))
-    missing_atomic_resume_rpc["rpcs"].remove(
-        "resume_research_lab_credit_blocked_run_v1"
-    )
-    path.write_text(json.dumps(missing_atomic_resume_rpc), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="RPCs are unavailable"):
         _migration_schema_contract(path, candidate_sha=COMMIT)
 
     incomplete = json.loads(json.dumps(contract))
@@ -1929,9 +1936,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_catalog_replay_contract_v2",
             "research_lab_compact_checkpoint_graph_contract_v1",
             "put_research_lab_provider_evidence_cache_v2",
-            "append_research_lab_provider_outcome_checkpoints_v2",
             "research_lab_provider_persistence_batch_contract_v1",
-            "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_source_add_provider_origin_contract_v1",
@@ -1954,7 +1959,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_add_reserve_leg1_slot_v3",
             "research_lab_source_add_finalize_leg1_v3",
         ],
-        "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
             _compact_weight_settlement_contract_fixture()
         ),
@@ -1969,15 +1973,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         "checks": {
             name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS
         },
-        "provider_outcome_contention_contract": {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v3"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-            "candidate_checkpoint_hash": True,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        },
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
             "atomic_acquire": True,
@@ -1986,15 +1981,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "expired_holder_replaced": True,
             "invalid_ttl_rejected": True,
         },
-        "provider_outcome_append": {
-            "accepted_count": 1,
-            "rejected_count": 1,
-            "row_count": 3,
-            "contention_rollback_delta": 0,
-            "durable_head_conflict_verified": True,
-            "empty_head_conflict_verified": True,
-        },
-        "provider_persistence_batch": _provider_persistence_batch_fixture(),
+        "provider_evidence_cache": _provider_evidence_cache_fixture(),
         "allocation_settlement_frontier": {
             "frontier_hash": "sha256:" + "a" * 64,
             "source_receipt_hash": "sha256:" + "b" * 64,
@@ -2072,6 +2059,15 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         hashlib.sha256(contract_path.read_bytes()).hexdigest()
     )
     invalid_contracts = []
+    missing_cache = json.loads(json.dumps(contract))
+    missing_cache.pop("provider_evidence_cache")
+    invalid_contracts.append(missing_cache)
+    failed_cache_replay = json.loads(json.dumps(contract))
+    failed_cache_replay["provider_evidence_cache"]["replay_status"] = "inserted"
+    invalid_contracts.append(failed_cache_replay)
+    mismatched_cache_row = json.loads(json.dumps(contract))
+    mismatched_cache_row["provider_evidence_cache"]["durable_row_exact"] = False
+    invalid_contracts.append(mismatched_cache_row)
     missing_check = json.loads(json.dumps(contract))
     missing_check["checks"][
         "measured_settlement_receipt_projection_exact"
@@ -2087,14 +2083,6 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         reordered_migrations["applied_migrations"][0:2]
     )
     invalid_contracts.append(reordered_migrations)
-    missing_atomic_credit_resume = json.loads(json.dumps(contract))
-    missing_atomic_credit_resume.pop("atomic_credit_resume")
-    invalid_contracts.append(missing_atomic_credit_resume)
-    altered_atomic_credit_resume = json.loads(json.dumps(contract))
-    altered_atomic_credit_resume["atomic_credit_resume"]["row_counts"][
-        "resumed_run"
-    ] = 3
-    invalid_contracts.append(altered_atomic_credit_resume)
     for invalid in invalid_contracts:
         contract_path.write_text(json.dumps(invalid), encoding="utf-8")
         with pytest.raises(
@@ -2177,58 +2165,6 @@ def test_source_add_rehearsal_migrations_preserve_prerequisite_order() -> None:
     )
 
 
-def test_credit_resume_rehearsal_uses_final_production_queue_guard() -> None:
-    applied = list(EXPECTED_APPLIED_MIGRATIONS)
-    ordered = (
-        EVENT_PROJECTIONS_MIGRATION,
-        QUEUE_CAPACITY_GUARD_MIGRATION,
-        MAINTENANCE_PAUSE_MIGRATION,
-        PAUSED_CAPACITY_AGING_MIGRATION,
-        RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
-        HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
-        postgres_probe.ATOMIC_CREDIT_RESUME_MIGRATION,
-    )
-    positions = [applied.index(name) for name in ordered]
-
-    assert positions == sorted(positions)
-    assert "CREATE SCHEMA extensions;" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    assert (
-        "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;"
-        in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    )
-    assert "miner_hotkey TEXT NOT NULL" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    assert (
-        "CREATE TABLE public.research_loop_run_queue_events"
-        not in ALLOCATION_MIGRATION_PREREQUISITES_SQL
-    )
-
-    source_root = Path(__file__).resolve().parents[2]
-    projections = (source_root / "scripts" / EVENT_PROJECTIONS_MIGRATION).read_text(
-        encoding="utf-8"
-    )
-    final_guard = (
-        source_root / "scripts" / HOTKEY_ACTIVE_LOOP_CAP_MIGRATION
-    ).read_text(encoding="utf-8")
-    assert (
-        "CREATE TABLE IF NOT EXISTS public.research_loop_run_queue_events"
-        in projections
-    )
-    assert (
-        "CREATE OR REPLACE VIEW public.research_loop_run_queue_current"
-        in projections
-    )
-    assert "hotkey_capacity_text" in final_guard
-    assert "same_hotkey_count >= hotkey_capacity" in final_guard
-    assert EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE[
-        "hotkey_capacity_guard_exercised"
-    ] is True
-    assert EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE[
-        "rpc_security_contract_valid"
-    ] is True
-    assert (
-        GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE
-        == EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE
-    )
 
 
 def test_event_projection_prerequisites_cover_migration_28_base_relations() -> None:
@@ -5705,10 +5641,8 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "gateway/tee/execution_job_manager_v2.py",
         "gateway/tee/provider_broker_v2.py",
         "gateway/tee/provider_client_v2.py",
-        "gateway/tee/provider_outcome_store_v2.py",
         "gateway/tee/rpc_authority.py",
         "gateway/main.py",
-        "gateway/research_lab/source_add_trial_runner.py",
         "gateway/tee/code_hash.py",
         "gateway/tee/prepare_gateway_envelopes_v2.py",
         "gateway/tee/protected_workflows.py",
@@ -6012,6 +5946,116 @@ def test_workflow_runs_before_command_adapters_are_installed() -> None:
     adapters = script.index("make_adapter()")
     assert workflow < adapters
     assert "/harness/production_workflow_runner.py" in script[workflow:adapters]
+
+
+def _local_postgrest_startup_function() -> str:
+    script = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    start = script.index("wait_for_local_postgrest_startup() {")
+    end = script.index("\n}\ncleanup_boundary_service() {", start) + 2
+    return script[start:end]
+
+
+@pytest.mark.parametrize("component", ["gateway", "validator"])
+@pytest.mark.parametrize(
+    ("scenario", "expected_status", "expected_marker"),
+    [
+        (
+            "process_exit",
+            1,
+            "outcome=process_exit returncode=23",
+        ),
+        ("readiness_timeout", 1, "outcome=readiness_timeout"),
+        ("delayed_ready", 0, None),
+    ],
+)
+def test_local_postgrest_startup_gate_executes_bounded_outcomes(
+    component: str,
+    scenario: str,
+    expected_status: int,
+    expected_marker: str | None,
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    runner = tmp_path / "startup-gate.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/bin/bash",
+                "set -u",
+                _local_postgrest_startup_function(),
+                'COMPONENT="$1"',
+                'REHEARSAL_STATE_ROOT="$2"',
+                'scenario="$3"',
+                'BOUNDARY_SERVICE_PID=""',
+                'case "$scenario" in',
+                "  process_exit)",
+                "    (exit 23) &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    for _attempt in $(seq 1 100); do",
+                '      kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null || break',
+                "      /bin/sleep 0.01",
+                "    done",
+                "    ;;",
+                "  readiness_timeout)",
+                "    /bin/sleep 40 &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    ;;",
+                "  delayed_ready)",
+                '    (/bin/sleep 6; '
+                ': >"$REHEARSAL_STATE_ROOT/local-postgrest.ready"; '
+                "exec /bin/sleep 40) &",
+                "    BOUNDARY_SERVICE_PID=$!",
+                "    ;;",
+                "esac",
+                "gate_status=0",
+                "wait_for_local_postgrest_startup || gate_status=$?",
+                'if [ -n "$BOUNDARY_SERVICE_PID" ]; then',
+                '  kill "$BOUNDARY_SERVICE_PID" 2>/dev/null || true',
+                '  wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || true',
+                "fi",
+                'exit "$gate_status"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner.chmod(0o700)
+
+    started = time.monotonic()
+    result = subprocess.run(
+        ["/bin/bash", str(runner), component, str(state_root), scenario],
+        capture_output=True,
+        text=True,
+        timeout=40,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == expected_status
+    if scenario == "process_exit":
+        assert elapsed < 2
+    elif scenario == "delayed_ready":
+        assert 5.5 <= elapsed < 15
+    else:
+        assert 25 <= elapsed < 40
+    if expected_marker is None:
+        assert "REHEARSAL_POSTGREST_STARTUP" not in result.stderr
+        assert "ERROR: strict local PostgREST" not in result.stderr
+    else:
+        assert (
+            f"REHEARSAL_POSTGREST_STARTUP component={component} "
+            f"{expected_marker}"
+        ) in result.stderr
+        if scenario == "readiness_timeout":
+            marker_line = next(
+                line
+                for line in result.stderr.splitlines()
+                if line.startswith("REHEARSAL_POSTGREST_STARTUP")
+            )
+            assert "returncode=" not in marker_line
 
 
 def test_workflow_uses_the_strict_exact_external_boundaries(
@@ -6686,106 +6730,6 @@ def test_gateway_rehearsal_serves_source_add_restart_contracts(
         thread.join(timeout=2.0)
 
 
-def test_gateway_rehearsal_provider_checkpoint_rpc_matches_migration_134(
-    tmp_path,
-) -> None:
-    source_root = Path(__file__).resolve().parents[2]
-    fixture = json.loads(
-        (
-            source_root
-            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
-        ).read_text(encoding="utf-8")
-    )
-    table = "research_lab_provider_outcome_checkpoints_v2"
-    columns = frozenset(
-        {
-            "schema_version",
-            "artifact_master_key_ref_hash",
-            "utc_day",
-            "sequence",
-            "checkpoint_hash",
-            "previous_checkpoint_hash",
-            "state_document_hash",
-            "checkpoint_artifact_id",
-            "encrypted_checkpoint_doc",
-            "created_at",
-        }
-    )
-    contract = {
-        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
-        "lock_contention_status": "busy",
-        "stale_lineage_status": "conflict",
-        "candidate_checkpoint_hash": True,
-        "conflict_head_checkpoint_row": "encrypted_or_null",
-    }
-    state = LocalPostgRESTState(
-        state_root=tmp_path,
-        fixture=fixture,
-        source_root=source_root,
-        tables={table},
-        rpcs={"append_research_lab_provider_outcome_checkpoint_v2"},
-        relation_columns={table: columns},
-        provider_outcome_contract=contract,
-    )
-
-    def checkpoint(
-        sequence: int,
-        checkpoint_hash: str,
-        previous_hash: str,
-        suffix: str,
-    ) -> dict[str, Any]:
-        return {
-            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
-            "artifact_master_key_ref_hash": "sha256:" + "a" * 64,
-            "utc_day": "2026-07-29",
-            "sequence": sequence,
-            "checkpoint_hash": checkpoint_hash,
-            "previous_checkpoint_hash": previous_hash,
-            "state_document_hash": "sha256:" + suffix * 64,
-            "checkpoint_artifact_id": "sha256:" + suffix * 64,
-            "encrypted_checkpoint_doc": {"fixture": suffix},
-        }
-
-    first_hash = "sha256:" + "1" * 64
-    first = checkpoint(1, first_hash, "", "2")
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": first}
-    ) == {"status": "inserted", "checkpoint_hash": first_hash}
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": first}
-    ) == {"status": "existing", "checkpoint_hash": first_hash}
-
-    stale_hash = "sha256:" + "3" * 64
-    stale = checkpoint(1, stale_hash, "", "4")
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": stale}
-    ) == {
-        "status": "conflict",
-        "checkpoint_hash": stale_hash,
-        "head_checkpoint_row": first,
-    }
-
-    second_hash = "sha256:" + "5" * 64
-    second = checkpoint(2, second_hash, first_hash, "6")
-    lock = state._provider_outcome_lock(
-        second["artifact_master_key_ref_hash"],
-        second["utc_day"],
-    )
-    lock.acquire()
-    try:
-        assert state.append_provider_outcome_checkpoint(
-            {"checkpoint_row": second}
-        ) == {"status": "busy", "checkpoint_hash": second_hash}
-    finally:
-        lock.release()
-    assert state.append_provider_outcome_checkpoint(
-        {"checkpoint_row": second}
-    ) == {"status": "inserted", "checkpoint_hash": second_hash}
-    assert [
-        int(row["sequence"]) for row in state.rows[table]
-    ] == [1, 2]
-
-
 def test_gateway_rehearsal_ancestry_checkpoint_rpc_matches_migration_135(
     tmp_path,
 ) -> None:
@@ -7106,188 +7050,12 @@ def test_rehearsal_scoring_provider_calls_cross_the_coordinator_process() -> Non
     ]
 
     assert "rehearsal_inter_enclave_provider_execute" in runtime
-    assert "seal_artifact_over_attested_tls_v2" in runtime
-    assert "_PersistentInterEnclaveArtifactClient" in runtime
     assert "handle_inter_enclave_rpc(" in handler
     assert '"provider_execute"' in handler
-    assert '"rehearsal_inter_enclave_artifact_call"' in handler
-    assert '"artifact_seal_finish"' in handler
 
 
-def test_rehearsal_artifact_client_crosses_the_coordinator_process(
-    monkeypatch,
-) -> None:
-    calls: list[tuple[str, str, dict[str, object]]] = []
-
-    def call(
-        role: str,
-        method: str,
-        params: dict[str, object],
-    ) -> dict[str, object]:
-        calls.append((role, method, dict(params)))
-        return {"status": "accepted"}
-
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "_call_persistent_gateway_enclave",
-        call,
-    )
-    client = rehearsal_sitecustomize._PersistentInterEnclaveArtifactClient(
-        peer_role="gateway_scoring"
-    )
-    params = {"upload_id": "artifact_upload:" + "1" * 32}
-
-    assert client.call(
-        target_physical_role="gateway_coordinator",
-        method="artifact_seal_finish",
-        params=params,
-        channel_id="2" * 32,
-    ) == {"status": "accepted"}
-    assert calls == [
-        (
-            "gateway_coordinator",
-            "rehearsal_inter_enclave_artifact_call",
-            {
-                "peer_role": "gateway_scoring",
-                "method": "artifact_seal_finish",
-                "params": params,
-                "channel_id": "2" * 32,
-            },
-        )
-    ]
-
-    with pytest.raises(ValueError, match="artifact channel differs"):
-        client.call(
-            target_physical_role="gateway_scoring",
-            method="artifact_seal_finish",
-            params=params,
-            channel_id="2" * 32,
-        )
-    with pytest.raises(ValueError, match="artifact channel differs"):
-        client.call(
-            target_physical_role="gateway_coordinator",
-            method="provider_execute",
-            params=params,
-            channel_id="2" * 32,
-        )
-    with pytest.raises(ValueError, match="artifact channel differs"):
-        client.call(
-            target_physical_role="gateway_coordinator",
-            method="artifact_seal_finish",
-            params=params,
-            channel_id="not-a-channel",
-        )
 
 
-def test_rehearsal_coordinator_binds_artifact_calls_to_peer_boot_identity(
-    monkeypatch,
-) -> None:
-    calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
-
-    class CandidateRuntime:
-        def handle_inter_enclave_rpc(
-            self,
-            method: str,
-            params: dict[str, object],
-            peer: dict[str, object],
-        ) -> dict[str, object]:
-            calls.append((method, dict(params), dict(peer)))
-            return {"status": "candidate"}
-
-    runtime = CandidateRuntime()
-    state = {
-        "roles": {
-            "gateway_coordinator": {
-                "config_hash": "sha256:" + "1" * 64,
-            },
-            "gateway_scoring": {
-                "config_hash": "sha256:" + "2" * 64,
-            },
-        }
-    }
-    boot_identity = {
-        "physical_role": "gateway_scoring",
-        "role": "gateway_scoring",
-        "boot_identity_hash": "sha256:" + "3" * 64,
-    }
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "_gateway_release_input",
-        lambda: {
-            "gateway_roles": {
-                "gateway_coordinator": {},
-                "gateway_scoring": {},
-            }
-        },
-    )
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "_gateway_enclave_state",
-        lambda _mutate=None: (state, None),
-    )
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "_gateway_runtime_objects",
-        lambda _role, _state: {"tee_service": runtime},
-    )
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "_local_boot_identity",
-        lambda role, config_hash: {
-            **boot_identity,
-            "physical_role": role,
-            "config_hash": config_hash,
-        },
-    )
-    params = {"upload_id": "artifact_upload:" + "4" * 32}
-
-    assert rehearsal_sitecustomize._handle_gateway_enclave_rpc(
-        "gateway_coordinator",
-        "rehearsal_inter_enclave_artifact_call",
-        {
-            "peer_role": "gateway_scoring",
-            "method": "artifact_seal_finish",
-            "params": params,
-            "channel_id": "5" * 32,
-        },
-    ) == {"status": "candidate"}
-    assert calls == [
-        (
-            "artifact_seal_finish",
-            params,
-            {
-                "physical_role": "gateway_scoring",
-                "service_role": "gateway_scoring",
-                "boot_identity": {
-                    **boot_identity,
-                    "config_hash": "sha256:" + "2" * 64,
-                },
-            },
-        )
-    ]
-
-    with pytest.raises(ValueError, match="artifact peer differs"):
-        rehearsal_sitecustomize._handle_gateway_enclave_rpc(
-            "gateway_coordinator",
-            "rehearsal_inter_enclave_artifact_call",
-            {
-                "peer_role": "gateway_scoring",
-                "method": "provider_execute",
-                "params": params,
-                "channel_id": "5" * 32,
-            },
-        )
-    with pytest.raises(ValueError, match="artifact peer differs"):
-        rehearsal_sitecustomize._handle_gateway_enclave_rpc(
-            "gateway_coordinator",
-            "rehearsal_inter_enclave_artifact_call",
-            {
-                "peer_role": "gateway_scoring",
-                "method": "artifact_seal_finish",
-                "params": params,
-                "channel_id": "not-a-channel",
-            },
-        )
 
 
 def test_rehearsal_gateway_boot_generation_separates_restarts(
@@ -8161,8 +7929,83 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
     assert '"VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=' in script
     assert '"VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=' in script
     assert '"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT=' in script
+    assert '"VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE=' in script
+    assert "lab_arena_restart_guard_handoff.py validate-request" in script
+    assert "lab_arena_restart_guard_handoff.py write-permit" in script
+    assert "run_rehearsal_lab_arena_guard authorize" in script
+    assert "run_rehearsal_lab_arena_guard release" in script
+    assert (
+        '"VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='
+        '$ACTIVE_RELEASE_AUTHORITY_SHA"'
+    ) in script
+    assert (
+        '"VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT='
+        '$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"'
+    ) in script
+    assert "mktemp -d /tmp/validator-restart-controller-bootstrap.XXXXXXXX" in script
+    assert (
+        "^/tmp/validator-restart-controller-bootstrap\\.[A-Za-z0-9]+$"
+        in script
+    )
+    assert (
+        'archive "$ACTIVE_RELEASE_AUTHORITY_SHA"'
+        in script
+    )
+    assert (
+        'find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type f -exec chmod 400'
+        in script
+    )
+    assert (
+        'find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type d -exec chmod 500'
+        in script
+    )
+    assert script.count(
+        '--authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA"'
+    ) == 3
+    assert '--authority-commit "$CANDIDATE_SHA"' not in script
+    assert "rehearsal accepted a foreign Arena guard permit" in script
+    assert "rehearsal accepted a stale Arena guard authority" in script
+    assert '"/proc/$ARENA_GUARD_CONTROLLER_PID/stat"' in script
+    validator_restart = script.index(
+        "bash /home/ec2-user/validator_restart.sh",
+        script.index('echo "REHEARSAL_START component=validator'),
+    )
+    controller_complete = script.index(
+        ': >"$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE"',
+        validator_restart,
+    )
+    validator_ready = script.index(
+        "run_rehearsal_lab_arena_guard ready",
+        controller_complete,
+    )
+    validator_release = script.index(
+        "release_rehearsal_lab_arena_guard validator",
+        validator_ready,
+    )
+    assert (
+        validator_restart
+        < controller_complete
+        < validator_ready
+        < validator_release
+    )
     assert '"${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \\' in script
     assert '"${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \\' in script
+
+
+def test_exact_rehearsal_gateway_secret_uses_local_arena_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    secret = contract_adapter._gateway_secret()
+    assert secret["LAB_ARENA_SUPABASE_URL"] == (
+        contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    assert secret["LAB_ARENA_SUPABASE_ANON_KEY"] == "rehearsal-secret"
+    assert secret["LAB_ARENA_SERVICE_JWT"] == "rehearsal.header.signature"
 
 
 def test_rehearsal_inherits_the_installed_cutover_manifest() -> None:

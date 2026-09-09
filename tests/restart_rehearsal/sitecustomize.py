@@ -296,11 +296,11 @@ class _LocalSupabaseHTTPSConnection:
             "authorization",
             "apikey",
             "connection",
-            "host",
         }
         normalized_method = str(method).upper()
         if body is not None:
             expected_headers |= {"content-length", "content-type"}
+        supplied_host = normalized_headers.pop("host", None)
         if (
             self._requested
             or normalized_method not in {"GET", "POST"}
@@ -310,11 +310,20 @@ class _LocalSupabaseHTTPSConnection:
             or parsed.fragment
             or encode_chunked
             or set(normalized_headers) != expected_headers
-            or normalized_headers.get("host") != _PRODUCTION_SUPABASE_HOST
+            or supplied_host not in (None, _PRODUCTION_SUPABASE_HOST)
             or normalized_headers.get("accept") != "application/json"
-            or normalized_headers.get("apikey") != "rehearsal-secret"
-            or normalized_headers.get("authorization")
-            != "Bearer rehearsal-secret"
+            or (
+                normalized_headers.get("apikey"),
+                normalized_headers.get("authorization"),
+            )
+            not in {
+                ("rehearsal-public", "Bearer rehearsal-public"),
+                ("rehearsal-secret", "Bearer rehearsal-secret"),
+                (
+                    "rehearsal-secret",
+                    "Bearer rehearsal.header.signature",
+                ),
+            }
             or normalized_headers.get("connection") != "close"
             or (normalized_method == "GET" and body is not None)
             or (normalized_method == "POST" and not isinstance(body, bytes))
@@ -545,6 +554,7 @@ def _subnet_epoch_state_at(block: int) -> dict[str, int]:
     next_epoch_block = _subnet_epoch_transition_block(epoch_index + 1)
     return {
         "Tempo": next_epoch_block - last_epoch_block,
+        "RevealPeriodEpochs": 1,
         "LastEpochBlock": last_epoch_block,
         "PendingEpochAt": next_epoch_block,
         "SubnetEpochIndex": epoch_index,
@@ -1008,10 +1018,10 @@ class _LocalSubstrate:
 
     def query(
         self,
-        *,
         module: str,
         storage_function: str,
         params: list[Any],
+        *,
         block_hash: str,
     ) -> _ScaleValue:
         exact_block = _block_number(block_hash)
@@ -1289,7 +1299,6 @@ def _call_persistent_gateway_enclave(
     """Cross one strict process boundary into a persistent role enclave."""
 
     if method not in {
-        "rehearsal_inter_enclave_artifact_call",
         "rehearsal_inter_enclave_provider_execute",
     }:
         raise ValueError("persistent inter-enclave method is not authorized")
@@ -1366,46 +1375,6 @@ def _call_persistent_gateway_enclave(
     return response["result"]
 
 
-class _PersistentInterEnclaveArtifactClient:
-    """Route production artifact chunks into the persistent coordinator role."""
-
-    def __init__(self, *, peer_role: str) -> None:
-        self._peer_role = str(peer_role)
-
-    def call(
-        self,
-        *,
-        target_physical_role: str,
-        method: str,
-        params: Mapping[str, Any],
-        channel_id: str,
-    ) -> dict[str, Any]:
-        if (
-            target_physical_role != "gateway_coordinator"
-            or method
-            not in {
-                "artifact_seal_begin",
-                "artifact_seal_chunk",
-                "artifact_seal_finish",
-                "artifact_seal_cancel",
-            }
-            or not isinstance(params, Mapping)
-            or re.fullmatch(r"[0-9a-f]{32}", str(channel_id or "")) is None
-        ):
-            raise ValueError("persistent artifact channel differs")
-        result = _call_persistent_gateway_enclave(
-            "gateway_coordinator",
-            "rehearsal_inter_enclave_artifact_call",
-            {
-                "peer_role": self._peer_role,
-                "method": method,
-                "params": dict(params),
-                "channel_id": str(channel_id),
-            },
-        )
-        if not isinstance(result, Mapping):
-            raise ValueError("persistent artifact response differs")
-        return dict(result)
 
 
 def _local_transport_certificate(role: str) -> bytes:
@@ -2453,34 +2422,6 @@ def _gateway_runtime_objects(
                     {"peer_role": role, "request": dict(request)},
                 )
             )
-        if role == "gateway_coordinator":
-            tee_service.seal_v2_inter_enclave_artifact = (
-                lambda *, plaintext, job_id, purpose, artifact_kind: vault.seal(
-                    bytes(plaintext),
-                    job_id=str(job_id),
-                    purpose=str(purpose),
-                    artifact_kind=str(artifact_kind),
-                )
-            )
-        else:
-            from gateway.tee.inter_enclave_artifact_v2 import (
-                seal_artifact_over_attested_tls_v2,
-            )
-
-            artifact_client = _PersistentInterEnclaveArtifactClient(
-                peer_role=role
-            )
-            tee_service.seal_v2_inter_enclave_artifact = (
-                lambda *, plaintext, job_id, purpose, artifact_kind: (
-                    seal_artifact_over_attested_tls_v2(
-                        client=artifact_client,
-                        plaintext=bytes(plaintext),
-                        job_id=str(job_id),
-                        purpose=str(purpose),
-                        artifact_kind=str(artifact_kind),
-                    )
-                )
-            )
         objects = {
             "runtime": runtime,
             "vault": vault,
@@ -2787,43 +2728,6 @@ def _handle_gateway_enclave_rpc(
     if method.startswith("v2_") and role_state is None:
         raise ValueError("local enclave runtime is not configured")
     config_hash = str((role_state or {}).get("config_hash") or "")
-    if role == "gateway_coordinator" and method == (
-        "rehearsal_inter_enclave_artifact_call"
-    ):
-        if set(params) != {"peer_role", "method", "params", "channel_id"}:
-            raise ValueError("local inter-enclave artifact fields differ")
-        peer_role = str(params.get("peer_role") or "")
-        target_method = str(params.get("method") or "")
-        target_params = params.get("params")
-        channel_id = str(params.get("channel_id") or "")
-        peer_state = state.get("roles", {}).get(peer_role)
-        if (
-            peer_role != "gateway_scoring"
-            or target_method
-            not in {
-                "artifact_seal_begin",
-                "artifact_seal_chunk",
-                "artifact_seal_finish",
-                "artifact_seal_cancel",
-            }
-            or not isinstance(target_params, Mapping)
-            or re.fullmatch(r"[0-9a-f]{32}", channel_id) is None
-            or not isinstance(peer_state, Mapping)
-        ):
-            raise ValueError("local inter-enclave artifact peer differs")
-        peer_config_hash = str(peer_state.get("config_hash") or "")
-        objects = _gateway_runtime_objects(role, role_state)
-        return objects["tee_service"].handle_inter_enclave_rpc(
-            target_method,
-            dict(target_params),
-            {
-                "physical_role": peer_role,
-                "service_role": ROLE_SPECS[peer_role]["service_role"],
-                "boot_identity": _local_boot_identity(
-                    peer_role, peer_config_hash
-                ),
-            },
-        )
     if role == "gateway_coordinator" and method == (
         "rehearsal_inter_enclave_provider_execute"
     ):

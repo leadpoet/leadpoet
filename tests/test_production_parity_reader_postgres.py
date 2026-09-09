@@ -3,12 +3,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 import uuid
 
 import psycopg2
 from psycopg2 import OperationalError
 import pytest
+
+from leadpoet_canonical.production_parity import (
+    CONTRACT_SCHEMA_VERSION,
+    ProductionParityError,
+    SNAPSHOT_SCHEMA_VERSION,
+    sha256_bytes,
+    sha256_json,
+)
+from scripts import production_parity_snapshot as parity_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +91,10 @@ def postgres() -> dict[str, object]:
                 "CREATE TABLE public.parity_source "
                 "(id bigint PRIMARY KEY, value text NOT NULL); "
                 "INSERT INTO public.parity_source VALUES (1, 'shape'); "
+                "CREATE TABLE public.research_lab_finalized_allocation_epochs_v2 "
+                "(netuid integer NOT NULL, epoch_id integer NOT NULL); "
+                "INSERT INTO public.research_lab_finalized_allocation_epochs_v2 "
+                "VALUES (71, 25000); "
                 "CREATE SEQUENCE public.parity_sequence"
             )
         connection.close()
@@ -141,6 +155,77 @@ def _contract(postgres: dict[str, object]) -> dict[str, object]:
             return json.loads(value) if isinstance(value, str) else value
     finally:
         connection.close()
+
+
+def _snapshot_contract() -> dict[str, object]:
+    candidate_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD^"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    migrations = parity_snapshot._source_migrations(
+        root=ROOT,
+        source_sha=candidate_sha,
+        candidate_sha=candidate_sha,
+    )
+    body = {
+        "schema_version": CONTRACT_SCHEMA_VERSION,
+        "base_sha": base_sha,
+        "candidate_sha": candidate_sha,
+        "changed_paths": [],
+        "risk": {
+            "class": "low",
+            "full_physical_required": False,
+            "reasons": ["documentation_or_test_only"],
+        },
+        "source_commitments": [
+            {
+                "path": "leadpoet_canonical/production_parity.py",
+                "sha256": sha256_bytes(
+                    subprocess.run(
+                        [
+                            "git",
+                            "show",
+                            f"{candidate_sha}:leadpoet_canonical/production_parity.py",
+                        ],
+                        cwd=ROOT,
+                        capture_output=True,
+                        check=True,
+                    ).stdout
+                ),
+            }
+        ],
+        "migrations": migrations,
+        "behavior_contract_hash": "sha256:" + "1" * 64,
+        "protected_manifest_hash": "sha256:" + "2" * 64,
+        "historical_oracle_hash": "sha256:" + "3" * 64,
+        "runtime_config_hash": "sha256:" + "4" * 64,
+        "runtime_config_keys": [],
+        "policy_commitments": {},
+    }
+    return {**body, "contract_hash": sha256_json(body)}
+
+
+def _pinned_postgres_image() -> str:
+    raw = _docker(
+        "image",
+        "inspect",
+        "postgres:15",
+        "--format",
+        "{{json .RepoDigests}}",
+    ).stdout.strip()
+    digests = json.loads(raw)
+    assert isinstance(digests, list) and digests
+    return str(digests[0])
 
 
 def test_reader_migration_is_clone_safe_read_only_and_idempotent(postgres):
@@ -248,3 +333,136 @@ def test_migration_refuses_an_existing_superuser_collision(postgres):
         finally:
             connection.close()
         _apply_migration(postgres)
+
+
+def test_snapshot_v5_real_capture_verify_restore_is_candidate_bound(
+    postgres,
+    monkeypatch,
+    tmp_path: Path,
+):
+    _apply_migration(postgres)
+    assert _bind(postgres, PASSWORD)["status"] == "bound"
+    target_database = "leadpoet_parity_snapshot_v5"
+    connection = _admin(postgres)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f'DROP DATABASE IF EXISTS "{target_database}"')
+            cursor.execute(f'CREATE DATABASE "{target_database}"')
+    finally:
+        connection.close()
+
+    contract = _snapshot_contract()
+    contract_path = tmp_path / "contract.json"
+    manifest_path = tmp_path / "snapshot-manifest.json"
+    archive_path = tmp_path / "production.dump"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    original_postgres_env = parity_snapshot._postgres_env
+    client_host = (
+        "host.docker.internal" if sys.platform == "darwin" else "127.0.0.1"
+    )
+
+    def local_postgres_env(dsn: str, *, read_only: bool):
+        env, host = original_postgres_env(dsn, read_only=read_only)
+        env["PGSSLMODE"] = "disable"
+        env["PGHOST"] = client_host
+        return env, host
+
+    monkeypatch.setattr(parity_snapshot, "_postgres_env", local_postgres_env)
+    postgres_image = _pinned_postgres_image()
+    source_dsn = (
+        f"postgresql://{READER}:{PASSWORD}@production.test:"
+        f"{postgres['port']}/{DATABASE}"
+    )
+    target_dsn = (
+        "postgresql://postgres:postgres@127.0.0.1:"
+        f"{postgres['port']}/{target_database}"
+    )
+
+    manifest = parity_snapshot.capture_snapshot(
+        contract_path=contract_path,
+        archive_path=archive_path,
+        manifest_path=manifest_path,
+        dsn=source_dsn,
+        expected_production_host="production.test",
+        ttl_hours=1,
+        source_sha=str(contract["base_sha"]),
+        postgres_image=postgres_image,
+    )
+    evidence = parity_snapshot.verify_snapshot(
+        contract_path=contract_path,
+        manifest_path=manifest_path,
+        archive_path=archive_path,
+        expected_production_host="production.test",
+        postgres_image=postgres_image,
+    )
+    restored = parity_snapshot.restore_snapshot(
+        root=ROOT,
+        contract_path=contract_path,
+        manifest_path=manifest_path,
+        archive_path=archive_path,
+        target_dsn=target_dsn,
+        production_host="production.test",
+        postgres_image=postgres_image,
+    )
+
+    assert manifest["schema_version"] == SNAPSHOT_SCHEMA_VERSION
+    assert set(manifest["database"]) == {
+        "server_version_num",
+        "relation_count",
+        "total_relation_bytes",
+        "largest_relation_bytes",
+        "capture_utc_date",
+        "target_rebenchmark_date",
+        "source_role",
+        "weight_history_scope",
+    }
+    assert manifest["database"]["weight_history_scope"] == {
+        "netuid": 71,
+        "start_epoch": 25000,
+        "end_epoch": 25000,
+        "expected_rows": 1,
+    }
+    assert evidence["candidate_sha"] == contract["candidate_sha"]
+    assert restored["manifest_hash"] == manifest["manifest_hash"]
+    assert restored["migration_delta"] == []
+    clone = psycopg2.connect(
+        host="127.0.0.1",
+        port=postgres["port"],
+        dbname=target_database,
+        user="postgres",
+        password="postgres",
+    )
+    try:
+        with clone.cursor() as cursor:
+            cursor.execute("SELECT id, value FROM public.parity_source")
+            assert cursor.fetchall() == [(1, "shape")]
+    finally:
+        clone.close()
+
+    wrong_candidate = dict(contract)
+    wrong_candidate["candidate_sha"] = "f" * 40
+    wrong_body = {
+        key: value
+        for key, value in wrong_candidate.items()
+        if key != "contract_hash"
+    }
+    wrong_candidate["contract_hash"] = sha256_json(wrong_body)
+    contract_path.write_text(json.dumps(wrong_candidate), encoding="utf-8")
+    with pytest.raises(ProductionParityError, match="capture commit differs"):
+        parity_snapshot.verify_snapshot(
+            contract_path=contract_path,
+            manifest_path=manifest_path,
+            archive_path=archive_path,
+            postgres_image=postgres_image,
+        )
+
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    with archive_path.open("ab") as handle:
+        handle.write(b"tampered")
+    with pytest.raises(ProductionParityError, match="archive size differs"):
+        parity_snapshot.verify_snapshot(
+            contract_path=contract_path,
+            manifest_path=manifest_path,
+            archive_path=archive_path,
+            postgres_image=postgres_image,
+        )

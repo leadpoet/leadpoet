@@ -37,6 +37,7 @@ from html.parser import HTMLParser
 import json
 import logging
 import re
+from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -59,9 +60,13 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 _HTTP_TIMEOUT_SECS = 5
-_MAX_BYTES = 200_000  # cap body read to 200KB — plenty for title + first paragraph
+# Large first-party sites can place identity metadata after bundled style data.
+# Keep the single fetch bounded while covering the observed 1.5 MB homepage.
+_MAX_BYTES = 2_000_000
 _TRANSIENT_FETCH_ATTEMPTS = 2
 _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
+_MAX_ORGANIZATION_LEGAL_NAME_ALIASES = 3
+_MAX_ORGANIZATION_NAME_LENGTH = 200
 
 # Headers that look like a real browser.  Some company sites refuse
 # default ``python-aiohttp/...`` user agents with 403, which would
@@ -93,6 +98,15 @@ _PARKED_DOMAIN_PATTERNS = [
     r"\bdefault web site page\b",
 ]
 _PARKED_DOMAIN_RE = re.compile("|".join(_PARKED_DOMAIN_PATTERNS), re.IGNORECASE)
+_COPYRIGHT_LEGAL_NAME_RE = re.compile(
+    r"(?:©|\bcopyright\b)\s*"
+    r"(?:\d{4}(?:\s*[-\N{EN DASH}]\s*\d{4})?\s*)?"
+    r"(?P<name>[a-z][a-z0-9&.,'’ -]{1,180}?\b(?:limited|ltd\.?|"
+    r"incorporated|inc\.?|corporation|corp\.?|llc|plc|pty limited|"
+    r"pty ltd\.?))"
+    r"(?=\s+(?:abn|acn|all rights reserved)\b|[\s.]*$)",
+    re.IGNORECASE,
+)
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
@@ -216,15 +230,65 @@ def _canonical_linkedin_company_url(value: str) -> str:
     return f"https://www.linkedin.com/company/{slug}"
 
 
-def _organization_same_as_urls(value) -> list[str]:
-    """Extract LinkedIn URLs only from JSON-LD Organization ``sameAs`` data."""
+def _organization_identity_records(value) -> list[dict[str, object]]:
+    """Extract bounded root Organization identity records from JSON-LD."""
 
     try:
         document = json.loads(value)
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
 
+    roots = document if isinstance(document, list) else [document]
+    candidates: list[object] = []
+    for root in roots[:20]:
+        if not isinstance(root, dict):
+            continue
+        candidates.append(root)
+        graph = root.get("@graph")
+        if isinstance(graph, list):
+            candidates.extend(graph[:20])
+
+    records: list[dict[str, object]] = []
+    for node in candidates:
+        if not isinstance(node, dict):
+            continue
+        raw_type = node.get("@type", "")
+        types = raw_type if isinstance(raw_type, list) else [raw_type]
+        if not any(str(item or "").casefold() == "organization" for item in types):
+            continue
+        raw_same_as = node.get("sameAs", [])
+        same_as_candidates = (
+            raw_same_as if isinstance(raw_same_as, list) else [raw_same_as]
+        )
+        linkedins = list(
+            dict.fromkeys(
+                canonical
+                for candidate in same_as_candidates[:20]
+                if (canonical := _canonical_linkedin_company_url(candidate))
+            )
+        )[:10]
+        records.append(
+            {
+                "name": node.get("name"),
+                "legal_name": node.get("legalName"),
+                "url": node.get("url"),
+                "linkedin_urls": linkedins,
+            }
+        )
+        if len(records) == 10:
+            break
+    return records
+
+
+def _organization_same_as_urls(value) -> list[str]:
+    """Extract LinkedIn URLs from nested JSON-LD Organization ``sameAs`` data."""
+
     urls: list[str] = []
+
+    try:
+        document = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
 
     def visit(node) -> None:
         if isinstance(node, dict):
@@ -236,9 +300,7 @@ def _organization_same_as_urls(value) -> list[str]:
             if is_organization:
                 raw_same_as = node.get("sameAs", [])
                 candidates = (
-                    raw_same_as
-                    if isinstance(raw_same_as, list)
-                    else [raw_same_as]
+                    raw_same_as if isinstance(raw_same_as, list) else [raw_same_as]
                 )
                 for candidate in candidates:
                     canonical = _canonical_linkedin_company_url(candidate)
@@ -289,27 +351,33 @@ class _HomepageIdentityParser(HTMLParser):
         self._in_title = False
         self._title_parts: list[str] = []
         self.metadata_names: list[str] = []
+        self.copyright_legal_names: list[str] = []
         self.linkedin_urls: list[str] = []
+        self.organization_records: list[dict[str, object]] = []
         self._json_ld_parts: list[str] | None = None
+        self._nonvisible_depth = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        tag_name = tag.casefold()
         attributes = {
             str(key or "").casefold(): str(value or "").strip()
             for key, value in attrs
         }
-        if tag.casefold() == "title":
+        if tag_name in {"script", "style", "template"}:
+            self._nonvisible_depth += 1
+        if tag_name == "title":
             self._in_title = True
             return
-        if tag.casefold() in {"a", "link"}:
+        if tag_name in {"a", "link"}:
             linkedin = _canonical_linkedin_company_url(attributes.get("href", ""))
             if linkedin:
                 self.linkedin_urls.append(linkedin)
-        if tag.casefold() == "script":
+        if tag_name == "script":
             script_type = attributes.get("type", "").split(";", 1)[0].casefold()
             if script_type == "application/ld+json":
                 self._json_ld_parts = []
             return
-        if tag.casefold() != "meta":
+        if tag_name != "meta":
             return
         key = (
             attributes.get("property")
@@ -323,19 +391,28 @@ class _HomepageIdentityParser(HTMLParser):
                 self.metadata_names.append(content[:200])
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.casefold() == "title":
+        tag_name = tag.casefold()
+        if tag_name == "title":
             self._in_title = False
-        elif tag.casefold() == "script" and self._json_ld_parts is not None:
-            self.linkedin_urls.extend(
-                _organization_same_as_urls("".join(self._json_ld_parts))
-            )
+        elif tag_name == "script" and self._json_ld_parts is not None:
+            json_ld = "".join(self._json_ld_parts)
+            records = _organization_identity_records(json_ld)
+            self.organization_records.extend(records)
+            self.linkedin_urls.extend(_organization_same_as_urls(json_ld))
             self._json_ld_parts = None
+        if tag_name in {"script", "style", "template"}:
+            self._nonvisible_depth = max(0, self._nonvisible_depth - 1)
 
     def handle_data(self, data: str) -> None:
         if self._in_title and data.strip():
             self._title_parts.append(data.strip())
         if self._json_ld_parts is not None:
             self._json_ld_parts.append(data)
+        if self._nonvisible_depth == 0:
+            self.copyright_legal_names.extend(
+                match.group("name").strip()[:200]
+                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(data[:500])
+            )
 
     @property
     def title(self) -> str:
@@ -350,7 +427,7 @@ def _homepage_company_names(page_text: str) -> list[str]:
         parser.feed(str(page_text or "")[:_MAX_BYTES])
     except Exception:
         return []
-    candidates = list(parser.metadata_names)
+    candidates = [*parser.metadata_names, *parser.copyright_legal_names]
     if parser.title:
         candidates.append(parser.title)
         candidates.extend(
@@ -372,8 +449,63 @@ def _homepage_company_names(page_text: str) -> list[str]:
     ))[:10]
 
 
+def _verified_organization_legal_name_aliases(
+    page_text: str,
+    *,
+    observed_domain: str,
+    observed_name: str,
+    observed_linkedin: str,
+) -> list[str]:
+    """Return legal names explicitly bound to the verified homepage entity."""
+
+    parser = _HomepageIdentityParser()
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+        parser.close()
+    except Exception:
+        return []
+    aliases: list[str] = []
+    for record in parser.organization_records[:10]:
+        brand = record.get("name")
+        legal_name = record.get("legal_name")
+        organization_url = record.get("url")
+        linkedins = record.get("linkedin_urls")
+        if not all(
+            isinstance(value, str) and value.strip() and len(value.strip()) <= limit
+            for value, limit in (
+                (brand, _MAX_ORGANIZATION_NAME_LENGTH),
+                (legal_name, _MAX_ORGANIZATION_NAME_LENGTH),
+                (organization_url, 2048),
+            )
+        ) or not isinstance(linkedins, list):
+            continue
+        try:
+            organization_domain = _registrable_domain(organization_url)
+        except Exception:
+            continue
+        if organization_domain != observed_domain or observed_linkedin not in linkedins:
+            continue
+        brand_receipt = evaluate_company_identity(
+            submitted_name=observed_name,
+            submitted_website=f"https://{observed_domain}",
+            submitted_linkedin=observed_linkedin,
+            observed_name=brand,
+            observed_website=organization_url,
+            observed_linkedin=observed_linkedin,
+            evidence_source="company_homepage",
+        )
+        if brand_receipt["decision"] != "match":
+            continue
+        alias = legal_name.strip()
+        if alias not in aliases:
+            aliases.append(alias)
+        if len(aliases) == _MAX_ORGANIZATION_LEGAL_NAME_ALIASES:
+            break
+    return aliases
+
+
 def _identity_result(
-    receipt: dict[str, str],
+    receipt: Mapping[str, object],
     reason: str,
     *,
     actual_final_url: str = "",
@@ -565,8 +697,21 @@ async def verify_company_exists(
         None,
     )
     if matched is not None:
+        matched_receipt: dict[str, object] = dict(matched)
+        matched_linkedin = (
+            "https://www.linkedin.com/company/"
+            f"{matched['observed_linkedin_slug']}"
+        )
+        legal_name_aliases = _verified_organization_legal_name_aliases(
+            text,
+            observed_domain=matched["observed_domain"],
+            observed_name=matched["observed_name"],
+            observed_linkedin=matched_linkedin,
+        )
+        if legal_name_aliases:
+            matched_receipt["verified_legal_name_aliases"] = legal_name_aliases
         return _identity_result(
-            matched,
+            matched_receipt,
             "verified: independently observed homepage name, final domain, "
             "and exact LinkedIn company identity",
             actual_final_url=observed_url,
@@ -576,9 +721,18 @@ async def verify_company_exists(
         None,
     )
     if conflict is not None:
+        # Page titles can be marketing copy, and outgoing company links can
+        # name a parent, partner, or an old LinkedIn slug. Their disagreement
+        # is not a proven entity conflict on the same final domain. Defer to
+        # the existing independent web verifier; do not mark this as a match
+        # or supply it as a verified identity anchor. Invalid domains, parked
+        # pages, and cross-domain redirects remain terminal checks above.
+        unresolved = dict(conflict)
+        unresolved.update(decision="unavailable", reason_code="identity_not_proven")
         return _identity_result(
-            conflict,
-            f"company identity conflict: {conflict['reason_code']}",
+            unresolved,
+            "homepage identity evidence unavailable: page metadata and links "
+            "do not prove the submitted identity",
             actual_final_url=observed_url,
         )
     unavailable = next(

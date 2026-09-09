@@ -5571,18 +5571,14 @@ class Validator(BaseValidatorNeuron):
             # emissions if BURN_TARGET_UID / EXPECTED_BURN_TARGET_HOTKEY
             # are misconfigured or the on-chain UID owner has changed).
             # ═══════════════════════════════════════════════════════════════════
-            # QUALIFICATION CHAMPION: Read from local JSON
-            # Determines dynamic split: champion active → 90/10, none → 100/0
+            # Arena reward values come from the verified public reward basis.
             # ═══════════════════════════════════════════════════════════════════
-            champion_hotkey = None
             champion_uid = None
             effective_champion_share = 0.0
-            champion_active = False
 
             if lab_arena_rewards_enabled:
                 champion_uid = lab_arena_values["champion_uid"]
                 effective_champion_share = float(lab_arena_values["effective_champion_share"])
-                champion_active = champion_uid is not None
                 print(
                     "   👑 LAB ARENA KING: share=%.4f uid=%s week=%s eligible=%s"
                     % (
@@ -5592,33 +5588,6 @@ class Validator(BaseValidatorNeuron):
                         lab_arena_values.get("eligible"),
                     )
                 )
-            elif CHAMPION_SHARE > 0 and _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION"):
-                try:
-                    champion_data = self._read_qualification_champion()
-
-                    if champion_data:
-                        champion_hotkey = champion_data.get("miner_hotkey")
-                        print(f"   👑 QUALIFICATION CHAMPION (from local JSON):")
-                        print(f"      Model: {champion_data.get('model_name', 'Unknown')}")
-                        print(f"      Miner: {champion_hotkey[:20] if champion_hotkey else 'Unknown'}...")
-                        print(f"      Score: {champion_data.get('score', 0):.2f}")
-                        print(f"      Since: {champion_data.get('became_champion_at', 'Unknown')}")
-
-                        if champion_hotkey and champion_hotkey in self.metagraph.hotkeys:
-                            champion_uid = self.metagraph.hotkeys.index(champion_hotkey)
-                            effective_champion_share = CHAMPION_SHARE
-                            champion_active = True
-                            print(f"      UID: {champion_uid}")
-                            print(f"      Emission Share: {CHAMPION_SHARE*100:.0f}%")
-                        else:
-                            print(f"      ⚠️  Champion not registered on subnet - share goes to sourcing miners")
-                    else:
-                        print(f"   📭 No qualification champion yet - 100% to sourcing miners")
-                except Exception as e:
-                    print(f"   ⚠️  Error reading champion: {e} - 100% to sourcing miners")
-            else:
-                print("   🚫 Legacy model competition champion disabled (0% champion share)")
-            
             # Fulfillment pool is ALWAYS reserved. If fulfillment is disabled
             # on this validator, or no miners earned rewards this epoch, the unused
             # portion flows to burn — it does NOT redistribute back to sourcing.
@@ -7072,67 +7041,7 @@ class Validator(BaseValidatorNeuron):
     # HISTORICAL QUALIFICATION CHAMPION READER
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _read_qualification_champion(self) -> Optional[Dict[str, Any]]:
-        """
-        Read qualification champion info from local JSON file.
-        
-        Also checks Supabase banned_hotkeys table - if champion is banned,
-        clears local file and returns None (5% goes to burn instead).
-        
-        Returns:
-            Dict with current_champion info, or None if no champion
-        """
-        try:
-            champion_file = Path("validator_weights") / "qualification_champion.json"
-            
-            if not champion_file.exists():
-                bt.logging.debug("No qualification champion file found")
-                return None
-            
-            with open(champion_file, 'r') as f:
-                data = json.load(f)
-            
-            champion = data.get("current_champion")
-            if not champion:
-                return None
-            
-            # Check if champion's hotkey is banned in Supabase
-            champion_hotkey = champion.get("miner_hotkey")
-            if champion_hotkey and self._is_champion_hotkey_banned(champion_hotkey):
-                bt.logging.warning(f"🚨 Champion hotkey {champion_hotkey[:20]}... is BANNED - clearing local champion")
-                self._clear_qualification_champion_for_ban(champion_hotkey)
-                # Re-read: _clear_qualification_champion_for_ban may have written
-                # an auto-promoted replacement from the gateway
-                with open(champion_file, 'r') as f:
-                    refreshed = json.load(f)
-                return refreshed.get("current_champion")
-            
-            return champion
-            
-        except Exception as e:
-            bt.logging.warning(f"Failed to read qualification champion: {e}")
-            return None
     
-    def _is_champion_hotkey_banned(self, hotkey: str) -> bool:
-        """Check the champion against the canonical gateway-owned ban snapshot."""
-        try:
-            from Leadpoet.utils.cloud_db import (
-                gateway_get_banned_hotkeys_snapshot,
-            )
-
-            snapshot = gateway_get_banned_hotkeys_snapshot(self.wallet)
-            is_banned = hotkey in set(snapshot["banned_hotkeys"])
-            if is_banned:
-                bt.logging.info(f"🚨 Hotkey {hotkey[:20]}... found in banned_hotkeys table")
-            return is_banned
-        except Exception as exc:
-            bt.logging.error(
-                "champion_ban_snapshot_unavailable; refusing champion allocation: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            raise RuntimeError(
-                "canonical champion ban snapshot is unavailable"
-            ) from exc
 
     def _apply_banned_hotkey_sourcing_penalties(self, banned_hotkeys: set):
         """Set sourcing scores to -100,000 for banned hotkeys in weight files.
@@ -7194,98 +7103,7 @@ class Validator(BaseValidatorNeuron):
             print(f"   🚨 BANNED HOTKEY SOURCING PENALTY: Set {penalized_count} history entries + {weights_penalized} current entries to {PENALTY:,}")
             print(f"      Hotkeys: {hk_list}")
 
-    def _clear_qualification_champion_for_ban(self, banned_hotkey: str):
-        """Clear champion from local JSON due to hotkey ban, then check
-        Supabase for a new champion that the gateway may have auto-promoted."""
-        try:
-            champion_file = Path("validator_weights") / "qualification_champion.json"
-            if not champion_file.exists():
-                return
-            
-            with open(champion_file, 'r') as f:
-                data = json.load(f)
-            
-            old_champion = data.get("current_champion")
-            if old_champion:
-                if "dethronement_history" not in data:
-                    data["dethronement_history"] = []
-                old_champion["dethroned_at"] = datetime.utcnow().isoformat()
-                old_champion["dethrone_reason"] = "hotkey_banned"
-                data["dethronement_history"].append(old_champion)
-            
-            data["current_champion"] = None
-            
-            print(f"\n{'='*60}")
-            print(f"🚨 CHAMPION DETHRONED (HOTKEY BANNED)")
-            print(f"   Hotkey: {banned_hotkey[:20]}...")
-            print(f"   Checking Supabase for auto-promoted replacement...")
-            print(f"{'='*60}")
-            
-            new_champion = self._fetch_current_champion_from_gateway()
-            if new_champion:
-                data["current_champion"] = new_champion
-                print(f"   👑 Found auto-promoted champion!")
-                print(f"      Model:  {new_champion.get('model_name', 'unknown')}")
-                print(f"      Miner:  {new_champion.get('miner_hotkey', 'unknown')[:20]}...")
-                print(f"      Score:  {new_champion.get('score', 0):.2f}")
-                print(f"      10% champion share → new champion")
-            else:
-                print(f"   📭 No replacement champion found")
-                print(f"   10% champion share → sourcing miners")
-            print(f"{'='*60}\n")
-            
-            with open(champion_file, 'w') as f:
-                json.dump(data, f, indent=2)
-            
-        except Exception as e:
-            bt.logging.error(f"Failed to clear banned champion: {e}")
     
-    def _fetch_current_champion_from_gateway(self) -> Optional[Dict[str, Any]]:
-        """Query the gateway's /qualification/champion endpoint for the current
-        champion. Used to pick up a champion that the gateway auto-promoted
-        after a ban. Falls back gracefully if the gateway is unreachable."""
-        try:
-            import requests
-            
-            gateway_url = os.getenv("GATEWAY_URL", "http://52.91.135.79:8000")
-            response = requests.get(
-                f"{gateway_url}/qualification/champion",
-                timeout=15
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            champion = data.get("champion")
-            if not champion:
-                return None
-
-            total_cost = champion.get("total_cost_usd") or 0
-            total_time = champion.get("total_time_seconds") or 0
-            num_leads = 100
-
-            evaluated_at = champion.get("evaluated_at")
-            if evaluated_at:
-                last_eval_date = evaluated_at[:10]
-            else:
-                from datetime import datetime as dt_datetime, timezone as dt_timezone
-                last_eval_date = dt_datetime.now(dt_timezone.utc).date().isoformat()
-
-            return {
-                "model_id": champion.get("model_id"),
-                "model_name": champion.get("model_name"),
-                "miner_hotkey": champion.get("miner_hotkey"),
-                "score": champion.get("score", 0),
-                "became_champion_at": champion.get("became_champion_at"),
-                "total_cost_usd": total_cost,
-                "total_time_seconds": total_time,
-                "avg_cost_per_lead_usd": champion.get("avg_cost_per_lead_usd", 0),
-                "avg_time_per_lead_seconds": champion.get("avg_time_per_lead_seconds", 0),
-                "num_leads_evaluated": num_leads,
-                "last_evaluated_utc_date": last_eval_date,
-            }
-        except Exception as e:
-            bt.logging.warning(f"Failed to fetch champion from gateway: {e}")
-            return None
 
 
     async def process_broadcast_requests_continuous(self):

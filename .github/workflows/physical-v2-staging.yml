@@ -12,7 +12,8 @@ on:
         type: string
 
 concurrency:
-  group: production-parity-full
+  # Release admission can preempt automatic runs; explicit diagnostics survive.
+  group: production-parity-full-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
@@ -222,7 +223,43 @@ jobs:
             --volume-gib "$PARITY_VOLUME_GIB"
             --state "$PARITY_TEMP/parity-stack.json"
           )
-          python3 scripts/provision_production_parity_staging.py "${args[@]}"
+          provision_pid=""
+          provision_cancel_status=0
+          record_provision_cancel() {
+            provision_cancel_status="$1"
+          }
+          stop_provisioner_if_cancelled() {
+            if [ "$provision_cancel_status" -eq 0 ]; then
+              return
+            fi
+            kill -TERM "$provision_pid" 2>/dev/null || true
+            while true; do
+              child_wait_status=0
+              wait "$provision_pid" 2>/dev/null || child_wait_status=$?
+              if [ "$child_wait_status" -lt 128 ] || \
+                 ! kill -0 "$provision_pid" 2>/dev/null; then
+                break
+              fi
+            done
+            provision_pid=""
+            trap - INT TERM
+            exit "$provision_cancel_status"
+          }
+          trap 'record_provision_cancel 130' INT
+          trap 'record_provision_cancel 143' TERM
+          python3 scripts/provision_production_parity_staging.py "${args[@]}" &
+          provision_pid=$!
+          stop_provisioner_if_cancelled
+          set +e
+          wait "$provision_pid"
+          provision_status=$?
+          set -e
+          stop_provisioner_if_cancelled
+          provision_pid=""
+          trap - INT TERM
+          if [ "$provision_status" -ne 0 ]; then
+            exit "$provision_status"
+          fi
           python3 - "$PARITY_TEMP/parity-stack.json" "$GITHUB_OUTPUT" <<'PY'
           import json
           from pathlib import Path
@@ -427,7 +464,7 @@ jobs:
             if [ "$final_status" -ne 0 ] && \
                [ "$failure_stage" = host-python-bootstrap ]; then
               case "$host_bootstrap_step" in
-                container-runtime-package|container-runtime-identity|container-runtime-service|venv-absence|runtime-package|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
+                native-build-package|native-build-package-identity|container-buildx-identity|container-runtime-service|venv-absence|runtime-package|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
                   printf 'LEADPOET_BOOTSTRAP_STEP=%s\n' \
                     "$host_bootstrap_step" >&2
                   ;;
@@ -557,22 +594,45 @@ jobs:
           failure_stage=canonical-origin-fetch
           candidate_git -C "$candidate_repo" fetch --no-tags origin \
             refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1
-          test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" = \
-            {q(required['CANDIDATE_SHA'])}
+          candidate_git -C "$candidate_repo" merge-base --is-ancestor \
+            {q(required['CANDIDATE_SHA'])} origin/main
           cd "$candidate_repo"
           host_venv={q(root + "/controller-venv")}
           host_python="$host_venv/bin/python3"
           failure_stage=host-python-bootstrap
           failure_category=CommandFailed
-          host_bootstrap_step=container-runtime-package
-          if [ ! -x /usr/bin/docker ]; then
-            test -x /usr/bin/dnf
-            sudo -n /usr/bin/dnf -q -y install docker >/dev/null 2>&1
-          fi
-          host_bootstrap_step=container-runtime-identity
-          test -x /usr/bin/docker
+          host_bootstrap_step=native-build-package
+          test -x /usr/bin/dnf
+          sudo -n /usr/bin/dnf -q -y install \
+            aws-nitro-enclaves-cli \
+            aws-nitro-enclaves-cli-devel \
+            docker \
+            rsync \
+            jq \
+            tar \
+            gzip >/dev/null 2>&1
+          host_bootstrap_step=native-build-package-identity
+          /usr/bin/rpm -q \
+            aws-nitro-enclaves-cli \
+            aws-nitro-enclaves-cli-devel \
+            docker \
+            rsync \
+            jq \
+            tar \
+            gzip >/dev/null
+          for native_build_tool in \
+            /usr/bin/nitro-cli \
+            /usr/bin/docker \
+            /usr/bin/rsync \
+            /usr/bin/jq \
+            /usr/bin/tar \
+            /usr/bin/gzip; do
+            test -x "$native_build_tool"
+          done
           /usr/bin/rpm -qf /usr/bin/docker \
             | /usr/bin/grep -Eq '^docker-[0-9]'
+          host_bootstrap_step=container-buildx-identity
+          sudo -n /usr/bin/docker buildx version >/dev/null 2>&1
           host_bootstrap_step=container-runtime-service
           sudo -n /usr/bin/systemctl start docker.service >/dev/null 2>&1
           sudo -n /usr/bin/systemctl is-active --quiet docker.service
@@ -709,8 +769,9 @@ jobs:
           import sys
 
           allowed = {
-              "container-runtime-package",
-              "container-runtime-identity",
+              "native-build-package",
+              "native-build-package-identity",
+              "container-buildx-identity",
               "container-runtime-service",
               "venv-absence",
               "runtime-package",
@@ -944,7 +1005,7 @@ jobs:
               or arena.get("mode") != "shadow"
               or arena.get("candidate_sha") != sys.argv[2]
               or arena.get("baseline_source_url")
-                  != "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
+                  != "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/lab.tar.gz"
               or not isinstance(stage_1_icps, int)
               or isinstance(stage_1_icps, bool)
               or stage_1_icps < 1
@@ -1108,6 +1169,12 @@ jobs:
             python3 scripts/provision_production_parity_staging.py \
               --region "$AWS_REGION" delete \
               --state "$parity_temp/parity-stack.json" || cleanup_status=$?
+          elif [ -n "${{ steps.inputs.outputs.run_id }}" ]; then
+            python3 scripts/cleanup_production_parity_staging.py \
+              --region "$AWS_REGION" \
+              --run-id "${{ steps.inputs.outputs.run_id }}" \
+              --candidate-sha "$CANDIDATE_SHA" \
+              --apply || cleanup_status=$?
           fi
           shred -u "$parity_temp/candidate.bundle" 2>/dev/null || \
             rm -f "$parity_temp/candidate.bundle"

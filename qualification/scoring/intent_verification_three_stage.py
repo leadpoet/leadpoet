@@ -147,6 +147,7 @@ _SD_TIER_TIMEOUT = {
 }
 _SD_CONTENT_ESCALATION_VERDICTS = frozenset({
     "body_too_short",
+    "html_empty_body",
     "anti_bot_marker",
     "js_shell",
     "non_textual",
@@ -875,6 +876,33 @@ def _looks_like_js_shell(body: str) -> bool:
     return False
 
 
+_HTML_DOCUMENT_RE = re.compile(
+    r"^\s*(?:<!doctype\s+html[^>]*>\s*)?<html\b",
+    re.IGNORECASE,
+)
+
+
+def _has_empty_html_body(body: str) -> bool:
+    """Return true only for an explicit HTML document with no visible body."""
+    if not _HTML_DOCUMENT_RE.search(body):
+        return False
+    try:
+        from bs4 import BeautifulSoup, Comment
+
+        document = BeautifulSoup(body, "html.parser")
+    except Exception:
+        return False
+    if document.body is None:
+        return False
+    for node in reversed(document.body.find_all(
+        ["script", "style", "template", "noscript"]
+    )):
+        node.decompose()
+    for node in document.body.find_all(string=lambda value: isinstance(value, Comment)):
+        node.extract()
+    return not document.body.get_text(" ", strip=True)
+
+
 def _evaluate_sd_response(status_code: int, body: str) -> str:
     """Classify a ScrapingDog response. Returns 'ok' or a short failure label.
 
@@ -890,6 +918,8 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
         return f"http_{status_code}"
     if not body or len(body) < 500:
         return "body_too_short"
+    if _has_empty_html_body(body):
+        return "html_empty_body"
     if _has_anti_bot_marker(body):
         return "anti_bot_marker"
     if _looks_like_js_shell(body):
@@ -1319,8 +1349,18 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     "https://api.scrapingdog.com/scrape",
                     params=params, timeout=tier_timeout,
                 )
-                body = r.text or ""
-                verdict = _evaluate_sd_response(r.status_code, body)
+                # ScrapingDog can return the original PDF bytes while labeling
+                # them as text. PDF syntax is mostly printable, so the normal
+                # text heuristic can accept the decoded binary and pass control
+                # characters into the Stage-3 request. Do not spend stronger
+                # render tiers on the same binary document; the existing Exa
+                # fallback below can extract bounded text from the original URL.
+                if r.status_code == 200 and r.content.startswith(b"%PDF-"):
+                    body = ""
+                    verdict = "pdf_binary"
+                else:
+                    body = r.text or ""
+                    verdict = _evaluate_sd_response(r.status_code, body)
                 history.append((tier_name, verdict))
                 last_status = r.status_code
                 last_verdict = verdict
@@ -1335,6 +1375,7 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     _safe_sd_request_id(r),
                 )
                 if verdict == "ok":
+                    source_publication_date = _published_date_from_html(body, url)
                     # Extract article body from raw HTML before truncation.
                     # Removes nav/sidebar/footer/related-posts that otherwise
                     # eat the first chars of the prompt input.
@@ -1345,6 +1386,7 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                         pass  # fall through with original content
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
+                            "source_publication_date": source_publication_date,
                             "error": None, "stage_history": history}
                 if not _should_escalate_sd_response(verdict, tier_name):
                     break
@@ -1386,7 +1428,9 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
 
     # All ScrapingDog tiers exhausted. Try Wayback as the final source of
     # content — stale snapshot is better than nothing for evidence verification.
-    if last_verdict != "http_404" or last_status != 404:
+    if last_verdict != "pdf_binary" and (
+        last_verdict != "http_404" or last_status != 404
+    ):
         wb = await _try_wayback(url)
         history.append(("wayback", wb["stage"]))
         if wb["ok"]:
@@ -1394,15 +1438,85 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     "content": wb["content"], "error": None,
                     "stage_history": history}
 
-    # Genuine unfetchable. Caller should treat this as "verifier infrastructure
-    # could not reach the URL" — NOT as miner fabrication.
+    # A target 404 alone cannot prove semantic absence. The caller compares it
+    # with the independent Exa result before separating a missing source from
+    # verifier infrastructure failure. Neither case proves miner fabrication.
+    every_attempt_not_found = bool(history) and all(
+        verdict == "http_404" for _tier, verdict in history
+    )
     fail_label = (
-        "genuine_404" if last_verdict == "http_404"
+        "genuine_404"
+        if every_attempt_not_found and last_status == 404
         else f"all_tiers_exhausted:{last_verdict}"
     )
     return {"ok": False, "stage": fail_label,
             "content": "", "error": last_verdict,
             "stage_history": history}
+
+
+def _exa_target_absence_receipt(
+    document: Mapping[str, Any], requested_url: str
+) -> Optional[Dict[str, Any]]:
+    """Return a typed receipt only for Exa's exact-URL not-found result."""
+
+    results = document.get("results")
+    statuses = document.get("statuses")
+    if (
+        not isinstance(requested_url, str)
+        or not requested_url
+        or not isinstance(results, list)
+        or results
+        or not isinstance(statuses, list)
+        or len(statuses) != 1
+    ):
+        return None
+    status = statuses[0]
+    if not isinstance(status, Mapping) or set(status) != {
+        "id", "status", "error"
+    }:
+        return None
+    error = status.get("error")
+    http_status = (
+        error.get("httpStatusCode") if isinstance(error, Mapping) else None
+    )
+    if (
+        status.get("id") != requested_url
+        or status.get("status") != "error"
+        or not isinstance(error, Mapping)
+        or error.get("tag") != "CRAWL_NOT_FOUND"
+        or type(http_status) is not int
+        or http_status != 404
+    ):
+        return None
+    return {
+        "id_matches_requested_url": True,
+        "status": "error",
+        "error_tag": "CRAWL_NOT_FOUND",
+        "error_http_status": 404,
+    }
+
+
+def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
+    expected = {
+        "id_matches_requested_url": True,
+        "status": "error",
+        "error_tag": "CRAWL_NOT_FOUND",
+        "error_http_status": 404,
+        "confirmed_attempts": 2,
+    }
+    if not isinstance(value, Mapping) or set(value) != set(expected):
+        return None
+    if (
+        value.get("id_matches_requested_url") is not True
+        or value.get("status") != "error"
+        or value.get("error_tag") != "CRAWL_NOT_FOUND"
+        or type(value.get("error_http_status")) is not int
+        or value.get("error_http_status") != 404
+        or type(value.get("confirmed_attempts")) is not int
+        or value.get("confirmed_attempts") != 2
+    ):
+        return None
+    return dict(expected)
 
 
 async def _scrape_exa(url: str) -> Dict[str, Any]:
@@ -1414,6 +1528,7 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
     payload = {"ids": [url], "text": {"maxCharacters": MAX_SCRAPED_CHARS},
                "maxAgeHours": 0}
     last_error = "not attempted"
+    first_target_absence = None
     async with httpx.AsyncClient() as cli:
         for attempt in range(2):
             try:
@@ -1425,33 +1540,60 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                 if r.status_code == 200:
                     data = r.json()
                     results = data.get("results") or []
+                    target_absence = None
                     if results:
-                        text = (results[0].get("text") or "")[:MAX_SCRAPED_CHARS]
+                        result = results[0]
+                        text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
                         if len(text) >= 300:
                             return {
                                 "ok": True,
                                 "stage": "exa_scraped",
                                 "content": text,
+                                "source_publication_date": _source_publication_date(
+                                    result.get("publishedDate")
+                                ),
                                 "error": None,
                             }
                         last_error = "<300 chars"
                         terminal_stage = "exa_thin"
                     else:
-                        last_error = json.dumps(data.get("statuses") or [])[:120]
-                        terminal_stage = "exa_no_results"
+                        target_absence = _exa_target_absence_receipt(data, url)
+                        if target_absence is not None:
+                            last_error = "target_not_found"
+                            terminal_stage = "exa_target_not_found"
+                        else:
+                            last_error = json.dumps(
+                                data.get("statuses") or []
+                            )[:120]
+                            terminal_stage = "exa_no_results"
                     # Exa can return a successful envelope before the exact
                     # URL content is available. Spend the already bounded
-                    # second attempt on that unavailable observation rather
-                    # than turning it into a persistent semantic rejection.
+                    # second attempt before accepting even its exact not-found
+                    # receipt as a persistent source-absence observation.
                     if attempt == 0:
+                        first_target_absence = target_absence
                         await asyncio.sleep(0.25)
                         continue
-                    return {
+                    failure = {
                         "ok": False,
                         "stage": terminal_stage,
                         "content": "",
                         "error": last_error,
                     }
+                    if (
+                        target_absence is not None
+                        and first_target_absence == target_absence
+                    ):
+                        failure["target_absence"] = {
+                            **target_absence,
+                            "confirmed_attempts": 2,
+                        }
+                    elif target_absence is not None:
+                        failure.update({
+                            "stage": "exa_target_not_found_unconfirmed",
+                            "error": "mixed_fetch_results",
+                        })
+                    return failure
                 last_error = f"HTTP {r.status_code}"
                 # Retry only transient transport/rate-limit responses. A 4xx
                 # result remains a deterministic miss and does not consume
@@ -1773,6 +1915,69 @@ def _safe_prompt_status_label(value: Any) -> str:
     return re.sub(r"[^a-z0-9_.:-]", "_", value.casefold())[:80]
 
 
+def _source_publication_date(value: Any) -> str:
+    """Normalize a source timestamp that came from page/provider metadata."""
+
+    if not isinstance(value, str):
+        return ""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[T ]|$)", value.strip())
+    if not match:
+        return ""
+    try:
+        date.fromisoformat(match.group(1))
+    except ValueError:
+        return ""
+    return match.group(1)
+
+
+def _published_date_from_html(html: str, source_url: str) -> str:
+    """Read first-party publication metadata before body extraction drops it."""
+
+    head_match = re.search(
+        r"<head(?:\s[^>]*)?>(.*?)</head\s*>",
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    head = head_match.group(1) if head_match else ""
+    patterns = (
+        r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\']',
+    )
+    candidates: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, head, re.IGNORECASE):
+            normalized = _source_publication_date(match.group(1))
+            if normalized:
+                candidates.add(normalized)
+    for match in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            payload = json.loads(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        nodes = payload.get("@graph") if isinstance(payload, Mapping) else None
+        nodes = nodes if isinstance(nodes, list) else [payload]
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                continue
+            node_type = node.get("@type")
+            types = node_type if isinstance(node_type, list) else [node_type]
+            valid_types = {value for value in types if isinstance(value, str)}
+            if not valid_types & {"Article", "NewsArticle", "BlogPosting"}:
+                continue
+            main_page = node.get("mainEntityOfPage")
+            page_id = main_page.get("@id") if isinstance(main_page, Mapping) else main_page
+            if _normalize_url(str(page_id or "")) != _normalize_url(source_url):
+                continue
+            normalized = _source_publication_date(node.get("datePublished"))
+            if normalized:
+                candidates.add(normalized)
+    return next(iter(candidates)) if len(candidates) == 1 else ""
+
+
 def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
     """Bound source fields while retaining the exact validated evidence URL."""
 
@@ -1788,20 +1993,65 @@ def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
                 "title": item.get("title") if isinstance(item.get("title"), str) else "",
                 "text": item.get("text") if isinstance(item.get("text"), str) else "",
                 "meta": dict(item.get("meta")) if isinstance(item.get("meta"), Mapping) else {},
+                "source_publication_date": _source_publication_date(
+                    item.get("source_publication_date")
+                ),
             }
         )
     statuses: List[Dict[str, Any]] = []
     for item in (contents.get("statuses") or []):
         if not isinstance(item, Mapping):
             continue
-        statuses.append(
-            {
-                "url": _prompt_url_origin_or_empty(item.get("url")),
-                "source": _safe_prompt_status_label(item.get("source")),
-                "stage": _safe_prompt_status_label(item.get("stage")),
-            }
+        projected_status = {
+            "url": _prompt_url_origin_or_empty(item.get("url")),
+            "source": _safe_prompt_status_label(item.get("source")),
+            "stage": _safe_prompt_status_label(item.get("stage")),
+        }
+        target_absence = _canonical_target_absence_receipt(
+            item.get("exa_target_absence")
         )
+        if target_absence is not None:
+            projected_status.update({
+                "sd_stage": _safe_prompt_status_label(item.get("sd_stage")),
+                "exa_stage": _safe_prompt_status_label(
+                    item.get("exa_stage")
+                ),
+                "exa_target_absence": target_absence,
+            })
+        statuses.append(projected_status)
     return {"results": results, "statuses": statuses}
+
+
+def _confirmed_source_absence(
+    contents: Mapping[str, Any], requested_url: str
+) -> bool:
+    """Whether independent fetches agree that this exact URL is absent."""
+
+    results = contents.get("results")
+    if (
+        not isinstance(requested_url, str)
+        or not requested_url
+        or not isinstance(results, list)
+        or results
+    ):
+        return False
+    statuses = contents.get("statuses")
+    if not isinstance(statuses, list) or len(statuses) != 1:
+        return False
+    status = statuses[0]
+    return bool(
+        isinstance(status, Mapping)
+        and status.get("url") == requested_url
+        and status.get("source") == "none"
+        and status.get("sd_stage") == "genuine_404"
+        and status.get("sd_error") == "http_404"
+        and status.get("exa_stage") == "exa_target_not_found"
+        and status.get("exa_error") == "target_not_found"
+        and _canonical_target_absence_receipt(
+            status.get("exa_target_absence")
+        )
+        is not None
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2099,6 +2349,7 @@ async def _fetch_sd_then_exa(
             results.append({
                 "url": url, "title": "",
                 "text": sd["content"][:max_chars],
+                "source_publication_date": sd.get("source_publication_date") or "",
                 "meta": (
                     {"kind": "lever_job"}
                     if _lever_posting_identity(url) is not None
@@ -2115,6 +2366,7 @@ async def _fetch_sd_then_exa(
             results.append({
                 "url": url, "title": "",
                 "text": exa["content"][:max_chars],
+                "source_publication_date": exa.get("source_publication_date") or "",
                 "meta": (
                     {"kind": "lever_job"}
                     if _lever_posting_identity(url) is not None
@@ -2127,19 +2379,48 @@ async def _fetch_sd_then_exa(
                 "sd_stage": sd.get("stage"),
             })
         else:
-            statuses.append({
+            status = {
                 "url": url, "source": "none",
                 "sd_stage": sd.get("stage"),
                 "sd_error": sd.get("error"),
                 "exa_stage": exa.get("stage"),
                 "exa_error": exa.get("error"),
-            })
+            }
+            target_absence = _canonical_target_absence_receipt(
+                exa.get("target_absence")
+            )
+            if target_absence is not None:
+                status["exa_target_absence"] = target_absence
+            statuses.append(status)
     return {"results": results, "statuses": statuses}
 
 
 # ─────────────────────────────────────────────────────────────────────
 # OpenRouter call with 429 retry / fail-soft
 # ─────────────────────────────────────────────────────────────────────
+def _structured_verdict_error(answer: Mapping[str, Any]) -> str:
+    """Return an error for a contradictory model-owned verdict pair.
+
+    ``wrong_entity`` is reserved for a definitive entity mismatch, so it must
+    carry ``same_entity_check=fail``. A pass or unclear entity check means the
+    judge has not produced one coherent verdict. Do not infer the intended
+    status from its prose because that would turn untrusted model explanation
+    into a qualification decision.
+    """
+
+    evaluations = answer.get("signal_evaluations")
+    if not isinstance(evaluations, list):
+        return ""
+    for item in evaluations:
+        if (
+            isinstance(item, Mapping)
+            and item.get("signal_status") == "wrong_entity"
+            and item.get("same_entity_check") != "fail"
+        ):
+            return "wrong_entity_requires_same_entity_fail"
+    return ""
+
+
 async def _call_openrouter(
     client: httpx.AsyncClient, model: str, prompt: str,
 ) -> Dict[str, Any]:
@@ -2247,6 +2528,33 @@ async def _call_openrouter(
                         "_error": "invalid_json_content",
                         "provider_usage": provider_usage,
                     }
+                await asyncio.sleep(1)
+                continue
+            verdict_error = _structured_verdict_error(ans)
+            if verdict_error:
+                logger.warning(
+                    "intent_three_stage_openrouter_verdict_inconsistent "
+                    "model=%s attempt=%s reason=%s",
+                    model,
+                    attempt + 1,
+                    verdict_error,
+                )
+                if attempt == 2:
+                    return {
+                        "_error": "inconsistent_structured_verdict",
+                        "provider_usage": provider_usage,
+                    }
+                body["messages"][1]["content"] = prompt + """
+
+STRUCTURED VERDICT CORRECTION:
+Your previous answer returned signal_status=wrong_entity without
+same_entity_check=fail. Those fields contradict each other. Re-evaluate the
+exact evidence and return one fresh schema-valid verdict. Use wrong_entity
+only for a definitive entity mismatch and pair it with same_entity_check=fail.
+If entity identity passes, choose the claim status independently under the
+signal status rules. If identity is unclear, use unable_to_verify. Do not infer
+or copy a status from the previous answer's explanation.
+"""
                 await asyncio.sleep(1)
                 continue
             return {
@@ -3074,17 +3382,23 @@ async def verify_three_stage(
     fetched_contents = await _fetch_sd_then_exa(
         [fetch_source_url] if fetch_source_url else []
     )
+    source_absent = _confirmed_source_absence(
+        fetched_contents, fetch_source_url
+    )
     contents = _project_contents_for_prompt(fetched_contents)
     if not (contents.get("results") or []):
         return {
             "client_ready": False,
-            # No verifier-readable source is an infrastructure-unavailable
-            # observation, not evidence that the model fabricated the event.
-            # Keep the score fail-closed at zero while allowing the existing
-            # Research Lab retry path to rerun the ICP instead of persisting a
-            # false semantic rejection.
-            "decision": "unavailable",
-            "rejection_reason": "evidence_fetch_failed",
+            # Two independent fetch paths can establish that the exact source
+            # URL is absent. That is a semantic failure to prove the claim, not
+            # a shared judge outage. Every incomplete or mixed provider result
+            # remains unavailable so the existing retry path stays fail-closed.
+            "decision": "reject" if source_absent else "unavailable",
+            "rejection_reason": (
+                "evidence_not_found"
+                if source_absent
+                else "evidence_fetch_failed"
+            ),
             "stage1": stage1_info,
             "scrape": {
                 "statuses": contents.get("statuses") or [],
@@ -3096,7 +3410,13 @@ async def verify_three_stage(
                 "signal_evaluations": [{
                     "signal_status": "unable_to_verify",
                     "verification_mode": "source_grounded",
-                    "explanation": "Every bounded evidence fetch and fallback returned no usable content",
+                    "explanation": (
+                        "Independent fetches confirmed that the exact supplied "
+                        "evidence URL was not found"
+                        if source_absent
+                        else "Every bounded evidence fetch and fallback returned "
+                        "no usable content"
+                    ),
                     "confidence": "high",
                 }],
             },
@@ -3298,17 +3618,12 @@ async def verify_three_stage(
             }
             deterministic_exact_hiring_evidence = (
                 # The exact, currently listed ATS record is the authority here.
-                # A semantic ``contradicted`` verdict may be normalized only
-                # when every quote it supplied as a contradiction is absent
-                # from that immutable posting; a grounded contradiction still
-                # fails closed through ``grounded_contradictions`` below.
-                item.get("signal_status")
-                in {
-                    "supported",
-                    "partially_supported",
-                    "wrong_entity",
-                    "contradicted",
-                }
+                # It can resolve employer identity and posting state, but it
+                # cannot resolve a partial or failed claim-to-ICP semantic fit.
+                # Normalize only a verdict that already says the claim is
+                # supported; every other semantic status keeps its normal
+                # fail-closed outcome.
+                item.get("signal_status") == "supported"
                 and item.get("verification_mode") == "source_grounded"
                 and item.get("confidence") in {"medium", "high"}
                 and item.get("same_entity_check") in {"pass", "unclear", "fail"}

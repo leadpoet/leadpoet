@@ -46,6 +46,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
+    "lab_arena_prepare_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
+    "lab_arena_complete_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_accept_submission_with_credentials": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_credentials", "jsonb")),
@@ -71,6 +73,10 @@ TABLES = (
     "lab_arena_runs",
     "lab_arena_ledger",
 )
+ROUND_MODE_FILTER = "configuration_doc->>mode"
+PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
+ROUND_NETWORK_COLUMN = "arena_network_name"
+ROUND_NETUID_COLUMN = "arena_netuid"
 
 
 DEADLOCK_SQLSTATE = "40P01"
@@ -117,6 +123,8 @@ class StoreTransport:
         order: Optional[str] = None,
         descending: bool = False,
         limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        status_in: Optional[Sequence[str]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
@@ -223,16 +231,41 @@ class PostgrestTransport(StoreTransport):
                 raise ArenaStoreError("rpc %s returned non-JSON" % function) from exc
         raise ArenaStoreError("rpc %s failed after deadlock retries" % function)
 
-    def select(self, table, *, filters=None, order=None, descending=False, limit=None, columns="*"):
+    def select(
+        self,
+        table,
+        *,
+        filters=None,
+        order=None,
+        descending=False,
+        limit=None,
+        offset=None,
+        status_in=None,
+        columns="*",
+    ):
         if table not in TABLES:
             raise ArenaStoreError("unknown Arena table")
         query: List[tuple] = [("select", columns)]
         for key, value in (filters or {}).items():
-            query.append((key, "eq." + _check_filter_value(value)))
+            if key not in (ROUND_MODE_FILTER, PROMOTION_OUTCOME_FILTER) and not key.replace("_", "").isalnum():
+                raise ArenaStoreError("invalid filter column")
+            query.append((key, "is.null" if value is None else "eq." + _check_filter_value(value)))
+        if status_in is not None:
+            if table != "lab_arena_rounds" or "status" in (filters or {}):
+                raise ArenaStoreError("status inclusion filter is invalid")
+            statuses = tuple(_check_filter_value(value) for value in status_in)
+            if not statuses:
+                raise ArenaStoreError("status inclusion filter is empty")
+            query.append(("status", "in.(%s)" % ",".join(statuses)))
         if order:
             query.append(("order", "%s.%s" % (order, "desc" if descending else "asc")))
         if limit is not None:
             query.append(("limit", str(int(limit))))
+        if offset is not None:
+            offset = int(offset)
+            if offset < 0:
+                raise ArenaStoreError("offset must be nonnegative")
+            query.append(("offset", str(offset)))
         try:
             response = self._client.get(
                 "%s/rest/v1/%s" % (self._base_url, table),
@@ -356,16 +389,44 @@ class PsycopgTransport(StoreTransport):
                 self._release(connection)
         raise ArenaStoreError("rpc %s failed after deadlock retries" % function)
 
-    def select(self, table, *, filters=None, order=None, descending=False, limit=None, columns="*"):
+    def select(
+        self,
+        table,
+        *,
+        filters=None,
+        order=None,
+        descending=False,
+        limit=None,
+        offset=None,
+        status_in=None,
+        columns="*",
+    ):
         if table not in TABLES:
             raise ArenaStoreError("unknown Arena table")
         clauses = []
         values: List[Any] = []
         for key, value in (filters or {}).items():
-            if not key.replace("_", "").isalnum():
+            if key == ROUND_MODE_FILTER:
+                expression = "configuration_doc ->> 'mode'"
+            elif key == PROMOTION_OUTCOME_FILTER:
+                expression = "publication_doc #>> '{king_decision,outcome}'"
+            elif key.replace("_", "").isalnum():
+                expression = key
+            else:
                 raise ArenaStoreError("invalid filter column")
-            clauses.append("%s = %%s" % key)
-            values.append(value)
+            if value is None:
+                clauses.append("%s IS NULL" % expression)
+            else:
+                clauses.append("%s = %%s" % expression)
+                values.append(value)
+        if status_in is not None:
+            if table != "lab_arena_rounds" or "status" in (filters or {}):
+                raise ArenaStoreError("status inclusion filter is invalid")
+            statuses = tuple(_check_filter_value(value) for value in status_in)
+            if not statuses:
+                raise ArenaStoreError("status inclusion filter is empty")
+            clauses.append("status = ANY(%s)")
+            values.append(list(statuses))
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -375,6 +436,11 @@ class PsycopgTransport(StoreTransport):
             sql += " ORDER BY %s %s" % (order, "DESC" if descending else "ASC")
         if limit is not None:
             sql += " LIMIT %d" % int(limit)
+        if offset is not None:
+            offset = int(offset)
+            if offset < 0:
+                raise ArenaStoreError("offset must be nonnegative")
+            sql += " OFFSET %d" % offset
         sql += ") t"
         connection = self._acquire()
         try:
@@ -475,18 +541,99 @@ class ArenaStore:
             "activate_reward",
         )
 
+    def prepare_promotion(self, round_id: str, plan: Mapping[str, Any]) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_prepare_promotion",
+                {"p_round_id": round_id, "p_plan": dict(plan)},
+            ),
+            "prepare_promotion",
+        )
+
+    def complete_promotion(self, round_id: str, plan: Mapping[str, Any]) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_complete_promotion",
+                {"p_round_id": round_id, "p_plan": dict(plan)},
+            ),
+            "complete_promotion",
+        )
+
+    def pending_promotions(
+        self, *, pinned_round_id: Optional[str] = None,
+        network_name: Optional[str] = None, netuid: Optional[int] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        if (network_name is None) != (netuid is None):
+            raise ArenaStoreError("round network filters must be supplied together")
+        filters: Dict[str, Any] = {
+            "status": "published",
+            ROUND_MODE_FILTER: "live",
+            "promotion_required": True,
+            "baseline_promoted_at": None,
+            PROMOTION_OUTCOME_FILTER: "crowned",
+        }
+        if pinned_round_id is not None:
+            filters["round_id"] = pinned_round_id
+        if network_name is not None:
+            filters[ROUND_NETWORK_COLUMN] = str(network_name)
+            filters[ROUND_NETUID_COLUMN] = int(netuid)
+        rows = self._transport.select(
+            "lab_arena_rounds",
+            filters=filters,
+            order="created_at",
+            descending=False,
+            limit=limit,
+            columns="round_id,publication_doc,promotion_doc,published_at,created_at",
+        )
+        return rows
+
     def get_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
         return rows[0] if rows else None
 
-    def list_rounds(self, *, status: Optional[str] = None, limit: int = 100, columns: str = "*") -> List[Dict[str, Any]]:
-        filters = {"status": status} if status else None
-        return self._transport.select("lab_arena_rounds", filters=filters, order="created_at", descending=True, limit=limit, columns=columns)
+    def list_rounds(
+        self,
+        *,
+        status: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None,
+        mode: Optional[str] = None,
+        network_name: Optional[str] = None,
+        netuid: Optional[int] = None,
+        limit: int = 100,
+        offset: Optional[int] = None,
+        columns: str = "*",
+    ) -> List[Dict[str, Any]]:
+        if status is not None and statuses is not None:
+            raise ArenaStoreError("round status filters are mutually exclusive")
+        if (network_name is None) != (netuid is None):
+            raise ArenaStoreError("round network filters must be supplied together")
+        filters: Dict[str, Any] = {}
+        if status is not None:
+            filters["status"] = status
+        if mode is not None:
+            filters[ROUND_MODE_FILTER] = mode
+        if network_name is not None:
+            filters[ROUND_NETWORK_COLUMN] = str(network_name)
+            filters[ROUND_NETUID_COLUMN] = int(netuid)
+        return self._transport.select(
+            "lab_arena_rounds",
+            filters=filters or None,
+            status_in=statuses,
+            order="created_at",
+            descending=True,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+        )
 
-    def published_reward_bases(self, *, limit: int = 200) -> List[Dict[str, Any]]:
+    def published_reward_bases(self, *, mode: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        filters: Dict[str, Any] = {"status": "published"}
+        if mode is not None:
+            filters[ROUND_MODE_FILTER] = mode
         rows = self._transport.select(
             "lab_arena_rounds",
-            filters={"status": "published"},
+            filters=filters,
             order="effective_reward_epoch",
             descending=True,
             limit=limit,

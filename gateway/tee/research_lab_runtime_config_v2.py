@@ -32,7 +32,7 @@ from leadpoet_canonical.production_parity_boundary_v2 import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v9"
+SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v10"
 
 HOST_ONLY_SECRET_FIELDS = frozenset({"internal_api_key"})
 
@@ -53,6 +53,11 @@ ADDITIONAL_QUALIFICATION_BEHAVIOR_ENV_NAMES = (
 
 SOURCE_ADD_BEHAVIOR_ENV_NAMES = ("RESEARCH_LAB_LLM_INCLUDE_REASONING",)
 
+LAB_ARENA_REWARD_BEHAVIOR_ENV_NAMES = (
+    "LAB_ARENA_REWARDS_ENABLED",
+    "LAB_ARENA_SIGNING_PUBLIC_KEY_HASH",
+)
+
 BEHAVIOR_DEFAULTS = {
     "RESEARCH_LAB_INTENT_CORROBORATION_RESCUE": "false",
     "RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE": "shadow",
@@ -66,6 +71,7 @@ BEHAVIOR_ENV_NAMES = tuple(
         | set(PROVIDER_PREFLIGHT_BEHAVIOR_ENV_NAMES)
         | set(ADDITIONAL_QUALIFICATION_BEHAVIOR_ENV_NAMES)
         | set(SOURCE_ADD_BEHAVIOR_ENV_NAMES)
+        | set(LAB_ARENA_REWARD_BEHAVIOR_ENV_NAMES)
         | set(PRODUCTION_PARITY_ENV_NAMES)
     )
 )

@@ -67,6 +67,7 @@ fi
 
 export REHEARSAL_STATE_ROOT=/rehearsal-state
 export REHEARSAL_DURABLE_STATE_ROOT=/rehearsal-durable-state
+export GATEWAY_RESTART_TIMING_DIR="$REHEARSAL_STATE_ROOT/gateway-restart-timings-${RUN_ORDINAL}-${CANDIDATE_SHA}"
 DURABLE_SCHEMA_SEED_ROOT=/rehearsal-durable-schema-seed
 mkdir -p \
   "$REHEARSAL_STATE_ROOT" \
@@ -76,6 +77,11 @@ mkdir -p \
   /evidence
 
 BOUNDARY_SERVICE_PID=""
+ARENA_GUARD_CONTROLLER_PID=""
+ARENA_GUARD_CONTROLLER_START_TIME=""
+VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT=""
+VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=""
+POSTGRES_CONNECTION=""
 GATEWAY_ENCLAVE_SERVICE_PIDS=""
 VALIDATOR_ENCLAVE_SERVICE_PID=""
 TLS_PROXY_SERVICE_PID=""
@@ -113,7 +119,66 @@ preserve_rehearsal_evidence() {
       2>/dev/null || true
   fi
 }
+
+emit_gateway_restart_timing_diagnostic() {
+  /usr/bin/python3.11 \
+    /source/scripts/gateway_restart_timing_diagnostic.py \
+    --timing-dir "$GATEWAY_RESTART_TIMING_DIR" \
+    --candidate-sha "$CANDIDATE_SHA" >&2 || true
+}
+wait_for_local_postgrest_startup() {
+  local child_status=0
+  local _attempt=""
+  for _attempt in $(seq 1 600); do
+    [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && return 0
+    if ! kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null; then
+      wait "$BOUNDARY_SERVICE_PID" || child_status=$?
+      BOUNDARY_SERVICE_PID=""
+      echo "REHEARSAL_POSTGREST_STARTUP component=$COMPONENT outcome=process_exit returncode=$child_status" >&2
+      echo "ERROR: strict local PostgREST service exited during startup" >&2
+      return 1
+    fi
+    /bin/sleep 0.05
+  done
+  if [ ! -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ]; then
+    echo "REHEARSAL_POSTGREST_STARTUP component=$COMPONENT outcome=readiness_timeout" >&2
+    echo "ERROR: strict local PostgREST service did not become ready" >&2
+    return 1
+  fi
+}
 cleanup_boundary_service() {
+  local cleanup_status=0
+  if [ -n "$ARENA_GUARD_CONTROLLER_PID" ]; then
+    local observed_start_time=""
+    observed_start_time="$(
+      awk '{print $22}' "/proc/$ARENA_GUARD_CONTROLLER_PID/stat" 2>/dev/null \
+        || true
+    )"
+    if [ -n "$observed_start_time" ] \
+        && [ "$observed_start_time" = "$ARENA_GUARD_CONTROLLER_START_TIME" ]; then
+      kill "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+    elif [ -n "$observed_start_time" ]; then
+      echo "ERROR: rehearsal Arena guard controller identity changed" >&2
+      cleanup_status=1
+    fi
+    wait "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" ]; then
+    if ! [[ "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" =~ ^/tmp/validator-restart-controller-bootstrap\.[A-Za-z0-9]+$ ]]; then
+      echo "ERROR: rehearsal validator authority cleanup root is invalid" >&2
+      cleanup_status=1
+    fi
+    if [ "$cleanup_status" = "0" ]; then
+      chmod -R u+w "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" 2>/dev/null \
+        || cleanup_status=1
+      rm -rf -- "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" \
+        || cleanup_status=1
+      if [ -e "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT" ]; then
+        echo "ERROR: rehearsal validator authority cleanup failed" >&2
+        cleanup_status=1
+      fi
+    fi
+  fi
   if [ -n "$RUNNING_VALIDATOR_FIXTURE_PID" ]; then
     kill "$RUNNING_VALIDATOR_FIXTURE_PID" 2>/dev/null || true
     wait "$RUNNING_VALIDATOR_FIXTURE_PID" 2>/dev/null || true
@@ -132,19 +197,39 @@ cleanup_boundary_service() {
   fi
   if [ -n "$BOUNDARY_SERVICE_PID" ]; then
     kill "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
-    wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
+    wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || cleanup_status=1
+  fi
+  if [ -n "$POSTGRES_CONNECTION" ] && [ -f "$POSTGRES_CONNECTION" ]; then
+    if ! /usr/bin/python3.11 - "$POSTGRES_CONNECTION" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+connection = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+root = Path(str(connection.get("root") or ""))
+if root.exists():
+    raise SystemExit("retained rehearsal PostgreSQL was not stopped")
+PY
+    then
+      cleanup_status=1
+    fi
   fi
   if [ -n "$TLS_PROXY_SERVICE_PID" ]; then
     kill "$TLS_PROXY_SERVICE_PID" 2>/dev/null || true
     wait "$TLS_PROXY_SERVICE_PID" 2>/dev/null || true
   fi
+  return "$cleanup_status"
 }
 finalize_rehearsal() {
   local status=$?
+  local cleanup_status=0
   trap - EXIT INT TERM
   set +e
   preserve_rehearsal_evidence
-  cleanup_boundary_service
+  cleanup_boundary_service || cleanup_status=$?
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
+  fi
   exit "$status"
 }
 trap finalize_rehearsal EXIT
@@ -283,6 +368,8 @@ PY
 
 if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
   echo "Validating migration-backed V2 settlement persistence"
+  POSTGRES_CONNECTION="$REHEARSAL_STATE_ROOT/postgres-connection.json"
+  rm -f -- "$POSTGRES_CONNECTION"
   SUPABASE_URL="http://127.0.0.1:54321" \
   SUPABASE_SERVICE_ROLE_KEY="rehearsal-secret" \
   AWS_ACCESS_KEY_ID="rehearsal-access" \
@@ -294,6 +381,7 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --candidate-sha "$DURABLE_SCHEMA_SHA" \
     --release-build-input \
       "$DURABLE_SCHEMA_SEED_ROOT/release-build-input.json" \
+    --postgres-connection-output "$POSTGRES_CONNECTION" \
     --output "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json"
   PYTHONPATH="/source:/harness" /usr/bin/python3.11 \
     /harness/gateway_boundary_service.py \
@@ -305,19 +393,11 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --schema-contract \
       "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json" \
     --candidate-sha "$DURABLE_SCHEMA_SHA" \
+    --postgres-connection "$POSTGRES_CONNECTION" \
     --durable-state \
       "$REHEARSAL_DURABLE_STATE_ROOT/postgrest-state.json" &
   BOUNDARY_SERVICE_PID=$!
-  for _attempt in $(seq 1 100); do
-    [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && break
-    kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null || {
-      echo "ERROR: strict local PostgREST service exited during startup" >&2
-      exit 1
-    }
-    /bin/sleep 0.05
-  done
-  if [ ! -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ]; then
-    echo "ERROR: strict local PostgREST service did not become ready" >&2
+  if ! wait_for_local_postgrest_startup; then
     exit 1
   fi
 fi
@@ -486,6 +566,16 @@ ACTIVE_RELEASE_GATEWAY_LINEAGE=""
 ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE=""
 ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE=""
 ACTIVE_RELEASE_COORDINATION_FILE=""
+ACTIVE_RELEASE_ARENA_GUARD_REQUEST=""
+ACTIVE_RELEASE_ARENA_GUARD_PERMIT=""
+ACTIVE_RELEASE_ARENA_GUARD_NONCE=""
+ACTIVE_RELEASE_ARENA_GUARD_GENERATION=""
+ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE=""
+LAB_ARENA_GUARD_ENV=(
+  "LAB_ARENA_SUPABASE_URL=https://qplwoislplkcegvdmbim.supabase.co"
+  "LAB_ARENA_SUPABASE_ANON_KEY=rehearsal-secret"
+  "LAB_ARENA_SERVICE_JWT=rehearsal.header.signature"
+)
 if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
     && [ "$WEIGHT_READINESS_SCENARIO" = "production_success" ]; then
   PAIRED_ACTIVE_RELEASE_FIXTURE=1
@@ -497,21 +587,64 @@ if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
   ACTIVE_RELEASE_GATEWAY_LINEAGE="/tmp/leadpoet-gateway-active-release-lineage.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
   ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE="/tmp/leadpoet-gateway-paired-restart.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
   ACTIVE_RELEASE_COORDINATION_FILE="/tmp/leadpoet-coordinated-restart.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
+  ACTIVE_RELEASE_ARENA_GUARD_REQUEST="/tmp/leadpoet-validator-arena-request.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_ARENA_GUARD_PERMIT="/tmp/leadpoet-validator-arena-permit.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE="/tmp/leadpoet-validator-arena-controller.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
   ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE="$(
     printf '%s' \
       "$FROM_SHA:$CANDIDATE_SHA:$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
       | sha256sum | cut -d' ' -f1
   )"
+  ACTIVE_RELEASE_ARENA_GUARD_NONCE="$(
+    printf '%s' \
+      "lab-arena:$FROM_SHA:$CANDIDATE_SHA:$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+      | sha256sum | cut -d' ' -f1
+  )"
   ACTIVE_RELEASE_AUTHORITY_SHA="$(
     git --git-dir=/srv/origin.git rev-parse --verify refs/heads/main
   )"
+  if [ "$COMPONENT" = "validator" ]; then
+    VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT="$(
+      mktemp -d /tmp/validator-restart-controller-bootstrap.XXXXXXXX
+    )"
+    chmod 700 "$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT"
+    VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="$VALIDATOR_AUTHORITY_BOOTSTRAP_ROOT/authority"
+    mkdir -m 700 "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"
+    GIT_NO_REPLACE_OBJECTS=1 git --git-dir=/srv/origin.git \
+      archive "$ACTIVE_RELEASE_AUTHORITY_SHA" \
+      | tar -xf - -C "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/validator_restart.sh"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/gateway/tee/prepare_active_release_lineage_v2.py"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/lab_arena_restart_guard_handoff.py"
+    test -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+    test ! -L "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+    test "$(
+      git --git-dir=/srv/origin.git hash-object --no-filters \
+        "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/validator_restart.sh"
+    )" = "$(
+      git --git-dir=/srv/origin.git rev-parse \
+        "$ACTIVE_RELEASE_AUTHORITY_SHA:validator_restart.sh"
+    )"
+    find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type f -exec chmod 400 {} +
+    find "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" -type d -exec chmod 500 {} +
+    test "$(
+      git --git-dir=/srv/origin.git hash-object --no-filters \
+        "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+    )" = "$(
+      git --git-dir=/srv/origin.git rev-parse \
+        "$ACTIVE_RELEASE_AUTHORITY_SHA:scripts/manage_owned_process_group.py"
+    )"
+  fi
   rm -f -- \
     "$ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS" \
     "$ACTIVE_RELEASE_VALIDATOR_OUTPUT" \
     "$ACTIVE_RELEASE_GATEWAY_REQUIREMENTS" \
     "$ACTIVE_RELEASE_GATEWAY_LINEAGE" \
     "$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE" \
-    "$ACTIVE_RELEASE_COORDINATION_FILE"
+    "$ACTIVE_RELEASE_COORDINATION_FILE" \
+    "$ACTIVE_RELEASE_ARENA_GUARD_REQUEST" \
+    "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+    "$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE"
   PYTHONDONTWRITEBYTECODE=1 \
     LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json \
     PYTHONPATH=/source:/harness \
@@ -739,6 +872,171 @@ PY
   fi
 fi
 
+run_rehearsal_lab_arena_guard() {
+  env "${LAB_ARENA_GUARD_ENV[@]}" \
+    PYTHONPATH=/source:/harness \
+    /usr/bin/python3.11 \
+    /source/scripts/lab_arena_restart_claim_guard.py "$@" \
+    --candidate "$CANDIDATE_SHA" \
+    --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+}
+
+release_rehearsal_lab_arena_guard() {
+  local scope="$1" state
+  state="$(run_rehearsal_lab_arena_guard state)"
+  ACTIVE_RELEASE_ARENA_GUARD_GENERATION="$(
+    /usr/bin/python3.11 -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$state"
+  )"
+  run_rehearsal_lab_arena_guard release \
+    --scope "$scope" \
+    --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" >/dev/null
+}
+
+verify_rehearsal_lab_arena_guard_boundary() {
+  local generation report started_at
+  started_at="$SECONDS"
+  echo "REHEARSAL_ARENA_GUARD_BOUNDARY_PROBE status=started"
+  report="$(run_rehearsal_lab_arena_guard drain --scope gateway)"
+  generation="$(
+    /usr/bin/python3.11 -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$report"
+  )"
+  run_rehearsal_lab_arena_guard authorize \
+    --scope gateway \
+    --generation "$generation" \
+    --phase gateway_destructive >/dev/null
+  run_rehearsal_lab_arena_guard ready \
+    --scope gateway \
+    --generation "$generation" \
+    --phase gateway_ready >/dev/null
+  release_rehearsal_lab_arena_guard gateway
+  env \
+    PYTHONPATH=/source:/harness \
+    /usr/bin/python3.11 - <<'PY'
+import http.client
+
+body = b"{}"
+connection = http.client.HTTPSConnection(
+    "qplwoislplkcegvdmbim.supabase.co",
+    443,
+    timeout=15,
+)
+try:
+    connection.request(
+        "POST",
+        "/rest/v1/rpc/lab_arena_restart_guard_state_v1",
+        body=body,
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer rehearsal-public",
+            "apikey": "rehearsal-public",
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "Connection": "close",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+finally:
+    connection.close()
+if response.status != 400:
+    raise SystemExit("rehearsal Arena guard public role was not denied")
+PY
+  echo "REHEARSAL_ARENA_GUARD_BOUNDARY_PROBE status=passed elapsed_seconds=$((SECONDS - started_at))"
+}
+
+start_validator_lab_arena_guard_controller() {
+  local report
+  report="$(run_rehearsal_lab_arena_guard drain --scope validator)"
+  ACTIVE_RELEASE_ARENA_GUARD_GENERATION="$(
+    /usr/bin/python3.11 -c \
+      'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
+      <<<"$report"
+  )"
+  (
+    request_ready=0
+    for _attempt in $(seq 1 10000); do
+      if [ -s "$ACTIVE_RELEASE_ARENA_GUARD_REQUEST" ]; then
+        request_ready=1
+        break
+      fi
+      /bin/sleep 0.05
+    done
+    if [ "$request_ready" != "1" ]; then
+      echo "ERROR: rehearsal validator did not publish its Arena guard request" >&2
+      exit 1
+    fi
+    PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+      /source/scripts/lab_arena_restart_guard_handoff.py validate-request \
+      --path "$ACTIVE_RELEASE_ARENA_GUARD_REQUEST" \
+      --candidate "$CANDIDATE_SHA" \
+      --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+      --scope validator \
+      --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
+      --authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA" >/dev/null
+    authorization="$(
+      run_rehearsal_lab_arena_guard authorize \
+        --scope validator \
+        --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \
+        --phase validator_destructive
+    )"
+    printf '%s' "$authorization" \
+      | PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+        /source/scripts/lab_arena_restart_guard_handoff.py write-permit \
+        --path "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+        --candidate "$CANDIDATE_SHA" \
+        --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --scope validator \
+        --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
+        --authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA" \
+        --expected-generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \
+        >/dev/null
+    if PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+        /source/scripts/lab_arena_restart_guard_handoff.py validate-permit \
+        --path "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+        --candidate "$CANDIDATE_SHA" \
+        --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --scope validator \
+        --nonce "$(printf '0%.0s' $(seq 1 64))" \
+        --authority-commit "$ACTIVE_RELEASE_AUTHORITY_SHA" \
+        >/dev/null 2>&1; then
+      echo "ERROR: rehearsal accepted a foreign Arena guard permit" >&2
+      exit 1
+    fi
+    if PYTHONPATH=/source:/harness /usr/bin/python3.11 \
+        /source/scripts/lab_arena_restart_guard_handoff.py validate-permit \
+        --path "$ACTIVE_RELEASE_ARENA_GUARD_PERMIT" \
+        --candidate "$CANDIDATE_SHA" \
+        --invocation "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --scope validator \
+        --nonce "$ACTIVE_RELEASE_ARENA_GUARD_NONCE" \
+        --authority-commit "$(printf '0%.0s' $(seq 1 40))" \
+        >/dev/null 2>&1; then
+      echo "ERROR: rehearsal accepted a stale Arena guard authority" >&2
+      exit 1
+    fi
+    while [ ! -f "$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE" ]; do
+      /bin/sleep 0.05
+    done
+  ) &
+  ARENA_GUARD_CONTROLLER_PID=$!
+  if ! ARENA_GUARD_CONTROLLER_START_TIME="$(
+      awk '{print $22}' "/proc/$ARENA_GUARD_CONTROLLER_PID/stat"
+    )" \
+      || ! [[ "$ARENA_GUARD_CONTROLLER_START_TIME" =~ ^[0-9]+$ ]]; then
+    wait "$ARENA_GUARD_CONTROLLER_PID" 2>/dev/null || true
+    echo "ERROR: rehearsal Arena guard controller identity is unavailable" >&2
+    exit 1
+  fi
+}
+
+if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+  verify_rehearsal_lab_arena_guard_boundary
+fi
+
 GATEWAY_ACTIVE_RELEASE_ENV=()
 VALIDATOR_ACTIVE_RELEASE_ENV=()
 if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
@@ -751,12 +1049,18 @@ if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS=30"
   )
   VALIDATOR_ACTIVE_RELEASE_ENV=(
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT"
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT=$ACTIVE_RELEASE_AUTHORITY_SHA"
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID=$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1"
     "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=$ACTIVE_RELEASE_VALIDATOR_OUTPUT"
     "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=$ACTIVE_RELEASE_GATEWAY_REQUIREMENTS"
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=$ACTIVE_RELEASE_GATEWAY_LINEAGE"
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=$ACTIVE_RELEASE_COORDINATION_FILE"
+    "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT=$ACTIVE_RELEASE_ARENA_GUARD_REQUEST"
+    "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT=$ACTIVE_RELEASE_ARENA_GUARD_PERMIT"
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE=$ACTIVE_RELEASE_ARENA_GUARD_NONCE"
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS=30"
   )
 fi
 
@@ -910,6 +1214,59 @@ PY
       --materialized-root "$MINER_BOOTSTRAP_ROOT/candidate" \
       --phase prepared_archive \
       --strict-extras >/dev/null
+
+    # The production operator installs the candidate controller after the
+    # N-1 archive is verified.  Keep the old release available for rollback,
+    # then advance current and the host wrapper before bootstrap exec.
+    CANDIDATE_CONTROLLER_RELEASE="$CONTROLLER_ROOT/releases/$CANDIDATE_SHA"
+    CANDIDATE_CONTROLLER_STAGE="$CONTROLLER_ROOT/.candidate-controller.$$.tmp"
+    test ! -e "$CANDIDATE_CONTROLLER_RELEASE"
+    rm -rf -- "$CANDIDATE_CONTROLLER_STAGE"
+    install -d -m 0700 \
+      "$CANDIDATE_CONTROLLER_STAGE/scripts" \
+      "$CANDIDATE_CONTROLLER_STAGE/Leadpoet/utils" \
+      "$CANDIDATE_CONTROLLER_STAGE/gateway/tee"
+    git -C /source show "$CANDIDATE_SHA:gw_restart.sh" \
+      >"$CANDIDATE_CONTROLLER_STAGE/gw_restart.sh"
+    git -C /source show "$CANDIDATE_SHA:scripts/gateway_git_deploy.py" \
+      >"$CANDIDATE_CONTROLLER_STAGE/scripts/gateway_git_deploy.py"
+    git -C /source show \
+      "$CANDIDATE_SHA:Leadpoet/utils/exact_commit_restart_v2.py" \
+      >"$CANDIDATE_CONTROLLER_STAGE/Leadpoet/utils/exact_commit_restart_v2.py"
+    git -C /source show "$CANDIDATE_SHA:gateway/tee/host_memory_guard_v2.py" \
+      >"$CANDIDATE_CONTROLLER_STAGE/gateway/tee/host_memory_guard_v2.py"
+    if git -C /source cat-file -e \
+        "$CANDIDATE_SHA:scripts/manage_owned_process_group.py"; then
+      git -C /source show \
+        "$CANDIDATE_SHA:scripts/manage_owned_process_group.py" \
+        >"$CANDIDATE_CONTROLLER_STAGE/scripts/manage_owned_process_group.py"
+    fi
+    chmod 0700 "$CANDIDATE_CONTROLLER_STAGE/gw_restart.sh"
+    find "$CANDIDATE_CONTROLLER_STAGE" -type f \
+      ! -path "$CANDIDATE_CONTROLLER_STAGE/gw_restart.sh" \
+      -exec chmod 0600 {} +
+    mv -- "$CANDIDATE_CONTROLLER_STAGE" "$CANDIDATE_CONTROLLER_RELEASE"
+    CANDIDATE_CONTROLLER_LINK="$CONTROLLER_ROOT/.current.$$.tmp"
+    ln -s "releases/$CANDIDATE_SHA" "$CANDIDATE_CONTROLLER_LINK"
+    mv -Tf -- "$CANDIDATE_CONTROLLER_LINK" "$CONTROLLER_ROOT/current"
+    install -m 0700 \
+      "$CANDIDATE_CONTROLLER_RELEASE/gw_restart.sh" \
+      /home/ec2-user/gw_restart.sh
+    test -d "$CONTROLLER_RELEASE"
+    test "$(readlink "$CONTROLLER_ROOT/current")" = "releases/$CANDIDATE_SHA"
+    test "$(git -C /source hash-object --no-filters \
+      "$CANDIDATE_CONTROLLER_RELEASE/gw_restart.sh")" = \
+      "$(git -C /source rev-parse "$CANDIDATE_SHA:gw_restart.sh")"
+    if git -C /source cat-file -e \
+        "$CANDIDATE_SHA:scripts/manage_owned_process_group.py"; then
+      test -f "$CANDIDATE_CONTROLLER_RELEASE/scripts/manage_owned_process_group.py"
+      test "$(git -C /source hash-object --no-filters \
+        "$CANDIDATE_CONTROLLER_RELEASE/scripts/manage_owned_process_group.py")" = \
+        "$(git -C /source rev-parse \
+          "$CANDIDATE_SHA:scripts/manage_owned_process_group.py")"
+    else
+      test ! -e "$CANDIDATE_CONTROLLER_RELEASE/scripts/manage_owned_process_group.py"
+    fi
     MINER_HANDOFF_FILE="/tmp/leadpoet-gateway-miner-maintenance-handoff.rehearsal-${RUN_ORDINAL}.ready"
     MINER_HANDOFF_NONCE="$(
       printf '%s' "$FROM_SHA:$CANDIDATE_SHA:$RUN_ORDINAL" | sha256sum | cut -d' ' -f1
@@ -1166,6 +1523,7 @@ PY
   fi
   if [ "$RESTART_STATUS" -ne 0 ]; then
     echo "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=$RESTART_STATUS" >&2
+    emit_gateway_restart_timing_diagnostic
     for endpoint in /research-lab/status /attest; do
       body_file="$(mktemp)"
       http_status="$(
@@ -1194,6 +1552,9 @@ PY
     fi
     echo "ERROR: exact gateway launcher failed" >&2
     exit "$RESTART_STATUS"
+  fi
+  if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+    release_rehearsal_lab_arena_guard gateway
   fi
 
   if [ "$MINER_FIRST_ROLLOUT" = "1" ]; then
@@ -1383,6 +1744,9 @@ else
     '{"ss58Address":"5CUxhqZ2ewLA61PtdKYzdnLXq1jyFxsvjMg8mRsim4Ni8T3p"}' \
     >/home/ec2-user/.bittensor/wallets/validator_72/coldkeypub.txt
 
+  if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+    start_validator_lab_arena_guard_controller
+  fi
   echo "REHEARSAL_START component=validator from=$FROM_SHA candidate=$CANDIDATE_SHA transition=$TRANSITION"
   if [ "$TRANSITION" = "rollback" ]; then
     env \
@@ -1401,6 +1765,18 @@ else
       VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
       "${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \
       bash /home/ec2-user/validator_restart.sh
+  fi
+
+  if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+    : >"$ACTIVE_RELEASE_ARENA_CONTROLLER_COMPLETE"
+    wait "$ARENA_GUARD_CONTROLLER_PID"
+    ARENA_GUARD_CONTROLLER_PID=""
+    ARENA_GUARD_CONTROLLER_START_TIME=""
+    run_rehearsal_lab_arena_guard ready \
+      --scope validator \
+      --generation "$ACTIVE_RELEASE_ARENA_GUARD_GENERATION" \
+      --phase validator_ready >/dev/null
+    release_rehearsal_lab_arena_guard validator
   fi
 
   test "$(git -C /home/ec2-user/leadpoet/leadpoet rev-parse HEAD)" = "$CANDIDATE_SHA"

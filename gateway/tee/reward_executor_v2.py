@@ -6,28 +6,18 @@ import re
 from typing import Any, Dict, Mapping
 
 from leadpoet_canonical.attested_v2 import sha256_json
-from leadpoet_verifier.economics import build_champion_reward_obligation
-from research_lab.reimbursements import (
-    ReimbursementCapUsage,
-    build_reimbursement_schedule,
-    compute_reimbursement_award,
-)
 from research_lab.source_add_rewards import (
     PUBLIC_LABELS,
     REWARD_KIND_SOURCE_ACCEPTANCE,
     create_leg1_reward,
-    create_leg2_reward,
 )
 
 
 OP_RESEARCH_LAB_REWARD_DECISION = "research_lab_reward_decision"
 REWARD_DECISION_KINDS = frozenset(
     {
-        "champion",
         "champion_migration",
-        "reimbursement",
         "source_add_leg1",
-        "source_add_leg2",
         "source_add_migration",
     }
 )
@@ -169,35 +159,11 @@ def execute_reward_decision_v2(payload: Mapping[str, Any]) -> Dict[str, Any]:
     value = payload.get("decision_payload")
     if not isinstance(value, Mapping):
         raise RewardExecutorV2Error("reward decision input is invalid")
-    if kind == "champion":
-        return _champion(value)
     if kind == "champion_migration":
         return _champion_migration(value)
     if kind == "source_add_migration":
         return _source_add_migration(value)
-    if kind == "reimbursement":
-        return _reimbursement(value)
     return _source_add(kind, value)
-
-
-def _champion(value: Mapping[str, Any]) -> Dict[str, Any]:
-    if set(value) != {"obligation_input", "policy", "promotion_decision"}:
-        raise RewardExecutorV2Error("champion reward fields are invalid")
-    obligation_input = value.get("obligation_input")
-    policy = value.get("policy")
-    promotion_decision = value.get("promotion_decision")
-    if (
-        not isinstance(obligation_input, Mapping)
-        or not isinstance(policy, Mapping)
-        or not isinstance(promotion_decision, Mapping)
-    ):
-        raise RewardExecutorV2Error("champion reward input is invalid")
-    if promotion_decision.get("status") != "promotion_passed":
-        raise RewardExecutorV2Error("champion reward promotion decision is invalid")
-    return {
-        "decision_kind": "champion",
-        "reward": build_champion_reward_obligation(obligation_input, policy),
-    }
 
 
 def _champion_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
@@ -309,6 +275,8 @@ def _champion_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
+    if kind != "source_add_leg1":
+        raise RewardExecutorV2Error("SOURCE_ADD reward producer is retired")
     common = {
         "adapter_id",
         "miner_ref",
@@ -317,11 +285,7 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
         "alpha_percent",
         "reward_epochs",
     }
-    expected = common | (
-        {"trigger_evidence", "judge_result"}
-        if kind == "source_add_leg2"
-        else {"provenance_result", "trigger_evidence"}
-    )
+    expected = common | {"provenance_result", "trigger_evidence"}
     if set(value) != expected:
         raise RewardExecutorV2Error("SOURCE_ADD reward fields are invalid")
     existing = value.get("existing_rewards")
@@ -391,26 +355,6 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
             )
         reward = create_leg1_reward(
             miner_ref=str(value.get("miner_ref") or ""),
-            trigger_evidence=dict(trigger),
-            **kwargs,
-        )
-    else:
-        trigger = value.get("trigger_evidence")
-        judge_result = value.get("judge_result")
-        if not isinstance(trigger, Mapping) or not isinstance(judge_result, Mapping):
-            raise RewardExecutorV2Error("SOURCE_ADD trigger evidence is invalid")
-        verdict = judge_result.get("verdict")
-        if (
-            not isinstance(verdict, Mapping)
-            or verdict.get("verdict") != "helped"
-            or verdict.get("source_used") is not True
-            or trigger.get("llm_judge_passed") is not True
-        ):
-            raise RewardExecutorV2Error(
-                "SOURCE_ADD Leg 2 signed judge did not approve the reward"
-            )
-        reward = create_leg2_reward(
-            adapter_owner_miner_ref=str(value.get("miner_ref") or ""),
             trigger_evidence=dict(trigger),
             **kwargs,
         )
@@ -492,39 +436,4 @@ def _source_add_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
             "public_label": PUBLIC_LABELS[REWARD_KIND_SOURCE_ACCEPTANCE],
             "stopped_reason": "",
         },
-    }
-
-
-def _reimbursement(value: Mapping[str, Any]) -> Dict[str, Any]:
-    if set(value) != {
-        "run_cost",
-        "participation_snapshot",
-        "policy",
-        "cap_usage",
-        "start_epoch",
-        "autoresearch_result",
-        "source_state",
-    }:
-        raise RewardExecutorV2Error("reimbursement decision fields are invalid")
-    for field in ("run_cost", "participation_snapshot", "policy", "cap_usage"):
-        if not isinstance(value.get(field), Mapping):
-            raise RewardExecutorV2Error("reimbursement %s is invalid" % field)
-    for field in ("autoresearch_result", "source_state"):
-        if not isinstance(value.get(field), Mapping):
-            raise RewardExecutorV2Error("reimbursement %s is invalid" % field)
-    award = compute_reimbursement_award(
-        value["run_cost"],
-        value["participation_snapshot"],
-        value["policy"],
-        ReimbursementCapUsage.from_mapping(value["cap_usage"]),
-    ).to_dict()
-    schedule = build_reimbursement_schedule(
-        award,
-        start_epoch=int(value.get("start_epoch") or 0),
-    ).to_dict()
-    return {
-        "decision_kind": "reimbursement",
-        "award": award,
-        "schedule": schedule,
-        "source_state": dict(value["source_state"]),
     }

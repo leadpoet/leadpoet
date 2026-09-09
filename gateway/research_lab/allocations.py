@@ -10,11 +10,6 @@ import logging
 import os
 from typing import Any, Mapping, Sequence
 
-from gateway.research_lab.alpha_pricing import (
-    inject_alpha_price_valuation,
-    resolve_epoch_alpha_price_valuation,
-)
-from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.v2_authority import build_allocation_v2
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
@@ -25,10 +20,7 @@ from gateway.research_lab.store import (
     select_all,
     select_many,
 )
-from leadpoet_verifier.economics import (
-    CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
-    allocate_research_lab_epoch,
-)
+from leadpoet_verifier.economics import CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
 
 
 ACTIVE_REIMBURSEMENT_STATUSES = {"awarded"}
@@ -263,152 +255,51 @@ async def build_research_lab_allocation_bundle(
     attestation_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a sanitized Research Lab allocation bundle for one epoch."""
-    if legacy_v1_enabled():
-        policy = config.reimbursement_policy_doc(enabled=True)
-        alpha_valuation = await resolve_epoch_alpha_price_valuation(
-            network=_bittensor_network(),
-            netuid=int(netuid),
-            epoch=int(epoch),
-            enabled=bool(config.reimbursement_dynamic_alpha_price_enabled),
-            require_live=bool(config.reimbursement_require_live_alpha_price),
-            miner_alpha_per_epoch=config.reimbursement_miner_alpha_per_epoch,
-            static_usd_per_0_1_percent_epoch=(
-                config.reimbursement_usd_per_0_1_percent_epoch
-            ),
-        )
-        policy = inject_alpha_price_valuation(policy, alpha_valuation)
-        reimbursement_obligations, reimbursement_skipped = (
-            await _active_reimbursement_obligations(int(epoch), policy=policy)
-        )
-        champion_obligations, champion_skipped = (
-            await _active_champion_obligations(
-                int(epoch),
-                netuid=int(netuid),
-                enable_champ_cap=bool(config.enable_champ_cap),
-            )
-        )
-        source_add_obligations, source_add_skipped = (
-            await _active_source_add_obligations(int(epoch), netuid=int(netuid))
-        )
-        source_add_present = bool(source_add_obligations or source_add_skipped)
-        fallback_reimbursement_obligations: list[dict[str, Any]] = []
-        fallback_reimbursement_skipped: list[dict[str, Any]] = []
-        fallback_source: dict[str, Any] = {}
-        if not bool(config.enable_conservative):
-            (
-                fallback_reimbursement_obligations,
-                fallback_reimbursement_skipped,
-                fallback_source,
-            ) = await _historical_compute_fallback_obligations(
-                epoch=int(epoch),
-                netuid=int(netuid),
-                policy=policy,
-            )
-        allocation_inputs = {
-            "epoch": int(epoch),
-            "policy": policy,
-            "active_reimbursement_obligations": reimbursement_obligations,
-            "active_champion_obligations": champion_obligations,
-        }
-        if fallback_reimbursement_obligations:
-            allocation_inputs["fallback_reimbursement_obligations"] = (
-                fallback_reimbursement_obligations
-            )
-        if source_add_present:
-            allocation_inputs["active_source_add_obligations"] = source_add_obligations
-        allocation = allocate_research_lab_epoch(
-            allocation_inputs["epoch"],
-            allocation_inputs["policy"],
-            allocation_inputs["active_reimbursement_obligations"],
-            allocation_inputs["active_champion_obligations"],
-            active_source_add_obligations=allocation_inputs.get(
-                "active_source_add_obligations", []
-            ),
-            fallback_reimbursement_obligations=allocation_inputs.get(
-                "fallback_reimbursement_obligations", []
-            ),
-        )
-        source_state = {
-            "epoch": int(epoch),
-            "netuid": int(netuid),
-            "policy_id": str(policy["policy_id"]),
-            "policy": policy,
-            "reimbursement_obligation_count": len(reimbursement_obligations),
-            "champion_obligation_count": len(champion_obligations),
-            "reimbursement_obligations": reimbursement_obligations,
-            "champion_obligations": champion_obligations,
-            "skipped": {
-                "reimbursements": reimbursement_skipped,
-                "champions": champion_skipped,
-            },
-        }
-        if fallback_reimbursement_obligations or fallback_reimbursement_skipped:
-            source_state.update(
-                {
-                    "fallback_reimbursement_obligation_count": len(
-                        fallback_reimbursement_obligations
-                    ),
-                    "fallback_reimbursement_obligations": (
-                        fallback_reimbursement_obligations
-                    ),
-                    "historical_compute_fallback_source": fallback_source,
-                }
-            )
-            source_state["skipped"]["fallback_reimbursements"] = (
-                fallback_reimbursement_skipped
-            )
-        if source_add_present:
-            source_state["source_add_obligation_count"] = len(source_add_obligations)
-            source_state["source_add_obligations"] = source_add_obligations
-            source_state["skipped"]["source_add"] = source_add_skipped
-        source_state_hash = sha256_json(source_state)
-        attestation = {"status": "off", "protocol": "legacy_v1"}
-    else:
-        policy = config.reimbursement_policy_doc(enabled=True)
-        attestation = await _build_allocation_v2_singleflight(
-            epoch_id=int(epoch),
-            netuid=int(netuid),
-            policy=policy,
-        )
-        authority = attestation.get("result")
-        if not isinstance(authority, Mapping):
-            raise ValueError("Research Lab V2 allocation authority result is missing")
-        allocation = authority.get("allocation")
-        allocation_inputs = authority.get("allocation_inputs")
-        source_state = authority.get("source_state")
-        if (
-            not isinstance(allocation, Mapping)
-            or not isinstance(allocation_inputs, Mapping)
-            or not isinstance(source_state, Mapping)
-        ):
-            raise ValueError("Research Lab V2 allocation authority result is invalid")
-        allocation = dict(allocation)
-        allocation_inputs = dict(allocation_inputs)
-        source_state = dict(source_state)
-        policy = dict(allocation_inputs.get("policy") or {})
-        reimbursement_obligations = list(
-            allocation_inputs.get("active_reimbursement_obligations") or []
-        )
-        champion_obligations = list(
-            allocation_inputs.get("active_champion_obligations") or []
-        )
-        fallback_reimbursement_obligations = list(
-            allocation_inputs.get("fallback_reimbursement_obligations") or []
-        )
-        source_add_present = "active_source_add_obligations" in allocation_inputs
-        source_add_obligations = list(
-            allocation_inputs.get("active_source_add_obligations") or []
-        )
-        skipped = source_state.get("skipped")
-        if not isinstance(skipped, Mapping):
-            raise ValueError("Research Lab V2 allocation skipped-state is invalid")
-        reimbursement_skipped = list(skipped.get("reimbursements") or [])
-        champion_skipped = list(skipped.get("champions") or [])
-        source_add_skipped = list(skipped.get("source_add") or [])
-        fallback_reimbursement_skipped = list(
-            skipped.get("fallback_reimbursements") or []
-        )
-        source_state_hash = str(authority.get("source_state_hash") or "")
+    policy = config.reimbursement_policy_doc(enabled=True)
+    attestation = await _build_allocation_v2_singleflight(
+        epoch_id=int(epoch),
+        netuid=int(netuid),
+        policy=policy,
+    )
+    authority = attestation.get("result")
+    if not isinstance(authority, Mapping):
+        raise ValueError("Research Lab V2 allocation authority result is missing")
+    allocation = authority.get("allocation")
+    allocation_inputs = authority.get("allocation_inputs")
+    source_state = authority.get("source_state")
+    if (
+        not isinstance(allocation, Mapping)
+        or not isinstance(allocation_inputs, Mapping)
+        or not isinstance(source_state, Mapping)
+    ):
+        raise ValueError("Research Lab V2 allocation authority result is invalid")
+    allocation = dict(allocation)
+    allocation_inputs = dict(allocation_inputs)
+    source_state = dict(source_state)
+    policy = dict(allocation_inputs.get("policy") or {})
+    reimbursement_obligations = list(
+        allocation_inputs.get("active_reimbursement_obligations") or []
+    )
+    champion_obligations = list(
+        allocation_inputs.get("active_champion_obligations") or []
+    )
+    fallback_reimbursement_obligations = list(
+        allocation_inputs.get("fallback_reimbursement_obligations") or []
+    )
+    source_add_present = "active_source_add_obligations" in allocation_inputs
+    source_add_obligations = list(
+        allocation_inputs.get("active_source_add_obligations") or []
+    )
+    skipped = source_state.get("skipped")
+    if not isinstance(skipped, Mapping):
+        raise ValueError("Research Lab V2 allocation skipped-state is invalid")
+    reimbursement_skipped = list(skipped.get("reimbursements") or [])
+    champion_skipped = list(skipped.get("champions") or [])
+    source_add_skipped = list(skipped.get("source_add") or [])
+    fallback_reimbursement_skipped = list(
+        skipped.get("fallback_reimbursements") or []
+    )
+    source_state_hash = str(authority.get("source_state_hash") or "")
     if attestation_out is not None:
         attestation_out.clear()
         attestation_out.update(attestation)
@@ -901,6 +792,8 @@ def _historical_compute_fallback_from_snapshot(
         "eligible_miner_count": len(obligations),
     }
     return obligations, skipped, source
+
+
 
 
 async def _active_champion_obligations(
@@ -1524,16 +1417,14 @@ def _epoch_active(row: Mapping[str, Any], epoch: int) -> bool:
     return epoch_count > 0 and start_epoch <= int(epoch) < start_epoch + epoch_count
 
 
+
+
 def _decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
 def _rate_float(value: Decimal) -> float:
     return float(value.quantize(RATE_QUANT, rounding=ROUND_HALF_UP))
-
-
-def _bittensor_network() -> str:
-    return (os.getenv("BITTENSOR_NETWORK") or os.getenv("SUBTENSOR_NETWORK") or "finney").strip() or "finney"
 
 
 def _utc_now_iso() -> str:

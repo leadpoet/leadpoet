@@ -31,7 +31,6 @@ def _provider_execution_fence(monkeypatch):
 def _config(**overrides):
     values = {
         "source_add_rewards_enabled": True,
-        "source_add_functional_rewards_enabled": True,
         "source_add_functional_probes_enabled": True,
         "source_add_leg1_alpha_percent": 0.2,
         "source_add_leg1_max_per_utc_day": 50,
@@ -236,7 +235,6 @@ async def test_provenance_authority_uses_retry_sequence(monkeypatch):
     async def persist_links(**_kwargs):
         return {"status": "persisted"}
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
     provenance, _outcome = await v2_authority.evaluate_source_add_provenance_v2(
         submission_id=SUBMISSION_ID,
         source_name="Credible API",
@@ -307,7 +305,6 @@ async def test_provenance_retry_reuses_identical_existing_authority(monkeypatch)
         observed.update(kwargs)
         return existing_graph
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
     monkeypatch.setattr(
         v2_authority,
         "validate_receipt_graph",
@@ -397,7 +394,6 @@ async def test_provenance_retry_rejects_different_existing_authority(monkeypatch
             "edges": [],
         }
 
-    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: False)
     monkeypatch.setattr(
         v2_authority,
         "validate_receipt_graph",
@@ -767,36 +763,6 @@ async def test_disabled_source_add_rewards_remain_retryable(monkeypatch):
     assert finished["result_doc"]["status"] == "rewards_disabled"
 
 
-@pytest.mark.asyncio
-async def test_disabled_functional_rewards_do_not_block_provenance_leg1(
-    monkeypatch,
-):
-    work = _leased_work(
-        "leg1_reward",
-        job_doc={"intent_id": "source_add_reward_intent:0123456789abcdef"},
-    )
-
-    async def fake_select_one(table, **_kwargs):
-        assert table == "research_lab_source_add_reward_intents"
-        return {"intent_id": work["job_doc"]["intent_id"]}
-
-    async def fake_rpc(name, _params):
-        assert name == "research_lab_source_add_reserve_leg1_slot_v4"
-        return {"status": "fifo_wait"}
-
-    async def fail_finish(*_args, **_kwargs):
-        raise AssertionError("functional reward control must not gate Leg 1")
-
-    monkeypatch.setattr(workflow, "select_one", fake_select_one)
-    monkeypatch.setattr(workflow, "_rpc", fake_rpc)
-    monkeypatch.setattr(workflow, "_finish_work", fail_finish)
-
-    result = await workflow._process_leg1_reward(
-        work,
-        config=_config(source_add_functional_rewards_enabled=False),
-    )
-
-    assert result == {"status": "fifo_wait"}
 
 
 @pytest.mark.asyncio

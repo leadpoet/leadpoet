@@ -699,7 +699,7 @@ async def _process_provisioning_smoke(
         not isinstance(catalog_row, Mapping)
         or not isinstance(provision_row, Mapping)
         or str(provision_row.get("provision_status") or "")
-        != "provisioned_autoresearch_eligible"
+        not in {"provisioned", "provisioned_autoresearch_eligible"}
     ):
         raise SourceAddWorkflowError("SOURCE_ADD provisioning smoke input is invalid")
 

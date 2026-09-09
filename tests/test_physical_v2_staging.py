@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import shlex
+import signal
+import subprocess
+import textwrap
+import time
 
 import pytest
 import yaml
@@ -10,6 +16,7 @@ from botocore.exceptions import ClientError
 from scripts import setup_production_parity_staging as parity_setup
 from scripts.cleanup_production_parity_staging import (
     _owned_run,
+    cleanup_exact_run,
     cleanup_stale,
 )
 from scripts.provision_production_parity_staging import (
@@ -936,6 +943,432 @@ def test_cleanup_dry_run_is_non_destructive_and_empty_without_owned_resources():
     assert result["instances"] == []
 
 
+def _exact_tags(run_id=RUN_ID, candidate_sha=SHA):
+    return [
+        {"Key": "leadpoet:parity-run", "Value": run_id},
+        {"Key": "leadpoet:candidate-sha", "Value": candidate_sha},
+        {"Key": "leadpoet:ephemeral", "Value": "true"},
+    ]
+
+
+class _ExactPaginator:
+    def __init__(self, client, operation):
+        self.client = client
+        self.operation = operation
+
+    def paginate(self, **kwargs):
+        if self.operation == "list_secrets":
+            return [{
+                "SecretList": [
+                    {"Name": name, "Tags": tags}
+                    for name, tags in self.client.secrets.items()
+                ]
+            }]
+        bucket = kwargs["Bucket"]
+        return (
+            [{"Versions": [{"Key": "evidence", "VersionId": "1"}]}]
+            if bucket in self.client.nonempty_buckets
+            else [{}]
+        )
+
+
+class _ExactCleanupClient:
+    manual_run = "pp-34171243785-1"
+    manual_instance = "i-11111111111111111"
+    manual_group = "sg-11111111111111111"
+    manual_distribution = "E11111111111111"
+
+    def __init__(self, *, untagged_bucket=False, nonempty_bucket=False):
+        self.instances = {
+            INSTANCE_ID: _exact_tags(),
+            self.manual_instance: _exact_tags(self.manual_run),
+            "i-22222222222222222": _exact_tags(candidate_sha="b" * 40),
+        }
+        self.groups = {
+            SECURITY_GROUP_ID: _exact_tags(),
+            self.manual_group: _exact_tags(self.manual_run),
+        }
+        self.distributions = {
+            DISTRIBUTION_ID: _exact_tags(),
+            self.manual_distribution: _exact_tags(self.manual_run),
+        }
+        target_secret = (
+            f"leadpoet/staging/production-parity/runs/{RUN_ID}/gateway"
+        )
+        manual_secret = (
+            "leadpoet/staging/production-parity/runs/"
+            f"{self.manual_run}/gateway"
+        )
+        self.secrets = {
+            target_secret: _exact_tags(),
+            manual_secret: _exact_tags(self.manual_run),
+        }
+        self.target_bucket = _artifact_bucket_name(
+            account_id=PRODUCTION_ACCOUNT_ID,
+            run_id=RUN_ID,
+            candidate_sha=SHA,
+        )
+        self.manual_bucket = _artifact_bucket_name(
+            account_id=PRODUCTION_ACCOUNT_ID,
+            run_id=self.manual_run,
+            candidate_sha=SHA,
+        )
+        self.buckets = {
+            self.target_bucket: None if untagged_bucket else _exact_tags(),
+            self.manual_bucket: _exact_tags(self.manual_run),
+        }
+        self.nonempty_buckets = (
+            {self.target_bucket} if nonempty_bucket else set()
+        )
+        self.deleted: list[str] = []
+        self.fail_terminate = False
+        self.fail_inventory = False
+        self.drift_group_on_retry = False
+
+    def describe_instances(self, **kwargs):
+        requested = kwargs.get("InstanceIds")
+        values = [
+            {"InstanceId": key, "State": {"Name": "running"}, "Tags": tags}
+            for key, tags in self.instances.items()
+            if requested is None or key in requested
+        ]
+        return {"Reservations": [{"Instances": values}] if values else []}
+
+    def terminate_instances(self, **kwargs):
+        if self.fail_terminate:
+            raise RuntimeError("injected termination failure")
+        for key in kwargs["InstanceIds"]:
+            self.instances.pop(key, None)
+            self.deleted.append(key)
+
+    def get_waiter(self, _name):
+        return _Waiter()
+
+    def describe_security_groups(self, **kwargs):
+        requested = kwargs.get("GroupIds")
+        return {"SecurityGroups": [
+            {"GroupId": key, "Tags": tags}
+            for key, tags in self.groups.items()
+            if requested is None or key in requested
+        ]}
+
+    def delete_security_group(self, **kwargs):
+        key = kwargs["GroupId"]
+        if self.drift_group_on_retry and key == SECURITY_GROUP_ID:
+            self.groups[key] = _exact_tags(self.manual_run)
+            self.drift_group_on_retry = False
+            raise _aws_error("DependencyViolation", "DeleteSecurityGroup")
+        self.groups.pop(key, None)
+        self.deleted.append(key)
+
+    def list_distributions(self, **_kwargs):
+        if self.fail_inventory:
+            raise RuntimeError("injected inventory failure")
+        return {"DistributionList": {
+            "Items": [
+                {"Id": key, "ARN": _distribution_arn(key)}
+                for key in self.distributions
+            ],
+            "IsTruncated": False,
+        }}
+
+    def list_tags_for_resource(self, **kwargs):
+        key = kwargs["Resource"].rsplit("/", 1)[-1]
+        return {"Tags": {"Items": self.distributions[key]}}
+
+    def get_distribution(self, **kwargs):
+        key = kwargs["Id"]
+        return {"Distribution": {
+            "Id": key,
+            "ARN": _distribution_arn(key),
+            "Status": "Deployed",
+            "DistributionConfig": {"Enabled": False},
+        }}
+
+    def get_distribution_config(self, **_kwargs):
+        return {"ETag": "etag", "DistributionConfig": {"Enabled": False}}
+
+    def delete_distribution(self, **kwargs):
+        key = kwargs["Id"]
+        self.distributions.pop(key, None)
+        self.deleted.append(key)
+
+    def describe_secret(self, **kwargs):
+        name = kwargs["SecretId"]
+        if name not in self.secrets:
+            raise _aws_error("ResourceNotFoundException", "DescribeSecret")
+        return {"Name": name, "Tags": self.secrets[name]}
+
+    def delete_secret(self, **kwargs):
+        name = kwargs["SecretId"]
+        self.secrets.pop(name, None)
+        self.deleted.append(name)
+
+    def list_buckets(self):
+        return {"Buckets": [{"Name": key} for key in self.buckets]}
+
+    def get_bucket_tagging(self, **kwargs):
+        tags = self.buckets[kwargs["Bucket"]]
+        if tags is None:
+            raise _aws_error("NoSuchTagSet", "GetBucketTagging")
+        return {"TagSet": tags}
+
+    def get_paginator(self, name):
+        return _ExactPaginator(self, name)
+
+    def list_objects_v2(self, **kwargs):
+        return (
+            {"Contents": [{"Key": "evidence"}]}
+            if kwargs["Bucket"] in self.nonempty_buckets
+            else {}
+        )
+
+    def delete_bucket(self, **kwargs):
+        key = kwargs["Bucket"]
+        self.buckets.pop(key, None)
+        self.deleted.append(key)
+
+
+def _cleanup_exact(client):
+    return cleanup_exact_run(
+        ec2=client,
+        cloudfront=client,
+        secretsmanager=client,
+        s3=client,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+        apply=True,
+        max_attempts=2,
+        retry_delay_seconds=0,
+    )
+
+
+def test_exact_cleanup_removes_partial_resources_only_for_exact_owner():
+    client = _ExactCleanupClient()
+    result = _cleanup_exact(client)
+
+    assert result["errors"] == []
+    assert result["residue"] == {}
+    assert {
+        INSTANCE_ID,
+        SECURITY_GROUP_ID,
+        DISTRIBUTION_ID,
+        f"leadpoet/staging/production-parity/runs/{RUN_ID}/gateway",
+        client.target_bucket,
+    }.issubset(client.deleted)
+    assert client.manual_instance in client.instances
+    assert "i-22222222222222222" in client.instances
+    assert client.manual_group in client.groups
+    assert client.manual_distribution in client.distributions
+    assert client.manual_bucket in client.buckets
+    assert _cleanup_exact(client)["residue"] == {}
+
+
+@pytest.mark.parametrize(
+    ("boundary", "resource"),
+    (
+        ("instance", INSTANCE_ID),
+        ("security-group", SECURITY_GROUP_ID),
+        ("distribution", DISTRIBUTION_ID),
+        ("artifact-bucket", "bucket"),
+    ),
+)
+def test_exact_cleanup_handles_each_interrupted_creation_boundary(
+    boundary, resource
+):
+    client = _ExactCleanupClient()
+    if boundary != "instance":
+        client.instances.pop(INSTANCE_ID)
+    if boundary != "security-group":
+        client.groups.pop(SECURITY_GROUP_ID)
+    if boundary != "distribution":
+        client.distributions.pop(DISTRIBUTION_ID)
+    if boundary != "artifact-bucket":
+        client.buckets.pop(client.target_bucket)
+    client.secrets = {
+        name: tags
+        for name, tags in client.secrets.items()
+        if client.manual_run in name
+    }
+
+    result = _cleanup_exact(client)
+    expected = client.target_bucket if resource == "bucket" else resource
+    assert result["residue"] == {}
+    assert expected in client.deleted
+
+
+def test_exact_cleanup_reports_untagged_bucket_without_deleting_it():
+    client = _ExactCleanupClient(untagged_bucket=True)
+    result = _cleanup_exact(client)
+
+    assert client.target_bucket not in client.deleted
+    assert result["residue"] == {
+        "unowned_artifact_buckets": [client.target_bucket]
+    }
+    assert result["errors"] == [
+        f"residue:unowned_artifact_buckets:{client.target_bucket}"
+    ]
+
+
+def test_exact_cleanup_retains_compliance_objects():
+    client = _ExactCleanupClient(nonempty_bucket=True)
+    result = _cleanup_exact(client)
+
+    assert result["retained_artifact_buckets"] == [client.target_bucket]
+    assert result["residue"] == {}
+    assert result["errors"] == []
+    assert client.target_bucket not in client.deleted
+
+
+def test_exact_cleanup_attempts_other_resources_and_reports_residue():
+    client = _ExactCleanupClient()
+    client.fail_terminate = True
+    result = _cleanup_exact(client)
+
+    assert result["residue"] == {"instances": [INSTANCE_ID]}
+    assert f"residue:instances:{INSTANCE_ID}" in result["errors"]
+    assert SECURITY_GROUP_ID in client.deleted
+    assert DISTRIBUTION_ID in client.deleted
+    assert client.target_bucket in client.deleted
+
+
+def test_exact_cleanup_rechecks_security_group_tags_during_retry(monkeypatch):
+    client = _ExactCleanupClient()
+    client.drift_group_on_retry = True
+    monkeypatch.setattr(
+        "scripts.cleanup_production_parity_staging.time.sleep", lambda _delay: None
+    )
+
+    result = cleanup_stale(
+        ec2=client,
+        cloudfront=client,
+        secretsmanager=client,
+        s3=client,
+        now=datetime.now(timezone.utc),
+        max_age_hours=30,
+        apply=True,
+        run_id=RUN_ID,
+        candidate_sha=SHA,
+    )
+
+    assert SECURITY_GROUP_ID in client.groups
+    assert SECURITY_GROUP_ID not in client.deleted
+    assert result["errors"] == [
+        f"security-group:{SECURITY_GROUP_ID}:StagingCleanupError"
+    ]
+
+
+def test_exact_cleanup_returns_machine_readable_inventory_errors():
+    client = _ExactCleanupClient()
+    client.fail_inventory = True
+    result = _cleanup_exact(client)
+
+    assert result["errors"] == ["exact-run-inventory:RuntimeError"]
+
+
+def test_full_cleanup_uses_fallback_only_after_run_identity_is_frozen():
+    source = (ROOT / ".github/workflows/physical-v2-staging.yml").read_text()
+    gate = source.index('if [ -s "$parity_temp/parity-stack.json" ]')
+    fallback = source.index(
+        "python3 scripts/cleanup_production_parity_staging.py", gate
+    )
+    scrub = source.index('rm -rf -- "$parity_temp"', fallback)
+    assert gate < fallback < scrub
+    assert 'elif [ -n "${{ steps.inputs.outputs.run_id }}" ]; then' in source
+    assert '--run-id "${{ steps.inputs.outputs.run_id }}"' in source
+    assert '--candidate-sha "$CANDIDATE_SHA"' in source
+
+
+@pytest.mark.parametrize(
+    ("signum", "exit_code"),
+    ((signal.SIGINT, 130), (signal.SIGTERM, 143)),
+)
+def test_full_create_cancellation_stops_and_waits_for_exact_child(
+    tmp_path, signum, exit_code
+):
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/physical-v2-staging.yml").read_text()
+    )
+    step = next(
+        item
+        for item in workflow["jobs"]["validate"]["steps"]
+        if item.get("name") == "Create one disposable Nitro host"
+    )
+    source = step["run"]
+    start = source.index('provision_pid=""')
+    end = source.index('python3 - "$PARITY_TEMP/parity-stack.json"')
+    cancellation = source[start:end]
+    command = (
+        'python3 scripts/provision_production_parity_staging.py "${args[@]}" &'
+    )
+    assert command in cancellation
+    cancellation = cancellation.replace(
+        command,
+        'python3 -c "$TEST_CHILD" "$READY" "$STOPPED" &',
+    )
+    assert 'kill -TERM "$provision_pid"' in cancellation
+    assert 'wait "$provision_pid"' in cancellation
+
+    ready = tmp_path / "ready"
+    stopped = tmp_path / "stopped"
+    child = """
+import pathlib, signal, sys, time
+ready = pathlib.Path(sys.argv[1])
+stopped = pathlib.Path(sys.argv[2])
+def stop(_signum, _frame):
+    stopped.write_text("stopped", encoding="utf-8")
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+ready.write_text("ready", encoding="utf-8")
+while True:
+    time.sleep(0.05)
+"""
+    environment = {
+        **os.environ,
+        "TEST_CHILD": child,
+        "READY": str(ready),
+        "STOPPED": str(stopped),
+    }
+    process = subprocess.Popen(
+        ["bash", "-c", "set -Eeuo pipefail\n" + cancellation],
+        env=environment,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(0.02)
+        assert ready.exists()
+        os.kill(process.pid, signum)
+        assert process.wait(timeout=5) == exit_code
+        assert stopped.read_text(encoding="utf-8") == "stopped"
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
+            process.wait(timeout=5)
+
+
+def test_cleanup_dispatch_validates_exact_pair_before_credentials():
+    source = (
+        ROOT / ".github/workflows/production-parity-cleanup.yml"
+    ).read_text()
+    validation = source.index(
+        "name: Validate exact cleanup selection before credentials"
+    )
+    credentials = source.index(
+        "uses: aws-actions/configure-aws-credentials@v4"
+    )
+    assert validation < credentials
+    assert "^pp-[0-9]{1,20}-[0-9]{1,6}$" in source
+    assert "^[0-9a-f]{40}$" in source
+    assert '--run-id "$EXACT_RUN_ID"' in source
+    assert '--candidate-sha "$EXACT_CANDIDATE_SHA"' in source
+
+
 def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     source = (ROOT / ".github/workflows/physical-v2-staging.yml").read_text()
     assert "Production Parity Full" in source
@@ -956,7 +1389,7 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "leadpoet.production_parity_arena_rebenchmark_evidence.v1" in source
     assert (
         "https://github.com/leadpoet/pydantic-harness/"
-        "archive/refs/heads/main.tar.gz"
+        "archive/refs/heads/lab.tar.gz"
     ) in source
     assert 'arena_counts.get("accepted_execute_runs")' in source
     assert 'arena_counts.get("accepted_score_runs")' in source
@@ -970,7 +1403,7 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert 'arena_recovery.get("service_restarted") is not True' in source
 
 
-def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
+def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main_ancestry():
     source = (
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
@@ -996,8 +1429,8 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     fetch = source.index(
         'candidate_git -C "$candidate_repo" fetch --no-tags origin'
     )
-    exact_main = source.index(
-        'test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" ='
+    canonical_main_ancestry = source.index(
+        'candidate_git -C "$candidate_repo" merge-base --is-ancestor'
     )
     runner = source.index(
         '"$host_python" scripts/run_production_parity_full_host.py'
@@ -1012,7 +1445,7 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         < canonical_origin
         < exact_origin
         < fetch
-        < exact_main
+        < canonical_main_ancestry
         < runner
     )
     assert '"$candidate_git_bin" -c init.templateDir=' in source
@@ -1031,11 +1464,14 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         '/usr/bin/python3.11 -I -m venv "$host_venv"'
         in source
     )
-    container_runtime_package = source.index(
-        "host_bootstrap_step=container-runtime-package"
+    native_build_package = source.index(
+        "host_bootstrap_step=native-build-package"
     )
-    container_runtime_identity = source.index(
-        "host_bootstrap_step=container-runtime-identity"
+    native_build_identity = source.index(
+        "host_bootstrap_step=native-build-package-identity"
+    )
+    buildx_identity = source.index(
+        "host_bootstrap_step=container-buildx-identity"
     )
     container_runtime_service = source.index(
         "host_bootstrap_step=container-runtime-service"
@@ -1044,21 +1480,180 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     python_runtime_package = source.index("host_bootstrap_step=runtime-package")
     venv_create = source.index("host_bootstrap_step=venv-create")
     assert (
-        container_runtime_package
-        < container_runtime_identity
+        native_build_package
+        < native_build_identity
+        < buildx_identity
         < container_runtime_service
         < venv_absence
         < python_runtime_package
         < venv_create
     )
-    assert "if [ ! -x /usr/bin/docker ]; then" in source
-    assert "sudo -n /usr/bin/dnf -q -y install docker" in source
+    assert (
+        "sudo -n /usr/bin/dnf -q -y install \\\n"
+        "            aws-nitro-enclaves-cli \\\n"
+        "            aws-nitro-enclaves-cli-devel \\\n"
+        "            docker \\\n"
+        "            rsync \\\n"
+        "            jq \\\n"
+        "            tar \\\n"
+        "            gzip >/dev/null 2>&1"
+    ) in source
+    assert "/usr/bin/rpm -q \\\n            aws-nitro-enclaves-cli" in source
     assert "/usr/bin/rpm -qf /usr/bin/docker" in source
+    assert "sudo -n /usr/bin/docker buildx version" in source
     assert "sudo -n /usr/bin/systemctl start docker.service" in source
     assert "sudo -n /usr/bin/docker info" in source
     assert "python3.11-pip-wheel" not in source
     assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
+
+
+def test_full_host_origin_check_accepts_only_candidate_ancestry(tmp_path: Path):
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_EMAIL": "parity-test@leadpoet.invalid",
+        "GIT_AUTHOR_NAME": "Parity Test",
+        "GIT_COMMITTER_EMAIL": "parity-test@leadpoet.invalid",
+        "GIT_COMMITTER_NAME": "Parity Test",
+    }
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            check=check,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+
+    remote = tmp_path / "origin.git"
+    source = tmp_path / "source"
+    candidate_repo = tmp_path / "candidate"
+    candidate_git_home = tmp_path / "git-home"
+    bundle = tmp_path / "candidate.bundle"
+    candidate_git_home.mkdir()
+    git("init", "--bare", str(remote))
+    git("init", "-b", "main", str(source))
+    (source / "release.txt").write_text("candidate\n", encoding="utf-8")
+    git("-C", str(source), "add", "release.txt")
+    git("-C", str(source), "commit", "-m", "candidate")
+    candidate = git("-C", str(source), "rev-parse", "HEAD").stdout.strip()
+    git("-C", str(source), "remote", "add", "origin", str(remote))
+    git("-C", str(source), "push", "origin", "main")
+    git("-C", str(source), "bundle", "create", str(bundle), "HEAD")
+
+    git("init", str(candidate_repo))
+    git("-C", str(candidate_repo), "fetch", "--no-tags", str(bundle), "HEAD")
+    assert git(
+        "-C", str(candidate_repo), "rev-parse", "FETCH_HEAD"
+    ).stdout.strip() == candidate
+    git("-C", str(candidate_repo), "checkout", "--detach", candidate)
+    git("-C", str(candidate_repo), "remote", "add", "origin", str(remote))
+
+    workflow_source = (
+        ROOT / ".github/workflows/physical-v2-staging.yml"
+    ).read_text(encoding="utf-8")
+    fragment_start = workflow_source.index(
+        "          failure_stage=canonical-origin-fetch"
+    )
+    fragment_end = workflow_source.index(
+        '          cd "$candidate_repo"', fragment_start
+    )
+    canonical_fragment = textwrap.dedent(
+        workflow_source[fragment_start:fragment_end]
+    )
+    ancestry_command = (
+        'candidate_git -C "$candidate_repo" merge-base --is-ancestor \\\n'
+        "  {q(required['CANDIDATE_SHA'])} origin/main"
+    )
+    equality_command = (
+        'test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" = \\\n'
+        "  {q(required['CANDIDATE_SHA'])}"
+    )
+    assert ancestry_command in canonical_fragment
+
+    def run_origin_check(
+        selected_candidate: str, *, use_old_equality: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        fragment = canonical_fragment
+        if use_old_equality:
+            fragment = fragment.replace(ancestry_command, equality_command)
+        fragment = fragment.replace(
+            "{q(required['CANDIDATE_SHA'])}", shlex.quote(selected_candidate)
+        )
+        script = textwrap.dedent(
+            f"""\
+            set -eu
+            candidate_repo={shlex.quote(str(candidate_repo))}
+            candidate_git_home={shlex.quote(str(candidate_git_home))}
+            candidate_git_bin=/usr/bin/git
+            candidate_git() {{
+              /usr/bin/env -i \\
+                PATH=/usr/bin:/bin \\
+                LC_ALL=C \\
+                HOME="$candidate_git_home" \\
+                XDG_CONFIG_HOME="$candidate_git_home/.config" \\
+                GIT_CONFIG_NOSYSTEM=1 \\
+                GIT_TERMINAL_PROMPT=0 \\
+                "$candidate_git_bin" -c init.templateDir= "$@"
+            }}
+            {textwrap.indent(fragment, '            ').lstrip()}
+            """
+        )
+        return subprocess.run(
+            ["/bin/bash", "-c", script],
+            check=False,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+
+    (source / "release.txt").write_text("newer main\n", encoding="utf-8")
+    git("-C", str(source), "commit", "-am", "newer main")
+    newer_main = git("-C", str(source), "rev-parse", "HEAD").stdout.strip()
+    git("-C", str(source), "push", "origin", "main")
+    assert run_origin_check(candidate, use_old_equality=True).returncode != 0
+    assert run_origin_check(candidate).returncode == 0
+    assert git(
+        "-C", str(candidate_repo), "rev-parse", "origin/main"
+    ).stdout.strip() == newer_main
+    assert git(
+        "-C", str(candidate_repo), "rev-parse", "HEAD"
+    ).stdout.strip() == candidate
+
+    foreign = git(
+        "-C",
+        str(candidate_repo),
+        "commit-tree",
+        f"{candidate}^{{tree}}",
+        "-p",
+        candidate,
+        "-m",
+        "foreign candidate",
+    ).stdout.strip()
+    assert run_origin_check(foreign).returncode != 0
+
+    git(
+        "-C",
+        str(candidate_repo),
+        "remote",
+        "set-url",
+        "origin",
+        str(tmp_path / "missing"),
+    )
+    assert run_origin_check(candidate).returncode != 0
+    git("-C", str(candidate_repo), "remote", "set-url", "origin", str(remote))
+
+    rewritten = git(
+        "-C",
+        str(source),
+        "commit-tree",
+        f"{candidate}^{{tree}}",
+        "-m",
+        "rewritten main",
+    ).stdout.strip()
+    git("-C", str(source), "push", "--force", "origin", f"{rewritten}:main")
+    assert run_origin_check(candidate).returncode != 0
 
 
 def test_parity_workflows_reject_non_main_code_before_aws_credentials():
@@ -1119,8 +1714,9 @@ def test_full_bootstrap_diagnostic_exposes_only_a_bounded_substage():
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
     allowed = {
-        "container-runtime-package",
-        "container-runtime-identity",
+        "native-build-package",
+        "native-build-package-identity",
+        "container-buildx-identity",
         "container-runtime-service",
         "venv-absence",
         "runtime-package",
@@ -1173,7 +1769,7 @@ def test_full_miner_intake_keeps_public_source_credentials_forbidden():
     source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
     assert '"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false"' in source
     assert '"RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false"' in source
-    assert '"global_miner_submissions_enabled": False' in source
+    assert '"global_miner_submissions_enabled"' not in source
     assert '"source_add_paused": False' in source
     assert 'retired_response.status_code != 410' in source
     assert 'forbidden_response.status_code != 422' in source

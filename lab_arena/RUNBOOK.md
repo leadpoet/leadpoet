@@ -36,21 +36,36 @@ dependencies read-only. It rejects URLs, local paths, nested requirements,
 VCS dependencies, and source builds. The common trusted scorer image supplies
 Python for every agent; it is not a miner image or a miner identity.
 
-The organizer supplies one host key for each provider:
+The organizer supplies host provider keys for execution and judging of the
+public baseline:
 
 - `LAB_ARENA_OPENROUTER_API_KEY`
 - `LAB_ARENA_SCRAPINGDOG_API_KEY`
 - `LAB_ARENA_DEEPLINE_API_KEY`
 
-The OpenRouter key is shared by bundle calls and judge calls. Only the
-organizer configures provider keys on the host. The broker
-permits any model in the organizer-fetched OpenRouter catalog that has usable
-pricing. It still enforces the fixed call, token, cost, privacy, and time
-limits. The trusted judge can use only its configured judge models.
+The host keys are used for baseline traffic. A competing model's
+OpenRouter runtime key and Deepline key are submitted separately, encrypted in
+the gateway vault, and attached to that submission's execution and judge calls. The
+matching OpenRouter management key is used for admission validation and then
+discarded. The miner funds those upstream calls. The validator receives an
+opaque runtime lease and cannot read the credentials; submitted code receives
+provider access only through the broker transport.
+
+The broker permits any model in the organizer-fetched OpenRouter catalog that
+has usable pricing. It still enforces the fixed call, token, cost, privacy, and
+time limits. The trusted judge can use only its configured judge models.
 
 A shared provider account failure, rate limit, or provider server failure is
 an infrastructure failure. It does not give a miner a score of zero. A real
 caller error, such as invalid request data, is returned to the bundle.
+
+The judge uses bounded retries. If no valid judge result is available after
+those retries, the service cancels the incomplete round before publishing a
+ranking. It does not exclude one challenger for a judge or provider failure.
+A successful accepted retry takes precedence over a failed attempt. A miner's
+own credential or budget failure retains its existing ineligibility rule.
+Malformed accepted scoring artifacts also cancel the round before scores are
+recorded; they are not company-verification failures.
 
 ## Required service configuration
 
@@ -70,8 +85,10 @@ Set these values on the Arena service host:
 - `LAB_ARENA_RUNNER_HOTKEYS`: the runner hotkeys allowed to claim work
 - `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns each daily
   public baseline entry
-- `LAB_ARENA_BASELINE_SOURCE_URL`: the public HTTPS PydanticAI source archive;
-  it defaults to the `leadpoet/pydantic-harness` main-branch archive
+- `LAB_ARENA_BASELINE_SOURCE_URL`: optional in live mode. The only live daily
+  baseline source is the promoted `leadpoet/pydantic-harness` `lab` branch.
+  Remove an old `main` override before service startup. Shadow mode can set a
+  different public HTTPS candidate archive.
 
 Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_NETWORK`, `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`,
@@ -88,12 +105,34 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/181-lab-arena-source-submissions.sql` and
 `scripts/182-lab-arena-source-execution.sql`,
 `scripts/183-lab-arena-miner-reward-basis.sql`, and
-`scripts/184-lab-arena-scoring-failure-isolation.sql` with the database owner
+`scripts/184-lab-arena-scoring-failure-isolation.sql`,
+`scripts/185-lab-arena-miner-credentials.sql`,
+`scripts/187-lab-arena-promotion-threshold.sql`, and
+`scripts/188-lab-arena-baseline-promotion.sql`,
+`scripts/189-lab-arena-round-network-scope.sql`,
+`scripts/190-lab-arena-restart-claim-drain.sql`, and
+`scripts/193-lab-arena-upload-recovery.sql`, then
+`scripts/194-lab-arena-open-scorer-refresh.sql` with the database owner
 before service startup. Then check the service wiring:
+
+`scripts/191-lab-arena-upload-recovery.sql` remains byte-identical only because
+an earlier production snapshot records that applied path. Do not apply it to a
+new database. Migration 193 is the current forward upload-recovery migration.
 
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only
 ```
+
+Migration 193 adds safe replacement of unfinished uploads and accurate
+`execution_incomplete:stageN:count` / `scoring_incomplete:stageN:count`
+cancellation labels. It preserves historical results and source objects.
+Deploy its matching service after applying the migration. Source admission
+still uses the existing upload MD5 and server-assigned submission ID.
+
+Migration 194 refreshes only the trusted scorer digest and pinned reference
+when an existing open round atomically commits its benchmark. This lets a
+deployed scorer fix apply before any work is created. The committed scorer
+pin and every other round setting remain immutable.
 
 Start the service:
 
@@ -101,12 +140,54 @@ Start the service:
 python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8792
 ```
 
+## Canonical restart claim drain
+
+Migration 190 installs the durable claim gate used by the canonical gateway
+and validator restart. Its first installation takes the rounds and runs table
+locks with `NOWAIT`. If live Arena work holds either table, the complete
+migration transaction fails without cancelling that work. Retry the same
+idempotent migration through the repository migration helper after the writer
+finishes.
+
+An already-running schema-189 Arena service can finish its current work while
+migration 190 is applied. A runner can continue against the replacement
+service, but canonical paired authority still requires both components at the
+exact release. After the database reports schema 190, an older schema-189 Arena
+service cannot newly start because its startup schema check rejects the
+mismatch. Therefore, schema 190 and the matching candidate runtime form one
+cutover dependency. Do not use an older Arena service as a claim-capable
+rollback after this migration.
+
+The canonical restart pauses new claims after its existing release,
+attestation, and maintenance preflight. It then waits for every captured lease
+to have an accepted receipt or an authentic terminal failure receipt with
+closed accounting. A lease expiry, worker loss, changed lease generation, or
+missing receipt stops the restart before shutdown and restores the prior
+operator pause state. Reported failures keep the normal retry assignment; the
+restart does not convert them to accepted work.
+
+A failed restart keeps the guard after a destructive phase. A normal canonical
+retry by the same retained invocation repeats the complete gateway and
+validator path. If the exact candidate advances, the same owner can change the
+guard target with a generation-checked operation after the new candidate has
+passed the normal preflight. The captured leases, operator pause, and
+destructive phase stay unchanged. The controller releases claims only after
+the joined gateway and validator readiness manifest passes. There is no
+separate completion or release-only path.
+
 The service creates a daily round at 00:00 UTC by default. Set
 `LAB_ARENA_DAILY_CUTOFF_UTC` to select another hour, or create one manually:
 
 ```bash
 python3 scripts/lab_arena_admin.py create --cutoff 2026-09-05T00:00:00Z
 ```
+
+Each round freezes `LAB_ARENA_NETWORK` and `LAB_ARENA_NETUID` in its
+configuration. API and driver instances only select rounds in their configured
+chain scope. Historical rows without these fields are treated as Finney/netuid
+71. This permits a pinned testnet service to use the shared database without
+redirecting or advancing a Finney round. Promotion ordering and published
+reward history remain shared across scopes.
 
 ## Runner configuration
 
@@ -136,13 +217,16 @@ python3 scripts/run_lab_arena_runner.py
 
 ## Miner flow
 
-Choose **Agent Competition** in `neurons/miner.py`. It asks for only the local
-source directory, then archives, uploads, signs, and finalizes it. It never
-asks for provider credentials, a Dockerfile, or an image tag. The same helper
-can run directly:
+Choose **Submit Model** in `neurons/miner.py`. It reads the local source
+directory and the miner's OpenRouter API key, OpenRouter management key, and
+Deepline API key from environment variables or masked prompts. It archives,
+uploads, signs, and finalizes the source. Runtime API keys are sent separately
+and encrypted for the model's runs. The management key is used only to check
+admission and is not stored. No Dockerfile or image tag is required. The
+same helper can run directly with those credentials in the environment:
 
 ```bash
-python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
+python3 scripts/lab_arena_miner.py submit-model --source ./my-agent \
   --wallet-name default --hotkey-name default
 ```
 
@@ -152,9 +236,42 @@ documentation only; it is not part of admission or scoring.
 At the first round cutoff, the service automatically admits the configured
 public baseline archive through the same source-admission checks. A temporary
 download or object-store failure is retried. An invalid baseline prevents the
-round from starting. Each daily round gets a new baseline download and uses
-only that baseline as the score miners must beat. Prior winners stay in reward
-history; they do not replace the next daily baseline.
+round from starting. Each daily round resolves the current promoted `lab`
+branch once when baseline execution starts, stores those bytes at the round's
+private source reference, and uses only that frozen bundle for execution and
+recovery. A later `lab` promotion affects the next round snapshot only. The
+operator log reports the archive's ordinary Git commit comment when GitHub
+provides it. A live round created before this policy can still show its old
+creation-time URL, but an unfrozen download uses `lab`; an already stored or
+registered bundle is not replaced. A finalist must score at least **1.0 point**
+above the daily baseline mean on the existing 0–100 scale. A tie or a smaller
+gain does not crown a new miner. The highest qualifying finalist wins.
+
+The gateway publishes that winner's accepted source to both `main` and `lab`
+with one atomic Git push. The new commit preserves both branches' history and
+contains exactly the submitted source files. The gateway never executes source
+while publishing it. Source bundles cannot contain Git metadata, export
+attributes, or GitHub workflows that could run with repository credentials.
+
+One ordinary promotion plan is saved on the round before the push. A failed
+push leaves promotion pending. A lost push response or restart checks the same
+plan and remote heads, then completes it without another promotion commit.
+Concurrent branch changes fail closed; they are not overwritten or force-pushed.
+There is no sequential fallback when the remote does not support atomic pushes.
+The next baseline download and the winner's reward activation wait for promotion
+to complete. Existing frozen round bundles do not change during recovery.
+
+Configure one repository-scoped host credential: `LAB_ARENA_GIT_SSH_KEY_PATH`
+for a write-enabled deploy key, or `LAB_ARENA_GITHUB_TOKEN`. Do not set both.
+SSH requires a verified GitHub host key and a private key readable only by its
+owner. Existing Git credential helpers can also provide HTTPS access. The
+optional `LAB_ARENA_PROMOTION_WORK_DIR` holds a bare Git cache; losing this cache
+does not lose the saved promotion plan. Credentials never enter miner runs.
+
+Outside promotion, `main` remains a development branch. A later `main`-only push
+does not affect production. The next daily round loads the promoted `lab` code;
+the organizer still owns the baseline entry, while the winning miner remains
+the reward payee.
 
 ## Rewards and independent disable controls
 
@@ -173,7 +290,12 @@ writes the participants, rankings, winner decision, and publication time
 directly to the round row. It does not need KMS, an epoch read, a signed
 receipt, a copied result bundle, or a replay. The driver later retries reward
 activation for enabled live rounds, oldest first. Shadow rounds and rounds
-created with rewards disabled cannot activate rewards later.
+created with rewards disabled cannot activate rewards later. New crowned rounds
+also require completed baseline promotion before activation. Historical published
+rounds are not retroactively promoted or rescored. The default champion pool is
+25% of total emissions, subject to the existing epoch eligibility and decay rules.
+An activated database record is not proof that chain weights were submitted;
+verify canonical publication, validator submission, finalization, and readback.
 
 To disable only the competition, set `LAB_ARENA_MODE=off` and stop the Arena
 service and runners. To disable only Arena rewards, turn off the Arena reward

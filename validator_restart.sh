@@ -3,6 +3,7 @@ set -euo pipefail
 
 VALIDATOR_ROOT="${VALIDATOR_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/validator.env}"
+LAB_ARENA_RUNNER_STATE_FILE="${LAB_ARENA_RUNNER_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-runner-process.json}"
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
 VALIDATOR_ENV_BACKUP_DIR="${VALIDATOR_ENV_BACKUP_DIR:-/home/ec2-user/.config/leadpoet/env-backups}"
 EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
@@ -47,8 +48,20 @@ VALIDATOR_RESTART_STARTED_EPOCH="${VALIDATOR_RESTART_STARTED_EPOCH:-$(date -u +%
 VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$}"
 VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT:-}"
 VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT:-}"
+if [ -n "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" ]; then
+  VALIDATOR_CONTROLLER_PROCESS_HELPER="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/scripts/manage_owned_process_group.py"
+else
+  VALIDATOR_CONTROLLER_PROCESS_HELPER="${LAB_ARENA_PROCESS_HELPER:-$VALIDATOR_ROOT/scripts/manage_owned_process_group.py}"
+fi
+LAB_ARENA_PROCESS_HELPER="$VALIDATOR_CONTROLLER_PROCESS_HELPER"
+VALIDATOR_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_RUNNER_STATE_FILE"
 VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-$VALIDATOR_RESTART_INVOCATION_ID}"
+VALIDATOR_ACTIVE_RELEASE_COMPONENT="${VALIDATOR_ACTIVE_RELEASE_COMPONENT:-validator}"
 VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="${VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
+VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT="${VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT:-}"
+VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT="${VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT:-}"
+VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE="${VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE:-}"
+VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS="${VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS:-9300}"
 VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}"
 VALIDATOR_RESTART_TIMING_DIR="${VALIDATOR_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 VALIDATOR_RESTART_TIMING_FILE="${VALIDATOR_RESTART_TIMING_FILE:-$VALIDATOR_RESTART_TIMING_DIR/validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$.jsonl}"
@@ -96,6 +109,13 @@ case "$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" in
     exit 2
     ;;
 esac
+case "$VALIDATOR_ACTIVE_RELEASE_COMPONENT" in
+  validator|all) ;;
+  *)
+    echo "ERROR: VALIDATOR_ACTIVE_RELEASE_COMPONENT must be validator or all" >&2
+    exit 2
+    ;;
+esac
 if ! [[ "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$ ]]; then
   echo "ERROR: validator active release restart invocation identity is invalid" >&2
   exit 2
@@ -125,9 +145,17 @@ run_bounded_validator_restart_artifact_cleanup() {
 }
 
 stop_lab_arena_runner() {
-  sudo pkill -TERM -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
-  sleep 1
-  sudo pkill -KILL -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
+  local process_helper="${1:-$VALIDATOR_CONTROLLER_PROCESS_HELPER}"
+  if [ ! -r "$process_helper" ] || [ -L "$process_helper" ]; then
+    echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
+    return 1
+  fi
+  sudo "$VALIDATOR_PYTHON_BIN" "$process_helper" stop \
+    --state-file "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" \
+    --cwd "$VALIDATOR_ROOT" \
+    --uid "$(sudo id -u)" \
+    -- \
+    "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py
 }
 
 start_lab_arena_runner() {
@@ -151,6 +179,11 @@ start_lab_arena_runner() {
   fi
   if [ ! -r "$VALIDATOR_ROOT/scripts/run_lab_arena_runner.py" ]; then
     echo "ERROR: Lab Arena runner entrypoint is unavailable" >&2
+    return 1
+  fi
+  if [ ! -r "$VALIDATOR_CONTROLLER_PROCESS_HELPER" ] \
+      || [ -L "$VALIDATOR_CONTROLLER_PROCESS_HELPER" ]; then
+    echo "ERROR: verified controller Lab Arena process helper is unavailable" >&2
     return 1
   fi
   runsc_path="${LAB_ARENA_RUNSC_PATH:-}"
@@ -183,13 +216,82 @@ start_lab_arena_runner() {
       > "$LAB_ARENA_RUNNER_LOG_FILE" 2>&1 < /dev/null &
   pid="$!"
   sleep 3
-  if ! sudo kill -0 "$pid" 2>/dev/null; then
+  if ! sudo "$VALIDATOR_PYTHON_BIN" "$VALIDATOR_CONTROLLER_PROCESS_HELPER" record \
+      --state-file "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" \
+      --cwd "$VALIDATOR_ROOT" \
+      --uid "$(sudo id -u)" \
+      --launch-pgid "$pid" \
+      --discover-timeout-seconds 5 \
+      -- \
+      "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py; then
+    sudo kill -TERM -- "-$pid" 2>/dev/null || true
+    sleep 1
+    sudo kill -KILL -- "-$pid" 2>/dev/null || true
     tail -120 "$LAB_ARENA_RUNNER_LOG_FILE" >&2 || true
-    echo "ERROR: Lab Arena runner exited during startup" >&2
-    wait "$pid" 2>/dev/null || true
+    echo "ERROR: Lab Arena runner exited or its ownership could not be recorded" >&2
     return 1
   fi
   echo "Lab Arena runner started"
+}
+
+write_lab_arena_restart_guard_request() {
+  verify_lab_arena_restart_guard_handoff_sources || return 1
+  PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
+    "$VALIDATOR_ROOT/scripts/lab_arena_restart_guard_handoff.py" write-request \
+    --path "$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+    --candidate "$VALIDATOR_DEPLOY_SHA" \
+    --invocation "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    --scope "$VALIDATOR_ACTIVE_RELEASE_COMPONENT" \
+    --nonce "$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE" \
+    --authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" >/dev/null
+}
+
+verify_lab_arena_restart_guard_handoff_sources() {
+  local source_path observed expected
+  if [ "$(git -C "$VALIDATOR_ROOT" rev-parse HEAD)" != "$VALIDATOR_DEPLOY_SHA" ]; then
+    echo "ERROR: validator Lab Arena handoff source checkout differs" >&2
+    return 1
+  fi
+  for source_path in \
+    scripts/lab_arena_restart_claim_guard.py \
+    scripts/lab_arena_restart_guard_handoff.py; do
+    if [ ! -f "$VALIDATOR_ROOT/$source_path" ] \
+        || [ -L "$VALIDATOR_ROOT/$source_path" ]; then
+      echo "ERROR: exact Lab Arena guard handoff source is unavailable" >&2
+      return 1
+    fi
+    observed="$(git -C "$VALIDATOR_ROOT" hash-object --no-filters "$VALIDATOR_ROOT/$source_path")" \
+      || return 1
+    expected="$(git -C "$VALIDATOR_ROOT" rev-parse "$VALIDATOR_DEPLOY_SHA:$source_path")" \
+      || return 1
+    if [ "$observed" != "$expected" ]; then
+      echo "ERROR: validator Lab Arena guard handoff source differs" >&2
+      return 1
+    fi
+  done
+}
+
+wait_for_lab_arena_restart_guard_permit() {
+  local deadline
+  deadline=$((SECONDS + VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -e "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT" ] \
+        || [ -L "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT" ]; then
+      verify_lab_arena_restart_guard_handoff_sources || return 1
+      PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
+        "$VALIDATOR_ROOT/scripts/lab_arena_restart_guard_handoff.py" validate-permit \
+        --path "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT" \
+        --candidate "$VALIDATOR_DEPLOY_SHA" \
+        --invocation "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --scope "$VALIDATOR_ACTIVE_RELEASE_COMPONENT" \
+        --nonce "$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE" \
+        --authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" >/dev/null
+      return
+    fi
+    sleep 1
+  done
+  echo "ERROR: canonical controller did not provide the Lab Arena restart permit" >&2
+  return 1
 }
 
 while [ "$#" -gt 0 ]; do
@@ -245,6 +347,35 @@ fi
 if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     && [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]; then
   echo "ERROR: coordinated forward commit conflicts with exact-commit rollback" >&2
+  exit 2
+fi
+
+arena_guard_handoff_count=0
+for handoff_value in \
+  "$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+  "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT" \
+  "$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE"; do
+  [ -n "$handoff_value" ] \
+    && arena_guard_handoff_count=$((arena_guard_handoff_count + 1))
+done
+if [ "$arena_guard_handoff_count" -ne 3 ]; then
+  echo "ERROR: validator restart requires the canonical controller Lab Arena guard permit" >&2
+  exit 2
+fi
+for handoff_path in \
+  "$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+  "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT"; do
+  if ! [[ "$handoff_path" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]] \
+      || [ -L "$handoff_path" ] || [ -d "$handoff_path" ]; then
+    echo "ERROR: validator Lab Arena guard handoff path is invalid" >&2
+    exit 2
+  fi
+done
+if [ "$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" = "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT" ] \
+    || ! [[ "$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE" =~ ^[0-9a-f]{64}$ ]] \
+    || ! [[ "$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    || [ "$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS" -gt 10800 ]; then
+  echo "ERROR: validator Lab Arena guard handoff authority is invalid" >&2
   exit 2
 fi
 
@@ -600,7 +731,9 @@ cleanup_validator_restart_preparation() {
     "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
     "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" \
     "$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" \
-    "$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE"; do
+    "$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE" \
+    "$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+    "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT"; do
     if [[ "$handoff_path" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
       rm -f -- "$handoff_path" || true
     fi
@@ -749,7 +882,12 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" \
     VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
     VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    VALIDATOR_ACTIVE_RELEASE_COMPONENT="$VALIDATOR_ACTIVE_RELEASE_COMPONENT" \
     VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" \
+    VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT="$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+    VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT="$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT" \
+    VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE="$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE" \
+    VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS="$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS" \
     VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}" \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
     VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
@@ -949,7 +1087,12 @@ follow_superseding_validator_release() {
     VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" \
     VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
     VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    VALIDATOR_ACTIVE_RELEASE_COMPONENT="$VALIDATOR_ACTIVE_RELEASE_COMPONENT" \
     VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" \
+    VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT="$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+    VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT="$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT" \
+    VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE="$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE" \
+    VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS="$VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS" \
     VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}" \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
     VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
@@ -1001,13 +1144,22 @@ cache = Path(sys.argv[2])
 export_file = Path(sys.argv[3])
 raw = src.read_text()
 cache_excluded_keys = {
+    "LAB_ARENA_PROCESS_HELPER",
+    "LAB_ARENA_RUNNER_STATE_FILE",
     "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
     "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_ACTIVE_RELEASE_COMPONENT",
+    "VALIDATOR_CONTROLLER_PROCESS_HELPER",
+    "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
+    "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT",
+    "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT",
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE",
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS",
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
     "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
     "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE",
@@ -1059,13 +1211,22 @@ skip_keys = {
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "LAB_ARENA_PROCESS_HELPER",
+    "LAB_ARENA_RUNNER_STATE_FILE",
     "VALIDATOR_COORDINATED_EXPECTED_COMMIT",
     "VALIDATOR_DEPLOY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
     "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
     "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_ACTIVE_RELEASE_COMPONENT",
+    "VALIDATOR_CONTROLLER_PROCESS_HELPER",
+    "VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
+    "VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT",
+    "VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT",
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_NONCE",
+    "VALIDATOR_LAB_ARENA_GUARD_HANDOFF_TIMEOUT_SECONDS",
     "VALIDATOR_EXACT_RELEASE_PINNED",
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
     "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
@@ -1690,6 +1851,14 @@ python3 -m validator_tee.host.restart_preflight_v2 \
   --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
   --host-hotkey-directory "$HOST_HOTKEY_DIR"
 
+VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_CONTROLLER_PROCESS_HELPER"
+if [ ! -r "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER" ] \
+    || [ -L "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER" ]; then
+  echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 if [ ! -r "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER" ]; then
   echo "ERROR: validator Docker operation lock helper is unavailable" >&2
   exit 1
@@ -1724,11 +1893,34 @@ if [ "$(
 fi
 record_validator_restart_timing "active_release_lineage_rechecked"
 
+VALIDATOR_DEPLOY_STAGE="lab_arena_guard_handoff"
+if ! verify_lab_arena_restart_guard_handoff_sources; then
+  echo "ERROR: exact Lab Arena guard handoff helper is unavailable" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+rm -f -- \
+  "$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+  "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT"
+if ! write_lab_arena_restart_guard_request; then
+  echo "ERROR: Lab Arena guard request could not be created" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+echo "Validator pre-shutdown checks complete; awaiting canonical Lab Arena guard permit"
+if ! wait_for_lab_arena_restart_guard_permit; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+rm -f -- \
+  "$VALIDATOR_LAB_ARENA_GUARD_REQUEST_OUTPUT" \
+  "$VALIDATOR_LAB_ARENA_GUARD_PERMIT_INPUT"
+
 VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"
 record_validator_restart_timing "destructive_phase_started"
 echo "Stopping validator processes and containers"
-stop_lab_arena_runner
+stop_lab_arena_runner "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
 sudo pkill -TERM -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true
@@ -1905,6 +2097,20 @@ fi
 VALIDATOR_DEPLOY_STAGE="lab_arena_runner_start"
 start_lab_arena_runner
 record_validator_restart_timing "lab_arena_runner_ready"
+if [ "${LAB_ARENA_MODE:-off}" = "off" ]; then
+  if [ -e "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" ] \
+      || pgrep -f "^$VALIDATOR_PYTHON_BIN -u scripts/run_lab_arena_runner[.]py$" >/dev/null; then
+    echo "ERROR: disabled Lab Arena mode still has an owned or active runner" >&2
+    exit 1
+  fi
+else
+  sudo "$VALIDATOR_PYTHON_BIN" "$VALIDATOR_CONTROLLER_PROCESS_HELPER" verify \
+    --state-file "$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE" \
+    --cwd "$VALIDATOR_ROOT" \
+    --uid "$(sudo id -u)" \
+    -- \
+    "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py
+fi
 install_validator_restart_controller
 leadpoet_release_docker_operation_lock_v2
 VALIDATOR_DOCKER_LOCK_ACQUIRED=0

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import concurrent.futures
 import copy
 import hashlib
 import json
@@ -16,7 +15,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab import store as research_lab_store
@@ -42,6 +40,7 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256,
     SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256,
@@ -165,18 +164,6 @@ TRANSPORT_FIX_MIGRATION = "128-research-lab-chain-settlement-transport-purposes.
 TRANSPORT_TERMINAL_MIGRATION = (
     "129-research-lab-attested-local-transport.sql"
 )
-PROVIDER_OUTCOME_APPEND_MIGRATION = (
-    "130-research-lab-provider-outcome-append.sql"
-)
-PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION = (
-    "131-research-lab-provider-outcome-backpressure.sql"
-)
-PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION = (
-    "133-research-lab-provider-outcome-contention-status.sql"
-)
-PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION = (
-    "134-research-lab-provider-outcome-head-contention.sql"
-)
 ANCESTRY_CHECKPOINT_MIGRATION = (
     "136-research-lab-ancestry-checkpoint-sidecars.sql"
 )
@@ -252,6 +239,12 @@ SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "178-research-lab-source-add-miner-status.sql"
 )
+SOURCE_ADD_PROVISIONED_STATUS_MIGRATION = (
+    "186-research-lab-source-add-provisioned-status.sql"
+)
+LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION = (
+    "190-lab-arena-restart-claim-drain.sql"
+)
 LAB_ARENA_MIGRATIONS = (
     "179-lab-arena-v1.sql",
     "180-lab-arena-daily-competition.sql",
@@ -259,6 +252,12 @@ LAB_ARENA_MIGRATIONS = (
     "182-lab-arena-source-execution.sql",
     "183-lab-arena-miner-reward-basis.sql",
     "184-lab-arena-scoring-failure-isolation.sql",
+    "185-lab-arena-miner-credentials.sql",
+)
+LAB_ARENA_POST_185_MIGRATIONS = (
+    "187-lab-arena-promotion-threshold.sql",
+    "188-lab-arena-baseline-promotion.sql",
+    "189-lab-arena-round-network-scope.sql",
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -291,11 +290,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     *MIGRATIONS_BEFORE_TRANSPORT_FIX[5:],
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
-    PROVIDER_OUTCOME_APPEND_MIGRATION,
-    PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
-    PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
-    PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
@@ -321,7 +316,12 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
     SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
     SOURCE_ADD_MINER_STATUS_MIGRATION,
+    SOURCE_ADD_PROVISIONED_STATUS_MIGRATION,
     *LAB_ARENA_MIGRATIONS,
+    *LAB_ARENA_POST_185_MIGRATIONS,
+    LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION,
+    "193-lab-arena-upload-recovery.sql",
+    "194-lab-arena-open-scorer-refresh.sql",
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -331,10 +331,6 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "pre_129_attested_local_transport_rejected",
     "post_129_attested_local_transport_persisted",
     "transport_terminal_contract_valid",
-    "pre_133_provider_outcome_contract_rejected",
-    "post_133_provider_outcome_contract_valid",
-    "pre_134_provider_outcome_head_contract_rejected",
-    "post_134_provider_outcome_head_contract_valid",
     "post_136_ancestry_checkpoint_contract_valid",
     "post_137_allocation_settlement_frontier_contract_valid",
     "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
@@ -342,11 +338,10 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_141_allocation_frontier_source_contract_valid",
     "post_142_source_catalog_replay_contract_valid",
     "post_143_compact_checkpoint_contract_valid",
-    "post_144_provider_persistence_batch_contract_valid",
+    "post_144_provider_evidence_cache_contract_valid",
     "post_096_source_add_functional_workflow_valid",
     "post_145_source_add_admission_control_contract_valid",
     "post_147_source_catalog_auth_metadata_contract_valid",
-    "post_148_atomic_credit_resume_contract_valid",
     "post_149_compact_weight_settlement_contract_valid",
     "post_155_ancestry_disclosure_lookup_contract_valid",
     "post_156_production_parity_reader_contract_valid",
@@ -359,15 +354,10 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_175_source_add_provenance_leg1_valid",
     "post_176_source_add_provenance_origin_repair_valid",
     "post_178_source_add_miner_status_valid",
-    "post_184_lab_arena_schema_valid",
-    "credit_resume_identical_replay_idempotent",
-    "credit_resume_differing_replay_rejected",
-    "credit_resume_invalid_heads_rejected",
-    "provider_outcome_append_atomic",
-    "provider_outcome_batch_append_atomic",
+    "post_186_source_add_provisioned_status_valid",
+    "post_185_lab_arena_schema_valid",
+    "post_190_lab_arena_restart_guard_valid",
     "provider_evidence_cache_put_atomic",
-    "provider_outcome_contention_zero_rollback",
-    "provider_outcome_conflict_head_exact",
     "pre_132_lifetime_credit_rejected",
     "post_132_lifetime_credit_persisted",
     "lifetime_credit_rpc_idempotent",
@@ -409,28 +399,6 @@ EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "state_transition_hash",
     "finalization_doc",
 )
-EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE = {
-    "event_id": "40000000-0000-0000-0000-000000000147",
-    "event_hash": "sha256:" + "2" * 64,
-    "identical_replay": True,
-    "concurrent_replay_serialized": True,
-    "differing_replay_rejected": True,
-    "invalid_arguments_rejected": True,
-    "stale_head_rejected": True,
-    "empty_head_rejected": True,
-    "wrong_paused_head_rejected": True,
-    "rpc_security_contract_valid": True,
-    "queue_capacity_guard_exercised": True,
-    "hotkey_capacity_guard_exercised": True,
-    "row_counts": {
-        "resumed_run": 2,
-        "empty_run": 0,
-        "wrong_paused_run": 1,
-        "capacity_closed_run": 1,
-        "hotkey_capacity_closed_run": 1,
-        "concurrent_run": 2,
-    },
-}
 IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 SYSTEM_BINARY_DIRS = tuple(
     Path(value)
@@ -589,6 +557,70 @@ class DisposablePostgres:
         self.socket.mkdir()
         os.chown(self.socket, account.pw_uid, account.pw_gid)
 
+    @classmethod
+    def attach(
+        cls,
+        path: Path,
+        *,
+        candidate_sha: str,
+    ) -> "DisposablePostgres":
+        if path.is_symlink() or not path.is_file():
+            raise PostgresContractProbeError(
+                "rehearsal PostgreSQL connection is unavailable"
+            )
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(value, Mapping)
+            or value.get("schema_version")
+            != "leadpoet.restart_rehearsal.postgres_connection.v1"
+            or value.get("candidate_sha") != candidate_sha
+            or value.get("database") != "leadpoet_rehearsal"
+            or value.get("port") != 55432
+        ):
+            raise PostgresContractProbeError(
+                "rehearsal PostgreSQL connection differs"
+            )
+        root = Path(str(value.get("root") or ""))
+        data = Path(str(value.get("data") or ""))
+        socket = Path(str(value.get("socket") or ""))
+        if (
+            not re.fullmatch(
+                r"/tmp/leadpoet-postgres-v2-[A-Za-z0-9_-]+", str(root)
+            )
+            or root.is_symlink()
+            or data != root / "data"
+            or socket != root / "socket"
+            or data.is_symlink()
+            or socket.is_symlink()
+            or not data.is_dir()
+            or not socket.is_dir()
+        ):
+            raise PostgresContractProbeError(
+                "rehearsal PostgreSQL connection paths differ"
+            )
+        database = cls.__new__(cls)
+        database.state_root = path.parent
+        database.root = root
+        database.data = data
+        database.socket = socket
+        database.port = 55432
+        database.database = "leadpoet_rehearsal"
+        database.started = True
+        return database
+
+    def connection_document(self, *, candidate_sha: str) -> dict[str, Any]:
+        return {
+            "schema_version": (
+                "leadpoet.restart_rehearsal.postgres_connection.v1"
+            ),
+            "candidate_sha": candidate_sha,
+            "root": str(self.root),
+            "data": str(self.data),
+            "socket": str(self.socket),
+            "port": self.port,
+            "database": self.database,
+        }
+
     @staticmethod
     def _binary(name: str) -> str:
         if not IDENTIFIER_RE.fullmatch(name):
@@ -670,7 +702,7 @@ class DisposablePostgres:
 
     def stop(self) -> None:
         if self.started:
-            self._as_postgres(
+            result = self._as_postgres(
                 [
                     self._binary("pg_ctl"),
                     "--pgdata",
@@ -682,6 +714,10 @@ class DisposablePostgres:
                 ],
                 check=False,
             )
+            if result.returncode != 0:
+                raise PostgresContractProbeError(
+                    "disposable PostgreSQL did not stop cleanly"
+                )
             self.started = False
         shutil.rmtree(self.root, ignore_errors=True)
 
@@ -691,6 +727,7 @@ class DisposablePostgres:
         *,
         database: str | None = None,
         check: bool = True,
+        quiet: bool = False,
         tuples_only: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         argv = [
@@ -709,6 +746,8 @@ class DisposablePostgres:
         ]
         if tuples_only:
             argv.extend(["--tuples-only", "--no-align"])
+        if quiet:
+            argv.append("--quiet")
         return self._as_postgres(argv, input_text=sql, check=check)
 
     def apply_migration(self, path: Path) -> None:
@@ -861,646 +900,14 @@ def _postgres_insert_row(
     return dict(json.loads(result))
 
 
-def _credit_resume_rpc(
-    database: DisposablePostgres,
-    params: Mapping[str, Any],
-) -> dict[str, Any]:
-    required = (
-        "p_run_id",
-        "p_ticket_id",
-        "p_expected_event_seq",
-        "p_expected_event_hash",
-        "p_event_id",
-        "p_anchored_hash",
-        "p_queue_priority",
-        "p_worker_ref",
-        "p_reason",
-        "p_event_doc",
-    )
-    if set(params) != set(required):
-        raise PostgresContractProbeError("credit resume RPC parameters differ")
-    arguments = ",".join(
-        "%s => %s" % (name, _postgres_literal(params[name]))
-        for name in required
-    )
-    result = database.psql(
-        "SELECT pg_catalog.to_jsonb(resumed)::text "
-        "FROM public.resume_research_lab_credit_blocked_run_v1(%s) AS resumed;"
-        % arguments,
-        check=False,
-        tuples_only=True,
-    )
-    if result.returncode != 0:
-        raise PostgresContractProbeError(
-            "credit resume RPC failed: %s" % result.stderr.strip()
-        )
-    payload = result.stdout.strip()
-    if not payload:
-        raise PostgresContractProbeError("credit resume RPC returned no row")
-    return dict(json.loads(payload))
 
 
-def _credit_resume_rejection(
-    database: DisposablePostgres,
-    params: Mapping[str, Any],
-    *,
-    expected_error: str,
-) -> None:
-    required = (
-        "p_run_id",
-        "p_ticket_id",
-        "p_expected_event_seq",
-        "p_expected_event_hash",
-        "p_event_id",
-        "p_anchored_hash",
-        "p_queue_priority",
-        "p_worker_ref",
-        "p_reason",
-        "p_event_doc",
-    )
-    arguments = ",".join(
-        "%s => %s" % (name, _postgres_literal(params[name]))
-        for name in required
-    )
-    result = database.psql(
-        "SELECT pg_catalog.to_jsonb(resumed)::text "
-        "FROM public.resume_research_lab_credit_blocked_run_v1(%s) AS resumed;"
-        % arguments,
-        check=False,
-        tuples_only=True,
-    )
-    if result.returncode == 0 or expected_error not in result.stderr:
-        raise PostgresContractProbeError(
-            "credit resume rejection differed expected=%s stderr=%s"
-            % (expected_error, result.stderr.strip())
-        )
 
 
-def _atomic_credit_resume_postgres_contract(
-    database: DisposablePostgres,
-) -> dict[str, Any]:
-    rpc_signature = (
-        "public.resume_research_lab_credit_blocked_run_v1("
-        "uuid,uuid,integer,text,uuid,text,integer,text,text,jsonb)"
-    )
-    rpc_catalog = json.loads(
-        database.psql(
-            """
-            SELECT pg_catalog.json_build_object(
-                'security_definer', p.prosecdef,
-                'config', pg_catalog.to_jsonb(p.proconfig),
-                'service_role_execute', EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.aclexplode(
-                        COALESCE(
-                            p.proacl,
-                            pg_catalog.acldefault('f', p.proowner)
-                        )
-                    ) AS acl
-                    JOIN pg_catalog.pg_roles AS role
-                      ON role.oid = acl.grantee
-                    WHERE role.rolname = 'service_role'
-                      AND acl.privilege_type = 'EXECUTE'
-                ),
-                'anon_execute', EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.aclexplode(
-                        COALESCE(
-                            p.proacl,
-                            pg_catalog.acldefault('f', p.proowner)
-                        )
-                    ) AS acl
-                    JOIN pg_catalog.pg_roles AS role
-                      ON role.oid = acl.grantee
-                    WHERE role.rolname = 'anon'
-                      AND acl.privilege_type = 'EXECUTE'
-                ),
-                'authenticated_execute', EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.aclexplode(
-                        COALESCE(
-                            p.proacl,
-                            pg_catalog.acldefault('f', p.proowner)
-                        )
-                    ) AS acl
-                    JOIN pg_catalog.pg_roles AS role
-                      ON role.oid = acl.grantee
-                    WHERE role.rolname = 'authenticated'
-                      AND acl.privilege_type = 'EXECUTE'
-                ),
-                'public_execute', EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.aclexplode(
-                        COALESCE(
-                            p.proacl,
-                            pg_catalog.acldefault('f', p.proowner)
-                        )
-                    ) AS acl
-                    WHERE acl.grantee = 0
-                      AND acl.privilege_type = 'EXECUTE'
-                )
-            )::text
-            FROM pg_catalog.pg_proc AS p
-            WHERE p.oid = %s::pg_catalog.regprocedure;
-            """
-            % _postgres_literal(rpc_signature),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    config = rpc_catalog.pop("config", None)
-    search_path_values = (
-        [
-            value.split("=", 1)[1]
-            for value in config
-            if isinstance(value, str) and value.startswith("search_path=")
-        ]
-        if isinstance(config, list)
-        else []
-    )
-    if (
-        rpc_catalog
-        != {
-            "security_definer": True,
-            "service_role_execute": True,
-            "anon_execute": False,
-            "authenticated_execute": False,
-            "public_execute": False,
-        }
-        or search_path_values not in ([""], ['""'])
-    ):
-        raise PostgresContractProbeError(
-            "atomic credit resume RPC security contract differs"
-        )
-    ticket_id = "20000000-0000-0000-0000-000000000147"
-    capacity_ticket_id = "20000000-0000-0000-0000-000000000148"
-    run_id = "10000000-0000-0000-0000-000000000147"
-    empty_run_id = "10000000-0000-0000-0000-000000000148"
-    wrong_paused_run_id = "10000000-0000-0000-0000-000000000149"
-    capacity_closed_run_id = "10000000-0000-0000-0000-000000000150"
-    hotkey_capacity_closed_run_id = "10000000-0000-0000-0000-000000000151"
-    concurrent_run_id = "10000000-0000-0000-0000-000000000152"
-    paused_hash = "sha256:" + "1" * 64
-    resumed_hash = "sha256:" + "2" * 64
-    wrong_paused_hash = "sha256:" + "7" * 64
-    capacity_closed_hash = "sha256:" + "9" * 64
-    hotkey_capacity_closed_hash = "sha256:" + "b" * 64
-    concurrent_paused_hash = "sha256:" + "d" * 64
-    concurrent_resumed_hash = "sha256:" + "e" * 64
-    _postgres_insert_row(
-        database,
-        "research_loop_tickets",
-        {
-            "ticket_id": ticket_id,
-            "miner_hotkey": "5F-rehearsal-credit-resume-miner",
-        },
-    )
-    _postgres_insert_row(
-        database,
-        "research_loop_run_queue_events",
-        {
-            "event_id": "30000000-0000-0000-0000-000000000147",
-            "schema_version": "1.0",
-            "run_id": run_id,
-            "ticket_id": ticket_id,
-            "seq": 4,
-            "event_type": "paused",
-            "queue_priority": 3,
-            "worker_ref": "worker:credit-blocked",
-            "reason": "blocked_for_credit",
-            "anchored_hash": paused_hash,
-            "event_doc": {"schema_version": "1.0"},
-        },
-    )
-    common = {
-        "p_run_id": run_id,
-        "p_ticket_id": ticket_id,
-        "p_expected_event_seq": 4,
-        "p_expected_event_hash": paused_hash,
-        "p_event_id": "40000000-0000-0000-0000-000000000147",
-        "p_anchored_hash": resumed_hash,
-        "p_queue_priority": 3,
-        "p_worker_ref": "miner:credit-topup",
-        "p_reason": "credit_topup_resume",
-        "p_event_doc": {
-            "schema_version": "1.0",
-            "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
-            "autoresearch_capacity": 1,
-            "autoresearch_hotkey_capacity": 1,
-            "active_loop_stale_after_seconds": 300,
-            "resume_source": "miner_credit_topup_resume",
-            "previous_event_hash": paused_hash,
-        },
-    }
-    first = _credit_resume_rpc(database, common)
-    replay = _credit_resume_rpc(database, common)
-    if (
-        first != replay
-        or first.get("event_id") != common["p_event_id"]
-        or first.get("run_id") != run_id
-        or first.get("ticket_id") != ticket_id
-        or first.get("seq") != 5
-        or first.get("event_type") != "queued"
-        or first.get("reason") != "credit_topup_resume"
-        or first.get("anchored_hash") != resumed_hash
-        or first.get("event_doc") != common["p_event_doc"]
-    ):
-        raise PostgresContractProbeError(
-            "credit resume append or identical replay differed"
-        )
-
-    _credit_resume_rejection(
-        database,
-        {**common, "p_anchored_hash": "sha256:" + "3" * 64},
-        expected_error="research_lab_credit_resume_replay_differs",
-    )
-    invalid_arguments = {
-        **common,
-        "p_event_doc": {
-            **common["p_event_doc"],
-            "resume_source": "noncanonical_resume",
-        },
-    }
-    _credit_resume_rejection(
-        database,
-        invalid_arguments,
-        expected_error="research_lab_credit_resume_invalid_arguments",
-    )
-    _credit_resume_rejection(
-        database,
-        {
-            **common,
-            "p_event_id": "40000000-0000-0000-0000-000000000148",
-            "p_anchored_hash": "sha256:" + "4" * 64,
-        },
-        expected_error="research_lab_credit_resume_head_conflict",
-    )
-    empty = {
-        **common,
-        "p_run_id": empty_run_id,
-        "p_expected_event_seq": 0,
-        "p_expected_event_hash": "sha256:" + "5" * 64,
-        "p_event_id": "40000000-0000-0000-0000-000000000149",
-        "p_anchored_hash": "sha256:" + "6" * 64,
-    }
-    empty["p_event_doc"] = {
-        **common["p_event_doc"],
-        "previous_event_hash": empty["p_expected_event_hash"],
-    }
-    _credit_resume_rejection(
-        database,
-        empty,
-        expected_error="research_lab_credit_resume_head_conflict",
-    )
-    _postgres_insert_row(
-        database,
-        "research_loop_tickets",
-        {
-            "ticket_id": capacity_ticket_id,
-            "miner_hotkey": "5F-rehearsal-capacity-other-miner",
-        },
-    )
-    _postgres_insert_row(
-        database,
-        "research_loop_run_queue_events",
-        {
-            "event_id": "30000000-0000-0000-0000-000000000149",
-            "schema_version": "1.0",
-            "run_id": wrong_paused_run_id,
-            "ticket_id": ticket_id,
-            "seq": 0,
-            "event_type": "paused",
-            "queue_priority": 3,
-            "worker_ref": "worker:maintenance",
-            "reason": "maintenance_pause",
-            "anchored_hash": wrong_paused_hash,
-            "event_doc": {"schema_version": "1.0"},
-        },
-    )
-    wrong_paused = {
-        **common,
-        "p_run_id": wrong_paused_run_id,
-        "p_expected_event_seq": 0,
-        "p_expected_event_hash": wrong_paused_hash,
-        "p_event_id": "40000000-0000-0000-0000-000000000150",
-        "p_anchored_hash": "sha256:" + "8" * 64,
-    }
-    wrong_paused["p_event_doc"] = {
-        **common["p_event_doc"],
-        "previous_event_hash": wrong_paused_hash,
-    }
-    _credit_resume_rejection(
-        database,
-        wrong_paused,
-        expected_error="research_lab_credit_resume_head_conflict",
-    )
-    _postgres_insert_row(
-        database,
-        "research_loop_run_queue_events",
-        {
-            "event_id": "30000000-0000-0000-0000-000000000150",
-            "schema_version": "1.0",
-            "run_id": capacity_closed_run_id,
-            "ticket_id": capacity_ticket_id,
-            "seq": 0,
-            "event_type": "paused",
-            "queue_priority": 3,
-            "worker_ref": "worker:credit-blocked",
-            "reason": "blocked_for_credit",
-            "anchored_hash": capacity_closed_hash,
-            "event_doc": {"schema_version": "1.0"},
-        },
-    )
-    capacity_closed = {
-        **common,
-        "p_run_id": capacity_closed_run_id,
-        "p_ticket_id": capacity_ticket_id,
-        "p_expected_event_seq": 0,
-        "p_expected_event_hash": capacity_closed_hash,
-        "p_event_id": "40000000-0000-0000-0000-000000000151",
-        "p_anchored_hash": "sha256:" + "a" * 64,
-        "p_event_doc": {
-            **common["p_event_doc"],
-            "autoresearch_capacity": 1,
-            "autoresearch_hotkey_capacity": 10,
-            "previous_event_hash": capacity_closed_hash,
-        },
-    }
-    _credit_resume_rejection(
-        database,
-        capacity_closed,
-        expected_error="research_lab_queue_capacity_conflict",
-    )
-    _postgres_insert_row(
-        database,
-        "research_loop_run_queue_events",
-        {
-            "event_id": "30000000-0000-0000-0000-000000000151",
-            "schema_version": "1.0",
-            "run_id": hotkey_capacity_closed_run_id,
-            "ticket_id": ticket_id,
-            "seq": 0,
-            "event_type": "paused",
-            "queue_priority": 3,
-            "worker_ref": "worker:credit-blocked",
-            "reason": "blocked_for_credit",
-            "anchored_hash": hotkey_capacity_closed_hash,
-            "event_doc": {"schema_version": "1.0"},
-        },
-    )
-    hotkey_capacity_closed = {
-        **common,
-        "p_run_id": hotkey_capacity_closed_run_id,
-        "p_expected_event_seq": 0,
-        "p_expected_event_hash": hotkey_capacity_closed_hash,
-        "p_event_id": "40000000-0000-0000-0000-000000000152",
-        "p_anchored_hash": "sha256:" + "c" * 64,
-        "p_event_doc": {
-            **common["p_event_doc"],
-            "autoresearch_capacity": 10,
-            "autoresearch_hotkey_capacity": 1,
-            "previous_event_hash": hotkey_capacity_closed_hash,
-        },
-    }
-    _credit_resume_rejection(
-        database,
-        hotkey_capacity_closed,
-        expected_error="research_lab_queue_hotkey_conflict",
-    )
-    _postgres_insert_row(
-        database,
-        "research_loop_run_queue_events",
-        {
-            "event_id": "30000000-0000-0000-0000-000000000152",
-            "schema_version": "1.0",
-            "run_id": concurrent_run_id,
-            "ticket_id": ticket_id,
-            "seq": 0,
-            "event_type": "paused",
-            "queue_priority": 3,
-            "worker_ref": "worker:credit-blocked",
-            "reason": "blocked_for_credit",
-            "anchored_hash": concurrent_paused_hash,
-            "event_doc": {"schema_version": "1.0"},
-        },
-    )
-    concurrent_params = {
-        **common,
-        "p_run_id": concurrent_run_id,
-        "p_expected_event_seq": 0,
-        "p_expected_event_hash": concurrent_paused_hash,
-        "p_event_id": "40000000-0000-0000-0000-000000000153",
-        "p_anchored_hash": concurrent_resumed_hash,
-        "p_event_doc": {
-            **common["p_event_doc"],
-            "autoresearch_capacity": 10,
-            "autoresearch_hotkey_capacity": 2,
-            "previous_event_hash": concurrent_paused_hash,
-        },
-    }
-    concurrent_arguments = ",".join(
-        "%s => %s" % (name, _postgres_literal(concurrent_params[name]))
-        for name in (
-            "p_run_id",
-            "p_ticket_id",
-            "p_expected_event_seq",
-            "p_expected_event_hash",
-            "p_event_id",
-            "p_anchored_hash",
-            "p_queue_priority",
-            "p_worker_ref",
-            "p_reason",
-            "p_event_doc",
-        )
-    )
-
-    def delayed_concurrent_resume() -> dict[str, Any]:
-        result = database.psql(
-            "BEGIN; "
-            "SELECT pg_catalog.to_jsonb(resumed)::text "
-            "FROM public.resume_research_lab_credit_blocked_run_v1(%s) "
-            "AS resumed; "
-            "SELECT pg_catalog.pg_sleep(0.75); COMMIT;"
-            % concurrent_arguments,
-            check=False,
-            tuples_only=True,
-        )
-        if result.returncode != 0:
-            raise PostgresContractProbeError(
-                "delayed concurrent credit resume failed: %s"
-                % result.stderr.strip()
-            )
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                return dict(json.loads(line))
-        raise PostgresContractProbeError(
-            "delayed concurrent credit resume returned no row"
-        )
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        first_future = executor.submit(delayed_concurrent_resume)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            lock_observed = database.psql(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.pg_locks
-                    WHERE locktype = 'advisory'
-                      AND granted
-                );
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-            if lock_observed == "t":
-                break
-            if first_future.done():
-                first_future.result()
-                raise PostgresContractProbeError(
-                    "concurrent credit resume lock was not observable"
-                )
-            time.sleep(0.01)
-        else:
-            raise PostgresContractProbeError(
-                "concurrent credit resume lock observation timed out"
-            )
-        second_future = executor.submit(
-            _credit_resume_rpc,
-            database,
-            concurrent_params,
-        )
-        concurrent_first = first_future.result(timeout=10)
-        concurrent_second = second_future.result(timeout=10)
-    if (
-        concurrent_first != concurrent_second
-        or concurrent_first.get("event_id") != concurrent_params["p_event_id"]
-        or concurrent_first.get("anchored_hash")
-        != concurrent_params["p_anchored_hash"]
-    ):
-        raise PostgresContractProbeError(
-            "concurrent credit resume replay was not exactly serialized"
-        )
-    capacity_trigger_enabled = database.psql(
-        """
-        SELECT EXISTS (
-            SELECT 1
-            FROM pg_catalog.pg_trigger
-            WHERE tgrelid =
-                  'public.research_loop_run_queue_events'::pg_catalog.regclass
-              AND tgname = 'guard_research_loop_queue_capacity_insert'
-              AND tgenabled <> 'D'
-              AND NOT tgisinternal
-        );
-        """,
-        tuples_only=True,
-    ).stdout.strip()
-    if capacity_trigger_enabled != "t":
-        raise PostgresContractProbeError(
-            "production queue-capacity trigger was not exercised"
-        )
-    capacity_guard_definition = database.psql(
-        """
-        SELECT pg_catalog.pg_get_functiondef(
-            'public.guard_research_lab_queue_capacity()'::pg_catalog.regprocedure
-        );
-        """,
-        tuples_only=True,
-    ).stdout
-    if not all(
-        marker in capacity_guard_definition
-        for marker in (
-            "hotkey_capacity_text",
-            "same_hotkey_count >= hotkey_capacity",
-        )
-    ):
-        raise PostgresContractProbeError(
-            "production queue-capacity guard is not the migration-67 definition"
-        )
-    counts = json.loads(
-        database.psql(
-            """
-            SELECT pg_catalog.json_build_object(
-                'resumed_run', pg_catalog.count(*) FILTER (
-                    WHERE run_id = '10000000-0000-0000-0000-000000000147'::uuid
-                ),
-                'empty_run', pg_catalog.count(*) FILTER (
-                    WHERE run_id = '10000000-0000-0000-0000-000000000148'::uuid
-                ),
-                'wrong_paused_run', pg_catalog.count(*) FILTER (
-                    WHERE run_id = '10000000-0000-0000-0000-000000000149'::uuid
-                ),
-                'capacity_closed_run', pg_catalog.count(*) FILTER (
-                    WHERE run_id = '10000000-0000-0000-0000-000000000150'::uuid
-                ),
-                'hotkey_capacity_closed_run', pg_catalog.count(*) FILTER (
-                    WHERE run_id = '10000000-0000-0000-0000-000000000151'::uuid
-                ),
-                'concurrent_run', pg_catalog.count(*) FILTER (
-                    WHERE run_id = '10000000-0000-0000-0000-000000000152'::uuid
-                )
-            )::text
-            FROM public.research_loop_run_queue_events;
-            """,
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if counts != {
-        "resumed_run": 2,
-        "empty_run": 0,
-        "wrong_paused_run": 1,
-        "capacity_closed_run": 1,
-        "hotkey_capacity_closed_run": 1,
-        "concurrent_run": 2,
-    }:
-        raise PostgresContractProbeError(
-            "credit resume rejection persisted an extra row"
-        )
-    evidence = {
-        "event_id": str(first["event_id"]),
-        "event_hash": str(first["anchored_hash"]),
-        "identical_replay": True,
-        "concurrent_replay_serialized": True,
-        "differing_replay_rejected": True,
-        "invalid_arguments_rejected": True,
-        "stale_head_rejected": True,
-        "empty_head_rejected": True,
-        "wrong_paused_head_rejected": True,
-        "rpc_security_contract_valid": True,
-        "queue_capacity_guard_exercised": True,
-        "hotkey_capacity_guard_exercised": True,
-        "row_counts": counts,
-    }
-    if evidence != EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE:
-        raise PostgresContractProbeError(
-            "atomic credit resume evidence differs from the release contract"
-        )
-    return evidence
 
 
-def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
-    payload = json.dumps(dict(row), sort_keys=True, separators=(",", ":"))
-    if "$leadpoet$" in payload:
-        raise PostgresContractProbeError(
-            "provider outcome checkpoint JSON delimiter collision"
-        )
-    return (
-        "SELECT public.append_research_lab_provider_outcome_checkpoint_v2("
-        "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
-    )
 
 
-def _provider_outcome_batch_append_sql(
-    rows: Sequence[Mapping[str, Any]],
-) -> str:
-    payload = json.dumps(list(rows), sort_keys=True, separators=(",", ":"))
-    if "$leadpoet$" in payload:
-        raise PostgresContractProbeError(
-            "provider outcome checkpoint batch JSON delimiter collision"
-        )
-    return (
-        "SELECT public.append_research_lab_provider_outcome_checkpoints_v2("
-        "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
-    )
 
 
 def _provider_cache_put_sql(row: Mapping[str, Any]) -> str:
@@ -1515,110 +922,9 @@ def _provider_cache_put_sql(row: Mapping[str, Any]) -> str:
     )
 
 
-def _provider_persistence_batch_contract(
+def _provider_evidence_cache_contract(
     database: DisposablePostgres,
 ) -> dict[str, Any]:
-    def checkpoint_row(
-        sequence: int,
-        checkpoint_hash: str,
-        previous_hash: str,
-        suffix: str,
-    ) -> dict[str, Any]:
-        return {
-            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
-            "artifact_master_key_ref_hash": "sha256:" + "8" * 64,
-            "utc_day": "2026-07-11",
-            "sequence": sequence,
-            "checkpoint_hash": checkpoint_hash,
-            "previous_checkpoint_hash": previous_hash,
-            "state_document_hash": sha256_json(
-                {"provider_persistence_batch_state": suffix}
-            ),
-            "checkpoint_artifact_id": sha256_json(
-                {"provider_persistence_batch_artifact": sequence}
-            ),
-            "encrypted_checkpoint_doc": {
-                "schema_version": "leadpoet.encrypted_artifact.v2",
-                "fixture": "batch-%d" % sequence,
-            },
-        }
-
-    batch = []
-    previous = ""
-    for sequence, suffix in enumerate(("1", "2", "3", "4", "5"), start=1):
-        checkpoint_hash = sha256_json(
-            {"provider_persistence_batch_checkpoint": sequence}
-        )
-        batch.append(
-            checkpoint_row(sequence, checkpoint_hash, previous, suffix)
-        )
-        previous = checkpoint_hash
-    inserted = json.loads(
-        database.psql(
-            _provider_outcome_batch_append_sql(batch),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    expected_inserted = {
-        "status": "inserted",
-        "checkpoint_hash": batch[-1]["checkpoint_hash"],
-        "checkpoint_count": len(batch),
-    }
-    if inserted != expected_inserted:
-        raise PostgresContractProbeError(
-            "provider outcome batch insert result differs"
-        )
-    replayed = json.loads(
-        database.psql(
-            _provider_outcome_batch_append_sql(batch),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if replayed != {**expected_inserted, "status": "existing"}:
-        raise PostgresContractProbeError(
-            "provider outcome batch replay result differs"
-        )
-    durable_count = int(
-        database.psql(
-            """
-            SELECT pg_catalog.count(*)
-            FROM public.research_lab_provider_outcome_checkpoints_v2
-            WHERE artifact_master_key_ref_hash =
-                  'sha256:8888888888888888888888888888888888888888888888888888888888888888'
-              AND utc_day = DATE '2026-07-11';
-            """,
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if durable_count != len(batch):
-        raise PostgresContractProbeError(
-            "provider outcome batch durable row count differs"
-        )
-
-    stale = [
-        checkpoint_row(
-            7,
-            sha256_json({"provider_persistence_batch_checkpoint": 7}),
-            batch[-1]["checkpoint_hash"],
-            "6",
-        )
-    ]
-    conflict = json.loads(
-        database.psql(
-            _provider_outcome_batch_append_sql(stale),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if (
-        conflict.get("status") != "conflict"
-        or conflict.get("checkpoint_hash") != stale[-1]["checkpoint_hash"]
-        or conflict.get("checkpoint_count") != 1
-        or conflict.get("head_checkpoint_row") != batch[-1]
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome batch conflict head differs"
-        )
-
     encrypted_cache_doc = {
         "schema_version": "leadpoet.encrypted_artifact.v2",
         "artifact_id": "sha256:" + "a" * 64,
@@ -1643,368 +949,41 @@ def _provider_persistence_batch_contract(
         "response_body_hash": "sha256:" + "3" * 64,
         "encrypted_cache_doc": encrypted_cache_doc,
     }
-    cache_inserted = json.loads(
+    inserted = json.loads(
         database.psql(
             _provider_cache_put_sql(cache_row),
             tuples_only=True,
         ).stdout.strip()
     )
-    if cache_inserted != {
+    expected_inserted = {
         "status": "inserted",
         "cache_entry_hash": cache_row["cache_entry_hash"],
         "cache_row": cache_row,
-    }:
+    }
+    if inserted != expected_inserted:
         raise PostgresContractProbeError(
-            "provider cache atomic put result differs"
+            "provider evidence cache insert result differs"
         )
-    cache_replayed = json.loads(
+    replayed = json.loads(
         database.psql(
             _provider_cache_put_sql(cache_row),
             tuples_only=True,
         ).stdout.strip()
     )
-    if cache_replayed != {**cache_inserted, "status": "existing"}:
+    if replayed != {**expected_inserted, "status": "existing"}:
         raise PostgresContractProbeError(
-            "provider cache atomic replay result differs"
-        )
-
-    schema = json.loads(
-        database.psql(
-            "SELECT public.research_lab_provider_persistence_batch_contract_v1()::text;",
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if schema != {
-        "schema_version": "leadpoet.provider_persistence_batch_contract.v1",
-        "cache_put": "atomic_exact_row",
-        "outcome_append": "atomic_contiguous_batch",
-        "outcome_batch_max": 32,
-        "conflict_head_checkpoint_row": "encrypted_or_null",
-    }:
-        raise PostgresContractProbeError(
-            "provider persistence batch schema differs"
+            "provider evidence cache replay result differs"
         )
     return {
-        "batch_size": len(batch),
-        "durable_count": durable_count,
-        "batch_replay_exact": True,
-        "batch_conflict_head_exact": True,
-        "cache_put_exact": True,
-        "cache_replay_exact": True,
-        "schema": schema,
+        "schema_version": "leadpoet.provider_evidence_cache_row.v2",
+        "insert_status": "inserted",
+        "replay_status": "existing",
+        "durable_row_exact": True,
     }
 
 
-def _provider_outcome_append_contract(
-    database: DisposablePostgres,
-) -> dict[str, Any]:
-    key_hash = "sha256:" + "a" * 64
 
-    def rollback_count() -> int:
-        database.psql("SELECT pg_catalog.pg_stat_clear_snapshot();")
-        return int(
-            database.psql(
-                """
-                SELECT xact_rollback
-                FROM pg_catalog.pg_stat_database
-                WHERE datname = pg_catalog.current_database();
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
 
-    def row(
-        *,
-        sequence: int,
-        checkpoint_hash: str,
-        previous_checkpoint_hash: str,
-        suffix: str,
-    ) -> dict[str, Any]:
-        return {
-            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
-            "artifact_master_key_ref_hash": key_hash,
-            "utc_day": "2026-07-10",
-            "sequence": sequence,
-            "checkpoint_hash": checkpoint_hash,
-            "previous_checkpoint_hash": previous_checkpoint_hash,
-            "state_document_hash": "sha256:" + suffix * 64,
-            "checkpoint_artifact_id": "sha256:" + suffix.upper().lower() * 64,
-            "encrypted_checkpoint_doc": {
-                "schema_version": "leadpoet.encrypted_artifact.v2",
-                "fixture": suffix,
-            },
-        }
-
-    first_hash = "sha256:" + "b" * 64
-    first = row(
-        sequence=1,
-        checkpoint_hash=first_hash,
-        previous_checkpoint_hash="",
-        suffix="c",
-    )
-    inserted = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(first),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if inserted != {"status": "inserted", "checkpoint_hash": first_hash}:
-        raise PostgresContractProbeError(
-            "provider outcome first append result differs"
-        )
-    existing = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(first),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if existing != {"status": "existing", "checkpoint_hash": first_hash}:
-        raise PostgresContractProbeError(
-            "provider outcome idempotent append result differs"
-        )
-    rollback_count_before_contention = rollback_count()
-
-    siblings = (
-        row(
-            sequence=2,
-            checkpoint_hash="sha256:" + "d" * 64,
-            previous_checkpoint_hash=first_hash,
-            suffix="e",
-        ),
-        row(
-            sequence=2,
-            checkpoint_hash="sha256:" + "f" * 64,
-            previous_checkpoint_hash=first_hash,
-            suffix="1",
-        ),
-    )
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        results = tuple(
-            executor.map(
-                lambda value: database.psql(
-                    _provider_outcome_append_sql(value),
-                    check=False,
-                    tuples_only=True,
-                ),
-                siblings,
-            )
-        )
-    if any(result.returncode != 0 for result in results):
-        raise PostgresContractProbeError(
-            "provider outcome expected contention surfaced as a SQL error"
-        )
-    outcomes = [json.loads(result.stdout.strip()) for result in results]
-    accepted = [
-        outcome for outcome in outcomes if outcome.get("status") == "inserted"
-    ]
-    rejected = [
-        outcome
-        for outcome in outcomes
-        if outcome.get("status") in {"busy", "conflict"}
-    ]
-    if len(accepted) != 1 or len(rejected) != 1:
-        raise PostgresContractProbeError(
-            "provider outcome concurrent append did not select one head"
-        )
-    accepted_hash = accepted[0].get("checkpoint_hash")
-    accepted_row = next(
-        (
-            dict(candidate)
-            for candidate in siblings
-            if candidate["checkpoint_hash"] == accepted_hash
-        ),
-        None,
-    )
-    if accepted_row is None:
-        raise PostgresContractProbeError(
-            "provider outcome append accepted an unknown candidate"
-        )
-    rejected_outcome = rejected[0]
-    if set(rejected_outcome) not in (
-        {"status", "checkpoint_hash"},
-        {"status", "checkpoint_hash", "head_checkpoint_row"},
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome contention response fields differ"
-        )
-    rejected_hash = rejected_outcome.get("checkpoint_hash")
-    if (
-        rejected_hash not in {candidate["checkpoint_hash"] for candidate in siblings}
-        or rejected_hash == accepted_hash
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome contention response lost candidate identity"
-        )
-    if rejected_outcome["status"] == "busy":
-        if set(rejected_outcome) != {"status", "checkpoint_hash"}:
-            raise PostgresContractProbeError(
-                "provider outcome busy response fields differ"
-            )
-    elif (
-        set(rejected_outcome)
-        != {"status", "checkpoint_hash", "head_checkpoint_row"}
-        or rejected_outcome.get("head_checkpoint_row") != accepted_row
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome concurrent conflict omitted its durable head"
-        )
-    row_count = int(
-        database.psql(
-            """
-            SELECT pg_catalog.count(*)
-            FROM public.research_lab_provider_outcome_checkpoints_v2
-            WHERE artifact_master_key_ref_hash =
-                  'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-              AND utc_day = DATE '2026-07-10';
-            """,
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if row_count != 2:
-        raise PostgresContractProbeError(
-            "provider outcome lineage contains an unexpected row count"
-        )
-
-    stale_row = next(
-        dict(candidate)
-        for candidate in siblings
-        if candidate["checkpoint_hash"] != accepted_hash
-    )
-    stale = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(stale_row),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if stale != {
-        "status": "conflict",
-        "checkpoint_hash": stale_row["checkpoint_hash"],
-        "head_checkpoint_row": accepted_row,
-    }:
-        raise PostgresContractProbeError(
-            "provider outcome stale append did not return the exact durable head"
-        )
-
-    empty_conflict_row = row(
-        sequence=2,
-        checkpoint_hash="sha256:" + "4" * 64,
-        previous_checkpoint_hash="sha256:" + "5" * 64,
-        suffix="6",
-    )
-    empty_conflict_row["artifact_master_key_ref_hash"] = "sha256:" + "9" * 64
-    empty_conflict = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(empty_conflict_row),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if empty_conflict != {
-        "status": "conflict",
-        "checkpoint_hash": empty_conflict_row["checkpoint_hash"],
-        "head_checkpoint_row": None,
-    }:
-        raise PostgresContractProbeError(
-            "provider outcome empty-lineage conflict response differs"
-        )
-
-    third_hash = "sha256:" + "2" * 64
-    third = row(
-        sequence=3,
-        checkpoint_hash=third_hash,
-        previous_checkpoint_hash=accepted_hash,
-        suffix="3",
-    )
-    lock_sql = """
-        BEGIN;
-        SELECT pg_catalog.pg_advisory_xact_lock(
-            pg_catalog.hashtext('research_lab_provider_outcome_checkpoint_v2'),
-            pg_catalog.hashtext(
-                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-                || ':2026-07-10'
-            )
-        );
-        SELECT pg_catalog.pg_sleep(2);
-        COMMIT;
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        holder = executor.submit(database.psql, lock_sql)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            granted = int(
-                database.psql(
-                    """
-                    SELECT pg_catalog.count(*)
-                    FROM pg_catalog.pg_locks
-                    WHERE locktype = 'advisory' AND granted;
-                    """,
-                    tuples_only=True,
-                ).stdout.strip()
-            )
-            if granted:
-                break
-            time.sleep(0.02)
-        else:
-            raise PostgresContractProbeError(
-                "provider outcome contention fixture did not acquire its lock"
-            )
-        started = time.monotonic()
-        busy = database.psql(
-            _provider_outcome_append_sql(third),
-            check=False,
-            tuples_only=True,
-        )
-        busy_elapsed = time.monotonic() - started
-        busy_result = (
-            json.loads(busy.stdout.strip())
-            if busy.returncode == 0 and busy.stdout.strip()
-            else {}
-        )
-        if busy.returncode != 0 or busy_result != {
-            "status": "busy",
-            "checkpoint_hash": third_hash,
-        }:
-            raise PostgresContractProbeError(
-                "provider outcome contention did not return the busy contract"
-            )
-        if busy_elapsed >= 1.0:
-            raise PostgresContractProbeError(
-                "provider outcome contention occupied a database session"
-            )
-        holder.result(timeout=3.0)
-
-    third_inserted = json.loads(
-        database.psql(
-            _provider_outcome_append_sql(third),
-            tuples_only=True,
-        ).stdout.strip()
-    )
-    if third_inserted != {
-        "status": "inserted",
-        "checkpoint_hash": third_hash,
-    }:
-        raise PostgresContractProbeError(
-            "provider outcome append did not recover after contention"
-        )
-    rollback_count_after_contention = rollback_count()
-    if rollback_count_after_contention != rollback_count_before_contention:
-        raise PostgresContractProbeError(
-            "provider outcome expected contention rolled back a transaction"
-        )
-    return {
-        "first_checkpoint_hash": first_hash,
-        "candidate_sibling_hashes": sorted(
-            item["checkpoint_hash"] for item in siblings
-        ),
-        "accepted_count": len(accepted),
-        "rejected_count": len(rejected),
-        "row_count": row_count + 1,
-        "contention_rollback_delta": (
-            rollback_count_after_contention
-            - rollback_count_before_contention
-        ),
-        "durable_head_conflict_verified": True,
-        "empty_head_conflict_verified": True,
-    }
 
 
 def _settlement_fixture(
@@ -3619,6 +2598,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         candidate_sha=args.candidate_sha,
     )
     database = DisposablePostgres(state_root=args.state_root)
+    retain_database = False
     try:
         database.start()
         scripts = args.source_root / "scripts"
@@ -3835,45 +2815,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 raise PostgresContractProbeError(
                     "post-129 transport terminal constraint is invalid"
                 )
-
-        database.apply_migration(scripts / PROVIDER_OUTCOME_APPEND_MIGRATION)
-        applied.append(PROVIDER_OUTCOME_APPEND_MIGRATION)
-        database.apply_migration(
-            scripts / PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION
-        )
-        applied.append(PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION)
-        pre_contention_contract = database.psql(
-            """
-            SELECT public.research_lab_provider_outcome_contention_contract_v2()
-                   ::text;
-            """,
-            check=False,
-        )
-        if (
-            pre_contention_contract.returncode == 0
-            or "research_lab_provider_outcome_contention_contract_v2"
-            not in pre_contention_contract.stderr
-            or "does not exist" not in pre_contention_contract.stderr
-        ):
-            raise PostgresContractProbeError(
-                "pre-133 provider outcome contention contract did not fail closed"
-            )
-        pre_head_contract = database.psql(
-            """
-            SELECT public.research_lab_provider_outcome_contention_contract_v3()
-                   ::text;
-            """,
-            check=False,
-        )
-        if (
-            pre_head_contract.returncode == 0
-            or "research_lab_provider_outcome_contention_contract_v3"
-            not in pre_head_contract.stderr
-            or "does not exist" not in pre_head_contract.stderr
-        ):
-            raise PostgresContractProbeError(
-                "pre-134 provider outcome head contract did not fail closed"
-            )
 
         prior_rows, prior_verified, _prior_fixture = _settlement_fixture(
             candidate_sha=args.candidate_sha,
@@ -4132,71 +3073,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post-131 lifetime credit contract is incomplete"
             )
 
-        database.apply_migration(
-            scripts / PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION
-        )
-        applied.append(PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION)
-        contention_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_provider_outcome_contention_contract_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if contention_contract != {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v2"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-        }:
-            raise PostgresContractProbeError(
-                "post-133 provider outcome contention contract differs"
-            )
-        pre_head_contract = database.psql(
-            """
-            SELECT public.research_lab_provider_outcome_contention_contract_v3()
-                   ::text;
-            """,
-            check=False,
-        )
-        if (
-            pre_head_contract.returncode == 0
-            or "research_lab_provider_outcome_contention_contract_v3"
-            not in pre_head_contract.stderr
-            or "does not exist" not in pre_head_contract.stderr
-        ):
-            raise PostgresContractProbeError(
-                "pre-134 provider outcome head contract did not fail closed"
-            )
-
-        database.apply_migration(
-            scripts / PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION
-        )
-        applied.append(PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION)
-        head_contention_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_provider_outcome_contention_contract_v3()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if head_contention_contract != {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v3"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-            "candidate_checkpoint_hash": True,
-            "conflict_head_checkpoint_row": "encrypted_or_null",
-        }:
-            raise PostgresContractProbeError(
-                "post-134 provider outcome head contract differs"
-            )
         database.apply_migration(scripts / ANCESTRY_CHECKPOINT_MIGRATION)
         applied.append(ANCESTRY_CHECKPOINT_MIGRATION)
         checkpoint_catalog = _relation_contract(database)
@@ -4373,6 +3249,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / PROVIDER_PERSISTENCE_BATCH_MIGRATION
         )
         applied.append(PROVIDER_PERSISTENCE_BATCH_MIGRATION)
+        provider_evidence_cache_contract = _provider_evidence_cache_contract(
+            database
+        )
         database.apply_migration(
             scripts / SOURCE_ADD_ADMISSION_CONTROL_MIGRATION
         )
@@ -4518,7 +3397,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             )
         database.apply_migration(scripts / ATOMIC_CREDIT_RESUME_MIGRATION)
         applied.append(ATOMIC_CREDIT_RESUME_MIGRATION)
-        atomic_credit_resume = _atomic_credit_resume_postgres_contract(database)
         database.apply_migration(
             scripts / COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION
         )
@@ -5354,7 +4232,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "research_lab_source_add_provenance_leg1_authority_v1"
             ),
             "function_authority_sha256": (
-                SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+                SOURCE_ADD_PROVENANCE_LEG1_V3_FUNCTION_AUTHORITY_SHA256
             ),
             "trigger_authority_sha256": (
                 SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
@@ -5517,10 +4395,55 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-178 SOURCE_ADD miner status contract differs"
             )
-        # The active agent competition schema follows SOURCE_ADD migration 178.
+        database.apply_migration(
+            scripts / SOURCE_ADD_PROVISIONED_STATUS_MIGRATION
+        )
+        applied.append(SOURCE_ADD_PROVISIONED_STATUS_MIGRATION)
+        source_add_post_status_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_post_accept_leg1_contract_v4()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        expected_post_status_contract = dict(
+            expected_provenance_origin_contract
+        )
+        expected_post_status_contract[
+            "function_authority_sha256"
+        ] = SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+        if source_add_post_status_contract != expected_post_status_contract:
+            raise PostgresContractProbeError(
+                "post-186 SOURCE_ADD provisioned-status contract differs"
+            )
+        # The active agent competition schema follows SOURCE_ADD migration 186.
         for migration in LAB_ARENA_MIGRATIONS:
             database.apply_migration(scripts / migration)
             applied.append(migration)
+        lab_arena_schema_contract_185 = json.loads(
+            database.psql(
+                """
+                SELECT public.lab_arena_schema_version_v1()::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract_185 != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 185,
+        }:
+            raise PostgresContractProbeError(
+                "post-185 Lab Arena schema contract differs"
+            )
+        for migration in LAB_ARENA_POST_185_MIGRATIONS:
+            database.apply_migration(scripts / migration)
+            applied.append(migration)
+        database.apply_migration(
+            scripts / LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION
+        )
+        applied.append(LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION)
         lab_arena_schema_contract = json.loads(
             database.psql(
                 """
@@ -5531,10 +4454,62 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         if lab_arena_schema_contract != {
             "schema_version": "leadpoet.lab_arena.schema_version.v1",
-            "version": 184,
+            "version": 190,
         }:
             raise PostgresContractProbeError(
-                "post-184 Lab Arena schema contract differs"
+                "post-190 Lab Arena restart guard contract differs"
+            )
+        arena_service_state = database.psql(
+            """
+            SET ROLE lab_arena_service;
+            SELECT public.lab_arena_restart_guard_state_v1()::text;
+            """,
+            check=False,
+            tuples_only=True,
+        )
+        arena_anon_state = database.psql(
+            """
+            SET ROLE anon;
+            SELECT public.lab_arena_restart_guard_state_v1()::text;
+            """,
+            check=False,
+            tuples_only=True,
+        )
+        if arena_service_state.returncode != 0 or arena_anon_state.returncode == 0:
+            raise PostgresContractProbeError(
+                "post-190 Lab Arena restart guard role grants differ"
+            )
+        upload_migration = "193-lab-arena-upload-recovery.sql"
+        database.apply_migration(scripts / upload_migration)
+        applied.append(upload_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 193,
+        }:
+            raise PostgresContractProbeError(
+                "post-193 Lab Arena upload recovery contract differs"
+            )
+        scorer_refresh_migration = "194-lab-arena-open-scorer-refresh.sql"
+        database.apply_migration(scripts / scorer_refresh_migration)
+        applied.append(scorer_refresh_migration)
+        lab_arena_schema_contract = json.loads(
+            database.psql(
+                "SELECT public.lab_arena_schema_version_v1()::text;",
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 194,
+        }:
+            raise PostgresContractProbeError(
+                "post-194 Lab Arena scorer refresh contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
@@ -5574,10 +4549,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-139 allocation frontier bootstrap schema is incomplete"
             )
-        provider_outcome_append = _provider_outcome_append_contract(database)
-        provider_persistence_batch = _provider_persistence_batch_contract(
-            database
-        )
         historical_compute_seed_rows = (
             _historical_compute_allocation_seed_rows(
                 database=database,
@@ -5640,14 +4611,13 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "catalog and finalized view projections differ"
             )
-        return {
+        result = {
             "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
             "candidate_sha": args.candidate_sha,
             "applied_migrations": applied,
             "relations": contract["relations"],
             "rpcs": contract["rpcs"],
             "maintenance_lease": maintenance_lease,
-            "atomic_credit_resume": atomic_credit_resume,
             "compact_weight_settlement_contract": (
                 compact_weight_settlement_contract
             ),
@@ -5671,13 +4641,28 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "allocation_settlement_frontier_bootstrap": (
                 allocation_frontier_bootstrap_contract
             ),
-            "provider_outcome_append": provider_outcome_append,
-            "provider_persistence_batch": provider_persistence_batch,
-            "provider_outcome_contention_contract": head_contention_contract,
+            "provider_evidence_cache": provider_evidence_cache_contract,
             "required_schema_declarations": declaration_counts,
         }
+        connection_output = getattr(args, "postgres_connection_output", None)
+        if connection_output is not None:
+            connection_output.write_text(
+                json.dumps(
+                    database.connection_document(
+                        candidate_sha=args.candidate_sha
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            connection_output.chmod(0o600)
+            retain_database = True
+        return result
     finally:
-        database.stop()
+        if not retain_database:
+            database.stop()
 
 
 def main() -> int:
@@ -5687,6 +4672,7 @@ def main() -> int:
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--release-build-input", type=Path, required=True)
     parser.add_argument("--epoch-id", type=int)
+    parser.add_argument("--postgres-connection-output", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):

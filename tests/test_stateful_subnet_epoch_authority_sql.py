@@ -51,6 +51,26 @@ TRANSPARENCY_SCOPE_REPAIR_SQL = (
     / "scripts"
     / "109-scope-stateful-epoch-transparency-high-water.sql"
 ).read_text(encoding="utf-8")
+FRESH_NETWORK_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "191-fresh-network-subnet-epoch-authority.sql"
+).read_text(encoding="utf-8")
+RESULT_REPLAY_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "104-research-lab-attested-result-replay-v2.sql"
+).read_text(encoding="utf-8")
+TEMP_TESTNET401_RESULT_SCOPE_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "192-temporary-testnet401-result-epoch-scope.sql"
+).read_text(encoding="utf-8")
+FRESH_NETWORK_CLEANUP_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "196-disable-temporary-testnet401-subnet-epoch-authority.sql"
+).read_text(encoding="utf-8")
 INDEX_VALIDATION_MATCH = re.search(
     r"(DO \$\$.*?\n\$\$;)\n\n-- The DO block above",
     INDEX_SQL,
@@ -79,6 +99,45 @@ TABLES = (
     "research_lab_stateful_subnet_epoch_boundaries_v1",
     "research_lab_stateful_subnet_epoch_snapshots_v1",
 )
+
+
+def test_fresh_network_authority_is_keyed_and_does_not_mutate_finney_singleton():
+    assert "leadpoet.subnet_epoch_cutover_authority.v3" in FRESH_NETWORK_SQL
+    assert "fresh_testnet401_network" in FRESH_NETWORK_SQL
+    assert "NEW.netuid IS DISTINCT FROM 401" in FRESH_NETWORK_SQL
+    assert "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105" in FRESH_NETWORK_SQL
+    assert "fresh_network_v1" in FRESH_NETWORK_SQL
+    assert "p_network_genesis_hash TEXT" in FRESH_NETWORK_SQL
+    assert "p_netuid INTEGER" in FRESH_NETWORK_SQL
+    assert "research_lab_attested_receipt_edges_v2" in FRESH_NETWORK_SQL
+    assert "parent_receipt_hash = NEW.first_snapshot_receipt_hash" in FRESH_NETWORK_SQL
+    assert "UPDATE public.research_lab_stateful_subnet_epoch_cutover_state_v1" not in FRESH_NETWORK_SQL
+    assert "INSERT INTO public.research_lab_stateful_subnet_epoch_cutover_state_v1" not in FRESH_NETWORK_SQL
+
+
+def test_fresh_network_cleanup_restores_finney_fences_without_deleting_evidence():
+    assert FRESH_NETWORK_CLEANUP_SQL.count(
+        "CREATE TRIGGER enforce_research_lab_stateful_epoch_fence_v1"
+    ) == 4
+    assert "WHEN (" not in FRESH_NETWORK_CLEANUP_SQL
+    assert "validate_research_lab_stateful_epoch_cutover_v2()" in (
+        FRESH_NETWORK_CLEANUP_SQL
+    )
+    assert (
+        "DROP FUNCTION IF EXISTS\n"
+        "    public.research_lab_fresh_network_epoch_cutover_public_state_v1(TEXT, INTEGER);"
+    ) in FRESH_NETWORK_CLEANUP_SQL
+    assert (
+        "public.enforce_temporary_testnet401_execution_result_epoch_scope_v1();"
+        in FRESH_NETWORK_CLEANUP_SQL
+    )
+    assert (
+        "public.enforce_temporary_testnet401_weight_submission_epoch_scope_v1();"
+        in FRESH_NETWORK_CLEANUP_SQL
+    )
+    assert "fresh_network_v1" not in FRESH_NETWORK_CLEANUP_SQL
+    assert "DELETE FROM" not in FRESH_NETWORK_CLEANUP_SQL
+    assert "UPDATE public." not in FRESH_NETWORK_CLEANUP_SQL
 
 
 def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities():
@@ -816,6 +875,7 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             "ALTER TABLE public.epoch_audit_logs DROP COLUMN other_key;"
         )
         psql(INDEX_VALIDATION_SQL)
+        psql(RESULT_REPLAY_SQL)
         psql(SQL)
         psql(TRANSPARENCY_SCOPE_REPAIR_SQL)
         psql(FENCE_REFRESH_SQL)
@@ -1909,6 +1969,404 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             "UPDATE public.research_lab_stateful_subnet_epoch_boundaries_v1 "
             "SET tempo = tempo WHERE subnet_epoch_index = 11;",
             "append-only",
+        )
+
+        # Apply the exact fresh-testnet migration twice. It must retain the
+        # active Finney row while adding one independently keyed authority.
+        finney_before = psql(
+            "SELECT md5(pg_catalog.row_to_json(cutover)::TEXT) "
+            "FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
+            f"WHERE mapping_hash = '{mapping_hash}';"
+        ).stdout.strip()
+        psql(FRESH_NETWORK_SQL)
+        psql(FRESH_NETWORK_SQL)
+
+        fresh_mapping_hash = (
+            "sha256:4b3941c091d3a29daf9ea863bb6cb587bad7dfd9426cf66a56bcf7de04ce4328"
+        )
+        fresh_snapshot_hash = (
+            "sha256:9e9eeaa358d0ea8325ea916bc18e7a271855878f2d352287f2e3d30509dda3b9"
+        )
+        fresh_snapshot_receipt = (
+            "sha256:66c7a0176e741a1e803539e6c50a3297aa81b74dbf44c8b8d311601f3f847a59"
+        )
+        fresh_authority_hash = (
+            "sha256:2eb438e142f4c27d5ce28b2e2c5148cc030724a38ab0bf479ce4fc0fade51bc7"
+        )
+        fresh_cutover_receipt = (
+            "sha256:4db3b2649bbd2182488b3f17cbff87abf04f96c9511055cb51efe743710b6aaa"
+        )
+        fresh_epoch_ref = sha(205)
+        fresh_block_hash = (
+            "0x08d9d41b0508e1c7dc7fffdfa5d055077e01c593b016c08d42471fecd401fa15"
+        )
+        testnet_genesis = (
+            "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+        )
+        fresh_manifest = {
+            "schema_version": "leadpoet.subnet_epoch_cutover.v1",
+            "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+            "network_genesis_hash": testnet_genesis,
+            "netuid": 401,
+            "cutover_block": 7_955_391,
+            "cutover_block_hash": fresh_block_hash,
+            "first_subnet_epoch_index": 22_042,
+            "first_settlement_epoch_id": 22_042,
+            "last_legacy_epoch_id": 22_041,
+            "mapping_hash": fresh_mapping_hash,
+        }
+        fresh_snapshot = {
+            "schema_version": "leadpoet.subnet_epoch_snapshot.v1",
+            "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+            "network_genesis_hash": testnet_genesis,
+            "netuid": 401,
+            "head_kind": "finalized",
+            "block_hash": fresh_block_hash,
+            "current_block": 7_955_391,
+            "last_epoch_block": 7_955_391,
+            "pending_epoch_at": 0,
+            "subnet_epoch_index": 22_042,
+            "tempo": 360,
+            "blocks_since_last_step": 0,
+            "observed_at": observed_at,
+            "epoch_id": 22_042,
+            "epoch_ref": fresh_epoch_ref,
+            "epoch_block": 0,
+            "next_epoch_block": 7_955_751,
+            "blocks_remaining": 360,
+            "settlement_epoch_id": 22_042,
+            "cutover_mapping_hash": fresh_mapping_hash,
+        }
+        fresh_authority = {
+            "schema_version": "leadpoet.subnet_epoch_cutover_authority.v3",
+            "mapping_hash": fresh_mapping_hash,
+            "first_epoch_ref": fresh_epoch_ref,
+            "first_snapshot_hash": fresh_snapshot_hash,
+            "first_snapshot_receipt_hash": fresh_snapshot_receipt,
+            "origin_kind": "fresh_testnet401_network",
+            "manifest": fresh_manifest,
+        }
+        psql(
+            f"SELECT public.test_insert_epoch_receipt('{fresh_snapshot_receipt}', "
+            "'validator_weights', 'validator.subnet_epoch_snapshot.v2', "
+            f"22042, '{fresh_snapshot_hash}'); "
+            f"SELECT public.test_insert_epoch_receipt('{fresh_cutover_receipt}', "
+            "'gateway_coordinator', 'research_lab.subnet_epoch_cutover.v2', "
+            f"22042, '{fresh_authority_hash}', "
+            f"'[\"{fresh_snapshot_receipt}\"]'::JSONB); "
+            "INSERT INTO public.research_lab_attested_receipt_edges_v2 "
+            "(child_receipt_hash, parent_receipt_hash) VALUES "
+            f"('{fresh_cutover_receipt}', '{fresh_snapshot_receipt}');"
+        )
+        psql(
+            "INSERT INTO public.research_lab_stateful_subnet_epoch_candidates_v1 ("
+            "snapshot_hash, schema_version, mapping_hash, epoch_scheme, "
+            "network_genesis_hash, netuid, head_kind, block_hash, current_block, "
+            "last_epoch_block, pending_epoch_at, subnet_epoch_index, epoch_ref, "
+            "proposed_settlement_epoch_id, validator_hotkey, candidate_payload_hash, "
+            "validator_hotkey_signature, candidate_authorization_hash, tempo, "
+            "blocks_since_last_step, next_epoch_block, blocks_remaining, "
+            "chain_state_receipt_hash, snapshot_doc, observed_at) VALUES ("
+            f"'{fresh_snapshot_hash}', 'leadpoet.subnet_epoch_snapshot.v1', "
+            f"'{fresh_mapping_hash}', 'bittensor.subnet_epoch_index.v1', "
+            f"'{testnet_genesis}', 401, 'finalized', '{fresh_block_hash}', "
+            f"7955391, 7955391, 0, 22042, '{fresh_epoch_ref}', 22042, "
+            f"'{candidate_hotkey}', '{sha(207)}', '{candidate_signature}', "
+            f"'{sha(208)}', 360, 0, 7955751, 360, "
+            f"'{fresh_snapshot_receipt}', '{json.dumps(fresh_snapshot)}'::JSONB, "
+            f"'{observed_at}'::TIMESTAMPTZ);"
+        )
+        psql(
+            "INSERT INTO public.research_lab_stateful_subnet_epoch_cutovers_v1 ("
+            "cutover_authority_hash, schema_version, mapping_hash, "
+            "manifest_schema_version, epoch_scheme, previous_epoch_scheme, "
+            "network_genesis_hash, netuid, cutover_block, cutover_block_hash, "
+            "first_subnet_epoch_index, first_epoch_ref, first_settlement_epoch_id, "
+            "last_legacy_epoch_id, first_tempo, first_pending_epoch_at, "
+            "first_blocks_since_last_step, first_next_epoch_block, first_observed_at, "
+            "first_snapshot_hash, first_snapshot_receipt_hash, cutover_receipt_hash, "
+            "manifest_doc, first_snapshot_doc, authority_doc) VALUES ("
+            f"'{fresh_authority_hash}', 'leadpoet.subnet_epoch_cutover_authority.v3', "
+            f"'{fresh_mapping_hash}', 'leadpoet.subnet_epoch_cutover.v1', "
+            "'bittensor.subnet_epoch_index.v1', 'fresh_network_v1', "
+            f"'{testnet_genesis}', 401, 7955391, '{fresh_block_hash}', 22042, "
+            f"'{fresh_epoch_ref}', 22042, 22041, 360, 0, 0, 7955751, "
+            f"'{observed_at}'::TIMESTAMPTZ, '{fresh_snapshot_hash}', "
+            f"'{fresh_snapshot_receipt}', '{fresh_cutover_receipt}', "
+            f"'{json.dumps(fresh_manifest)}'::JSONB, "
+            f"'{json.dumps(fresh_snapshot)}'::JSONB, "
+            f"'{json.dumps(fresh_authority)}'::JSONB);"
+        )
+        public_fresh = psql(
+            "SET ROLE anon; SELECT lifecycle_state, mapping_hash, netuid "
+            "FROM public.research_lab_fresh_network_epoch_cutover_public_state_v1("
+            f"'{testnet_genesis}', 401); RESET ROLE;"
+        ).stdout
+        assert f"stateful_active|{fresh_mapping_hash}|401" in public_fresh
+        assert "\n0\n" in psql(
+            "SET ROLE anon; SELECT COUNT(*) FROM "
+            "public.research_lab_fresh_network_epoch_cutover_public_state_v1("
+            f"'{testnet_genesis}', 400); RESET ROLE;"
+        ).stdout
+        assert psql(
+            "SELECT md5(pg_catalog.row_to_json(cutover)::TEXT) "
+            "FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
+            f"WHERE mapping_hash = '{mapping_hash}';"
+        ).stdout.strip() == finney_before
+
+        # Apply the temporary trigger split over the real migration-101 fence,
+        # not a stand-in. Normal Finney and mapping-free weight-input rows must
+        # continue through that exact function unchanged.
+        original_fence_fingerprint = psql(
+            "SELECT md5(pg_catalog.pg_get_functiondef("
+            "'public.enforce_research_lab_stateful_epoch_fence_v1()'::regprocedure));"
+        ).stdout.strip()
+        assert original_fence_fingerprint == "2ba4e9788be6473a1de22123f2b94cf0"
+        psql(TEMP_TESTNET401_RESULT_SCOPE_SQL)
+        psql(TEMP_TESTNET401_RESULT_SCOPE_SQL)
+        assert psql(
+            "SELECT md5(pg_catalog.pg_get_functiondef("
+            "'public.enforce_research_lab_stateful_epoch_fence_v1()'::regprocedure));"
+        ).stdout.strip() == original_fence_fingerprint
+
+        finney_result_receipt = sha(213)
+        finney_result_output = sha(214)
+        weight_input_receipt = sha(215)
+        weight_input_output = sha(216)
+        wrong_mapping_receipt = sha(217)
+        wrong_mapping_output = sha(218)
+        testnet_result_receipt = sha(230)
+        testnet_result_output = sha(231)
+        psql(
+            f"SELECT public.test_insert_epoch_receipt('{finney_result_receipt}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22061, "
+            f"'{finney_result_output}'); "
+            f"SELECT public.test_insert_epoch_receipt('{weight_input_receipt}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22061, "
+            f"'{weight_input_output}'); "
+            f"SELECT public.test_insert_epoch_receipt('{wrong_mapping_receipt}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22061, "
+            f"'{wrong_mapping_output}'); "
+            f"SELECT public.test_insert_epoch_receipt('{testnet_result_receipt}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22061, "
+            f"'{testnet_result_output}');"
+        )
+        psql(
+            "INSERT INTO public.research_lab_attested_execution_results_v2 ("
+            "receipt_hash, schema_version, role, operation, purpose, job_id, "
+            "epoch_id, sequence, release_hash, input_root, output_root, "
+            "artifact_root, result_hash, artifact_hashes, result_doc) VALUES ("
+            f"'{finney_result_receipt}', 'leadpoet.attested_execution_result.v2', "
+            "'gateway_coordinator', 'research_lab_allocation', "
+            f"'research_lab.allocation.v2', 'test:{finney_result_receipt}', "
+            f"22061, 0, '{sha(219)}', '{finney_result_receipt}', "
+            f"'{finney_result_output}', '{sha(77)}', '{sha(220)}', '[]'::JSONB, "
+            "pg_catalog.jsonb_build_object('source_state', "
+            "pg_catalog.jsonb_build_object('netuid', 71, "
+            f"'cutover_mapping_hash', '{mapping_hash}'))), ("
+            f"'{weight_input_receipt}', 'leadpoet.attested_execution_result.v2', "
+            "'gateway_coordinator', 'attest_weight_input', "
+            f"'research_lab.allocation.v2', 'test:{weight_input_receipt}', "
+            f"22061, 0, '{sha(221)}', '{weight_input_receipt}', "
+            f"'{weight_input_output}', '{sha(77)}', '{sha(222)}', '[]'::JSONB, "
+            "pg_catalog.jsonb_build_object("
+            "'schema_version', 'leadpoet.weight_input_value.v2', "
+            "'category', 'research_lab_allocation', 'netuid', 401, "
+            "'epoch_id', 22061, 'value', '{}'::JSONB));"
+        )
+        psql(
+            "INSERT INTO public.research_lab_attested_execution_results_v2 ("
+            "receipt_hash, schema_version, role, operation, purpose, job_id, "
+            "epoch_id, sequence, release_hash, input_root, output_root, "
+            "artifact_root, result_hash, artifact_hashes, result_doc) VALUES ("
+            f"'{testnet_result_receipt}', "
+            "'leadpoet.attested_execution_result.v2', 'gateway_coordinator', "
+            "'research_lab_allocation', 'research_lab.allocation.v2', "
+            f"'test:{testnet_result_receipt}', 22061, 0, '{sha(232)}', "
+            f"'{testnet_result_receipt}', '{testnet_result_output}', "
+            f"'{sha(77)}', '{sha(233)}', '[]'::JSONB, "
+            "pg_catalog.jsonb_build_object("
+            "'allocation', pg_catalog.jsonb_build_object('epoch', 22061), "
+            "'allocation_inputs', pg_catalog.jsonb_build_object('epoch', 22061), "
+            "'source_state', pg_catalog.jsonb_build_object("
+            "'epoch', 22061, 'netuid', 401, 'settlement_frontier', "
+            "pg_catalog.jsonb_build_object("
+            "'netuid', 401, 'allocation_epoch', 22061), "
+            "'fresh_network_origin', pg_catalog.jsonb_build_object("
+            f"'cutover_mapping_hash', '{fresh_mapping_hash}')), "
+            f"'source_state_hash', '{sha(234)}'));"
+        )
+        rejected(
+            "INSERT INTO public.research_lab_attested_execution_results_v2 ("
+            "receipt_hash, schema_version, role, operation, purpose, job_id, "
+            "epoch_id, sequence, release_hash, input_root, output_root, "
+            "artifact_root, result_hash, artifact_hashes, result_doc) VALUES ("
+            f"'{wrong_mapping_receipt}', 'leadpoet.attested_execution_result.v2', "
+            "'gateway_coordinator', 'attest_weight_input', "
+            f"'research_lab.allocation.v2', 'test:{wrong_mapping_receipt}', "
+            f"22061, 0, '{sha(223)}', '{wrong_mapping_receipt}', "
+            f"'{wrong_mapping_output}', '{sha(77)}', '{sha(224)}', '[]'::JSONB, "
+            "pg_catalog.jsonb_build_object("
+            "'schema_version', 'leadpoet.weight_input_value.v2', "
+            "'category', 'research_lab_allocation', 'netuid', 401, "
+            f"'epoch_id', 22061, 'value', pg_catalog.jsonb_build_object("
+            f"'cutover_mapping_hash', '{sha(225)}')));",
+            "stateful epoch active mapping authority differs",
+        )
+        psql(
+            "INSERT INTO public.transparency_log(event_type, payload) VALUES ("
+            "'FINNEY_SCOPE_PROBE', pg_catalog.jsonb_build_object("
+            "'epoch_id', 22061, "
+            f"'cutover_mapping_hash', '{mapping_hash}'));"
+        )
+        rejected(
+            "INSERT INTO public.transparency_log(event_type, payload) VALUES ("
+            "'FINNEY_SCOPE_WRONG_MAPPING', pg_catalog.jsonb_build_object("
+            "'epoch_id', 22061, "
+            f"'cutover_mapping_hash', '{sha(226)}'));",
+            "stateful epoch active mapping authority differs",
+        )
+
+        rejected(
+            "INSERT INTO public.research_lab_stateful_subnet_epoch_cutovers_v1 "
+            "SELECT (pg_catalog.jsonb_populate_record(NULL::public."
+            "research_lab_stateful_subnet_epoch_cutovers_v1, "
+            "pg_catalog.to_jsonb(cutover) || "
+            f"pg_catalog.jsonb_build_object('cutover_authority_hash','{sha(209)}',"
+            f"'mapping_hash','{sha(210)}','network_genesis_hash',"
+            "'0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03'"
+            "))).* FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 "
+            f"cutover WHERE mapping_hash = '{fresh_mapping_hash}';",
+            "fresh-network cutover scope is invalid",
+        )
+
+        extra_parent_authority = sha(211)
+        extra_parent_receipt = sha(212)
+        psql(
+            f"SELECT public.test_insert_epoch_receipt('{extra_parent_receipt}', "
+            "'gateway_coordinator', 'research_lab.subnet_epoch_cutover.v2', "
+            f"22042, '{extra_parent_authority}', "
+            f"'[\"{fresh_snapshot_receipt}\",\"{first_boundary_receipt}\"]'::JSONB); "
+            "INSERT INTO public.research_lab_attested_receipt_edges_v2 "
+            "(child_receipt_hash, parent_receipt_hash) VALUES "
+            f"('{extra_parent_receipt}', '{fresh_snapshot_receipt}'),"
+            f"('{extra_parent_receipt}', '{first_boundary_receipt}');"
+        )
+        rejected(
+            "INSERT INTO public.research_lab_stateful_subnet_epoch_cutovers_v1 "
+            "SELECT (pg_catalog.jsonb_populate_record(NULL::public."
+            "research_lab_stateful_subnet_epoch_cutovers_v1, "
+            "pg_catalog.to_jsonb(cutover) || "
+            f"pg_catalog.jsonb_build_object('cutover_authority_hash','{extra_parent_authority}',"
+            f"'cutover_receipt_hash','{extra_parent_receipt}'))).* "
+            "FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
+            f"WHERE mapping_hash = '{fresh_mapping_hash}';",
+            "fresh-network coordinator receipt is invalid",
+        )
+
+        fresh_candidate_before = psql(
+            "SELECT md5(pg_catalog.row_to_json(candidate)::TEXT) "
+            "FROM public.research_lab_stateful_subnet_epoch_candidates_v1 candidate "
+            f"WHERE mapping_hash = '{fresh_mapping_hash}';"
+        ).stdout.strip()
+        fresh_cutover_before = psql(
+            "SELECT md5(pg_catalog.row_to_json(cutover)::TEXT) "
+            "FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
+            f"WHERE mapping_hash = '{fresh_mapping_hash}';"
+        ).stdout.strip()
+        fresh_result_before = psql(
+            "SELECT md5(pg_catalog.row_to_json(result_row)::TEXT) "
+            "FROM public.research_lab_attested_execution_results_v2 result_row "
+            f"WHERE receipt_hash = '{testnet_result_receipt}';"
+        ).stdout.strip()
+        psql(FRESH_NETWORK_CLEANUP_SQL)
+        psql(FRESH_NETWORK_CLEANUP_SQL)
+        assert psql(
+            "SELECT pg_catalog.to_regprocedure("
+            "'public.research_lab_fresh_network_epoch_cutover_public_state_v1(text,integer)'"
+            ") IS NULL;"
+        ).stdout.strip() == "t"
+        assert psql(
+            "SELECT pg_catalog.to_regprocedure("
+            "'public.validate_research_lab_fresh_network_epoch_cutover_v1()'"
+            ") IS NULL;"
+        ).stdout.strip() == "t"
+        assert psql(
+            "SELECT pg_catalog.to_regprocedure("
+            "'public.enforce_temporary_testnet401_execution_result_epoch_scope_v1()'"
+            ") IS NULL, pg_catalog.to_regprocedure("
+            "'public.enforce_temporary_testnet401_weight_submission_epoch_scope_v1()'"
+            ") IS NULL;"
+        ).stdout.strip() == "t|t"
+        assert psql(
+            "SELECT COUNT(*) FROM pg_catalog.pg_trigger trigger_row "
+            "WHERE trigger_row.tgname = "
+            "'enforce_research_lab_stateful_epoch_fence_v1' "
+            "AND trigger_row.tgrelid IN ("
+            "'public.research_lab_attested_execution_results_v2'::REGCLASS, "
+            "'public.transparency_log'::REGCLASS) "
+            "AND NOT trigger_row.tgisinternal "
+            "AND pg_catalog.pg_get_triggerdef(trigger_row.oid) NOT LIKE '%WHEN%';"
+        ).stdout.strip() == "2"
+        assert psql(
+            "SELECT md5(pg_catalog.row_to_json(candidate)::TEXT) "
+            "FROM public.research_lab_stateful_subnet_epoch_candidates_v1 candidate "
+            f"WHERE mapping_hash = '{fresh_mapping_hash}';"
+        ).stdout.strip() == fresh_candidate_before
+        assert psql(
+            "SELECT md5(pg_catalog.row_to_json(cutover)::TEXT) "
+            "FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
+            f"WHERE mapping_hash = '{fresh_mapping_hash}';"
+        ).stdout.strip() == fresh_cutover_before
+        assert psql(
+            "SELECT md5(pg_catalog.row_to_json(cutover)::TEXT) "
+            "FROM public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
+            f"WHERE mapping_hash = '{mapping_hash}';"
+        ).stdout.strip() == finney_before
+        assert psql(
+            "SELECT md5(pg_catalog.row_to_json(result_row)::TEXT) "
+            "FROM public.research_lab_attested_execution_results_v2 result_row "
+            f"WHERE receipt_hash = '{testnet_result_receipt}';"
+        ).stdout.strip() == fresh_result_before
+        rejected(
+            f"SELECT public.test_insert_epoch_receipt('{sha(235)}', "
+            "'gateway_coordinator', 'research_lab.allocation.v2', 22062, "
+            f"'{sha(236)}'); "
+            "INSERT INTO public.research_lab_attested_execution_results_v2 ("
+            "receipt_hash, schema_version, role, operation, purpose, job_id, "
+            "epoch_id, sequence, release_hash, input_root, output_root, "
+            "artifact_root, result_hash, artifact_hashes, result_doc) VALUES ("
+            f"'{sha(235)}', 'leadpoet.attested_execution_result.v2', "
+            "'gateway_coordinator', 'research_lab_allocation', "
+            f"'research_lab.allocation.v2', 'test:{sha(235)}', 22062, 0, "
+            f"'{sha(237)}', '{sha(235)}', '{sha(236)}', '{sha(77)}', "
+            f"'{sha(238)}', '[]'::JSONB, pg_catalog.jsonb_build_object("
+            "'source_state', pg_catalog.jsonb_build_object("
+            "'netuid', 401, "
+            f"'cutover_mapping_hash', '{fresh_mapping_hash}')));",
+            "stateful epoch active mapping authority differs",
+        )
+        rejected(
+            "INSERT INTO public.transparency_log(event_type, payload) VALUES ("
+            "'WEIGHT_SUBMISSION_V2', pg_catalog.jsonb_build_object("
+            "'netuid', 401, 'epoch_id', 22062, 'epoch_authority', "
+            "pg_catalog.jsonb_build_object("
+            f"'cutover_mapping_hash', '{fresh_mapping_hash}')));",
+            "stateful epoch active mapping authority differs",
+        )
+        rejected(
+            "INSERT INTO public.research_lab_stateful_subnet_epoch_candidates_v1 "
+            "SELECT candidate.* FROM "
+            "public.research_lab_stateful_subnet_epoch_candidates_v1 candidate "
+            f"WHERE mapping_hash = '{fresh_mapping_hash}';",
+            "stateful epoch fence rejects an unbound candidate",
+        )
+        rejected(
+            "INSERT INTO public.research_lab_stateful_subnet_epoch_cutovers_v1 "
+            "SELECT cutover.* FROM "
+            "public.research_lab_stateful_subnet_epoch_cutovers_v1 cutover "
+            f"WHERE mapping_hash = '{fresh_mapping_hash}';",
+            "stateful epoch fence requires the atomic staged cutover RPC",
         )
     finally:
         subprocess.run(

@@ -21,8 +21,6 @@ DEFAULT_PROFILE = "default"
 BENCHMARK_MODEL_PROFILE = "benchmark_model"
 BENCHMARK_SCORER_PROFILE = "benchmark_scorer"
 PROVIDER_PREFLIGHT_PROFILE = "provider_preflight"
-STALE_PARENT_REPAIR_PROFILE = "stale_parent_repair"
-SOURCE_ADD_JUDGE_PROFILE = "source_add_judge"
 DEFAULT_CONFIG_DIR = Path("/home/ec2-user/.config/leadpoet/v2")
 
 _PROFILE_FILES = {
@@ -35,12 +33,6 @@ _PROFILE_FILES = {
     PROVIDER_PREFLIGHT_PROFILE: (
         ("exa", "benchmark_exa.json"),
         ("scrapingdog", "benchmark_scrapingdog.json"),
-    ),
-    STALE_PARENT_REPAIR_PROFILE: (
-        ("openrouter", "stale_parent_openrouter.json"),
-    ),
-    SOURCE_ADD_JUDGE_PROFILE: (
-        ("openrouter", "source_add_judge_openrouter.json"),
     ),
 }
 _EXECUTION_PROXY_FILES = {
@@ -300,8 +292,6 @@ def verify_required_worker_proxy_profiles_v2(
         BENCHMARK_MODEL_PROFILE: frozenset({"exa"}),
         BENCHMARK_SCORER_PROFILE: frozenset({"openrouter", "scrapingdog"}),
         PROVIDER_PREFLIGHT_PROFILE: frozenset({"exa", "scrapingdog"}),
-        STALE_PARENT_REPAIR_PROFILE: frozenset({"openrouter"}),
-        SOURCE_ADD_JUDGE_PROFILE: frozenset({"openrouter"}),
     }
     for profile, required_slots in sorted(required_profiles.items()):
         document = load_provider_profile_v2(profile, config_dir=config_dir)

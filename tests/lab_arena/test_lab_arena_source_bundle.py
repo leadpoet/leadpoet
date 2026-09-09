@@ -58,6 +58,39 @@ def test_archive_validation_accepts_one_github_wrapper_directory():
     assert facts["source_root"] == "pydantic-harness-main"
 
 
+@pytest.mark.parametrize("name", [
+    ".git/config", ".GIT/config", ".gitattributes",
+    ".github/workflows/push.yml", "wrapper/.github/workflows/push.yml",
+])
+def test_public_source_rejects_git_automation(name):
+    with pytest.raises(source_bundle.SourceBundleError, match="source_git_automation_forbidden"):
+        source_bundle.validate_publishable_path(name)
+
+
+def test_public_source_allows_ordinary_model_and_documentation_paths():
+    for name in ("harness.py", "README.md", ".gitignore", ".github/ISSUE_TEMPLATE.md"):
+        source_bundle.validate_publishable_path(name)
+
+
+def test_archive_commit_reads_only_one_ordinary_pax_comment():
+    commit = "a" * 40
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(
+            fileobj=compressed,
+            mode="w",
+            format=tarfile.PAX_FORMAT,
+            pax_headers={"comment": commit},
+        ) as archive:
+            data = b"def run_icp(icp):\n    return []\n"
+            info = tarfile.TarInfo("pydantic-harness-lab/harness.py")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+    assert source_bundle.source_archive_commit(raw.getvalue()) == commit
+    assert source_bundle.source_archive_commit(b"not an archive") == ""
+
+
 def test_archive_validation_rejects_links_traversal_and_missing_harness():
     for name, kind in (("../harness.py", "file"), ("harness.py", "link"), ("logic.py", "file")):
         raw = io.BytesIO()
@@ -214,3 +247,17 @@ def test_archive_scan_checks_allowed_environment_templates_for_exact_values():
             payload,
             forbidden_values=(secret,),
         )
+
+
+def test_source_errors_carry_relative_path_without_file_contents():
+    payload = _archive_members(
+        (
+            ("harness.py", b"def run_icp(icp): return []\n"),
+            ("nested/.env.local.sh", b"loader-without-secrets\n"),
+        )
+    )
+    with pytest.raises(source_bundle.SourceBundleError) as caught:
+        source_bundle.validate_source_archive(payload)
+    assert caught.value.code == "source_contains_credentials"
+    assert caught.value.path == "nested/.env.local.sh"
+    assert "loader-without-secrets" not in str(caught.value)

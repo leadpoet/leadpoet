@@ -59,6 +59,9 @@ REQUIREMENT_RE = re.compile(
 )
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
+COMPLETION_SIGNATURE_REFRESH_AGE_SECONDS = (
+    contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS - int(API_TIMEOUT_SECONDS)
+)
 PROVIDER_API_TIMEOUT_GRACE_SECONDS = 15.0
 MAX_PROVIDER_API_TIMEOUT_SECONDS = 135.0
 DEFAULT_IMAGE_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
@@ -74,6 +77,22 @@ DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
+MAX_JUDGE_DIAGNOSTIC_CHARS = scoring.MAX_FAILURE_DETAIL_CHARS
+_DIAGNOSTIC_URL_QUERY_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]+)\?[^\s#]*"
+)
+_DIAGNOSTIC_URL_AUTHORITY_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s?#]+"
+)
+_DIAGNOSTIC_CREDENTIAL_RE = re.compile(
+    r"(?i)((?<![a-z0-9])[\"']?(?:[a-z0-9]+[_-])*(?:api[_-]?key|apikey|"
+    r"access[_-]?token|token|authorization|secret|password|private[_-]?key)"
+    r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
+)
+_DIAGNOSTIC_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_DIAGNOSTIC_KNOWN_TOKEN_RE = re.compile(
+    r"(?i)\b(?:sk-|sb_secret)[A-Za-z0-9._-]*"
+)
 
 
 class RunnerError(RuntimeError):
@@ -82,6 +101,40 @@ class RunnerError(RuntimeError):
 
 class AgentDependencyError(RunnerError):
     """The submitted dependency declaration cannot run in the Arena."""
+
+
+def _safe_judge_diagnostic_text(
+    value: Any,
+    *,
+    max_chars: int = MAX_JUDGE_DIAGNOSTIC_CHARS,
+) -> str:
+    """Return bounded operator diagnostics with common credentials removed."""
+
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", str(value or ""))
+    text = _DIAGNOSTIC_URL_QUERY_RE.sub(r"\1?[redacted]", text)
+    text = _DIAGNOSTIC_URL_AUTHORITY_RE.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_BEARER_RE.sub("Bearer [redacted]", text)
+    text = _DIAGNOSTIC_CREDENTIAL_RE.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_KNOWN_TOKEN_RE.sub("[redacted]", text)
+    return " ".join(text.split())[:max_chars]
+
+
+def _log_judge_diagnostic(
+    run_id: str,
+    *,
+    event: str,
+    error_class: str,
+    detail: Any = "",
+) -> None:
+    safe_run_id = _safe_judge_diagnostic_text(run_id, max_chars=128) or "-"
+    safe_detail = _safe_judge_diagnostic_text(detail) or "-"
+    print(
+        "Lab Arena judge diagnostic: "
+        f"run_id={safe_run_id} event={event} error_class={error_class} "
+        f"detail={safe_detail}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 class SignatureFn(Protocol):
@@ -1142,9 +1195,10 @@ class RunnerConfig:
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
     # Waits between completion retries after a transport or server failure.
     completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
-    # A sandbox can end while its last provider request is still settling. The
-    # 142-second bound covers MAX_PROVIDER_API_TIMEOUT_SECONDS without holding
-    # the lease until its 20-minute expiry.
+    # Execution and scoring sandboxes can end while their last provider request
+    # is still settling. This fixed 352-second retry-wait budget covers a
+    # 300-second broker call plus 52 seconds of completion grace. The retry
+    # waits and bounded API calls still end before the 20-minute lease expires.
     accounting_open_retry_seconds: Tuple[float, ...] = (
         2.0,
         5.0,
@@ -1152,7 +1206,10 @@ class RunnerConfig:
         20.0,
         30.0,
         45.0,
-        30.0,
+        60.0,
+        60.0,
+        60.0,
+        60.0,
     )
     evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
@@ -1290,14 +1347,33 @@ class AssignmentExecutor:
             else:
                 if result.output_error or result.output_bytes is None:
                     terminal = "judge_error" if scoring_run else ("invalid_output" if result.output_error else "model_error")
+                    if scoring_run:
+                        _log_judge_diagnostic(
+                            str(lease["run_id"]),
+                            event="output_error" if result.output_error else "output_missing",
+                            error_class="SandboxOutputError" if result.output_error else "MissingOutput",
+                            detail=result.output_error or "",
+                        )
                 elif scoring_run:
                     try:
                         output_document = scoring.scoring_output_from_bytes(result.output_bytes)
                     except scoring.ScoringError as exc:
                         terminal = "judge_error"
+                        _log_judge_diagnostic(
+                            str(lease["run_id"]),
+                            event="output_parse_error",
+                            error_class=type(exc).__name__,
+                            detail=str(exc),
+                        )
                     else:
                         if "failure" in output_document:
                             terminal = str(output_document["failure"])
+                            _log_judge_diagnostic(
+                                str(lease["run_id"]),
+                                event="scoring_failure",
+                                error_class=terminal,
+                                detail=output_document.get("detail", ""),
+                            )
                             output_document = None
                         else:
                             terminal = "accepted"
@@ -1485,6 +1561,7 @@ class Runner:
             tuple(self._config.accounting_open_retry_seconds)
         )
         while True:
+            envelope = self._completion_envelope_for_attempt(envelope)
             try:
                 result = self._config.api.complete(envelope)
             except Exception as exc:
@@ -1511,6 +1588,27 @@ class Runner:
                 except StopIteration:
                     raise RunnerError("completion remained accounting_open")
             time.sleep(max(0.0, float(delay)))
+
+    def _completion_envelope_for_attempt(
+        self, envelope: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Refresh an old completion signature without changing its identity or body."""
+
+        now = int(self._config.clock().timestamp())
+        if (
+            abs(now - int(envelope["timestamp"]))
+            < COMPLETION_SIGNATURE_REFRESH_AGE_SECONDS
+        ):
+            return envelope
+        return contracts.build_signed_request(
+            scope=contracts.SCOPE_COMPLETE,
+            round_id=str(envelope["round_id"]),
+            hotkey=str(envelope["hotkey"]),
+            body=envelope["body"],
+            timestamp=now,
+            request_id=str(envelope["request_id"]),
+            sign_message=self._config.identity.sign,
+        )
 
     def run_once(self, *, max_claims: int = 1000) -> int:
         """Claim while a local slot is free; return the number of leases taken."""

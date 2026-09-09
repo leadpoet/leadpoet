@@ -13,6 +13,9 @@ from qualification.scoring.company_fit_decision import (
     company_fit_match,
 )
 from qualification.scoring import linkedin_company_size
+from qualification.scoring.competition import (
+    scorer_breakdown_has_retryable_infrastructure_failure,
+)
 
 
 def _company(*, linkedin: str = "https://linkedin.com/company/acme") -> CompanyOutput:
@@ -552,6 +555,202 @@ def test_failed_refresh_clears_stale_size_and_is_reused_on_schema_repair(monkeyp
     )
     assert original_verdict["observed_employee_count"] == "1"
     assert original_verdict["employee_size_matches"] is False
+
+
+@pytest.mark.parametrize("repair_kind", ["invalid_citation", "unbound_identity"])
+def test_actual_profile_failure_survives_an_unusable_repair(
+    monkeypatch,
+    repair_kind,
+):
+    initial = _verdict()
+    repaired = _verdict()
+    if repair_kind == "invalid_citation":
+        repaired["employee_size_evidence_url"] = (
+            "https://www.linkedin.com/in/acme-employee"
+        )
+    else:
+        repaired["observed_company_name"] = "Acme Holdings"
+    verdicts = [initial, repaired]
+    fetches = []
+
+    async def provider(**_kwargs):
+        return verdicts.pop(0), ""
+
+    async def fetch(url):
+        fetches.append(url)
+        return None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(linkedin=""),
+            _icp(),
+            require_company_fit_dimensions=True,
+        )
+    )
+
+    assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == (
+        "employee_size_verification_failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "employee_url",
+    [
+        "https://www.linkedin.com/company/dewaofficial",
+        "https://www.linkedin.com/in/dewa-http-careers-dewa-gov-ae-0a579332",
+    ],
+)
+def test_same_domain_dewa_alias_is_insufficient_without_a_profile_failure(
+    monkeypatch,
+    employee_url,
+):
+    company = _company(linkedin="").model_copy(
+        update={
+            "company_name": "Dubai Electricity and Water Authority",
+            "company_website": "https://dewa.gov.ae/",
+        }
+    )
+    verdict = _verdict(
+        observed_size="5,001-10,000",
+        size_matches=True,
+        employee_url=employee_url,
+    )
+    verdict.update(
+        observed_company_name="Dubai Electricity & Water Authority - DEWA",
+        observed_company_website="https://dewa.gov.ae",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/dewaofficial"
+        ),
+        employee_size_evidence_quote="Company size 5,001-10,000 employees",
+        observed_company_stage="",
+        stage_matches=None,
+        stage_evidence_url="",
+        stage_evidence_quote="",
+    )
+    provider_calls = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return verdict, ""
+
+    async def unexpected_fetch(_url):
+        raise AssertionError("an unbound profile must not be fetched")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        unexpected_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            company,
+            _icp().model_copy(update={"company_stage": "Series A"}),
+            require_company_fit_dimensions=True,
+        )
+    )
+    receipt = result.receipt("company_fit")
+
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == "insufficient_fit_evidence"
+    assert result.details["identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        {"verifier_gate_receipts": [receipt]}
+    )
+
+
+def test_identity_insufficient_path_does_not_hide_malformed_evidence():
+    complete_alias_receipt = {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "evidence_source": "company_web_reverification",
+        "submitted_name": "dubaielectricityandwaterauthority",
+        "submitted_domain": "dewa.gov.ae",
+        "submitted_linkedin_slug": "",
+        "observed_name": "dubaielectricitywaterauthoritydewa",
+        "observed_domain": "dewa.gov.ae",
+        "observed_linkedin_slug": "dewaofficial",
+    }
+
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {},
+        ("identity", "employee_size"),
+        linkedin_refresh_outcome="insufficient_evidence",
+        identity_receipt={
+            "decision": "unavailable",
+            "reason_code": "identity_observation_type_invalid",
+        },
+    )
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {},
+        ("identity", "employee_size", "industry"),
+        linkedin_refresh_outcome="insufficient_evidence",
+        identity_receipt=complete_alias_receipt,
+    )
+
+
+def test_direct_size_repair_clears_an_earlier_invalid_linkedin_citation(
+    monkeypatch,
+):
+    initial = _verdict(
+        employee_url="https://www.linkedin.com/in/acme-employee",
+    )
+    repaired = _verdict(
+        observed_size="11-50",
+        size_matches=True,
+        employee_url="https://acme.example.com/about",
+    )
+    repaired["employee_size_evidence_quote"] = "Acme has 11-50 employees."
+    verdicts = [initial, repaired]
+    provider_calls = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return verdicts.pop(0), ""
+
+    async def unexpected_fetch(_url):
+        raise AssertionError("neither citation is a LinkedIn company profile")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        unexpected_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+        )
+    )
+
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.decision == COMPANY_FIT_MATCH
+    assert "failure_class" not in result.details
 
 
 @pytest.mark.parametrize(

@@ -1210,11 +1210,22 @@ async def _refresh_linkedin_employee_size_observation(
 
     evidence_url = _dimension_web_evidence(verdict, "employee_size")["url"]
     if not is_linkedin_evidence_url(evidence_url):
+        direct_decision = _decision_with_web_evidence(
+            _decision_from_observed_employee_size(dict(verdict), icp),
+            _dimension_web_evidence(verdict, "employee_size"),
+        )
+        if direct_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}:
+            # A fresh repair can replace an unusable LinkedIn citation with
+            # complete direct evidence. Do not retain the earlier outcome.
+            invocation_cache["refresh_outcome"] = "verified"
         return dict(verdict)
     unavailable = _without_employee_size_observation(verdict)
     evidence_slug = linkedin_company_page_slug(evidence_url)
     if not evidence_slug:
-        invocation_cache["refresh_outcome"] = "retryable_failure"
+        if invocation_cache.get("refresh_outcome") != "retryable_failure":
+            invocation_cache["refresh_outcome"] = (
+                CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+            )
         return unavailable
 
     anchor_slug = str(
@@ -1240,7 +1251,12 @@ async def _refresh_linkedin_employee_size_observation(
             and receipt.get("observed_linkedin_slug") == evidence_slug
         )
     if not identity_matches:
-        invocation_cache["refresh_outcome"] = "retryable_failure"
+        # A model-supplied profile that cannot bind to the observed company is
+        # unusable evidence. No profile request failed in this path.
+        if invocation_cache.get("refresh_outcome") != "retryable_failure":
+            invocation_cache["refresh_outcome"] = (
+                CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+            )
         return unavailable
 
     profile_url = f"https://www.linkedin.com/company/{evidence_slug}"
@@ -1262,7 +1278,10 @@ async def _refresh_linkedin_employee_size_observation(
         else:
             invocation_cache["refresh_outcome"] = "retryable_failure"
     if invocation_cache.get("profile_url") != profile_url:
-        invocation_cache["refresh_outcome"] = "retryable_failure"
+        if invocation_cache.get("refresh_outcome") != "retryable_failure":
+            invocation_cache["refresh_outcome"] = (
+                CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+            )
         return unavailable
     current = invocation_cache.get("evidence")
     if not isinstance(current, Mapping):
@@ -1498,13 +1517,40 @@ def _incomplete_company_reverify_dimensions(
     return tuple(incomplete)
 
 
+def _is_same_domain_unproven_web_identity(
+    receipt: Optional[Mapping[str, Any]],
+) -> bool:
+    """Recognize a complete same-domain alias observation without accepting it."""
+
+    value = receipt or {}
+    return bool(
+        value.get("decision") == COMPANY_FIT_UNAVAILABLE
+        and value.get("reason_code") == "identity_not_proven"
+        and value.get("evidence_source") == "company_web_reverification"
+        and all(
+            isinstance(value.get(field), str)
+            and bool(str(value.get(field) or "").strip())
+            for field in (
+                "submitted_name",
+                "submitted_domain",
+                "observed_name",
+                "observed_domain",
+                "observed_linkedin_slug",
+            )
+        )
+        and value.get("submitted_linkedin_slug") == ""
+        and value.get("submitted_domain") == value.get("observed_domain")
+    )
+
+
 def _has_explicitly_unproven_fit_dimensions(
     verdict: Mapping[str, Any],
     incomplete: tuple[str, ...],
     *,
     linkedin_refresh_outcome: str = "",
+    identity_receipt: Optional[Mapping[str, Any]] = None,
 ) -> bool:
-    """Accept only contract-shaped null outcomes for size and stage proof."""
+    """Recognize unavailable proof after one complete repair response."""
 
     fields = {
         "employee_size": (
@@ -1520,9 +1566,15 @@ def _has_explicitly_unproven_fit_dimensions(
             "stage_evidence_quote",
         ),
     }
-    if not incomplete or any(dimension not in fields for dimension in incomplete):
+    if not incomplete or any(
+        dimension not in {*fields, "identity"} for dimension in incomplete
+    ):
         return False
     for dimension in incomplete:
+        if dimension == "identity":
+            if not _is_same_domain_unproven_web_identity(identity_receipt):
+                return False
+            continue
         if (
             dimension == "employee_size"
             and linkedin_refresh_outcome == "retryable_failure"
@@ -1921,6 +1973,11 @@ async def _llm_reverify_company(
             repaired_verdict,
             repaired_incomplete,
             linkedin_refresh_outcome=linkedin_refresh_outcome,
+            identity_receipt=(
+                repaired_result.details.get("identity_receipt")
+                if isinstance(repaired_result.details, Mapping)
+                else None
+            ),
         )
     ):
         return company_fit_unavailable(

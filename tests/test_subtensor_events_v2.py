@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pytest
 
+import leadpoet_canonical.subtensor_events_v2 as subtensor_events_v2
 from leadpoet_canonical.subtensor_events_v2 import (
     PROOF_SCHEMA_VERSION,
     SYSTEM_EVENT_COUNT_STORAGE_KEY,
     SYSTEM_EVENTS_STORAGE_KEY,
     SubtensorEventsV2Error,
     decode_system_events_v2,
+    load_subtensor_events_profile_for_runtime_v2,
     load_subtensor_events_profile_v2,
     prove_timelocked_weights_reveal_v2,
     validate_subtensor_events_profile_v2,
@@ -22,6 +24,9 @@ from leadpoet_canonical.subtensor_events_v2 import (
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = (
     ROOT / "tests" / "fixtures" / "subtensor_events_spec452_block8984916.json"
+)
+TESTNET455_FIXTURE_PATH = (
+    ROOT / "tests" / "fixtures" / "subtensor_events_test455_block7964757.json"
 )
 
 
@@ -134,6 +139,121 @@ def test_real_spec452_archive_events_prove_exact_adjacent_reveal():
         "weights_set_event_index": 5,
         "timelocked_weights_revealed_event_index": 109,
     }
+
+
+def test_testnet455_profile_selects_exact_runtime_and_proves_measured_layout():
+    profile = load_subtensor_events_profile_for_runtime_v2(
+        genesis_hash=(
+            "0x8f9cf856bf558a14440e75569c9e5859"
+            "4757048d7b3a84b5d25f6bd978263105"
+        ),
+        spec_version=455,
+        transaction_version=1,
+    )
+    finney = load_subtensor_events_profile_v2()
+    assert profile["network"] == "test"
+    assert profile["metadata_raw_sha256"] == (
+        "74c4067de4bf2eba95156e8a46c793b5"
+        "2fcd9862dfeb28502632e46416979ec7"
+    )
+    assert profile["runtime_code_storage_hash"] == (
+        "0xbca85925668cabb2880164610d64eda2"
+        "e4d9bf2777994f9cdfdb9d36253ce74a"
+    )
+    assert profile["event_layout"] == finney["event_layout"]
+    assert profile["types"] == finney["types"]
+    validated = validate_subtensor_events_profile_v2(
+        profile,
+        genesis_hash=profile["genesis_hash"],
+        spec_version=455,
+        transaction_version=1,
+        metadata_sha256=profile["metadata_raw_sha256"],
+        runtime_code_hash=profile["runtime_code_storage_hash"],
+    )
+    fixture = json.loads(TESTNET455_FIXTURE_PATH.read_text(encoding="utf-8"))
+    expected = fixture["expected"]
+    events_raw = bytes.fromhex(fixture["system_events"][2:])
+    event_count_raw = bytes.fromhex(fixture["system_event_count"][2:])
+    assert len(events_raw) == profile["measurement"]["system_events_bytes"]
+    assert hashlib.sha256(events_raw).hexdigest() == (
+        profile["measurement"]["system_events_sha256"]
+    )
+    proof = prove_timelocked_weights_reveal_v2(
+        events_raw,
+        profile=validated,
+        event_count_raw=event_count_raw,
+        expected_netuid=expected["netuid"],
+        expected_uid=expected["uid"],
+        expected_account_id_hex=expected["account_id_hex"],
+    )
+    assert proof["weights_set_record_index"] == 1
+    assert proof["reveal_record_index"] == 2
+    assert proof["netuid"] == 401
+    assert proof["uid"] == 9
+
+
+@pytest.mark.parametrize(
+    "genesis_hash,spec_version,transaction_version",
+    [
+        ("0x" + "11" * 32, 455, 1),
+        (
+            "0x8f9cf856bf558a14440e75569c9e5859"
+            "4757048d7b3a84b5d25f6bd978263105",
+            454,
+            1,
+        ),
+        (
+            "0x8f9cf856bf558a14440e75569c9e5859"
+            "4757048d7b3a84b5d25f6bd978263105",
+            455,
+            2,
+        ),
+    ],
+)
+def test_event_profile_selector_rejects_unknown_runtime(
+    genesis_hash, spec_version, transaction_version
+):
+    with pytest.raises(SubtensorEventsV2Error, match="no reviewed event profile"):
+        load_subtensor_events_profile_for_runtime_v2(
+            genesis_hash=genesis_hash,
+            spec_version=spec_version,
+            transaction_version=transaction_version,
+        )
+
+
+def test_event_profile_selector_preserves_finney_validation_path():
+    base = load_subtensor_events_profile_v2()
+    selected = load_subtensor_events_profile_for_runtime_v2(
+        genesis_hash=base["genesis_hash"],
+        spec_version=455,
+        transaction_version=1,
+    )
+    assert selected == base
+    with pytest.raises(SubtensorEventsV2Error, match="spec version differs"):
+        validate_subtensor_events_profile_v2(
+            selected,
+            genesis_hash=base["genesis_hash"],
+            spec_version=455,
+            transaction_version=1,
+            metadata_sha256=base["metadata_raw_sha256"],
+            runtime_code_hash=base["runtime_code_storage_hash"],
+        )
+
+
+def test_testnet455_profile_tampering_fails_closed(tmp_path, monkeypatch):
+    profile = json.loads(
+        subtensor_events_v2.TESTNET455_PROFILE_PATH.read_text(encoding="utf-8")
+    )
+    profile["measurement"]["archive_host"] = "archive.chain.opentensor.ai"
+    path = tmp_path / "testnet455.json"
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setattr(subtensor_events_v2, "TESTNET455_PROFILE_PATH", path)
+    with pytest.raises(SubtensorEventsV2Error, match="archive host"):
+        load_subtensor_events_profile_for_runtime_v2(
+            genesis_hash=profile["genesis_hash"],
+            spec_version=455,
+            transaction_version=1,
+        )
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 PROFILE_SCHEMA_VERSION = "leadpoet.subtensor_events_profile.v2"
 PROOF_SCHEMA_VERSION = "leadpoet.timelocked_weights_reveal_proof.v2"
 DEFAULT_PROFILE_PATH = Path(__file__).with_name("subtensor_events_profile_v2.json")
+TESTNET455_PROFILE_PATH = Path(__file__).with_name(
+    "subtensor_events_profile_test455_v2.json"
+)
+TESTNET_GENESIS_HASH = (
+    "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+)
 SYSTEM_EVENTS_STORAGE_KEY = (
     "0x26aa394eea5630e07c48ae0c9558cef7" "80d41e5e16056765bc8461851072c9d7"
 )
@@ -340,11 +346,11 @@ def _validate_profile_structure(profile: Any) -> Dict[str, Any]:
     profile = _exact_fields(profile, top_fields, "event profile")
     if profile["schema_version"] != PROFILE_SCHEMA_VERSION:
         _fail("event profile schema version is unsupported")
-    if profile["network"] != "finney":
+    if profile["network"] not in {"finney", "test"}:
         _fail("event profile network is unsupported")
     normalized: Dict[str, Any] = {
         "schema_version": PROFILE_SCHEMA_VERSION,
-        "network": "finney",
+        "network": str(profile["network"]),
         "genesis_hash": _hash(profile["genesis_hash"], "genesis hash", prefix="0x"),
         "spec_version": _integer(profile["spec_version"], "spec version"),
         "transaction_version": _integer(
@@ -581,7 +587,13 @@ def _validate_profile_structure(profile: Any) -> Dict[str, Any]:
             maximum=MAX_EVENT_RECORDS,
         ),
     }
-    if clean_measurement["archive_host"] != "archive.chain.opentensor.ai":
+    if normalized["network"] == "finney":
+        expected_archive_host = "archive.chain.opentensor.ai"
+    else:
+        expected_archive_host = "test.finney.opentensor.ai"
+        if normalized["genesis_hash"] != TESTNET_GENESIS_HASH:
+            _fail("test event profile genesis hash is unsupported")
+    if clean_measurement["archive_host"] != expected_archive_host:
         _fail("event profile archive host is unsupported")
     normalized["measurement"] = clean_measurement
     return normalized
@@ -596,6 +608,40 @@ def load_subtensor_events_profile_v2(path: Optional[Path] = None) -> Dict[str, A
     except OSError as exc:
         raise SubtensorEventsV2Error("event profile cannot be read") from exc
     return _validate_profile_structure(_strict_json(payload))
+
+
+def load_subtensor_events_profile_for_runtime_v2(
+    *, genesis_hash: str, spec_version: int, transaction_version: int
+) -> Dict[str, Any]:
+    """Select one reviewed event profile by its complete runtime identity."""
+
+    normalized_genesis = _hash(
+        genesis_hash, "observed genesis hash", prefix="0x"
+    )
+    normalized_spec = _integer(spec_version, "observed spec version")
+    normalized_transaction = _integer(
+        transaction_version, "observed transaction version"
+    )
+    base = load_subtensor_events_profile_v2()
+    identity = (
+        normalized_genesis,
+        normalized_spec,
+        normalized_transaction,
+    )
+    # Preserve the Finney path: the existing validator below remains the
+    # authority for every observed Finney runtime identity.
+    if normalized_genesis == base["genesis_hash"]:
+        return base
+    if identity != (TESTNET_GENESIS_HASH, 455, 1):
+        _fail("observed runtime has no reviewed event profile")
+    profile = load_subtensor_events_profile_v2(TESTNET455_PROFILE_PATH)
+    if (
+        profile["genesis_hash"],
+        profile["spec_version"],
+        profile["transaction_version"],
+    ) != identity:
+        _fail("selected event profile differs from observed runtime")
+    return profile
 
 
 def validate_subtensor_events_profile_v2(

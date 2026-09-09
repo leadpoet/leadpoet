@@ -65,7 +65,7 @@ from leadpoet_canonical.production_parity_boundary_v2 import (
 from leadpoet_canonical.subtensor_events_v2 import (
     RUNTIME_CODE_STORAGE_KEY,
     SubtensorEventsV2Error,
-    load_subtensor_events_profile_v2,
+    load_subtensor_events_profile_for_runtime_v2,
     prove_timelocked_weights_reveal_v2,
     validate_subtensor_events_profile_v2,
 )
@@ -1560,7 +1560,13 @@ class CoordinatorChainSourceV2:
                 "pre-reveal runtime code hash",
             )
             event_profile = validate_subtensor_events_profile_v2(
-                load_subtensor_events_profile_v2(),
+                load_subtensor_events_profile_for_runtime_v2(
+                    genesis_hash=self._chain_signing_profile["genesis_hash"],
+                    spec_version=reveal_runtime["spec_version"],
+                    transaction_version=reveal_runtime[
+                        "transaction_version"
+                    ],
+                ),
                 genesis_hash=self._chain_signing_profile["genesis_hash"],
                 spec_version=reveal_runtime["spec_version"],
                 transaction_version=reveal_runtime["transaction_version"],

@@ -1266,6 +1266,20 @@ def _reveal_proof_case(
 
 def test_timelocked_reveal_proof_uses_real_spec452_event_pair(monkeypatch):
     event_block = 8_984_916
+    selected_runtime = []
+    original_selector = (
+        chain_source_module.load_subtensor_events_profile_for_runtime_v2
+    )
+
+    def select_profile(**runtime_identity):
+        selected_runtime.append(dict(runtime_identity))
+        return original_selector(**runtime_identity)
+
+    monkeypatch.setattr(
+        chain_source_module,
+        "load_subtensor_events_profile_for_runtime_v2",
+        select_profile,
+    )
     source, archive, chain_state, authority, context = _reveal_proof_case(
         monkeypatch,
         final_block=event_block - 24,
@@ -1287,6 +1301,13 @@ def test_timelocked_reveal_proof_uses_real_spec452_event_pair(monkeypatch):
     assert proof["event_witness"]["reveal_record_index"] == 2
     assert proof["event_witness"]["account_id_hex"] == archive.public_key
     assert proof["revealed_weights"] == archive.weights
+    assert selected_runtime == [
+        {
+            "genesis_hash": source._chain_signing_profile["genesis_hash"],
+            "spec_version": 452,
+            "transaction_version": 1,
+        }
+    ]
     assert proof["proof_hash"] == sha256_json(
         {key: value for key, value in proof.items() if key != "proof_hash"}
     )

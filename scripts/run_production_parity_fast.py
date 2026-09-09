@@ -54,9 +54,11 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
     verify_contract_checkout,
 )
 from scripts.production_parity_snapshot import (  # noqa: E402
+    DATABASE_RELATION_SHAPE_SQL,
     DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
     restore_snapshot,
+    validate_database_relation_shape,
     verify_snapshot,
 )
 from scripts.materialize_production_parity_secrets import (  # noqa: E402
@@ -1192,30 +1194,15 @@ GRANT USAGE ON SCHEMA extensions TO service_role;
         expected_shape: Mapping[str, Any],
         capture_mode: str,
     ) -> dict[str, Any]:
-        restored_raw = self._psql(
-            """
-SELECT json_build_object(
-  'relation_count', COUNT(*),
-  'total_relation_bytes', COALESCE(SUM(pg_total_relation_size(c.oid)), 0),
-  'largest_relation_bytes', COALESCE(MAX(pg_total_relation_size(c.oid)), 0)
-)::text
-FROM pg_class AS c
-JOIN pg_namespace AS n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r', 'm')
-  AND n.nspname = 'public';
-"""
-        ).strip()
+        restored_raw = self._psql(DATABASE_RELATION_SHAPE_SQL).strip()
         restored = json.loads(restored_raw)
+        validate_database_relation_shape(
+            expected_shape, restored, capture_mode=capture_mode
+        )
         expected_relations = int(expected_shape.get("relation_count") or 0)
         restored_relations = int(restored.get("relation_count") or 0)
-        if expected_relations <= 0 or restored_relations < expected_relations:
-            raise ProductionParityError(
-                "restored relation inventory lost production relations"
-            )
         expected_total = int(expected_shape.get("total_relation_bytes") or 0)
         restored_total = int(restored.get("total_relation_bytes") or 0)
-        if expected_total <= 0 or restored_total <= 0:
-            raise ProductionParityError("restored production data shape is empty")
         if capture_mode == "schema-only":
             return {
                 "capture_mode": capture_mode,
@@ -1229,13 +1216,7 @@ WHERE c.relkind IN ('r', 'm')
                 "restored_schema_bytes": restored_total,
                 "live_rows_copied": 0,
             }
-        if capture_mode != "full":
-            raise ProductionParityError("snapshot capture mode is unsupported")
         size_ratio = restored_total / expected_total
-        if not 0.5 <= size_ratio <= 2.0:
-            raise ProductionParityError(
-                "restored relation size differs materially from the production snapshot"
-            )
         largest_raw = self._psql(
             """
 SELECT json_build_object(
@@ -2606,9 +2587,10 @@ def _run_database_lane(
         )
         shape = database.shape_evidence(
             service_role_key=service_role_key,
-            expected_shape=manifest["database"],
+            expected_shape=restore["database_after_migrations"],
             capture_mode=manifest["capture_mode"],
         )
+        shape["comparison_baseline"] = "after_candidate_migrations"
         weight_input_scale = database.weight_input_scale_evidence(
             service_role_key=service_role_key,
             scope=manifest["database"]["weight_history_scope"],

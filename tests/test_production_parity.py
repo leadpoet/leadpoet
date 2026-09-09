@@ -919,11 +919,72 @@ def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
     assert "current_day_benchmark_bundle_count" not in stats
 
 
+@pytest.mark.parametrize("capture_mode", ["full", "schema-only"])
+@pytest.mark.parametrize("damaged_restore", [None, "missing_relation", "missing_data"])
+def test_restore_checks_snapshot_before_candidate_table_retirement(
+    monkeypatch, tmp_path: Path, capture_mode: str, damaged_restore: str | None
+):
+    migration = tmp_path / "retire.sql"
+    migration.write_text("DROP TABLE public.retired_table;\n")
+    delta = [{"path": migration.name, "sha256": parity_snapshot.file_sha256(migration)}]
+    original = {"relation_count": 2, "total_relation_bytes": 1000, "largest_relation_bytes": 600}
+    before = dict(original)
+    if damaged_restore == "missing_relation":
+        before["relation_count"] = 1
+    elif damaged_restore == "missing_data":
+        before["total_relation_bytes"] = 400
+        before["largest_relation_bytes"] = 300
+    after = {"relation_count": 1, "total_relation_bytes": 300, "largest_relation_bytes": 300}
+    calls = []
+    stats = iter((before, after))
+
+    def run(command, **kwargs):
+        if command[0] == "pg_restore":
+            calls.append("restore")
+            payload = b""
+        elif "-f" in command:
+            calls.append("migration")
+            payload = b""
+        else:
+            assert command[-1] == parity_snapshot.DATABASE_RELATION_SHAPE_SQL
+            calls.append("shape")
+            payload = json.dumps(next(stats)).encode()
+        return subprocess.CompletedProcess(command, 0, payload, b"")
+
+    monkeypatch.setattr(parity_snapshot, "verify_snapshot", lambda **kwargs: {"migration_delta": delta})
+    monkeypatch.setattr(parity_snapshot, "_load_json", lambda *args, **kwargs: {"capture_mode": capture_mode, "database": original})
+    monkeypatch.setattr(parity_snapshot, "validate_snapshot_manifest", lambda value: value)
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", run)
+    monkeypatch.setattr(parity_snapshot, "_require_full_snapshot_disk_headroom", lambda *args, **kwargs: None)
+    kwargs = dict(root=tmp_path, contract_path=tmp_path / "contract.json",
+                  manifest_path=tmp_path / "manifest.json", archive_path=tmp_path / "snapshot.dump",
+                  target_dsn="postgresql://postgres:x@127.0.0.1:32768/leadpoet_parity_test",
+                  production_host="db.production.example")
+    if damaged_restore == "missing_relation" or (damaged_restore == "missing_data" and capture_mode == "full"):
+        with pytest.raises(ProductionParityError, match="lost production relations|size differs materially"):
+            restore_snapshot(**kwargs)
+        assert calls == ["restore", "shape"]
+        return
+
+    restored = restore_snapshot(**kwargs)
+    assert calls == ["restore", "shape", "migration", "shape"]
+    assert restored["database_before_migrations"] == before
+    assert restored["database_after_migrations"] == after
+    # The runtime check must compare against the migrated state. The original
+    # snapshot would incorrectly reject this declared table retirement.
+    parity_snapshot.validate_database_relation_shape(after, after, capture_mode=capture_mode)
+    with pytest.raises(ProductionParityError, match="lost production relations"):
+        parity_snapshot.validate_database_relation_shape(original, after, capture_mode=capture_mode)
+    with pytest.raises(ProductionParityError, match="lost production relations"):
+        parity_snapshot.validate_database_relation_shape(after, {**after, "relation_count": 0}, capture_mode=capture_mode)
+
+
 def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     monkeypatch,
     tmp_path: Path,
 ):
     observed: dict[str, object] = {}
+    shape = {"relation_count": 2, "total_relation_bytes": 1000, "largest_relation_bytes": 600}
     original_safe_database_target = parity_snapshot.safe_database_target
 
     def record_safe_database_target(dsn: str, *, production_host: str) -> None:
@@ -949,7 +1010,7 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     monkeypatch.setattr(
         parity_snapshot,
         "_load_json",
-        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
+        lambda *_args, **_kwargs: {"capture_mode": "schema-only", "database": shape},
     )
     monkeypatch.setattr(
         parity_snapshot,
@@ -957,6 +1018,7 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
         lambda value: value,
     )
     monkeypatch.setattr(parity_snapshot, "_run", fake_run)
+    monkeypatch.setattr(parity_snapshot, "_database_relation_shape", lambda *_args, **_kwargs: shape)
     monkeypatch.setenv("PGSSLMODE", "verify-full")
 
     production_env, _ = parity_snapshot._postgres_env(
@@ -1061,6 +1123,7 @@ def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
     migration.write_text("SELECT 1;\n", encoding="utf-8")
     migration_hash = parity_snapshot.file_sha256(migration)
     calls: list[dict[str, object]] = []
+    shape = {"relation_count": 2, "total_relation_bytes": 1000, "largest_relation_bytes": 600}
 
     def fake_verify_snapshot(**kwargs):
         assert kwargs["postgres_image"] == image
@@ -1078,12 +1141,13 @@ def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
     monkeypatch.setattr(
         parity_snapshot,
         "_load_json",
-        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
+        lambda *_args, **_kwargs: {"capture_mode": "schema-only", "database": shape},
     )
     monkeypatch.setattr(
         parity_snapshot, "validate_snapshot_manifest", lambda value: value
     )
     monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+    monkeypatch.setattr(parity_snapshot, "_database_relation_shape", lambda *_args, **_kwargs: shape)
 
     restore_snapshot(
         root=tmp_path,

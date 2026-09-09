@@ -241,16 +241,86 @@ def _pinned_postgres_image() -> str:
 
 
 def _pinned_postgrest_image() -> str:
-    raw = _docker(
-        "image",
-        "inspect",
-        "postgrest/postgrest:v12.2.8",
-        "--format",
-        "{{json .RepoDigests}}",
-    ).stdout.strip()
+    image = "postgrest/postgrest:v12.2.8"
+    try:
+        inspected = _docker(
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{json .RepoDigests}}",
+        )
+    except subprocess.CalledProcessError:
+        _docker("pull", image)
+        inspected = _docker(
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{json .RepoDigests}}",
+        )
+    raw = inspected.stdout.strip()
     digests = json.loads(raw)
     assert isinstance(digests, list) and digests
-    return str(digests[0])
+    pinned = str(digests[0])
+    assert fast_parity.PINNED_IMAGE_RE.fullmatch(pinned)
+    return pinned
+
+
+def test_pinned_postgrest_image_acquires_a_missing_local_image(monkeypatch):
+    image = "postgrest/postgrest:v12.2.8"
+    pinned = "postgrest/postgrest@sha256:" + "a" * 64
+    calls: list[tuple[str, ...]] = []
+
+    def docker(*args: str, check: bool = True):
+        calls.append(args)
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(1, ["docker", *args])
+        if args == ("pull", image):
+            return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+        return subprocess.CompletedProcess(
+            ["docker", *args],
+            0,
+            json.dumps([pinned]),
+            "",
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_docker", docker)
+
+    assert _pinned_postgrest_image() == pinned
+    assert calls == [
+        ("image", "inspect", image, "--format", "{{json .RepoDigests}}"),
+        ("pull", image),
+        ("image", "inspect", image, "--format", "{{json .RepoDigests}}"),
+    ]
+
+
+def test_pinned_postgrest_image_does_not_hide_pull_failure(monkeypatch):
+    image = "postgrest/postgrest:v12.2.8"
+
+    def docker(*args: str, check: bool = True):
+        raise subprocess.CalledProcessError(1, ["docker", *args])
+
+    monkeypatch.setattr(sys.modules[__name__], "_docker", docker)
+
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        _pinned_postgrest_image()
+    assert error.value.cmd == ["docker", "pull", image]
+
+
+def test_pinned_postgrest_image_rejects_an_unpinned_inspect_result(monkeypatch):
+    def docker(*args: str, check: bool = True):
+        return subprocess.CompletedProcess(
+            ["docker", *args],
+            0,
+            json.dumps(["postgrest/postgrest:v12.2.8"]),
+            "",
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_docker", docker)
+
+    with pytest.raises(AssertionError):
+        _pinned_postgrest_image()
 
 
 def test_reader_migration_is_clone_safe_read_only_and_idempotent(postgres):

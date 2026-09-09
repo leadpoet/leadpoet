@@ -8,7 +8,7 @@ import asyncio
 import base64
 import binascii
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import hmac
 from http.client import HTTPException
@@ -2274,6 +2274,12 @@ def _successful_openrouter_settlement_count(
     return successful
 
 
+def _arena_rebenchmark_icp_set_id(evaluation_date: str) -> int:
+    """Match Arena's bank from the UTC day before the evaluation cutoff."""
+    bank_date = date.fromisoformat(evaluation_date) - timedelta(days=1)
+    return int(bank_date.strftime("%Y%m%d"))
+
+
 def _validate_arena_rebenchmark_evidence(
     value: Mapping[str, Any],
     *,
@@ -2322,7 +2328,8 @@ def _validate_arena_rebenchmark_evidence(
     try:
         final_score = float(value.get("baseline_final_score"))
         set_id = int(value.get("daily_icp_set_id"))
-    except (TypeError, ValueError) as exc:
+        expected_set_id = _arena_rebenchmark_icp_set_id(evaluation_date)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise FullParityError("Arena rebenchmark evidence is incomplete") from exc
     if any(
         isinstance(item, bool) or not isinstance(item, int)
@@ -2370,7 +2377,7 @@ def _validate_arena_rebenchmark_evidence(
         or value.get("mode") != "shadow"
         or value.get("baseline_source_url") != ARENA_BASELINE_SOURCE_URL
         or re.fullmatch(r"\d{4}-\d{2}-\d{2}", evaluation_date) is None
-        or str(set_id) != evaluation_date.replace("-", "")
+        or set_id != expected_set_id
         or re.fullmatch(
             r"arena-\d{4}-\d{2}-\d{2}-[a-z0-9]{1,16}",
             str(value.get("round_id") or ""),
@@ -3154,7 +3161,7 @@ def _run_arena_rebenchmark_child(
         startup = service.startup_checks()
         now = datetime.now(timezone.utc)
         evaluation_date = now.date().isoformat()
-        set_id = int(now.strftime("%Y%m%d"))
+        set_id = _arena_rebenchmark_icp_set_id(evaluation_date)
         daily = service.store.current_daily_icp_set(set_id)
         raw_icps = daily.get("icps") if isinstance(daily, Mapping) else None
         icps = (
@@ -3174,7 +3181,7 @@ def _run_arena_rebenchmark_child(
             or len(set(icp_ids)) != len(icp_ids)
             or datetime.now(timezone.utc).date().isoformat() != evaluation_date
         ):
-            raise FullParityError("latest clone daily ICP set is not ready")
+            raise FullParityError("scheduled clone daily ICP set is not ready")
         suffix = hashlib.sha256(
             f"{run_id}:{candidate_sha}".encode("ascii")
         ).hexdigest()[:12]
@@ -4143,7 +4150,6 @@ def run_full(
             raise FullParityError(
                 "gateway handoff and primary/audit allocation hashes differ"
             )
-        failure_stage = "miner-intake"
         failure_stage = "clone-shape"
         service_role_key = _clone_service_role_key(
             parsed_env,

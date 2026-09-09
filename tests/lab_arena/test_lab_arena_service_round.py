@@ -1939,9 +1939,13 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     # the same public HTTP partition used by the dashboard.
     from scripts.run_production_parity_full_host import (
         FullParityError,
+        _arena_rebenchmark_icp_set_id,
         _verify_arena_daily_public_results,
     )
 
+    assert _arena_rebenchmark_icp_set_id(row["evaluation_date"]) == int(
+        str(row["icp_set_date"]).replace("-", "")
+    )
     baseline_id = next(p["submission_id"] for p in row["participants"] if p["is_king"])
     baseline_public = original_get(
         "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, baseline_id)

@@ -5996,7 +5996,15 @@ def test_clone_postgrest_can_assume_the_candidate_arena_service_role():
     assert "GRANT lab_arena_service TO authenticator" in source
 
 
-def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence():
+@pytest.mark.parametrize(("evaluation_date", "daily_icp_set_id"), [
+    ("2026-09-04", 20260903),
+    ("2026-01-01", 20251231),
+    ("2024-03-01", 20240229),
+    ("2026-03-01", 20260228),
+])
+def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence(
+    evaluation_date, daily_icp_set_id
+):
     bucket = "leadpoet-parity-493765492819-" + "f" * 16
     evidence = {
         "schema_version": (
@@ -6007,9 +6015,9 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence():
         "artifact_bucket": bucket,
         "status": "passed",
         "mode": "shadow",
-        "round_id": "arena-2026-09-04-abcdef123456",
-        "evaluation_date": "2026-09-04",
-        "daily_icp_set_id": 20260904,
+        "round_id": f"arena-{evaluation_date}-abcdef123456",
+        "evaluation_date": evaluation_date,
+        "daily_icp_set_id": daily_icp_set_id,
         "baseline_source_url": (
             "https://github.com/leadpoet/pydantic-harness/"
             "archive/refs/heads/lab.tar.gz"
@@ -6074,7 +6082,11 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence():
         artifact_bucket=bucket,
     )["status"] == "passed"
 
-    broken_values = []
+    broken_values = [
+        dict(evidence, daily_icp_set_id=int(evaluation_date.replace("-", ""))),
+        dict(evidence, daily_icp_set_id=daily_icp_set_id - 1),
+        dict(evidence, evaluation_date="2026-02-30"),
+    ]
     for section, key, value in (
         ("counts", "stage_1_icp_count", 9),
         ("counts", "accepted_execute_runs", 19),

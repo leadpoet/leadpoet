@@ -767,6 +767,16 @@ def test_stage_decision_requires_category_specific_proof(
             "a strategic buyer in 2024.",
         ),
         (
+            "Public",
+            True,
+            "Acme becoming publicly traded is planned for next year.",
+        ),
+        (
+            "Private Equity",
+            True,
+            "Acme acquired by a private-equity firm is planned for next year.",
+        ),
+        (
             "Seed",
             True,
             "Acme provides seed capital to early-stage startups.",

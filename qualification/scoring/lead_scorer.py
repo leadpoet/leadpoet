@@ -545,6 +545,16 @@ def _has_affirmed_stage_proof(
             )[-1]
             suffix = text[match.end():match.end() + 60]
             suffix_clause = re.split(r"[.!?;:\n]", suffix, maxsplit=1)[0]
+            proof_suffix_clause = (
+                re.split(
+                    r",|\b(?:and|but|while|although|however)\b",
+                    suffix_clause,
+                    maxsplit=1,
+                    flags=re.I,
+                )[0]
+                if supersession_patterns
+                else suffix_clause
+            )
             context = text[max(0, match.start() - 40):match.end() + 60]
             if (
                 _has_stage_proof_uncertainty(prefix)
@@ -567,10 +577,11 @@ def _has_affirmed_stage_proof(
             )
             if (
                 not match_names_completed_event
-                and not supersession_patterns
                 and (
-                    _STAGE_PROOF_PROSPECTIVE_EVENT_RE.search(suffix)
-                    or _has_stage_proof_uncertainty(suffix_clause)
+                    _STAGE_PROOF_PROSPECTIVE_EVENT_RE.search(
+                        proof_suffix_clause
+                    )
+                    or _has_stage_proof_uncertainty(proof_suffix_clause)
                 )
             ):
                 continue

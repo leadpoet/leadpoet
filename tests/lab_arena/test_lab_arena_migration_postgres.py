@@ -78,6 +78,22 @@ def superuser(connect):
     connection.close()
 
 
+@pytest.fixture()
+def fresh_superuser():
+    """Isolate historical migration tests from the current-schema fixtures."""
+    database = database_with_lab_arena_migration(())
+    connection = None
+    try:
+        psycopg2, dsn = next(database)
+        connection = psycopg2.connect(**dsn)
+        connection.autocommit = True
+        yield connection
+    finally:
+        if connection is not None:
+            connection.close()
+        database.close()
+
+
 def round_config(
     round_id: str,
     runners: List[str],
@@ -223,10 +239,14 @@ def expire_now(superuser, run_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
-    with superuser.cursor() as cursor:
+def test_migration_applies_twice_and_roles_have_exact_attributes(fresh_superuser):
+    with fresh_superuser.cursor() as cursor:
+        # Repeat each migration at its own schema version. Replaying an old
+        # CREATE OR REPLACE VIEW over later added columns is a downgrade.
         for migration in DEFAULT_MIGRATIONS:
-            cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            sql = (SCRIPTS / migration).read_text(encoding="utf-8")
+            cursor.execute(sql)
+            cursor.execute(sql)
         cursor.execute("SELECT rolname, rolsuper, rolbypassrls, rolcanlogin, rolinherit, rolcreaterole, rolcreatedb, rolreplication FROM pg_roles WHERE rolname IN ('lab_arena_owner', 'lab_arena_service') ORDER BY rolname")
         rows = cursor.fetchall()
         assert rows == [
@@ -687,7 +707,7 @@ def test_commit_waits_for_inflight_acceptance_and_retries_without_orphan(
     assert store.list_submissions(round_id, status="accepted") == []
 
 
-def test_migration_removes_the_draft_receipt_and_hash_chain_state(superuser):
+def test_migration_removes_the_draft_receipt_and_hash_chain_state(fresh_superuser):
     draft_round_columns = (
         "generation_attempts",
         "configuration_hash",
@@ -720,7 +740,8 @@ def test_migration_removes_the_draft_receipt_and_hash_chain_state(superuser):
         "image_environment",
         "working_dir",
     )
-    with superuser.cursor() as cursor:
+    with fresh_superuser.cursor() as cursor:
+        cursor.execute((SCRIPTS / DEFAULT_MIGRATIONS[0]).read_text(encoding="utf-8"))
         for column in draft_round_columns:
             cursor.execute("ALTER TABLE public.lab_arena_rounds ADD COLUMN %s JSONB" % column)
         for column in draft_run_columns:

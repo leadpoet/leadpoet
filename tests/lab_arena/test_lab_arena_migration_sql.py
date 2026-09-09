@@ -103,7 +103,8 @@ def test_arena_migrations_are_uniquely_numbered():
         int(path.name.split("-", 1)[0])
         for path in SCRIPTS.glob("*-lab-arena-*.sql")
     )
-    assert arena_frontier == 199
+    assert numbered[200] == ["200-lab-arena-next-day-icp-disclosure.sql"]
+    assert arena_frontier == 200
 
 
 def test_reward_chain_scope_migration_scopes_every_reward_history_read():

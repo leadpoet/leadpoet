@@ -93,6 +93,19 @@ _DIAGNOSTIC_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _DIAGNOSTIC_KNOWN_TOKEN_RE = re.compile(
     r"(?i)\b(?:sk-|sb_secret)[A-Za-z0-9._-]*"
 )
+_JUDGE_FAILURE_STAGES = frozenset(
+    {"sandbox", "sandbox_output", "scoring_output", "scorer", "provider_call"}
+)
+_JUDGE_FAILURE_CLASSES = frozenset(
+    {
+        "judge_timeout",
+        "sandbox_output_error",
+        "missing_output",
+        "scoring_output_invalid",
+        "judge_error",
+        "provider_unavailable",
+    }
+)
 
 
 class RunnerError(RuntimeError):
@@ -119,18 +132,23 @@ def _safe_judge_diagnostic_text(
     return " ".join(text.split())[:max_chars]
 
 
-def _log_judge_diagnostic(
+def _log_judge_failure(
     run_id: str,
     *,
-    event: str,
+    stage: str,
     error_class: str,
     detail: Any = "",
 ) -> None:
     safe_run_id = _safe_judge_diagnostic_text(run_id, max_chars=128) or "-"
     safe_detail = _safe_judge_diagnostic_text(detail) or "-"
+    safe_stage = stage if stage in _JUDGE_FAILURE_STAGES else "unknown"
+    safe_error_class = (
+        error_class if error_class in _JUDGE_FAILURE_CLASSES else "unknown"
+    )
     print(
-        "Lab Arena judge diagnostic: "
-        f"run_id={safe_run_id} event={event} error_class={error_class} "
+        "Lab Arena judge failure: "
+        f"run_id={safe_run_id} stage={safe_stage} "
+        f"error_class={safe_error_class} "
         f"detail={safe_detail}",
         file=sys.stderr,
         flush=True,
@@ -1278,6 +1296,8 @@ class AssignmentExecutor:
         kind = str(lease.get("kind") or "execute")
         scoring_run = kind == "score"
         terminal = "judge_error" if scoring_run else "model_error"
+        failure_diagnostic: Optional[Dict[str, str]] = None
+        failure_detail: Any = ""
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
@@ -1347,36 +1367,42 @@ class AssignmentExecutor:
                 result = config.sandbox_runtime.run_icp(spec)
             if result.timed_out:
                 terminal = "judge_timeout" if scoring_run else "model_timeout"
+                if scoring_run:
+                    failure_diagnostic = {
+                        "stage": "sandbox",
+                        "error_class": "judge_timeout",
+                    }
             else:
                 if result.output_error or result.output_bytes is None:
                     terminal = "judge_error" if scoring_run else ("invalid_output" if result.output_error else "model_error")
                     if scoring_run:
-                        _log_judge_diagnostic(
-                            str(lease["run_id"]),
-                            event="output_error" if result.output_error else "output_missing",
-                            error_class="SandboxOutputError" if result.output_error else "MissingOutput",
-                            detail=result.output_error or "",
-                        )
+                        failure_diagnostic = {
+                            "stage": "sandbox_output",
+                            "error_class": (
+                                "sandbox_output_error"
+                                if result.output_error
+                                else "missing_output"
+                            ),
+                        }
+                        failure_detail = result.output_error or ""
                 elif scoring_run:
                     try:
                         output_document = scoring.scoring_output_from_bytes(result.output_bytes)
                     except scoring.ScoringError as exc:
                         terminal = "judge_error"
-                        _log_judge_diagnostic(
-                            str(lease["run_id"]),
-                            event="output_parse_error",
-                            error_class=type(exc).__name__,
-                            detail=str(exc),
-                        )
+                        failure_diagnostic = {
+                            "stage": "scoring_output",
+                            "error_class": "scoring_output_invalid",
+                        }
+                        failure_detail = str(exc)
                     else:
                         if "failure" in output_document:
                             terminal = str(output_document["failure"])
-                            _log_judge_diagnostic(
-                                str(lease["run_id"]),
-                                event="scoring_failure",
-                                error_class=terminal,
-                                detail=output_document.get("detail", ""),
-                            )
+                            failure_diagnostic = {
+                                "stage": "scorer",
+                                "error_class": terminal,
+                            }
+                            failure_detail = output_document.get("detail", "")
                             output_document = None
                         else:
                             terminal = "accepted"
@@ -1409,6 +1435,12 @@ class AssignmentExecutor:
             if provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
+                if scoring_run:
+                    failure_diagnostic = {
+                        "stage": "provider_call",
+                        "error_class": "provider_unavailable",
+                    }
+                    failure_detail = ""
         except AgentDependencyError:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
                 raise
@@ -1434,6 +1466,21 @@ class AssignmentExecutor:
             "finished_at": finished_at,
             "terminal_status": terminal,
         }
+        if scoring_run and terminal in ("judge_error", "judge_timeout"):
+            # Only fixed, contract-validated codes are persisted. The bounded,
+            # redacted detail stays in the private operator log.
+            if failure_diagnostic is None:
+                failure_diagnostic = {
+                    "stage": "scorer",
+                    "error_class": terminal,
+                }
+            run_result["failure_diagnostic"] = failure_diagnostic
+            _log_judge_failure(
+                str(lease["run_id"]),
+                stage=failure_diagnostic["stage"],
+                error_class=failure_diagnostic["error_class"],
+                detail=failure_detail,
+            )
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
         return contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,

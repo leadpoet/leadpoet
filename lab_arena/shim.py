@@ -295,7 +295,7 @@ def execute(
             raise ShimRequestError(exc.code) from None
         operation_id, parameters = page_fetch
         _trace({"event": "page_fetch", "method": "GET", "url": _trace_url(url), "operation_id": operation_id})
-        return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
+        return dispatch(operation_id, parameters, _trusted_page_fetch_timeout_ms())
     _trace({"event": "matched", "method": str(method).upper(), "url": _trace_url(url), "operation_id": operation_id})
     return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
 
@@ -322,6 +322,18 @@ def _normalize_local_provider_url(url: str) -> str:
 
 
 PAGE_FETCH_OPERATION = "scrapingdog.scrape"
+
+
+def _trusted_page_fetch_timeout_ms() -> int:
+    """Return the bounded provider deadline for routed scorer page fetches.
+
+    Direct callers keep their own client timeout. A trusted scorer page GET is
+    translated into a provider operation whose compatibility adapter can need
+    the operation's full deadline. Passing the original direct-HTTP timeout
+    through would terminate that routed call early.
+    """
+
+    return operations.OPERATIONS[PAGE_FETCH_OPERATION].timeout_seconds * 1000
 
 
 def _trusted_page_fetch(method: str, url: str, body: bytes) -> Optional[Tuple[str, Dict[str, Any]]]:

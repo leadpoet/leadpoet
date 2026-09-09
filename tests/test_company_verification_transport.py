@@ -60,6 +60,43 @@ def test_default_http_company_url_upgrades_to_https():
     )
 
 
+def test_direct_company_verification_keeps_five_second_deadline(monkeypatch):
+    import asyncio
+
+    observed_timeouts = []
+    response = _Response(
+        200,
+        b'<title>Example Company</title>'
+        b'<a href="https://linkedin.com/company/example-company">LinkedIn</a>',
+    )
+
+    def session(**kwargs):
+        observed_timeouts.append(kwargs["timeout"])
+        return _Session(response)
+
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification._registrable_domain",
+        lambda _url: "example.com",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        session,
+    )
+
+    result = asyncio.run(
+        verify_company_exists(
+            "Example Company",
+            "https://example.com/",
+            company_linkedin="https://linkedin.com/company/example-company",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert len(observed_timeouts) == 1
+    assert observed_timeouts[0].total == 5
+    assert observed_timeouts[0].connect == 3
+
+
 def test_unsafe_or_nonstandard_company_urls_are_not_rewritten():
     for value in (
         "http://example.com:8080/",

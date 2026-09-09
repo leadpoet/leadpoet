@@ -110,6 +110,7 @@ class FakeLedgerStore:
             if call["kind"] != "dispatch":
                 return self._view(call)
             call["kind"] = "uncertain"
+            call["uncertain_doc"] = dict(call_doc)
             return {"status": "uncertain", "idempotent": False, "amount_microusd": call["amount"]}
 
 class FakeTransport:
@@ -501,6 +502,11 @@ def test_a_reply_the_sanitizer_refuses_after_dispatch_settles_as_uncertain_not_d
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert result.call["outcome"] == "uncertain" and result.call["error_code"] == "provider_unavailable"
     assert store.log[-1] == "uncertain" and "settle" not in store.log[-1:]  # the reservation is consumed, the head is terminal
+    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
+        "reason": "settle_failure",
+        "failure_stage": "response_adaptation",
+        "error_class": "OperationResponseError",
+    }
     assert b"Cloudflare" not in result.body
 
 
@@ -516,4 +522,43 @@ def test_a_store_that_rejects_the_settlement_leaves_the_call_uncertain():
     store.settle_call = refusing_settle
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["outcome"] == "uncertain" and store.log[-1] == "uncertain"
+    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
+        "reason": "settle_failure",
+        "failure_stage": "settlement",
+        "error_class": "ArenaContractError",
+    }
     store.settle_call = original
+
+
+def test_response_adaptation_failure_retains_only_safe_class_and_stage(monkeypatch):
+    secret = "api-key-must-not-be-stored"
+
+    class AdapterFailure(RuntimeError):
+        pass
+
+    def fail_adaptation(*_args, **_kwargs):
+        raise AdapterFailure(secret)
+
+    monkeypatch.setattr(br.scoring_provider_compat, "adapt_response", fail_adaptation)
+    scoring_context = br.RunContext(**{**CONTEXT.__dict__, "kind": "score"})
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, {"result": {"data": {}}})]),
+        funding_source_for=lambda _context: "miner_key",
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+    )
+
+    result = broker.execute(
+        scoring_context,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com"},
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert diagnostic == {
+        "reason": "settle_failure",
+        "failure_stage": "response_adaptation",
+        "error_class": "Exception",
+    }
+    assert secret not in json.dumps(diagnostic)

@@ -53,6 +53,28 @@ GENERIC_ERRORS = {
 }
 
 _DECIMAL_RE = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?(?:[eE]-?[0-9]+)?$")
+_SAFE_EXCEPTION_CLASSES = frozenset(
+    {
+        "ArenaContractError",
+        "ArenaStoreError",
+        "CompatibilityResponseError",
+        "JSONDecodeError",
+        "KeyError",
+        "OperationError",
+        "OperationResponseError",
+        "OverflowError",
+        "TypeError",
+        "UnicodeDecodeError",
+        "ValueError",
+    }
+)
+
+
+def _safe_exception_class(exc: BaseException) -> str:
+    """Return only a bounded Python class label, never exception text."""
+
+    name = type(exc).__name__
+    return name if name in _SAFE_EXCEPTION_CLASSES else "Exception"
 
 
 class BrokerError(RuntimeError):
@@ -700,13 +722,16 @@ class Broker:
             secret = ""
             del secret
 
+        failure_stage = "response_adaptation"
         try:
             if effective_operation.provider == "openrouter":
                 response = _openrouter_effective_response(response)
             if funding_source == "miner_key" and response.status in (401, 402, 403):
+                failure_stage = "response_sanitization"
                 refused = _error_result("miner_credentials_unavailable", summary)
                 sanitized_status, sanitized_headers, sanitized_body = refused.status, refused.headers, refused.body
             else:
+                failure_stage = "response_adaptation"
                 adapted_status, adapted_headers, adapted_body = (
                     scoring_provider_compat.adapt_response(
                         route,
@@ -717,6 +742,7 @@ class Broker:
                     if route is not None and 200 <= response.status < 300
                     else (response.status, response.headers, response.body)
                 )
+                failure_stage = "response_sanitization"
                 sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
                     operation_id,
                     adapted_status,
@@ -724,6 +750,7 @@ class Broker:
                     adapted_body,
                     parameters=normalized,
                 )
+            failure_stage = "cost_accounting"
             if effective_operation.provider == "openrouter":
                 actual: Optional[int] = None
                 if 200 <= response.status < 300:
@@ -738,13 +765,15 @@ class Broker:
                 actual = deepline_cost_microusd(response.body)
             else:
                 actual = 0  # providers without a reported charge: record the bounded call, not an invented price
+            failure_stage = "terminal_response"
             terminal = _terminal_response_document(sanitized_status, sanitized_headers, sanitized_body)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=int(response.status), actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
+            failure_stage = "settlement"
             settled = self._store.settle_call(
                 run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
                 actual_microusd=actual, terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
             )
-        except Exception:
+        except Exception as exc:
             # A reply the sanitizer refuses (not JSON, oversized) or a settlement
             # the store rejects must not leave the call dispatched forever, which
             # would block the attempt's completion and, repeated, cancel the
@@ -753,7 +782,12 @@ class Broker:
             try:
                 self._store.mark_uncertain(
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                    call_doc={"reason": "settle_failure"}, lease_ttl_seconds=self._lease_ttl_seconds,
+                    call_doc={
+                        "reason": "settle_failure",
+                        "failure_stage": failure_stage,
+                        "error_class": _safe_exception_class(exc),
+                    },
+                    lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount})
             except Exception:

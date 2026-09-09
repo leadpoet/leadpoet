@@ -158,6 +158,56 @@ stop_lab_arena_runner() {
     "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py
 }
 
+rotate_lab_arena_runner_log() {
+  local log_index log_path log_previous log_temp
+  local log_archive_count=4
+  local log_max_bytes=4194304
+  mkdir -p "$(dirname "$LAB_ARENA_RUNNER_LOG_FILE")"
+  for ((log_index = 0; log_index <= log_archive_count + 1; log_index++)); do
+    log_path="$LAB_ARENA_RUNNER_LOG_FILE"
+    if [ "$log_index" -gt 0 ]; then
+      log_path="$LAB_ARENA_RUNNER_LOG_FILE.$log_index"
+    fi
+    if [ -L "$log_path" ] || { [ -e "$log_path" ] && [ ! -f "$log_path" ]; }; then
+      echo "ERROR: Lab Arena runner log retention target is not a regular file" >&2
+      return 1
+    fi
+  done
+  for ((log_index = 1; log_index <= log_archive_count; log_index++)); do
+    log_path="$LAB_ARENA_RUNNER_LOG_FILE.$log_index"
+    if [ -f "$log_path" ]; then
+      chmod 600 "$log_path"
+    fi
+  done
+  if [ ! -s "$LAB_ARENA_RUNNER_LOG_FILE" ]; then
+    (umask 077; : > "$LAB_ARENA_RUNNER_LOG_FILE")
+    chmod 600 "$LAB_ARENA_RUNNER_LOG_FILE"
+    return 0
+  fi
+  # The runner is already stopped here. Retain the bounded tail of each old
+  # process log before the new shell redirection creates an empty current log.
+  rm -f -- "$LAB_ARENA_RUNNER_LOG_FILE.$((log_archive_count + 1))"
+  for ((log_index = log_archive_count; log_index >= 2; log_index--)); do
+    log_previous="$LAB_ARENA_RUNNER_LOG_FILE.$((log_index - 1))"
+    if [ -f "$log_previous" ]; then
+      mv -f -- "$log_previous" "$LAB_ARENA_RUNNER_LOG_FILE.$log_index"
+    fi
+  done
+  if [ -s "$LAB_ARENA_RUNNER_LOG_FILE" ]; then
+    log_temp="$(mktemp "$LAB_ARENA_RUNNER_LOG_FILE.rotate.XXXXXX")"
+    tail -c "$log_max_bytes" -- "$LAB_ARENA_RUNNER_LOG_FILE" > "$log_temp"
+    mv -f -- "$log_temp" "$LAB_ARENA_RUNNER_LOG_FILE.1"
+  fi
+  for ((log_index = 1; log_index <= log_archive_count; log_index++)); do
+    log_path="$LAB_ARENA_RUNNER_LOG_FILE.$log_index"
+    if [ -f "$log_path" ]; then
+      chmod 600 "$log_path"
+    fi
+  done
+  (umask 077; : > "$LAB_ARENA_RUNNER_LOG_FILE")
+  chmod 600 "$LAB_ARENA_RUNNER_LOG_FILE"
+}
+
 start_lab_arena_runner() {
   local mode api_base runsc_name runsc_path pid
   mode="${LAB_ARENA_MODE:-off}"
@@ -199,7 +249,7 @@ start_lab_arena_runner() {
     echo "ERROR: verified Lab Arena runsc binary is unavailable" >&2
     return 1
   fi
-  mkdir -p "$(dirname "$LAB_ARENA_RUNNER_LOG_FILE")"
+  rotate_lab_arena_runner_log || return 1
   cd "$VALIDATOR_ROOT"
   setsid sudo env \
     PYTHONPATH="$VALIDATOR_ROOT" \

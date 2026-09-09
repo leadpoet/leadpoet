@@ -16,34 +16,40 @@ def test_a_days_cycle_fits_inside_twenty_four_hours():
     """Submission window plus every stage window leaves room for the next round's cutoff."""
 
     stages = sum(svc.DEFAULT_STAGE_MINUTES.values())
-    window = svc.RoundDefaults().min_submission_hours * 60
-    assert stages + window <= 24 * 60, (stages, window)
+    # Submission for tomorrow overlaps today's evaluation; do not add the
+    # admission window a second time to the evaluation day.
+    assert stages < 24 * 60, stages
     # The stage windows are the ones the schedule builder lays out end to end.
     assert set(svc.DEFAULT_STAGE_MINUTES) == {"benchmark", "stage_1", "stage_1_scoring", "stage_2", "final_scoring"}
 
 
 def test_default_daily_windows_fit_the_default_competition_load():
-    """One default runner can complete all normal runs and retry every agent run."""
+    """One default runner can retry every agent AND judge run on all 20 ICPs."""
 
-    challengers = contracts.DEFAULT_MAX_CHALLENGERS
+    from tests.lab_arena.test_lab_arena_capacity import configuration
+    from lab_arena.capacity import ATTEMPT_OVERHEAD_SECONDS, daily_challenger_capacity
+
+    challengers = min(contracts.DEFAULT_MAX_CHALLENGERS, daily_challenger_capacity(configuration()))
     stage_1_participants = challengers + 1  # daily baseline plus miners
-    stage_2_participants = min(challengers, contracts.FINALIST_COUNT) + 1
+    stage_2_participants = stage_1_participants
     stage_1_runs = stage_1_participants * contracts.STAGE_1_ICP_COUNT
     stage_2_runs = stage_2_participants * contracts.STAGE_2_ICP_COUNT
 
     assert _parallel_minutes(
         stage_1_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
-        contracts.ICP_WALL_CLOCK_SECONDS,
+        contracts.ICP_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
     ) <= svc.DEFAULT_STAGE_MINUTES["stage_1"]
     assert _parallel_minutes(
         stage_2_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
-        contracts.ICP_WALL_CLOCK_SECONDS,
+        contracts.ICP_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
     ) <= svc.DEFAULT_STAGE_MINUTES["stage_2"]
     assert _parallel_minutes(
-        stage_1_runs, contracts.SCORING_WALL_CLOCK_SECONDS
+        stage_1_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
+        contracts.SCORING_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
     ) <= svc.DEFAULT_STAGE_MINUTES["stage_1_scoring"]
     assert _parallel_minutes(
-        stage_2_runs, contracts.SCORING_WALL_CLOCK_SECONDS
+        stage_2_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
+        contracts.SCORING_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
     ) <= svc.DEFAULT_STAGE_MINUTES["final_scoring"]
 
 

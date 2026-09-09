@@ -993,7 +993,8 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     harness.clock.now = datetime.now(timezone.utc)
     runner = harness.runner(0, parallel=1)
     try:
-        assert runner.run_once() == 1
+        # Deliberately leave the other assignments unclaimed to model a gap.
+        assert runner.run_once(max_claims=1) == 1
     finally:
         runner.close()
         harness.clock.now = scheduled_now

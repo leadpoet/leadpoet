@@ -1152,6 +1152,109 @@ def _start_round(harness: Harness, *, day: int = 9, epoch: int = 30000) -> int:
     return len(service.store.get_round(harness.round_id)["participants"])
 
 
+def test_fresh_completion_signature_keeps_the_same_result_idempotent(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    participants = _start_round(harness, day=24, epoch=31400)
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["assignments"] == (
+        contracts.STAGE_1_ICP_COUNT * participants
+    )
+    runner_key = keypair("svc-runner-alpha")
+    claim_envelope = contracts.build_signed_request(
+        scope=contracts.SCOPE_CLAIM,
+        round_id=harness.round_id,
+        hotkey=runner_key.ss58_address,
+        body={"declared_parallelism": 1},
+        timestamp=int(harness.clock().timestamp()),
+        sign_message=lambda message: runner_key.sign(message.encode()).hex(),
+    )
+    lease = harness.service.handle_claim(claim_envelope)
+    assert lease["status"] == "leased"
+    icp = lease["icp"]
+    output = rn.output_document_from_bytes(
+        json.dumps(
+            {
+                "companies": [
+                    {
+                        "company_name": "Late Settlement Company",
+                        "company_website": "https://late-settlement.example.com",
+                        "company_linkedin": "",
+                        "industry": icp["industry"],
+                        "employee_count": icp["employee_count"][0],
+                        "company_stage": str(icp.get("company_stage") or ""),
+                        "country": icp.get("country") or "United States",
+                        "state": "",
+                        "fit_summary": "The company matches the ICP.",
+                        "fit_evidence_urls": [
+                            "https://late-settlement.example.com/about"
+                        ],
+                        "intent_signals": [
+                            {
+                                "description": "Raised a round",
+                                "url": "https://late-settlement.example.com/news",
+                                "date": "2026-08-01",
+                                "why_now": "The funding makes outreach timely.",
+                                "snippet": "Funding announced",
+                                "matched_icp_signal": 0,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ).encode()
+    )
+    body = {
+        "run_id": lease["run_id"],
+        "lease_token": lease["lease_token"],
+        "result": {
+            "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+            "resource_summary": {
+                "wall_seconds": 1.0,
+                "cpu_seconds": 1.0,
+                "max_rss_bytes": 1024,
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "provider_call_count": 0,
+            },
+            "started_at": "2026-10-24T01:00:00Z",
+            "finished_at": "2026-10-24T01:00:01Z",
+            "terminal_status": "accepted",
+        },
+        "output": output,
+    }
+    request_id = "b" * 32
+
+    def complete():
+        return harness.service.handle_complete(
+            contracts.build_signed_request(
+                scope=contracts.SCOPE_COMPLETE,
+                round_id=harness.round_id,
+                hotkey=runner_key.ss58_address,
+                body=body,
+                timestamp=int(harness.clock().timestamp()),
+                request_id=request_id,
+                sign_message=lambda message: runner_key.sign(message.encode()).hex(),
+            )
+        )
+
+    first = complete()
+    assert first["status"] == "accepted"
+    stored_before = harness.service.store.get_run(lease["run_id"])
+    object_before = harness.objects.get(stored_before["output_ref"])
+
+    harness.clock.now += timedelta(seconds=280)
+    replay = complete()
+
+    assert replay["status"] == "accepted" and replay["idempotent"] is True
+    stored_after = harness.service.store.get_run(lease["run_id"])
+    assert stored_after["output_ref"] == stored_before["output_ref"]
+    assert stored_after["result_doc"] == stored_before["result_doc"]
+    assert harness.objects.get(stored_after["output_ref"]) == object_before
+    assert len(
+        list((harness.objects_root / "arena" / harness.round_id / "outputs").glob("*.json"))
+    ) == 1
+
+
 def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(connect, tmp_path):
     harness = Harness(
         connect,

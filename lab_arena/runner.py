@@ -59,6 +59,9 @@ REQUIREMENT_RE = re.compile(
 )
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
+COMPLETION_SIGNATURE_REFRESH_AGE_SECONDS = (
+    contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS - int(API_TIMEOUT_SECONDS)
+)
 PROVIDER_API_TIMEOUT_GRACE_SECONDS = 15.0
 MAX_PROVIDER_API_TIMEOUT_SECONDS = 135.0
 DEFAULT_IMAGE_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
@@ -1192,9 +1195,10 @@ class RunnerConfig:
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
     # Waits between completion retries after a transport or server failure.
     completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
-    # A sandbox can end while its last provider request is still settling. The
-    # 142-second bound covers MAX_PROVIDER_API_TIMEOUT_SECONDS without holding
-    # the lease until its 20-minute expiry.
+    # Execution and scoring sandboxes can end while their last provider request
+    # is still settling. This fixed 352-second retry-wait budget covers a
+    # 300-second broker call plus 52 seconds of completion grace. The retry
+    # waits and bounded API calls still end before the 20-minute lease expires.
     accounting_open_retry_seconds: Tuple[float, ...] = (
         2.0,
         5.0,
@@ -1202,7 +1206,10 @@ class RunnerConfig:
         20.0,
         30.0,
         45.0,
-        30.0,
+        60.0,
+        60.0,
+        60.0,
+        60.0,
     )
     evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
@@ -1554,6 +1561,7 @@ class Runner:
             tuple(self._config.accounting_open_retry_seconds)
         )
         while True:
+            envelope = self._completion_envelope_for_attempt(envelope)
             try:
                 result = self._config.api.complete(envelope)
             except Exception as exc:
@@ -1580,6 +1588,27 @@ class Runner:
                 except StopIteration:
                     raise RunnerError("completion remained accounting_open")
             time.sleep(max(0.0, float(delay)))
+
+    def _completion_envelope_for_attempt(
+        self, envelope: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Refresh an old completion signature without changing its identity or body."""
+
+        now = int(self._config.clock().timestamp())
+        if (
+            abs(now - int(envelope["timestamp"]))
+            < COMPLETION_SIGNATURE_REFRESH_AGE_SECONDS
+        ):
+            return envelope
+        return contracts.build_signed_request(
+            scope=contracts.SCOPE_COMPLETE,
+            round_id=str(envelope["round_id"]),
+            hotkey=str(envelope["hotkey"]),
+            body=envelope["body"],
+            timestamp=now,
+            request_id=str(envelope["request_id"]),
+            sign_message=self._config.identity.sign,
+        )
 
     def run_once(self, *, max_claims: int = 1000) -> int:
         """Claim while a local slot is free; return the number of leases taken."""

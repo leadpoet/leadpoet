@@ -28,6 +28,23 @@ HISTORICAL_PROVIDER_OUTCOME_PURPOSES_V2 = frozenset(
     }
 )
 
+# Migration 126 admitted these exact coordinator inputs. Source Add was later
+# retired from the active weight-input contract, but the append-only migration
+# must continue to match the historical database constraint it installed.
+CHAIN_REALIZED_WEIGHT_INPUT_PURPOSES_V1 = frozenset(
+    {
+        "research_lab.allocation.v2",
+        "research_lab.champion_input.v2",
+        "research_lab.reimbursement_input.v2",
+        "research_lab.source_add_reward_input.v2",
+        "research_lab.sourcing_input.v2",
+        "research_lab.fulfillment_input.v2",
+        "research_lab.leaderboard_input.v2",
+        "research_lab.ban_input.v2",
+        "research_lab.anomaly_adjustment_input.v2",
+    }
+)
+
 
 def canonical_purposes_before_routing_experiment_v2(role: str) -> set[str]:
     """Return the exact canonical role set before migration 158."""

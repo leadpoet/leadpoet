@@ -571,7 +571,6 @@ def test_allowlisted_parity_policy_shapes_survive_noop_scope_validation():
         region=operator.EXPECTED_REGION,
         production_secret_id="leadpoet/prod/gateway/env",
         readonly_secret_id=parity_setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=parity_setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         runner_arn=(
             f"arn:aws:iam::{ACCOUNT}:role/leadpoet-production-parity-runner"
         ),
@@ -1266,7 +1265,6 @@ def _controller_documents() -> dict[str, dict[str, object]]:
         region=operator.EXPECTED_REGION,
         production_secret_id=parity_setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_secret_id=parity_setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=parity_setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{parity_setup.RUNNER_ROLE}",
     )
 

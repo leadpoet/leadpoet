@@ -65,8 +65,6 @@ CALL_SITE_REGISTRY = {
     "qualification/scoring/verification_helpers.py": "uncaptured_by_decision",
     "qualification/scoring/lead_scorer.py": "uncaptured_by_decision",
     "gateway/qualification/utils/helpers.py": "uncaptured_by_decision",
-    # -- infrastructure / tooling, not production call sites -----------------
-    "gateway/research_lab/key_vault.py": "not_a_call_site",
 }
 
 

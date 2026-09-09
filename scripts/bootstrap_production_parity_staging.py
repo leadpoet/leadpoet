@@ -474,7 +474,6 @@ def _configuration_args(
         production_gateway_url=setup.PRODUCTION_GATEWAY_URL,
         production_gateway_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_dsn_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         volume_gib=setup.DEFAULT_VOLUME_GIB,
         enabled="true",
         commit=commit,

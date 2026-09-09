@@ -129,7 +129,7 @@ MANAGED_POLICY_DOCUMENT_HASHES = {
         "sha256:f7095b6fe01bdf5f26ee1adc9e5bfa82ba3246acf293113c5d14fdd5410ec731"
     ),
     "LeadpoetParityControllerData": (
-        "sha256:572c3931b63b87053ae923b483cb39acd61a8ffe33278fb6f77250c65b242618"
+        "sha256:9d191952dd4540c92b96d43a209a92963f20c86d50bd81e76da8842b3974d2de"
     ),
     "LeadpoetParityControllerEc2Launch": (
         "sha256:5466df394b6369c338ff9efdae6d6e7ba945506bca9dec1f21db11d0edcace3e"
@@ -1966,7 +1966,6 @@ def _validate_setup_managed_authority(
             region=EXPECTED_REGION,
             production_secret_id=setup["PRODUCTION_GATEWAY_SECRET_ID"],
             readonly_secret_id=setup["READONLY_DSN_SECRET_ID"],
-            miner_intake_secret_id=setup["DEFAULT_MINER_INTAKE_SECRET_ID"],
             runner_arn=(
                 f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:role/"
                 f"{setup['RUNNER_ROLE']}"

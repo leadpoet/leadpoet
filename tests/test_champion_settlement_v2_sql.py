@@ -1,9 +1,9 @@
 from pathlib import Path
 import re
 
-from leadpoet_canonical.attested_v2 import COORDINATOR_ROLE, ROLE_PURPOSES
-from leadpoet_canonical.weight_authority_v2 import WEIGHT_INPUT_PURPOSES
+from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
 from tests.historical_sql_purpose_contract import (
+    CHAIN_REALIZED_WEIGHT_INPUT_PURPOSES_V1,
     canonical_purposes_before_routing_experiment_v2,
 )
 
@@ -236,14 +236,9 @@ def test_chain_realized_migration_extends_replay_contract_exactly():
     migrated_weight_input_purposes = set(
         re.findall(r"'([^']+)'", weight_input_match.group(1))
     )
-    canonical_weight_input_purposes = {
-        purpose
-        for role, purpose in WEIGHT_INPUT_PURPOSES.values()
-        if role == COORDINATOR_ROLE
-    }
     assert (
         migrated_weight_input_purposes
-        == canonical_weight_input_purposes
+        == CHAIN_REALIZED_WEIGHT_INPUT_PURPOSES_V1
     )
 
 

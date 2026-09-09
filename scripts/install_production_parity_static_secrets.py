@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Install two fixed parity secrets through a 15-minute validator bootstrap role.
+"""Install the fixed parity DSN through a 15-minute validator bootstrap role.
 
-The read-only DSN arrives only on an already-open anonymous descriptor.  The
-BuiltWith credential is selected by exact name from the running validator
-container without rendering or returning the rest of its environment.
-Neither credential is accepted through argv, environment variables, or files.
+The read-only DSN arrives only on an already-open anonymous descriptor. It is
+not accepted through argv, environment variables, or files.
 """
 
 from __future__ import annotations
@@ -15,7 +13,6 @@ import json
 import os
 import re
 import stat
-import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qsl, unquote, urlparse
@@ -31,22 +28,15 @@ EXPECTED_POOLER_HOST = "aws-0-us-east-1.pooler.supabase.com"
 VALIDATOR_ROLE = "leadpoet-validator-s3-cloudwatch-role"
 BOOTSTRAP_ROLE = "leadpoet-production-parity-static-bootstrap"
 DEFAULT_READONLY_SECRET_ID = "leadpoet/staging/production-parity/readonly-dsn"
-DEFAULT_MINER_INTAKE_SECRET_ID = (
-    "leadpoet/staging/production-parity-miner-intake"
-)
 STATIC_DESCRIPTIONS = {
     DEFAULT_READONLY_SECRET_ID: (
         "Leadpoet production-parity read-only source DSN"
-    ),
-    DEFAULT_MINER_INTAKE_SECRET_ID: (
-        "Leadpoet production-parity miner-intake provider credential"
     ),
 }
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SECRET_RE = re.compile(r"^[A-Za-z0-9/_+=.@-]{6,512}$")
 ROLE_RE = re.compile(r"^[A-Za-z0-9+=,.@_-]{1,64}$")
-ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class StaticSecretInstallError(RuntimeError):
@@ -93,49 +83,6 @@ def _read_request(descriptor: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise StaticSecretInstallError("static bootstrap request is invalid")
     return value
-
-
-def _validate_builtwith_key(value: str) -> str:
-    normalized = str(value or "").strip()
-    if (
-        not 8 <= len(normalized) <= 512
-        or any(character.isspace() for character in normalized)
-        or "\x00" in normalized
-    ):
-        raise StaticSecretInstallError("BuiltWith credential is invalid")
-    return normalized
-
-
-def _builtwith_from_validator_container(container_name: str) -> str:
-    if container_name != "leadpoet-validator-main":
-        raise StaticSecretInstallError("validator container identity differs")
-    template = (
-        '{{range .Config.Env}}{{if eq (index (split . "=") 0) '
-        '"BUILTWITH_API_KEY"}}{{println .}}{{end}}{{end}}'
-    )
-    try:
-        result = subprocess.run(
-            ["docker", "inspect", "--format", template, container_name],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=20,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise StaticSecretInstallError(
-            "validator BuiltWith credential read failed"
-        ) from exc
-    prefix = "BUILTWITH_API_KEY="
-    lines = [line for line in result.stdout.splitlines() if line]
-    if (
-        result.returncode != 0
-        or len(lines) != 1
-        or not lines[0].startswith(prefix)
-    ):
-        raise StaticSecretInstallError(
-            "validator BuiltWith credential is unavailable"
-        )
-    return _validate_builtwith_key(lines[0][len(prefix) :])
 
 
 def _validate_readonly_dsn(value: str) -> str:
@@ -356,16 +303,8 @@ def install(
     if (
         not SHA_RE.fullmatch(args.commit)
         or not HASH_RE.fullmatch(args.migration_sha256)
-        or any(
-            SECRET_RE.fullmatch(value) is None
-            for value in (
-                args.readonly_dsn_secret_id,
-                args.miner_intake_secret_id,
-            )
-        )
-        or args.readonly_dsn_secret_id == args.miner_intake_secret_id
+        or SECRET_RE.fullmatch(args.readonly_dsn_secret_id) is None
         or args.readonly_dsn_secret_id != DEFAULT_READONLY_SECRET_ID
-        or args.miner_intake_secret_id != DEFAULT_MINER_INTAKE_SECRET_ID
         or request.get("migration_sha256") != args.migration_sha256
         or mode not in {"probe", "ensure"}
     ):
@@ -379,10 +318,8 @@ def install(
     client, instance_arn, bootstrap_arn = _instance_bootstrap_client(
         validator_role=VALIDATOR_ROLE
     )
-    builtwith_key = _builtwith_from_validator_container(args.validator_container)
 
     readonly_raw = _static_secret_value(client, args.readonly_dsn_secret_id)
-    intake_raw = _static_secret_value(client, args.miner_intake_secret_id)
     existing_dsn = ""
     if readonly_raw is not None:
         try:
@@ -408,21 +345,12 @@ def install(
         if effective_dsn
         else ""
     )
-    expected_intake = json.dumps(
-        {"builtwith_api_key": builtwith_key},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     if (
         readonly_raw is not None
         and readonly_dsn
         and not hmac.compare_digest(existing_dsn, readonly_dsn)
     ):
         raise StaticSecretInstallError("existing read-only parity secret differs")
-    if intake_raw is not None and not hmac.compare_digest(
-        intake_raw, expected_intake
-    ):
-        raise StaticSecretInstallError("existing miner-intake parity secret differs")
     if mode == "ensure" and readonly_raw is None:
         _create_static_secret(
             client,
@@ -431,26 +359,13 @@ def install(
             value=expected_readonly,
             commit=args.commit,
         )
-    if mode == "ensure" and intake_raw is None:
-        _create_static_secret(
-            client,
-            name=args.miner_intake_secret_id,
-            description=STATIC_DESCRIPTIONS[DEFAULT_MINER_INTAKE_SECRET_ID],
-            value=expected_intake,
-            commit=args.commit,
-        )
     if mode == "ensure":
         readonly_readback = _static_secret_value(
             client, args.readonly_dsn_secret_id
         )
-        intake_readback = _static_secret_value(
-            client, args.miner_intake_secret_id
-        )
         if (
             not isinstance(readonly_readback, str)
-            or not isinstance(intake_readback, str)
             or not hmac.compare_digest(readonly_readback, expected_readonly)
-            or not hmac.compare_digest(intake_readback, expected_intake)
         ):
             raise StaticSecretInstallError("static parity secret readback differs")
     receipt = {
@@ -463,10 +378,8 @@ def install(
         "instance_role": instance_arn,
         "bootstrap_role": bootstrap_arn,
         "readonly_secret_id": args.readonly_dsn_secret_id,
-        "miner_intake_secret_id": args.miner_intake_secret_id,
         "reader_role": "leadpoet_parity_reader",
         "readonly_secret_present": readonly_raw is not None or mode == "ensure",
-        "miner_intake_secret_present": intake_raw is not None or mode == "ensure",
         "secret_values_printed": False,
     }
     secret_response = {
@@ -481,13 +394,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--migration-sha256", required=True)
     parser.add_argument(
-        "--validator-container", default="leadpoet-validator-main"
-    )
-    parser.add_argument(
         "--readonly-dsn-secret-id", default=DEFAULT_READONLY_SECRET_ID
-    )
-    parser.add_argument(
-        "--miner-intake-secret-id", default=DEFAULT_MINER_INTAKE_SECRET_ID
     )
     parser.add_argument("--request-fd", type=int, required=True)
     parser.add_argument("--receipt-fd", type=int, required=True)

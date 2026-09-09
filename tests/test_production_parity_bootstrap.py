@@ -29,6 +29,9 @@ DSN = (
     + PASSWORD
     + "@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
 )
+RETIRED_MINER_INTAKE_SECRET_ID = (
+    "leadpoet/staging/production-parity-miner-intake"
+)
 
 
 def _controller_policy() -> dict:
@@ -37,7 +40,6 @@ def _controller_policy() -> dict:
         region=setup.EXPECTED_REGION,
         production_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
     )
 
@@ -148,7 +150,6 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
         account_id=ACCOUNT,
         region="us-east-1",
         readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         expires_at=expiry,
     )
     encoded_static = json.dumps(static, sort_keys=True)
@@ -163,17 +164,13 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
     assert create["Resource"] == "*"
     assert create["Condition"]["StringEquals"]["secretsmanager:Name"] == [
         setup.READONLY_DSN_SECRET_ID,
-        setup.DEFAULT_MINER_INTAKE_SECRET_ID,
     ]
     static_bases = {
         (
             f"arn:aws:secretsmanager:us-east-1:{ACCOUNT}:secret:"
             f"{secret_id}"
         )
-        for secret_id in (
-            setup.READONLY_DSN_SECRET_ID,
-            setup.DEFAULT_MINER_INTAKE_SECRET_ID,
-        )
+        for secret_id in (setup.READONLY_DSN_SECRET_ID,)
     }
     expected_static_resources = static_bases | {
         base + "-??????" for base in static_bases
@@ -209,6 +206,16 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
             base + "-adjacent-ABC123",
             context,
         )
+    retired_intake_base = (
+        f"arn:aws:secretsmanager:us-east-1:{ACCOUNT}:secret:"
+        f"{RETIRED_MINER_INTAKE_SECRET_ID}"
+    )
+    assert not _policy_allows(
+        static,
+        "secretsmanager:GetSecretValue",
+        retired_intake_base + "-ABC123",
+        context,
+    )
     expiry_deny = next(
         item for item in static["Statement"]
         if item["Effect"] == "Deny" and item["Action"] == "*"
@@ -227,7 +234,6 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
         region="us-east-1",
         production_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
     )
     encoded = json.dumps(controller, sort_keys=True)
@@ -244,14 +250,26 @@ def test_iam_policies_use_true_run_namespace_and_bounded_static_trust():
     )
     deny = [item for item in controller["Statement"] if item["Effect"] == "Deny"]
     assert setup.READONLY_DSN_SECRET_ID in json.dumps(deny)
-    assert setup.DEFAULT_MINER_INTAKE_SECRET_ID in json.dumps(deny)
+    assert RETIRED_MINER_INTAKE_SECRET_ID not in encoded
+    assert not _policy_allows(
+        controller,
+        "secretsmanager:GetSecretValue",
+        retired_intake_base + "-ABC123",
+        {},
+    )
 
     runner = setup._runner_policy(
         account_id=ACCOUNT,
         region="us-east-1",
         production_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
+    )
+    assert RETIRED_MINER_INTAKE_SECRET_ID not in json.dumps(runner, sort_keys=True)
+    assert not _policy_allows(
+        runner,
+        "secretsmanager:GetSecretValue",
+        retired_intake_base + "-ABC123",
+        {},
     )
     attested_version = (
         "arn:aws:s3:::leadpoet-attested-v2-artifacts-493765492819/"
@@ -295,7 +313,6 @@ def test_controller_managed_policy_partition_and_adversarial_boundaries():
         region=setup.EXPECTED_REGION,
         production_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{setup.RUNNER_ROLE}",
     )
     assert set(slices) == set(setup.CONTROLLER_POLICY_NAMES.values())
@@ -983,7 +1000,6 @@ def test_iam_only_has_no_github_or_secretsmanager_dependency(monkeypatch):
         production_gateway_ip=setup.PRODUCTION_GATEWAY_IP,
         production_gateway_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_dsn_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         volume_gib=512,
     )
     result = setup.setup_iam_only(args)
@@ -1107,7 +1123,6 @@ def test_simulator_permission_denial_leaves_both_roles_inert_and_controller_deta
         production_gateway_ip=setup.PRODUCTION_GATEWAY_IP,
         production_gateway_secret_id=setup.PRODUCTION_GATEWAY_SECRET_ID,
         readonly_dsn_secret_id=setup.READONLY_DSN_SECRET_ID,
-        miner_intake_secret_id=setup.DEFAULT_MINER_INTAKE_SECRET_ID,
         volume_gib=512,
     )
     with pytest.raises(ClientError) as denied:
@@ -1809,15 +1824,10 @@ def test_static_installer_first_create_and_retry_are_immutable(monkeypatch):
             f"arn:aws:sts::{ACCOUNT}:assumed-role/{installer.BOOTSTRAP_ROLE}/session",
         ),
     )
-    monkeypatch.setattr(
-        installer, "_builtwith_from_validator_container", lambda name: "builtwith-canary"
-    )
     args = argparse.Namespace(
         commit=COMMIT,
         migration_sha256=MIGRATION_HASH,
-        validator_container="leadpoet-validator-main",
         readonly_dsn_secret_id=installer.DEFAULT_READONLY_SECRET_ID,
-        miner_intake_secret_id=installer.DEFAULT_MINER_INTAKE_SECRET_ID,
     )
     request = {
         "mode": "ensure",
@@ -1831,8 +1841,11 @@ def test_static_installer_first_create_and_retry_are_immutable(monkeypatch):
         "readonly_dsn_available": True,
         "readonly_dsn": DSN,
     }
-    assert client.creates == 2
-    assert client.policy_reads >= 6
+    assert set(client.values) == {installer.DEFAULT_READONLY_SECRET_ID}
+    assert "miner_intake_secret_id" not in first
+    assert "miner_intake_secret_present" not in first
+    assert client.creates == 1
+    assert client.policy_reads >= 3
 
 
 def test_static_installer_rejects_deprecated_or_alternate_versions(monkeypatch):

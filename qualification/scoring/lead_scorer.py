@@ -487,11 +487,41 @@ _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS = (
         re.I,
     ),
     re.compile(
-        rf"\b{_PRIVATE_EQUITY_LABEL}\b.{{0,100}}\b(?:acquired|owns?|"
+        rf"\b{_PRIVATE_EQUITY_LABEL}\b.{{0,100}}?\b(?:acquired|owns?|"
         r"majority[- ]owned|controls?|controlling\s+owner|took\s+.{0,30}\s+private|"
         r"majority\s+stake|controlling\s+stake)\b",
         re.I,
     ),
+)
+_PUBLIC_STAGE_SUPERSESSION_PATTERNS = (
+    re.compile(r"\bdelisted(?:\s+from\b)?", re.I),
+    re.compile(r"\b(?:taken|went|became)\s+private\b", re.I),
+    re.compile(r"\b(?:ceased|stopped)\s+trading\b", re.I),
+)
+_PRIVATE_EQUITY_STAGE_SUPERSESSION_PATTERNS = (
+    re.compile(
+        r"\b(?:was|were|has\s+been)\s+"
+        r"(?:later\s+|subsequently\s+)?sold\s+to\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:sold|divested)\s+(?:its|the)\s+(?:majority|controlling)\s+"
+        r"(?:stake|interest|ownership)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:exited|sold|divested)\s+(?:its|the)\s+"
+        r"(?:investment|ownership)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:relinquished|transferred)\s+(?:its|the)?\s*control\b",
+        re.I,
+    ),
+)
+_STAGE_SUPERSESSION_FUTURE_RE = re.compile(
+    r"\bwill\b(?:\W+\w+){0,6}\W*$",
+    re.I,
 )
 
 
@@ -501,6 +531,8 @@ def _has_affirmed_stage_proof(
     *,
     reject_historical: bool = False,
     reject_minority: bool = False,
+    supersession_patterns: Sequence[re.Pattern] = (),
+    reject_future_will: bool = False,
 ) -> bool:
     """Reject negated, historical, prospective, and failed stage mentions."""
 
@@ -517,6 +549,10 @@ def _has_affirmed_stage_proof(
             if (
                 _has_stage_proof_uncertainty(prefix)
                 or _has_stage_proof_uncertainty(match.group(0))
+                or (
+                    reject_future_will
+                    and _STAGE_SUPERSESSION_FUTURE_RE.search(prefix)
+                )
             ):
                 continue
             if reject_historical and (
@@ -531,6 +567,7 @@ def _has_affirmed_stage_proof(
             )
             if (
                 not match_names_completed_event
+                and not supersession_patterns
                 and (
                     _STAGE_PROOF_PROSPECTIVE_EVENT_RE.search(suffix)
                     or _has_stage_proof_uncertainty(suffix_clause)
@@ -538,6 +575,12 @@ def _has_affirmed_stage_proof(
             ):
                 continue
             if reject_minority and "minority" in context.casefold():
+                continue
+            if supersession_patterns and _has_affirmed_stage_proof(
+                text[match.end():],
+                supersession_patterns,
+                reject_future_will=True,
+            ):
                 continue
             return True
     return False
@@ -557,12 +600,14 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
         text,
         _PUBLIC_STAGE_PROOF_PATTERNS,
         reject_historical=True,
+        supersession_patterns=_PUBLIC_STAGE_SUPERSESSION_PATTERNS,
     )
     private_equity = _has_affirmed_stage_proof(
         text,
         _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS,
         reject_historical=True,
         reject_minority=True,
+        supersession_patterns=_PRIVATE_EQUITY_STAGE_SUPERSESSION_PATTERNS,
     )
     if public and private_equity:
         return False

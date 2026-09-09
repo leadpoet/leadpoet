@@ -475,6 +475,19 @@ def test_unproven_structured_fit_scores_zero_without_arena_retry(
             "Privately Held · Founded 1992 · 51-200 employees",
             False,
         ),
+        (
+            "Series A",
+            "Public",
+            "Acme went public in 2020 but was delisted in 2024.",
+            False,
+        ),
+        (
+            "Series A",
+            "Private Equity",
+            "Acme was acquired by a private-equity firm in 2020 but was sold to "
+            "a strategic buyer in 2024.",
+            False,
+        ),
     ],
 )
 def test_unsupported_stage_observation_repairs_then_scores_as_insufficient_evidence(

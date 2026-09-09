@@ -641,6 +641,52 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             COMPANY_FIT_MATCH,
         ),
         (
+            "Public",
+            "Public",
+            True,
+            "Acme shares are publicly traded on Nasdaq and will be delisted next year.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
+            "Acme shares are publicly traded on Nasdaq and have not been delisted.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
+            "Acme was delisted in 2020 but its shares are publicly traded on "
+            "Nasdaq today.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Private Equity",
+            "Private Equity",
+            True,
+            "A private-equity firm acquired Acme as its controlling owner and plans "
+            "to sell its stake next year.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Private Equity",
+            "Private Equity",
+            True,
+            "A private-equity firm acquired Acme as its controlling owner and has "
+            "not sold its controlling stake.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Private Equity",
+            "Private Equity",
+            True,
+            "Acme was sold in 2020 but was later acquired by a private-equity "
+            "firm that is now its controlling owner.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
             "Private Equity",
             "Public",
             False,
@@ -708,6 +754,17 @@ def test_stage_decision_requires_category_specific_proof(
             "Private Equity",
             False,
             "Acme received a minority investment from a private-equity firm.",
+        ),
+        (
+            "Public",
+            False,
+            "Acme went public in 2020 but was delisted in 2024.",
+        ),
+        (
+            "Private Equity",
+            False,
+            "Acme was acquired by a private-equity firm in 2020 but was sold to "
+            "a strategic buyer in 2024.",
         ),
         (
             "Seed",

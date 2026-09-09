@@ -54,20 +54,24 @@ def _gateway_environment():
     }
 
 
-def test_real_import_boundary_freezes_both_canonical_consumers_to_testnet(tmp_path):
+@pytest.mark.parametrize("role", ("gateway", "validator"))
+def test_real_import_boundary_freezes_both_canonical_consumers_to_testnet(tmp_path, role):
     profile, hotkey = _documents(tmp_path)
     program = (
         f"import json,sys; sys.path.insert(0,{str(ROOT)!r}); "
         "from scripts.run_temporary_testnet401_chain_bound_gateway "
         "import configure_temporary_testnet401_chain_source as c; "
-        f"r=c(profile_path={str(profile)!r},hotkey_config_path={str(hotkey)!r},role='gateway'); "
+        f"r=c(profile_path={str(profile)!r},hotkey_config_path={str(hotkey)!r},role={role!r}); "
         "from leadpoet_canonical import weight_authority_v2 as w; "
         "from leadpoet_canonical import compact_auditor_authority_v2 as a; "
         "print(json.dumps({'result':r,'weight':w.CHAIN_ENDPOINT_HOST,'auditor':a.CHAIN_ENDPOINT_HOST},sort_keys=True))"
     )
     completed = subprocess.run(
         [sys.executable, "-I", "-c", program], cwd=ROOT,
-        env=_gateway_environment(), capture_output=True, text=True, check=True,
+        env={**_gateway_environment(), "BITTENSOR_NETWORK": "test",
+             "BITTENSOR_NETUID": "401", "VALIDATOR_SUBTENSOR_NETWORK": "test",
+             "EXPECTED_CHAIN": "wss://test.finney.opentensor.ai:443"},
+        capture_output=True, text=True, check=True,
     )
     result = json.loads(completed.stdout)
     assert result["weight"] == result["auditor"] == "test.finney.opentensor.ai"
@@ -105,17 +109,45 @@ def test_chain_bound_startup_rejects_wrong_identity_before_gateway_import(
     if failure == "environment":
         environment["ALLOWED_NETUIDS"] = "71"
     program = (
-        f"import sys; sys.path.insert(0,{str(ROOT)!r}); "
+        f"import json,sys; sys.path.insert(0,{str(ROOT)!r}); "
         "from scripts.run_temporary_testnet401_chain_bound_gateway "
-        "import configure_temporary_testnet401_chain_source as c; "
-        f"c(profile_path={str(profile)!r},hotkey_config_path={str(hotkey)!r},role='gateway')"
+        "import configure_temporary_testnet401_chain_source as c\n"
+        "try:\n"
+        f" c(profile_path={str(profile)!r},hotkey_config_path={str(hotkey)!r},role='gateway')\n"
+        "except (ValueError,RuntimeError):\n"
+        " print(json.dumps({'rejected':True,'gateway_loaded':'gateway.main' in sys.modules}))\n"
+        "else:\n"
+        " raise AssertionError('invalid boundary accepted')\n"
     )
     completed = subprocess.run(
         [sys.executable, "-I", "-c", program], cwd=ROOT,
         env=environment, capture_output=True, text=True,
     )
-    assert completed.returncode != 0
-    assert "gateway.main" not in sys.modules
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout) == {"rejected": True, "gateway_loaded": False}
+
+
+def test_chain_bound_startup_rejects_a_preloaded_finney_consumer(tmp_path):
+    profile, hotkey = _documents(tmp_path)
+    program = (
+        f"import json,sys; sys.path.insert(0,{str(ROOT)!r}); "
+        "from leadpoet_canonical import weight_authority_v2 as w; "
+        "from scripts.run_temporary_testnet401_chain_bound_gateway "
+        "import configure_temporary_testnet401_chain_source as c\n"
+        "try:\n"
+        f" c(profile_path={str(profile)!r},hotkey_config_path={str(hotkey)!r},role='gateway')\n"
+        "except RuntimeError as error:\n"
+        " assert str(error)=='temporary canonical chain consumer binding differs'\n"
+        " assert w.CHAIN_ENDPOINT_HOST=='entrypoint-finney.opentensor.ai'\n"
+        " print('rejected')\n"
+        "else:\n"
+        " raise AssertionError('stale consumer accepted')\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", program], cwd=ROOT,
+        env=_gateway_environment(), capture_output=True, text=True, check=True,
+    )
+    assert completed.stdout.strip() == "rejected"
 
 
 def test_both_temporary_entrypoints_configure_before_chain_consumers_import():

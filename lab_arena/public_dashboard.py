@@ -14,7 +14,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from lab_arena import contracts, source_disclosure, verify
 
 
-PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/pydantic-harness"
+PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/pydantic-harness/tree/lab"
 DEFAULT_RECENT_ROUND_LIMIT = 30
 MAX_RECENT_ROUND_LIMIT = 100
 _ROUND_COLUMNS = (

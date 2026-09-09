@@ -165,7 +165,7 @@ def test_competition_snapshot_is_scoped_and_separates_open_running_and_completed
     assert result["latest_round"]["round_id"] == "arena-2026-09-10-running"
     assert result["latest_round"]["status"] == "stage2_scoring"
     assert result["latest_completed_round"]["round_id"] == published["round_id"]
-    assert result["repo_url"] == "https://github.com/leadpoet/pydantic-harness"
+    assert result["repo_url"] == "https://github.com/leadpoet/pydantic-harness/tree/lab"
 
 
 def test_competition_snapshot_fetches_the_latest_published_outside_recent_window():

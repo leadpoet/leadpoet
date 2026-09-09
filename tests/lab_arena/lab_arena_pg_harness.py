@@ -35,7 +35,7 @@ LAB_ARENA_RESTART_CLAIM_DRAIN_MIGRATION = "190-lab-arena-restart-claim-drain.sql
 LAB_ARENA_UPLOAD_RECOVERY_MIGRATION = "193-lab-arena-upload-recovery.sql"
 LAB_ARENA_OPEN_SCORER_REFRESH_MIGRATION = "194-lab-arena-open-scorer-refresh.sql"
 LAB_ARENA_REWARD_CHAIN_SCOPE_MIGRATION = "197-lab-arena-reward-chain-scope.sql"
-LAB_ARENA_SOURCE_DISCLOSURE_MIGRATION = "198-lab-arena-source-disclosure-time.sql"
+LAB_ARENA_SOURCE_DISCLOSURE_MIGRATION = "199-lab-arena-source-disclosure-time.sql"
 DEFAULT_MIGRATIONS = (
     LAB_ARENA_MIGRATION,
     LAB_ARENA_DAILY_COMPETITION_MIGRATION,

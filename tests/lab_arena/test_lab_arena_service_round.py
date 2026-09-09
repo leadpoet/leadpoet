@@ -1936,11 +1936,15 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
         "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, winner)
     )
     assert results.status_code == 200
-    assert len(results.json()["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
-    assert len(results.json()["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
+    public_scores = results.json()["scores"]["stage_1"] + results.json()["scores"]["stage_2"]
+    assert len(public_scores) == 10
     benchmark = original_get("http://localhost/arena/v1/rounds/%s/benchmark" % harness.round_id)
     assert benchmark.status_code == 200
-    assert len(benchmark.json()["icps"]) == contracts.BENCHMARK_ICP_COUNT
+    public_positions = {icp["icp_position"] for icp in benchmark.json()["icps"]}
+    assert len(public_positions) == 10
+    assert {score["icp_position"] for score in public_scores} == public_positions
+    assert benchmark.json()["disclosure_policy"] == "baseline_7_weakest_3_strongest"
+    assert benchmark.json()["private_icp_count"] == 10
     current = original_get("http://localhost/arena/v1/current")
     assert current.status_code == 200
     assert row["king_outcome"] == "no_king"

@@ -813,6 +813,52 @@ def test_stage_decision_rejects_unproven_or_contradictory_observations(
     )
 
 
+@pytest.mark.parametrize(
+    ("requested", "observed", "quote"),
+    [
+        (
+            "Public",
+            "Public",
+            "Acme will be publicly traded on Nasdaq next year.",
+        ),
+        (
+            "Public",
+            "Public",
+            "Acme shares will be listed on Nasdaq next year.",
+        ),
+        (
+            "Private Equity",
+            "Private Equity",
+            "Acme will be acquired by a private-equity firm as controlling "
+            "owner next year.",
+        ),
+    ],
+)
+def test_future_primary_stage_claims_are_unavailable_through_full_reverify_decision(
+    requested,
+    observed,
+    quote,
+):
+    verdict = _explicitly_unproven_fit_verdict()
+    verdict.update(
+        observed_company_stage=observed,
+        stage_matches=True,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote=quote,
+    )
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        requested.casefold(),
+        icp=_icp(company_stage=requested),
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+
+
 def test_web_dimension_matches_require_citations_and_bound_identity():
     company = _company(linkedin="https://linkedin.com/company/acme")
     icp = _icp()

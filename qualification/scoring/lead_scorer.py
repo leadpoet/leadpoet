@@ -380,7 +380,7 @@ _SCORER_REVERIFY_SYSTEM_PROMPT = (
 _STAGE_PROOF_NEGATED_OR_UNCERTAIN_RE = re.compile(
     r"\b(?:not|never|no|without|unconfirmed|rumou?red|plans?|planned|"
     r"planning|proposed|future|seeks?|seeking|expects?|expected|targets?|"
-    r"targeted|might|could|would)\b(?:\W+\w+){0,6}\W*$",
+    r"targeted|might|could|would|will)\b(?:\W+\w+){0,6}\W*$",
     re.I,
 )
 _STAGE_PROOF_HISTORICAL_RE = re.compile(

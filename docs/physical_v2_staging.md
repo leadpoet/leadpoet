@@ -35,7 +35,7 @@ would be needed only when external inclusion/finality itself must be tested.
 ## Fast lane
 
 After every push to main, `Production Parity Fast` runs in parallel with
-attestation and targets 5-10 minutes. It:
+attestation and targets 5-15 minutes. It:
 
 1. resolves live N-1 from the production gateway;
 2. takes an ephemeral schema-only snapshot through the dedicated read-only

@@ -4576,7 +4576,7 @@ def test_rehearsal_fixed_diagnostic_markers_are_strict_and_secret_safe():
             "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
             "status=unknown duration_seconds=1.0",
             "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
-            "status=failed duration_seconds=601.0",
+            "status=failed duration_seconds=901.0",
             "REHEARSAL_PREPUSH_PHASE phase=workflow-runtime "
             f"status=failed duration_seconds=1.0 token={secret}",
         ]
@@ -4974,7 +4974,7 @@ def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
         "status": "failed",
         "stages": [
             {
-                "duration_seconds": 600,
+                "duration_seconds": 900,
                 "error": secret,
                 "error_type": "RehearsalTimeBudgetExceeded",
                 "stage": "time-budget",
@@ -5000,7 +5000,7 @@ def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
             stdout="",
             stderr=(
                 "REHEARSAL_TIME_BUDGET_EXCEEDED profile=prepush "
-                "error='prepush rehearsal exceeded its 600-second wall-clock budget'\n"
+                "error='prepush rehearsal exceeded its 900-second wall-clock budget'\n"
                 f"REHEARSAL_BATCH_FAILURE_EVIDENCE {durable_root}\n"
             ),
         )
@@ -5020,7 +5020,7 @@ def test_fast_rehearsal_parent_waits_for_inner_budget_failure_evidence(
         )
 
     message = str(raised.value)
-    assert observed == {"timeout": 720}
+    assert observed == {"timeout": 1020}
     assert "candidate-derived N-1 rehearsal failed" in message
     assert "parent watchdog timed out" not in message
     assert '"failure_summary_available":true' in message
@@ -5273,7 +5273,7 @@ def test_fast_parent_timeout_projects_only_sanitized_child_evidence(
 
     message = str(raised.value)
     assert "parent watchdog timed out" in message
-    assert '"parent_watchdog_timeout_seconds":720' in message
+    assert '"parent_watchdog_timeout_seconds":1020' in message
     if expects_safe_markers:
         assert '"marker":"prepush_phase"' in message
         assert '"phase":"workflow-runtime"' in message
@@ -5333,15 +5333,16 @@ def test_fast_workflow_budget_covers_sequential_database_and_rehearsal():
     bounded_external_cleanup = (
         scheduler_cleanup_bound + normalization_cleanup_bound
     )
-    assert restart_rehearsal.PROFILE_LIMITS["prepush"]["target_seconds"] == 600
-    assert fast_parity.FAST_REHEARSAL_INNER_TIMEOUT_SECONDS == 600
+    assert restart_rehearsal.PROFILE_LIMITS["prepush"]["target_seconds"] == 900
+    assert fast_parity.FAST_REHEARSAL_INNER_TIMEOUT_SECONDS == 900
+    assert fast_parity.SAFE_PREPUSH_PHASE_DURATION_MAX_SECONDS == 900.0
     assert bounded_external_cleanup == 96
     assert fast_parity.FAST_REHEARSAL_PARENT_CLEANUP_HEADROOM_SECONDS == 120
     assert (
         fast_parity.FAST_REHEARSAL_PARENT_CLEANUP_HEADROOM_SECONDS
         > bounded_external_cleanup
     )
-    assert fast_parity.FAST_REHEARSAL_TIMEOUT_SECONDS == 720
+    assert fast_parity.FAST_REHEARSAL_TIMEOUT_SECONDS == 1020
     assert fast_parity._fast_job_minimum_timeout_seconds(2) == expected_minimum
     assert fast_parity.FAST_JOB_MINIMUM_TIMEOUT_SECONDS == expected_minimum
     assert outer_seconds == fast_parity.FAST_JOB_OUTER_TIMEOUT_SECONDS

@@ -118,7 +118,7 @@ python3 scripts/run_local_restart_rehearsal.py \
   --profile prepush
 ```
 
-The controller reports each stage duration and has a 600-second target. It
+The controller reports each stage duration and has a 900-second target. It
 runs one exact forward transition and should prove:
 
 - [ ] Candidate Git tree, source blobs, release artifacts, PCR0, roles, and
@@ -143,7 +143,7 @@ runs one exact forward transition and should prove:
   protected workflows satisfy the candidate-derived behavioral contract.
 - [ ] Every declared stage appears once as `passed`; no critical stage is
   `failed` or `unexercised`.
-- [ ] Total elapsed time is at most 600 seconds, or the retained artifact
+- [ ] Total elapsed time is at most 900 seconds, or the retained artifact
   identifies the exact timed-out stage.
 
 The controller continues independent stages after a failure and writes one

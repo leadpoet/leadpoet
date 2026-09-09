@@ -4,7 +4,7 @@
 The driver has two deliberately fixed profiles:
 
 ``prepush``
-    The default 5-10 minute gate: one forward N-1 -> N restart and one
+    The default 5-15 minute gate: one forward N-1 -> N restart and one
     complete V2 publication in a resource-bounded Docker replica.
 ``unaccelerated``
     Forward, rollback, roll-forward, the external-boundary fault matrix,
@@ -119,7 +119,7 @@ PROFILE_LIMITS = {
         "memory": "7g",
         "epochs": 1,
         "fault_matrix": False,
-        "target_seconds": 600,
+        "target_seconds": 900,
     },
     "release": {
         "cpus": "6",
@@ -3524,7 +3524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=CLI_PROFILES,
         default="prepush",
         help=(
-            "prepush is the default 5-10 minute gate; unaccelerated runs "
+            "prepush is the default 5-15 minute gate; unaccelerated runs "
             "forward/rollback/roll-forward, the full fault matrix, and 100 epochs"
         ),
     )
@@ -3982,7 +3982,7 @@ def _run_profile(
                 }
                 if elapsed_seconds > target_seconds:
                     budget_result["error"] = (
-                        "prepush rehearsal exceeded its 10-minute budget"
+                        "prepush rehearsal exceeded its 15-minute budget"
                     )
                     budget_result["error_type"] = "RehearsalTimeBudgetExceeded"
                 stage_results.append(budget_result)

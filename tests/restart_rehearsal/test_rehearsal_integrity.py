@@ -4375,7 +4375,7 @@ def test_profiles_are_fixed_and_fit_the_developer_docker_budget() -> None:
             "memory": "7g",
             "epochs": 1,
             "fault_matrix": False,
-            "target_seconds": 600,
+            "target_seconds": 900,
         },
         "release": {
             "cpus": "6",
@@ -4385,6 +4385,86 @@ def test_profiles_are_fixed_and_fit_the_developer_docker_budget() -> None:
             "target_seconds": None,
         },
     }
+
+
+def test_prepush_total_budget_wraps_profile_preparation_and_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    events: list[tuple[str, int | None]] = []
+
+    @contextmanager
+    def fixed_context(*_args, **_kwargs):
+        yield tmp_path
+
+    @contextmanager
+    def budget(seconds: int | None):
+        events.append(("budget-enter", seconds))
+        try:
+            yield
+        finally:
+            events.append(("budget-exit", seconds))
+            raise rehearsal.RehearsalTimeBudgetExceeded(
+                f"prepush rehearsal exceeded its {seconds}-second wall-clock budget"
+            )
+
+    def prepare_profile(*_args, **_kwargs) -> int:
+        events.append(("profile-preparation", None))
+        return 0
+
+    monkeypatch.setattr(rehearsal, "_exclusive_rehearsal_lock", fixed_context)
+    monkeypatch.setattr(rehearsal, "_isolated_docker_client_config", fixed_context)
+    monkeypatch.setattr(rehearsal, "_profile_time_limit", budget)
+    monkeypatch.setattr(rehearsal, "_run_profile", prepare_profile)
+
+    assert rehearsal.main(["--profile", "prepush"]) == 1
+    assert events == [
+        ("budget-enter", 900),
+        ("profile-preparation", None),
+        ("budget-exit", 900),
+    ]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "exceeded its 900-second wall-clock budget" in captured.err
+
+
+def test_profile_time_limit_arms_exact_900_second_alarm(monkeypatch) -> None:
+    previous_handler = object()
+    installed: dict[int, object] = {}
+    timers: list[tuple[int, float]] = []
+
+    monkeypatch.setattr(
+        rehearsal.signal,
+        "getsignal",
+        lambda signal_number: previous_handler,
+    )
+
+    def install_handler(signal_number: int, handler: object) -> object:
+        installed[signal_number] = handler
+        return previous_handler
+
+    def set_timer(timer_kind: int, seconds: float, *_args) -> tuple[float, float]:
+        timers.append((timer_kind, seconds))
+        return (0.0, 0.0)
+
+    monkeypatch.setattr(rehearsal.signal, "signal", install_handler)
+    monkeypatch.setattr(rehearsal.signal, "setitimer", set_timer)
+
+    with pytest.raises(
+        rehearsal.RehearsalTimeBudgetExceeded,
+        match="exceeded its 900-second wall-clock budget",
+    ):
+        with rehearsal._profile_time_limit(900):
+            handler = installed[rehearsal.signal.SIGALRM]
+            assert callable(handler)
+            handler(rehearsal.signal.SIGALRM, None)
+
+    assert timers == [
+        (rehearsal.signal.ITIMER_REAL, 900.0),
+        (rehearsal.signal.ITIMER_REAL, 0.0),
+    ]
+    assert installed[rehearsal.signal.SIGALRM] is previous_handler
 
 
 def test_rehearsal_base_images_are_immutable_platform_children() -> None:

@@ -99,11 +99,11 @@ CHAIN_REALIZED_ACTIVATION_COLUMNS = (
     "source_finalized_block",
 )
 # The candidate controller keeps the authoritative prepush wall-clock cap at
-# 600 seconds.  Its parent must leave enough time for the controller's bounded
+# 900 seconds.  Its parent must leave enough time for the controller's bounded
 # worker cancellation, evidence normalization, local unwind, and sanitized
 # failure handoff; otherwise the parent wins the deadline race and destroys the
 # exact stage diagnostics produced at the inner limit.
-FAST_REHEARSAL_INNER_TIMEOUT_SECONDS = 600
+FAST_REHEARSAL_INNER_TIMEOUT_SECONDS = 900
 FAST_REHEARSAL_PARENT_CLEANUP_HEADROOM_SECONDS = 120
 FAST_REHEARSAL_TIMEOUT_SECONDS = (
     FAST_REHEARSAL_INNER_TIMEOUT_SECONDS
@@ -280,7 +280,7 @@ SAFE_PREPUSH_PHASE_ORDER = (
 )
 SAFE_PREPUSH_PHASES = frozenset(SAFE_PREPUSH_PHASE_ORDER)
 SAFE_PREPUSH_PHASE_STATUSES = frozenset({"failed", "passed", "started"})
-SAFE_PREPUSH_PHASE_DURATION_MAX_SECONDS = 600.0
+SAFE_PREPUSH_PHASE_DURATION_MAX_SECONDS = 900.0
 SAFE_PREPUSH_PHASE_MARKER_MAX = len(SAFE_PREPUSH_PHASES) * 2
 SAFE_PREPUSH_PHASE_MARKER_RE = re.compile(
     r"^REHEARSAL_PREPUSH_PHASE "

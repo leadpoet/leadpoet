@@ -1622,7 +1622,10 @@ def _repair_testnet401_host_profile(
         ["nitro-cli", "describe-enclaves"], check=True,
         capture_output=True, text=True,
     )
-    if _json.loads(after.stdout) != _json.loads(described.stdout):
+    after_enclaves = sorted(
+        _json.loads(after.stdout), key=lambda item: int(item["EnclaveCID"])
+    )
+    if after_enclaves != enclaves:
         raise RuntimeError("host profile repair changed enclave identity")
     return {
         "schema_version": HOST_PROFILE_REPAIR_SCHEMA_VERSION,
@@ -1644,15 +1647,44 @@ def host_profile_repair_program(
 ) -> str:
     if candidate_sha != HOST_PROFILE_REPAIR_CANDIDATE_SHA:
         raise TemporaryHostError("host profile repair is not for the frozen candidate")
-    return (
-        "import json\n"
+    source_lines, source_start = inspect.getsourcelines(
+        _repair_testnet401_host_profile
+    )
+    preamble = (
+        "import json,os,traceback\n"
         f"HOST_PROFILE_REPAIR_CANDIDATE_SHA={HOST_PROFILE_REPAIR_CANDIDATE_SHA!r}\n"
         f"HOST_PROFILE_REPAIR_SCHEMA_VERSION={HOST_PROFILE_REPAIR_SCHEMA_VERSION!r}\n"
-        + inspect.getsource(_repair_testnet401_host_profile)
-        + "\nprint(json.dumps(_repair_testnet401_host_profile("
+        f"REPAIR_SOURCE_START={source_start}\n"
+        "REPAIR_PROGRAM_FUNCTION_LINE=6\n"
+    )
+    invocation = (
+        "_repair_testnet401_host_profile("
         f"repository={SOURCE_REPOSITORY!r},config_path={NATIVE_CONFIG!r},"
         f"expected_run_id={run_id!r},expected_candidate_sha={candidate_sha!r},"
-        f"expected_instance_id={instance_id!r}),sort_keys=True))\n"
+        f"expected_instance_id={instance_id!r})"
+    )
+    return (
+        preamble
+        + "".join(source_lines)
+        + "\ntry:\n"
+        + f"    result={invocation}\n"
+        + "except Exception as exc:\n"
+        + "    frames=traceback.extract_tb(exc.__traceback__)\n"
+        + "    own=[f for f in frames if f.name=='_repair_testnet401_host_profile']\n"
+        + "    frame=own[-1] if own else frames[-1]\n"
+        + "    if frame.filename=='<string>':\n"
+        + "        line=REPAIR_SOURCE_START+frame.lineno-REPAIR_PROGRAM_FUNCTION_LINE\n"
+        + "        location='scripts/temporary_testnet_signing_host.py:'+str(line)\n"
+        + "    else:\n"
+        + "        name=os.path.basename(frame.filename)\n"
+        + "        allowed={'bootstrap_temporary_testnet_weights_host.py','hotkey_authority_v2.py','temporary_testnet_signing_host.py'}\n"
+        + "        location=(name+':'+str(frame.lineno)) if name in allowed else ''\n"
+        + "    failure={'status':'failed','error_type':type(exc).__name__,"
+        + "'operation':'host_profile_repair','code':'host_profile_repair_failed'}\n"
+        + "    if location: failure['location']=location\n"
+        + "    print(json.dumps(failure,sort_keys=True),flush=True)\n"
+        + "    raise SystemExit(1)\n"
+        + "print(json.dumps(result,sort_keys=True))\n"
     )
 
 

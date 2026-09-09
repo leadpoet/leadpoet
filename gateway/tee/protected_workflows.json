@@ -612,7 +612,7 @@
       "symbol": "attest_historical_champion_settlement_v2"
     },
     {
-      "ast_sha256": "sha256:7bff0de480fe1470495f67b6274a9d718c6169b7ef0f25300d8c6593309aa5b1",
+      "ast_sha256": "sha256:1b343c2b356f670b9482eddcb38af55692283a29eb77988904836990d14dc4bd",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -4112,7 +4112,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:13b49ecae1cfc003deccbca1f84f46d0ecd72345c048c069edd198e482f0bf46",
-  "protected_source_commit": "555fb4e95eeadd5968c8c14ada65c412a4c9b500",
+  "manifest_hash": "sha256:690fc5c8849c3c6dd83d2cefd349d60c42e36bad8223b8b676774be5b2f9ac5c",
+  "protected_source_commit": "79f6ea3af6ab226c7a67a7f1859a80e8ec29b04f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

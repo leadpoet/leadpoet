@@ -262,6 +262,8 @@ def _snapshot(*, bypass_rls: bool = True, capture_mode: str = "full") -> dict:
             ),
             "storage": "ephemeral-encrypted-volume",
             "persisted": False,
+            "ownership": "preserved",
+            "acl": "preserved",
             "sha256": HASH,
             "size_bytes": 40 * 1024 * 1024,
         },
@@ -312,13 +314,27 @@ def test_snapshot_binds_real_scale_future_day_and_readonly_role():
     assert value["database"]["weight_history_scope"]["expected_rows"] == 571
 
 
-def test_snapshot_v5_rejects_v4_instead_of_reinterpreting_old_metadata():
+def test_snapshot_v6_rejects_v5_instead_of_reinterpreting_old_metadata():
     document = _snapshot()
-    document["schema_version"] = "leadpoet.production_parity_snapshot.v4"
+    document["schema_version"] = "leadpoet.production_parity_snapshot.v5"
     body = {key: item for key, item in document.items() if key != "manifest_hash"}
     document["manifest_hash"] = sha256_json(body)
 
     with pytest.raises(ProductionParityError, match="snapshot schema differs"):
+        validate_snapshot_manifest(
+            document,
+            now=datetime(2026, 8, 15, 12, 30, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize("field", ("ownership", "acl"))
+def test_snapshot_v6_requires_native_archive_metadata(field):
+    document = _snapshot()
+    document["archive"][field] = "stripped"
+    body = {key: item for key, item in document.items() if key != "manifest_hash"}
+    document["manifest_hash"] = sha256_json(body)
+
+    with pytest.raises(ProductionParityError, match="archive format is unsupported"):
         validate_snapshot_manifest(
             document,
             now=datetime(2026, 8, 15, 12, 30, tzinfo=timezone.utc),
@@ -1321,102 +1337,6 @@ def test_schema_only_source_add_cutover_rejects_malformed_identity(field, value)
         parity_snapshot._schema_only_source_add_maintenance_sql(migration)
 
 
-def test_schema_only_source_add_acl_is_exact_migration_bound():
-    migrations = parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
-    sql = parity_snapshot._schema_only_source_add_acl_sql(migrations).decode(
-        "utf-8"
-    )
-
-    duplicate_privacy_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/171-research-lab-source-add-duplicate-privacy.sql"
-        )
-    )
-    assert duplicate_privacy_migration["sha256"] in sql
-    provenance_leg1_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/175-research-lab-source-add-provenance-leg1.sql"
-        )
-    )
-    assert provenance_leg1_migration["sha256"] in sql
-    provenance_origin_repair_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
-        )
-    )
-    assert provenance_origin_repair_migration["sha256"] in sql
-    provenance_authority_acl_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/177-research-lab-source-add-provenance-authority-acl.sql"
-        )
-    )
-    assert provenance_authority_acl_migration["sha256"] in sql
-    miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
-        "scripts/178-research-lab-source-add-miner-status.sql"
-    )
-    provisioned_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
-        "scripts/186-research-lab-source-add-provisioned-status.sql"
-    )
-    assert miner_status_migration["sha256"] in sql
-    assert provisioned_status_migration["sha256"] in sql
-    assert (
-        "public.research_lab_source_add_admit_v3"
-        "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
-    ) in sql
-    assert "public.research_lab_source_add_finish_work" in sql
-    assert "public.research_lab_source_add_begin_provider_execution" in sql
-    assert "public.research_lab_source_add_requeue_provenance_v2" in sql
-    assert "public.enforce_research_lab_source_add_leg1_obligation_v2()" in sql
-    assert "public.research_lab_source_add_finalize_leg1_v4" in sql
-    assert "public.research_lab_source_add_post_accept_leg1_contract_v4()" in sql
-    assert (
-        "public.research_lab_source_add_miner_status_page_v1"
-        "(text,text,integer)"
-    ) in sql
-    assert "public.research_lab_source_add_miner_status_contract_v1()" in sql
-    assert (
-        "REVOKE ALL ON TABLE public.research_lab_source_add_miner_status_v1"
-        in sql
-    )
-    assert (
-        "GRANT SELECT ON TABLE public.research_lab_source_add_miner_status_v1"
-        in sql
-    )
-    assert "'security_invoker=true', 'security_barrier=true'" in sql
-    assert "miner_status_view_acl_bound" in sql
-    assert "provenance_leg1_trigger_authority_bound" in sql
-    assert "provenance_leg1_view_authority_bound" in sql
-    assert "provenance_origin_repair_authority_bound" in sql
-    assert "provenance_leg1_policy_bound" in sql
-    assert "schema-only SOURCE_ADD ACL function inventory differs" in sql
-    assert "schema-only SOURCE_ADD ACL readback differs" in sql
-    assert "pg_catalog.aclexplode" in sql
-    assert "FROM PUBLIC, anon, authenticated, service_role" in sql
-    assert "TO PUBLIC" in sql
-    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 79
-
-    rewritten = [dict(item) for item in migrations]
-    next(
-        item
-        for item in rewritten
-        if item["path"]
-        == "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql"
-    )["sha256"] = "sha256:" + "0" * 64
-    with pytest.raises(
-        ProductionParityError,
-        match="schema-only SOURCE_ADD ACL migration identity differs",
-    ):
-        parity_snapshot._schema_only_source_add_acl_sql(rewritten)
-
-    extended = [
-        *migrations,
-        {
-            **migrations[-1],
-            "path": "scripts/179-next.sql",
-            "sequence": 179,
-        },
-    ]
-    parity_snapshot._schema_only_source_add_acl_sql(extended)
 
 
 def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypatch):
@@ -1457,127 +1377,6 @@ def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypa
     assert "current_day_benchmark_bundle_count" not in result
 
 
-def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
-    monkeypatch,
-):
-    expectations = parity_snapshot._schema_only_source_add_acl_expectations()
-    duplicate_privacy_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/171-research-lab-source-add-duplicate-privacy.sql"
-        )
-    )
-    provenance_leg1_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/175-research-lab-source-add-provenance-leg1.sql"
-        )
-    )
-    provenance_origin_repair_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
-        )
-    )
-    provenance_authority_acl_migration = (
-        parity_snapshot._schema_only_source_add_acl_migration(
-            "scripts/177-research-lab-source-add-provenance-authority-acl.sql"
-        )
-    )
-    miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
-        "scripts/178-research-lab-source-add-miner-status.sql"
-    )
-    provisioned_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
-        "scripts/186-research-lab-source-add-provisioned-status.sql"
-    )
-    readback = {
-        "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
-        "migration_count": len(
-            parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
-        ),
-        "migration_171_sha256": duplicate_privacy_migration["sha256"],
-        "migration_175_sha256": provenance_leg1_migration["sha256"],
-        "migration_176_sha256": provenance_origin_repair_migration["sha256"],
-        "migration_177_sha256": provenance_authority_acl_migration["sha256"],
-        "migration_178_sha256": miner_status_migration["sha256"],
-        "migration_186_sha256": provisioned_status_migration["sha256"],
-        "function_signature_count": len(expectations),
-        "service_role_function_count": sum(
-            privileges["service_role_callable"]
-            for privileges in expectations.values()
-        ),
-        "non_service_role_function_count": sum(
-            not privileges["service_role_callable"]
-            for privileges in expectations.values()
-        ),
-        "public_function_count": sum(
-            privileges["public_callable"] for privileges in expectations.values()
-        ),
-        "anon_callable_function_count": sum(
-            privileges["anon_callable"] for privileges in expectations.values()
-        ),
-        "authenticated_callable_function_count": sum(
-            privileges["authenticated_callable"]
-            for privileges in expectations.values()
-        ),
-        "miner_status_view_acl_bound": True,
-        "function_acl_inventory": expectations,
-        "duplicate_privacy_authority_bound": True,
-        "duplicate_privacy_permissions_bound": True,
-        "post_accept_leg1_authority_bound": True,
-        "provenance_leg1_trigger_authority_bound": True,
-        "provenance_leg1_view_authority_bound": True,
-        "provenance_origin_repair_authority_bound": True,
-        "provenance_leg1_policy_bound": True,
-        "post_accept_leg1_permissions_bound": True,
-        "claim_control_authority_bound": True,
-        "claim_control_permissions_bound": True,
-    }
-
-    monkeypatch.setattr(parity_snapshot, "safe_database_target", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        parity_snapshot,
-        "_postgres_env",
-        lambda *_a, **_k: ({}, "127.0.0.1"),
-    )
-
-    def postgres_readback(*_args, **_kwargs):
-        return subprocess.CompletedProcess(
-            (), 0, stdout=json.dumps(readback).encode("utf-8"), stderr=b""
-        )
-
-    monkeypatch.setattr(parity_snapshot, "_run_postgres", postgres_readback)
-    evidence = parity_snapshot.restore_schema_only_source_add_acl_contract(
-        target_dsn="postgresql://postgres:x@127.0.0.1/leadpoet_parity_test",
-        production_host="db.production.example",
-        candidate_migrations=parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS,
-    )
-    assert "function_acl_inventory" not in evidence
-    assert evidence["function_acl_inventory_sha256"] == sha256_json(
-        {"functions": expectations}
-    )
-
-    readback["function_acl_inventory"] = {
-        **expectations,
-        "public.research_lab_source_add_finish_work"
-        "(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,"
-        "timestamp with time zone,boolean)": {
-            **expectations[
-                "public.research_lab_source_add_finish_work"
-                "(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,"
-                "timestamp with time zone,boolean)"
-            ],
-            "anon_callable": True,
-        },
-    }
-    with pytest.raises(
-        ProductionParityError,
-        match="schema-only SOURCE_ADD ACL readback differs",
-    ):
-        parity_snapshot.restore_schema_only_source_add_acl_contract(
-            target_dsn="postgresql://postgres:x@127.0.0.1/leadpoet_parity_test",
-            production_host="db.production.example",
-            candidate_migrations=(
-                parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
-            ),
-        )
 
 
 def test_full_restore_does_not_stage_schema_only_source_add_state(
@@ -1651,6 +1450,8 @@ def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
         "service_role",
         "arena_owner_role",
         "arena_service_role",
+        "supabase_admin_role",
+        "parity_reader_placeholder_role",
         "auth_schema",
         "extensions_schema",
         "pgcrypto_extension",

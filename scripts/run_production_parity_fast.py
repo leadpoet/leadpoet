@@ -56,7 +56,6 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 from scripts.production_parity_snapshot import (  # noqa: E402
     DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
-    restore_schema_only_source_add_acl_contract,
     restore_snapshot,
     verify_snapshot,
 )
@@ -969,11 +968,15 @@ DO $$ BEGIN CREATE ROLE authenticated NOLOGIN INHERIT; EXCEPTION WHEN duplicate_
 DO $$ BEGIN CREATE ROLE service_role NOLOGIN INHERIT BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE lab_arena_owner NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE lab_arena_service NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE supabase_admin NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE leadpoet_parity_reader NOLOGIN NOINHERIT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER ROLE anon WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE authenticated WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE service_role WITH NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
 ALTER ROLE lab_arena_owner WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE lab_arena_service WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE supabase_admin WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE leadpoet_parity_reader WITH NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
@@ -1035,6 +1038,18 @@ SELECT json_build_object(
       AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
       AND NOT rolbypassrls
   ),
+  'supabase_admin_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin'
+      AND NOT rolcanlogin AND NOT rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND NOT rolbypassrls
+  ),
+  'parity_reader_placeholder_role', EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'leadpoet_parity_reader'
+      AND NOT rolcanlogin AND NOT rolinherit AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
+      AND NOT rolbypassrls
+  ),
   'auth_schema', to_regnamespace('auth') IS NOT NULL,
   'extensions_schema', to_regnamespace('extensions') IS NOT NULL,
   'pgcrypto_extension', EXISTS (
@@ -1060,6 +1075,8 @@ SELECT json_build_object(
             "service_role",
             "arena_owner_role",
             "arena_service_role",
+            "supabase_admin_role",
+            "parity_reader_placeholder_role",
             "auth_schema",
             "extensions_schema",
             "pgcrypto_extension",
@@ -1113,14 +1130,7 @@ BEGIN
   END IF;
 END
 $roles$;
-GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA extensions TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_role;
-GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO service_role;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_role;
 """
         self._psql(role_sql)
         db_uri = (
@@ -2584,11 +2594,6 @@ def _run_database_lane(
             raise ProductionParityError(
                 "fast database lane requires a schema-only snapshot"
             )
-        source_add_acl = restore_schema_only_source_add_acl_contract(
-            target_dsn=database.target_dsn,
-            production_host=production_host,
-            candidate_migrations=contract["migrations"],
-        )
         schema = verify_required_supabase_v2_schema(
             {
                 "SUPABASE_URL": supabase_url,
@@ -2621,7 +2626,6 @@ def _run_database_lane(
                 **restore,
                 "clone_prerequisites": prerequisites,
                 "clone_restore_contract": restore_contract,
-                "schema_only_source_add_acl": source_add_acl,
                 "production_activation_authority": activation_live_evidence,
             },
             "schema": schema,

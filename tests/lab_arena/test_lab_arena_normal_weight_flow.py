@@ -15,7 +15,12 @@ from lab_arena import signing
 from lab_arena.store import ArenaStoreError
 from lab_arena.promotion import GitPromoter
 from lab_arena.validator import ArenaWeightOrchestrator, ArenaWeightPaths
-from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import (
+    DEFAULT_MIGRATIONS,
+    LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
+    LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
+    database_with_lab_arena_migration,
+)
 from tests.lab_arena.test_lab_arena_service_round import (
     Harness, _run_stage_one_to_scoring, _start_round, promotion_repository,
     assert_canary_absent,
@@ -77,7 +82,16 @@ TEMPORARY_WEIGHT_TRIGGER_FUNCTIONS = (
 
 @pytest.fixture(scope="module")
 def integrated_database():
-    database = database_with_lab_arena_migration(DEFAULT_MIGRATIONS[:-1])
+    staged_migrations = tuple(
+        migration
+        for migration in DEFAULT_MIGRATIONS
+        if migration
+        not in (
+            LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
+            LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
+        )
+    )
+    database = database_with_lab_arena_migration(staged_migrations)
     psycopg2, dsn = next(database)
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True
@@ -163,7 +177,16 @@ def integrated_database():
                 "CREATE FUNCTION public.research_lab_compact_checkpoint_graph_contract_v1() "
                 "RETURNS JSONB LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb'"
             )
-            cursor.execute((SCRIPTS / DEFAULT_MIGRATIONS[-1]).read_text(encoding="utf-8"))
+            cursor.execute(
+                (
+                    SCRIPTS / LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION
+                ).read_text(encoding="utf-8")
+            )
+            cursor.execute(
+                (
+                    SCRIPTS / LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION
+                ).read_text(encoding="utf-8")
+            )
             cursor.execute(
                 "SELECT to_regclass('public.' || name) FROM unnest(%s::text[]) name",
                 (list(RETIRED_INCENTIVE_TABLES),),
@@ -225,7 +248,11 @@ def integrated_database():
             assert cursor.fetchall() == [
                 ("research_lab_stateful_subnet_epoch_candidates_v1",)
             ]
-            cursor.execute((SCRIPTS / DEFAULT_MIGRATIONS[-1]).read_text(encoding="utf-8"))
+            cursor.execute(
+                (
+                    SCRIPTS / LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION
+                ).read_text(encoding="utf-8")
+            )
             cursor.execute("SELECT public.lab_arena_incentive_retirement_schema_v1()")
             assert cursor.fetchone()[0]["version"] == 203
         yield psycopg2, dsn

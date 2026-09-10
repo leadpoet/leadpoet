@@ -1048,10 +1048,20 @@ def restore_snapshot(
         _database_relation_shape(env, postgres_image=postgres_image)
         if evidence["migration_delta"] else before_migrations
     )
+    _require_success(
+        _run_postgres(
+            ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-c", "ANALYZE"],
+            env=env,
+            timeout=timeout_seconds,
+            postgres_image=postgres_image,
+        ),
+        stage="restored database statistics analysis",
+    )
     return {
         **evidence,
         "database_before_migrations": before_migrations,
         "database_after_migrations": after_migrations,
+        "database_statistics_analyzed": True,
     }
 
 

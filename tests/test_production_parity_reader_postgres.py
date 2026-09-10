@@ -437,6 +437,24 @@ def test_snapshot_v6_real_capture_verify_restore_is_candidate_bound(
 ):
     _apply_migration(postgres)
     assert _bind(postgres, PASSWORD)["status"] == "bound"
+    source = _admin(postgres)
+    try:
+        with source.cursor() as cursor:
+            cursor.execute("ANALYZE public.parity_source")
+            cursor.execute(
+                "SELECT count(*) FROM pg_stats "
+                "WHERE schemaname='public' AND tablename='parity_source'"
+            )
+            assert cursor.fetchone()[0] > 0
+            cursor.execute(
+                "SELECT pg_get_userbyid(relowner), "
+                "has_table_privilege(%s, 'public.parity_source', 'SELECT') "
+                "FROM pg_class WHERE oid='public.parity_source'::regclass",
+                (READER,),
+            )
+            assert cursor.fetchone() == ("postgres", True)
+    finally:
+        source.close()
     target_database = "leadpoet_parity_snapshot_v6"
     connection = _admin(postgres)
     try:
@@ -490,6 +508,35 @@ def test_snapshot_v6_real_capture_verify_restore_is_candidate_bound(
         expected_production_host="production.test",
         postgres_image=postgres_image,
     )
+    original_run_postgres = parity_snapshot._run_postgres
+    statistics_before_analyze = []
+
+    def observe_run_postgres(command, **kwargs):
+        if list(command)[-1] == "ANALYZE":
+            clone = psycopg2.connect(
+                host="127.0.0.1",
+                port=postgres["port"],
+                dbname=target_database,
+                user="postgres",
+                password="postgres",
+            )
+            try:
+                with clone.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT count(*) FROM pg_stats "
+                        "WHERE schemaname='public' "
+                        "AND tablename='parity_source'"
+                    )
+                    statistics_before_analyze.append(cursor.fetchone()[0])
+            finally:
+                clone.close()
+        return original_run_postgres(command, **kwargs)
+
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_run_postgres",
+        observe_run_postgres,
+    )
     restored = parity_snapshot.restore_snapshot(
         root=ROOT,
         contract_path=contract_path,
@@ -522,6 +569,8 @@ def test_snapshot_v6_real_capture_verify_restore_is_candidate_bound(
     assert evidence["candidate_sha"] == contract["candidate_sha"]
     assert restored["manifest_hash"] == manifest["manifest_hash"]
     assert restored["migration_delta"] == []
+    assert restored["database_statistics_analyzed"] is True
+    assert statistics_before_analyze == [0]
     clone = psycopg2.connect(
         host="127.0.0.1",
         port=postgres["port"],
@@ -533,6 +582,18 @@ def test_snapshot_v6_real_capture_verify_restore_is_candidate_bound(
         with clone.cursor() as cursor:
             cursor.execute("SELECT id, value FROM public.parity_source")
             assert cursor.fetchall() == [(1, "shape")]
+            cursor.execute(
+                "SELECT count(*) FROM pg_stats "
+                "WHERE schemaname='public' AND tablename='parity_source'"
+            )
+            assert cursor.fetchone()[0] > 0
+            cursor.execute(
+                "SELECT pg_get_userbyid(relowner), "
+                "has_table_privilege(%s, 'public.parity_source', 'SELECT') "
+                "FROM pg_class WHERE oid='public.parity_source'::regclass",
+                (READER,),
+            )
+            assert cursor.fetchone() == ("postgres", True)
     finally:
         clone.close()
 

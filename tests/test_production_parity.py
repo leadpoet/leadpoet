@@ -21,10 +21,14 @@ from urllib.error import HTTPError
 
 import pytest
 import yaml
+import httpx
 from botocore.exceptions import ClientError
+from postgrest import SyncPostgrestClient
 
 from gateway.tee import prepare_gateway_envelopes_v2 as envelope_prepare
 from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
+from gateway.tee import verify_weight_submission_ready_v2 as weight_readiness
+from gateway.research_lab import champion_settlement_v2 as champion_settlement
 from gateway.tee.proxy_transport_preflight_v2 import (
     WorkerProxyTransportPreflightV2Error,
     verify_worker_proxy_fleets_v2,
@@ -1162,7 +1166,11 @@ def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
         postgres_image=image,
     )
 
-    assert [call["command"][0] for call in calls] == ["pg_restore", "psql"]
+    assert [call["command"][0] for call in calls] == [
+        "pg_restore",
+        "psql",
+        "psql",
+    ]
     assert all(call["postgres_image"] == image for call in calls)
     assert "--dbname=" in calls[0]["command"]
     assert "leadpoet_parity_test" not in calls[0]["command"]
@@ -1183,6 +1191,16 @@ def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
             read_only=True,
         ),
     )
+    assert calls[2]["command"] == [
+        "psql",
+        "-X",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        "ANALYZE",
+    ]
+    assert calls[2]["env"] == calls[1]["env"]
+    assert "mounts" not in calls[2]
 
 
 
@@ -2191,6 +2209,42 @@ def test_full_runner_retains_exact_bounded_initialization_stage(
                 "elapsed_seconds": 312.913,
             },
         ),
+        (
+            {
+                "stage": "validator_weight_input_storage_preflight",
+                "status": "failed",
+                "elapsed_seconds": 397.935,
+            },
+            "storage_failed",
+            {
+                "final_stage": "validator_weight_input_storage_preflight",
+                "final_status": "failed",
+                "elapsed_seconds": 397.935,
+            },
+        ),
+        (
+            {
+                "stage": "validator_weight_input_storage_preflight",
+                "status": "failed",
+                "elapsed_seconds": 397.935,
+                "commit_sha": "c" * 40,
+            },
+            "storage_failed",
+            None,
+        ),
+        (
+            {
+                "stage": "v2_runtime_bootstrap",
+                "status": "failed",
+                "elapsed_seconds": 397.935,
+            },
+            "storage_wrong_stage",
+            {
+                "final_stage": "v2_runtime_bootstrap",
+                "final_status": "failed",
+                "elapsed_seconds": 397.935,
+            },
+        ),
     ],
 )
 def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
@@ -2234,7 +2288,7 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
                 {
                     "schema_version": "leadpoet.gateway_restart_timing.v1",
                     **timing_record,
-                    "commit_sha": "b" * 40,
+                    "commit_sha": timing_record.get("commit_sha", "b" * 40),
                     "ignored_free_text": "must-not-survive",
                 }
             )
@@ -2264,6 +2318,24 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
                 "SupabaseSchemaPreflightV2Error: must-not-survive\n",
                 encoding="utf-8",
             )
+        if (
+            timing_record.get("stage") == "validator_weight_input_storage_preflight"
+            or restart_outcome == "storage_wrong_stage"
+        ):
+            log_path = Path(kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "Traceback (most recent call last):\n"
+                '  File "/run/candidate/gateway/tee/verify_weight_submission_ready_v2.py", '
+                "line 169, in verify_weight_submission_storage_readable_v2\n"
+                '  File "/run/candidate/gateway/research_lab/champion_settlement_v2.py", '
+                "line 3509, in validate_chain_realized_settlement_bootstrap_v1\n"
+                "gateway.research_lab.champion_settlement_v2."
+                "ChampionSettlementV2Error: chain realized settlement activation "
+                "source is not authoritative\n"
+                "private-query-value=must-not-survive\n",
+                encoding="utf-8",
+            )
         if restart_outcome == "timed_out":
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         if restart_outcome == "epoch_gate":
@@ -2278,7 +2350,12 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
                 "official subnet epoch block 300 or earlier; observed 312\n",
                 encoding="utf-8",
             )
-        return subprocess.CompletedProcess(command, 75)
+        return subprocess.CompletedProcess(
+            command,
+            1
+            if restart_outcome in {"storage_failed", "storage_wrong_stage"}
+            else 75,
+        )
 
     monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
     monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
@@ -2365,7 +2442,14 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
     expected = (
         {"outcome": "timed_out", "timeout_seconds": 10800}
         if restart_outcome == "timed_out"
-        else {"outcome": "exited", "returncode": 75}
+        else {
+            "outcome": "exited",
+            "returncode": (
+                1
+                if restart_outcome in {"storage_failed", "storage_wrong_stage"}
+                else 75
+            ),
+        }
     )
     if expected_timing is not None:
         expected["timing"] = expected_timing
@@ -2396,6 +2480,17 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
                 "marker": "credential_envelope_preparation_observation",
                 "phase": "schema_preflight",
                 "exception_class": "SupabaseSchemaPreflightV2Error",
+            }
+        ]
+    if expected_timing is not None and (
+        expected_timing["final_stage"]
+        == "validator_weight_input_storage_preflight"
+    ):
+        expected["observations"] = [
+            {
+                "marker": "weight_storage_preflight_observation",
+                "exception_class": "ChampionSettlementV2Error",
+                "reason": "activation_source_not_authoritative",
             }
         ]
     assert evidence["gateway_restart_diagnostic"] == expected
@@ -2955,6 +3050,208 @@ def test_credential_envelope_observations_retain_required_schema_identity(
             "phase": "schema_preflight",
             "exception_class": "SupabaseSchemaPreflightV2Error",
             **detail,
+        }
+    ]
+
+
+def test_weight_storage_preflight_observations_execute_canonical_cli(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def unavailable_activation(**_kwargs):
+        raise champion_settlement.ChampionSettlementV2Error(
+            "chain realized settlement activation is unavailable"
+        )
+
+    monkeypatch.setattr(
+        champion_settlement,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        unavailable_activation,
+    )
+    monkeypatch.setattr(
+        weight_readiness.sys,
+        "argv",
+        ["verify_weight_submission_ready_v2", "--storage-read-preflight", "--epoch", "25081"],
+    )
+    log_path = tmp_path / "storage-preflight.log"
+    _capture_failure_traceback(log_path, weight_readiness.main)
+
+    observation = full_host._weight_storage_preflight_observations(log_path)
+    assert observation == [
+        {
+            "marker": "weight_storage_preflight_observation",
+            "exception_class": "ChampionSettlementV2Error",
+            "reason": "activation_unavailable",
+        }
+    ]
+    assert "25081" not in json.dumps(observation)
+
+
+def test_weight_storage_preflight_observations_execute_postgrest_502(
+    monkeypatch,
+    tmp_path: Path,
+):
+    def empty_bad_gateway(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, content=b"", request=request)
+
+    http_client = httpx.Client(
+        base_url="http://clone.invalid",
+        transport=httpx.MockTransport(empty_bad_gateway),
+    )
+    postgrest = SyncPostgrestClient(
+        "http://clone.invalid",
+        http_client=http_client,
+    )
+
+    async def failed_clone_read(**_kwargs):
+        postgrest.from_("research_lab_chain_realized_settlement_activation_v1").select(
+            "netuid"
+        ).execute()
+
+    monkeypatch.setattr(
+        champion_settlement,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        failed_clone_read,
+    )
+    monkeypatch.setattr(
+        weight_readiness.sys,
+        "argv",
+        ["verify_weight_submission_ready_v2", "--storage-read-preflight", "--epoch", "25081"],
+    )
+    log_path = tmp_path / "postgrest-502.log"
+    try:
+        _capture_failure_traceback(log_path, weight_readiness.main)
+    finally:
+        postgrest.aclose()
+
+    observation = full_host._weight_storage_preflight_observations(log_path)
+    assert observation == [
+        {
+            "marker": "weight_storage_preflight_observation",
+            "exception_class": "APIError",
+            "reason": "storage_query_failed",
+            "http_status": 502,
+        }
+    ]
+    assert "clone.invalid" not in json.dumps(observation)
+
+
+def test_weight_storage_preflight_observations_match_canonical_sources():
+    shell = (full_host.ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    storage = (
+        full_host.ROOT / "gateway/research_lab/champion_settlement_v2.py"
+    ).read_text(encoding="utf-8")
+    readiness = (
+        full_host.ROOT / "gateway/tee/verify_weight_submission_ready_v2.py"
+    ).read_text(encoding="utf-8")
+    for message in full_host._WEIGHT_STORAGE_PREFLIGHT_EXACT_REASONS:
+        assert message in storage or message in readiness
+    for line in full_host._WEIGHT_STORAGE_PREFLIGHT_FIXED_LINES:
+        assert line in shell
+
+
+@pytest.mark.parametrize(
+    ("exception_line", "expected"),
+    [
+        (
+            "postgrest.exceptions.APIError: {'message': 'must-not-survive', "
+            "'code': '42501', 'details': 'private-row'}",
+            {
+                "exception_class": "APIError",
+                "reason": "storage_query_failed",
+                "storage_code": "42501",
+            },
+        ),
+        (
+            "httpx.HTTPStatusError: Server error '502 Bad Gateway' for url "
+            "'https://must-not-survive.example/rest/v1/private'",
+            {
+                "exception_class": "HTTPStatusError",
+                "reason": "storage_http_status_failed",
+                "http_status": 502,
+            },
+        ),
+        (
+            "postgrest.exceptions.APIError: {'message': \"nested 'code': 502 "
+            "must-not-survive\", 'code': 'PRIVATE', 'details': None}",
+            {
+                "exception_class": "APIError",
+                "reason": "storage_query_failed",
+            },
+        ),
+        (
+            "postgrest.exceptions.APIError: {'message': 'must-not-survive', "
+            "'code': '502', 'details': None}",
+            {
+                "exception_class": "APIError",
+                "reason": "storage_query_failed",
+            },
+        ),
+    ],
+)
+def test_weight_storage_preflight_observations_retain_only_safe_status(
+    tmp_path: Path,
+    exception_line: str,
+    expected: dict,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/verify_weight_submission_ready_v2.py", '
+        "line 169, in verify_weight_submission_storage_readable_v2\n"
+        f"{exception_line}\n",
+        encoding="utf-8",
+    )
+    observation = full_host._weight_storage_preflight_observations(log_path)
+    assert observation == [
+        {"marker": "weight_storage_preflight_observation", **expected}
+    ]
+    assert "must-not-survive" not in json.dumps(observation)
+
+
+def test_weight_storage_preflight_observations_reject_unsafe_or_stale_input(
+    tmp_path: Path,
+):
+    private_log = tmp_path / "private.log"
+    private_log.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/verify_weight_submission_ready_v2.py", '
+        "line 169, in verify_weight_submission_storage_readable_v2\n"
+        "ChampionSettlementV2Error: chain realized settlement history is incomplete\n"
+        "RuntimeError: must-not-survive-later-failure\n",
+        encoding="utf-8",
+    )
+    assert full_host._weight_storage_preflight_observations(private_log) == []
+
+    symlink = tmp_path / "gateway.log"
+    symlink.symlink_to(private_log)
+    assert full_host._weight_storage_preflight_observations(symlink) == []
+    fifo = tmp_path / "gateway.fifo"
+    os.mkfifo(fifo)
+    assert full_host._weight_storage_preflight_observations(fifo) == []
+
+    malformed = tmp_path / "oversized.log"
+    malformed.write_bytes(
+        b"private=" + b"x" * (full_host._GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES + 1024)
+    )
+    assert full_host._weight_storage_preflight_observations(malformed) == []
+
+
+@pytest.mark.parametrize(
+    ("line", "reason"),
+    sorted(full_host._WEIGHT_STORAGE_PREFLIGHT_FIXED_LINES.items()),
+)
+def test_weight_storage_preflight_observations_classify_fixed_shell_failures(
+    tmp_path: Path,
+    line: str,
+    reason: str,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(line + "\nprivate=must-not-survive\n", encoding="utf-8")
+    assert full_host._weight_storage_preflight_observations(log_path) == [
+        {
+            "marker": "weight_storage_preflight_observation",
+            "reason": reason,
         }
     ]
 

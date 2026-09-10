@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import base64
 import binascii
@@ -356,6 +357,94 @@ _CREDENTIAL_AWS_ERROR_CODES = frozenset(
     }
 )
 _CREDENTIAL_AWS_OPERATIONS = frozenset({"Encrypt"})
+_WEIGHT_STORAGE_PREFLIGHT_EXCEPTION_CLASSES = frozenset(
+    {
+        "APIError",
+        "AttestedV2StoreError",
+        "ChampionSettlementV2Error",
+        "ConnectError",
+        "ConnectTimeout",
+        "HTTPStatusError",
+        "PoolTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "TimeoutException",
+        "WeightSubmissionReadinessV2Error",
+    }
+)
+_WEIGHT_STORAGE_PREFLIGHT_EXACT_REASONS = {
+    "chain realized settlement bootstrap policy is invalid": "bootstrap_policy_invalid",
+    "chain realized settlement activation is unavailable": "activation_unavailable",
+    "chain realized settlement activation is invalid": "activation_invalid",
+    "chain realized settlement bootstrap target predates activation": (
+        "target_predates_activation"
+    ),
+    "chain realized settlement history is invalid": "settlement_history_invalid",
+    "chain realized settlement history is incomplete": (
+        "settlement_history_incomplete"
+    ),
+    "chain realized settlement history is ahead of target": (
+        "settlement_history_ahead_of_target"
+    ),
+    "chain-realized settlement backlog exceeds policy": "backlog_exceeds_policy",
+    "chain realized settlement activation source is unavailable": (
+        "activation_source_unavailable"
+    ),
+    "chain realized settlement activation source is not authoritative": (
+        "activation_source_not_authoritative"
+    ),
+    "chain-realized settlement frontier disagrees with authority readiness": (
+        "settlement_frontier_disagrees"
+    ),
+}
+_WEIGHT_STORAGE_PREFLIGHT_FIXED_REASONS = {
+    "APIError": "storage_query_failed",
+    "AttestedV2StoreError": "receipt_graph_validation_failed",
+    "ConnectError": "storage_transport_failed",
+    "ConnectTimeout": "storage_timeout",
+    "HTTPStatusError": "storage_http_status_failed",
+    "PoolTimeout": "storage_timeout",
+    "ReadError": "storage_transport_failed",
+    "ReadTimeout": "storage_timeout",
+    "RemoteProtocolError": "storage_transport_failed",
+    "TimeoutException": "storage_timeout",
+}
+_WEIGHT_STORAGE_POSTGREST_CODES = {"42501", "42P01", "42703"}
+_WEIGHT_STORAGE_POSTGREST_HTTP_STATUSES = {
+    408,
+    429,
+    500,
+    502,
+    503,
+    504,
+    520,
+    521,
+    522,
+    523,
+    524,
+}
+_WEIGHT_STORAGE_HTTP_STATUS_RE = re.compile(
+    r"^(?:httpx\.)?HTTPStatusError: (?:Client|Server) error "
+    r"'([45][0-9]{2}) [A-Za-z][A-Za-z -]{0,63}' for url .{1,4096}$"
+)
+_WEIGHT_STORAGE_PREFLIGHT_FIXED_LINES = {
+    "ERROR: unable to inspect selected weight-readiness CLI capability": (
+        "capability_inspection_failed"
+    ),
+    "ERROR: official restart epoch could not be mapped to durable storage": (
+        "epoch_mapping_failed"
+    ),
+    "ERROR: durable V2 validator weight authority is not readable": "module_failed",
+    "ERROR: selected current release lacks the required weight storage preflight": (
+        "capability_missing"
+    ),
+    "ERROR: selected weight-readiness CLI capability result is invalid": (
+        "capability_result_invalid"
+    ),
+    "weight storage preflight report is invalid": "report_invalid",
+    "weight storage preflight ancestry epoch is invalid": "ancestry_epoch_invalid",
+}
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -937,6 +1026,93 @@ def _credential_envelope_observations(log_path: Path) -> list[dict[str, Any]]:
             if field not in selected and field in observation:
                 selected[field] = observation[field]
     return [selected]
+
+
+def _weight_storage_preflight_observations(
+    log_path: Path,
+) -> list[dict[str, Any]]:
+    """Project only fixed failure identities from the storage-read preflight."""
+
+    body = _bounded_gateway_log_tail(log_path)
+    if body is None:
+        return []
+    lines = body.decode("utf-8", errors="replace").splitlines()
+    fixed_observations = [
+        {
+            "marker": "weight_storage_preflight_observation",
+            "reason": _WEIGHT_STORAGE_PREFLIGHT_FIXED_LINES[line.strip()],
+        }
+        for line in lines
+        if line.strip() in _WEIGHT_STORAGE_PREFLIGHT_FIXED_LINES
+    ]
+    starts = [index for index, line in enumerate(lines) if line == _TRACEBACK_START]
+    if not starts:
+        return fixed_observations[-1:]
+    block = lines[starts[-1] + 1 :]
+    frames: list[tuple[str, str]] = []
+    exception_class = None
+    exception_line = None
+    terminal_exception_line = None
+    for line in block:
+        frame = _TRACEBACK_FRAME_RE.fullmatch(line)
+        if frame is not None:
+            frames.append((frame.group(1).replace("\\", "/"), frame.group(2)))
+        exception = _TRACEBACK_EXCEPTION_RE.match(line)
+        if (
+            exception is not None
+            and exception.group(1) in _WEIGHT_STORAGE_PREFLIGHT_EXCEPTION_CLASSES
+        ):
+            exception_class = exception.group(1)
+            exception_line = line
+        if _TRACEBACK_TERMINAL_EXCEPTION_RE.fullmatch(line) is not None:
+            terminal_exception_line = line
+    if (
+        exception_class is None
+        or exception_line is None
+        or exception_line != terminal_exception_line
+        or not any(
+            path.endswith("/gateway/tee/verify_weight_submission_ready_v2.py")
+            and function == "verify_weight_submission_storage_readable_v2"
+            for path, function in frames
+        )
+    ):
+        return fixed_observations[-1:]
+
+    observation: dict[str, Any] = {
+        "marker": "weight_storage_preflight_observation",
+        "exception_class": exception_class,
+    }
+    _prefix, separator, message = exception_line.partition(": ")
+    if not separator:
+        message = ""
+    reason = _WEIGHT_STORAGE_PREFLIGHT_EXACT_REASONS.get(message)
+    if reason is None:
+        reason = _WEIGHT_STORAGE_PREFLIGHT_FIXED_REASONS.get(exception_class)
+    if reason is not None:
+        observation["reason"] = reason
+    if exception_class == "APIError":
+        try:
+            error_document = ast.literal_eval(message)
+        except (SyntaxError, ValueError):
+            error_document = None
+        if isinstance(error_document, dict):
+            code = error_document.get("code")
+            if isinstance(code, str) and (
+                code in _WEIGHT_STORAGE_POSTGREST_CODES
+                or re.fullmatch(r"PGRST[0-9]{3}", code) is not None
+            ):
+                observation["storage_code"] = code
+            elif (
+                isinstance(code, int)
+                and not isinstance(code, bool)
+                and code in _WEIGHT_STORAGE_POSTGREST_HTTP_STATUSES
+            ):
+                observation["http_status"] = code
+    elif exception_class == "HTTPStatusError":
+        status = _WEIGHT_STORAGE_HTTP_STATUS_RE.fullmatch(exception_line)
+        if status is not None:
+            observation["http_status"] = int(status.group(1))
+    return [observation]
 
 
 class _RejectCloneRedirects(HTTPRedirectHandler):
@@ -4225,6 +4401,9 @@ def run_full(
                         if final_stage == "local_release_build"
                         else _credential_envelope_observations(gateway_log)
                         if final_stage == "v2_credential_envelope_preparation"
+                        else _weight_storage_preflight_observations(gateway_log)
+                        if final_stage
+                        == "validator_weight_input_storage_preflight"
                         else []
                     )
                     if observations:

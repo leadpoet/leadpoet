@@ -790,10 +790,10 @@ class ValidatorChainSourceV2:
         """Prove the first present-to-absent commit transition and its weights.
 
         The storage transition is read at exact finalized historical blocks.
-        LastUpdate records the timelocked commit block and is deliberately not
-        changed when commit-reveal applies the weights. A failed reveal cannot
-        satisfy the simultaneous exact event, Weights, ownership, queue, and
-        commit-block LastUpdate checks.
+        LastUpdate records each timelocked commit and is deliberately not
+        changed when commit-reveal applies the weights. Bind it to this commit
+        at its inclusion block; a later valid commit may advance it before this
+        commitment is revealed.
         """
 
         if self._archive_rpc_call is None:
@@ -841,6 +841,31 @@ class ValidatorChainSourceV2:
 
         if not is_present(start):
             raise ValidatorChainSourceV2Error("Arena commitment is absent at inclusion block")
+        inclusion_digest = block_hash(start)
+        inclusion_metagraph = decode_selective_metagraph_result(archive(
+            "state_call", [CHAIN_RPC_METHOD, encode_selective_metagraph_params(
+                netuid=int(netuid)), "0x" + inclusion_digest],
+            "inclusion-metagraph:%d" % start,
+        ))
+        inclusion_matches = [
+            uid for uid, hotkey in enumerate(inclusion_metagraph["hotkeys"])
+            if hotkey == validator_hotkey
+        ]
+        if len(inclusion_matches) != 1:
+            raise ValidatorChainSourceV2Error(
+                "validator hotkey has no unique UID at commitment inclusion"
+            )
+        inclusion_uid = inclusion_matches[0]
+        inclusion_updates = list(decode_last_update_storage(archive(
+            "state_getStorage", [last_update_storage_key(netuid=int(netuid)),
+                                 "0x" + inclusion_digest],
+            "inclusion-last-update:%d" % start,
+        )))
+        if (inclusion_uid >= len(inclusion_updates)
+                or int(inclusion_updates[inclusion_uid]) != start):
+            raise ValidatorChainSourceV2Error(
+                "LastUpdate does not bind the Arena commitment inclusion"
+            )
         if is_present(end):
             return None
         low, high = start, end
@@ -860,6 +885,10 @@ class ValidatorChainSourceV2:
         if len(matches) != 1:
             raise ValidatorChainSourceV2Error("validator hotkey has no unique UID at reveal transition")
         uid = matches[0]
+        if uid != inclusion_uid:
+            raise ValidatorChainSourceV2Error(
+                "validator UID changed between commitment and reveal"
+            )
         validate_rewarded_uid_ownership(
             metagraph["hotkeys"], expected_recipient_uid_hotkeys
         )
@@ -871,9 +900,10 @@ class ValidatorChainSourceV2:
             "state_getStorage", [last_update_storage_key(netuid=int(netuid)), "0x" + digest],
             "last-update:%d" % transition,
         )))
-        if uid >= len(updates) or int(updates[uid]) != int(inclusion_block):
+        if (uid >= len(updates)
+                or not int(inclusion_block) <= int(updates[uid]) <= transition):
             raise ValidatorChainSourceV2Error(
-                "LastUpdate differs from the proved Arena commitment"
+                "LastUpdate is outside the proved commit-reveal interval"
             )
         if weights != [(int(uid_), int(weight)) for uid_, weight in expected_weights]:
             raise ValidatorChainSourceV2Error("revealed weights differ at commit transition")

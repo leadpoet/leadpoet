@@ -89,11 +89,13 @@ def _metagraph(block: int, *, recycle_uid: bool) -> str:
 class ArchiveFixture:
     def __init__(self, *, reveal_block: int = 105, event_success: bool = True,
                  recycle_uid: bool = False,
-                 last_update_block: int = 100) -> None:
+                 last_update_block: int = 100,
+                 inclusion_last_update_block: int = 100) -> None:
         self.reveal_block = reveal_block
         self.event_success = event_success
         self.recycle_uid = recycle_uid
         self.last_update_block = last_update_block
+        self.inclusion_last_update_block = inclusion_last_update_block
         self.hashes = {
             block: hashlib.sha256(("block:%d" % block).encode()).hexdigest()
             for block in range(90, 131)
@@ -124,7 +126,10 @@ class ArchiveFixture:
         if key == weights_storage_key(netuid=NETUID, validator_uid=VALIDATOR_UID):
             return _weights()
         if key == last_update_storage_key(netuid=NETUID):
-            return _last_update(self.last_update_block)
+            return _last_update(
+                self.inclusion_last_update_block
+                if block == 100 else self.last_update_block
+            )
         if key == system_events_storage_key():
             return "0x01" if self.event_success else "0x00"
         if key == system_event_count_storage_key():
@@ -198,12 +203,33 @@ def test_rewarded_uid_recycling_at_reveal_fails(monkeypatch):
         _prove(source)
 
 
-def test_reveal_rejects_last_update_changed_by_another_commit(monkeypatch):
+def test_reveal_allows_last_update_advanced_by_another_commit(monkeypatch):
     source = _source(
         monkeypatch, ArchiveFixture(last_update_block=104)
     )
+    assert _prove(source)["last_update"] == 104
+
+
+def test_reveal_rejects_unbound_inclusion_last_update(monkeypatch):
+    source = _source(
+        monkeypatch, ArchiveFixture(inclusion_last_update_block=99)
+    )
     with pytest.raises(
         ValidatorChainSourceV2Error,
-        match="differs from the proved Arena commitment",
+        match="does not bind the Arena commitment inclusion",
+    ):
+        _prove(source)
+
+
+@pytest.mark.parametrize("last_update_block", [99, 106])
+def test_reveal_rejects_last_update_outside_commit_reveal_interval(
+    monkeypatch, last_update_block
+):
+    source = _source(
+        monkeypatch, ArchiveFixture(last_update_block=last_update_block)
+    )
+    with pytest.raises(
+        ValidatorChainSourceV2Error,
+        match="outside the proved commit-reveal interval",
     ):
         _prove(source)

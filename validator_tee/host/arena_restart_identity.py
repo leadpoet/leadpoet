@@ -1,8 +1,10 @@
 """Fail-closed ownership check for the canonical Arena validator restart."""
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
@@ -34,6 +36,7 @@ def validate_legacy_container_inventory(
             if mount.get("Type") == "bind"
             and mount.get("Source") == weights_source
             and mount.get("Destination") == "/app/validator_weights"
+            and mount.get("RW") is True
         ]
         return (
             (item_config.get("Entrypoint") or [])
@@ -108,17 +111,30 @@ def validate_legacy_container_inventory(
         raise RuntimeError("legacy validator container identity is invalid")
     workers = []
     for name, item in by_name.items():
-        match = re.fullmatch(r"/leadpoet-ff-worker-([1-9][0-9]*)", str(name))
+        match = re.fullmatch(r"/leadpoet-ff-worker-(10|[1-9])", str(name))
         if not match:
             raise RuntimeError("legacy validator worker identity is ambiguous")
         worker_id = int(match.group(1))
         command = (item.get("Config") or {}).get("Cmd") or []
-        if not common(item) or command != [
+        expected_command = [
             "--mode",
             "fulfillment_worker",
             "--container-id",
             str(worker_id),
-        ]:
+        ]
+        host_config = item.get("HostConfig") or {}
+        if (
+            not common(item)
+            or command != expected_command
+            or item.get("Args") != ["neurons/validator.py", *expected_command]
+            or len(item.get("Mounts") or []) != 1
+            or (host_config.get("RestartPolicy") or {}).get("Name")
+            != "unless-stopped"
+            or host_config.get("NetworkMode") != "host"
+            or host_config.get("Privileged") is not False
+            or host_config.get("Devices") not in (None, [])
+            or host_config.get("CapAdd") not in (None, [])
+        ):
             raise RuntimeError("legacy validator worker identity is invalid")
         container_id, pid = runtime_identity(item)
         workers.append(
@@ -135,6 +151,34 @@ def validate_legacy_container_inventory(
         "main_pid": main_pid,
         "workers": workers,
     }
+
+
+def legacy_fulfillment_queue_is_quiescent(weights_dir: Path) -> bool:
+    """Return true only when every old worker work file has a regular result."""
+
+    root = Path(weights_dir)
+    try:
+        metadata = root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            return False
+        with os.scandir(str(root)) as entries:
+            work_files = [
+                entry
+                for entry in entries
+                if fnmatch.fnmatchcase(
+                    entry.name, "fulfillment_worker_*_work_*.json"
+                )
+            ]
+        for work_file in work_files:
+            if not work_file.is_file(follow_symlinks=False):
+                return False
+            result = root / work_file.name.replace("_work_", "_results_", 1)
+            result_metadata = os.stat(str(result), follow_symlinks=False)
+            if not stat.S_ISREG(result_metadata.st_mode):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def _stat(entry: Path) -> List[str]:

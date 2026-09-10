@@ -6,6 +6,11 @@ import os
 import types
 
 import pytest
+import validator_tee.host.arena_restart_identity as restart_identity
+
+from validator_tee.host.arena_restart_identity import (
+    legacy_fulfillment_queue_is_quiescent,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -242,8 +247,9 @@ def test_single_enclave_transition_has_bounded_automatic_rollback():
     start_candidate = text.index('run-enclave --eif-path "$EIF_FILE"')
     protected_ready = text.index("--check-only", start_candidate)
     stop_runner = text.index('stop_owned_process "$old_runner_pgid"')
-    stop_workers = text.index("for worker_container_id in ${legacy_worker_container_ids[@]+")
-    assert public_preflight < stop_weight < stop_old_signer < start_candidate < protected_ready < stop_runner < stop_workers
+    activated = text.index('normal Arena validator did not become ready')
+    stop_workers = text.index('docker stop --time "$STOP_TIMEOUT"', activated)
+    assert public_preflight < stop_weight < stop_old_signer < start_candidate < protected_ready < stop_runner < activated < stop_workers
     assert "docker rm" not in text
     cleanup = text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]
     assert 'run-enclave --eif-path "$LEGACY_EIF_SNAPSHOT"' in cleanup
@@ -309,6 +315,13 @@ def test_process_identity_ignores_only_each_captured_container_tree(tmp_path):
     assert find_validator_process(
         source, current, 0, proc, ignored_tree_roots=(201, 202)
     ) == (101, "1101")
+    foreign = tmp_path / "foreign"
+    (foreign / "neurons").mkdir(parents=True)
+    _proc_entry(proc, 301, foreign, foreign / "neurons/validator.py")
+    with pytest.raises(RuntimeError, match="ownership is ambiguous"):
+        find_validator_process(
+            source, current, 0, proc, ignored_tree_roots=(201, 202)
+        )
 
 
 def _legacy_container(name, command, pid, *, image="sha256:" + "b" * 64, revision="a" * 40):
@@ -316,6 +329,7 @@ def _legacy_container(name, command, pid, *, image="sha256:" + "b" * 64, revisio
         "Id": ("%064x" % (abs(hash(name)) or 1))[-64:],
         "Name": name,
         "Image": image,
+        "Args": ["neurons/validator.py", *command],
         "Config": {
             "Entrypoint": ["python3", "neurons/validator.py"],
             "WorkingDir": "/app",
@@ -323,9 +337,16 @@ def _legacy_container(name, command, pid, *, image="sha256:" + "b" * 64, revisio
             "Labels": {"org.opencontainers.image.revision": revision},
         },
         "State": {"Running": pid > 0, "Pid": pid},
+        "HostConfig": {
+            "RestartPolicy": {"Name": "unless-stopped"},
+            "NetworkMode": "host",
+            "Privileged": False,
+            "Devices": [],
+            "CapAdd": None,
+        },
         "Mounts": [{
             "Type": "bind", "Source": "/source/validator_weights",
-            "Destination": "/app/validator_weights",
+            "Destination": "/app/validator_weights", "RW": True,
         }],
     }
 
@@ -359,6 +380,9 @@ def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
     assert inventory["main_pid"] == 100
     assert [item["worker_id"] for item in inventory["workers"]] == list(range(1, 11))
     assert [item["pid"] for item in inventory["workers"]] == list(range(101, 111))
+    assert validate_legacy_container_inventory([], Path("/source")) == {
+        "main_id": "", "main_pid": 0, "workers": []
+    }
 
     # A retry after partial drain still binds the retained stopped containers.
     containers[3]["State"] = {"Running": False, "Pid": 0}
@@ -368,6 +392,20 @@ def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
         changed = json.loads(json.dumps(containers))
         changed[1][field] = value
         with pytest.raises(RuntimeError):
+            validate_legacy_container_inventory(changed, Path("/source"))
+    for mutate in (
+        lambda item: item["Mounts"].append({
+            "Type": "bind", "Source": "/wallet", "Destination": "/wallet"
+        }),
+        lambda item: item["HostConfig"].update({"Privileged": True}),
+        lambda item: item["HostConfig"].update({"NetworkMode": "bridge"}),
+        lambda item: item["HostConfig"].update({"Devices": [{"PathOnHost": "/dev/x"}]}),
+        lambda item: item["HostConfig"].update({"CapAdd": ["SYS_ADMIN"]}),
+        lambda item: item["Args"].append("--unexpected"),
+    ):
+        changed = json.loads(json.dumps(containers))
+        mutate(changed[1])
+        with pytest.raises(RuntimeError, match="worker identity is invalid"):
             validate_legacy_container_inventory(changed, Path("/source"))
     subset = validate_legacy_container_inventory(containers[:-1], Path("/source"))
     assert [item["worker_id"] for item in subset["workers"]] == list(range(1, 10))
@@ -401,6 +439,116 @@ def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
         malformed[0]["Config"]["Cmd"] = bad_command
         with pytest.raises(RuntimeError, match="container identity is invalid"):
             validate_legacy_container_inventory(malformed, Path("/source"))
+
+
+def _run_legacy_worker_retirement(
+    tmp_path, *, pending=False, changed=False, no_workers=False
+):
+    text = SCRIPT.read_text()
+    start = text.index('if [ "${#legacy_worker_container_ids[@]}" -gt 0 ]; then')
+    end = text.index('\nfi\n[ -z "$SERVICE_ENV_BACKUP" ]', start) + len("\nfi")
+    block = text[start:end]
+    weights = tmp_path / "validator_weights"
+    weights.mkdir()
+    work = weights / "fulfillment_worker_3_work_25000_request.json"
+    work.write_text("{}")
+    if not pending:
+        (weights / "fulfillment_worker_3_results_25000_request.json").write_text("{}")
+    calls = tmp_path / "calls"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sudo = fake_bin / "sudo"
+    sudo.write_text(
+        '#!/bin/sh\necho "$*" >> "$CALLS"\n'
+        'case "$*" in docker\\ inspect\\ -f*) echo false ;; esac\n'
+    )
+    sudo.chmod(0o755)
+    timeout = fake_bin / "timeout"
+    timeout.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+    timeout.chmod(0o755)
+    captured_id = "b" * 64
+    current_id = "c" * 64 if changed else captured_id
+    captured_workers = json.dumps([
+        {"container_id": captured_id, "pid": 503, "worker_id": 3}
+    ], sort_keys=True, separators=(",", ":"))
+    current_inventory = json.dumps({
+        "main_id": "a" * 64,
+        "main_pid": 0,
+        "workers": [{"container_id": current_id, "pid": 503, "worker_id": 3}],
+    }, sort_keys=True, separators=(",", ":"))
+    worker_ids = "" if no_workers else captured_id
+    program = f'''set -euo pipefail
+fail() {{ echo "ERROR: $*" >&2; exit 1; }}
+legacy_worker_container_ids=({worker_ids})
+legacy_worker_identity_json='{captured_workers}'
+legacy_main_identity={'a' * 64}
+read_legacy_inventory_json() {{ printf '%s' '{current_inventory}'; }}
+SOURCE_ROOT="$SOURCE"
+STOP_TIMEOUT=0
+RELEASE="$RELEASE_ROOT"
+PYTHON="$PYTHON_BIN"
+{block}
+'''
+    result = subprocess.run(
+        ["bash", "-c", program],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "CALLS": str(calls),
+            "SOURCE": str(tmp_path),
+            "RELEASE_ROOT": str(ROOT),
+            "PYTHON_BIN": sys.executable,
+        },
+        text=True,
+        capture_output=True,
+    )
+    return result, weights, calls, captured_id
+
+
+def test_pending_legacy_fulfillment_work_prevents_container_stop(tmp_path):
+    result, weights, calls, _ = _run_legacy_worker_retirement(
+        tmp_path, pending=True
+    )
+    assert not legacy_fulfillment_queue_is_quiescent(weights)
+    assert result.returncode != 0
+    assert "legacy fulfillment work remains active" in result.stderr
+    assert not calls.exists()
+
+
+def test_quiescent_worker_is_revalidated_and_stopped_without_deletion(tmp_path):
+    result, weights, calls, container_id = _run_legacy_worker_retirement(tmp_path)
+    assert legacy_fulfillment_queue_is_quiescent(weights)
+    assert result.returncode == 0, result.stderr
+    observed = calls.read_text()
+    assert f"docker stop --time 0 {container_id}" in observed
+    assert f"docker inspect -f {{{{.State.Running}}}} {container_id}" in observed
+    assert "docker rm" not in observed
+
+
+def test_changed_worker_identity_is_rejected_without_stop(tmp_path):
+    result, _, calls, _ = _run_legacy_worker_retirement(tmp_path, changed=True)
+    assert result.returncode != 0
+    assert "identity changed before stop" in result.stderr
+    assert not calls.exists()
+
+
+def test_queue_scan_error_is_not_treated_as_quiescent(tmp_path, monkeypatch):
+    weights = tmp_path / "validator_weights"
+    weights.mkdir()
+
+    def denied(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(restart_identity.os, "scandir", denied)
+    assert not legacy_fulfillment_queue_is_quiescent(weights)
+
+
+def test_second_restart_without_legacy_workers_does_not_stop_containers(tmp_path):
+    result, _, calls, _ = _run_legacy_worker_retirement(
+        tmp_path, no_workers=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert not calls.exists()
 
 
 def test_process_identity_cli_owns_legacy_runner_group_and_relay(tmp_path):

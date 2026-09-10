@@ -252,26 +252,32 @@ service_active=0
 sudo systemctl is-active --quiet "$SERVICE" && service_active=1 || true
 service_pid="$(sudo systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)"
 [[ "$service_pid" =~ ^[0-9]+$ ]] || service_pid=0
-legacy_container_ids="$(
-  sudo docker container ls -a \
-    --filter 'name=^/leadpoet-validator-main$' \
-    --filter 'name=^/leadpoet-ff-worker-' \
-    --format '{{.ID}}'
-)" || fail "Docker cannot enumerate the legacy validator inventory"
-if [ -z "$legacy_container_ids" ]; then
-  legacy_container_json='[]'
-else
-  legacy_container_json="$(sudo docker inspect $legacy_container_ids)" || fail "Docker cannot inspect the legacy validator inventory"
-fi
-legacy_inventory_json="$(cd "$RELEASE" && printf '%s' "$legacy_container_json" | SOURCE_ROOT="$SOURCE_ROOT" PYTHONPATH="$RELEASE" "$PYTHON" -c '
+read_legacy_inventory_json() {
+  local container_ids container_json
+  container_ids="$(
+    sudo docker container ls -a \
+      --filter 'name=^/leadpoet-validator-main$' \
+      --filter 'name=^/leadpoet-ff-worker-' \
+      --format '{{.ID}}'
+  )" || return
+  if [ -z "$container_ids" ]; then
+    container_json='[]'
+  else
+    container_json="$(sudo docker inspect $container_ids)" || return
+  fi
+  cd "$RELEASE" && printf '%s' "$container_json" | SOURCE_ROOT="$SOURCE_ROOT" PYTHONPATH="$RELEASE" "$PYTHON" -c '
 import json,os,sys
 from pathlib import Path
 from validator_tee.host.arena_restart_identity import validate_legacy_container_inventory
 print(json.dumps(validate_legacy_container_inventory(json.load(sys.stdin),Path(os.environ["SOURCE_ROOT"])),sort_keys=True,separators=(",",":")))
-')" || fail "legacy validator container inventory is invalid"
+'
+}
+legacy_inventory_json="$(read_legacy_inventory_json)" || fail "legacy validator container inventory is invalid"
 read -r legacy_container_id legacy_container_pid < <(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; x=json.load(sys.stdin); print(x["main_id"],x["main_pid"])')
 mapfile -t legacy_worker_container_ids < <(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; [print(x["container_id"]) for x in json.load(sys.stdin)["workers"]]')
 mapfile -t legacy_worker_pids < <(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; [print(x["pid"]) for x in json.load(sys.stdin)["workers"]]')
+legacy_worker_identity_json="$(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["workers"],sort_keys=True,separators=(",",":")))')"
+legacy_main_identity="$(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["main_id"])')"
 [[ -z "$legacy_container_pid" || "$legacy_container_pid" =~ ^[0-9]+$ ]] || fail "legacy validator container PID is invalid"
 ignore_tree_args=()
 for container_pid in "$legacy_container_pid" "${legacy_worker_pids[@]}"; do
@@ -396,11 +402,6 @@ stop_owned_process() {
   ! sudo kill -0 "$pid" 2>/dev/null || fail "$label did not stop"
 }
 stop_owned_process "$old_runner_pgid" "$old_runner_start" "standalone Arena runner"
-for worker_container_id in ${legacy_worker_container_ids[@]+"${legacy_worker_container_ids[@]}"}; do
-  sudo docker stop --time "$STOP_TIMEOUT" "$worker_container_id" >/dev/null
-  [ "$(sudo docker inspect -f '{{.State.Running}}' "$worker_container_id")" = false ] \
-    || fail "legacy fulfillment worker did not stop"
-done
 if [ -n "$legacy_container_id" ] && [ "${legacy_container_pid:-0}" -gt 0 ] && [ "$LEGACY_CONTAINER_STOPPED" -eq 0 ]; then
   sudo docker stop --time "$STOP_TIMEOUT" "$legacy_container_id" >/dev/null
   [ "$(sudo docker inspect -f '{{.State.Running}}' "$legacy_container_id")" = false ] || fail "legacy validator container did not stop"
@@ -452,6 +453,35 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep 2
 done
 [ "$ACTIVATED" -eq 1 ] || fail "normal Arena validator did not become ready"
+
+# Retire exact old fulfillment workers only after the replacement service is
+# active and every old work file has a corresponding result.
+if [ "${#legacy_worker_container_ids[@]}" -gt 0 ]; then
+  deadline=$((SECONDS + STOP_TIMEOUT))
+  while ! ( cd "$RELEASE" && PYTHONPATH="$RELEASE" "$PYTHON" -c '
+from pathlib import Path
+import sys
+from validator_tee.host.arena_restart_identity import legacy_fulfillment_queue_is_quiescent
+raise SystemExit(0 if legacy_fulfillment_queue_is_quiescent(Path(sys.argv[1])) else 1)
+' "$SOURCE_ROOT/validator_weights" ); do
+    [ "$SECONDS" -lt "$deadline" ] || fail "legacy fulfillment work remains active"
+    sleep 5
+  done
+  current_legacy_inventory_json="$(read_legacy_inventory_json)" \
+    || fail "legacy fulfillment worker identity changed before stop"
+  current_legacy_worker_identity_json="$(printf '%s' "$current_legacy_inventory_json" | "$PYTHON" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["workers"],sort_keys=True,separators=(",",":")))')"
+  current_legacy_main_identity="$(printf '%s' "$current_legacy_inventory_json" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["main_id"])')"
+  [ "$current_legacy_main_identity" = "$legacy_main_identity" ] \
+    && [ "$current_legacy_worker_identity_json" = "$legacy_worker_identity_json" ] \
+    || fail "legacy fulfillment worker identity changed before stop"
+  timeout "$((STOP_TIMEOUT + 30))" sudo docker stop --time "$STOP_TIMEOUT" \
+    "${legacy_worker_container_ids[@]}" >/dev/null \
+    || fail "legacy fulfillment workers did not stop"
+  for worker_container_id in "${legacy_worker_container_ids[@]}"; do
+    [ "$(sudo docker inspect -f '{{.State.Running}}' "$worker_container_id")" = false ] \
+      || fail "legacy fulfillment worker remains active"
+  done
+fi
 [ -z "$SERVICE_ENV_BACKUP" ] || sudo rm -f -- "$SERVICE_ENV_BACKUP"
 SERVICE_ENV_BACKUP=""
 [ -z "$RUNTIME_ENV_BACKUP" ] || sudo rm -f -- "$RUNTIME_ENV_BACKUP"

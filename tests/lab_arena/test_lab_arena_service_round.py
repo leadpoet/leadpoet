@@ -647,6 +647,153 @@ def test_benchmark_commit_rejects_an_invalid_current_scorer_before_freeze(connec
     assert harness.service.store.list_runs(harness.round_id) == []
 
 
+def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
+    connect, tmp_path
+):
+    """Start fields budget capacity but do not idle between ready phases."""
+
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["Continuous"],
+        runners=["alpha"],
+    )
+    service = harness.service
+    harness.chain.epoch = 24780
+    configuration = service.create_round(
+        datetime.now(timezone.utc) + timedelta(hours=12),
+        round_id="arena-2026-09-27-continuous",
+    )
+    harness.round_id = configuration["round_id"]
+    challenger_id = harness.submit("Continuous", harness.round_id)
+    schedule = harness.schedule()
+    cutoff = datetime.strptime(
+        schedule["submission_cutoff"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+
+    harness.clock.now = cutoff - timedelta(microseconds=1)
+    assert service.advance_round(harness.round_id) == {
+        "status": "waiting",
+        "round_status": "open",
+    }
+    assert harness.status() == "open"
+    assert service.store.list_runs(harness.round_id) == []
+    with pytest.raises(svc.ServiceError) as private_bank:
+        service.public_benchmark(harness.round_id)
+    assert private_bank.value.code == "benchmark_not_public"
+    with pytest.raises(svc.ServiceError) as private_source:
+        service.public_submission_code(challenger_id)
+    assert private_source.value.code == "source_not_public"
+    with pytest.raises(svc.ServiceError) as private_results:
+        service.public_results(harness.round_id, challenger_id)
+    assert private_results.value.code == "results_not_public"
+
+    harness.clock.now = cutoff
+    committed = service.advance_round(harness.round_id)
+    assert committed["status"] == "ok"
+    frozen = service.store.get_round(harness.round_id)
+    participants = list(frozen["participants"])
+    assert len(participants) == 2
+    assert len(service.public_benchmark(harness.round_id)["icps"]) == (
+        contracts.BENCHMARK_ICP_COUNT
+    )
+    with pytest.raises(svc.ServiceError) as still_private_source:
+        service.public_submission_code(challenger_id)
+    assert still_private_source.value.code == "source_not_public"
+    with pytest.raises(svc.ServiceError) as still_private_results:
+        service.public_results(harness.round_id, challenger_id)
+    assert still_private_results.value.code == "results_not_public"
+    assert harness.clock.now < datetime.strptime(
+        schedule["stage_1_start"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+
+    opened = service.advance_round(harness.round_id)
+    assert opened["assignments"] == contracts.STAGE_1_ICP_COUNT * len(participants)
+    assert harness.status() == "stage1"
+    assert service.advance_round(harness.round_id) == {
+        "status": "waiting",
+        "round_status": "stage1",
+    }
+    assert service.store.list_runs(harness.round_id, stage=2) == []
+
+    harness.run_stage_with_runners(1)
+    assert service.advance_round(harness.round_id)["status"] == "ok"
+    scoring_opened = service.advance_round(harness.round_id)
+    assert scoring_opened["assignments"] == (
+        contracts.STAGE_1_ICP_COUNT * len(participants)
+    )
+    harness.run_stage_with_runners(1)
+    assert service.advance_round(harness.round_id)["round_status"] == "stage1_judged"
+    assert service.advance_round(harness.round_id)["status"] == "ok"
+    assert harness.status() == "stage1_scored"
+    assert harness.clock.now < datetime.strptime(
+        schedule["stage_2_start"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+
+    configuration_before_restart = service.store.get_round(harness.round_id)[
+        "configuration_doc"
+    ]
+    submissions_before_restart = service.store.list_submissions(harness.round_id)
+    stage_one_runs_before_restart = service.store.list_runs(
+        harness.round_id, stage=1
+    )
+    frozen_source_bytes = {
+        participant["submission_id"]: harness.objects.get(participant["source_ref"])
+        for participant in participants
+    }
+
+    harness.service = harness.build_service()
+    service = harness.service
+    stage_two = service.advance_round(harness.round_id)
+    assert stage_two["assignments"] == contracts.STAGE_2_ICP_COUNT * len(participants)
+    assert stage_two["assignments"] == 20
+    assert harness.status() == "stage2"
+    assert service.advance_round(harness.round_id) == {
+        "status": "waiting",
+        "round_status": "stage2",
+    }
+    assert len(service.store.list_runs(harness.round_id, stage=2, kind="execute")) == 20
+    assert service.store.get_round(harness.round_id)["configuration_doc"] == (
+        configuration_before_restart
+    )
+    assert service.store.list_submissions(harness.round_id) == (
+        submissions_before_restart
+    )
+    assert service.store.list_runs(harness.round_id, stage=1) == (
+        stage_one_runs_before_restart
+    )
+    assert {
+        participant["submission_id"]: harness.objects.get(participant["source_ref"])
+        for participant in participants
+    } == frozen_source_bytes
+    harness.advance_until("published", runners=1)
+    assert harness.clock.now < datetime.strptime(
+        schedule["stage_2_start"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+
+    published = service.store.get_round(harness.round_id)
+    assert published["configuration_doc"] == configuration_before_restart
+    assert published["benchmark_ref"] == frozen["benchmark_ref"]
+    assert published["participants"] == participants
+    for participant in participants:
+        execute_runs = service.store.list_runs(
+            harness.round_id,
+            submission_id=participant["submission_id"],
+            kind="execute",
+        )
+        assert len(execute_runs) == contracts.BENCHMARK_ICP_COUNT
+        assert {run["icp_position"] for run in execute_runs} == set(
+            range(contracts.BENCHMARK_ICP_COUNT)
+        )
+        public = service.public_results(
+            harness.round_id, participant["submission_id"]
+        )
+        assert len(public["scores"]["stage_1"] + public["scores"]["stage_2"]) == (
+            contracts.BENCHMARK_ICP_COUNT
+        )
+    assert service.public_submission_code(challenger_id)["files"]
+
+
 def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(connect, tmp_path):
     """A crowned source is promoted before it becomes tomorrow's baseline."""
 

@@ -107,8 +107,16 @@ def _scoring_driver_service(stage, runs, *, work_item_ids=("execute-planned",)):
         "status": "stage%d_scoring" % stage,
         "configuration_doc": {
             "schedule": {
-                "stage_1_scoring_close": "2100-01-01T00:00:00Z",
-                "final_scoring_close": "2100-01-01T00:00:00Z",
+                "submission_open": "2026-09-01T00:00:00Z",
+                "submission_cutoff": "2026-09-02T00:00:00Z",
+                "benchmark_deadline": "2026-09-02T00:30:00Z",
+                "stage_1_start": "2026-09-02T00:30:01Z",
+                "stage_1_close": "2026-09-02T04:30:01Z",
+                "stage_1_scoring_close": "2026-09-02T11:00:01Z",
+                "stage_2_start": "2026-09-02T11:00:02Z",
+                "stage_2_close": "2026-09-02T14:00:02Z",
+                "final_scoring_close": "2026-09-02T19:00:02Z",
+                "publication_deadline": "2026-09-02T19:00:03Z",
             }
         },
         "stage%d_scoring_plan_doc" % stage: plan,
@@ -142,6 +150,34 @@ def _scoring_driver_service(stage, runs, *, work_item_ids=("execute-planned",)):
     service._lock = threading.RLock()
     service._round = lambda requested_round_id: row
     return service
+
+
+@pytest.mark.parametrize("status", ["committed", "stage1_scored"])
+def test_advance_never_opens_execution_before_submission_cutoff(status):
+    cutoff = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(
+        defaults=SimpleNamespace(stage_minutes={
+            "benchmark": 30,
+            "stage_1": 240,
+            "stage_1_scoring": 390,
+            "stage_2": 180,
+            "final_scoring": 300,
+        })
+    )
+    schedule = service.build_schedule(cutoff)
+    service._clock = lambda: cutoff - timedelta(microseconds=1)
+    service._lock = threading.RLock()
+    service._round = lambda _round_id: {
+        "status": status,
+        "configuration_doc": {"schedule": schedule},
+    }
+    service.open_stage = lambda *_args: pytest.fail("execution opened before cutoff")
+
+    assert service._advance_round_locked("arena-2026-09-02") == {
+        "status": "waiting",
+        "round_status": status,
+    }
 
 
 @pytest.mark.parametrize(

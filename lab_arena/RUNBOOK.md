@@ -15,6 +15,11 @@ previous submission day's bank, which remains fixed during restart and retry.
 Historical rounds retain their actual bank date; they are not relabelled as a
 previous-day evaluation.
 
+The midnight submission cutoff starts the readiness-driven execution and
+scoring batches. Completed work moves to the next batch without fixed 00:30 or
+11:00 UTC idle periods. Stage start fields remain nominal capacity-budget
+boundaries, while stage close fields bound work that is still incomplete.
+
 Code previews and promotion to public Git branches use the same completed
 evaluation gate. Queued, incomplete, and cancelled evaluations do not release
 submitted code. Provider credentials are never public. The CLI's public-rerun

@@ -10,9 +10,13 @@ CURRENT_LINK="${VALIDATOR_CURRENT_LINK:-/home/ec2-user/leadpoet/validator-curren
 ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/arena-validator.env}"
 RUNTIME_ENV="${VALIDATOR_RUNTIME_ENV:-/home/ec2-user/.config/leadpoet/arena-validator-runtime.env}"
 SERVICE_ENV="${VALIDATOR_SERVICE_ENV:-/home/ec2-user/.config/leadpoet/arena-validator-service.env}"
-MANIFEST="${VALIDATOR_ARENA_SIGNER_MANIFEST:-/home/ec2-user/.config/leadpoet/arena-signer/manifest.json}"
-EIF_FILE="${VALIDATOR_ARENA_SIGNER_EIF:-/home/ec2-user/.config/leadpoet/arena-signer/validator-enclave.eif}"
-POLICY_FILE="${VALIDATOR_ARENA_SIGNER_POLICY:-/home/ec2-user/.config/leadpoet/arena-signer/arena_signer_policy.json}"
+ARENA_ARTIFACT_ROOT="/home/ec2-user/.config/leadpoet/arena-signer"
+MANIFEST="${VALIDATOR_ARENA_SIGNER_MANIFEST:-$ARENA_ARTIFACT_ROOT/manifest.json}"
+EIF_FILE="${VALIDATOR_ARENA_SIGNER_EIF:-$ARENA_ARTIFACT_ROOT/validator-enclave.eif}"
+POLICY_FILE="${VALIDATOR_ARENA_SIGNER_POLICY:-$ARENA_ARTIFACT_ROOT/arena_signer_policy.json}"
+PREVIOUS_ARENA_MANIFEST="${VALIDATOR_PREVIOUS_ARENA_SIGNER_MANIFEST:-$ARENA_ARTIFACT_ROOT/manifest.json}"
+PREVIOUS_ARENA_EIF="${VALIDATOR_PREVIOUS_ARENA_SIGNER_EIF:-$ARENA_ARTIFACT_ROOT/validator-enclave.eif}"
+PREVIOUS_ARENA_POLICY="${VALIDATOR_PREVIOUS_ARENA_SIGNER_POLICY:-$ARENA_ARTIFACT_ROOT/arena_signer_policy.json}"
 LEGACY_ENVELOPE="${VALIDATOR_LEGACY_HOTKEY_ENVELOPE:-/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json}"
 LEGACY_EIF="${VALIDATOR_LEGACY_EIF:-$SOURCE_ROOT/validator_tee/validator-enclave.eif}"
 LEGACY_HOTKEY_CONFIG="${VALIDATOR_LEGACY_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
@@ -38,6 +42,13 @@ SERVICE_ATTEMPTED=0
 STAGE=""
 UNIT_STAGE=""
 LEGACY_EIF_SNAPSHOT=""
+PREVIOUS_ARENA_SNAPSHOT=""
+OLD_SIGNER_KIND=""
+OLD_SERVICE_DRAINED=0
+PREVIOUS_CURRENT_TARGET=""
+PREVIOUS_UNIT_SNAPSHOT=""
+ARTIFACT_PROMOTION_STARTED=0
+SERVICE_READY=0
 CANDIDATE_SERVICE_ENV=""
 SERVICE_ENV_BACKUP=""
 SERVICE_ENV_PROMOTED=0
@@ -78,13 +89,28 @@ cleanup() {
       sudo rm -f -- "$RUNTIME_ENV" || true
     fi
   fi
+  if [ "$status" -ne 0 ] && [ "${OLD_SIGNER_KIND:-}" = "arena" ] && [ "$SIGNER_HANDOFF_COMMITTED" -eq 0 ]; then
+    if [ -n "$PREVIOUS_CURRENT_TARGET" ]; then ln -sfn "$PREVIOUS_CURRENT_TARGET" "$CURRENT_LINK.new" && mv -Tf "$CURRENT_LINK.new" "$CURRENT_LINK" || true; fi
+    if [ -n "$PREVIOUS_UNIT_SNAPSHOT" ]; then sudo install -m 0644 "$PREVIOUS_UNIT_SNAPSHOT" "$UNIT_PATH" && sudo systemctl daemon-reload || true; fi
+    if [ -n "$PREVIOUS_ARENA_SNAPSHOT" ]; then
+      sudo install -m 0600 -o root -g root "$PREVIOUS_ARENA_SNAPSHOT/service.env" "$SERVICE_ENV" || true
+      sudo install -m 0600 -o root -g root "$PREVIOUS_ARENA_SNAPSHOT/runtime.env" "$RUNTIME_ENV" || true
+    fi
+    if [ "$ARTIFACT_PROMOTION_STARTED" -eq 1 ] && [ -n "$PREVIOUS_ARENA_SNAPSHOT" ]; then
+      install -m 0600 "$PREVIOUS_ARENA_SNAPSHOT/validator-enclave.eif" "$ARENA_ARTIFACT_ROOT/validator-enclave.eif" || true
+      install -m 0600 "$PREVIOUS_ARENA_SNAPSHOT/manifest.json" "$ARENA_ARTIFACT_ROOT/manifest.json" || true
+      install -m 0600 "$PREVIOUS_ARENA_SNAPSHOT/policy.json" "$ARENA_ARTIFACT_ROOT/arena_signer_policy.json" || true
+    fi
+  fi
   if [ "$status" -ne 0 ] && [ "$SIGNER_HANDOFF_COMMITTED" -eq 0 ] && [ "$CANDIDATE_CREATED" -eq 1 ] && [ -n "$CANDIDATE_ENCLAVE_ID" ]; then
     sudo nitro-cli terminate-enclave --enclave-id "$CANDIDATE_ENCLAVE_ID" >/dev/null 2>&1 || true
   fi
   if [ "$status" -ne 0 ] && [ "$OLD_ENCLAVE_TERMINATED" -eq 1 ] && [ "$SIGNER_HANDOFF_COMMITTED" -eq 0 ]; then
     recovery=""
     for _ in $(seq 1 10); do
-      recovery="$(sudo nitro-cli run-enclave --eif-path "$LEGACY_EIF_SNAPSHOT" --cpu-count "$OLD_ENCLAVE_CPUS" --memory "$OLD_ENCLAVE_MEMORY" --enclave-cid "$OLD_ENCLAVE_CID" --enclave-name "$OLD_ENCLAVE_NAME" 2>/dev/null || true)"
+      recovery_eif="$LEGACY_EIF_SNAPSHOT"
+      [ "${OLD_SIGNER_KIND:-legacy}" != "arena" ] || recovery_eif="$PREVIOUS_ARENA_SNAPSHOT/validator-enclave.eif"
+      recovery="$(sudo nitro-cli run-enclave --eif-path "$recovery_eif" --cpu-count "$OLD_ENCLAVE_CPUS" --memory "$OLD_ENCLAVE_MEMORY" --enclave-cid "$OLD_ENCLAVE_CID" --enclave-name "$OLD_ENCLAVE_NAME" 2>/dev/null || true)"
       [ -z "$recovery" ] || break
       sleep 2
     done
@@ -95,13 +121,23 @@ cleanup() {
       sleep 2
     done
     if [ "$observed" = "$OLD_PCR0" ]; then
+      RECOVERY_SOURCE="$SOURCE_ROOT"
+      [ "${OLD_SIGNER_KIND:-legacy}" != "arena" ] || RECOVERY_SOURCE="$PREVIOUS_CURRENT_TARGET"
       legacy_rpc_ready=0
       deadline=$((SECONDS + READY_TIMEOUT))
       while [ "$SECONDS" -lt "$deadline" ]; do
-        if ( cd "$SOURCE_ROOT" && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; ValidatorEnclaveClient().health_check()' ) >/dev/null 2>&1; then legacy_rpc_ready=1; break; fi
+        if ( cd "$RECOVERY_SOURCE" && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$RECOVERY_SOURCE" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; ValidatorEnclaveClient().health_check()' ) >/dev/null 2>&1; then legacy_rpc_ready=1; break; fi
         sleep 1
       done
-      if [ "$legacy_rpc_ready" -eq 1 ] && ( cd "$SOURCE_ROOT" && unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON && LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$LEGACY_CUTOVER" ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.runtime_v2_bootstrap --validator-release "$LEGACY_RELEASE_MANIFEST" --gateway-release "$LEGACY_GATEWAY_MANIFEST" --gateway-release-lineage "$LEGACY_GATEWAY_LINEAGE" --hotkey-config "$LEGACY_HOTKEY_CONFIG" ) >/dev/null 2>&1 \
+      if [ "${OLD_SIGNER_KIND:-legacy}" = "arena" ]; then
+        if [ "$legacy_rpc_ready" -eq 1 ] && ( cd "$RECOVERY_SOURCE" && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$RECOVERY_SOURCE" "$PYTHON" -m validator_tee.host.arena_hotkey_bootstrap migrate-legacy --legacy-envelope "$LEGACY_ENVELOPE" --policy "$PREVIOUS_ARENA_SNAPSHOT/policy.json" --kms-key-id "$MIGRATION_KMS_KEY_ID" ) >/dev/null 2>&1; then
+          if [ -n "$PREVIOUS_CURRENT_TARGET" ]; then ln -sfn "$PREVIOUS_CURRENT_TARGET" "$CURRENT_LINK.new" && mv -Tf "$CURRENT_LINK.new" "$CURRENT_LINK"; fi
+          if [ -n "$PREVIOUS_UNIT_SNAPSHOT" ]; then sudo install -m 0644 "$PREVIOUS_UNIT_SNAPSHOT" "$UNIT_PATH" && sudo systemctl daemon-reload; fi
+          [ "$OLD_SERVICE_DRAINED" -eq 0 ] || sudo systemctl start "$SERVICE" >/dev/null 2>&1 || echo "ERROR: previous Arena validator service recovery failed" >&2
+        else
+          echo "ERROR: previous Arena signer reprovisioning failed" >&2
+        fi
+      elif [ "$legacy_rpc_ready" -eq 1 ] && ( cd "$SOURCE_ROOT" && unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON && LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$LEGACY_CUTOVER" ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.runtime_v2_bootstrap --validator-release "$LEGACY_RELEASE_MANIFEST" --gateway-release "$LEGACY_GATEWAY_MANIFEST" --gateway-release-lineage "$LEGACY_GATEWAY_LINEAGE" --hotkey-config "$LEGACY_HOTKEY_CONFIG" ) >/dev/null 2>&1 \
           && ( cd "$SOURCE_ROOT" && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.hotkey_bootstrap_v2 --hotkey-config "$LEGACY_HOTKEY_CONFIG" --hotkey-envelope "$LEGACY_ENVELOPE" ) >/dev/null 2>&1; then
         [ "$LEGACY_CONTAINER_STOPPED" -eq 0 ] || sudo docker start "$legacy_container_id" >/dev/null 2>&1 || echo "ERROR: legacy validator container recovery failed" >&2
       else
@@ -111,9 +147,14 @@ cleanup() {
       echo "ERROR: exact legacy signer recovery failed" >&2
     fi
   fi
+  if [ "$status" -ne 0 ] && [ "${OLD_SIGNER_KIND:-}" = "arena" ] && [ "$OLD_SERVICE_DRAINED" -eq 1 ] && [ "$OLD_ENCLAVE_TERMINATED" -eq 0 ] && [ "$SIGNER_HANDOFF_COMMITTED" -eq 0 ]; then
+    sudo systemctl start "$SERVICE" >/dev/null 2>&1 || echo "ERROR: previous Arena validator service recovery failed" >&2
+  fi
   [ -z "$STAGE" ] || rm -rf -- "$STAGE"
   [ -z "${UNIT_STAGE:-}" ] || rm -f -- "$UNIT_STAGE"
   [ -z "$LEGACY_EIF_SNAPSHOT" ] || rm -f -- "$LEGACY_EIF_SNAPSHOT"
+  [ -z "${PREVIOUS_ARENA_SNAPSHOT:-}" ] || rm -rf -- "$PREVIOUS_ARENA_SNAPSHOT"
+  [ -z "${PREVIOUS_UNIT_SNAPSHOT:-}" ] || rm -f -- "$PREVIOUS_UNIT_SNAPSHOT"
   [ -z "$CANDIDATE_SERVICE_ENV" ] || sudo rm -f -- "$CANDIDATE_SERVICE_ENV"
   exit "$status"
 }
@@ -317,6 +358,57 @@ if [ -n "$old_enclave_id" ] && [ "${discovered_pcr0,,}" = "${EXPECTED_PCR0,,}" ]
   old_enclave_id=""
   reuse_candidate=1
 elif [ -n "$old_enclave_id" ]; then
+  if [ "$service_active" -eq 1 ]; then
+    PREVIOUS_CURRENT_TARGET="$(readlink -f "$CURRENT_LINK")"
+    [ -d "$PREVIOUS_CURRENT_TARGET" ] || fail "active Arena release target is unavailable"
+    previous_release_sha="$(cat "$PREVIOUS_CURRENT_TARGET/.release-commit" 2>/dev/null || true)"
+    [[ "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]] || fail "active Arena release identity is invalid"
+    [ "$(readlink -f "$RELEASE_ROOT/$previous_release_sha")" = "$PREVIOUS_CURRENT_TARGET" ] || fail "active Arena release is outside the release root"
+    sudo test -f "$UNIT_PATH" && sudo test ! -L "$UNIT_PATH" || fail "active Arena service unit is unavailable"
+    for active_private in "$SERVICE_ENV" "$RUNTIME_ENV"; do
+      sudo test -f "$active_private" && sudo test ! -L "$active_private" || fail "active Arena private configuration is unavailable"
+      [ "$(sudo stat -c %u "$active_private")" = 0 ] && [ "$(sudo stat -c %a "$active_private")" = 600 ] || fail "active Arena private configuration is unsafe"
+    done
+    PREVIOUS_UNIT_SNAPSHOT="$(mktemp "$RELEASE_ROOT/.previous-arena-unit.XXXXXX")"
+    sudo cat "$UNIT_PATH" > "$PREVIOUS_UNIT_SNAPSHOT"
+    chmod 0600 "$PREVIOUS_UNIT_SNAPSHOT"
+    for arena_input in "$PREVIOUS_ARENA_EIF" "$PREVIOUS_ARENA_MANIFEST" "$PREVIOUS_ARENA_POLICY" "$LEGACY_ENVELOPE"; do
+      [ -f "$arena_input" ] && [ ! -L "$arena_input" ] || fail "previous Arena rollback input is unavailable"
+    done
+    PREVIOUS_ARENA_SNAPSHOT="$(mktemp -d "$RELEASE_ROOT/.previous-arena-signer.XXXXXX")"
+    cp --reflink=auto "$PREVIOUS_ARENA_EIF" "$PREVIOUS_ARENA_SNAPSHOT/validator-enclave.eif"
+    cp "$PREVIOUS_ARENA_MANIFEST" "$PREVIOUS_ARENA_SNAPSHOT/manifest.json"
+    cp "$PREVIOUS_ARENA_POLICY" "$PREVIOUS_ARENA_SNAPSHOT/policy.json"
+    sudo cat "$SERVICE_ENV" > "$PREVIOUS_ARENA_SNAPSHOT/service.env"
+    sudo cat "$RUNTIME_ENV" > "$PREVIOUS_ARENA_SNAPSHOT/runtime.env"
+    chmod 0700 "$PREVIOUS_ARENA_SNAPSHOT"; chmod 0600 "$PREVIOUS_ARENA_SNAPSHOT"/*
+    ( cd "$RELEASE" && PYTHONPATH="$RELEASE" "$PYTHON" - "$PREVIOUS_ARENA_SNAPSHOT" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+from validator_tee.enclave.arena_hotkey import validate_policy
+from leadpoet_canonical.lab_arena_rewards import sha256_json
+root=Path(sys.argv[1]); eif=root/'validator-enclave.eif'
+manifest=json.loads((root/'manifest.json').read_text()); policy=validate_policy(json.loads((root/'policy.json').read_text()))
+if set(manifest)!={"schema_version","eif_sha256","pcr0","policy_sha256"} or manifest["schema_version"]!="leadpoet.arena.signer_manifest.v1": raise SystemExit("previous Arena manifest is invalid")
+if manifest["eif_sha256"]!="sha256:"+hashlib.sha256(eif.read_bytes()).hexdigest() or manifest["policy_sha256"]!=sha256_json(policy): raise SystemExit("previous Arena artifact binding differs")
+PY
+    ) || fail "previous Arena rollback artifacts are invalid"
+    OLD_PCR0="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["pcr0"])' "$PREVIOUS_ARENA_SNAPSHOT/manifest.json")"
+    [ "${OLD_PCR0,,}" = "${discovered_pcr0,,}" ] || fail "previous Arena signer image differs from running enclave"
+    previous_snapshot_pcr0="$(sudo nitro-cli describe-eif --eif-path "$PREVIOUS_ARENA_SNAPSHOT/validator-enclave.eif" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["Measurements"]["PCR0"])')"
+    [ "$(printf '%s' "$previous_snapshot_pcr0" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$OLD_PCR0" | tr '[:upper:]' '[:lower:]')" ] || fail "previous Arena signer snapshot PCR differs"
+    ( cd "$PREVIOUS_CURRENT_TARGET" && ENCLAVE_CID="$discovered_cid" PYTHONPATH="$PREVIOUS_CURRENT_TARGET" "$PYTHON" - "$PREVIOUS_ARENA_SNAPSHOT/manifest.json" <<'PY'
+import json,sys
+from validator_tee.host.vsock_client import ValidatorEnclaveClient
+manifest=json.load(open(sys.argv[1])); state=ValidatorEnclaveClient().get_arena_hotkey_state_v1()
+if state.get("provisioned") is not True or state.get("policy_hash") != manifest["policy_sha256"]:
+    raise SystemExit("running Arena signer policy differs from rollback artifact")
+PY
+    ) || fail "previous Arena signer protected identity is invalid"
+    OLD_SIGNER_KIND=arena
+    OLD_ENCLAVE_ID="$old_enclave_id"; OLD_ENCLAVE_CID="$discovered_cid"; OLD_ENCLAVE_NAME="$discovered_name"
+    OLD_ENCLAVE_CPUS="$discovered_cpus"; OLD_ENCLAVE_MEMORY="$discovered_memory"
+  else
   for legacy_input in "$LEGACY_EIF" "$LEGACY_HOTKEY_CONFIG" "$LEGACY_RELEASE_MANIFEST" "$LEGACY_GATEWAY_MANIFEST" "$LEGACY_GATEWAY_LINEAGE" "$LEGACY_ENVELOPE" "$LEGACY_CUTOVER"; do
     [ -f "$legacy_input" ] && [ ! -L "$legacy_input" ] || fail "legacy rollback input is unavailable"
   done
@@ -330,6 +422,8 @@ elif [ -n "$old_enclave_id" ]; then
   [ "${snapshot_pcr0,,}" = "${OLD_PCR0,,}" ] || fail "private legacy signer snapshot differs"
   OLD_ENCLAVE_ID="$old_enclave_id"; OLD_ENCLAVE_CID="$discovered_cid"; OLD_ENCLAVE_NAME="$discovered_name"
   OLD_ENCLAVE_CPUS="$discovered_cpus"; OLD_ENCLAVE_MEMORY="$discovered_memory"
+    OLD_SIGNER_KIND=legacy
+  fi
 fi
 
 # Adopt only the exact legacy validator from the installed checkout. A process
@@ -357,6 +451,10 @@ if [ "$reuse_candidate" -eq 0 ]; then
     sudo docker stop --time "$LEGACY_COORDINATOR_STOP_TIMEOUT" "$legacy_container_id" >/dev/null
     LEGACY_CONTAINER_STOPPED=1
   fi
+  if [ "$OLD_SIGNER_KIND" = "arena" ] && [ "$service_active" -eq 1 ]; then
+    timeout "$STOP_TIMEOUT" sudo systemctl stop "$SERVICE"
+    OLD_SERVICE_DRAINED=1
+  fi
   if [ -n "$OLD_ENCLAVE_ID" ]; then
     sudo nitro-cli terminate-enclave --enclave-id "$OLD_ENCLAVE_ID" >/dev/null
     OLD_ENCLAVE_TERMINATED=1
@@ -381,12 +479,14 @@ if ! ( cd "$RELEASE" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" ENCLAVE_
     --legacy-envelope "$LEGACY_ENVELOPE" --policy "$POLICY_FILE" --kms-key-id "$MIGRATION_KMS_KEY_ID" )
 fi
 ( cd "$RELEASE" && sudo timeout "$READY_TIMEOUT" env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" "$RELEASE/scripts/run_arena_validator.py" --environment-file "$CANDIDATE_SERVICE_ENV" --enclave-cid "$CANDIDATE_CID" --check-only )
-SIGNER_HANDOFF_COMMITTED=1
+[ "$OLD_SIGNER_KIND" = "arena" ] || SIGNER_HANDOFF_COMMITTED=1
 
 # Only now drain the exact old supervised process. No broad process kill or
 # transaction submission is allowed here.
 if [ "$service_active" -eq 1 ]; then
-  timeout "$STOP_TIMEOUT" sudo systemctl stop "$SERVICE"
+  if [ "$OLD_SERVICE_DRAINED" -eq 0 ]; then
+    timeout "$STOP_TIMEOUT" sudo systemctl stop "$SERVICE"
+  fi
 elif [ -n "$old_pid" ]; then
   observed="$(awk '{print $22}' "/proc/$old_pid/stat" 2>/dev/null || true)"
   [ "$observed" = "$old_start" ] || fail "legacy validator identity changed before drain"
@@ -419,6 +519,11 @@ fi
 stop_owned_process "$old_relay_pid" "$old_relay_start" "legacy chain relay"
 if sudo ss --vsock -H -ln | awk '$5 ~ /:500[23]$/ {found=1} END{exit !found}'; then fail "a validator relay remains after service stop"; fi
 
+if [ "$OLD_SIGNER_KIND" = "arena" ]; then
+  [ "$(readlink -f "$CURRENT_LINK")" = "$PREVIOUS_CURRENT_TARGET" ] || fail "active Arena release identity changed during handoff"
+  sudo cmp -s "$PREVIOUS_ARENA_SNAPSHOT/service.env" "$SERVICE_ENV" || fail "active Arena service configuration changed during handoff"
+  sudo cmp -s "$PREVIOUS_ARENA_SNAPSHOT/runtime.env" "$RUNTIME_ENV" || fail "active Arena runtime identity changed during handoff"
+fi
 ln -sfn "$RELEASE" "$CURRENT_LINK.new"
 mv -Tf "$CURRENT_LINK.new" "$CURRENT_LINK"
 if sudo test -e "$SERVICE_ENV"; then
@@ -457,12 +562,29 @@ deadline=$((SECONDS + READY_TIMEOUT))
 while [ "$SECONDS" -lt "$deadline" ]; do
   main_pid="$(sudo systemctl show -p MainPID --value "$SERVICE")"
   if sudo systemctl is-active --quiet "$SERVICE" && [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] && sudo ss --vsock -H -ln | awk '$5 ~ /:5002$/ {chain=1} $5 ~ /:5003$/ {state=1} END{exit !(chain&&state)}'; then
-    ACTIVATED=1
+    SERVICE_READY=1
     break
   fi
   sleep 2
 done
-[ "$ACTIVATED" -eq 1 ] || fail "normal Arena validator did not become ready"
+[ "$SERVICE_READY" -eq 1 ] || fail "normal Arena validator did not become ready"
+# Candidate overrides are staging inputs. Publish their already-verified bytes
+# only after the new signer and service are ready, so the next routine restart
+# treats this signer as its rollback source.
+for promotion in \
+  "$EIF_FILE:$ARENA_ARTIFACT_ROOT/validator-enclave.eif" \
+  "$MANIFEST:$ARENA_ARTIFACT_ROOT/manifest.json" \
+  "$POLICY_FILE:$ARENA_ARTIFACT_ROOT/arena_signer_policy.json"; do
+  source_path="${promotion%%:*}"; target_path="${promotion#*:}"
+  if [ "$source_path" != "$target_path" ]; then
+    ARTIFACT_PROMOTION_STARTED=1
+    artifact_tmp="${target_path}.candidate.$$"
+    install -m 0600 "$source_path" "$artifact_tmp"
+    mv -f "$artifact_tmp" "$target_path"
+  fi
+done
+SIGNER_HANDOFF_COMMITTED=1
+ACTIVATED=1
 
 # Retire exact old fulfillment workers only after the replacement service is
 # active and every old work file has a corresponding result.

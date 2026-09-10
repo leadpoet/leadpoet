@@ -252,7 +252,8 @@ def test_single_enclave_transition_has_bounded_automatic_rollback():
     assert public_preflight < stop_weight < stop_old_signer < start_candidate < protected_ready < stop_runner < activated < stop_workers
     assert "docker rm" not in text
     cleanup = text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]
-    assert 'run-enclave --eif-path "$LEGACY_EIF_SNAPSHOT"' in cleanup
+    assert 'recovery_eif="$LEGACY_EIF_SNAPSHOT"' in cleanup
+    assert 'recovery_eif="$PREVIOUS_ARENA_SNAPSHOT/validator-enclave.eif"' in cleanup
     assert "runtime_v2_bootstrap" in cleanup
     assert "hotkey_bootstrap_v2" in cleanup
     assert 'docker start "$legacy_container_id"' in cleanup
@@ -262,6 +263,98 @@ def test_single_enclave_transition_has_bounded_automatic_rollback():
     assert "request_timeout_seconds=timeout" in text
     assert 'ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT"' in cleanup
     assert "no recoverable legacy signer is running" not in text
+
+
+def test_arena_to_arena_handoff_drains_service_and_validates_old_image_first():
+    text = SCRIPT.read_text()
+    old_identity = text.index("previous Arena signer image differs from running enclave")
+    drain = text.index('timeout "$STOP_TIMEOUT" sudo systemctl stop "$SERVICE"', old_identity)
+    terminate = text.index('terminate-enclave --enclave-id "$OLD_ENCLAVE_ID"', drain)
+    candidate = text.index('run-enclave --eif-path "$EIF_FILE"', terminate)
+    assert old_identity < drain < terminate < candidate
+    assert '[ "$OLD_SIGNER_KIND" = "arena" ] || SIGNER_HANDOFF_COMMITTED=1' in text
+    assert text.index("SIGNER_HANDOFF_COMMITTED=1", candidate) < text.rindex("SIGNER_HANDOFF_COMMITTED=1")
+
+
+def test_arena_candidate_failure_restores_previous_signer_and_service(tmp_path):
+    text = SCRIPT.read_text()
+    cleanup = text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]
+    fake_bin = tmp_path / "bin"; fake_bin.mkdir(); calls = tmp_path / "calls"
+    sudo = fake_bin / "sudo"
+    sudo.write_text('''#!/bin/sh
+echo "sudo:$*" >> "$CALL_LOG"
+case "$*" in
+  "nitro-cli run-enclave"*) echo '{"EnclaveID":"restored"}' ;;
+  "nitro-cli describe-enclaves"*) echo '[{"State":"RUNNING","EnclaveCID":81,"Measurements":{"PCR0":"oldpcr"}}]' ;;
+esac
+'''); sudo.chmod(0o755)
+    python = fake_bin / "python"
+    python.write_text('''#!/bin/sh
+if [ "$1" = "-c" ]; then cat >/dev/null; echo oldpcr; exit 0; fi
+echo "python:$ENCLAVE_CID:$*" >> "$CALL_LOG"
+'''); python.chmod(0o755)
+    mv = fake_bin / "mv"
+    mv.write_text('#!/bin/sh\n[ "$1" = "-Tf" ] && shift\nexec /bin/mv -f "$@"\n')
+    mv.chmod(0o755)
+    previous = tmp_path / "previous"; previous.mkdir()
+    (previous / "validator-enclave.eif").write_text("eif")
+    (previous / "manifest.json").write_text("manifest")
+    (previous / "policy.json").write_text("{}")
+    (previous / "service.env").write_text("service")
+    (previous / "runtime.env").write_text("runtime")
+    artifacts = tmp_path / "artifacts"; artifacts.mkdir()
+    for name in ("validator-enclave.eif", "manifest.json", "arena_signer_policy.json"):
+        (artifacts / name).write_text("candidate")
+    old_release = tmp_path / "old-release"; old_release.mkdir()
+    current = tmp_path / "current"
+    unit = tmp_path / "unit"; unit.write_text("unit")
+    program = f'''set -euo pipefail
+SERVICE_ATTEMPTED=0; ACTIVATED=0; SERVICE_STARTED=0; SERVICE=test.service
+CANDIDATE_ENCLAVE_ID=new; CANDIDATE_CREATED=1; STAGE=; CANDIDATE_SERVICE_ENV=
+SERVICE_ENV_PROMOTED=0; SERVICE_ENV_BACKUP=; RUNTIME_ENV_PROMOTED=0; RUNTIME_ENV_BACKUP=
+SIGNER_HANDOFF_COMMITTED=0; OLD_ENCLAVE_TERMINATED=1; LEGACY_EIF_SNAPSHOT=
+PREVIOUS_ARENA_SNAPSHOT={previous}; PREVIOUS_UNIT_SNAPSHOT={unit}; PREVIOUS_CURRENT_TARGET={old_release}
+    CURRENT_LINK={current}; UNIT_PATH=/unit; SERVICE_ENV=/service-env; RUNTIME_ENV=/runtime-env; OLD_SIGNER_KIND=arena; OLD_SERVICE_DRAINED=1; ARTIFACT_PROMOTION_STARTED=1; ARENA_ARTIFACT_ROOT={artifacts}
+OLD_ENCLAVE_CPUS=2; OLD_ENCLAVE_MEMORY=1024; OLD_ENCLAVE_CID=81; OLD_ENCLAVE_NAME=arena-signer-old; OLD_PCR0=oldpcr
+PYTHON={python}; SOURCE_ROOT={old_release}; LEGACY_ENVELOPE=/envelope; MIGRATION_KMS_KEY_ID=arn:test
+READY_TIMEOUT=2; LEGACY_CONTAINER_STOPPED=0; legacy_container_id=
+{cleanup}
+trap cleanup EXIT
+false
+'''
+    result = subprocess.run(["bash", "-c", program], env={"PATH":f"{fake_bin}:/usr/bin:/bin","CALL_LOG":str(calls)}, capture_output=True, text=True)
+    assert result.returncode != 0
+    log = calls.read_text()
+    assert "run-enclave --eif-path" in log
+    assert "python:81:-m validator_tee.host.arena_hotkey_bootstrap migrate-legacy" in log
+    assert "sudo:systemctl start test.service" in log
+    assert (artifacts / "validator-enclave.eif").read_text() == "eif"
+    assert (artifacts / "manifest.json").read_text() == "manifest"
+    assert (artifacts / "arena_signer_policy.json").read_text() == "{}"
+
+
+def test_previous_arena_snapshot_pcr_mismatch_fails_closed(tmp_path):
+    text = SCRIPT.read_text()
+    start = text.index('previous_snapshot_pcr0="$(')
+    end = text.index('\n    ( cd "$PREVIOUS_CURRENT_TARGET"', start)
+    fragment = text[start:end]
+    fake_bin = tmp_path / "bin"; fake_bin.mkdir()
+    sudo = fake_bin / "sudo"
+    sudo.write_text('#!/bin/sh\nexec "$@"\n'); sudo.chmod(0o755)
+    nitro = fake_bin / "nitro-cli"
+    nitro.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"Measurements":{"PCR0":"different"}}\'\n'); nitro.chmod(0o755)
+    previous = tmp_path / "previous"; previous.mkdir()
+    (previous / "validator-enclave.eif").write_text("eif")
+    program = f'''set -euo pipefail
+fail() {{ echo "ERROR: $*" >&2; exit 1; }}
+PYTHON={sys.executable}; PREVIOUS_ARENA_SNAPSHOT={previous}; OLD_PCR0=expected
+{fragment}
+printf 'drain-started\\n'
+'''
+    result = subprocess.run(["bash", "-c", program], env={"PATH":f"{fake_bin}:/usr/bin:/bin"}, text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "previous Arena signer snapshot PCR differs" in result.stderr
+    assert "drain-started" not in result.stdout
 
 
 def _proc_entry(proc: Path, pid: int, cwd: Path, command: Path, *, ppid=1, pgid=None):

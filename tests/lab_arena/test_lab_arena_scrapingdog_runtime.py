@@ -1,5 +1,6 @@
 """Scrapingdog SDK handle compatibility without exposing provider secrets."""
 
+import logging
 from urllib.parse import urlencode
 
 import pytest
@@ -136,9 +137,10 @@ def test_standard_http_client_handle_crosses_worker_without_credentials():
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_provider_transport_never_logs_key_at_debug_level(caplog, fails):
-    import logging
-
+@pytest.mark.parametrize("prior_httpx_level", [logging.NOTSET, logging.WARNING])
+def test_provider_transport_never_logs_key_at_debug_level(
+    caplog, fails, prior_httpx_level
+):
     import httpx
 
     from lab_arena.broker import HttpxProviderTransport, ProviderTransportError
@@ -155,9 +157,11 @@ def test_provider_transport_never_logs_key_at_debug_level(caplog, fails):
             raise httpx.ConnectError("provider request failed", request=request)
         return httpx.Response(200, json={"organic_results": []})
 
+    # Some imported model modules raise the process-wide httpx logger level.
+    # Exercise that adversarial prior state, then make this test's logging
+    # boundary explicit. caplog restores every named logger after the test.
+    caplog.set_level(prior_httpx_level, logger="httpx")
     caplog.set_level(logging.DEBUG)
-    # Exercise each transport logger even when another test configured it above
-    # DEBUG. caplog restores each logger's prior level after this test.
     for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.proxy"):
         caplog.set_level(logging.DEBUG, logger=name)
     with httpx.Client(transport=httpx.MockTransport(provider)) as client:

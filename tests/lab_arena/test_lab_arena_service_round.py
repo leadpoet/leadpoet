@@ -179,6 +179,7 @@ class ModelSandbox:
         self.runs = 0
         self.inflate_scores = False  # a cheating validator reports 99.0 for every company
         self.judge_failures: set[tuple[str, int]] = set()
+        self.empty_outputs: set[tuple[str, int]] = set()
 
     def run_icp(self, spec: runtime.SandboxSpec, **_):
         with self.lock:
@@ -240,8 +241,9 @@ class ModelSandbox:
         if flavor is None:
             flavor = (spec.source_dir / "flavor.txt").read_text(encoding="utf-8")
             self.flavor_by_submission[submission_id] = flavor
+        position = int(str(icp["icp_id"]).rsplit("_", 1)[-1]) - 1
         bucket = icp["employee_count"][0]
-        companies = [
+        companies = [] if (flavor, position) in self.empty_outputs else [
             {
                 "company_name": "%s Company %d" % (flavor, i),
                 "company_website": "https://%s-%d.example.com" % (flavor.lower(), i),
@@ -2079,6 +2081,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
         harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+    harness.sandbox.empty_outputs.add(("PublicBaseline", 7))
 
     _run_stage_one_to_scoring(harness, len(participants), runners=2)
     harness.advance_until("published", runners=2)
@@ -2104,6 +2107,21 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     assert {score["icp_position"] for score in public_scores} == public_positions
     assert benchmark.json()["disclosure_policy"] == "all_20_next_day"
     assert benchmark.json()["private_icp_count"] == 0
+    baseline_id = next(p["submission_id"] for p in row["participants"] if p["is_king"])
+    baseline_public = original_get(
+        "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, baseline_id)
+    ).json()
+    assert len(baseline_public["outputs"]) == 20
+    baseline_runs = [run for run in harness.service.store.list_runs(
+        harness.round_id, kind="execute", status="accepted"
+    ) if run["submission_id"] == baseline_id]
+    empty_run = next(run for run in baseline_runs if run["icp_position"] == 7)
+    assert empty_run["terminal_cause"] == "accepted"
+    assert float(empty_run["per_icp_score"]) == 0.0
+    empty_output = json.loads(harness.service._objects.get_bounded(
+        empty_run["output_ref"], 4 * 1024 * 1024
+    ))
+    assert empty_output["companies"] == []
     current = original_get("http://localhost/arena/v1/current")
     assert current.status_code == 200
     assert row["king_outcome"] == "no_king"

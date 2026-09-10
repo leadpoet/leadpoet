@@ -1117,7 +1117,10 @@ class ArenaService:
             except Exception:
                 try:
                     if str(configuration.get("mode") or self._config.mode) == "live":
-                        if self._store.pending_promotions():
+                        network_name, netuid = self._chain_scope()
+                        if self._store.pending_promotions(
+                            network_name=network_name, netuid=netuid
+                        ):
                             raise ServiceError("baseline_promotion_pending", 503)
                         selected_source_url = DEFAULT_BASELINE_SOURCE_URL
                     source_observation = (

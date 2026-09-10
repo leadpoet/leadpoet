@@ -1,7 +1,7 @@
 <h1 align="center">Leadpoet</h1>
 
 <p align="center">
-  <strong>AI sales intelliegence, built on Bittensor.</strong>
+  <strong>AI sales intelligence, built on Bittensor.</strong>
 </p>
 
 <p align="center">
@@ -15,283 +15,173 @@
 
 ---
 
-Leadpoet is a Bittensor subnet (SN71). The Open Source Agent Competition Arena rewards miners for improving AI systems that find high-quality sales leads. Arena is the only subnet incentive mechanism. Fulfillment still accepts and scores leads for client requests, but does not receive subnet emissions.
+# Leadpoet Open Source Agent Competition
 
-## Dashboard
+Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [pydantic-harness](https://github.com/leadpoet/pydantic-harness).
 
-Use the dashboard to track:
+## Daily schedule
 
-- Research Lab agent benchmark examples and scores, areas to improve, and activity.
-- Fulfillment activity and leaderboard.
+Day 0: submit models while that day's 20 ICPs stay hidden. At about **00:00 UTC on Day 1**, those ICPs become public and evaluation starts for the baseline and prior-day models. All 20 are processed without fixed pauses between batches. Code, final and per-ICP scores publish when evaluation finishes. Day 1's new ICP set stays hidden until Day 2.
 
-Dashboard: [subnet71.com](https://subnet71.com)
+## Install and register
 
-## Installation
+Use Python 3.11. Install the miner runtime:
 
 ```bash
 git clone https://github.com/leadpoet/leadpoet.git
 cd leadpoet
-
-python3 -m venv venv
+python3.11 -m venv venv
 source venv/bin/activate
-
-pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-Requirements:
-
-- Python 3.11 for the host runtime
-- Bittensor wallet
-- Bittensor CLI
+The runtime pins Bittensor 10.5.0. Use a separate environment for the current v11 wallet CLI so its dependencies do not change the miner runtime:
 
 ```bash
-pip install "bittensor==10.5.0" "bittensor-cli>=1.0.0"
-btcli wallet create
+deactivate
+python3.11 -m venv .venv-bittensor11-cli
+source .venv-bittensor11-cli/bin/activate
+python -m pip install "bittensor==11.1.0"
+btcli wallet create -w miner -H default
+btcli wallet registrations -w miner --network finney --netuid 71
+btcli tx burned-register --netuid 71 --hotkey miner/default -w miner --network finney --dry-run
 ```
 
-## Miners
+Fund the coldkey, review the registration cost, then run the last command without `--dry-run` to register. Keep the seed phrase private. See the official [wallet guide](https://www.bittensor.com/docs/concepts/wallets) and [registration guide](https://www.bittensor.com/docs/tx/burned-register).
 
-Register on subnet 71:
+Return to the miner environment:
 
 ```bash
-btcli subnet register \
-  --netuid 71 \
-  --subtensor.network finney \
-  --wallet.name miner \
-  --wallet.hotkey default
+deactivate
+source venv/bin/activate
 ```
 
-Run the miner:
+## Build your agent
+
+Fork the public baseline, or clone its promoted version as a starting point:
 
 ```bash
-python neurons/miner.py \
-  --wallet_name miner \
-  --wallet_hotkey default \
-  --netuid 71 \
-  --subtensor_network finney
+git clone --branch lab https://github.com/leadpoet/pydantic-harness.git ../my-agent
 ```
 
-The miner will ask which mode to run:
-
-- **Agent Competition**
-- **Fulfillment**
-
-### Research Lab
-
-The agent-bundle Arena scores miner submissions and determines the accepted
-reward state. Validators independently construct weights from that state.
-Research Lab reimbursements, legacy champion obligations, and SOURCE_ADD
-incentives are retired.
-
-#### Agent Bundle Arena
-
-The Arena rebenchmarks the public baseline on the daily ICPs and evaluates
-miner-submitted forks on the same ICPs. A miner can change the harness, model,
-prompts, dependencies, provider use, and internal logic. The benchmark score is
-the quality authority.
-
-The public starting point is
-[`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
-Fork it or replace any part of it. The one source-code contract is:
+In `harness.py`, define or re-export this synchronous function with exactly one positional parameter:
 
 ```python
 def run_icp(icp: dict) -> list[dict]:
-    """Return at most five companies for one ICP."""
+    """Return at most five companies."""
 ```
 
-`harness.py` must expose this function. It can define the function or re-export
-it from vendored code. The function must be synchronous and must have
-exactly one positional parameter. It cannot have keyword-only parameters,
-`*args`, or `**kwargs`. It must return JSON-ready company objects in the schema
-below. The ICP dictionary contains the public business criteria, including
-industry, geography, employee-count ranges, product/service, required
-attributes, required intent signals, bonus intent signals, and descriptive
-prompt fields. Agents must ignore fields they do not use so the host can add
-descriptive fields without changing the function signature.
+Change the harness, model, prompts, and approved API routing. List Python dependencies in `requirements.txt`: package names and version constraints only, with binary wheels available. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported. Return at most five companies as a JSON list. Use `[]` if there are no valid matches.
 
-Each returned company must have this shape:
+The output below shows the exact supported fields. It is a format example, not a real company claim. `company_linkedin`, `company_stage`, and `state` may be empty; `required_attribute` may be `null` when it is not required. `matched_icp_signal` is the zero-based position in the input's `intent_signals` list.
+
+<details>
+<summary>Output</summary>
+
+```json
+[
+  {
+    "company_name": "Example",
+    "company_website": "https://example.com/",
+    "company_linkedin": "",
+    "industry": "Software",
+    "employee_count": "51-200",
+    "company_stage": "Series A",
+    "country": "United States",
+    "state": "",
+    "fit_summary": "Why it fits.",
+    "fit_evidence_urls": ["https://example.com/about"],
+    "intent_signals": [
+      {
+        "matched_icp_signal": 0,
+        "description": "Recent required event.",
+        "date": "2026-08-20",
+        "why_now": "Why now.",
+        "url": "https://example.com/news",
+        "snippet": "Supporting source text."
+      }
+    ],
+    "required_attribute": {
+      "text": "Required characteristic.",
+      "passed": true,
+      "evidence_url": "https://example.com/about",
+      "evidence_quote": "Supporting quote.",
+      "explanation": "Why it passes."
+    }
+  }
+]
+```
+</details>
+
+Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A winning model must beat the daily baseline mean by at least 1.0 point on the 0–100 scale. Ties and smaller gains do not promote. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. The current champion pool starts at 25% of the subnet's emissions and decays weekly, subject to registration and continued eligibility.
+
+## Submit a model
+
+Use the interactive CLI:
+
+```bash
+python scripts/lab_arena_miner.py interactive \
+  --wallet-name miner --hotkey-name default \
+  --api-base-url https://gateway.subnet71.com
+```
+
+Enter `../my-agent` as the source directory and confirm submission, then enter your OpenRouter API key, OpenRouter management key, and Deepline key in the masked prompts. Runtime keys are stored encrypted and are never published or shared with other miners; the management key is checked and not stored.
+
+For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEPLINE_API_KEY`, then replace `interactive` with `submit-model --source ../my-agent` in the command above.
+
+Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files. Each hotkey can have one accepted model per round; daily capacity is limited. Track admission, scoring, per-ICP results, and champion status on the [dashboard](https://subnet71.com).
+
+## Public input example
+
+This real ICP comes from the September 9 set, released for evaluation on September 10: [public benchmark](https://gateway.subnet71.com/arena/v1/rounds/arena-2026-09-10/benchmark). Display-only score and position fields are omitted.
+
+<details>
+<summary>Input</summary>
 
 ```json
 {
-  "company_name": "Example",
-  "company_website": "https://example.com/",
-  "company_linkedin": "https://www.linkedin.com/company/example/",
+  "icp_id": "icp_20260909_001",
+  "prompt": "I need software companies that just shipped a major platform capability or integration in the last 12 months and are scaling fast.",
   "industry": "Software",
-  "employee_count": "51-200",
-  "company_stage": "Series A",
+  "sub_industry": "B2B workflow software",
+  "target_roles": [],
+  "target_seniority": "",
+  "employee_count": ["2-10", "11-50", "51-200", "201-500", "501-1,000"],
+  "company_stage": "Seed",
+  "geography": "United States",
   "country": "United States",
-  "state": "California",
-  "fit_summary": "Why this company fits the ICP.",
-  "fit_evidence_urls": ["https://example.com/about"],
-  "intent_signals": [{
-    "matched_icp_signal": 0,
-    "description": "The required recent event.",
-    "date": "2026-08-20",
-    "why_now": "Why a sales representative should contact the company now.",
-    "url": "https://example.com/news/event",
-    "snippet": "Source text that supports the claim."
-  }],
-  "required_attribute": {
-    "text": "The required company characteristic.",
-    "passed": true,
-    "evidence_url": "https://example.com/about",
-    "evidence_quote": "Source text that proves the characteristic.",
-    "explanation": "Why the evidence satisfies the requirement."
-  }
+  "product_service": "A subscription software platform that helps business teams automate workflows, manage requests, and connect data across systems.",
+  "intent_signals": ["Launched a new product or major platform capability in the last 12 months, per a press release, product page, or changelog."],
+  "intent_signal": "Launched a new product or major platform capability in the last 12 months, per a press release, product page, or changelog.",
+  "intent_category": "PRODUCT_LAUNCH",
+  "intent_max_age_days": 365,
+  "bonus_intents": [],
+  "required_attribute": "Sells a subscription software platform used by business teams to automate workflows, manage requests, or connect operational data across systems.",
+  "buyer_description": "I need software companies that just shipped a major platform capability or integration in the last 12 months and are scaling fast.",
+  "verified_example_company": "Airtable",
+  "excluded_companies": ["reflow.systems"],
+  "max_companies": 5
 }
 ```
+</details>
 
-`company_linkedin`, `company_stage`, `state`, and `required_attribute` can be
-empty or omitted only where the public contract permits it. All other shown
-fields are required, and `intent_signals` must contain at least one item.
-For the public baseline, provider credentials come from the Arena host. A
-competing model submission supplies its own OpenRouter runtime key, matching
-OpenRouter management key, and Deepline API key during admission; see
-[Submit a competing model](docs/miner-model-submissions.md). The gateway
-validates those keys, stores only encrypted runtime credentials, and never
-passes the management key to the model.
+## Validators and rewards
 
-An agent can vendor its Python code and can include an optional
-`requirements.txt`. The runner accepts normal package names and version
-constraints and installs binary wheels only. URLs, local paths, nested
-requirements files, VCS dependencies, and source builds are not accepted.
-Miners can replace PydanticAI with any design that exposes the one Python
-`run_icp` adapter. The adapter is the stable competition boundary; the
-framework, model, prompts, routing, and internal logic are not admission
-identities or promotion gates.
+Arena is the only subnet incentive mechanism. Research Lab reimbursements,
+legacy champion obligations, SOURCE_ADD, and Fulfillment emission allocations
+are retired. Fulfillment still accepts, scores, and delivers client leads.
 
-Submit the local source directory. No Dockerfile, public registry, image tag,
-commit identity, receipt, or release manifest is part of miner admission:
-
-```bash
-python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
-  --wallet-name default --hotkey-name default
-```
-
-For model submissions, use `submit-model` and follow the credential and source
-archive rules in [Submit a competing model](docs/miner-model-submissions.md).
-
-Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
-[input contract](lab_arena/runner.py), [output contract](lab_arena/output.py),
-[provider adapter and socket protocol](lab_arena/shim.py), and
-[submission helper](scripts/lab_arena_miner.py). Examples are documentation,
-not admission or scoring requirements.
-
-At the first cutoff, the Arena automatically enters the configured public
-PydanticAI source archive through the same source checks, runner, provider
-limits, and scorer as miner bundles. The downloaded bytes are frozen for that
-round. Every new daily round downloads the promoted `lab` baseline and scores
-it again; the comparison uses that fresh score, not yesterday's score.
-
-The Open Source Agent Competition uses UTC days. Day 0's twenty ICPs stay
-hidden while miners submit. On Day 1, submissions close, all twenty of Day 0's
-ICPs become public, and the frozen baseline and submitted models are evaluated
-on that same set. Code, final scores, and all per-ICP scores become public when
-evaluation completes. Day 1's new ICP set stays hidden until Day 2.
-
-### Fulfillment
-
-Fulfillment miners compete on real client requests. A client publishes an ICP, miners submit enriched leads, and validators score each lead for fit, accuracy, and intent evidence.
-
-High-level flow:
-
-1. Client request is published.
-2. Miners commit hashed leads during the commit window.
-3. Miners reveal full lead data during the reveal window.
-4. Validators score revealed leads.
-5. Winning leads are recorded and delivered for the client request.
-
-Fulfillment leads should include:
-
-- Contact name, email, LinkedIn, title, role type, seniority, and location.
-- Company name, website, LinkedIn, industry, sub-industry, size, and HQ location.
-- A clear company description.
-- Intent evidence with source, URL, date, snippet, and matched ICP signal.
-- Optional attribute evidence for required client constraints.
-
-Common rejection causes:
-
-- Role, seniority, industry, geography, or employee-count mismatch.
-- Invalid or unverifiable email.
-- Weak company description.
-- Missing required intent signal.
-- Intent snippet not present on the cited page.
-- Wrong `source` for an intent URL.
-
-Use the correct intent source:
-
-| URL type | `source` |
-| --- | --- |
-| Company website or blog | `company_website` |
-| Lever, Greenhouse, Indeed, careers pages | `job_board` |
-| Press releases and news articles | `news` |
-| LinkedIn pages, posts, jobs | `linkedin` |
-| X, Threads, Instagram, Facebook, TikTok | `social_media` |
-| GitHub repositories or organizations | `github` |
-| G2, Capterra, TrustRadius, Glassdoor, Trustpilot | `review_site` |
-| Wikipedia | `wikipedia` |
-| Government or education sources that do not fit another category | `other` |
-
-Fulfillment validates the declared source against the evidence URL before
-applying its score multiplier. First-party `job_board` evidence must be on the
-lead company's own careers/jobs property; third-party job, news, social,
-review, and reference sources must use a recognized platform. Arbitrary
-third-party or self-published domains are not accepted as `other`.
-
-Reference fulfillment code lives in `miner_models/Main_fulfillment_model/`. It is a starting point, not a guaranteed competitive miner.
-
-## Validators
-
-Register a validator on subnet 71:
-
-```bash
-btcli subnet register \
-  --netuid 71 \
-  --subtensor.network finney \
-  --wallet.name validator \
-  --wallet.hotkey default
-```
+Every normal validator scores submitted models with brokered miner credentials,
+returns scores through the competition API, and independently derives weights
+from the signed accepted reward state and finalized chain ownership. A small
+protected signer constrains the transaction. Chain outcomes are recorded
+separately. There is no audit-validator role.
 
 Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)
-to provision the protected signer and create the private environment file.
-Check readiness, then start the same normal validator implementation:
+for signer provisioning, configuration, restart, and verification.
 
-```bash
-python3 scripts/run_arena_validator.py \
-  --environment-file /home/ec2-user/.config/leadpoet/arena-validator.env \
-  --check-only
-
-python3 scripts/run_arena_validator.py \
-  --environment-file /home/ec2-user/.config/leadpoet/arena-validator.env
-```
-
-Validators score miner-submitted models using brokered miner credentials,
-return scores through the competition API, and submit weights from the
-accepted reward state. The validator hotkey stays in the protected signer.
-
-## Rewards
-
-Rewards come from the Open Source Competition Arena. Validators score the
-submitted models, read the signed accepted reward state, independently derive
-the same champion and burn weights from finalized chain ownership, and submit
-their own protected transaction. There is no separate auditor validator role.
-
-## Transparency
-
-Each normal validator derives the Arena weight vector independently. A small protected verifier checks the accepted reward state, finalized UID ownership, and exact transaction before signing. Chain outcomes are recorded separately. See [the validator architecture](docs/arena_normal_validator_weights.md).
-
-Agent submissions use the documented competition input and output contract. The competition does not require a Git identity, release manifest, receipt chain, or repository attestation from miners.
-
-Useful tools:
-
-```bash
-python scripts/verify_attestation.py
-```
-
-For more detail, see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md).
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [LICENSE](LICENSE).

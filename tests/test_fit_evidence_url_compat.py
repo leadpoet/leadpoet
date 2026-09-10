@@ -17,10 +17,16 @@ from qualification.scoring.company_fit_decision import (
     company_fit_mismatch,
 )
 from qualification.scoring.competition import _normalized_company
+from qualification.scoring.competition import (
+    count_penalizable_false_positives,
+    scorer_breakdown_has_retryable_infrastructure_failure,
+)
 from qualification.scoring.lead_scorer import (
+    INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
     _fit_evidence_url_hints,
     _llm_reverify_company,
     _verify_company_fit,
+    _web_identity_receipt,
 )
 
 
@@ -541,6 +547,245 @@ def test_web_linkedin_conflict_without_verified_anchor_remains_mismatch(
     assert result.details["identity_receipt"]["reason_code"] == (
         "identity_mismatch"
     )
+
+
+def _selsym_company():
+    return _company(
+        company_name="SelSym Biotech",
+        company_website="https://selsym.com/",
+        company_linkedin="",
+    )
+
+
+def _selsym_alternate_domain_verdict():
+    verdict = _complete_verdict(
+        name="SelSym Biotech",
+        website="https://selsymbio.com/",
+    )
+    verdict["observed_company_linkedin"] = (
+        "https://linkedin.com/company/selsymbio"
+    )
+    return verdict
+
+
+def _selsym_homepage_identity():
+    return _verified_homepage_identity(
+        observed_name="selsymbiotech",
+        observed_domain="selsym.com",
+        observed_linkedin_slug="selsymbio",
+    )
+
+
+def test_verified_homepage_same_name_domain_conflict_repairs_then_is_unproven(
+    monkeypatch,
+):
+    prompts = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match()
+
+    async def homepage(*_args, **_kwargs):
+        return _selsym_homepage_identity()
+
+    async def request(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return _selsym_alternate_domain_verdict(), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer.run_company_zero_checks", prechecks
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer.verify_company_exists", homepage
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+
+    result = asyncio.run(
+        _verify_company_fit(
+            _selsym_company(),
+            _icp(),
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+    identity = result.details["dimension_evidence"]["identity"]
+    receipt = identity["web_identity_receipt"]
+    breakdown = {
+        "final_score": 0.0,
+        "failure_reason": f"Company fit unavailable: {result.reason}",
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    }
+
+    assert len(prompts) == 2
+    assert "prior observed_company_website" in prompts[1]
+    assert "Do not assume that the two domains are aliases" in prompts[1]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == (
+        INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+    )
+    assert receipt["reason_code"] == (
+        "web_domain_conflicts_with_verified_homepage"
+    )
+    assert receipt["submitted_name"] == receipt["observed_name"] == (
+        "selsymbiotech"
+    )
+    assert receipt["submitted_domain"] == "selsym.com"
+    assert receipt["observed_domain"] == "selsymbio.com"
+    assert receipt["observed_linkedin_slug"] == "selsymbio"
+    assert count_penalizable_false_positives(
+        [breakdown], icp_has_intent_signals=True
+    ) == (0, 0)
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+def test_verified_homepage_same_name_domain_conflict_can_be_repaired(
+    monkeypatch,
+):
+    calls = []
+
+    async def request(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        if len(calls) == 1:
+            return _selsym_alternate_domain_verdict(), ""
+        repaired = _complete_verdict(
+            name="SelSym Biotech",
+            website="https://selsym.com/",
+        )
+        repaired["observed_company_linkedin"] = (
+            "https://linkedin.com/company/selsymbio"
+        )
+        return repaired, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _selsym_company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_selsym_homepage_identity(),
+        )
+    )
+
+    assert calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity_receipt"]["observed_domain"] == (
+        "selsym.com"
+    )
+
+
+def test_verified_homepage_different_domain_and_linkedin_remains_mismatch():
+    verdict = _selsym_alternate_domain_verdict()
+    verdict["observed_company_linkedin"] = (
+        "https://linkedin.com/company/same-name-other-company"
+    )
+
+    receipt = _web_identity_receipt(
+        _selsym_company(),
+        verdict,
+        verified_homepage_identity={
+            "normalized_name": "selsymbiotech",
+            "registrable_dns_domain": "selsym.com",
+            "linkedin_company_slug": "selsymbio",
+        },
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MISMATCH
+    assert receipt["reason_code"] == "identity_mismatch"
+
+
+def test_same_name_wrong_domain_without_homepage_anchor_remains_mismatch(
+    monkeypatch,
+):
+    calls = []
+
+    async def request(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        verdict = _complete_verdict(
+            name="Global South Utilities",
+            website="https://alternate-utilities.example/",
+        )
+        verdict["observed_company_linkedin"] = (
+            "https://linkedin.com/company/global-south-utilities"
+        )
+        return verdict, ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+    company = _company(
+        company_name="Global South Utilities",
+        company_website="https://globalsouthutilities.example/",
+        company_linkedin="",
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            company,
+            _icp(),
+            require_company_fit_dimensions=True,
+        )
+    )
+
+    assert calls == ["lead_scorer_reverify"]
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "identity_mismatch"
+    )
+
+
+def test_verified_homepage_domain_conflict_repair_failure_remains_retryable(
+    monkeypatch,
+):
+    calls = []
+
+    async def request(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        if len(calls) == 1:
+            return _selsym_alternate_domain_verdict(), ""
+        return None, "provider HTTP 503"
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _selsym_company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_selsym_homepage_identity(),
+        )
+    )
+    breakdown = {
+        "final_score": 0.0,
+        "failure_reason": f"Company fit unavailable: {result.reason}",
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    }
+
+    assert calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "failure_class" not in result.details
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
 
 
 def test_verified_anchor_does_not_hide_a_different_web_entity(monkeypatch):

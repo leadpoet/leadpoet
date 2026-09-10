@@ -1176,6 +1176,30 @@ def _web_identity_receipt(
         receipt.get("decision") == COMPANY_FIT_MISMATCH
         and receipt.get("reason_code") == "identity_mismatch"
         and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+        and isinstance(verified_homepage_identity, Mapping)
+        and receipt.get("submitted_name") == receipt.get("observed_name")
+        and receipt.get("submitted_domain")
+        == verified_homepage_identity.get("registrable_dns_domain")
+        and receipt.get("observed_domain")
+        and receipt.get("observed_domain")
+        != verified_homepage_identity.get("registrable_dns_domain")
+        and receipt.get("observed_linkedin_slug")
+        == verified_homepage_identity.get("linkedin_company_slug")
+    ):
+        # A same-name, same-LinkedIn alternate domain from the web model
+        # conflicts with the exact identity already fetched from the
+        # first-party homepage. Neither observation proves that the domains are
+        # aliases. Keep both identities and use the one bounded repair instead
+        # of turning the conflict into a false positive.
+        receipt.update(
+            decision=COMPANY_FIT_UNAVAILABLE,
+            reason_code="web_domain_conflicts_with_verified_homepage",
+        )
+        return receipt
+    if (
+        receipt.get("decision") == COMPANY_FIT_MISMATCH
+        and receipt.get("reason_code") == "identity_mismatch"
+        and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and receipt.get("submitted_name") == receipt.get("observed_name")
         and receipt.get("submitted_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
@@ -1547,7 +1571,10 @@ def _incomplete_company_reverify_dimensions(
     conflicting_verified_identity = bool(
         isinstance(identity_receipt, Mapping)
         and identity_receipt.get("reason_code")
-        == "web_linkedin_conflicts_with_verified_homepage"
+        in {
+            "web_domain_conflicts_with_verified_homepage",
+            "web_linkedin_conflicts_with_verified_homepage",
+        }
     )
     if (
         result.decision != COMPANY_FIT_UNAVAILABLE
@@ -1599,6 +1626,33 @@ def _is_same_domain_unproven_web_identity(
     )
 
 
+def _is_verified_homepage_web_identity_conflict(
+    receipt: Optional[Mapping[str, Any]],
+) -> bool:
+    """Recognize a complete web identity that conflicts with a verified anchor."""
+
+    value = receipt or {}
+    return bool(
+        value.get("decision") == COMPANY_FIT_UNAVAILABLE
+        and value.get("reason_code")
+        in {
+            "web_domain_conflicts_with_verified_homepage",
+            "web_linkedin_conflicts_with_verified_homepage",
+        }
+        and value.get("evidence_source") == "company_web_reverification"
+        and all(
+            isinstance(value.get(field), str)
+            and bool(str(value.get(field) or "").strip())
+            for field in (
+                "submitted_name",
+                "submitted_domain",
+                "observed_name",
+                "observed_domain",
+            )
+        )
+    )
+
+
 def _has_explicitly_unproven_fit_dimensions(
     verdict: Mapping[str, Any],
     incomplete: tuple[str, ...],
@@ -1628,7 +1682,10 @@ def _has_explicitly_unproven_fit_dimensions(
         return False
     for dimension in incomplete:
         if dimension == "identity":
-            if not _is_same_domain_unproven_web_identity(identity_receipt):
+            if not (
+                _is_same_domain_unproven_web_identity(identity_receipt)
+                or _is_verified_homepage_web_identity_conflict(identity_receipt)
+            ):
                 return False
             continue
         if (
@@ -1932,9 +1989,18 @@ async def _llm_reverify_company(
     # One repair is allowed only after a syntactically valid verifier object
     # left active dimensions unavailable. It is another independent web call,
     # not a merge with or reinterpretation of the first response.
-    repair_prompt = (
-        prompt
-        + (
+    result_identity_receipt = (
+        result.details.get("identity_receipt")
+        if isinstance(result.details, Mapping)
+        and isinstance(result.details.get("identity_receipt"), Mapping)
+        else {}
+    )
+    identity_conflict_reason = str(
+        result_identity_receipt.get("reason_code") or ""
+    )
+    identity_conflict_repair = ""
+    if identity_conflict_reason == "web_linkedin_conflicts_with_verified_homepage":
+        identity_conflict_repair = (
             "\nIDENTITY CONFLICT REPAIR: the prior observed_company_linkedin "
             "conflicted with the server-verified first-party homepage anchor "
             "while the normalized company name and domain matched. Perform a "
@@ -1942,16 +2008,19 @@ async def _llm_reverify_company(
             "public source proves it; otherwise return an empty string. Do not "
             "assume that two different slugs are aliases and do not repeat an "
             "ungrounded alternate slug."
-            if (
-                isinstance(result.details, Mapping)
-                and isinstance(
-                    result.details.get("identity_receipt"), Mapping
-                )
-                and result.details["identity_receipt"].get("reason_code")
-                == "web_linkedin_conflicts_with_verified_homepage"
-            )
-            else ""
         )
+    elif identity_conflict_reason == "web_domain_conflicts_with_verified_homepage":
+        identity_conflict_repair = (
+            "\nIDENTITY CONFLICT REPAIR: the prior observed_company_website "
+            "used a different registrable domain from the server-verified "
+            "first-party homepage anchor while the normalized company name "
+            "and exact LinkedIn company slug matched. Perform a fresh lookup "
+            "for the anchored company. Do not assume that the two domains are "
+            "aliases and do not substitute a same-name company."
+        )
+    repair_prompt = (
+        prompt
+        + identity_conflict_repair
         + "\nSCHEMA REPAIR: the prior response was incomplete or invalid for "
         + ", ".join(incomplete)
         + ". Perform a fresh independent web lookup and return the FULL JSON "

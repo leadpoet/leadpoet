@@ -1,5 +1,9 @@
 # Agent Instructions
 
+## Scoped production authorization: optional miner Scrapingdog credential
+
+On 2026-09-10 the user explicitly authorized this task to use `$overnight-rebenchmark-validation` for the optional miner-provided Scrapingdog credential: protected secret retrieval, narrow code and migration changes, pushes to main, canonical gateway/normal-validator restarts, and fresh live miner submissions with and without Scrapingdog. Prove real brokered Scrapingdog data is consumed by the submitted model without manual runtime credential injection or secret disclosure. Preserve scheduling, scoring, promotion, isolation, and unrelated concurrent work. No auditor or SOURCE_ADD requirement applies. This authorization expires when this task completes.
+
 ## Scoped production authorization: Arena-only production transition
 
 The user explicitly authorized this task on 2026-09-10 to integrate the tested

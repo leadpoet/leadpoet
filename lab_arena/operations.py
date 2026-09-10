@@ -40,6 +40,10 @@ PRICE_LIST_SCHEMA_VERSION = "leadpoet.lab_arena.provider_price_list.v1"
 # shim consumes it without exposing it as a provider response header.
 TRUSTED_RESPONSE_URL_HEADER = "x-lab-arena-response-url"
 
+# A public SDK-compatible handle, not a provider credential. The worker drops
+# this exact value before the gateway resolves the submission-owned key.
+SCRAPINGDOG_RUNTIME_HANDLE = "lab-arena-brokered-scrapingdog"
+
 PROVIDERS = contracts.PROVIDERS
 FUNDING_SOURCES = ("host",)
 METHODS = ("GET", "POST")
@@ -1506,9 +1510,17 @@ def match_request(
         except ValueError as exc:
             raise OperationRequestError("invalid_query") from exc
         parameters = {}
+        seen = set()
         for name, value in pairs:
-            if name in parameters:
+            if name in seen:
                 raise OperationRequestError("invalid_query")
+            seen.add(name)
+            if (
+                operation.provider == "scrapingdog"
+                and name == "api_key"
+                and value == SCRAPINGDOG_RUNTIME_HANDLE
+            ):
+                continue
             spec = operation.request_fields.get(name)
             parameters[name] = _coerce_query_value(spec, value, "$." + name) if spec is not None else value
     return operation.operation_id, validate_operation_request(operation.operation_id, parameters)

@@ -44,6 +44,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from lab_arena import contracts
+from lab_arena.operations import SCRAPINGDOG_RUNTIME_HANDLE
 
 SANDBOX_MODEL_DIR = "/model"
 SANDBOX_AGENT_DIR = "/agent"
@@ -293,6 +294,9 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LAB_ARENA_WORKER_SOCKET": SANDBOX_SOCKET_PATH,
     })
     environment.update(PROVIDER_BASE_URLS)
+    # Models may use the normal API-key parameter through the worker socket.
+    # Only the broker has the actual key; a missing submitted key fails there.
+    environment["SCRAPINGDOG_API_KEY"] = SCRAPINGDOG_RUNTIME_HANDLE
     for name, value in spec.extra_environment.items():
         environment.setdefault(name, value)  # the fixed model environment always wins
     return environment

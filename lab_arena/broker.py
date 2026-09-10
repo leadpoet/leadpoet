@@ -13,7 +13,9 @@ credential, or transport detail.
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -384,16 +386,38 @@ class ProviderTransport(Protocol):
     def send(self, *, method: str, url: str, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> ProviderResponse: ...
 
 
+_PROVIDER_HTTP_IN_FLIGHT = contextvars.ContextVar("arena_provider_http_in_flight", default=False)
+
+
+class _ProviderHTTPLogFilter(logging.Filter):
+    """Keep vendor request URLs and response headers out of broker logs.
+
+    Scrapingdog authenticates in its query string. The broker's redacted call
+    records remain the operational log; unrelated HTTP traffic is unaffected.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _PROVIDER_HTTP_IN_FLIGHT.get()
+
+
+_PROVIDER_HTTP_LOG_FILTER = _ProviderHTTPLogFilter()
+
+
 class HttpxProviderTransport:
     """HTTPS to the constant provider hosts: HTTP/1.1, no redirects, bounded."""
 
     def __init__(self, *, client: Optional[httpx.Client] = None, max_response_bytes: int = 4 * 1024 * 1024) -> None:
         self._client = client or httpx.Client(http1=True, http2=False, follow_redirects=False, timeout=httpx.Timeout(30.0), trust_env=False)
         self._max_response_bytes = max_response_bytes
+        # These are the loggers used by the pinned synchronous HTTP/1.1 path.
+        # The context-local filter does not silence concurrent unrelated work.
+        for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.proxy"):
+            logging.getLogger(name).addFilter(_PROVIDER_HTTP_LOG_FILTER)
 
     def send(self, *, method: str, url: str, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> ProviderResponse:
         if not url.startswith("https://"):
             raise ProviderTransportError("non-https target")
+        log_token = _PROVIDER_HTTP_IN_FLIGHT.set(True)
         try:
             with self._client.stream(method, url, headers=dict(headers), content=body, timeout=httpx.Timeout(float(timeout_seconds))) as response:
                 status = int(response.status_code)
@@ -407,6 +431,8 @@ class HttpxProviderTransport:
                     content.extend(chunk)
         except httpx.HTTPError as exc:
             raise ProviderTransportError(type(exc).__name__) from exc
+        finally:
+            _PROVIDER_HTTP_IN_FLIGHT.reset(log_token)
         if oversized or 300 <= status < 400:
             # Redirects are never followed; a redirecting provider is unavailable.
             return ProviderResponse(502, {"content-type": "application/json"}, operations.GENERIC_UNAVAILABLE_BODY)

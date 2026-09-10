@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.complete_gateway_migration_203_barrier import complete
+from scripts.complete_gateway_migration_203_barrier import (
+    _load_environment,
+    complete,
+)
 
 
 COMMIT = "a" * 40
@@ -24,6 +27,53 @@ def _open(_request, timeout):
 
 
 ENV = {"SUPABASE_URL": "https://db.example", "SUPABASE_SERVICE_ROLE_KEY": "secret"}
+
+
+def test_environment_loader_ignores_unrelated_raw_dump_values(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "gateway.env"
+    path.write_text(
+        "GIT_SSH_COMMAND=ssh -i /tmp/key -o IdentitiesOnly=yes\n"
+        "LESSOPEN=| /usr/bin/lesspipe %s\n"
+        "SSH_CLIENT=192.0.2.1 12345 22\n"
+        "SSH_CONNECTION=192.0.2.1 12345 192.0.2.2 22\n"
+        "which_declare=declare -f\n"
+        "SUPABASE_URL=https://db.example\n"
+        "export SUPABASE_SERVICE_ROLE_KEY='service role test'\n"
+    )
+    assert _load_environment(path) == {
+        "SUPABASE_URL": "https://db.example",
+        "SUPABASE_SERVICE_ROLE_KEY": "service role test",
+    }
+
+
+def test_environment_loader_rejects_duplicate_or_malformed_required_values(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "gateway.env"
+    path.write_text(
+        "SUPABASE_URL=https://one.example\n"
+        "SUPABASE_URL=https://two.example\n"
+    )
+    with pytest.raises(ValueError, match="duplicate required"):
+        _load_environment(path)
+    path.write_text("SUPABASE_URL=https://db.example unexpected\n")
+    with pytest.raises(ValueError, match="required gateway environment is malformed"):
+        _load_environment(path)
+
+
+def test_environment_loader_preserves_required_json_input(tmp_path: Path) -> None:
+    path = tmp_path / "gateway.json"
+    path.write_text(json.dumps({**ENV, "UNRELATED": "ignored"}))
+    assert _load_environment(path) == ENV
+    path.write_text(
+        '{"SUPABASE_URL":"https://one.example",'
+        '"SUPABASE_URL":"https://two.example",'
+        '"SUPABASE_SERVICE_ROLE_KEY":"secret"}'
+    )
+    with pytest.raises(ValueError, match="duplicate required"):
+        _load_environment(path)
 
 
 def test_completion_is_bound_to_exact_sql_candidate_and_invocation(tmp_path: Path) -> None:

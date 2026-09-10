@@ -15,6 +15,11 @@ import tempfile
 from urllib.request import Request, urlopen
 
 
+_REQUIRED_ENVIRONMENT_NAMES = frozenset(
+    {"SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"}
+)
+
+
 def _load_regular(path: Path) -> dict:
     info = path.lstat()
     if (
@@ -32,12 +37,28 @@ def _load_regular(path: Path) -> dict:
 
 def _load_environment(path: Path) -> dict[str, str]:
     raw = path.read_text(encoding="utf-8")
+    duplicate_required: set[str] = set()
+
+    def load_object(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result and name in _REQUIRED_ENVIRONMENT_NAMES:
+                duplicate_required.add(name)
+            result[name] = value
+        return result
+
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(raw, object_pairs_hook=load_object)
     except json.JSONDecodeError:
         parsed = None
     if isinstance(parsed, dict):
-        return {str(name): str(value) for name, value in parsed.items()}
+        if duplicate_required:
+            raise ValueError("gateway environment has duplicate required names")
+        return {
+            name: str(parsed[name])
+            for name in _REQUIRED_ENVIRONMENT_NAMES
+            if name in parsed
+        }
     result: dict[str, str] = {}
     for raw_line in raw.replace("\x00", "\n").splitlines():
         line = raw_line.strip()
@@ -45,12 +66,22 @@ def _load_environment(path: Path) -> dict[str, str]:
             continue
         if line.startswith("export "):
             line = line[7:].strip()
+        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", line)
+        if match is None:
+            if any(
+                re.match(rf"{re.escape(name)}(?:\s|$)", line)
+                for name in _REQUIRED_ENVIRONMENT_NAMES
+            ):
+                raise ValueError("required gateway environment is malformed")
+            continue
+        if match.group(1) not in _REQUIRED_ENVIRONMENT_NAMES:
+            continue
         parts = shlex.split(line, posix=True)
         if len(parts) != 1 or "=" not in parts[0]:
-            raise ValueError("gateway environment is malformed")
+            raise ValueError("required gateway environment is malformed")
         name, value = parts[0].split("=", 1)
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            raise ValueError("gateway environment name is invalid")
+        if name in result:
+            raise ValueError("gateway environment has duplicate required names")
         result[name] = value
     return result
 

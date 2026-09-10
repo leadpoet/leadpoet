@@ -11,6 +11,9 @@ from gateway.tee.release_channel_v2 import (
 )
 from gateway.tee.release_manifest_v2 import BUILD_EVIDENCE_SCHEMA_VERSION, build_release_manifest
 from gateway.tee.release_lineage_v2 import ReleaseLineageV2Error
+from gateway.tee.release_lineage_v2 import (
+    build_compact_release_lineage_boot_verifier_v2,
+)
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import sha256_json
 
@@ -109,6 +112,64 @@ def test_installed_prior_lineage_rejects_hash_and_retired_role_binding_drift():
  drifted["lineage_hash"] = sha256_json(body)
  with pytest.raises(ReleaseLineageV2Error, match="expectation is invalid"):
   release_channel_v2._project_installed_prior_release_lineage_v2(drifted)
+
+
+def test_fetch_retains_projected_installed_ancestors_for_generic_boot_proof(
+ monkeypatch, tmp_path
+):
+ current_commit = "3" * 40
+ gateway_path = tmp_path / "gateway.json"
+ gateway_path.write_text(json.dumps(_manifest(current_commit)))
+ prior_path = tmp_path / "lineage.json"
+ prior_path.write_text(json.dumps(_retired_validator_lineage()))
+ monkeypatch.setenv("LEADPOET_LOCAL_RELEASE_COMMIT_SHA", current_commit)
+ monkeypatch.setenv("LEADPOET_LOCAL_GATEWAY_RELEASE", str(gateway_path))
+ monkeypatch.setenv("LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE", str(prior_path))
+
+ lineage = release_channel_v2.fetch_release_lineage_v2(
+  bucket="unused",
+  current_commit=current_commit,
+  allowed_commits=(current_commit, "1" * 40, "2" * 40),
+  required_commits=(current_commit,),
+ )
+
+ assert set(lineage["releases"]) == {
+  current_commit, "1" * 40, "2" * 40
+ }
+ assert all(set(item["roles"]) == set(ROLE_SPECS)
+            for item in lineage["releases"].values())
+ prior_role = lineage["releases"]["2" * 40]["roles"][
+  "gateway_coordinator"
+ ]
+ identity = {
+  "physical_role": "gateway_coordinator",
+  **prior_role,
+ }
+ verifier = build_compact_release_lineage_boot_verifier_v2(
+  lineage, boot_verifier=lambda value, **_kwargs: value
+ )
+ assert verifier(identity) == identity
+
+
+def test_fetch_rejects_installed_commit_outside_bounded_git_ancestry(
+ monkeypatch, tmp_path
+):
+ current_commit = "3" * 40
+ gateway_path = tmp_path / "gateway.json"
+ gateway_path.write_text(json.dumps(_manifest(current_commit)))
+ prior_path = tmp_path / "lineage.json"
+ prior_path.write_text(json.dumps(_retired_validator_lineage()))
+ monkeypatch.setenv("LEADPOET_LOCAL_RELEASE_COMMIT_SHA", current_commit)
+ monkeypatch.setenv("LEADPOET_LOCAL_GATEWAY_RELEASE", str(gateway_path))
+ monkeypatch.setenv("LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE", str(prior_path))
+
+ with pytest.raises(ReleaseChannelV2Error, match="non-ancestor"):
+  release_channel_v2.fetch_release_lineage_v2(
+   bucket="unused",
+   current_commit=current_commit,
+   allowed_commits=(current_commit, "1" * 40),
+   required_commits=(current_commit,),
+  )
 
 def test_publish_is_immutable_object_locked_and_install_is_gateway_only(tmp_path):
  s3=S3(); channel=build_release_channel_v2(gateway_release_manifest=_manifest())

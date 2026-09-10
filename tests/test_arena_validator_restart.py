@@ -49,6 +49,90 @@ def test_restart_requires_persistent_state_and_supervised_readiness():
     assert "PYTHONDONTWRITEBYTECODE=1" in unit
 
 
+def _run_durable_directory_setup(tmp_path, state_path, runner_path):
+    text = SCRIPT.read_text()
+    start = text.index('for durable in "$STATE_PATH" "$RUNNER_PATH"; do')
+    end = text.index("\ndone", start) + len("\ndone")
+    setup = text[start:end]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sudo = fake_bin / "sudo"
+    sudo.write_text(
+        """#!/bin/bash
+set -euo pipefail
+chmod 0700 "$GUARDED_PARENT"
+status=0
+if [ "$1" = install ]; then
+  shift
+  filtered=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o|-g) shift 2 ;;
+      *) filtered+=("$1"); shift ;;
+    esac
+  done
+  install "${filtered[@]}" || status=$?
+else
+  "$@" || status=$?
+fi
+chmod 0000 "$GUARDED_PARENT"
+exit "$status"
+"""
+    )
+    sudo.chmod(0o755)
+    program = f"""set -euo pipefail
+fail() {{ echo "ERROR: $*" >&2; exit 1; }}
+STATE_PATH={state_path}
+RUNNER_PATH={runner_path}
+{setup}
+"""
+    guarded_parent = state_path.parent
+    guarded_parent.chmod(0)
+    try:
+        return subprocess.run(
+            ["bash", "-c", program],
+            env={
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "GUARDED_PARENT": str(guarded_parent),
+            },
+            text=True,
+            capture_output=True,
+        )
+    finally:
+        guarded_parent.chmod(0o700)
+
+
+def test_durable_directory_setup_checks_root_private_paths_as_root(tmp_path):
+    guarded = tmp_path / "durable"
+    guarded.mkdir()
+    state = guarded / "state"
+    runner = guarded / "runner"
+
+    result = _run_durable_directory_setup(tmp_path, state, runner)
+
+    assert result.returncode == 0, result.stderr
+    assert state.is_dir() and runner.is_dir()
+    assert state.stat().st_mode & 0o777 == 0o700
+    assert runner.stat().st_mode & 0o777 == 0o700
+
+
+def test_durable_directory_setup_rejects_symlink_before_install(tmp_path):
+    guarded = tmp_path / "durable"
+    guarded.mkdir()
+    target = tmp_path / "target"
+    target.mkdir(mode=0o755)
+    state = guarded / "state"
+    state.symlink_to(target, target_is_directory=True)
+    runner = guarded / "runner"
+
+    result = _run_durable_directory_setup(tmp_path, state, runner)
+
+    assert result.returncode != 0
+    assert "Arena durable directory is unsafe" in result.stderr
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert not runner.exists()
+
+
 def test_restart_privilege_boundaries_keep_active_config_until_activation():
     text = SCRIPT.read_text()
     assert "operator Arena environment owner differs from restart identity" in text

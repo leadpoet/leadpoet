@@ -167,8 +167,11 @@ PY
 )
 for durable in "$STATE_PATH" "$RUNNER_PATH"; do
   [[ "$durable" = /* ]] || fail "Arena durable directory is not absolute"
+  if sudo test -e "$durable" || sudo test -L "$durable"; then
+    sudo test -d "$durable" && sudo test ! -L "$durable" || fail "Arena durable directory is unsafe"
+  fi
   sudo install -d -m 0700 -o root -g root "$durable"
-  [ -d "$durable" ] && [ ! -L "$durable" ] || fail "Arena durable directory is unsafe"
+  sudo test -d "$durable" && sudo test ! -L "$durable" || fail "Arena durable directory is unsafe"
 done
 
 # Validate all durable inputs before starting or stopping anything.

@@ -63,7 +63,25 @@ after a gateway outage without signing another weight transaction.
 ## Installation and restart
 
 Apply additive migration `scripts/202-arena-accepted-weight-state.sql` before
-the first restart. Then run the exact pushed `main` controller transition:
+the first restart. Prepare the measured signer files and its KMS recipient
+policy, then run the exact pushed `main` validator restart while the old gateway
+is still available:
+
+```bash
+git -C /home/ec2-user/leadpoet/leadpoet fetch --no-tags origin main
+test "$(git -C /home/ec2-user/leadpoet/leadpoet rev-parse origin/main)" = "$SHA"
+git -C /home/ec2-user/leadpoet/leadpoet show "$SHA:validator_restart.sh" \
+  | VALIDATOR_DEPLOY_COMMIT="$SHA" bash
+```
+
+The controller checks the public chain and configuration before stopping the
+old weight container. On this host, one enclave fits at a time. The controller
+preserves the old image and container, boots and provisions the Arena signer,
+and restores the old signer and container if protected readiness fails. A
+routine restart reuses a matching Arena signer. The normal validator retries
+missing accepted-state responses until the gateway transition completes.
+
+After the validator restart succeeds, run the gateway controller transition:
 
 ```bash
 git -C /home/ec2-user/leadpoet_repo fetch --no-tags origin main
@@ -79,7 +97,8 @@ the fixed migration barrier and waits. Apply the exact migration 203 from the
 same commit. For the 2026-09-10 transition only, apply migration 204 next. It
 appends the primary normal validator to the still-open `arena-2026-09-11`
 runner list only when the complete stored configuration has the reviewed hash;
-it is a no-op on fresh databases. The completion helper checks the live 203 capability and binds the
+it is a no-op on fresh databases. The completion helper checks the live 203
+capability and binds the
 completion to the candidate, SQL hash, and restart invocation before startup
 continues. Run the helper from the exact Git object and use the protected
 persistent gateway environment, which remains available after the temporary
@@ -131,7 +150,8 @@ decryption. The returned recipient ciphertext is opened only inside the
 enclave and is accepted only when its hotkey matches the measured policy. This
 transition does not require the owner seed on the host or a newly sealed copy.
 
-Before stopping a working service, run its local readiness check:
+The canonical restart runs this protected readiness check after provisioning
+the candidate signer. It can also check an already running Arena signer:
 
 ```bash
 python3 scripts/run_arena_validator.py \

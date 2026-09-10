@@ -6,6 +6,71 @@ import httpx
 import pytest
 
 from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, PostgrestTransport, PsycopgTransport, SCORE_BATCH_SIZE, TABLES, create_http1_client
+from lab_arena.store import ArenaStoreUnavailable
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
+@pytest.mark.parametrize("recovers", [True, False])
+def test_select_retries_one_read_failure_without_changing_query(error_type, recovers):
+    requests = []
+    rows = [{"round_id": "arena-2026-09-10", "status": "published"}]
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1 or not recovers:
+            raise error_type("private transport diagnostic", request=request)
+        return httpx.Response(200, json=rows)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        kwargs = dict(filters={"status": "published"}, order="created_at", descending=True, limit=5, offset=20, columns="round_id,status")
+        if recovers:
+            assert transport.select("lab_arena_rounds", **kwargs) == rows
+        else:
+            with pytest.raises(ArenaStoreUnavailable) as caught:
+                transport.select("lab_arena_rounds", **kwargs)
+            assert isinstance(caught.value.__cause__, error_type)
+            assert "private transport diagnostic" not in str(caught.value)
+    assert len(requests) == 2
+    assert requests[0].method == requests[1].method == "GET"
+    assert requests[0].url == requests[1].url
+    assert requests[0].headers == requests[1].headers
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(403, json={"message": "permission denied"}),
+    httpx.Response(200, json={"unexpected": "object"}),
+    httpx.Response(200, content=b"invalid JSON"),
+])
+def test_select_does_not_retry_authorization_or_contract_errors(response):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return response
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        with pytest.raises((ArenaStoreError, ValueError)) as caught:
+            transport.select("lab_arena_rounds")
+        assert not isinstance(caught.value, ArenaStoreUnavailable)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
+def test_rpc_does_not_retry_ambiguous_read_failure(error_type):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        raise error_type("private transport diagnostic", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-10", "p_reason": "test"})
+        assert not isinstance(caught.value, ArenaStoreUnavailable)
+    assert len(requests) == 1 and requests[0].method == "POST"
 
 
 class RecordingTransport:

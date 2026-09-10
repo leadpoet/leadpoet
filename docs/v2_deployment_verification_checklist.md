@@ -72,7 +72,10 @@ running. Invoke the exact `origin/main` transition wrapper documented in
 `docs/arena_normal_validator_weights.md`. It installs the gateway-only
 controller and holds the canonical restart lock. The restart stops the old
 producers and then waits at its exact migration 203 barrier. Apply the exact
-203 SQL, verify its capability RPC, and use the exact completion helper. The
+203 SQL. For the 2026-09-10 transition, apply exact migration 204 while that
+barrier remains held; it changes only the reviewed open round's runner list and
+fails if the frozen configuration differs. Then verify the 203 capability RPC
+and use the exact completion helper. The
 helper checks the live capability and the candidate, SQL hash, and invocation
 binding against the protected persistent gateway environment before the
 restart can activate the new gateway. The temporary parent environment has

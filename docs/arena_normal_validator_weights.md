@@ -76,7 +76,10 @@ git -C /home/ec2-user/leadpoet_repo show \
 The transition keeps the canonical restart lock from controller installation
 through restart. After it stops all old gateway incentive producers, it writes
 the fixed migration barrier and waits. Apply the exact migration 203 from the
-same commit. The completion helper checks the live 203 capability and binds the
+same commit. For the 2026-09-10 transition only, apply migration 204 next. It
+appends the primary normal validator to the still-open `arena-2026-09-11`
+runner list only when the complete stored configuration has the reviewed hash;
+it is a no-op on fresh databases. The completion helper checks the live 203 capability and binds the
 completion to the candidate, SQL hash, and restart invocation before startup
 continues. Run the helper from the exact Git object and use the protected
 persistent gateway environment, which remains available after the temporary
@@ -92,8 +95,10 @@ git -C /home/ec2-user/leadpoet_repo show "$SHA:scripts/complete_gateway_migratio
       --env-file /home/ec2-user/.config/leadpoet/gateway.env
 ```
 
-The helper does not print credentials. Later restarts use the normal canonical
-command; migration 203 is idempotent and the special barrier is not required.
+The helper does not print credentials. Complete migration 204 before running
+the helper because normal Arena claims can resume after it returns. Later
+restarts use the normal canonical command; migrations 203 and 204 are
+idempotent and the special barrier is not required.
 
 `neurons/validator.py` starts the normal Arena validator. The sample
 `deploy/leadpoet-arena-validator.service` supervises that same implementation.

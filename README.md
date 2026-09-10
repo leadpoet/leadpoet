@@ -21,7 +21,7 @@ Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. Th
 
 ## Daily schedule
 
-UTC schedule: Day 0 has 20 hidden ICPs for submission. On Day 1, all 20 become public; baseline and prior-day models are evaluated. Code, final and per-ICP scores publish immediately when evaluation finishes. Day 1's bank stays hidden until Day 2.
+Day 0: submit models while that day's 20 ICPs stay hidden. At about **00:00 UTC on Day 1**, those ICPs become public and evaluation starts for the baseline and prior-day models. All 20 are processed without fixed pauses between batches. Code, final and per-ICP scores publish when evaluation finishes. Day 1's new ICP set stays hidden until Day 2.
 
 ## Install and register
 

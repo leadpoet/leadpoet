@@ -24,11 +24,14 @@ executing anything, which is what the repository test exercises.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import os
 import socket
 import sys
 import tempfile
+import tarfile
 import threading
 import urllib.request
 from pathlib import Path
@@ -64,7 +67,7 @@ print("LAB_ARENA_MODEL_OK")
 MODEL_SLEEP = "import time\ntime.sleep(600)\n"
 MODEL_BIG = "open('/output/companies.json', 'w').write('[' + ('1,' * 400000) + '1]')\n"
 AGENT_HARNESS = "def run_icp(icp: dict) -> list[dict]:\n    assert icp == {'prompt': 'probe', 'max_companies': 5}\n    return []\n"
-RUNSC_DOWNLOAD_URL = "https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc"
+RUNSC_DOWNLOAD_URL = "https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/gvisor.tar.bz2"
 
 
 class ProbeApi:
@@ -85,11 +88,27 @@ def probe_runsc(destination: Path) -> Path:
     if destination.exists():
         runtime.require_runsc_executable(destination)
         return destination
-    request = urllib.request.Request(RUNSC_DOWNLOAD_URL, headers={"User-Agent": "leadpoet-lab-arena-runsc-probe/1"})
-    with urllib.request.urlopen(request, timeout=300) as response:
-        data = response.read()
-    destination.write_bytes(data)
-    destination.chmod(0o755)
+    # Current gVisor releases require companion binaries next to runsc.
+    # Fetch and verify the official bundle instead of a standalone executable.
+    def download(url):
+        request = urllib.request.Request(url, headers={"User-Agent": "leadpoet-lab-arena-runsc-probe/1"})
+        with urllib.request.urlopen(request, timeout=300) as response:
+            return response.read()
+
+    data = download(RUNSC_DOWNLOAD_URL)
+    expected = download(RUNSC_DOWNLOAD_URL + ".sha512").decode("ascii").split()[0]
+    if hashlib.sha512(data).hexdigest() != expected:
+        raise RuntimeError("gVisor bundle checksum differs")
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:bz2") as archive:
+        members = archive.getmembers()
+        for member in members:
+            path = Path(member.name)
+            if path.is_absolute() or ".." in path.parts or not (member.isfile() or member.isdir()):
+                raise RuntimeError("gVisor bundle contains an unsafe path")
+        archive.extractall(destination.parent, members=members)
+    installed = destination.parent / "runsc"
+    if installed != destination:
+        raise RuntimeError("gVisor probe destination must be named runsc")
     runtime.require_runsc_executable(destination)
     return destination
 
@@ -131,7 +150,7 @@ def make_agent_spec(work: Path) -> runtime.SandboxSpec:
     )
 
 
-def run_probe(*, dry_run: bool) -> int:
+def run_probe(*, dry_run: bool, runsc_path: Path = None) -> int:
     if not dry_run:
         if os.geteuid() != 0:
             raise RuntimeError("the Lab Arena runsc probe must execute as root")
@@ -149,7 +168,7 @@ def run_probe(*, dry_run: bool) -> int:
             document = runtime.oci_spec(spec)
             assert document["root"]["readonly"] is True and document["process"]["user"]["uid"] == runtime.SANDBOX_UID
             assert "network" not in json.dumps(document.get("linux", {}).get("namespaces", []))
-            config = runtime.RuntimeConfig(runsc_path=work / "runsc", work_dir=work / "sandboxes")
+            config = runtime.RuntimeConfig(runsc_path=runsc_path or work / "runsc", work_dir=work / "sandboxes")
             bundle = work / ("bundle-" + name)
             command = runtime.runsc_run_command(
                 config,
@@ -167,7 +186,7 @@ def run_probe(*, dry_run: bool) -> int:
         if dry_run:
             print("LAB_ARENA_RUNSC_PROBE_DRY_RUN_OK")
             return 0
-        runsc = probe_runsc(work / "runsc")
+        runsc = runtime.require_runsc_executable(runsc_path) if runsc_path else probe_runsc(work / "runsc")
         sandbox_work = work / "sandboxes"
         sandbox_work.mkdir(mode=0o700)
         config = runtime.RuntimeConfig(runsc_path=runsc, work_dir=sandbox_work)
@@ -201,8 +220,9 @@ def run_probe(*, dry_run: bool) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Lab Arena pinned-runsc sandbox probe")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--runsc-path", type=Path, help="probe this installed runtime and its companion binaries")
     args = parser.parse_args(argv)
-    return run_probe(dry_run=bool(args.dry_run))
+    return run_probe(dry_run=bool(args.dry_run), runsc_path=args.runsc_path)
 
 
 if __name__ == "__main__":

@@ -77,7 +77,7 @@
       "symbol": "_champion_lifetime_credit_ledger_from_snapshots"
     },
     {
-      "ast_sha256": "sha256:c1c387a55f18d997c55462ed3e2777cd728f3135025b9b907841acfb4ef19628",
+      "ast_sha256": "sha256:e882a02e1d2aa724eb47509689d119019b8d2a516e003f09655d0ecc3aa36668",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_champion_obligation_caps"
     },
@@ -4117,7 +4117,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:1946bf3a00ba4adcd438b2115093f8e77e55aecda1af53094a4f8be0c0d5d441",
-  "protected_source_commit": "c6dde433c911a49a638103bd53d3fba04e7e2430",
+  "manifest_hash": "sha256:07e1d489a1a5f9111f52bb904388e6b11d6eced7dd6dc5f0ac0a7c0468dc694a",
+  "protected_source_commit": "1c2124161863d925df1174fc5d7886079f897c78",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

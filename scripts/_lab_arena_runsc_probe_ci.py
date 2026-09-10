@@ -201,7 +201,7 @@ def run_probe(*, dry_run: bool, runsc_path: Path = None) -> int:
                 result = sandbox_runtime.run_icp(spec)
             finally:
                 server.stop()
-            outcomes[name] = {"exit_code": result.exit_code, "timed_out": result.timed_out, "has_output": result.output_bytes is not None, "output_error": result.output_error, "stdout": result.stdout.decode(errors="replace")[-200:], "output": json.loads(result.output_bytes) if result.output_bytes is not None else None}
+            outcomes[name] = {"exit_code": result.exit_code, "timed_out": result.timed_out, "has_output": result.output_bytes is not None, "output_error": result.output_error, "stdout": result.stdout.decode(errors="replace")[-200:], "stderr": result.stderr.decode(errors="replace")[-2000:], "output": json.loads(result.output_bytes) if result.output_bytes is not None else None}
         checks = {
             "ok_exit": outcomes["ok"]["exit_code"] == 0 and "LAB_ARENA_MODEL_OK" in outcomes["ok"]["stdout"] and outcomes["ok"]["has_output"],
             "ok_provider_call": len(api.frames) == 1 and api.frames[0]["operation_id"] == "exa.search",

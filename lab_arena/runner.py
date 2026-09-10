@@ -1024,8 +1024,39 @@ class WorkerSocketServer:
             document = self._api.provider(state.lease["run_id"], state.lease_token, frame)
         except RunnerError:
             return "worker_unavailable", None
-        if "call" not in document or "body_b64" not in document:
+        if not isinstance(document, Mapping) or set(document) != {
+            "status",
+            "headers",
+            "body_b64",
+            "call",
+        }:
             return "worker_unavailable", None
+        response_headers = document.get("headers")
+        if not isinstance(response_headers, Mapping):
+            return "worker_unavailable", None
+        trusted_names = [
+            name
+            for name in response_headers
+            if isinstance(name, str)
+            and name.lower() == operations.TRUSTED_RESPONSE_URL_HEADER
+        ]
+        if len(trusted_names) > 1:
+            return "worker_unavailable", None
+        if trusted_names:
+            if operation_id != shim.PAGE_FETCH_OPERATION:
+                return "worker_unavailable", None
+            try:
+                response_url = operations.validate_https_url(
+                    response_headers[trusted_names[0]],
+                    max_length=2000,
+                    field="response_url",
+                )
+            except operations.OperationError:
+                return "worker_unavailable", None
+            response_headers = dict(response_headers)
+            response_headers.pop(trusted_names[0])
+            response_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = response_url
+            document = {**document, "headers": response_headers}
         call = dict(document["call"])
         with state.lock:
             state.calls.append(call)
@@ -1059,7 +1090,11 @@ class WorkerSocketServer:
         error, document = self._dispatch(operation_id, parameters, shim.DEFAULT_TIMEOUT_MS)
         if error:
             return HTTP_ERROR_STATUS.get(error, 400), {}, _http_error_body(error)
-        response_headers = {str(name): str(value) for name, value in dict(document.get("headers") or {}).items()}
+        response_headers = {
+            str(name): str(value)
+            for name, value in dict(document.get("headers") or {}).items()
+            if str(name).lower() != operations.TRUSTED_RESPONSE_URL_HEADER
+        }
         try:
             payload = base64.b64decode(str(document["body_b64"]), validate=True)
         except (ValueError, TypeError):

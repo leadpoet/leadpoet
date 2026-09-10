@@ -465,17 +465,59 @@ class CallStore(Protocol):
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
 
 
+def _validated_response_url(value: Any, *, secret: str = "") -> str:
+    try:
+        response_url = operations.validate_https_url(
+            value,
+            max_length=2000,
+            field="response_url",
+        )
+    except operations.OperationError as exc:
+        raise BrokerError("broker_unavailable") from exc
+    if secret:
+        encoded = response_url.encode("utf-8", errors="surrogatepass")
+        secret_bytes = secret.encode("utf-8")
+        if secret_bytes in encoded or secret_bytes in unquote_to_bytes(encoded):
+            raise BrokerError("broker_unavailable")
+    return response_url
+
+
 def _terminal_response_document(status: int, headers: Mapping[str, str], body: bytes) -> Dict[str, Any]:
     return {"status": int(status), "headers": dict(headers), "body_b64": base64.b64encode(bytes(body)).decode("ascii")}
 
 
-def _decode_terminal(document: Any) -> Tuple[int, Dict[str, str], bytes]:
-    if not isinstance(document, Mapping):
+def _decode_terminal(
+    document: Any,
+    *,
+    secret: str = "",
+) -> Tuple[int, Dict[str, str], bytes]:
+    if not isinstance(document, Mapping) or set(document) != {
+        "status",
+        "headers",
+        "body_b64",
+    }:
         raise BrokerError("broker_unavailable")
     try:
-        return int(document["status"]), dict(document.get("headers") or {}), base64.b64decode(str(document["body_b64"]), validate=True)
+        status = int(document["status"])
+        headers = dict(document["headers"])
+        body = base64.b64decode(str(document["body_b64"]), validate=True)
     except (KeyError, TypeError, ValueError) as exc:
         raise BrokerError("broker_unavailable") from exc
+    trusted_names = [
+        name
+        for name in headers
+        if isinstance(name, str)
+        and name.lower() == operations.TRUSTED_RESPONSE_URL_HEADER
+    ]
+    if len(trusted_names) > 1:
+        raise BrokerError("broker_unavailable")
+    if trusted_names:
+        name = trusted_names[0]
+        headers[operations.TRUSTED_RESPONSE_URL_HEADER] = _validated_response_url(
+            headers.pop(name),
+            secret=secret,
+        )
+    return status, headers, body
 
 
 def _error_result(code: str, call: Mapping[str, Any]) -> BrokerResult:
@@ -679,7 +721,17 @@ class Broker:
             return _error_result("budget_refused", summary)
         if status == "settled":
             # Repeated request for a settled identity: the stored response, no second dispatch.
-            terminal_status, terminal_headers, terminal_body = _decode_terminal(reserved.get("terminal_response"))
+            try:
+                terminal_status, terminal_headers, terminal_body = _decode_terminal(
+                    reserved.get("terminal_response"),
+                    secret=secret,
+                )
+            except BrokerError:
+                return _error_result("broker_unavailable", summary)
+            if operations.TRUSTED_RESPONSE_URL_HEADER in terminal_headers and (
+                route is None or route.adapter != "firecrawl_raw_html"
+            ):
+                return _error_result("broker_unavailable", summary)
             summary.update({"outcome": "settled", "idempotent": True, "actual_microusd": reserved.get("amount_microusd")})
             if funding_source == "miner_key" and terminal_status == 402:
                 try:
@@ -733,6 +785,7 @@ class Broker:
             del secret
 
         failure_stage = "response_adaptation"
+        adapted_response_url = ""
         try:
             if effective_operation.provider == "openrouter":
                 response = _openrouter_effective_response(response)
@@ -742,15 +795,15 @@ class Broker:
                 sanitized_status, sanitized_headers, sanitized_body = refused.status, refused.headers, refused.body
             else:
                 failure_stage = "response_adaptation"
-                adapted_status, adapted_headers, adapted_body = (
-                    scoring_provider_compat.adapt_response(
+                adapted_status, adapted_headers, adapted_body, adapted_response_url = (
+                    scoring_provider_compat.adapt_response_with_trusted_url(
                         route,
                         status=response.status,
                         headers=response.headers,
                         body=response.body,
                     )
                     if route is not None and 200 <= response.status < 300
-                    else (response.status, response.headers, response.body)
+                    else (response.status, response.headers, response.body, "")
                 )
                 failure_stage = "response_sanitization"
                 sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
@@ -760,6 +813,10 @@ class Broker:
                     adapted_body,
                     parameters=normalized,
                 )
+                if adapted_response_url:
+                    sanitized_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = (
+                        _validated_response_url(adapted_response_url)
+                    )
             failure_stage = "cost_accounting"
             if effective_operation.provider == "openrouter":
                 actual: Optional[int] = None

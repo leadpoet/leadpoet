@@ -190,7 +190,9 @@ def encode_worker_error(code: str) -> bytes:
     return contracts.canonical_json({"error": str(code)}).encode("utf-8")
 
 
-def parse_worker_response(payload: Any) -> Tuple[int, Dict[str, str], bytes]:
+def _parse_worker_response_with_url(
+    payload: Any,
+) -> Tuple[int, Dict[str, str], bytes, str]:
     if not isinstance(payload, Mapping):
         raise ShimTransportError("invalid_response")
     if set(payload) == {"error"}:
@@ -207,16 +209,39 @@ def parse_worker_response(payload: Any) -> Tuple[int, Dict[str, str], bytes]:
     if not isinstance(raw_headers, Mapping):
         raise ShimTransportError("invalid_response")
     headers: Dict[str, str] = {}
+    trusted_names = []
     for name, value in raw_headers.items():
         if not isinstance(name, str) or not isinstance(value, str):
             raise ShimTransportError("invalid_response")
-        if name.lower() in ("content-type", "content-length"):
-            headers[name.lower()] = value
+        normalized_name = name.lower()
+        if normalized_name == operations.TRUSTED_RESPONSE_URL_HEADER:
+            trusted_names.append(name)
+        elif normalized_name in ("content-type", "content-length"):
+            headers[normalized_name] = value
+    if len(trusted_names) > 1:
+        raise ShimTransportError("invalid_response")
     try:
         body = base64.b64decode(str(payload["body_b64"]), validate=True)
     except (TypeError, ValueError) as exc:
         raise ShimTransportError("invalid_response") from exc
+    response_url = ""
+    if trusted_names:
+        try:
+            response_url = operations.validate_https_url(
+                raw_headers[trusted_names[0]],
+                max_length=2000,
+                field="response_url",
+            )
+        except operations.OperationError as exc:
+            raise ShimTransportError("invalid_response") from exc
     headers["content-length"] = str(len(body))
+    return status, headers, body, response_url
+
+
+def parse_worker_response(payload: Any) -> Tuple[int, Dict[str, str], bytes]:
+    """Validate a worker response while keeping the historical public tuple."""
+
+    status, headers, body, _response_url = _parse_worker_response_with_url(payload)
     return status, headers, body
 
 
@@ -242,8 +267,12 @@ def worker_socket_path() -> str:
     return path
 
 
-def dispatch(operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[int, Dict[str, str], bytes]:
-    """Send one frame and return the worker's ``(status, headers, body)``."""
+def _dispatch_with_response_url(
+    operation_id: str,
+    parameters: Mapping[str, Any],
+    timeout_ms: int,
+) -> Tuple[int, Dict[str, str], bytes, str]:
+    """Send one frame and retain a validated trusted page response URL."""
 
     encoded = build_operation_frame(operation_id, parameters, timeout_ms)
     path = worker_socket_path()
@@ -269,18 +298,32 @@ def dispatch(operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) 
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ShimTransportError("invalid_response") from exc
-    return parse_worker_response(payload)
+    status, headers, body, response_url = _parse_worker_response_with_url(payload)
+    if response_url and operation_id != PAGE_FETCH_OPERATION:
+        raise ShimTransportError("invalid_response")
+    return status, headers, body, response_url
 
 
-def execute(
+def dispatch(operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[int, Dict[str, str], bytes]:
+    """Send one frame and return the worker's ``(status, headers, body)``."""
+
+    status, headers, body, _response_url = _dispatch_with_response_url(
+        operation_id,
+        parameters,
+        timeout_ms,
+    )
+    return status, headers, body
+
+
+def _execute_with_response_url(
     *,
     method: str,
     url: str,
     headers: Mapping[str, Any],
     body: bytes,
     timeout_ms: int,
-) -> Tuple[int, Dict[str, str], bytes]:
-    """Match, validate, and dispatch one client request."""
+) -> Tuple[int, Dict[str, str], bytes, str]:
+    """Match, validate, and dispatch one client request with trusted URL data."""
 
     url = _normalize_local_provider_url(url)
     trusted = trusted_scorer_mode()
@@ -295,9 +338,39 @@ def execute(
             raise ShimRequestError(exc.code) from None
         operation_id, parameters = page_fetch
         _trace({"event": "page_fetch", "method": "GET", "url": _trace_url(url), "operation_id": operation_id})
-        return dispatch(operation_id, parameters, _trusted_page_fetch_timeout_ms())
+        return _dispatch_with_response_url(
+            operation_id,
+            parameters,
+            _trusted_page_fetch_timeout_ms(),
+        )
     _trace({"event": "matched", "method": str(method).upper(), "url": _trace_url(url), "operation_id": operation_id})
-    return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
+    return _dispatch_with_response_url(
+        operation_id,
+        parameters,
+        max(1, int(timeout_ms)),
+    )
+
+
+def execute(
+    *,
+    method: str,
+    url: str,
+    headers: Mapping[str, Any],
+    body: bytes,
+    timeout_ms: int,
+) -> Tuple[int, Dict[str, str], bytes]:
+    """Match, validate, and dispatch one client request."""
+
+    status, response_headers, response_body, _response_url = (
+        _execute_with_response_url(
+            method=method,
+            url=url,
+            headers=headers,
+            body=body,
+            timeout_ms=timeout_ms,
+        )
+    )
+    return status, response_headers, response_body
 
 
 def _normalize_local_provider_url(url: str) -> str:
@@ -564,14 +637,22 @@ class _AiohttpContent:
 class _AiohttpResponse:
     """The subset of ``aiohttp.ClientResponse`` a model can rely on."""
 
-    def __init__(self, *, url: str, status: int, headers: Mapping[str, str], body: bytes) -> None:
+    def __init__(
+        self,
+        *,
+        request_url: str,
+        response_url: str,
+        status: int,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> None:
         self._body = body
         self.status = int(status)
         self.headers = dict(headers)
-        self.url = url
+        self.url = response_url or request_url
         self.reason = "OK" if status < 400 else "lab arena provider error"
         self.history = ()
-        self.request_info = SimpleNamespace(real_url=url)
+        self.request_info = SimpleNamespace(real_url=request_url)
         self.content = _AiohttpContent(body)
 
     @property
@@ -652,8 +733,8 @@ def _aiohttp_request(aiohttp: Any, yarl_url: Any) -> Callable[..., Any]:
             timeout = getattr(session, "timeout", None)
         try:
             body, headers = _aiohttp_body(session, kwargs)
-            status, response_headers, response_body = await asyncio.to_thread(
-                execute,
+            status, response_headers, response_body, response_url = await asyncio.to_thread(
+                _execute_with_response_url,
                 method=str(method),
                 url=str(url),
                 headers=headers,
@@ -662,7 +743,13 @@ def _aiohttp_request(aiohttp: Any, yarl_url: Any) -> Callable[..., Any]:
             )
         except ShimError as exc:
             raise aiohttp.ClientConnectionError(str(exc)) from None
-        response = _AiohttpResponse(url=str(url), status=status, headers=response_headers, body=response_body)
+        response = _AiohttpResponse(
+            request_url=str(url),
+            response_url=response_url,
+            status=status,
+            headers=response_headers,
+            body=response_body,
+        )
         raise_for_status = kwargs.get("raise_for_status")
         if raise_for_status is None:
             raise_for_status = getattr(session, "_raise_for_status", False)

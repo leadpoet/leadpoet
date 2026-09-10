@@ -59,10 +59,12 @@ def test_firecrawl_route_requires_raw_html_and_exact_source_identity():
             "storeInCache": False,
         },
     }
-    status, headers, body = compat.adapt_response(
+    status, headers, body, response_url = compat.adapt_response_with_trusted_url(
         selected,
         status=200,
-        headers={},
+        headers={
+            operations.TRUSTED_RESPONSE_URL_HEADER: "https://attacker.example/"
+        },
         body=envelope(
             {
                 "rawHtml": "<!doctype html><head><meta name='x'></head>",
@@ -76,6 +78,7 @@ def test_firecrawl_route_requires_raw_html_and_exact_source_identity():
     )
     assert status == 200 and headers["content-type"].startswith("text/html")
     assert b"<head>" in body
+    assert response_url == requested_url
 
     with pytest.raises(compat.CompatibilityResponseError, match="source_url_mismatch"):
         compat.adapt_response(
@@ -88,6 +91,68 @@ def test_firecrawl_route_requires_raw_html_and_exact_source_identity():
                     "metadata": {
                         "sourceURL": "https://other.example/",
                         "url": requested_url,
+                        "statusCode": 200,
+                    },
+                }
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "response_url",
+    (
+        "",
+        "http://example.com/about",
+        "https://127.0.0.1/about",
+        "https://user@example.com/about",
+        "https://example.com/about#fragment",
+        "https://example.com/about\n",
+    ),
+)
+def test_firecrawl_final_url_must_be_a_public_https_url(response_url):
+    requested_url = "https://example.com/about"
+    selected = route("scrapingdog.scrape", {"url": requested_url})
+
+    with pytest.raises(
+        compat.CompatibilityResponseError,
+        match="invalid_firecrawl_final_url",
+    ):
+        compat.adapt_response_with_trusted_url(
+            selected,
+            status=200,
+            headers={
+                operations.TRUSTED_RESPONSE_URL_HEADER: "https://attacker.example/"
+            },
+            body=envelope(
+                {
+                    "rawHtml": "<html></html>",
+                    "metadata": {
+                        "sourceURL": requested_url,
+                        "url": response_url,
+                        "statusCode": 200,
+                    },
+                }
+            ),
+        )
+
+
+def test_firecrawl_final_url_metadata_is_required():
+    requested_url = "https://example.com/about"
+    selected = route("scrapingdog.scrape", {"url": requested_url})
+
+    with pytest.raises(
+        compat.CompatibilityResponseError,
+        match="invalid_firecrawl_final_url",
+    ):
+        compat.adapt_response_with_trusted_url(
+            selected,
+            status=200,
+            headers={},
+            body=envelope(
+                {
+                    "rawHtml": "<html></html>",
+                    "metadata": {
+                        "sourceURL": requested_url,
                         "statusCode": 200,
                     },
                 }

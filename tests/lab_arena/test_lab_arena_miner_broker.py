@@ -3,15 +3,18 @@
 from dataclasses import replace
 import base64
 import json
+from urllib.parse import quote
 
 import pytest
 
 from lab_arena import broker as br
+from lab_arena import operations
 from test_lab_arena_broker import CHAT, CONTEXT, FakeLedgerStore, FakeTransport, make_broker
 
 
-def test_miner_score_scrape_uses_only_deepline_and_keeps_requested_identity():
+def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     source_url = "https://example.com/about"
+    final_url = "https://www.example.net/about"
     envelope = {
         "job_id": "test",
         "status": "completed",
@@ -20,7 +23,7 @@ def test_miner_score_scrape_uses_only_deepline_and_keeps_requested_identity():
                 "rawHtml": "<!doctype html><head><title>Acme</title></head>",
                 "metadata": {
                     "sourceURL": source_url,
-                    "url": source_url,
+                    "url": final_url,
                     "statusCode": 200,
                 },
             }
@@ -28,8 +31,20 @@ def test_miner_score_scrape_uses_only_deepline_and_keeps_requested_identity():
         "billing": {"cost_usd": 0.002},
     }
     providers = []
+    class HeaderInjectionTransport(FakeTransport):
+        def send(self, **kwargs):
+            response = super().send(**kwargs)
+            return br.ProviderResponse(
+                response.status,
+                {
+                    **response.headers,
+                    operations.TRUSTED_RESPONSE_URL_HEADER: "https://attacker.example/",
+                },
+                response.body,
+            )
+
     broker, ledger, transport = make_broker(
-        transport=FakeTransport([(200, envelope)]),
+        transport=HeaderInjectionTransport([(200, envelope)]),
         credential_for=lambda context, provider: (
             providers.append(provider) or "miner-deepline-key"
         ),
@@ -44,6 +59,7 @@ def test_miner_score_scrape_uses_only_deepline_and_keeps_requested_identity():
         timeout_ms=60_000,
     )
     assert result.status == 200 and b"<title>Acme</title>" in result.body
+    assert result.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
     assert providers == ["deepline"]
     sent = transport.sent[0]
     assert sent["url"].endswith("/api/v2/integrations/firecrawl_scrape/execute")
@@ -54,6 +70,112 @@ def test_miner_score_scrape_uses_only_deepline_and_keeps_requested_identity():
     assert result.call["provider"] == "deepline"
     assert result.call["actual_microusd"] == 2000
     assert ledger.calls[result.call["call_identity"]]["provider"] == "deepline"
+    terminal = ledger.calls[result.call["call_identity"]]["terminal"]
+    assert set(terminal) == {"status", "headers", "body_b64"}
+    assert terminal["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
+    assert "attacker.example" not in repr(result.to_document())
+    assert "attacker.example" not in repr(terminal)
+
+    replay = broker.execute(
+        context,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": source_url},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+    assert replay.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
+    assert replay.call["idempotent"] is True
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize("percent_encoded", [False, True])
+def test_miner_score_final_url_cannot_expose_its_runtime_key(percent_encoded):
+    secret = "miner+deepline/key=never-publish"
+    exposed = quote(secret, safe="") if percent_encoded else secret
+    source_url = "https://example.com/about"
+    envelope = {
+        "job_id": "test",
+        "status": "completed",
+        "result": {
+            "data": {
+                "rawHtml": "<html><title>Example Company</title></html>",
+                "metadata": {
+                    "sourceURL": source_url,
+                    "url": f"https://example.net/about?token={exposed}",
+                    "statusCode": 200,
+                },
+            }
+        },
+        "billing": {"cost_usd": 0.002},
+    }
+    broker, ledger, _transport = make_broker(
+        transport=FakeTransport([(200, envelope)]),
+        credential_for=lambda _context, _provider: secret,
+        funding_source_for=lambda _context: "miner_key",
+    )
+
+    result = broker.execute(
+        replace(CONTEXT, kind="score", round_id="arena-2026-09-04"),
+        operation_id="scrapingdog.scrape",
+        parameters={"url": source_url},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+
+    assert result.status == 502
+    assert operations.TRUSTED_RESPONSE_URL_HEADER not in result.headers
+    assert secret not in repr(result.to_document())
+    assert secret not in repr(ledger.calls)
+    assert exposed not in repr(ledger.calls)
+
+
+@pytest.mark.parametrize("corruption", ("empty", "null", "secret"))
+def test_cached_final_url_fails_closed_when_invalid_or_secret_bearing(corruption):
+    secret = "miner+deepline/key=never-publish"
+    source_url = "https://example.com/about"
+    envelope = {
+        "job_id": "test",
+        "status": "completed",
+        "result": {
+            "data": {
+                "rawHtml": "<html><title>Example Company</title></html>",
+                "metadata": {
+                    "sourceURL": source_url,
+                    "url": "https://example.net/about",
+                    "statusCode": 200,
+                },
+            }
+        },
+        "billing": {"cost_usd": 0.002},
+    }
+    broker, ledger, transport = make_broker(
+        transport=FakeTransport([(200, envelope)]),
+        credential_for=lambda _context, _provider: secret,
+        funding_source_for=lambda _context: "miner_key",
+    )
+    context = replace(CONTEXT, kind="score", round_id="arena-2026-09-04")
+    args = {
+        "operation_id": "scrapingdog.scrape",
+        "parameters": {"url": source_url},
+        "action_sequence": 0,
+        "timeout_ms": 60_000,
+    }
+    first = broker.execute(context, **args)
+    terminal = ledger.calls[first.call["call_identity"]]["terminal"]
+    corrupted_url = {
+        "empty": "",
+        "null": None,
+        "secret": "https://example.net/about?token=" + quote(secret, safe=""),
+    }[corruption]
+    terminal["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] = corrupted_url
+
+    replay = broker.execute(context, **args)
+
+    assert replay.status == 503
+    assert json.loads(replay.body) == {"error": {"code": "broker_unavailable"}}
+    assert operations.TRUSTED_RESPONSE_URL_HEADER not in replay.headers
+    assert secret not in repr(replay.to_document())
+    assert len(transport.sent) == 1
 
 
 def test_miner_execution_does_not_fall_back_to_a_host_scrapingdog_key():
@@ -98,6 +220,21 @@ def test_host_funded_score_keeps_the_direct_scrapingdog_route():
     )
     assert result.call["provider"] == "scrapingdog"
     assert ledger.calls[result.call["call_identity"]]["provider"] == "scrapingdog"
+    assert operations.TRUSTED_RESPONSE_URL_HEADER not in result.headers
+
+    terminal = ledger.calls[result.call["call_identity"]]["terminal"]
+    terminal["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] = (
+        "https://attacker.example/"
+    )
+    replay = broker.execute(
+        replace(CONTEXT, kind="score", round_id="arena-2026-09-04"),
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+    assert replay.status == 503
+    assert json.loads(replay.body) == {"error": {"code": "broker_unavailable"}}
 
 
 @pytest.mark.parametrize("kind", ["execute", "score"])

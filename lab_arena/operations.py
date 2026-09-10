@@ -35,6 +35,10 @@ from lab_arena import contracts
 
 OPERATION_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.operation_table.v1"
 PRICE_LIST_SCHEMA_VERSION = "leadpoet.lab_arena.provider_price_list.v1"
+# Added by the broker only after provider headers have been sanitized. The
+# worker carries it inside the existing response-header map, and the scorer
+# shim consumes it without exposing it as a provider response header.
+TRUSTED_RESPONSE_URL_HEADER = "x-lab-arena-response-url"
 
 PROVIDERS = contracts.PROVIDERS
 FUNDING_SOURCES = ("host",)
@@ -1715,6 +1719,7 @@ __all__ = [
     "DEEPLINE_EXECUTE_HEADERS",
     "PAYLOAD_FORBIDDEN_FIELD_NAMES",
     "OPERATION_TABLE_SCHEMA_VERSION",
+    "TRUSTED_RESPONSE_URL_HEADER",
     "Operation",
     "OperationError",
     "OperationRequestError",

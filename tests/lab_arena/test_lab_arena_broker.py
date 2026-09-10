@@ -548,6 +548,23 @@ def test_price_table_parsing_and_validation():
     assert cost > 0
     parsed = br.parse_broker_document({"status": 200, "headers": {"content-type": "application/json"}, "body_b64": base64.b64encode(b"{}").decode(), "call": {"a": 1}})
     assert parsed.body == b"{}" and parsed.call == {"a": 1}
+    with_url = br.parse_broker_document({
+        "status": 200,
+        "headers": {
+            "content-type": "text/html",
+            operations.TRUSTED_RESPONSE_URL_HEADER: "https://www.example.com/final",
+        },
+        "body_b64": base64.b64encode(b"<html></html>").decode(),
+        "call": {"a": 1},
+    })
+    assert with_url.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == "https://www.example.com/final"
+    assert set(with_url.to_document()) == {"status", "headers", "body_b64", "call"}
+    for invalid in (
+        {**with_url.to_document(), "response_url": "https://www.example.com/final"},
+        {**with_url.to_document(), "unexpected": "https://attacker.example/"},
+    ):
+        with pytest.raises(contracts.ArenaContractError):
+            br.parse_broker_document(invalid)
 
 
 @pytest.mark.parametrize("status", [401, 402, 403, 429, 500, 503])
@@ -615,7 +632,11 @@ def test_response_adaptation_failure_retains_only_safe_class_and_stage(monkeypat
     def fail_adaptation(*_args, **_kwargs):
         raise AdapterFailure(secret)
 
-    monkeypatch.setattr(br.scoring_provider_compat, "adapt_response", fail_adaptation)
+    monkeypatch.setattr(
+        br.scoring_provider_compat,
+        "adapt_response_with_trusted_url",
+        fail_adaptation,
+    )
     scoring_context = br.RunContext(**{**CONTEXT.__dict__, "kind": "score"})
     broker, store, _transport = make_broker(
         transport=FakeTransport([(200, {"result": {"data": {}}})]),

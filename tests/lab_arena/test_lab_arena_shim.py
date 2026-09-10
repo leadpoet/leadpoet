@@ -32,6 +32,7 @@ import requests
 from lab_arena import contracts, operations, runner, shim
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
+    COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
 )
 from qualification.scoring.company_verification import verify_company_exists
@@ -155,7 +156,14 @@ def assert_frame_is_minimal(frame: dict, raw: bytes, operation_id: str) -> None:
     assert raw == contracts.canonical_json(frame).encode("utf-8")
 
 
-def _verify_company_through_broker(monkeypatch, provider_broker):
+def _verify_company_through_broker(
+    monkeypatch,
+    provider_broker,
+    *,
+    company_name="Example Company",
+    company_website="https://example.com/",
+    company_linkedin="https://www.linkedin.com/company/example-company",
+):
     context = replace(CONTEXT, kind="score", round_id="arena-2026-09-04")
 
     class BrokerApi:
@@ -182,11 +190,9 @@ def _verify_company_through_broker(monkeypatch, provider_broker):
     try:
         return asyncio.run(
             verify_company_exists(
-                "Example Company",
-                "https://example.com/",
-                company_linkedin=(
-                    "https://www.linkedin.com/company/example-company"
-                ),
+                company_name,
+                company_website,
+                company_linkedin=company_linkedin,
                 require_https_transport=True,
             )
         )
@@ -350,11 +356,53 @@ def test_company_verification_routed_page_fetch_uses_provider_deadline(
     result = _verify_company_through_broker(monkeypatch, provider_broker)
 
     assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["actual_final_url"] == source_url
     assert len(transport.sent) == 1
     assert transport.sent[0]["timeout"] == 60.0
     request = json.loads(transport.sent[0]["body"])
     assert request["operation"] == "firecrawl_scrape"
     assert request["payload"]["timeout"] == 60_000
+
+
+def test_company_verification_retains_cross_domain_final_url_and_policy(
+    monkeypatch,
+):
+    source_url = "https://old.example/"
+    final_url = "https://new.example/"
+    envelope = {
+        "job_id": "test",
+        "status": "completed",
+        "result": {
+            "data": {
+                "rawHtml": (
+                    "<html><title>Example Company</title>"
+                    '<a href="https://www.linkedin.com/company/example-company">'
+                    "LinkedIn</a></html>"
+                ),
+                "metadata": {
+                    "sourceURL": source_url,
+                    "url": final_url,
+                    "statusCode": 200,
+                },
+            }
+        },
+        "billing": {"cost_usd": 0.002},
+    }
+    provider_broker, _ledger, _transport = make_broker(
+        transport=FakeTransport([(200, envelope)]),
+        credential_for=lambda _context, _provider: "miner-deepline-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+
+    result = _verify_company_through_broker(
+        monkeypatch,
+        provider_broker,
+        company_website=source_url,
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["actual_final_url"] == final_url
+    assert "redirect changed registrable domain" in (result.reason or "")
 
 
 def test_company_verification_routed_failure_stays_explicit_and_bounded(
@@ -608,3 +656,60 @@ def test_encode_helpers_round_trip():
     with pytest.raises(shim.ShimProviderError) as excinfo:
         shim.parse_worker_response(json.loads(shim.encode_worker_error("stage_closed")))
     assert excinfo.value.code == "stage_closed"
+
+
+def test_worker_response_consumes_only_a_valid_reserved_final_url_header():
+    document = json.loads(
+        shim.encode_worker_response(
+            200,
+            {
+                "content-type": "text/html",
+                operations.TRUSTED_RESPONSE_URL_HEADER: "https://new.example/",
+            },
+            b"<html></html>",
+        )
+    )
+
+    status, headers, body, response_url = shim._parse_worker_response_with_url(
+        document
+    )
+    assert (status, body, response_url) == (
+        200,
+        b"<html></html>",
+        "https://new.example/",
+    )
+    assert operations.TRUSTED_RESPONSE_URL_HEADER not in headers
+    assert set(document) == {"status", "headers", "body_b64"}
+
+    for invalid in (
+        {
+            **document,
+            "headers": {
+                **document["headers"],
+                operations.TRUSTED_RESPONSE_URL_HEADER: "https://127.0.0.1/",
+            },
+        },
+        {
+            **document,
+            "headers": {
+                **document["headers"],
+                operations.TRUSTED_RESPONSE_URL_HEADER.upper(): "https://other.example/",
+            },
+        },
+        {**document, "response_url": "https://attacker.example/"},
+    ):
+        with pytest.raises(shim.ShimTransportError):
+            shim._parse_worker_response_with_url(invalid)
+
+
+def test_aiohttp_response_keeps_request_and_validated_final_urls_distinct():
+    response = shim._AiohttpResponse(
+        request_url="https://old.example/",
+        response_url="https://new.example/",
+        status=200,
+        headers={"content-type": "text/html"},
+        body=b"<html></html>",
+    )
+
+    assert response.url == "https://new.example/"
+    assert response.request_info.real_url == "https://old.example/"

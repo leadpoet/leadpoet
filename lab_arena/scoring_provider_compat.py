@@ -19,6 +19,8 @@ from datetime import date, datetime, timezone
 from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
 
+from lab_arena import operations
+
 
 COMPATIBILITY_VERSION = "miner-score-deepline-compat:v1"
 EFFECTIVE_OPERATION_ID = "deepline.execute"
@@ -250,22 +252,14 @@ def _target_status(data: Mapping[str, Any], *, default: int = 200) -> int:
 
 
 def _safe_https_url(value: Any) -> str:
-    text = str(value or "")
     try:
-        parts = urlsplit(text)
-        port = parts.port
-    except ValueError:
+        return operations.validate_https_url(
+            value,
+            max_length=2000,
+            field="response_url",
+        )
+    except operations.OperationError:
         return ""
-    if (
-        parts.scheme != "https"
-        or not parts.hostname
-        or parts.username is not None
-        or parts.password is not None
-        or parts.fragment
-        or (port is not None and port != 443)
-    ):
-        return ""
-    return text
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -296,7 +290,7 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
 
 def _firecrawl_response(
     route: MinerScoreRoute, data: Mapping[str, Any]
-) -> tuple[int, dict[str, str], bytes]:
+) -> tuple[int, dict[str, str], bytes, str]:
     raw_html = data.get("rawHtml")
     metadata = data.get("metadata")
     if not isinstance(raw_html, str) or not isinstance(metadata, Mapping):
@@ -310,8 +304,11 @@ def _firecrawl_response(
     status = metadata.get("statusCode")
     if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
         raise CompatibilityResponseError("missing_firecrawl_target_status")
-    return status, {"content-type": "text/html; charset=utf-8"}, raw_html.encode(
-        "utf-8"
+    return (
+        status,
+        {"content-type": "text/html; charset=utf-8"},
+        raw_html.encode("utf-8"),
+        final_url,
     )
 
 
@@ -536,6 +533,46 @@ def _generic_ats_response(
     return 200, {"content-type": "application/json"}, _json_bytes(data)
 
 
+def adapt_response_with_trusted_url(
+    route: MinerScoreRoute,
+    *,
+    status: int,
+    headers: Mapping[str, Any],
+    body: bytes,
+) -> tuple[int, dict[str, str], bytes, str]:
+    """Convert a Deepline reply and retain only its validated page URL."""
+
+    del headers
+    if status < 200 or status >= 300:
+        raise CompatibilityResponseError("deepline_http_error")
+    data = _envelope_data(body)
+    if route.adapter.startswith("generic_ats_json:"):
+        response_status, response_headers, response_body = _generic_ats_response(
+            route, data
+        )
+        return response_status, response_headers, response_body, ""
+    if not isinstance(data, Mapping):
+        raise CompatibilityResponseError("missing_deepline_result")
+    if route.adapter == "firecrawl_raw_html":
+        return _firecrawl_response(route, data)
+    if route.adapter == "harvest_linkedin_job":
+        response_status, response_headers, response_body = _harvest_job_response(
+            route, data
+        )
+        return response_status, response_headers, response_body, ""
+    if route.adapter == "harvest_linkedin_post":
+        response_status, response_headers, response_body = _harvest_post_response(
+            route, data
+        )
+        return response_status, response_headers, response_body, ""
+    if route.adapter == "twitter_x_post":
+        response_status, response_headers, response_body = _twitter_post_response(
+            route, data
+        )
+        return response_status, response_headers, response_body, ""
+    raise CompatibilityResponseError("unknown_compatibility_adapter")
+
+
 def adapt_response(
     route: MinerScoreRoute,
     *,
@@ -545,23 +582,15 @@ def adapt_response(
 ) -> tuple[int, dict[str, str], bytes]:
     """Convert one Deepline reply to the requested legacy response shape."""
 
-    del headers
-    if status < 200 or status >= 300:
-        raise CompatibilityResponseError("deepline_http_error")
-    data = _envelope_data(body)
-    if route.adapter.startswith("generic_ats_json:"):
-        return _generic_ats_response(route, data)
-    if not isinstance(data, Mapping):
-        raise CompatibilityResponseError("missing_deepline_result")
-    if route.adapter == "firecrawl_raw_html":
-        return _firecrawl_response(route, data)
-    if route.adapter == "harvest_linkedin_job":
-        return _harvest_job_response(route, data)
-    if route.adapter == "harvest_linkedin_post":
-        return _harvest_post_response(route, data)
-    if route.adapter == "twitter_x_post":
-        return _twitter_post_response(route, data)
-    raise CompatibilityResponseError("unknown_compatibility_adapter")
+    response_status, response_headers, response_body, _response_url = (
+        adapt_response_with_trusted_url(
+            route,
+            status=status,
+            headers=headers,
+            body=body,
+        )
+    )
+    return response_status, response_headers, response_body
 
 
 __all__ = [
@@ -575,5 +604,6 @@ __all__ = [
     "TWITTER_POST_TOOL",
     "MinerScoreRoute",
     "adapt_response",
+    "adapt_response_with_trusted_url",
     "route_for",
 ]

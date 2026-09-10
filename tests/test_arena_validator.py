@@ -24,9 +24,6 @@ class _Substrate:
 
     def __init__(self, broadcasts):
         self.broadcasts = broadcasts
-        self.uid = 0
-        self.last_updates = [900]
-        self.rate_limit = 100
 
     def get_account_nonce(self, _hotkey):
         return 7
@@ -38,31 +35,24 @@ class _Substrate:
         assert method == "author_submitExtrinsic"
         self.broadcasts.append(params[0])
 
-    def query(self, *, module, storage_function, params, block_hash):
-        assert module == "SubtensorModule"
-        assert block_hash == "0x" + ("2" * 64)
-        if storage_function == "Uids":
-            assert params == [71, "5" + "V" * 47]
-            return SimpleNamespace(value=self.uid)
-        if storage_function == "LastUpdate":
-            assert params == [71]
-            return SimpleNamespace(value=self.last_updates)
-        if storage_function == "WeightsSetRateLimit":
-            assert params == [71]
-            return SimpleNamespace(value=self.rate_limit)
-        raise AssertionError(storage_function)
-
 
 class _Chain:
     def __init__(self, broadcasts):
         self.client = _Substrate(broadcasts)
         self.config = SimpleNamespace(netuid=71, network_name="finney")
+        self.submission_ready = True
+        self.submission_read_error = None
 
     def finalized_head(self):
         return SimpleNamespace(number=1050, hash="0x" + ("2" * 64))
 
     def refresh_metagraph(self):
         return SimpleNamespace(hotkeys=("5" + "A" * 47, "5" + "B" * 47))
+
+    def finalized_weight_submission_context(self, _hotkey):
+        if self.submission_read_error is not None:
+            raise self.submission_read_error
+        return self.finalized_head(), self.refresh_metagraph(), self.submission_ready
 
 
 class _Signer:
@@ -225,45 +215,6 @@ def test_missing_finalized_nonce_fails_before_protected_signing(tmp_path):
     assert signer.prepares == 0
 
 
-@pytest.mark.parametrize(
-    ("last_update", "rate_limit", "expected"),
-    [(0, 100, "broadcast"), (950, 100, "broadcast"), (951, 100, "waiting_for_rate_limit")],
-)
-def test_new_signature_obeys_exact_finalized_rate_limit_boundary(
-    tmp_path, last_update, rate_limit, expected
-):
-    signer = _Signer(_protected(), [])
-    orchestrator = _orchestrator(tmp_path, signer, [])
-    orchestrator.chain.client.last_updates = [last_update]
-    orchestrator.chain.client.rate_limit = rate_limit
-    assert orchestrator.run_once(9) == expected
-    assert signer.prepares == (1 if expected == "broadcast" else 0)
-    assert (tmp_path / "epoch-9-signed.json").exists() is (expected == "broadcast")
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("uid", None, "uid"),
-        ("uid", True, "uid"),
-        ("last_updates", [], "LastUpdate"),
-        ("last_updates", [True], "LastUpdate"),
-        ("last_updates", [1051], "LastUpdate"),
-        ("rate_limit", None, "rate limit"),
-        ("rate_limit", True, "rate limit"),
-        ("rate_limit", -1, "rate limit"),
-    ],
-)
-def test_rate_limit_inputs_fail_closed_before_signing(tmp_path, field, value, message):
-    signer = _Signer(_protected(), [])
-    orchestrator = _orchestrator(tmp_path, signer, [])
-    setattr(orchestrator.chain.client, field, value)
-    with pytest.raises(ArenaValidatorError, match=message):
-        orchestrator.run_once(9)
-    assert signer.prepares == 0
-    assert not (tmp_path / "epoch-9-signed.json").exists()
-
-
 def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     (tmp_path / "epoch-8-signed.json").write_text(
         '{"epoch":8,"record_hash":"sha256:bad"}\n', encoding="utf-8"
@@ -319,18 +270,100 @@ def test_expired_mortal_attempt_retries_fresh_era_within_same_epoch(tmp_path):
     assert broadcasts[-1] == "0xcafebabe"
 
 
-def test_rate_limited_retry_preserves_active_journal_without_archiving(tmp_path):
+def test_late_prior_update_defers_next_epoch_without_consuming_attempt(tmp_path):
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    orchestrator.chain.submission_ready = False
+
+    assert orchestrator.run_once(9) == "rate_limited"
+    assert signer.prepares == 0
+    assert not orchestrator.paths.signed(9).exists()
+
+    orchestrator.chain.submission_ready = True
+    assert orchestrator.run_once(9) == "broadcast"
+    assert signer.prepares == 1
+
+
+def test_expired_attempt_waits_across_restart_until_rate_limit_is_ready(tmp_path):
     first = _protected()
-    signer = _Signer(first, [
-        {"status": "not_included_expired", "finalized": False,
-         "state_hash": first["state_hash"], "extrinsic_hash": first["extrinsic_hash"],
-         "finalized_head": {"block": 1050}, "finalized_nonce": 7},
-    ])
+    second = dict(first)
+    second.update({
+        "attempt_sequence": 2,
+        "authorization_hash": "sha256:" + "9" * 64,
+        "extrinsic_hash": "0x" + "a" * 64,
+        "extrinsic_hex": "cafebabe",
+    })
+    second["recovery_record"] = {
+        "authorization_hash": second["authorization_hash"],
+        "extrinsic_hash": second["extrinsic_hash"],
+        "extrinsic_hex": second["extrinsic_hex"],
+    }
+
+    class RetrySigner(_Signer):
+        def prepare_arena_weight_extrinsic_v1(self, _request):
+            self.prepares += 1
+            return dict(first if self.prepares == 1 else second)
+
+    expired = {
+        "status": "not_included_expired", "finalized": False,
+        "state_hash": first["state_hash"], "extrinsic_hash": first["extrinsic_hash"],
+        "finalized_head": {"block": 1050}, "finalized_nonce": 7,
+    }
+    signer = RetrySigner(first, [expired, expired, expired])
+    broadcasts = []
+    orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    assert orchestrator.run_once(9) == "broadcast"
+    orchestrator.chain.submission_ready = False
+    assert orchestrator.run_once(9) == "rate_limited"
+    assert signer.prepares == 1
+    assert not orchestrator.paths.archived_attempt(9, 1).exists()
+
+    restarted = _orchestrator(tmp_path, signer, broadcasts)
+    restarted.chain.submission_ready = False
+    assert restarted.run_once(9) == "rate_limited"
+    assert signer.prepares == 1
+    assert not restarted.paths.archived_attempt(9, 1).exists()
+
+    restarted.chain.submission_ready = True
+    assert restarted.run_once(9) == "broadcast"
+    assert signer.prepares == 2
+    assert _read_hashed_json(restarted.paths.archived_attempt(9, 1))["extrinsic_hex"] == "deadbeef"
+    assert _read_hashed_json(restarted.paths.signed(9))["attempt_sequence"] == 2
+
+
+def test_invalid_replacement_does_not_archive_active_attempt(tmp_path):
+    first = _protected()
+    invalid_second = dict(first)
+    invalid_second["attempt_sequence"] = 2
+    invalid_second["sparse_weights_u16"] = [1, 2]
+
+    class RetrySigner(_Signer):
+        def prepare_arena_weight_extrinsic_v1(self, _request):
+            self.prepares += 1
+            return dict(first if self.prepares == 1 else invalid_second)
+
+    expired = {
+        "status": "not_included_expired", "finalized": False,
+        "state_hash": first["state_hash"], "extrinsic_hash": first["extrinsic_hash"],
+        "finalized_head": {"block": 1050}, "finalized_nonce": 7,
+    }
+    signer = RetrySigner(first, [expired])
     orchestrator = _orchestrator(tmp_path, signer, [])
     assert orchestrator.run_once(9) == "broadcast"
-    original = (tmp_path / "epoch-9-signed.json").read_bytes()
-    orchestrator.chain.client.last_updates = [1000]
-    assert orchestrator.run_once(9) == "waiting_for_rate_limit"
-    assert (tmp_path / "epoch-9-signed.json").read_bytes() == original
-    assert not (tmp_path / "epoch-9-attempt-1-signed.json").exists()
-    assert signer.prepares == 1
+    original = orchestrator.paths.signed(9).read_bytes()
+
+    with pytest.raises(ArenaValidatorError, match="differs"):
+        orchestrator.run_once(9)
+    assert orchestrator.paths.signed(9).read_bytes() == original
+    assert not orchestrator.paths.archived_attempt(9, 1).exists()
+
+
+def test_rate_limit_read_failure_fails_before_signing(tmp_path):
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    orchestrator.chain.submission_read_error = RuntimeError("chain unavailable")
+
+    with pytest.raises(RuntimeError, match="chain unavailable"):
+        orchestrator.run_once(9)
+    assert signer.prepares == 0
+    assert not orchestrator.paths.signed(9).exists()

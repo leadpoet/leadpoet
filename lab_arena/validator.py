@@ -299,48 +299,6 @@ class ArenaWeightOrchestrator:
             and int(death) - 1 <= int(state["valid_until_block"])
         )
 
-    @staticmethod
-    def _chain_value(value: Any) -> Any:
-        if isinstance(value, (Mapping, list, tuple, str, bytes, int)) or value is None:
-            return value
-        return getattr(value, "value", value)
-
-    def _weight_rate_limit_ready(self, head: Any) -> bool:
-        """Read the runtime's commit-rate inputs at one finalized block."""
-
-        substrate = self.chain.client
-        block_hash = str(head.hash)
-        netuid = int(self.chain.config.netuid)
-        uid = self._chain_value(substrate.query(
-            module="SubtensorModule", storage_function="Uids",
-            params=[netuid, self.validator_hotkey], block_hash=block_hash,
-        ))
-        if isinstance(uid, bool) or not isinstance(uid, int) or uid < 0:
-            raise ArenaValidatorError("finalized validator uid is unavailable or invalid")
-        updates = self._chain_value(substrate.query(
-            module="SubtensorModule", storage_function="LastUpdate",
-            params=[netuid], block_hash=block_hash,
-        ))
-        if not isinstance(updates, (list, tuple)) or uid >= len(updates):
-            raise ArenaValidatorError("finalized validator LastUpdate is unavailable or invalid")
-        last_update = self._chain_value(updates[uid])
-        if (
-            isinstance(last_update, bool)
-            or not isinstance(last_update, int)
-            or last_update < 0
-            or last_update > int(head.number)
-        ):
-            raise ArenaValidatorError("finalized validator LastUpdate is unavailable or invalid")
-        rate_limit = self._chain_value(substrate.query(
-            module="SubtensorModule", storage_function="WeightsSetRateLimit",
-            params=[netuid], block_hash=block_hash,
-        ))
-        if isinstance(rate_limit, bool) or not isinstance(rate_limit, int) or rate_limit < 0:
-            raise ArenaValidatorError("finalized weights rate limit is unavailable or invalid")
-        # This is the runtime's exact check_rate_limit predicate. A zero
-        # LastUpdate is the storage default and means weights were never set.
-        return last_update == 0 or int(head.number) - last_update >= rate_limit
-
     def _recover_protected_state(self, signed: Mapping[str, Any]) -> None:
         accepted_state = signed.get("accepted_state")
         recovery_record = signed.get("recovery_record")
@@ -378,6 +336,7 @@ class ArenaWeightOrchestrator:
         outcome_path = self.paths.outcome(epoch)
         existing = _read_hashed_json(signed_path)
         retry_state = None
+        submission_context = None
         retry_to_archive = None
         if existing is not None:
             outcome = _read_hashed_json(outcome_path)
@@ -389,22 +348,30 @@ class ArenaWeightOrchestrator:
             if confirmation in {"finalized", "included_pending_reveal"}:
                 return confirmation
             if confirmation == "not_included_expired":
-                head = self.chain.finalized_head()
                 accepted = existing.get("accepted_state")
                 if not isinstance(accepted, Mapping):
                     raise ArenaValidatorError("Arena retry lacks accepted state")
                 prior_sequence = int(existing.get("attempt_sequence", 0))
                 if prior_sequence <= 0:
                     raise ArenaValidatorError("Arena retry lacks attempt sequence")
-                if (
-                    prior_sequence >= MAX_ARENA_WEIGHT_ATTEMPTS
-                    or not self._fresh_era_fits(accepted, head.number)
-                ):
+                if prior_sequence >= MAX_ARENA_WEIGHT_ATTEMPTS:
                     self._record_expired(
                         existing,
                         self._last_confirmation or {},
                     )
                     return "not_included_expired"
+                submission_context = self.chain.finalized_weight_submission_context(
+                    self.validator_hotkey
+                )
+                head, _metagraph, rate_limit_ready = submission_context
+                if not self._fresh_era_fits(accepted, head.number):
+                    self._record_expired(
+                        existing,
+                        self._last_confirmation or {},
+                    )
+                    return "not_included_expired"
+                if not rate_limit_ready:
+                    return "rate_limited"
                 retry_state = dict(accepted)
                 retry_to_archive = (prior_sequence, existing)
             head = self.chain.finalized_head()
@@ -420,12 +387,15 @@ class ArenaWeightOrchestrator:
             return "state_unavailable"
         if retry_state is not None and state != retry_state:
             raise ArenaValidatorError("Arena retry state differs from durable accepted state")
-        head = self.chain.finalized_head()
+        if submission_context is None:
+            submission_context = self.chain.finalized_weight_submission_context(
+                self.validator_hotkey
+            )
+        head, metagraph, rate_limit_ready = submission_context
         if not int(state["valid_from_block"]) <= head.number <= int(state["valid_until_block"]):
             return "outside_submission_window"
-        if not self._weight_rate_limit_ready(head):
-            return "waiting_for_rate_limit"
-        metagraph = self.chain.refresh_metagraph()
+        if not rate_limit_ready:
+            return "rate_limited"
         host_result = self._host_derivation(state, metagraph.hotkeys)
         substrate = self.chain.client
         nonce = substrate.get_account_nonce(self.validator_hotkey)

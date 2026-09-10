@@ -156,6 +156,10 @@ def test_provider_transport_never_logs_key_at_debug_level(caplog, fails):
         return httpx.Response(200, json={"organic_results": []})
 
     caplog.set_level(logging.DEBUG)
+    # Exercise each transport logger even when another test configured it above
+    # DEBUG. caplog restores each logger's prior level after this test.
+    for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.proxy"):
+        caplog.set_level(logging.DEBUG, logger=name)
     with httpx.Client(transport=httpx.MockTransport(provider)) as client:
         transport = HttpxProviderTransport(client=client)
         if fails:

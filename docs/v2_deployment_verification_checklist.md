@@ -67,7 +67,18 @@ finalized chain readback for each configured normal validator. Report local
 tests, provisioning, and live chain results separately. Never claim live weight
 submission from readiness or an HTTP acknowledgement alone.
 
-For the first transition, install and verify the gateway-only restart controller
-from the exact release before invoking it. The installed legacy controller can
-still require deleted auditor artifacts. Keep that mismatch fail-closed and
-leave the working service running until the controller upgrade is complete.
+For the first transition, apply additive migration 202 while the gateway is
+running. Invoke the exact `origin/main` transition wrapper documented in
+`docs/arena_normal_validator_weights.md`. It installs the gateway-only
+controller and holds the canonical restart lock. The restart stops the old
+producers and then waits at its exact migration 203 barrier. Apply the exact
+203 SQL, verify its capability RPC, and use the exact completion helper. The
+helper checks the live capability and the candidate, SQL hash, and invocation
+binding against the protected persistent gateway environment before the
+restart can activate the new gateway. The temporary parent environment has
+already been scrubbed at this point. Do not write the completion marker by
+hand.
+
+If migration 203 succeeds but a later restart stage fails, rerun the ordinary
+canonical exact-commit restart. Migration 203 is idempotent, the new schema
+preflight is then fully enabled, and no legacy incentive table is required.

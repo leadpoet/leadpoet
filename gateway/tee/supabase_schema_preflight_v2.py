@@ -57,7 +57,7 @@ def _read_json(request: Request, *, opener: Any, timeout_seconds: float, label: 
     except (TypeError, ValueError, UnicodeDecodeError) as exc:
         raise SupabaseSchemaPreflightV2Error(f"{label} response is invalid") from exc
 
-def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *, opener: Any = urlopen, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *, opener: Any = urlopen, timeout_seconds: float = 10.0, defer_incentive_retirement: bool = False) -> Dict[str, Any]:
     """Verify only live Arena and generic scoring dependencies."""
     supabase_url = str(parent_environment.get("SUPABASE_URL") or "").rstrip("/")
     service_role_key = str(parent_environment.get("SUPABASE_SERVICE_ROLE_KEY") or "")
@@ -78,7 +78,15 @@ def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *,
         if not 200 <= status < 300:
             raise SupabaseSchemaPreflightV2Error(f"required schema is unavailable for {table}; apply {migration} before restart (HTTP {status})")
         migrations.add(migration)
-    for migration, function_name in REQUIRED_SUPABASE_V2_RPCS:
+    required_rpcs = tuple(
+        row for row in REQUIRED_SUPABASE_V2_RPCS
+        if not (defer_incentive_retirement and row[1] == "lab_arena_incentive_retirement_schema_v1")
+    )
+    required_capabilities = tuple(
+        row for row in SCHEMA_CAPABILITIES
+        if not (defer_incentive_retirement and row[0] == "lab_arena_incentive_retirement_schema_v1")
+    )
+    for migration, function_name in required_rpcs:
         if len(function_name.encode()) > POSTGRES_IDENTIFIER_MAX_BYTES:
             raise SupabaseSchemaPreflightV2Error(f"required RPC identifier exceeds PostgreSQL's identifier limit: {function_name}")
         migrations.add(migration)
@@ -86,13 +94,13 @@ def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *,
     paths = schema_document.get("paths") if isinstance(schema_document, Mapping) else None
     if not isinstance(paths, Mapping):
         raise SupabaseSchemaPreflightV2Error("Supabase RPC schema document is invalid")
-    for migration, function_name in REQUIRED_SUPABASE_V2_RPCS:
+    for migration, function_name in required_rpcs:
         if f"/rpc/{function_name}" not in paths:
             raise SupabaseSchemaPreflightV2Error(f"required RPC is unavailable for {function_name}; apply {migration} before restart")
     capabilities: Dict[str, Any] = {}
-    for function_name, expected in SCHEMA_CAPABILITIES:
+    for function_name, expected in required_capabilities:
         value = _read_json(Request(f"{supabase_url}/rest/v1/rpc/{function_name}", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST"), opener=opener, timeout_seconds=timeout_seconds, label=f"{function_name} capability probe")
         if value != expected:
             raise SupabaseSchemaPreflightV2Error(f"{function_name} capability differs: expected {expected}")
         capabilities[function_name] = dict(expected)
-    return {"status": "ready", "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA) + 1 + len(SCHEMA_CAPABILITIES), "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA), "rpc_probe_count": len(REQUIRED_SUPABASE_V2_RPCS), "data_probe_count": len(SCHEMA_CAPABILITIES), "schema_document_probe_count": 1, "schema_capabilities": capabilities, "migration_files": sorted(migrations)}
+    return {"status": "ready", "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA) + 1 + len(required_capabilities), "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA), "rpc_probe_count": len(required_rpcs), "data_probe_count": len(required_capabilities), "schema_document_probe_count": 1, "schema_capabilities": capabilities, "migration_files": sorted(migrations), "incentive_retirement_deferred": bool(defer_incentive_retirement)}

@@ -85,7 +85,7 @@ CONTROLLER_PROCESS_HELPER_FD_NUMBER = 195
 CONTROLLER_PROCESS_HELPER_PATH = "scripts/manage_owned_process_group.py"
 MAX_PROOF_BYTES = 32 * 1024
 MAX_RUNTIME_STATUS_BYTES = 256 * 1024
-DEFAULT_RUNTIME_STATUS_URL = "http://127.0.0.1:8000/research-lab/status"
+DEFAULT_RUNTIME_STATUS_URL = "http://127.0.0.1:8000/build-info"
 # These are minimum compatible ancestry floors, not an exhaustive release list.
 SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS = frozenset(
     {"0dd3a385a23a3af0fa17210bfe02a39cc4023952"}
@@ -2212,7 +2212,7 @@ def _fetch_runtime_status(
     try:
         connection.request(
             "GET",
-            "/research-lab/status",
+            "/build-info",
             body=None,
             headers={"Host": "127.0.0.1:8000", "Connection": "close"},
         )
@@ -2292,8 +2292,8 @@ def verify_gateway_miner_maintenance_runtime_state(
     if not _COMMIT_RE.fullmatch(commit) or not _TREE_RE.fullmatch(str(candidate_tree_hash).lower()):
         raise GatewayMinerMaintenanceRestartError("candidate identity is invalid")
     _require_disabled_parent_environment(runtime_environment)
-    if runtime_status.get("miner_submissions_enabled") is not False:
-        raise GatewayMinerMaintenanceRestartError("runtime miner submissions are not disabled")
+    if str(runtime_status.get("git_commit") or "").lower() != commit:
+        raise GatewayMinerMaintenanceRestartError("runtime commit differs from the disabled candidate")
     parity = _production_parity_clone_authority(runtime_environment, deploy_commit=commit)
     if parity is not None:
         return {"authority": "production_parity_clone", "runtime_status": "disabled"}

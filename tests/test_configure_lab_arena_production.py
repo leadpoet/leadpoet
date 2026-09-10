@@ -25,6 +25,9 @@ def args():
         baseline_hotkey="baseline-key",
         chain_endpoint="wss://chain.example",
         api_base_url="https://gateway.example",
+        arena_signing_key_hash="sha256:" + "a" * 64,
+        network="finney",
+        netuid=71,
         daily_cutoff_utc=0,
     )
 
@@ -149,11 +152,11 @@ def test_scorer_image_only_apply_sends_exactly_one_target(monkeypatch, tmp_path)
     assert set(calls[0][1]["updates"]) == {"LAB_ARENA_SCORER_IMAGE"}
 
 
-def test_validator_uses_dedicated_host_only_runner_wallet():
+def test_validator_uses_protected_hotkey_and_persistent_arena_state():
     updates = MODULE.validator_updates(args())
-    assert updates["LAB_ARENA_WALLET_NAME"] == "arena_runner"
-    assert updates["LAB_ARENA_HOTKEY_NAME"] == "default"
-    assert updates["LAB_ARENA_WALLET_PATH"] == "/var/lib/lab-arena/runner-wallets"
+    assert not any("WALLET" in name or "HOTKEY_NAME" in name for name in updates)
+    assert updates["LAB_ARENA_VALIDATOR_STATE_DIR"] == "/var/lib/leadpoet/arena-validator"
+    assert updates["LAB_ARENA_SIGNING_KEY_HASH"] == "sha256:" + "a" * 64
 
 
 @pytest.mark.parametrize("missing", [

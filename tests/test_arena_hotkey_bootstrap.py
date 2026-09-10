@@ -53,6 +53,9 @@ class _Client:
     def provision_arena_hotkey_v1(self, value):
         self.provisions += 1
         return self.authority.provision(value)
+    def provision_arena_legacy_hotkey_v1(self, value):
+        self.provisions += 1
+        return self.authority.provision_legacy_seed(value)
 
 
 class _Kms:
@@ -66,11 +69,82 @@ class _Kms:
         return {"KeyId": "kms-key", "CiphertextForRecipient": base64.b64decode(_kms_cms_encrypt(request, self.plaintext.decode()))}
 
 
+def _legacy_envelope(seed, policy, key_id="kms-key"):
+    ciphertext = b"legacy-kms-ciphertext"
+    context = {"purpose": "leadpoet.validator_hotkey_seed.v2", "validator_hotkey": policy["validator_hotkey"]}
+    return {
+        "schema_version": arena_hotkey_bootstrap.LEGACY_ENVELOPE_SCHEMA,
+        "ciphertext_blob_b64": base64.b64encode(ciphertext).decode(),
+        "ciphertext_blob_hash": arena_hotkey_bootstrap._sha256_bytes(ciphertext),
+        "encryption_context": context,
+        "encryption_context_hash": sha256_json(context),
+        "hotkey_public_key": policy["hotkey_public_key"],
+        "kms_key_id_hash": arena_hotkey_bootstrap._kms_key_reference_hash(key_id),
+        "validator_hotkey": policy["validator_hotkey"],
+    }
+
+
+class _LegacyKms:
+    def __init__(self, captured, seed, key_id="kms-key"):
+        self.captured = captured; self.seed = seed; self.key_id = key_id; self.decrypts = 0
+    def decrypt(self, **kwargs):
+        self.decrypts += 1
+        request = {"recipient_public_key_der_b64": base64.b64encode(self.captured["public_key"]).decode()}
+        return {"KeyId": self.key_id, "CiphertextForRecipient": base64.b64decode(_kms_cms_encrypt(request, self.seed.decode("latin1")))}
+
+
+def test_legacy_raw_seed_migrates_only_to_measured_policy():
+    seed = b"a" * 32
+    policy, _ = _policy(seed)
+    captured = {}
+    authority = ArenaHotkeyAuthority(
+        attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm",
+        measured_policy=policy,
+    )
+    client = _Client(authority); kms = _LegacyKms(captured, seed)
+    state = arena_hotkey_bootstrap.provision_legacy(
+        _legacy_envelope(seed, policy), expected_policy=policy,
+        kms_key_id="kms-key", client=client, kms_client=kms,
+    )
+    assert state["policy"] == policy and state["validator_hotkey"] == policy["validator_hotkey"]
+    assert client.provisions == 1 and kms.decrypts == 1
+
+
+def test_legacy_migration_rejects_tampered_policy_identity_and_plaintext():
+    seed = b"a" * 32; policy, _ = _policy(seed); captured = {}
+    authority = ArenaHotkeyAuthority(
+        attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm",
+        measured_policy=policy,
+    )
+    envelope = _legacy_envelope(seed, policy)
+    changed = deepcopy(policy); changed["arena_api_base_url"] = "https://changed.example.com"
+    with pytest.raises(ArenaHotkeyError, match="measured policy"):
+        arena_hotkey_bootstrap.provision_legacy(
+            envelope, expected_policy=changed, kms_key_id="kms-key",
+            client=_Client(authority), kms_client=_LegacyKms(captured, seed),
+        )
+    wrong_identity = deepcopy(envelope); wrong_identity["validator_hotkey"] = Keypair.create_from_uri("//Other").ss58_address
+    with pytest.raises(ArenaHotkeyError, match="identity"):
+        arena_hotkey_bootstrap.provision_legacy(
+            wrong_identity, expected_policy=policy, kms_key_id="kms-key",
+            client=_Client(authority), kms_client=_LegacyKms(captured, seed),
+        )
+
+    class PlaintextKms(_LegacyKms):
+        def decrypt(self, **kwargs):
+            return {"KeyId": self.key_id, "Plaintext": self.seed, "CiphertextForRecipient": b"forbidden"}
+    with pytest.raises(ArenaHotkeyError, match="plaintext"):
+        arena_hotkey_bootstrap.provision_legacy(
+            envelope, expected_policy=policy, kms_key_id="kms-key",
+            client=_Client(authority), kms_client=PlaintextKms(captured, seed),
+        )
+
+
 def test_real_cms_recipient_provisions_bound_sr25519_and_does_not_reunseal():
     seed = b"a" * 32
     policy, _arena_signer = _policy(seed)
     captured = {}
-    authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm-attestation")
+    authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm-attestation", measured_policy=policy)
     client = _Client(authority)
     kms = _Kms(captured)
     envelope = arena_hotkey_bootstrap.seal(seed, policy, kms_key_id="kms-key", kms_client=kms)
@@ -101,7 +175,7 @@ def test_seed_policy_and_parent_plaintext_fail_closed():
     class PlaintextKms(_Kms):
         def decrypt(self, **kwargs): return {"KeyId": "kms-key", "Plaintext": b"forbidden"}
     captured = {}
-    authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm")
+    authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm", measured_policy=policy)
     envelope = arena_hotkey_bootstrap.seal(b"a" * 32, policy, kms_key_id="kms-key", kms_client=_Kms(captured))
     with pytest.raises(ArenaHotkeyError, match="plaintext"):
         arena_hotkey_bootstrap.provision(envelope, client=_Client(authority), kms_client=PlaintextKms(captured))
@@ -114,7 +188,8 @@ def test_recipient_retry_refreshes_attestation_without_replacing_recipient_key()
         calls.append(kwargs)
         return ("hardware-attestation-%d" % len(calls)).encode()
 
-    authority = ArenaHotkeyAuthority(attestation_supplier=attest)
+    policy, _ = _policy()
+    authority = ArenaHotkeyAuthority(attestation_supplier=attest, measured_policy=policy)
     first = authority.recipient_request()
     second = authority.recipient_request()
     assert len(calls) == 2
@@ -140,7 +215,7 @@ def test_recipient_rejects_policy_changed_after_seed_binding():
     document = json.loads(sealed_payload(b"a" * 32, policy))
     document["policy"]["arena_api_base_url"] = "https://changed.example.com"
     captured = {}
-    authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm")
+    authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm", measured_policy=policy)
     authority.recipient_request()
     request = {"recipient_public_key_der_b64": base64.b64encode(captured["public_key"]).decode()}
     ciphertext = _kms_cms_encrypt(request, json.dumps(document, sort_keys=True, separators=(",", ":")))
@@ -150,7 +225,7 @@ def test_recipient_rejects_policy_changed_after_seed_binding():
 
 def test_application_signer_rejects_other_validator_and_chain_payloads():
     seed = b"a" * 32; policy, _ = _policy(seed)
-    captured = {}; authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm")
+    captured = {}; authority = ArenaHotkeyAuthority(attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm", measured_policy=policy)
     client = _Client(authority); kms = _Kms(captured)
     arena_hotkey_bootstrap.provision(arena_hotkey_bootstrap.seal(seed, policy, kms_key_id="kms-key", kms_client=kms), client=client, kms_client=kms)
     with pytest.raises((ArenaHotkeyError, ValueError)):
@@ -192,6 +267,7 @@ def test_tee_service_arena_boot_wire_does_not_require_legacy_configuration(monke
     captured = {}
     monkeypatch.setenv("LEADPOET_ENCLAVE_MODE", "arena")
     monkeypatch.setattr(arena_hotkey, "_nsm_attest", lambda **kwargs: captured.update(kwargs) or b"measured-nsm")
+    monkeypatch.setattr(arena_hotkey, "load_measured_policy", lambda: policy)
 
     class ExternalDrandBoundary:
         def __init__(self, *, library_path, expected_sha256):

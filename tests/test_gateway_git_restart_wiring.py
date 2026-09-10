@@ -316,8 +316,11 @@ def test_unpinned_gateway_local_build_follows_new_main_before_shutdown() -> None
     assert "Acquiring the exact historical attested V2 release channel" in release_build
     assert '--expected-commit "$PREPARED_GATEWAY_SHA"' in release_build
     assert '--gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"' in release_build
+    historical = release_build.index(
+        "Acquiring the exact historical attested V2 release channel"
+    )
     assert release_build.index('[ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]') < (
-        release_build.index("--ensure")
+        release_build.index("--ensure", historical)
     )
     assert script.index("follow_superseding_gateway_release") < script.index(
         'echo "Stopping existing gateway and Research Lab worker processes"'
@@ -441,9 +444,8 @@ def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() ->
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert "http://localhost:8000/health/v2-authority >/dev/null" in script
     assert "wait_for_gateway_v2_authority" in script
-    assert "http://localhost:8000/research-lab/status >/dev/null" in script
+    assert "http://localhost:8000/research-lab/status" not in script
     assert "http://localhost:8000/attest >/dev/null" in script
-    assert "http://localhost:8000/research-lab/status || true" not in script
     assert "http://localhost:8000/attest || true" not in script
 
 
@@ -544,54 +546,6 @@ def test_gateway_restart_forces_instance_role_for_runtime_aws_calls() -> None:
         instance_role,
     )
     assert runtime_launch < unset_credentials < instance_role < gateway_launch
-
-
-def test_gateway_restart_installs_commit_bound_admin_wrapper_after_handoff() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    wrapper = (
-        ROOT / "scripts" / "research_lab_admin_wrapper_runtime.sh"
-    ).read_text(encoding="utf-8")
-
-    status_handoff = script.index(
-        "timeout 30 curl -fsS http://localhost:8000/research-lab/status"
-    )
-    install_stage = script.index(
-        'GATEWAY_DEPLOY_STAGE="host_restart_script_install"'
-    )
-    wrapper_install = script.index(
-        "install_research_lab_admin_wrapper",
-        install_stage,
-    )
-    restart_install = script.index(
-        "install_successful_restart_script",
-        wrapper_install,
-    )
-    completed = script.index(
-        'GATEWAY_DEPLOY_STAGE="completed"',
-        restart_install,
-    )
-
-    assert (
-        status_handoff
-        < install_stage
-        < wrapper_install
-        < restart_install
-        < completed
-    )
-    assert (
-        'source_script="$LEADPOET_REPO_ROOT/scripts/'
-        'research_lab_admin_wrapper_runtime.sh"'
-    ) in script
-    assert "RESEARCH_LAB_PRIVATE_REPO_BRANCH" not in wrapper
-    assert "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI" not in wrapper
-    assert "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID" not in wrapper
-    assert "LEADPOET_AWS_INSTANCE_ROLE_ONLY=true" in wrapper
-
-
-
-
-
-
 
 
 
@@ -1248,6 +1202,21 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
     )
 
 
+def test_migration_203_barrier_is_after_old_producer_shutdown_and_before_activation() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    shutdown = script.index("Stopping existing gateway and Research Lab worker processes")
+    lab_stop = script.index(
+        'stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"', shutdown
+    )
+    barrier = script.index("wait_for_exact_migration_203", lab_stop)
+    activation = script.index("Activating prepared gateway Git commit", barrier)
+    assert shutdown < lab_stop < barrier < activation
+    assert '"old_producers_stopped":True' in script
+    assert '"migration_203_verified":True' in script
+    assert "stat.S_IMODE(info.st_mode) != 0o600" in script
+    assert "doc == expected" in script
+
+
 def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert "leadpoet.gateway_restart_timing.v1" in script
@@ -1521,9 +1490,7 @@ def test_miner_bootstrap_exec_preserves_stable_cwd_and_timing_ledger(
 def test_gateway_restart_checks_shared_maintenance_without_retired_admin_command() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     v2_health = "if ! wait_for_gateway_v2_authority; then"
-    shared_status = (
-        "curl -fsS http://localhost:8000/research-lab/status"
-    )
+    shared_status = "BUILD_INFO_RESPONSE="
     maintenance_runtime = (
         "-m gateway.tee.gateway_miner_maintenance_restart_v1"
     )

@@ -422,6 +422,16 @@ class ValidatorEnclaveClient:
         )
         return dict(response["arena_hotkey_state"])
 
+    def provision_arena_legacy_hotkey_v1(self, ciphertext_for_recipient_b64: str) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "provision_arena_legacy_hotkey_v1",
+                "ciphertext_for_recipient_b64": str(ciphertext_for_recipient_b64),
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["arena_hotkey_state"])
+
     def sign_arena_application_v1(self, message: bytes) -> Dict[str, Any]:
         if not isinstance(message, bytes):
             raise TypeError("Arena application message must be bytes")

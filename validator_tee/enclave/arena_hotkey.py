@@ -28,6 +28,7 @@ from leadpoet_canonical.kms_recipient import decrypt_kms_recipient_ciphertext
 from leadpoet_canonical.lab_arena_rewards import sha256_json, signing_key_from_document
 
 POLICY_SCHEMA = "leadpoet.arena.signer_policy.v1"
+MEASURED_POLICY_PATH = Path("/app/validator_tee/enclave/arena_signer_policy.json")
 PAYLOAD_SCHEMA = "leadpoet.arena.sealed_hotkey.v1"
 RECIPIENT_SCHEMA = "leadpoet.arena.hotkey_recipient.v1"
 ENCRYPTION_ALGORITHM = "RSAES_OAEP_SHA_256"
@@ -147,6 +148,15 @@ def validate_policy(value: Any) -> Dict[str, Any]:
     return policy
 
 
+def load_measured_policy(path: Path = MEASURED_POLICY_PATH) -> Dict[str, Any]:
+    """Load the immutable public policy copied into the measured signer EIF."""
+
+    try:
+        return validate_policy(json.loads(Path(path).read_text(encoding="utf-8")))
+    except (OSError, ValueError, ArenaHotkeyError) as exc:
+        raise ArenaHotkeyError("measured Arena signer policy is unavailable") from exc
+
+
 def sealed_payload(seed: bytes, policy: Mapping[str, Any]) -> bytes:
     """Owner-side input for KMS Encrypt. Never use it in a validator runner."""
 
@@ -166,11 +176,15 @@ def sealed_payload(seed: bytes, policy: Mapping[str, Any]) -> bytes:
 
 
 class ArenaHotkeyAuthority:
-    def __init__(self, *, attestation_supplier=None, decrypt_recipient=None) -> None:
+    def __init__(self, *, attestation_supplier=None, decrypt_recipient=None,
+                 measured_policy=None) -> None:
         if attestation_supplier is None:
             attestation_supplier = _nsm_attest
         self._attest = attestation_supplier
         self._decrypt = decrypt_recipient or decrypt_kms_recipient_ciphertext
+        self._measured_policy = validate_policy(
+            measured_policy if measured_policy is not None else load_measured_policy()
+        )
         self._recipient_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
         self._recipient = None
         self._policy = None
@@ -189,7 +203,13 @@ class ArenaHotkeyAuthority:
             # Refresh the hardware timestamp after a failed KMS attempt. Keep
             # the recipient key stable so an in-flight response remains valid.
             public = self._recipient_key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-            claim = {"schema_version": RECIPIENT_SCHEMA, "purpose": PAYLOAD_SCHEMA, "nonce": secrets.token_hex(32)}
+            claim = {
+                "schema_version": RECIPIENT_SCHEMA,
+                "purpose": PAYLOAD_SCHEMA,
+                "nonce": secrets.token_hex(32),
+                "policy_hash": sha256_json(self._measured_policy),
+                "policy": self._measured_policy,
+            }
             attestation = self._attest(user_data=json.dumps(claim, sort_keys=True, separators=(",", ":")).encode(), public_key=public)
             if not isinstance(attestation, bytes) or not attestation:
                 raise ArenaHotkeyError("Arena hardware attestation is unavailable")
@@ -215,6 +235,8 @@ class ArenaHotkeyAuthority:
                 if not isinstance(document, dict) or set(document) != {"schema_version", "seed_hex", "policy", "policy_mac"} or document["schema_version"] != PAYLOAD_SCHEMA:
                     raise ValueError("sealed payload fields")
                 policy = validate_policy(document["policy"])
+                if policy != self._measured_policy:
+                    raise ValueError("measured policy binding")
                 seed = bytearray.fromhex(document.pop("seed_hex"))
                 try:
                     import sr25519
@@ -236,6 +258,38 @@ class ArenaHotkeyAuthority:
             finally:
                 for index in range(len(plaintext)):
                     plaintext[index] = 0
+            return self.public_state()
+
+    def provision_legacy_seed(self, ciphertext_for_recipient_b64: str) -> Dict[str, Any]:
+        """Migrate the existing KMS raw-seed envelope inside the measured EIF.
+
+        The parent handles only AWS KMS ciphertext and CiphertextForRecipient.
+        The unwrapped seed never crosses the enclave boundary, and the host has
+        no input that can replace the policy embedded in this image.
+        """
+
+        with self._lock:
+            if self._pair is not None or self._recipient is None:
+                raise ArenaHotkeyError("Arena hotkey provisioning state is invalid")
+            seed = bytearray()
+            try:
+                ciphertext = base64.b64decode(ciphertext_for_recipient_b64, validate=True)
+                if not 1 <= len(ciphertext) <= 65536:
+                    raise ValueError("recipient ciphertext size")
+                seed = bytearray(self._decrypt(self._recipient_key, ciphertext))
+                if len(seed) != 32:
+                    raise ValueError("legacy seed size")
+                import sr25519
+                pair = sr25519.pair_from_seed(bytes(seed))
+                if pair[0].hex() != self._measured_policy["hotkey_public_key"]:
+                    raise ValueError("legacy seed identity")
+                self._pair = (bytes(pair[0]), bytes(pair[1]))
+                self._policy = json.loads(json.dumps(self._measured_policy))
+            except Exception:
+                raise ArenaHotkeyError("Arena legacy recipient provisioning failed") from None
+            finally:
+                for index in range(len(seed)):
+                    seed[index] = 0
             return self.public_state()
 
     def public_state(self) -> Dict[str, Any]:

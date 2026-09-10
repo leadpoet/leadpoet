@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from scripts import run_arena_validator
 from scripts.run_arena_validator import load_environment
 
 
@@ -41,3 +42,28 @@ def test_public_or_symlinked_environment_is_rejected(tmp_path):
     link.symlink_to(path)
     with pytest.raises(OSError):
         load_environment(link)
+
+
+def test_explicit_candidate_enclave_cid_overrides_environment(tmp_path, monkeypatch):
+    path = _env(tmp_path, "ENCLAVE_CID=8\n")
+    observed = {}
+
+    def validator_main(argv):
+        observed["cid"] = os.environ["ENCLAVE_CID"]
+        observed["argv"] = argv
+        return 0
+
+    import lab_arena.validator
+
+    monkeypatch.setattr(lab_arena.validator, "main", validator_main)
+    assert run_arena_validator.main(
+        ["--environment-file", str(path), "--enclave-cid", "19", "--check-only"]
+    ) == 0
+    assert observed == {"cid": "19", "argv": ["--check-only"]}
+
+
+def test_parent_cid_is_rejected_before_validator_import(tmp_path):
+    with pytest.raises(SystemExit):
+        run_arena_validator.main(
+            ["--environment-file", str(_env(tmp_path, "# empty\n")), "--enclave-cid", "3"]
+        )

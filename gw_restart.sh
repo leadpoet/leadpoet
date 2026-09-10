@@ -58,6 +58,12 @@ GATEWAY_V2_HEALTH_DEADLINE_SECONDS="${GATEWAY_V2_HEALTH_DEADLINE_SECONDS:-600}"
 GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="${GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT:-}"
 GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$}"
+GATEWAY_MIGRATION_203_SQL_SHA256="${GATEWAY_MIGRATION_203_SQL_SHA256:-}"
+GATEWAY_MIGRATION_203_BARRIER_FILE="${GATEWAY_MIGRATION_203_BARRIER_FILE:-/home/ec2-user/.config/leadpoet/migration-203-barrier.json}"
+GATEWAY_MIGRATION_203_COMPLETION_FILE="${GATEWAY_MIGRATION_203_COMPLETION_FILE:-/home/ec2-user/.config/leadpoet/migration-203-complete.json}"
+GATEWAY_MIGRATION_203_WAIT_SECONDS="${GATEWAY_MIGRATION_203_WAIT_SECONDS:-900}"
+export GATEWAY_MIGRATION_203_SQL_SHA256 GATEWAY_MIGRATION_203_BARRIER_FILE
+export GATEWAY_MIGRATION_203_COMPLETION_FILE GATEWAY_MIGRATION_203_WAIT_SECONDS
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-$GATEWAY_RESTART_INVOCATION_ID}"
 GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
@@ -69,6 +75,65 @@ GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN=""
 GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT=""
 GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE=""
 GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE=""
+
+wait_for_exact_migration_203() {
+  local deadline
+  [ -n "$GATEWAY_MIGRATION_203_SQL_SHA256" ] || return 0
+  if ! [[ "$GATEWAY_MIGRATION_203_SQL_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+      || ! [[ "$GATEWAY_MIGRATION_203_WAIT_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]]; then
+    echo "ERROR: migration 203 barrier configuration is invalid" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$GATEWAY_MIGRATION_203_BARRIER_FILE")"
+  rm -f -- "$GATEWAY_MIGRATION_203_COMPLETION_FILE"
+  "$GATEWAY_PYTHON_BIN" - "$GATEWAY_MIGRATION_203_BARRIER_FILE" \
+    "$PREPARED_GATEWAY_SHA" "$GATEWAY_MIGRATION_203_SQL_SHA256" \
+    "$GATEWAY_RESTART_INVOCATION_ID" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+path = Path(sys.argv[1])
+doc = {"schema_version":"leadpoet.gateway.migration_203_barrier.v1",
+       "candidate_commit":sys.argv[2], "sql_sha256":sys.argv[3],
+       "restart_invocation_id":sys.argv[4], "old_producers_stopped":True}
+fd, name = tempfile.mkstemp(prefix=".migration-203.", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="ascii") as handle:
+        json.dump(doc, handle, sort_keys=True, separators=(",", ":")); handle.write("\n")
+        handle.flush(); os.fsync(handle.fileno())
+    os.chmod(name, 0o600); os.replace(name, path)
+finally:
+    try: os.unlink(name)
+    except FileNotFoundError: pass
+PY
+  echo "Migration 203 barrier ready; old incentive producers are stopped"
+  deadline=$((SECONDS + GATEWAY_MIGRATION_203_WAIT_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if "$GATEWAY_PYTHON_BIN" - "$GATEWAY_MIGRATION_203_COMPLETION_FILE" \
+      "$PREPARED_GATEWAY_SHA" "$GATEWAY_MIGRATION_203_SQL_SHA256" \
+      "$GATEWAY_RESTART_INVOCATION_ID" <<'PY'
+import json, os, stat, sys
+path = sys.argv[1]
+try:
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid() or info.st_size > 4096:
+        raise ValueError("unsafe completion file")
+    with open(path, "r", encoding="ascii") as handle: doc = json.load(handle)
+except (OSError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+expected = {"schema_version":"leadpoet.gateway.migration_203_complete.v1",
+            "candidate_commit":sys.argv[2], "sql_sha256":sys.argv[3],
+            "restart_invocation_id":sys.argv[4], "migration_203_verified":True}
+raise SystemExit(0 if doc == expected else 1)
+PY
+    then
+      echo "Exact migration 203 completion received"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: exact migration 203 completion was not received; gateway remains stopped" >&2
+  return 1
+}
 
 if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
   if ! [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+/authority$|^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+/authority$ ]] \
@@ -1442,6 +1507,8 @@ enforce_deployment_environment() {
   export GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
+  export GATEWAY_MIGRATION_203_SQL_SHA256 GATEWAY_MIGRATION_203_BARRIER_FILE
+  export GATEWAY_MIGRATION_203_COMPLETION_FILE GATEWAY_MIGRATION_203_WAIT_SECONDS
   export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_RELEASE_LINEAGE
   export GATEWAY_V2_ARTIFACT_POLICY
@@ -1560,32 +1627,6 @@ install_successful_restart_script() {
     rm -f "$temporary"
     return 1
   fi
-}
-
-install_research_lab_admin_wrapper() {
-  local source_script target_dir target_script temporary
-  source_script="$LEADPOET_REPO_ROOT/scripts/research_lab_admin_wrapper_runtime.sh"
-  target_dir="/home/ec2-user/bin"
-  target_script="$target_dir/research-lab-admin"
-  if [ ! -f "$source_script" ]; then
-    echo "ERROR: Research Lab admin wrapper source is missing" >&2
-    return 1
-  fi
-  if ! bash -n "$source_script"; then
-    echo "ERROR: Research Lab admin wrapper source has invalid syntax" >&2
-    return 1
-  fi
-  mkdir -p "$target_dir"
-  temporary="$(mktemp "$target_dir/.research-lab-admin.XXXXXX")"
-  if ! install -m 700 "$source_script" "$temporary"; then
-    rm -f "$temporary"
-    return 1
-  fi
-  if ! mv -f "$temporary" "$target_script"; then
-    rm -f "$temporary"
-    return 1
-  fi
-  "$target_script" --help >/dev/null
 }
 
 root_free_kb() {
@@ -2557,6 +2598,19 @@ if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
   else
     unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
   fi
+  if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+      "$GATEWAY_PYTHON_BIN" -m gateway.tee.release_channel_v2 \
+        --ensure \
+        --expected-commit "$PREPARED_GATEWAY_SHA" \
+        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+        --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+        --lineage-repository "$LEADPOET_REPO_ROOT" \
+        --lineage-authority-commit "$PREPARED_GATEWAY_SHA" \
+        --lineage-required-commit "$PREPARED_GATEWAY_SHA"; then
+    echo "ERROR: exact local gateway release lineage is invalid" >&2
+    echo "Gateway remains running; production shutdown has not started." >&2
+    exit 75
+  fi
   record_gateway_restart_timing "local_release_ready"
 elif [ ! -e "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
     && [ ! -L "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
@@ -2609,12 +2663,17 @@ fi
 echo "Preparing commit-bound KMS credential envelopes"
 GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"
 export GATEWAY_DEPLOY_STAGE
+gateway_envelope_schema_args=()
+if [ -n "$GATEWAY_MIGRATION_203_SQL_SHA256" ]; then
+  gateway_envelope_schema_args+=(--defer-incentive-retirement-schema)
+fi
 if ! run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2 \
     --install \
     --env-file "$ENV_CLONE" \
     --kms-key-id "$GATEWAY_V2_KMS_KEY_ID" \
     --deploy-commit "$PREPARED_GATEWAY_SHA" \
-    --output-dir "$GATEWAY_V2_CONFIG_DIR"; then
+    --output-dir "$GATEWAY_V2_CONFIG_DIR" \
+    "${gateway_envelope_schema_args[@]}"; then
   echo "ERROR: gateway V2 credential envelope preparation failed before shutdown" >&2
   exit 75
 fi
@@ -2793,6 +2852,8 @@ stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
+wait_for_exact_migration_203
+
 echo "Stopping stuck local validator Docker builds or pip installs"
 stop_local_stale_build_processes TERM
 sleep 3
@@ -2897,6 +2958,14 @@ fi
 
 bind_activated_gateway_guard_candidate || exit 1
 record_gateway_restart_timing "candidate_activated"
+echo "Installing the preflighted gateway manifest and lineage"
+PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+  -m gateway.tee.install_gateway_release_state_v2 \
+  --prepared-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+  --prepared-lineage "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+  --active-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+  --active-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
+  --expected-commit "$GATEWAY_DEPLOY_SHA"
 echo "Cleaning stale read-only gateway vsock probes"
 "$GATEWAY_PYTHON_BIN" \
   "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
@@ -3286,13 +3355,11 @@ if actual != expected:
 print(f"verified gateway /build-info commit: {actual}")
 VERIFY_BUILD_INFO
 
-echo "Verifying gateway admission status"
-timeout 30 curl -fsS http://localhost:8000/research-lab/status >/dev/null
+echo "Verifying gateway attestation status"
 timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
 
 GATEWAY_DEPLOY_STAGE="host_restart_script_install"
 export GATEWAY_DEPLOY_STAGE
-install_research_lab_admin_wrapper
 install_successful_restart_script
 
 GATEWAY_DEPLOY_STAGE="miner_maintenance_runtime_verify"

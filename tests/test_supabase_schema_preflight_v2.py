@@ -50,6 +50,17 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     )
     assert result["status"] == "ready"
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
+
+
+def test_first_transition_defers_only_retirement_203_after_arena_202_exists():
+    result = verify_required_supabase_v2_schema(
+        {"SUPABASE_URL": "https://db.example", "SUPABASE_SERVICE_ROLE_KEY": "secret"},
+        opener=_opener(missing="lab_arena_incentive_retirement_schema_v1"),
+        defer_incentive_retirement=True,
+    )
+    assert result["incentive_retirement_deferred"] is True
+    assert "lab_arena_weight_state_schema_v1" in result["schema_capabilities"]
+    assert "lab_arena_incentive_retirement_schema_v1" not in result["schema_capabilities"]
     names = {name for _, name, _ in REQUIRED_SUPABASE_V2_SCHEMA}
     assert "lab_arena_accepted_weight_states" in names
     assert "research_lab_chain_realized_epoch_settlements_v1" not in names

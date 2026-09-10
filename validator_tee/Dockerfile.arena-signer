@@ -15,6 +15,7 @@ RUN mv /tmp/sr25519.whl /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17
     && rm /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
 COPY validator_tee/enclave/ /app/validator_tee/enclave/
+COPY .validator-tee-artifacts/arena_signer_policy.json /app/validator_tee/enclave/arena_signer_policy.json
 COPY .validator-tee-artifacts/libbittensor_drand_v2.so /app/validator_tee/enclave/libbittensor_drand_v2.so
 COPY leadpoet_canonical/ /app/leadpoet_canonical/
 COPY lab_arena/__init__.py lab_arena/contracts.py /app/lab_arena/

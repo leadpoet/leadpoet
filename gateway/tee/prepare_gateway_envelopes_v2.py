@@ -955,6 +955,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--deploy-commit", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--install", action="store_true")
+    parser.add_argument("--defer-incentive-retirement-schema", action="store_true")
     args = parser.parse_args(argv)
     if args.install:
         cleanup_stale_gateway_restart_probes_v2()
@@ -962,7 +963,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     keyword = "install_dir" if args.install else "output_dir"
     environment = load_environment_file(args.env_file)
     schema_result = (
-        verify_required_supabase_v2_schema(environment) if args.install else None
+        verify_required_supabase_v2_schema(
+            environment,
+            defer_incentive_retirement=args.defer_incentive_retirement_schema,
+        ) if args.install else None
     )
     result = function(
         environment=environment,

@@ -196,6 +196,22 @@ def provision_arena_hotkey_v1(ciphertext: str) -> Dict[str, Any]:
     return state
 
 
+def provision_arena_legacy_hotkey_v1(ciphertext: str) -> Dict[str, Any]:
+    """Install an existing KMS raw-seed envelope under measured Arena policy."""
+
+    global validator_arena_weight_signer_v1, validator_chain_source_v2
+    if validator_arena_hotkey_authority_v1 is None:
+        raise RuntimeError("Arena hotkey recipient was not configured")
+    existing = validator_arena_hotkey_authority_v1.public_state()
+    if existing.get("provisioned") is True:
+        if validator_arena_weight_signer_v1 is None:
+            raise RuntimeError("Arena signer initialization is incomplete")
+        return existing
+    validator_arena_hotkey_authority_v1.provision_legacy_seed(ciphertext)
+    # Reuse the single signer initialization path without decrypting twice.
+    return provision_arena_hotkey_v1("")
+
+
 def configure_arena_weight_signer_v1(configuration: Dict[str, Any]) -> Dict[str, Any]:
     """Confirm the signer configuration against its sealed policy."""
 
@@ -221,6 +237,7 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     command = request.get("command")
     allowed = {
         "health", "get_arena_hotkey_recipient_v1", "provision_arena_hotkey_v1",
+        "provision_arena_legacy_hotkey_v1",
         "get_arena_hotkey_state_v1", "sign_arena_application_v1",
         "configure_arena_weight_signer_v1", "prepare_arena_weight_extrinsic_v1",
         "recover_arena_weight_extrinsic_v1", "confirm_arena_weight_extrinsic_v1",
@@ -236,6 +253,11 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             if not isinstance(ciphertext, str):
                 return {"status": "error", "error": "Missing Arena recipient ciphertext"}
             return {"status": "ok", "arena_hotkey_state": provision_arena_hotkey_v1(ciphertext)}
+        if command == "provision_arena_legacy_hotkey_v1":
+            ciphertext = request.get("ciphertext_for_recipient_b64")
+            if not isinstance(ciphertext, str):
+                return {"status": "error", "error": "Missing Arena recipient ciphertext"}
+            return {"status": "ok", "arena_hotkey_state": provision_arena_legacy_hotkey_v1(ciphertext)}
         if command == "get_arena_hotkey_state_v1":
             if validator_arena_hotkey_authority_v1 is None:
                 state = {"provisioned": False}

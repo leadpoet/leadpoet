@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -51,18 +50,9 @@ class ConfigurationError(RuntimeError):
 
 
 def _gateway_iam_session():
-    """Load the existing pinned gateway IAM credential reader."""
-
-    path = Path(__file__).with_name("setup_production_parity_staging.py")
-    spec = importlib.util.spec_from_file_location(
-        "_leadpoet_production_parity_setup_for_arena", path
-    )
-    if spec is None or spec.loader is None:
-        raise ConfigurationError("gateway IAM authority loader is unavailable")
-    module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)
-        return module._gateway_iam_session()
+        from scripts.gateway_iam_session import gateway_iam_session
+        return gateway_iam_session()
     except Exception as exc:
         raise ConfigurationError("gateway IAM authority is unavailable") from exc
 
@@ -294,15 +284,19 @@ def gateway_nonsecret_updates(args: argparse.Namespace) -> dict[str, str]:
 
 
 def validator_updates(args: argparse.Namespace) -> dict[str, str]:
-    # Wallet, hotkey, path, work directory, and runsc use validator_restart.sh defaults.
     return {
         "LAB_ARENA_MODE": "live",
         "LAB_ARENA_REWARDS_ENABLED": "false",
         "LAB_ARENA_API_BASE_URL": args.api_base_url,
+        "LAB_ARENA_CHAIN_ENDPOINT": args.chain_endpoint,
+        "LAB_ARENA_SIGNING_KEY_HASH": args.arena_signing_key_hash,
+        "LAB_ARENA_NETWORK": args.network,
+        "LAB_ARENA_NETUID": str(args.netuid),
         "LAB_ARENA_REGISTRY_REPOSITORY": _registry_repository(args.scorer_image),
-        "LAB_ARENA_WALLET_NAME": "arena_runner",
-        "LAB_ARENA_HOTKEY_NAME": "default",
-        "LAB_ARENA_WALLET_PATH": "/var/lib/lab-arena/runner-wallets",
+        "LAB_ARENA_VALIDATOR_STATE_DIR": "/var/lib/leadpoet/arena-validator",
+        "LAB_ARENA_RUNNER_WORK_DIR": "/var/lib/lab-arena/runner",
+        "LAB_ARENA_RUNSC_PATH": "/usr/local/bin/runsc",
+        "LAB_ARENA_HOTKEY_ENVELOPE": "/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json",
     }
 
 
@@ -612,6 +606,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-hotkey")
     parser.add_argument("--chain-endpoint")
     parser.add_argument("--api-base-url")
+    parser.add_argument("--arena-signing-key-hash")
+    parser.add_argument("--network", default="finney")
+    parser.add_argument("--netuid", type=int, default=71)
     parser.add_argument("--daily-cutoff-utc", type=int, default=0)
     return parser
 
@@ -635,7 +632,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         _validate_scorer_image(str(args.scorer_image or ""))
     if not narrow_scope and args.service_key_fd is None:
         raise ConfigurationError("--service-key-fd is required for configuration")
-    for name in (() if narrow_scope else ("bucket", "scorer_image", "runner_hotkey", "baseline_hotkey", "chain_endpoint", "api_base_url")):
+    for name in (() if narrow_scope else ("bucket", "scorer_image", "runner_hotkey", "baseline_hotkey", "chain_endpoint", "api_base_url", "arena_signing_key_hash")):
         raw_value = getattr(args, name)
         value = str(raw_value or "")
         if not value.strip() or any(ch in value for ch in "\r\n\x00"):

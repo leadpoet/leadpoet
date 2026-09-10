@@ -1382,7 +1382,7 @@ def test_runtime_status_fetch_uses_exact_loopback_path_and_never_follows_redirec
         (
             "request",
             "GET",
-            "/research-lab/status",
+            "/build-info",
             None,
             {"Host": "127.0.0.1:8000", "Connection": "close"},
         ),
@@ -2284,7 +2284,7 @@ def test_controller_install_recovers_every_publication_crash_point(
     body = restart_source.split(
         "install_successful_restart_script() {\n",
         1,
-    )[1].split("\n}\n\ninstall_research_lab_admin_wrapper()", 1)[0]
+    )[1].split("\n}\n\nroot_free_kb()", 1)[0]
     script = (
         "set -euo pipefail\n"
         "install_successful_restart_script() {\n"

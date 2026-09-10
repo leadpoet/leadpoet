@@ -177,7 +177,7 @@ def test_validator_enclave_normalizer_uses_root_backed_workspace() -> None:
     build_script = (
         root / "validator_tee" / "scripts" / "build_enclave.sh"
     ).read_text(encoding="utf-8")
-    assert '"VALIDATOR_V2_BUILD_WORK_ROOT", "RUNNER_TEMP"' in build_script
-    assert 'dir=str(normalization_work_root())' in build_script
-    assert 'tempfile.mkdtemp(prefix="pcr0_normalize_")' not in build_script
+    assert "VALIDATOR_ARENA_SIGNER_BUILD_ROOT" in build_script
+    assert 'mktemp -d "$BUILD_PARENT/exact-source.XXXXXX"' in build_script
+    assert "validator_tee.host.docker_image_normalizer_v2" in build_script
     assert "Dockerfile.arena-signer" in build_script

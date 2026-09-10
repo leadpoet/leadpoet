@@ -27,11 +27,12 @@ state, epoch window, UID ownership, nonce, runtime, and exact transaction. It
 then signs only the permitted mortal time-locked weight commitment.
 
 The dedicated `validator_tee/Dockerfile.arena-signer` image exposes only Arena
-RPCs. The validator seed and its public policy are sealed together with KMS.
-That policy binds the Arena signing key and HTTPS host, chain and subnet,
-epoch mapping, burn hotkey, transaction profile, and drand library. A MAC derived
-from the seed also binds the policy inside the recipient envelope. The host
-cannot replace the policy while retaining the key.
+RPCs. Its measured image contains the reviewed public policy, which binds the
+Arena signing key and HTTPS host, chain and subnet, epoch mapping, burn hotkey,
+transaction profile, and drand library. KMS unwraps the existing encrypted
+validator seed only to an attested recipient inside that measured image. The
+enclave verifies that the derived hotkey matches its policy. The host cannot
+read the seed or replace the policy while retaining the key.
 
 TLS to Arena and the chain terminates inside the protected signer. The host
 relays can interrupt traffic but cannot substitute an authenticated response.
@@ -61,21 +62,38 @@ after a gateway outage without signing another weight transaction.
 
 ## Installation and restart
 
-Use the migration process for `scripts/202-arena-accepted-weight-state.sql`
-and `scripts/203-retire-legacy-incentive-weight-bridge.sql`. Migration 202 adds
-accepted states and chain outcomes. Migration 203 requires SOURCE_ADD migration
-198 and removes retired incentive schema. Stop the old incentive producers
-before applying 203, then start the new release. Historical migration files
-remain for database upgrades; they are not runtime producers.
+Apply additive migration `scripts/202-arena-accepted-weight-state.sql` before
+the first restart. Then run the exact pushed `main` controller transition:
 
-The first deployment also requires the gateway-only restart controller from
-the exact verified release to be installed and verified through the trusted
-operator bootstrap before restart. The currently installed legacy controller
-can still demand deleted auditor artifacts. Its checks must fail closed; a
-successful code push does not prove that this controller upgrade has occurred.
-Stage and verify the replacement controller and release artifacts before
-stopping the working gateway. Apply 203 during that coordinated transition;
-the new release must pass its schema check before startup.
+```bash
+git -C /home/ec2-user/leadpoet_repo fetch --no-tags origin main
+test "$(git -C /home/ec2-user/leadpoet_repo rev-parse origin/main)" = "$SHA"
+git -C /home/ec2-user/leadpoet_repo show \
+  "$SHA:scripts/transition_gateway_controller_and_restart_v1.sh" \
+  | bash -s -- --commit "$SHA"
+```
+
+The transition keeps the canonical restart lock from controller installation
+through restart. After it stops all old gateway incentive producers, it writes
+the fixed migration barrier and waits. Apply the exact migration 203 from the
+same commit. The completion helper checks the live 203 capability and binds the
+completion to the candidate, SQL hash, and restart invocation before startup
+continues. Run the helper from the exact Git object and use the protected
+persistent gateway environment, which remains available after the temporary
+parent environment is scrubbed:
+
+```bash
+git -C /home/ec2-user/leadpoet_repo show "$SHA:scripts/203-retire-legacy-incentive-weight-bridge.sql" > "/tmp/203-$SHA.sql"
+git -C /home/ec2-user/leadpoet_repo show "$SHA:scripts/complete_gateway_migration_203_barrier.py" \
+  | python3 - \
+      --barrier /home/ec2-user/.config/leadpoet/migration-203-barrier.json \
+      --completion /home/ec2-user/.config/leadpoet/migration-203-complete.json \
+      --sql "/tmp/203-$SHA.sql" --commit "$SHA" \
+      --env-file /home/ec2-user/.config/leadpoet/gateway.env
+```
+
+The helper does not print credentials. Later restarts use the normal canonical
+command; migration 203 is idempotent and the special barrier is not required.
 
 `neurons/validator.py` starts the normal Arena validator. The sample
 `deploy/leadpoet-arena-validator.service` supervises that same implementation.
@@ -93,18 +111,20 @@ LAB_ARENA_NETUID=71
 LAB_ARENA_VALIDATOR_STATE_DIR=/var/lib/leadpoet/arena-validator
 LAB_ARENA_RUNNER_WORK_DIR=/var/lib/lab-arena/runner
 LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
-LAB_ARENA_HOTKEY_ENVELOPE=/home/ec2-user/.config/leadpoet/arena-hotkey-envelope.json
+LAB_ARENA_HOTKEY_ENVELOPE=/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json
 ```
 
 Use the existing sandbox settings for scoring. Do not put miner provider keys
 or the validator seed in this environment file.
 
-Prepare the encrypted envelope once from the owner's protected seed and the
-reviewed public policy with
-`python3 -m validator_tee.host.arena_hotkey_bootstrap seal`. The host receives
-only that envelope. On a fresh enclave boot, the configured envelope permits
-KMS recipient provisioning. KMS must permit the approved signer image and
-require recipient-only decryption. The old raw-seed envelope format is rejected.
+Keep the existing KMS-encrypted validator hotkey envelope as the durable boot
+input. Build the signer with the reviewed public policy set through
+`VALIDATOR_ARENA_SIGNER_POLICY_INPUT`. On every fresh enclave boot, the host
+sends the existing KMS ciphertext and the enclave's signed recipient document
+to KMS. KMS must permit the approved signer PCR0 and require recipient-only
+decryption. The returned recipient ciphertext is opened only inside the
+enclave and is accepted only when its hotkey matches the measured policy. This
+transition does not require the owner seed on the host or a newly sealed copy.
 
 Before stopping a working service, run its local readiness check:
 

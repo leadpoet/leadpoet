@@ -150,3 +150,21 @@ def test_checked_in_sr25519_pin_matches_verified_cp37_wheel():
     pin = lock["artifacts"]["sr25519_cp37"]
     assert pin["sha256"] == "b74c31e2960c4af5b709b562aaf610989af532aee771fcdf175533de60441607"
     assert "cp37-cp37m-manylinux_2_17_x86_64" in pin["filename"]
+
+
+def test_python37_probe_dependencies_are_separately_hash_locked_and_offline():
+    root = Path(__file__).resolve().parents[1]
+    lock = artifacts.load_lock(
+        root / "tests/validator_enclave_python37_artifacts.lock.json"
+    )
+    assert {
+        name: entry["sha256"] for name, entry in lock["artifacts"].items()
+    } == {
+        "cffi_cp37": "0e2642fe3142e4cc4af0799748233ad6da94c62a8bec3a6648bf8ee68b1c7426",
+        "cryptography_cp37": "3994c809c17fc570c2af12c9b840d7cea85a9fd3e5c0e0491f4fa3c029216d59",
+        "pycparser_py2_py3": "8ee45429555515e1f6b185e78100aea234072576aa43ab53aefcae078162fca9",
+    }
+    workflow = (root / ".github/workflows/deploy-checks.yml").read_text()
+    assert "validator_enclave_python37_artifacts.lock.json" in workflow
+    assert "--network none" in workflow
+    assert "pip install --no-index --no-deps" in workflow

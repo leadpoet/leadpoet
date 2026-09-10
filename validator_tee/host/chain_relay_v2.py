@@ -34,6 +34,7 @@ MAX_BYTES_PER_DIRECTION = 32 * 1024 * 1024
 RELAY_CHUNK_BYTES = 64 * 1024
 CONNECT_TIMEOUT_SECONDS = 15.0
 IDLE_TIMEOUT_SECONDS = 90.0
+ACCEPT_POLL_SECONDS = 0.25
 _TRANSIENT_ACCEPT_ERRNOS = frozenset(
     value
     for value in (
@@ -453,6 +454,7 @@ class ValidatorChainRelayV2:
             listener = None
             try:
                 listener = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
+                listener.settimeout(ACCEPT_POLL_SECONDS)
                 listener.bind((VMADDR_CID_ANY, self.port))
                 listener.listen(8)
             except Exception as exc:
@@ -561,6 +563,8 @@ class ValidatorChainRelayV2:
         while not stop_event.is_set():
             try:
                 connection, _address = listener.accept()
+            except socket.timeout:
+                continue
             except Exception as exc:
                 if stop_event.is_set():
                     return

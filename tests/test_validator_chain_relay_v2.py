@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import socket
 import threading
 
 import pytest
@@ -109,7 +110,12 @@ def test_validator_chain_relay_listener_cleanup_retains_failed_ownership():
 
 
 def test_validator_chain_relay_start_preserves_primary_and_cleanup_failure():
+    timeouts = []
+
     class Listener:
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
         def bind(self, _address):
             raise RuntimeError("primary bind failure")
 
@@ -130,6 +136,7 @@ def test_validator_chain_relay_start_preserves_primary_and_cleanup_failure():
 
     assert isinstance(captured.value.__cause__, RuntimeError)
     assert str(captured.value.__cause__) == "primary bind failure"
+    assert timeouts == [chain_relay_v2.ACCEPT_POLL_SECONDS]
     assert relay._listener is listener
     assert relay.status()["last_failure"]["primary_error_type"] == "RuntimeError"
 
@@ -346,6 +353,9 @@ def test_validator_chain_thread_start_cleanup_is_recoverable(
         def __init__(self):
             self.close_result = False
 
+        def settimeout(self, _timeout):
+            return None
+
         def bind(self, _address):
             return None
 
@@ -397,6 +407,9 @@ def test_validator_chain_relay_accept_loop_death_is_observable(monkeypatch):
     failures = []
 
     class Listener:
+        def settimeout(self, _timeout):
+            return None
+
         def bind(self, _address):
             return None
 
@@ -429,6 +442,34 @@ def test_validator_chain_relay_accept_loop_death_is_observable(monkeypatch):
     assert status["last_failure"]["errno"] == errno.EIO
     assert failures[0][1]["stage"] == "chain_relay_accept"
     relay.stop()
+
+
+def test_validator_chain_accept_timeout_observes_stop_without_listener_close():
+    endpoint = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    endpoint.bind(("127.0.0.1", 0))
+    endpoint.listen(1)
+    endpoint.settimeout(0.05)
+    accept_entered = threading.Event()
+
+    class Listener:
+        def accept(self):
+            accept_entered.set()
+            return endpoint.accept()
+
+    listener = Listener()
+    relay = ValidatorChainRelayV2()
+    stop_event = threading.Event()
+    thread = threading.Thread(target=relay._accept_loop, args=(listener, stop_event))
+    thread.start()
+    try:
+        assert accept_entered.wait(timeout=0.5)
+        stop_event.set()
+        thread.join(timeout=0.5)
+        assert not thread.is_alive()
+        assert relay.status().get("last_failure") is None
+    finally:
+        endpoint.close()
 
 
 def test_validator_chain_relay_main_exits_nonzero_when_accept_loop_dies(

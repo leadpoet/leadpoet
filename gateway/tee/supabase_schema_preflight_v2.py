@@ -7,10 +7,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 REQUIRED_SUPABASE_V2_SCHEMA = (
-    ("scripts/92-validator-sourcing-attested-v2.sql", "validator_sourcing_epoch_inputs_v2", ("epoch_id", "epoch_hash", "decision_root", "receipt_hash")),
     ("scripts/125-research-lab-artifact-key-lineage.sql", "research_lab_provider_evidence_cache_v2", ("artifact_master_key_ref_hash",)),
-    ("scripts/136-research-lab-ancestry-checkpoint-sidecars.sql", "research_lab_attested_ancestry_checkpoints_v2", ("root_receipt_hash", "schema_version", "lineage_id", "certificate_hash", "certificate_sequence", "issuer_boot_identity_hash", "proof_hash", "checkpoint_graph_hash", "certificate_doc", "proof_doc", "checkpoint_graph_doc")),
-    ("scripts/136-research-lab-ancestry-checkpoint-sidecars.sql", "research_lab_attested_ancestry_activations_v2", ("lineage_id", "activation_root_receipt_hash", "activation_certificate_hash")),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutovers_v1", ("mapping_hash", "network_genesis_hash", "netuid", "first_subnet_epoch_index", "first_settlement_epoch_id")),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_state_v1", ("lifecycle_state", "mapping_hash", "network_genesis_hash", "netuid", "updated_at")),
     ("scripts/197-lab-arena-reward-chain-scope.sql", "lab_arena_reward_basis_v1", ("round_id", "effective_reward_epoch", "reward_basis_hash", "reward_basis_doc", "signing_key_doc", "king_outcome", "king_hotkey", "king_start_epoch", "published_at", "arena_network_name", "arena_netuid")),
@@ -20,11 +17,6 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
 REQUIRED_SUPABASE_V2_RPCS = (
     ("scripts/144-research-lab-provider-persistence-batches.sql", "put_research_lab_provider_evidence_cache_v2"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "research_lab_provider_persistence_batch_contract_v1"),
-    ("scripts/156-production-parity-readonly-role.sql", "leadpoet_production_parity_reader_contract_v1"),
-    ("scripts/136-research-lab-ancestry-checkpoint-sidecars.sql", "persist_research_lab_ancestry_checkpoint_v2"),
-    ("scripts/138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql", "research_lab_ancestry_checkpoint_bootstrap_contract_v2"),
-    ("scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql", "research_lab_ancestry_disclosure_lookup_contract_v1"),
-    ("scripts/143-research-lab-compact-ancestry-checkpoints.sql", "research_lab_compact_checkpoint_graph_contract_v1"),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
     ("scripts/197-lab-arena-reward-chain-scope.sql", "lab_arena_schema_version_v1"),
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_publish_weight_state_v1"),

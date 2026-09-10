@@ -21,8 +21,25 @@ class _Response:
     def read(self, size=-1): return self.body if size < 0 else self.body[:size]
 
 
-def _opener(*, missing=None, bad_capability=None):
+def _opener(*, missing=None, bad_capability=None, retired_storage_absent=False):
     paths = {f"/rpc/{name}": {} for _, name in REQUIRED_SUPABASE_V2_RPCS}
+    retired_tables = {
+        "validator_sourcing_epoch_inputs_v2",
+        "research_lab_attested_ancestry_checkpoints_v2",
+        "research_lab_attested_ancestry_activations_v2",
+    }
+    retired_rpcs = {
+        "leadpoet_production_parity_reader_contract_v1",
+        "persist_research_lab_ancestry_checkpoint_v2",
+        "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
+        "research_lab_ancestry_disclosure_lookup_contract_v1",
+        "research_lab_compact_checkpoint_graph_contract_v1",
+    }
+    if retired_storage_absent:
+        for name in retired_rpcs:
+            paths.pop(f"/rpc/{name}", None)
+    if missing:
+        paths.pop(f"/rpc/{missing}", None)
     capabilities = {
         "lab_arena_schema_version_v1": {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197},
         "lab_arena_weight_state_schema_v1": {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202},
@@ -30,6 +47,8 @@ def _opener(*, missing=None, bad_capability=None):
     }
     def open_(request, timeout):
         path = urlparse(request.full_url).path
+        if retired_storage_absent and path.rsplit("/", 1)[-1] in retired_tables:
+            raise HTTPError(request.full_url, 404, "retired storage absent", {}, None)
         if missing and missing in path:
             raise HTTPError(request.full_url, 404, "missing", {}, None)
         if path == "/rest/v1/":
@@ -50,6 +69,30 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     )
     assert result["status"] == "ready"
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
+
+
+def test_preflight_accepts_current_schema_without_retired_host_receipt_storage():
+    result = verify_required_supabase_v2_schema(
+        {"SUPABASE_URL": "https://db.example", "SUPABASE_SERVICE_ROLE_KEY": "secret"},
+        opener=_opener(retired_storage_absent=True),
+    )
+    assert result["status"] == "ready"
+    assert result["schema_capabilities"]["lab_arena_weight_state_schema_v1"]["version"] == 202
+
+
+@pytest.mark.parametrize("missing", [
+    "research_lab_provider_evidence_cache_v2",
+    "research_lab_stateful_subnet_epoch_cutovers_v1",
+    "put_research_lab_provider_evidence_cache_v2",
+    "research_lab_stateful_subnet_epoch_cutover_public_state_v1",
+    "lab_arena_publish_weight_state_v1",
+])
+def test_preflight_still_requires_active_scoring_epoch_and_arena_dependencies(missing):
+    with pytest.raises(SupabaseSchemaPreflightV2Error, match="required (schema|RPC)"):
+        verify_required_supabase_v2_schema(
+            {"SUPABASE_URL": "https://db.example", "SUPABASE_SERVICE_ROLE_KEY": "secret"},
+            opener=_opener(missing=missing),
+        )
 
 
 def test_first_transition_defers_only_retirement_203_after_arena_202_exists():

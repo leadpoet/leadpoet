@@ -158,33 +158,6 @@ def test_ancestry_checkpoint_indexes_bound_lineage_sequence_and_issuer() -> None
     )
 
 
-def test_gateway_schema_preflight_requires_the_checkpoint_sidecar() -> None:
-    matches = [
-        (migration, relation, tuple(columns))
-        for migration, relation, columns in REQUIRED_SUPABASE_V2_SCHEMA
-        if relation == TABLE
-    ]
-    assert matches == [
-        (
-            MIGRATION_NAME,
-            TABLE,
-            (
-                "root_receipt_hash",
-                "schema_version",
-                "lineage_id",
-                "certificate_hash",
-                "certificate_sequence",
-                "issuer_boot_identity_hash",
-                "proof_hash",
-                "checkpoint_graph_hash",
-                "certificate_doc",
-                "proof_doc",
-                "checkpoint_graph_doc",
-            ),
-        )
-    ]
-
-
 def test_historical_compact_weight_sidecar_is_not_preflighted() -> None:
     assert "CREATE TABLE IF NOT EXISTS\npublic.%s" % COMPACT_WEIGHT_TABLE in SQL
     for marker in (
@@ -209,18 +182,7 @@ def test_historical_compact_weight_sidecar_is_not_preflighted() -> None:
     assert matches == []
 
 
-def test_checkpoint_rpc_is_required_before_gateway_shutdown() -> None:
-    from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
-
-    assert (
-        MIGRATION_NAME,
-        "persist_research_lab_ancestry_checkpoint_v2",
-    ) in REQUIRED_SUPABASE_V2_RPCS
-
-
-def test_compact_checkpoint_migration_is_additive_and_preflight_required() -> None:
-    from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
-
+def test_compact_checkpoint_migration_is_additive() -> None:
     assert COMPACT_SQL.lstrip().startswith(
         "-- Compact operational ancestry checkpoints without duplicating raw sidecars."
     )
@@ -236,15 +198,9 @@ def test_compact_checkpoint_migration_is_additive_and_preflight_required() -> No
     assert "leadpoet.attested_checkpointed_receipt_graph.v3" in COMPACT_SQL
     assert "leadpoet.attested_checkpointed_receipt_graph.v4" in COMPACT_SQL
     assert "compact checkpoint raw sidecars are incomplete" in COMPACT_SQL
-    assert (
-        COMPACT_MIGRATION_NAME,
-        "research_lab_compact_checkpoint_graph_contract_v1",
-    ) in REQUIRED_SUPABASE_V2_RPCS
 
 
-def test_disclosure_root_fast_path_preserves_exact_fallback_and_is_preflighted() -> None:
-    from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
-
+def test_disclosure_root_fast_path_preserves_exact_fallback() -> None:
     assert re.search(r"\bBEGIN\s*;", DISCLOSURE_FAST_PATH_SQL)
     assert re.search(r"\bCOMMIT\s*;\s*$", DISCLOSURE_FAST_PATH_SQL)
     root_predicate = (
@@ -267,10 +223,6 @@ def test_disclosure_root_fast_path_preserves_exact_fallback_and_is_preflighted()
         r"IF NOT EXISTS \(",
         DISCLOSURE_FAST_PATH_SQL,
     )
-    assert (
-        DISCLOSURE_FAST_PATH_MIGRATION_NAME,
-        "research_lab_ancestry_disclosure_lookup_contract_v1",
-    ) in REQUIRED_SUPABASE_V2_RPCS
 
 
 def _sha(character: str) -> str:

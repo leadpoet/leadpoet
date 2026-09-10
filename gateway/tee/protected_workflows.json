@@ -1,175 +1,10 @@
 {
-  "baseline_commit": "58a7904cc1b016291962cc1b947aeb092a05c247",
+  "baseline_commit": "a7829f92664a3f4b1b244c21f97a4df9e063350e",
   "entries": [
     {
       "ast_sha256": "sha256:3b0e06adab3d4d8093d2686426273807fdfc79b86bd9f0f1e9a90dc57930ae8d",
       "path": "gateway/main.py",
       "symbol": "lifespan"
-    },
-    {
-      "ast_sha256": "sha256:04ddcdba4fdbf7df54fa339d1157e2f698f045c29e903823caba52858f01be58",
-      "path": "gateway/research_lab/attested_artifacts_v2.py",
-      "symbol": "_select_committed_encrypted_artifacts"
-    },
-    {
-      "ast_sha256": "sha256:ba7a3cd6bb881afa84531ee32f2f5346493e6332760b1462f88cf883f57a9b85",
-      "path": "gateway/research_lab/attested_artifacts_v2.py",
-      "symbol": "persist_execution_transport_artifacts_v2"
-    },
-    {
-      "ast_sha256": "sha256:e7ca9b6363ea77cc6241b70fb5693c9991e72b502a5ee75a68b675b9a933c164",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_compact_parent_graphs_for_transport"
-    },
-    {
-      "ast_sha256": "sha256:28087c9e25b3b7fc10fad856c82e33be2583bf70321f3c3f270054fe57dbd279",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_encrypted_transport_attempts_v2"
-    },
-    {
-      "ast_sha256": "sha256:56bbc4afdc22f24cbc590f10a3f793f99a1c54957cca2ebbd0704342594e2e28",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_is_checkpoint_bootstrap_scope"
-    },
-    {
-      "ast_sha256": "sha256:cb633a53de3f32bdf23e6db356f5b4058c85a8d162a8770c2e94dbc784e2486f",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_local_failed_receipt_hashes"
-    },
-    {
-      "ast_sha256": "sha256:10516fad7e51d737dcd0b24952d2b374b6afc6f63431a23645a13a79c2fca7e6",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_persist_ancestry_checkpoint_after_graph_v2"
-    },
-    {
-      "ast_sha256": "sha256:d65beb8b67150c2a31b6c28ddb1aaddb2828117f904b9d82a95dadf8192cd7ba",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_persist_graph_then_ancestry_checkpoint_v2"
-    },
-    {
-      "ast_sha256": "sha256:22d6179327381526b2c28fb2567a726385b5c06985ed943599ec35fcacb01dd5",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_resolve_parent_ancestry_transport_v2"
-    },
-    {
-      "ast_sha256": "sha256:e5b7a982ea7645327b1d4aa89012bac832f4ad6ef9491559ef5bb4a133fb60c9",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_validate_checkpointed_graph_proof_v2"
-    },
-    {
-      "ast_sha256": "sha256:00de8abb6046e3c5a5215e4c71c3132ec5904745f152c4b3f436f30ec3630237",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "_validate_output_ancestry_checkpoint_v2"
-    },
-    {
-      "ast_sha256": "sha256:713c8c6ae6c46f77f1abd09462943eab38af6300b15f137c519702b8acd0f45a",
-      "path": "gateway/research_lab/attested_scoring_v2.py",
-      "symbol": "execute_scoring_v2"
-    },
-    {
-      "ast_sha256": "sha256:dad14978e3c332536f2badf4bdde239ad1973e3306a2a064e191919e0f282252",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS"
-    },
-    {
-      "ast_sha256": "sha256:0db58dda5a2ee40a7aaeff2d794e5d3f3fefcb9a74e654bfd357bc28d3e0f12f",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_EXACT_INSERT_BATCH_ROWS"
-    },
-    {
-      "ast_sha256": "sha256:aefc68ff23a361576ace928e913f91521be556e53226893ecde35a2c643cadc5",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_ancestry_checkpoint_unknown_commit_sleep"
-    },
-    {
-      "ast_sha256": "sha256:1e0b4cb2f79b409f6bc9b32836f63b5027957a1998b3292ce03905fb327fc28c",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_exact_batch_row_key"
-    },
-    {
-      "ast_sha256": "sha256:098edd8c7ff598e3e9312f34a4dc8ff005807d4d9a26142bfd6e0ce7a4b2186a",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_insert_exact_batch"
-    },
-    {
-      "ast_sha256": "sha256:62b15a0b158d643de4c4780d08e58a99ec3e6bdcd55eb820d4bd8db3225fc537",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_insert_exact_rows"
-    },
-    {
-      "ast_sha256": "sha256:cf0b450a6c135c4ab64c8491b9ed7a3d5ddb65d33d786d8748b9b6eaa2d7732f",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_load_receipt_graph_batch_v2"
-    },
-    {
-      "ast_sha256": "sha256:6b19aaf22d468f1a9582838c9402a64bbadba0d263b3bc6d9d5116c7cb29a839",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_read_exact_batch_rows"
-    },
-    {
-      "ast_sha256": "sha256:36785139d1e37d2e20f1be8f1e21ab0e14c96067d81efda4d8b9c1518cf22a67",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "_select_by_values"
-    },
-    {
-      "ast_sha256": "sha256:b392d1938c681ed9e5ebc37e8c879e38439a1ae4c288c208fa5a026a21915098",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_ancestry_checkpoint_proof_v2"
-    },
-    {
-      "ast_sha256": "sha256:eade2a8f63a679469773a4d7e3e1b3c3dd4e4f14f6dcd97aff04d1c5bc705542",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_ancestry_checkpoint_proofs_v2"
-    },
-    {
-      "ast_sha256": "sha256:6ab6cb484c0bcebde82da98cd8523535d6ba1d32120c1759b4be95d5ae2aa254",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_business_artifact_graph_by_ref_v2"
-    },
-    {
-      "ast_sha256": "sha256:908cb45f30e40334c6d5ea88460c7bfcda20d87c4ed85f07ea28634755bf217b",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_business_artifact_graph_v2"
-    },
-    {
-      "ast_sha256": "sha256:c71495d4a2845ca21291138293034bddcb17dd9f3a057d2e06f000f806368eba",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_business_artifact_graphs_by_ref_v2"
-    },
-    {
-      "ast_sha256": "sha256:51484f80584c8c2481cc16cd2be3568758b0df8ed10e083de6455cfeba9e833f",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_business_artifact_graphs_v2"
-    },
-    {
-      "ast_sha256": "sha256:fc86222f00891915594f240be5306526481ee4027b355b6b2f96f97eff364033",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_checkpointed_receipt_graph_v2"
-    },
-    {
-      "ast_sha256": "sha256:cf946138143e518496a42708a8eb32cb429148927371589c3756ec854358f0e0",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_checkpointed_receipt_graphs_v2"
-    },
-    {
-      "ast_sha256": "sha256:d4b4b002a46dc745dd3271f3a1d9ab4bf7efe423ce86d1add7a80a81c84dcdc1",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_receipt_graph_v2"
-    },
-    {
-      "ast_sha256": "sha256:453117214a61731bb23daa02924890dd7202ea6db6b4d6ac54b30bf16a3e13b8",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "load_receipt_graphs_v2"
-    },
-    {
-      "ast_sha256": "sha256:39454d854dbf99dbfa0f2a7795bc3bbbc1f24faa043c135af5b3fc778c287f69",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "persist_ancestry_checkpoint_v2"
-    },
-    {
-      "ast_sha256": "sha256:710e8b36e060b7a9b882248d736f76dc65d956acfa5bf4064fcc96cb4af021dc",
-      "path": "gateway/research_lab/attested_v2_store.py",
-      "symbol": "persist_receipt_graph_v2"
     },
     {
       "ast_sha256": "sha256:1cc8e98faebcfb6b076f1e973a4a27b788f5b4b80e718d2ab5a2c014b8b03ac4",
@@ -202,16 +37,6 @@
       "symbol": "ProviderPreflight.check"
     },
     {
-      "ast_sha256": "sha256:cff6d74cd0999b0947ebf16711140fa0526d7643b961863f1b4e0d09f2a799c0",
-      "path": "gateway/research_lab/provider_preflight.py",
-      "symbol": "_cached_attested_preflight"
-    },
-    {
-      "ast_sha256": "sha256:5475590941e0be4309eef92185b3570d23fe6d83755145421279e969066179f0",
-      "path": "gateway/research_lab/provider_preflight.py",
-      "symbol": "preflight_gate"
-    },
-    {
       "ast_sha256": "sha256:4ffa42ef6296c9eb969f58f1d535ab4cd2b0fa23fe86136d5100e9a902c5328e",
       "path": "gateway/research_lab/store.py",
       "symbol": "_TRANSIENT_ERROR_SIGNATURES"
@@ -240,11 +65,6 @@
       "ast_sha256": "sha256:15bf4fe51b68e05e3a85bd0cb3fc3318f97485f0e6357ae0aa3d5b24aad0d1e6",
       "path": "gateway/research_lab/tee_protocol.py",
       "symbol": "normalize_tee_protocol"
-    },
-    {
-      "ast_sha256": "sha256:dfce982d4649f11d1444801fc06f0dbd6ff5f9b0417aae43ba7709e18208c912",
-      "path": "gateway/research_lab/v2_authority.py",
-      "symbol": "execute_provider_preflight_v2"
     },
     {
       "ast_sha256": "sha256:0e258fd7f27ee8b7717f739a82c17dd4bdceab5da63323bc33bbe645d4026c29",
@@ -2977,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:7c178b5dcff2b15970b417412eb60de0f656cb63c5620bae2e01a31c086b5063",
-  "protected_source_commit": "58a7904cc1b016291962cc1b947aeb092a05c247",
+  "manifest_hash": "sha256:7af4c6a92d0a7fbd98955c9dc12c41a85c55e93f119b4842bf19b2d4392755bf",
+  "protected_source_commit": "a7829f92664a3f4b1b244c21f97a4df9e063350e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

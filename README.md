@@ -130,7 +130,7 @@ Enter `../my-agent` as the source directory and confirm submission, then enter y
 
 For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEPLINE_API_KEY`, then replace `interactive` with `submit-model --source ../my-agent` in the command above.
 
-Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files. Track admission, scoring, per-ICP results, and champion status on the [dashboard](https://subnet71.com).
+Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files. Each hotkey can have one accepted model per round; daily capacity is limited. Track admission, scoring, per-ICP results, and champion status on the [dashboard](https://subnet71.com).
 
 ## Public input example
 

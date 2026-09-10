@@ -486,10 +486,16 @@ def test_install_cli_checks_schema_before_writing_envelopes(
         "cleanup_stale_vsock_probes",
         lambda: calls.append("cleanup") or [],
     )
+    def verify_schema(observed, *, defer_incentive_retirement):
+        assert observed == environment
+        assert defer_incentive_retirement is False
+        calls.append("schema")
+        return {"status": "ready"}
+
     monkeypatch.setattr(
         envelope_module,
         "verify_required_supabase_v2_schema",
-        lambda observed: calls.append("schema") or {"status": "ready"},
+        verify_schema,
     )
     monkeypatch.setattr(
         envelope_module,
@@ -526,10 +532,14 @@ def test_install_cli_does_not_inherit_retired_worker_deferral(
     env_file.write_text(json.dumps(environment))
     observed = {}
     monkeypatch.setenv("GATEWAY_V2_DEFER_WORKER_FLEETS", "all")
+    def verify_schema(_environment, *, defer_incentive_retirement):
+        assert defer_incentive_retirement is False
+        return {"status": "ready"}
+
     monkeypatch.setattr(
         envelope_module,
         "verify_required_supabase_v2_schema",
-        lambda _environment: {"status": "ready"},
+        verify_schema,
     )
     monkeypatch.setattr(
         envelope_module,

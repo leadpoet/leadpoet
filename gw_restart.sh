@@ -2598,8 +2598,7 @@ if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
   else
     unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
   fi
-  if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
-      "$GATEWAY_PYTHON_BIN" -m gateway.tee.release_channel_v2 \
+  if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
         --ensure \
         --expected-commit "$PREPARED_GATEWAY_SHA" \
         --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
@@ -2783,8 +2782,7 @@ if [ ! -r "$DOCKER_LOCK_HELPER" ]; then
 fi
 . "$DOCKER_LOCK_HELPER"
 leadpoet_acquire_docker_operation_lock_v2
-PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" \
-  -m validator_tee.host.docker_operation_guard_v2 \
+run_prepared_gateway_module validator_tee.host.docker_operation_guard_v2 \
   --wait \
   --timeout-seconds 1800 \
   --interval-seconds 3

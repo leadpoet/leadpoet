@@ -1535,6 +1535,62 @@ def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> Non
     assert 'pkill -9 -f "python3 -u -m gateway.main"' in script
 
 
+def test_gateway_restart_runs_prepared_modules_from_candidate_checkout(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    runner = _shell_function_source(script, "run_prepared_gateway_module")
+    stale = tmp_path / "stale"
+    candidate = tmp_path / "candidate"
+    for root, identity in ((stale, "stale"), (candidate, "candidate")):
+        package = root / "fixture_gateway"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "probe.py").write_text(
+            f'print("{identity}")\n', encoding="utf-8"
+        )
+
+    unsafe = subprocess.run(
+        [sys.executable, "-m", "fixture_gateway.probe"],
+        cwd=stale,
+        env={**os.environ, "PYTHONPATH": str(candidate)},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert unsafe.returncode == 0, unsafe.stderr
+    assert unsafe.stdout.strip() == "stale"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            + runner
+            + "\ncd \"$1\"\n"
+            + "GATEWAY_PREFLIGHT_TREE=\"$2\"\n"
+            + "GATEWAY_PYTHON_BIN=\"$3\"\n"
+            + "run_prepared_gateway_module fixture_gateway.probe\n",
+            "prepared-module-test",
+            str(stale),
+            str(candidate),
+            sys.executable,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "candidate"
+    assert "run_prepared_gateway_module gateway.tee.release_channel_v2" in script
+    assert (
+        "run_prepared_gateway_module validator_tee.host.docker_operation_guard_v2"
+        in script
+    )
+
+
 def test_gateway_restart_disables_the_retired_host_provider_proxy() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'pkill -9 -f "gateway.research_lab.provider_evidence_proxy"' in script

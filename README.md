@@ -15,7 +15,7 @@
 
 ---
 
-Leadpoet is a Bittensor subnet (SN71). The subnet rewards miners for improving and operating AI systems that find high-quality sales leads. Miners contribute in two tracks, the Research Lab and Fulfillment. The Research Lab includes an open agent-bundle Arena beside the existing research reward path. In Fulfillment, miners compete on real lead requests by submitting qualified leads.
+Leadpoet is a Bittensor subnet (SN71). The Open Source Agent Competition Arena rewards miners for improving AI systems that find high-quality sales leads. Arena is the only subnet incentive mechanism. Fulfillment still accepts and scores leads for client requests, but does not receive subnet emissions.
 
 ## Dashboard
 
@@ -42,7 +42,7 @@ pip install -e .
 
 Requirements:
 
-- Python 3.9 or 3.10 recommended
+- Python 3.11 for the host runtime
 - Bittensor wallet
 - Bittensor CLI
 
@@ -80,9 +80,10 @@ The miner will ask which mode to run:
 
 ### Research Lab
 
-Research Lab now operates the agent-bundle Arena. It creates no model changes
-and runs no autoresearch or code-edit loop. Existing reward settlement remains
-downstream of the Arena result.
+The agent-bundle Arena scores miner submissions and determines the accepted
+reward state. Validators independently construct weights from that state.
+Research Lab reimbursements, legacy champion obligations, and SOURCE_ADD
+incentives are retired.
 
 #### Agent Bundle Arena
 
@@ -200,7 +201,7 @@ High-level flow:
 2. Miners commit hashed leads during the commit window.
 3. Miners reveal full lead data during the reveal window.
 4. Validators score revealed leads.
-5. Winning leads earn emissions over the reward runway.
+5. Winning leads are recorded and delivered for the client request.
 
 Fulfillment leads should include:
 
@@ -243,7 +244,7 @@ Reference fulfillment code lives in `miner_models/Main_fulfillment_model/`. It i
 
 ## Validators
 
-Register and run a validator on subnet 71:
+Register a validator on subnet 71:
 
 ```bash
 btcli subnet register \
@@ -253,25 +254,22 @@ btcli subnet register \
   --wallet.hotkey default
 ```
 
-```bash
-python neurons/validator.py \
-  --wallet_name validator \
-  --wallet_hotkey default \
-  --netuid 71 \
-  --subtensor_network finney
-```
-
-Validators verify the canonical weight allocation and submit the resulting subnet weights.
-
-Useful validator environment variables:
+Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)
+to provision the protected signer and create the private environment file.
+Check readiness, then start the same normal validator implementation:
 
 ```bash
-export TRUELIST_API_KEY="your_truelist_key"
-export SCRAPINGDOG_API_KEY="your_scrapingdog_key"
-export OPENROUTER_KEY="your_openrouter_key"
+python3 scripts/run_arena_validator.py \
+  --environment-file /home/ec2-user/.config/leadpoet/arena-validator.env \
+  --check-only
+
+python3 scripts/run_arena_validator.py \
+  --environment-file /home/ec2-user/.config/leadpoet/arena-validator.env
 ```
 
-See [`env.example`](env.example) for the full configuration template.
+Validators score miner-submitted models using brokered miner credentials,
+return scores through the competition API, and submit weights from the
+accepted reward state. The validator hotkey stays in the protected signer.
 
 ## Rewards
 

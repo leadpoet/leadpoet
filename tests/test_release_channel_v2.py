@@ -64,7 +64,7 @@ def _retired_validator_lineage():
  return {**body, "lineage_hash": sha256_json(body)}
 
 
-def test_installed_prior_lineage_discards_only_retired_validator_role():
+def test_installed_prior_lineage_discards_retired_physical_roles():
  prior = _retired_validator_lineage()
  projected = release_channel_v2._project_installed_prior_release_lineage_v2(
   prior
@@ -77,6 +77,21 @@ def test_installed_prior_lineage_discards_only_retired_validator_role():
  assert release_channel_v2._project_installed_prior_release_lineage_v2(
   projected
  ) == projected
+
+
+def test_installed_prior_lineage_discards_historical_autoresearch_only():
+ prior = _retired_validator_lineage()
+ for release in prior["releases"].values():
+  release["roles"].pop("validator_weights")
+ body = {key: value for key, value in prior.items() if key != "lineage_hash"}
+ prior["lineage_hash"] = sha256_json(body)
+ projected = release_channel_v2._project_installed_prior_release_lineage_v2(
+  prior
+ )
+ assert all(
+  set(release["roles"]) == set(ROLE_SPECS)
+  for release in projected["releases"].values()
+ )
 
 
 def test_installed_prior_lineage_rejects_hash_and_retired_role_binding_drift():

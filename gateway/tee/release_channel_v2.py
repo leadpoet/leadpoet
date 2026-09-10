@@ -528,7 +528,7 @@ def _project_installed_prior_release_lineage_v2(
     )
 
     try:
-        return validate_prior_compact_release_lineage_v2(value)
+        prior = validate_prior_compact_release_lineage_v2(value)
     except ReleaseLineageV2Error:
         prior = validate_retired_validator_compact_release_lineage_v2(value)
     body = {

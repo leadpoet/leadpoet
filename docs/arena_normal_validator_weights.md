@@ -56,6 +56,10 @@ block a new epoch. Final success requires chain readback of the time-locked
 reveal, the exact weight vector, and unchanged rewarded UID ownership at that
 transition. Commitment inclusion alone is insufficient.
 
+Before requesting a new signature, the validator checks the chain's weight
+rate limit at the same finalized block used for UID ownership. Waiting for that
+limit does not consume an attempt or replace a saved transaction.
+
 Chain outcomes are separate signed observations. They do not modify the reward
 state or maintain a reimbursement ledger. Delayed report delivery can resume
 after a gateway outage without signing another weight transaction.

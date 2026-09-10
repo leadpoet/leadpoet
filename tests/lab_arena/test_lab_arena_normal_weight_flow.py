@@ -131,6 +131,10 @@ def integrated_database():
             for table in RETIRED_INCENTIVE_TABLES + SHARED_EPOCH_TABLES:
                 cursor.execute(f"INSERT INTO public.{table} VALUES (1)")
             cursor.execute(
+                "CREATE VIEW public.research_lab_epoch_payouts AS "
+                "SELECT id AS epoch FROM public.research_lab_emission_allocation_snapshots"
+            )
+            cursor.execute(
                 "CREATE FUNCTION public.research_lab_stateful_subnet_epoch_cutover_public_state_v1() "
                 "RETURNS TABLE(id BIGINT) LANGUAGE sql STABLE AS "
                 "'SELECT id FROM public.research_lab_stateful_subnet_epoch_cutover_state_v1'"
@@ -192,6 +196,10 @@ def integrated_database():
                 (list(RETIRED_INCENTIVE_TABLES),),
             )
             assert all(row[0] is None for row in cursor.fetchall())
+            cursor.execute(
+                "SELECT to_regclass('public.research_lab_epoch_payouts')"
+            )
+            assert cursor.fetchone()[0] is None
             cursor.execute(
                 "SELECT to_regprocedure('public.' || name || '()') "
                 "FROM unnest(%s::text[]) name",

@@ -144,6 +144,7 @@ def test_retired_incentive_schema_is_removed_without_scoring_scope_growth():
     assert "DROP TABLE IF EXISTS public.research_lab_scoring_runs" not in RETIRED_INCENTIVE_BRIDGE_SQL
     assert "DROP TABLE IF EXISTS public.lab_arena_" not in RETIRED_INCENTIVE_BRIDGE_SQL
     assert "DROP TABLE IF EXISTS public.fulfillment_score_consensus" not in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "DROP VIEW IF EXISTS public.research_lab_epoch_payouts" in RETIRED_INCENTIVE_BRIDGE_SQL
     assert "lab_arena_incentive_retirement_schema_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
     assert "DROP TABLE IF EXISTS public.research_lab_stateful_subnet_epoch_cutovers_v1" not in RETIRED_INCENTIVE_BRIDGE_SQL
     assert "DROP TABLE IF EXISTS public.research_lab_stateful_subnet_epoch_cutover_state_v1" not in RETIRED_INCENTIVE_BRIDGE_SQL

@@ -80,6 +80,7 @@ $drop_retired_functions$;
 DROP VIEW IF EXISTS public.research_lab_finalized_weight_vector_candidates_v1;
 DROP VIEW IF EXISTS public.research_lab_finalized_allocation_epochs_v2;
 DROP VIEW IF EXISTS public.research_lab_emission_allocation_current;
+DROP VIEW IF EXISTS public.research_lab_epoch_payouts;
 DROP VIEW IF EXISTS public.research_lab_champion_reward_current;
 DROP VIEW IF EXISTS public.research_reimbursement_award_current;
 DROP VIEW IF EXISTS public.research_loop_shadow_weight_inputs;

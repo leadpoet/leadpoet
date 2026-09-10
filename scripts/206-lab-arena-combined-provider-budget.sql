@@ -3,6 +3,12 @@
 -- rewritten. The latest ledger state remains the sole accounting authority.
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+-- Hosted migrations run as the non-superuser schema owner. PostgreSQL requires
+-- the target function owner to have CREATE while ownership is assigned.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 
 CREATE OR REPLACE FUNCTION public.lab_arena__submission_kind_spend(
   p_submission_id TEXT,
@@ -821,5 +827,6 @@ $lab_arena_submission_costs_acl$;
 GRANT EXECUTE ON FUNCTION public.lab_arena_submission_costs(TEXT)
   TO lab_arena_service;
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 NOTIFY pgrst, 'reload schema';
 COMMIT;

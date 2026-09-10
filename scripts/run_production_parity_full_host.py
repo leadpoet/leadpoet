@@ -3647,7 +3647,7 @@ def _run_arena_rebenchmark_child(
                 "stage_2_icp_count": stage_counts[2],
                 "accepted_execute_runs": len(all_execute),
                 "accepted_score_runs": len(all_score),
-                "scored_icp_count": len(stage1_scores) + len(stage2_scores),
+                "scored_icp_count": len(all_score),
                 "unique_icp_positions": len(positions),
                 "company_count": company_count,
                 "evidence_url_count": len(evidence_urls),

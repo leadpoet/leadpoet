@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import builtins
 from datetime import datetime, timedelta, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import symtable
 import threading
 import traceback
 from types import SimpleNamespace
@@ -6239,6 +6241,30 @@ def test_arena_rebenchmark_is_live_complete_and_precedes_weights():
     weights = source.index('failure_stage = "weight-readiness"')
     assert gateway < arena < weights
     assert '"arena_rebenchmark": arena_rebenchmark' in source
+
+
+def test_arena_rebenchmark_child_has_no_unbound_globals():
+    # Exercise name resolution in the full child, including its late result
+    # builder, without making live provider calls just to reach that branch.
+    symbols = symtable.symtable(
+        inspect.getsource(full_host), full_host.__file__, "exec"
+    )
+    child = next(
+        table for table in symbols.get_children()
+        if table.get_name() == "_run_arena_rebenchmark_child"
+    )
+    available = set(vars(full_host)) | set(vars(builtins))
+    pending = [child]
+    unresolved = set()
+    while pending:
+        table = pending.pop()
+        unresolved.update(
+            symbol.get_name() for symbol in table.get_symbols()
+            if symbol.is_global() and symbol.is_referenced()
+            and symbol.get_name() not in available
+        )
+        pending.extend(table.get_children())
+    assert not unresolved, sorted(unresolved)
 
 
 def test_arena_rebenchmark_accepts_existing_gateway_provider_key_names():

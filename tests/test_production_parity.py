@@ -949,6 +949,9 @@ def test_restore_checks_snapshot_before_candidate_table_retirement(
         elif "-f" in command:
             calls.append("migration")
             payload = b""
+        elif command[-1] == "ANALYZE":
+            calls.append("analyze")
+            payload = b""
         else:
             assert command[-1] == parity_snapshot.DATABASE_RELATION_SHAPE_SQL
             calls.append("shape")
@@ -971,7 +974,8 @@ def test_restore_checks_snapshot_before_candidate_table_retirement(
         return
 
     restored = restore_snapshot(**kwargs)
-    assert calls == ["restore", "shape", "migration", "shape"]
+    assert calls == ["restore", "shape", "migration", "shape", "analyze"]
+    assert restored["database_statistics_analyzed"] is True
     assert restored["database_before_migrations"] == before
     assert restored["database_after_migrations"] == after
     # The runtime check must compare against the migrated state. The original
@@ -988,6 +992,7 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     tmp_path: Path,
 ):
     observed: dict[str, object] = {}
+    calls = []
     shape = {"relation_count": 2, "total_relation_bytes": 1000, "largest_relation_bytes": 600}
     original_safe_database_target = parity_snapshot.safe_database_target
 
@@ -997,8 +1002,7 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
 
     def fake_run(command, *, env, timeout, stdin=None):
         assert observed.get("target_validated") is True
-        observed["command"] = list(command)
-        observed["env"] = dict(env)
+        calls.append({"command": list(command), "env": dict(env)})
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(
@@ -1039,9 +1043,10 @@ def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     )
 
     assert production_env["PGSSLMODE"] == "require"
-    assert observed["command"][0] == "pg_restore"
-    assert observed["env"]["PGSSLMODE"] == "disable"
-    assert observed["env"]["PGOPTIONS"] == "-c check_function_bodies=off"
+    assert calls[0]["command"][0] == "pg_restore"
+    assert calls[0]["env"]["PGOPTIONS"] == "-c check_function_bodies=off"
+    assert calls[1]["command"] == ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-c", "ANALYZE"]
+    assert all(call["env"]["PGSSLMODE"] == "disable" for call in calls)
 
 
 def test_pinned_snapshot_verify_lists_only_the_archive_file(

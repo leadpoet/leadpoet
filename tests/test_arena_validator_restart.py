@@ -121,6 +121,7 @@ def test_durable_directory_setup_rejects_symlink_before_install(tmp_path):
     guarded.mkdir()
     target = tmp_path / "target"
     target.mkdir(mode=0o755)
+    target.chmod(0o755)
     state = guarded / "state"
     state.symlink_to(target, target_is_directory=True)
     runner = guarded / "runner"

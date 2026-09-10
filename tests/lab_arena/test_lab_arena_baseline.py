@@ -49,11 +49,14 @@ class _Store:
     def get_round(self, round_id):
         return self.rounds.get(round_id)
 
-    def pending_promotions(self, *, network_name=None, netuid=None, **_kwargs):
+    def pending_promotions(
+        self, *, pinned_round_id=None, network_name=None, netuid=None, **_kwargs
+    ):
         return [row for row in self.rounds.values() if (
             row.get("promotion_required") and not row.get("baseline_promoted_at")
             and row.get("status") == "published"
             and (row.get("publication_doc") or {}).get("king_decision", {}).get("outcome") == "crowned"
+            and (pinned_round_id is None or row.get("round_id") == pinned_round_id)
             and (
                 network_name is None
                 or (
@@ -261,7 +264,13 @@ def test_pending_promotion_blocks_a_new_snapshot_but_preserves_recovery(tmp_path
             service.freeze_participants(current["round_id"])
 
 
-def test_foreign_pending_promotion_does_not_block_current_chain_baseline(tmp_path):
+@pytest.mark.parametrize(
+    ("foreign_network", "foreign_netuid"),
+    [("test", 71), ("finney", 401), ("test", 401)],
+)
+def test_foreign_pending_promotion_does_not_block_current_chain_baseline(
+    tmp_path, foreign_network, foreign_netuid
+):
     current = _round()
     foreign = {
         "round_id": "arena-foreign-2026-09-04",
@@ -269,8 +278,8 @@ def test_foreign_pending_promotion_does_not_block_current_chain_baseline(tmp_pat
         "promotion_required": True,
         "configuration_doc": {
             "mode": "live",
-            "network_name": "test",
-            "netuid": 401,
+            "network_name": foreign_network,
+            "netuid": foreign_netuid,
         },
         "publication_doc": {"king_decision": {"outcome": "crowned"}},
     }

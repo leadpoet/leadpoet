@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "1a9d60550e942c9cca184cefbdf633e4f11e1071",
+  "baseline_commit": "58a7904cc1b016291962cc1b947aeb092a05c247",
   "entries": [
     {
       "ast_sha256": "sha256:3b0e06adab3d4d8093d2686426273807fdfc79b86bd9f0f1e9a90dc57930ae8d",
@@ -932,7 +932,7 @@
       "symbol": "CONTROLLER_WRAPPER_FD_NUMBER"
     },
     {
-      "ast_sha256": "sha256:be686e3ada2714379631aa7e45cd071d258b637f86aa67fb195c5791b05d44de",
+      "ast_sha256": "sha256:74fcaa359ef3526511576666f08c9b06a0946dbe5b0d83b61c5020e53cb5c755",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "DEFAULT_RUNTIME_STATUS_URL"
     },
@@ -1037,7 +1037,7 @@
       "symbol": "_VERSION_ID_RE"
     },
     {
-      "ast_sha256": "sha256:78aef3fa21a781915401ae8dd8ffb5afa1354ceeb9f4f87d3c72452c08a2ce01",
+      "ast_sha256": "sha256:87bcc91e40559f75a5180854ff0f3c381bbbbbce8d2b856dc07adeed85c78335",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "__module__"
     },
@@ -1067,7 +1067,7 @@
       "symbol": "_controller_exec_environment"
     },
     {
-      "ast_sha256": "sha256:48fe83656e98d7a64eabc16cc56128c56d6a04f4e7fb8548bcf01f093c301c95",
+      "ast_sha256": "sha256:398e5f36922529970e72d990b4793805e4c546d22a6d1c4c3c3997b681f89e50",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_fetch_runtime_status"
     },
@@ -1312,7 +1312,7 @@
       "symbol": "prepare_gateway_miner_maintenance_restart"
     },
     {
-      "ast_sha256": "sha256:fabe465b45619f8f83505de98b448dd1b225229df634401a084657d79686430b",
+      "ast_sha256": "sha256:262dbfd271a460a2199bd1af2fef3115148b23c6b07f2e40dbb6e5a405e78790",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "verify_gateway_miner_maintenance_runtime_state"
     },
@@ -2067,7 +2067,7 @@
       "symbol": "ScoringExecutorV2._execute_provider_preflight"
     },
     {
-      "ast_sha256": "sha256:c7929ce12253ae044a639855d3b48c789664e559912952c316dd6a6f9a414951",
+      "ast_sha256": "sha256:6b58f427d89901303bf34d8dfaf18ebf5051c2fb869da8fb5c7301f7a3d17200",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
@@ -2977,7 +2977,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:b26c513be9dfbbe5be980e99925bab71e2fbe7f2905c68d362a9ff5091cb9772",
-  "protected_source_commit": "1a9d60550e942c9cca184cefbdf633e4f11e1071",
+  "manifest_hash": "sha256:7c178b5dcff2b15970b417412eb60de0f656cb63c5620bae2e01a31c086b5063",
+  "protected_source_commit": "58a7904cc1b016291962cc1b947aeb092a05c247",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

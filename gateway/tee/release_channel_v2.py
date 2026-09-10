@@ -652,12 +652,19 @@ def fetch_release_lineage_v2(
             raise ReleaseChannelV2Error(
                 "required release lineage Git ancestry is invalid"
             )
-        releases = _local_release_lineage_entries(
+        local_releases = _local_release_lineage_entries(
             current_commit=current,
             bucket=bucket,
             prefix=normalized_prefix,
             s3_client=s3_client,
-        ) or {}
+        )
+        releases = local_releases or {}
+        if local_releases is not None:
+            outside_ancestry = sorted(set(local_releases) - allowed)
+            if outside_ancestry:
+                raise ReleaseChannelV2Error(
+                    "installed release lineage contains a non-ancestor commit"
+                )
         missing = sorted(set(required) - set(releases))
         if missing:
             channels = [
@@ -691,7 +698,12 @@ def fetch_release_lineage_v2(
                         "local and fetched release identities conflict"
                     )
                 releases[commit] = release
-        selected = {commit: releases[commit] for commit in required}
+        selected_commits = (
+            set(required) | set(local_releases)
+            if local_releases is not None
+            else set(required)
+        )
+        selected = {commit: releases[commit] for commit in selected_commits}
         return _compact_release_lineage_from_entries(
             selected,
             current_commit=current,

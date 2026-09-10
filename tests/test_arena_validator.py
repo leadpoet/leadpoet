@@ -40,12 +40,19 @@ class _Chain:
     def __init__(self, broadcasts):
         self.client = _Substrate(broadcasts)
         self.config = SimpleNamespace(netuid=71, network_name="finney")
+        self.submission_ready = True
+        self.submission_read_error = None
 
     def finalized_head(self):
         return SimpleNamespace(number=1050, hash="0x" + ("2" * 64))
 
     def refresh_metagraph(self):
         return SimpleNamespace(hotkeys=("5" + "A" * 47, "5" + "B" * 47))
+
+    def finalized_weight_submission_context(self, _hotkey):
+        if self.submission_read_error is not None:
+            raise self.submission_read_error
+        return self.finalized_head(), self.refresh_metagraph(), self.submission_ready
 
 
 class _Signer:
@@ -261,3 +268,75 @@ def test_expired_mortal_attempt_retries_fresh_era_within_same_epoch(tmp_path):
     assert restarted.run_once(9) == "rebroadcast"
     assert signer.prepares == 2
     assert broadcasts[-1] == "0xcafebabe"
+
+
+def test_late_prior_update_defers_next_epoch_without_consuming_attempt(tmp_path):
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    orchestrator.chain.submission_ready = False
+
+    assert orchestrator.run_once(9) == "rate_limited"
+    assert signer.prepares == 0
+    assert not orchestrator.paths.signed(9).exists()
+
+    orchestrator.chain.submission_ready = True
+    assert orchestrator.run_once(9) == "broadcast"
+    assert signer.prepares == 1
+
+
+def test_expired_attempt_waits_across_restart_until_rate_limit_is_ready(tmp_path):
+    first = _protected()
+    second = dict(first)
+    second.update({
+        "attempt_sequence": 2,
+        "authorization_hash": "sha256:" + "9" * 64,
+        "extrinsic_hash": "0x" + "a" * 64,
+        "extrinsic_hex": "cafebabe",
+    })
+    second["recovery_record"] = {
+        "authorization_hash": second["authorization_hash"],
+        "extrinsic_hash": second["extrinsic_hash"],
+        "extrinsic_hex": second["extrinsic_hex"],
+    }
+
+    class RetrySigner(_Signer):
+        def prepare_arena_weight_extrinsic_v1(self, _request):
+            self.prepares += 1
+            return dict(first if self.prepares == 1 else second)
+
+    expired = {
+        "status": "not_included_expired", "finalized": False,
+        "state_hash": first["state_hash"], "extrinsic_hash": first["extrinsic_hash"],
+        "finalized_head": {"block": 1050}, "finalized_nonce": 7,
+    }
+    signer = RetrySigner(first, [expired, expired, expired])
+    broadcasts = []
+    orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    assert orchestrator.run_once(9) == "broadcast"
+    orchestrator.chain.submission_ready = False
+    assert orchestrator.run_once(9) == "rate_limited"
+    assert signer.prepares == 1
+    assert not orchestrator.paths.archived_attempt(9, 1).exists()
+
+    restarted = _orchestrator(tmp_path, signer, broadcasts)
+    restarted.chain.submission_ready = False
+    assert restarted.run_once(9) == "rate_limited"
+    assert signer.prepares == 1
+    assert not restarted.paths.archived_attempt(9, 1).exists()
+
+    restarted.chain.submission_ready = True
+    assert restarted.run_once(9) == "broadcast"
+    assert signer.prepares == 2
+    assert _read_hashed_json(restarted.paths.archived_attempt(9, 1))["extrinsic_hex"] == "deadbeef"
+    assert _read_hashed_json(restarted.paths.signed(9))["attempt_sequence"] == 2
+
+
+def test_rate_limit_read_failure_fails_before_signing(tmp_path):
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    orchestrator.chain.submission_read_error = RuntimeError("chain unavailable")
+
+    with pytest.raises(RuntimeError, match="chain unavailable"):
+        orchestrator.run_once(9)
+    assert signer.prepares == 0
+    assert not orchestrator.paths.signed(9).exists()

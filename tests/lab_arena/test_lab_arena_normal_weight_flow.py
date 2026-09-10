@@ -340,6 +340,8 @@ class _HostChain:
         assert method == "author_submitExtrinsic"; self.broadcasts.append(params[0]); self.source.extrinsic = params[0]
     def finalized_head(self): return SimpleNamespace(number=104, hash="0x" + "2" * 64)
     def refresh_metagraph(self): return SimpleNamespace(hotkeys=tuple(self.source.hotkeys))
+    def finalized_weight_submission_context(self, _hotkey):
+        return self.finalized_head(), self.refresh_metagraph(), True
 
 
 class _Api:

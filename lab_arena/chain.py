@@ -661,6 +661,59 @@ class ArenaChain:
     def refresh_metagraph(self) -> MetagraphSnapshot:
         return self.metagraph(finalized=True, refresh=True)
 
+    def finalized_weight_submission_context(
+        self, validator_hotkey: str
+    ) -> Tuple[BlockRef, MetagraphSnapshot, bool]:
+        """Read one finalized metagraph and the matching weight-rate limit."""
+
+        hotkey = require_hotkey(validator_hotkey, "validator_hotkey")
+        head = self.finalized_head()
+        snapshot = self._metagraph_source(
+            self._serialized, self._config.netuid, head.hash
+        )
+        if (
+            not isinstance(snapshot, MetagraphSnapshot)
+            or snapshot.block_hash != head.hash
+            or snapshot.block_number != head.number
+            or snapshot.netuid != self._config.netuid
+        ):
+            raise ArenaChainError(
+                "weight submission metagraph is not pinned to the finalized head"
+            )
+        uid = uid_for_hotkey(snapshot, hotkey)
+        if uid is None:
+            raise ArenaChainError("validator hotkey is absent from finalized metagraph")
+        rate_limit = _chain_int(
+            self._call(
+                "query",
+                "SubtensorModule",
+                "WeightsSetRateLimit",
+                [self._config.netuid],
+                block_hash=head.hash,
+            ),
+            "weights set rate limit",
+        )
+        updates = _unwrap(
+            self._call(
+                "query",
+                "SubtensorModule",
+                "LastUpdate",
+                [self._config.netuid],
+                block_hash=head.hash,
+            )
+        )
+        if (
+            rate_limit < 0
+            or not isinstance(updates, (list, tuple))
+            or uid >= len(updates)
+        ):
+            raise ArenaChainError("finalized weight rate-limit state is invalid")
+        last_update = _chain_int(updates[uid], "validator last update")
+        if last_update < 0 or last_update > head.number:
+            raise ArenaChainError("finalized validator last update is invalid")
+        ready = head.number - last_update >= rate_limit
+        return head, snapshot, ready
+
 
 # ---------------------------------------------------------------------------
 # Settlement epoch ordinals (section 13.2)

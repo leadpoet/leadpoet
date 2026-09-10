@@ -336,6 +336,7 @@ class ArenaWeightOrchestrator:
         outcome_path = self.paths.outcome(epoch)
         existing = _read_hashed_json(signed_path)
         retry_state = None
+        submission_context = None
         if existing is not None:
             outcome = _read_hashed_json(outcome_path)
             if outcome is not None and outcome.get("extrinsic_hash") == existing.get("extrinsic_hash"):
@@ -346,22 +347,30 @@ class ArenaWeightOrchestrator:
             if confirmation in {"finalized", "included_pending_reveal"}:
                 return confirmation
             if confirmation == "not_included_expired":
-                head = self.chain.finalized_head()
                 accepted = existing.get("accepted_state")
                 if not isinstance(accepted, Mapping):
                     raise ArenaValidatorError("Arena retry lacks accepted state")
                 prior_sequence = int(existing.get("attempt_sequence", 0))
                 if prior_sequence <= 0:
                     raise ArenaValidatorError("Arena retry lacks attempt sequence")
-                if (
-                    prior_sequence >= MAX_ARENA_WEIGHT_ATTEMPTS
-                    or not self._fresh_era_fits(accepted, head.number)
-                ):
+                if prior_sequence >= MAX_ARENA_WEIGHT_ATTEMPTS:
                     self._record_expired(
                         existing,
                         self._last_confirmation or {},
                     )
                     return "not_included_expired"
+                submission_context = self.chain.finalized_weight_submission_context(
+                    self.validator_hotkey
+                )
+                head, _metagraph, rate_limit_ready = submission_context
+                if not self._fresh_era_fits(accepted, head.number):
+                    self._record_expired(
+                        existing,
+                        self._last_confirmation or {},
+                    )
+                    return "not_included_expired"
+                if not rate_limit_ready:
+                    return "rate_limited"
                 # Preserve the old exact bytes before the active journal is
                 # atomically replaced with the newly signed attempt.
                 _atomic_json(
@@ -381,10 +390,15 @@ class ArenaWeightOrchestrator:
             return "state_unavailable"
         if retry_state is not None and state != retry_state:
             raise ArenaValidatorError("Arena retry state differs from durable accepted state")
-        head = self.chain.finalized_head()
+        if submission_context is None:
+            submission_context = self.chain.finalized_weight_submission_context(
+                self.validator_hotkey
+            )
+        head, metagraph, rate_limit_ready = submission_context
         if not int(state["valid_from_block"]) <= head.number <= int(state["valid_until_block"]):
             return "outside_submission_window"
-        metagraph = self.chain.refresh_metagraph()
+        if not rate_limit_ready:
+            return "rate_limited"
         host_result = self._host_derivation(state, metagraph.hotkeys)
         substrate = self.chain.client
         nonce = substrate.get_account_nonce(self.validator_hotkey)

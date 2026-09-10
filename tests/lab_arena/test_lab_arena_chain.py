@@ -404,6 +404,49 @@ def test_connect_substrate_uses_only_the_configured_endpoint(monkeypatch):
         connect_substrate("wss://not-a-config")
 
 
+def test_weight_submission_context_is_pinned_and_enforces_last_update_rate_limit():
+    fake = FakeSubstrate()
+    fake.storage.update({
+        "WeightsSetRateLimit": 100,
+        "LastUpdate": [FINALIZED_NUMBER - 99, 0, 0],
+    })
+    queries = []
+    original_query = fake.query
+
+    def query(module, storage_function, params=None, block_hash=None):
+        queries.append((storage_function, tuple(params or ()), block_hash))
+        return original_query(module, storage_function, params, block_hash)
+
+    fake.query = query
+    source = CountingSource()
+    chain = ArenaChain(make_config(), fake, metagraph_source=source)
+
+    head, metagraph, ready = chain.finalized_weight_submission_context(
+        ALICE.ss58_address
+    )
+    assert head.number == FINALIZED_NUMBER
+    assert metagraph.hotkeys[0] == ALICE.ss58_address
+    assert ready is False
+    assert source.calls == [(NETUID, canonical_hash(FINALIZED_NUMBER))]
+    assert queries == [
+        ("WeightsSetRateLimit", (NETUID,), canonical_hash(FINALIZED_NUMBER)),
+        ("LastUpdate", (NETUID,), canonical_hash(FINALIZED_NUMBER)),
+    ]
+
+    fake.storage["LastUpdate"][0] = FINALIZED_NUMBER - 100
+    assert chain.finalized_weight_submission_context(ALICE.ss58_address)[2] is True
+
+
+def test_weight_submission_context_fails_closed_when_rate_limit_read_fails():
+    fake = FakeSubstrate()
+    fake.storage.update({"WeightsSetRateLimit": 100, "LastUpdate": [0, 0, 0]})
+    fake.fail.add("query")
+    chain = ArenaChain(make_config(), fake, metagraph_source=CountingSource())
+
+    with pytest.raises(ArenaChainError, match="chain call query failed"):
+        chain.finalized_weight_submission_context(ALICE.ss58_address)
+
+
 def test_import_closure_is_lazy_and_boundary_clean():
     code = (
         "import json, sys\n"

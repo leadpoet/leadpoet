@@ -297,6 +297,7 @@ def test_artifact_egress_transport_boundaries_are_protected():
     } <= set(PROTECTED_SYMBOLS["research_lab/employee_buckets.py"])
     assert {
         "_decision_from_observed_employee_size",
+        "_has_explicitly_unproven_fit_dimensions",
         "_reverify_decision",
         "_llm_reverify_company",
     } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])

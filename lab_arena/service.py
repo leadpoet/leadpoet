@@ -531,6 +531,14 @@ class ArenaService:
     # -- round creation (section 5.1) ----------------------------------------
 
     def build_schedule(self, cutoff: datetime) -> Dict[str, str]:
+        """Build the round's cutoff and absolute timeout budget.
+
+        ``submission_cutoff`` is the only minimum start time.  The stage start
+        fields mark nominal capacity-budget boundaries.  The close fields are
+        deadlines for incomplete work.  Ready phases advance without waiting
+        for a nominal boundary.
+        """
+
         minutes = self._config.defaults.stage_minutes
         cutoff = cutoff.astimezone(timezone.utc)
         benchmark_deadline = cutoff + timedelta(minutes=minutes["benchmark"])
@@ -2214,13 +2222,14 @@ class ArenaService:
             status = round_row["status"]
             schedule = round_row["configuration_doc"]["schedule"]
             now = self.now()
+            if (
+                status not in TERMINAL_STATUSES
+                and now < _parse_iso(schedule["submission_cutoff"])
+            ):
+                return {"status": "waiting", "round_status": status}
             if status == "open":
-                if now < _parse_iso(schedule["submission_cutoff"]):
-                    return {"status": "waiting", "round_status": status}
                 return self.commit_benchmark(round_id)
             if status == "committed":
-                if now < _parse_iso(schedule["stage_1_start"]):
-                    return {"status": "waiting", "round_status": status}
                 return self.open_stage(round_id, 1)
             if status in ("stage1", "stage2"):
                 stage = 1 if status == "stage1" else 2
@@ -2262,8 +2271,6 @@ class ArenaService:
                         return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
                     return {"status": "retry", "round_status": status}
             if status == "stage1_scored":
-                if now < _parse_iso(schedule["stage_2_start"]):
-                    return {"status": "waiting", "round_status": status}
                 return self.open_stage(round_id, 2)
             if status == "scored":
                 try:

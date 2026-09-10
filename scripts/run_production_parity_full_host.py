@@ -1056,10 +1056,23 @@ def _weight_storage_preflight_observations(
         for line in lines
         if line.strip() in _WEIGHT_STORAGE_PREFLIGHT_FIXED_LINES
     ]
-    starts = [index for index, line in enumerate(lines) if line == _TRACEBACK_START]
+    module_failure_line = (
+        "ERROR: durable V2 validator weight authority is not readable"
+    )
+    module_boundaries = [
+        index for index, line in enumerate(lines) if line.strip() == module_failure_line
+    ]
+    traceback_lines = (
+        lines[: module_boundaries[-1]] if module_boundaries else lines
+    )
+    starts = [
+        index
+        for index, line in enumerate(traceback_lines)
+        if line == _TRACEBACK_START
+    ]
     if not starts:
         return fixed_observations[-1:]
-    block = lines[starts[-1] + 1 :]
+    block = traceback_lines[starts[-1] + 1 :]
     frames: list[tuple[str, str]] = []
     exception_class = None
     exception_line = None

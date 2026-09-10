@@ -2350,7 +2350,9 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
                 "gateway.research_lab.champion_settlement_v2."
                 "ChampionSettlementV2Error: chain realized settlement activation "
                 "source is not authoritative\n"
-                "private-query-value=must-not-survive\n",
+                "private-query-value=must-not-survive\n"
+                "ERROR: durable V2 validator weight authority is not readable\n"
+                "Gateway remains running; production shutdown has not started.\n",
                 encoding="utf-8",
             )
         if restart_outcome == "timed_out":
@@ -3102,6 +3104,11 @@ def test_weight_storage_preflight_observations_execute_canonical_cli(
     )
     log_path = tmp_path / "storage-preflight.log"
     _capture_failure_traceback(log_path, weight_readiness.main)
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(
+            "ERROR: durable V2 validator weight authority is not readable\n"
+            "Gateway remains running; production shutdown has not started.\n"
+        )
 
     observation = full_host._weight_storage_preflight_observations(log_path)
     assert observation == [
@@ -3148,6 +3155,11 @@ def test_weight_storage_preflight_observations_execute_postgrest_502(
     log_path = tmp_path / "postgrest-502.log"
     try:
         _capture_failure_traceback(log_path, weight_readiness.main)
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(
+                "ERROR: durable V2 validator weight authority is not readable\n"
+                "Gateway remains running; production shutdown has not started.\n"
+            )
     finally:
         postgrest.aclose()
 
@@ -3262,6 +3274,28 @@ def test_weight_storage_preflight_observations_reject_unsafe_or_stale_input(
         b"private=" + b"x" * (full_host._GATEWAY_DIAGNOSTIC_LOG_TAIL_BYTES + 1024)
     )
     assert full_host._weight_storage_preflight_observations(malformed) == []
+
+
+def test_weight_storage_preflight_observations_reject_later_python_failure(
+    tmp_path: Path,
+):
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/run/gateway/tee/verify_weight_submission_ready_v2.py", '
+        "line 169, in verify_weight_submission_storage_readable_v2\n"
+        "ChampionSettlementV2Error: chain realized settlement activation is unavailable\n"
+        "RuntimeError: must-not-survive-later-failure\n"
+        "ERROR: durable V2 validator weight authority is not readable\n",
+        encoding="utf-8",
+    )
+
+    assert full_host._weight_storage_preflight_observations(log_path) == [
+        {
+            "marker": "weight_storage_preflight_observation",
+            "reason": "module_failed",
+        }
+    ]
 
 
 @pytest.mark.parametrize(

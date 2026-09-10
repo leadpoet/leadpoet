@@ -49,11 +49,20 @@ class _Store:
     def get_round(self, round_id):
         return self.rounds.get(round_id)
 
-    def pending_promotions(self):
+    def pending_promotions(self, *, network_name=None, netuid=None, **_kwargs):
         return [row for row in self.rounds.values() if (
             row.get("promotion_required") and not row.get("baseline_promoted_at")
             and row.get("status") == "published"
             and (row.get("publication_doc") or {}).get("king_decision", {}).get("outcome") == "crowned"
+            and (
+                network_name is None
+                or (
+                    (row.get("configuration_doc") or {}).get("network_name", "finney")
+                    == network_name
+                    and int((row.get("configuration_doc") or {}).get("netuid", 71))
+                    == int(netuid)
+                )
+            )
         )]
 
     def list_rounds(self, *, status=None, limit=None, **_kwargs):
@@ -250,6 +259,51 @@ def test_pending_promotion_blocks_a_new_snapshot_but_preserves_recovery(tmp_path
     else:
         with pytest.raises(ServiceError, match="baseline_promotion_pending"):
             service.freeze_participants(current["round_id"])
+
+
+def test_foreign_pending_promotion_does_not_block_current_chain_baseline(tmp_path):
+    current = _round()
+    foreign = {
+        "round_id": "arena-foreign-2026-09-04",
+        "status": "published",
+        "promotion_required": True,
+        "configuration_doc": {
+            "mode": "live",
+            "network_name": "test",
+            "netuid": 401,
+        },
+        "publication_doc": {"king_decision": {"outcome": "crowned"}},
+    }
+    payload = _archive(tmp_path)
+    store = _Store(current, [], [foreign])
+    service = _service(store, _Objects(), payload)
+
+    participants = service.freeze_participants(current["round_id"])
+
+    assert [row["submission_id"] for row in participants] == [
+        "baseline-2026-09-05"
+    ]
+
+
+def test_same_chain_pending_promotion_still_blocks_baseline(tmp_path):
+    current = _round()
+    same_chain = {
+        "round_id": "arena-same-2026-09-04",
+        "status": "published",
+        "promotion_required": True,
+        "configuration_doc": {
+            "mode": "live",
+            "network_name": "finney",
+            "netuid": 71,
+        },
+        "publication_doc": {"king_decision": {"outcome": "crowned"}},
+    }
+    store = _Store(current, [], [same_chain])
+    service = _service(store, _Objects(), _archive(tmp_path))
+    service._config.pinned_round_id = current["round_id"]
+
+    with pytest.raises(ServiceError, match="baseline_promotion_pending"):
+        service.freeze_participants(current["round_id"])
 
 
 def test_existing_frozen_baseline_recovers_without_refetching_old_main():

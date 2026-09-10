@@ -33,6 +33,12 @@ _APPROVED_RELEASE_ROLES = frozenset(ROLE_SPECS)
 _HISTORICAL_RELEASE_ROLES = _APPROVED_RELEASE_ROLES | {
     "gateway_autoresearch"
 }
+_RETIRED_VALIDATOR_RELEASE_ROLES = _APPROVED_RELEASE_ROLES | {
+    "validator_weights"
+}
+_RETIRED_VALIDATOR_HISTORICAL_RELEASE_ROLES = (
+    _HISTORICAL_RELEASE_ROLES | {"validator_weights"}
+)
 
 
 class ReleaseLineageV2Error(RuntimeError):
@@ -46,6 +52,7 @@ def _validate_compact_release_lineage_v2(
     expected_current_gateway_release_hash: str | None = None,
     allow_historical_current: bool = False,
     expected_historical_topology_hash: str | None = None,
+    allow_retired_validator_roles: bool = False,
 ) -> Dict[str, Any]:
     """Validate the immutable compact release authority used inside enclaves."""
 
@@ -100,6 +107,15 @@ def _validate_compact_release_lineage_v2(
                     "historical release topology hash is unsupported"
                 )
             allowed_roles = {_HISTORICAL_RELEASE_ROLES}
+        elif allow_retired_validator_roles:
+            allowed_roles = (
+                {_RETIRED_VALIDATOR_RELEASE_ROLES}
+                if commit == current_commit and not allow_historical_current
+                else {
+                    _RETIRED_VALIDATOR_RELEASE_ROLES,
+                    _RETIRED_VALIDATOR_HISTORICAL_RELEASE_ROLES,
+                }
+            )
         else:
             allowed_roles = (
                 {_APPROVED_RELEASE_ROLES}
@@ -222,6 +238,18 @@ def validate_prior_compact_release_lineage_v2(
             expected_current_gateway_release_hash
         ),
         allow_historical_current=True,
+    )
+
+
+def validate_retired_validator_compact_release_lineage_v2(
+    value: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate the exact installed lineage from before validator retirement."""
+
+    return _validate_compact_release_lineage_v2(
+        value,
+        allow_historical_current=True,
+        allow_retired_validator_roles=True,
     )
 
 

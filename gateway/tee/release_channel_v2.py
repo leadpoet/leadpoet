@@ -504,11 +504,7 @@ def _local_release_lineage_entries(
     prior_path = str(os.environ.get(_LOCAL_PRIOR_LINEAGE_ENV) or "").strip()
     if not prior_path:
         return releases
-    from gateway.tee.release_lineage_v2 import (
-        validate_prior_compact_release_lineage_v2,
-    )
-
-    prior = validate_prior_compact_release_lineage_v2(
+    prior = _project_installed_prior_release_lineage_v2(
         _load_json(Path(prior_path), "installed prior release lineage")
     )
     for commit, release in prior["releases"].items():
@@ -518,6 +514,45 @@ def _local_release_lineage_entries(
             )
         releases[commit] = release
     return releases
+
+
+def _project_installed_prior_release_lineage_v2(
+    value: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Remove retired physical roles from a validated prior lineage."""
+
+    from gateway.tee.release_lineage_v2 import (
+        ReleaseLineageV2Error,
+        validate_prior_compact_release_lineage_v2,
+        validate_retired_validator_compact_release_lineage_v2,
+    )
+
+    try:
+        return validate_prior_compact_release_lineage_v2(value)
+    except ReleaseLineageV2Error:
+        prior = validate_retired_validator_compact_release_lineage_v2(value)
+    body = {
+        "schema_version": prior["schema_version"],
+        "current_commit_sha": prior["current_commit_sha"],
+        "current_gateway_release_hash": prior[
+            "current_gateway_release_hash"
+        ],
+        "releases": {
+            commit: {
+                **release,
+                "roles": {
+                    role: expectation
+                    for role, expectation in release["roles"].items()
+                    if role
+                    not in {"gateway_autoresearch", "validator_weights"}
+                },
+            }
+            for commit, release in prior["releases"].items()
+        },
+    }
+    return validate_prior_compact_release_lineage_v2(
+        {**body, "lineage_hash": sha256_json(body)}
+    )
 
 
 def _compact_release_lineage_from_entries(

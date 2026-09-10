@@ -2,6 +2,7 @@
 import copy
 import json
 import pytest
+from gateway.tee import release_channel_v2
 from gateway.tee.release_channel_v2 import (
     SCHEMA_VERSION, ReleaseChannelV2Error, build_release_channel_v2,
     build_release_lineage_v2, install_release_channel_v2,
@@ -9,6 +10,7 @@ from gateway.tee.release_channel_v2 import (
     validate_release_channel_v2,
 )
 from gateway.tee.release_manifest_v2 import BUILD_EVIDENCE_SCHEMA_VERSION, build_release_manifest
+from gateway.tee.release_lineage_v2 import ReleaseLineageV2Error
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import sha256_json
 
@@ -45,6 +47,53 @@ def test_historical_validator_field_is_hash_covered_but_not_authority():
  assert validate_prior_release_channel_v2(old)["validator_release_manifest"]=={"opaque":"historical"}
  tampered=copy.deepcopy(old); tampered["validator_release_manifest"]["opaque"]="changed"
  with pytest.raises(ReleaseChannelV2Error,match="hash"): validate_prior_release_channel_v2(tampered)
+
+
+def _retired_validator_lineage():
+ current = build_release_channel_v2(gateway_release_manifest=_manifest("1" * 40))
+ historical = build_release_channel_v2(gateway_release_manifest=_manifest("2" * 40))
+ lineage = build_release_lineage_v2(
+  [current, historical], current_commit="1" * 40
+ )
+ for commit, release in lineage["releases"].items():
+  template = next(iter(release["roles"].values()))
+  release["roles"]["validator_weights"] = dict(template)
+  if commit == "2" * 40:
+   release["roles"]["gateway_autoresearch"] = dict(template)
+ body = {key: value for key, value in lineage.items() if key != "lineage_hash"}
+ return {**body, "lineage_hash": sha256_json(body)}
+
+
+def test_installed_prior_lineage_discards_only_retired_validator_role():
+ prior = _retired_validator_lineage()
+ projected = release_channel_v2._project_installed_prior_release_lineage_v2(
+  prior
+ )
+ assert set(projected["releases"]["1" * 40]["roles"]) == set(ROLE_SPECS)
+ assert set(projected["releases"]["2" * 40]["roles"]) == set(ROLE_SPECS)
+ assert projected["releases"]["1" * 40]["channel_hash"] == (
+  prior["releases"]["1" * 40]["channel_hash"]
+ )
+ assert release_channel_v2._project_installed_prior_release_lineage_v2(
+  projected
+ ) == projected
+
+
+def test_installed_prior_lineage_rejects_hash_and_retired_role_binding_drift():
+ prior = _retired_validator_lineage()
+ with pytest.raises(ReleaseLineageV2Error, match="hash differs"):
+  release_channel_v2._project_installed_prior_release_lineage_v2(
+   {**prior, "lineage_hash": _hash("9")}
+  )
+
+ drifted = copy.deepcopy(prior)
+ drifted["releases"]["2" * 40]["roles"]["validator_weights"][
+  "commit_sha"
+ ] = "3" * 40
+ body = {key: value for key, value in drifted.items() if key != "lineage_hash"}
+ drifted["lineage_hash"] = sha256_json(body)
+ with pytest.raises(ReleaseLineageV2Error, match="expectation is invalid"):
+  release_channel_v2._project_installed_prior_release_lineage_v2(drifted)
 
 def test_publish_is_immutable_object_locked_and_install_is_gateway_only(tmp_path):
  s3=S3(); channel=build_release_channel_v2(gateway_release_manifest=_manifest())

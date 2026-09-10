@@ -208,13 +208,13 @@ class ArenaHotkeyAuthority:
                 "purpose": PAYLOAD_SCHEMA,
                 "nonce": secrets.token_hex(32),
                 "policy_hash": sha256_json(self._measured_policy),
-                "policy": self._measured_policy,
             }
             attestation = self._attest(user_data=json.dumps(claim, sort_keys=True, separators=(",", ":")).encode(), public_key=public)
             if not isinstance(attestation, bytes) or not attestation:
                 raise ArenaHotkeyError("Arena hardware attestation is unavailable")
             self._recipient = {
-                **claim, "attestation_document_b64": base64.b64encode(attestation).decode(),
+                **claim, "policy": self._measured_policy,
+                "attestation_document_b64": base64.b64encode(attestation).decode(),
                 "key_encryption_algorithm": ENCRYPTION_ALGORITHM,
             }
             return dict(self._recipient)

@@ -250,6 +250,36 @@ def test_recipient_retry_refreshes_attestation_without_replacing_recipient_key()
     assert calls[0]["public_key"] == calls[1]["public_key"]
 
 
+def test_recipient_attests_compact_policy_binding_and_returns_full_policy():
+    calls = []
+
+    def attest(**kwargs):
+        calls.append(kwargs)
+        return b"hardware-attestation"
+
+    policy, _ = _policy()
+    assert len(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()) > 1024
+    recipient = ArenaHotkeyAuthority(
+        attestation_supplier=attest, measured_policy=policy
+    ).recipient_request()
+    user_data = calls[0]["user_data"]
+    claim = json.loads(user_data)
+
+    assert len(user_data) <= 512
+    assert set(claim) == {"schema_version", "purpose", "nonce", "policy_hash"}
+    assert claim == {
+        "schema_version": recipient["schema_version"],
+        "purpose": recipient["purpose"],
+        "nonce": recipient["nonce"],
+        "policy_hash": sha256_json(policy),
+    }
+    assert recipient["policy"] == policy
+    changed = deepcopy(recipient)
+    changed["policy"]["netuid"] += 1
+    with pytest.raises(ArenaHotkeyError, match="recipient identity"):
+        arena_hotkey_bootstrap._validate_recipient(changed, policy)
+
+
 @pytest.mark.parametrize("mutation", [
     lambda policy: policy.update(arena_api_base_url="http://arena.example.com"),
     lambda policy: policy.update(network="other-network"),

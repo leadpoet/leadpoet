@@ -10,6 +10,30 @@ from lab_arena import wiring
 from lab_arena.service import ServiceConfig, ServiceError
 
 
+@pytest.mark.parametrize("pending,expected_end", [(0, 1359), (1200, 1199), (1400, 1359)])
+def test_weight_state_window_uses_effective_epoch_boundary(monkeypatch, pending, expected_end):
+    from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
+
+    genesis = "0x" + "1" * 64
+    snapshot = SubnetEpochSnapshot(
+        network_genesis_hash=genesis, netuid=71, head_kind="finalized",
+        block_hash="0x" + "2" * 64, current_block=1050,
+        last_epoch_block=1000, pending_epoch_at=pending, subnet_epoch_index=20,
+        tempo=360, blocks_since_last_step=50, observed_at="2026-09-10T00:00:00Z",
+    )
+    adapter = wiring.ChainReadsAdapter(object())
+    adapter._cutover = SubnetEpochCutover(
+        network_genesis_hash=genesis, netuid=71, cutover_block=1000,
+        cutover_block_hash="0x" + "3" * 64, first_subnet_epoch_index=20,
+        first_settlement_epoch_id=32000, last_legacy_epoch_id=31999,
+    )
+    monkeypatch.setattr(wiring.chain_module, "finalized_epoch_snapshot", lambda _chain: snapshot)
+    scope = adapter.accepted_weight_epoch_scope()
+    assert scope["epoch"] == 32000
+    assert scope["valid_from_block"] == 1000
+    assert scope["valid_until_block"] == expected_end
+
+
 def test_service_wiring_requires_every_environment_value(monkeypatch):
     for name in list(__import__("os").environ):
         if name.startswith("LAB_ARENA_"):

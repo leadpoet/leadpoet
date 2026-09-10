@@ -153,7 +153,7 @@ class ChainReadsAdapter:
             "genesis_hash": snapshot.network_genesis_hash,
             "epoch": int(snapshot.settlement_epoch_id(self._cutover)),
             "valid_from_block": int(snapshot.last_epoch_block),
-            "valid_until_block": int(snapshot.pending_epoch_at) - 1,
+            "valid_until_block": int(snapshot.next_epoch_block) - 1,
         }
 
     def hotkeys_owned_by_same_coldkey(self, hotkey: str) -> List[str]:

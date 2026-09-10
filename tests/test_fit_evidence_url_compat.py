@@ -22,6 +22,7 @@ from qualification.scoring.competition import (
     scorer_breakdown_has_retryable_infrastructure_failure,
 )
 from qualification.scoring.lead_scorer import (
+    EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS,
     INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
     _fit_evidence_url_hints,
     _llm_reverify_company,
@@ -565,6 +566,10 @@ def _selsym_alternate_domain_verdict():
     verdict["observed_company_linkedin"] = (
         "https://linkedin.com/company/selsymbio"
     )
+    # Retained SelSym receipt shape: the direct employee source and quote were
+    # present, but the observed string did not normalize to a canonical bucket.
+    verdict["observed_employee_count"] = "approximately 40 employees"
+    verdict["employee_size_matches"] = True
     return verdict
 
 
@@ -785,6 +790,60 @@ def test_verified_homepage_domain_conflict_repair_failure_remains_retryable(
     ]
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert "failure_class" not in result.details
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+
+
+def test_homepage_domain_conflict_with_failed_size_fetch_remains_retryable(
+    monkeypatch,
+):
+    calls = []
+    profile_calls = []
+
+    async def request(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        verdict = _selsym_alternate_domain_verdict()
+        verdict["employee_size_evidence_url"] = (
+            "https://linkedin.com/company/selsymbio"
+        )
+        return verdict, ""
+
+    async def failed_profile_fetch(url):
+        profile_calls.append(url)
+        return None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json",
+        request,
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer.fetch_current_linkedin_company_size",
+        failed_profile_fetch,
+    )
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _selsym_company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_selsym_homepage_identity(),
+        )
+    )
+    breakdown = {
+        "final_score": 0.0,
+        "failure_reason": f"Company fit unavailable: {result.reason}",
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    }
+
+    assert calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert profile_calls == ["https://www.linkedin.com/company/selsymbio"]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == (
+        EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS
+    )
     assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
 
 

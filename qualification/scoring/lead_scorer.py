@@ -61,6 +61,7 @@ from gateway.qualification.models import (
     candidate_company_prompt_identity,
 )
 from qualification.competition_models import public_http_url
+from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
 from qualification.scoring.pre_checks import (
     check_country_match,
     run_company_zero_checks,
@@ -1657,6 +1658,7 @@ def _has_explicitly_unproven_fit_dimensions(
     verdict: Mapping[str, Any],
     incomplete: tuple[str, ...],
     *,
+    icp: Optional[ICPPrompt] = None,
     linkedin_refresh_outcome: str = "",
     identity_receipt: Optional[Mapping[str, Any]] = None,
 ) -> bool:
@@ -1702,6 +1704,27 @@ def _has_explicitly_unproven_fit_dimensions(
         observed_value = verdict.get(observed)
         if dimension == "employee_size":
             if observed_value is not None:
+                effective_evidence = _dimension_web_evidence(
+                    verdict, dimension
+                )
+                if (
+                    icp is not None
+                    and isinstance(observed_value, str)
+                    and bool(observed_value.strip())
+                    and observed_value not in LINKEDIN_EMPLOYEE_BUCKETS
+                    and _decision_from_observed_employee_size(
+                        dict(verdict), icp
+                    )
+                    == COMPANY_FIT_UNAVAILABLE
+                    and bool(effective_evidence.get("url"))
+                    and bool(effective_evidence.get("quote"))
+                ):
+                    # A complete direct citation paired with a noncanonical
+                    # employee value proves no supported size bucket. After
+                    # the one fresh repair this is insufficient evidence, not
+                    # a provider failure. A failed LinkedIn refresh returned
+                    # above and remains retryable.
+                    continue
                 return False
         elif observed_value is not None and observed_value != "":
             normalized_stage = _normalize_company_stage(observed_value)
@@ -2097,6 +2120,7 @@ async def _llm_reverify_company(
         and _has_explicitly_unproven_fit_dimensions(
             repaired_verdict,
             repaired_incomplete,
+            icp=icp,
             linkedin_refresh_outcome=linkedin_refresh_outcome,
             identity_receipt=(
                 repaired_result.details.get("identity_receipt")

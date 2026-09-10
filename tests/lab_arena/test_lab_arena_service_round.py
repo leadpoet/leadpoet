@@ -179,6 +179,7 @@ class ModelSandbox:
         self.runs = 0
         self.inflate_scores = False  # a cheating validator reports 99.0 for every company
         self.judge_failures: set[tuple[str, int]] = set()
+        self.empty_outputs: set[tuple[str, int]] = set()
 
     def run_icp(self, spec: runtime.SandboxSpec, **_):
         with self.lock:
@@ -240,8 +241,9 @@ class ModelSandbox:
         if flavor is None:
             flavor = (spec.source_dir / "flavor.txt").read_text(encoding="utf-8")
             self.flavor_by_submission[submission_id] = flavor
+        position = int(str(icp["icp_id"]).rsplit("_", 1)[-1]) - 1
         bucket = icp["employee_count"][0]
-        companies = [
+        companies = [] if (flavor, position) in self.empty_outputs else [
             {
                 "company_name": "%s Company %d" % (flavor, i),
                 "company_website": "https://%s-%d.example.com" % (flavor.lower(), i),
@@ -2079,6 +2081,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
         harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+    harness.sandbox.empty_outputs.add(("PublicBaseline", 7))
 
     _run_stage_one_to_scoring(harness, len(participants), runners=2)
     harness.advance_until("published", runners=2)
@@ -2108,6 +2111,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     # the same public HTTP partition used by the dashboard.
     from scripts.run_production_parity_full_host import (
         FullParityError,
+        _arena_persisted_score_company_count,
         _arena_rebenchmark_icp_set_id,
         _verify_arena_daily_public_results,
     )
@@ -2129,6 +2133,24 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     baseline_runs, persisted_outputs = _verify_arena_daily_public_results(**verify_args)
     assert len(baseline_runs) == len(persisted_outputs) == 20
     assert len(baseline_public["outputs"]) == 20
+    empty_run = next(run for run in baseline_runs if run["icp_position"] == 7)
+    assert empty_run["status"] == empty_run["terminal_cause"] == "accepted"
+    assert float(empty_run["per_icp_score"]) == 0.0
+    assert persisted_outputs[empty_run["run_id"]]["companies"] == []
+    score_run = next(
+        run
+        for run in harness.service.store.list_runs(
+            harness.round_id, kind="score", status="accepted"
+        )
+        if run["scored_run_id"] == empty_run["run_id"]
+    )
+    assert _arena_persisted_score_company_count(
+        service=harness.service,
+        score_row=score_run,
+        execute_row=empty_run,
+        icp=harness.service.benchmark_icps(harness.round_id)[7],
+        companies=[],
+    ) == 0
     missing = dict(baseline_public, scores={**baseline_public["scores"], "stage_1": []})
     with pytest.raises(FullParityError, match="public daily scores differ"):
         _verify_arena_daily_public_results(**dict(verify_args, results_view=missing))

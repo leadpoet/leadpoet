@@ -6339,6 +6339,62 @@ def test_arena_rebenchmark_counts_only_public_https_and_successful_openrouter():
     ) == 1
 
 
+def test_arena_rebenchmark_revalidates_persisted_zero_company_score_output():
+    from lab_arena import scoring
+
+    execute_row = {"run_id": "execute-1"}
+    score_row = {
+        "status": "accepted",
+        "terminal_cause": "accepted",
+        "scored_run_id": "execute-1",
+        "output_ref": "scores/execute-1.json",
+    }
+    score_output = scoring.build_scoring_output("execute-1", [])
+
+    class Objects:
+        def get_bounded(self, ref, maximum):
+            assert ref == score_row["output_ref"]
+            assert maximum == scoring.MAX_SCORING_OUTPUT_BYTES
+            return json.dumps(score_output).encode("utf-8")
+
+    service = SimpleNamespace(
+        _objects=Objects(),
+        scorer_policy={"max_scored_companies": 0},
+    )
+    assert full_host._arena_persisted_score_company_count(
+        service=service,
+        score_row=score_row,
+        execute_row=execute_row,
+        icp={"employee_count": ["51-200"]},
+        companies=[],
+    ) == 0
+    # The first-N slice is authoritative. A matching trailing company after
+    # an out-of-bucket first result must not create another scored company.
+    assert full_host._arena_persisted_score_company_count(
+        service=service,
+        score_row=score_row,
+        execute_row=execute_row,
+        icp={"employee_count": ["51-200"], "max_companies": 1},
+        companies=[
+            {"employee_count": "10000+"},
+            {"employee_count": "51-200"},
+        ],
+    ) == 0
+
+    for broken in (
+        {**score_row, "status": "failed", "terminal_cause": "judge_error"},
+        {**score_row, "scored_run_id": "execute-2"},
+    ):
+        with pytest.raises(FullParityError, match="score output is invalid"):
+            full_host._arena_persisted_score_company_count(
+                service=service,
+                score_row=broken,
+                execute_row=execute_row,
+                icp={"employee_count": ["51-200"]},
+                companies=[],
+            )
+
+
 def test_clone_postgrest_can_assume_the_candidate_arena_service_role():
     source = inspect.getsource(fast_parity._DockerDatabase.start_postgrest)
     assert "rolname = 'lab_arena_service'" in source
@@ -6377,9 +6433,14 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence(
                 "icp_position": position,
                 "execute_accepted": True,
                 "score_accepted": True,
+                "execute_terminal_cause": "accepted",
+                "score_terminal_cause": "accepted",
+                "persisted_output_empty": False,
+                "persisted_per_icp_score": 72.5,
                 "company_count": 1,
                 "valid_company_with_https_evidence_count": 1,
                 "https_evidence_url_count": 1,
+                "scored_company_count": 1,
                 "successful_openrouter_execute_call_count": 1,
                 "successful_openrouter_score_settlement_count": 1,
             }
@@ -6394,7 +6455,9 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence(
             "scored_icp_count": 20,
             "unique_icp_positions": 20,
             "company_count": 20,
+            "valid_company_with_https_evidence_count": 20,
             "evidence_url_count": 20,
+            "scored_company_count": 20,
         },
         "providers": {
             "transport": "live-httpx",
@@ -6431,6 +6494,41 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence(
         artifact_bucket=bucket,
     )["status"] == "passed"
 
+    mixed = json.loads(json.dumps(evidence))
+    empty = mixed["icp_results"][7]
+    empty["persisted_output_empty"] = True
+    empty["persisted_per_icp_score"] = 0.0
+    for field in (
+        "company_count",
+        "valid_company_with_https_evidence_count",
+        "https_evidence_url_count",
+        "scored_company_count",
+        "successful_openrouter_execute_call_count",
+        "successful_openrouter_score_settlement_count",
+    ):
+        empty[field] = 0
+    all_skipped = mixed["icp_results"][8]
+    all_skipped["persisted_per_icp_score"] = 0.0
+    all_skipped["scored_company_count"] = 0
+    all_skipped["successful_openrouter_score_settlement_count"] = 0
+    mixed["counts"].update({
+        "company_count": 19,
+        "valid_company_with_https_evidence_count": 19,
+        # The same valid HTTPS evidence URL may occur in several ICP outputs.
+        "evidence_url_count": 1,
+        "scored_company_count": 18,
+    })
+    mixed["providers"].update({
+        "successful_openrouter_execute_call_count": 19,
+        "successful_openrouter_score_settlement_count": 18,
+    })
+    assert full_host._validate_arena_rebenchmark_evidence(
+        mixed,
+        candidate_sha=SHA,
+        run_id="pp-1-1",
+        artifact_bucket=bucket,
+    )["status"] == "passed"
+
     broken_values = [
         dict(evidence, daily_icp_set_id=int(evaluation_date.replace("-", ""))),
         dict(evidence, daily_icp_set_id=daily_icp_set_id - 1),
@@ -6441,7 +6539,9 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence(
         ("counts", "accepted_execute_runs", 19),
         ("counts", "accepted_score_runs", 19),
         ("counts", "company_count", 0),
+        ("counts", "valid_company_with_https_evidence_count", 0),
         ("counts", "evidence_url_count", 0),
+        ("counts", "scored_company_count", 0),
         ("providers", "execute_settled_provider_call_count", 0),
         ("providers", "score_settled_provider_call_count", 0),
         ("providers", "successful_openrouter_execute_call_count", 19),
@@ -6470,9 +6570,14 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence(
     for key, value in (
         ("execute_accepted", False),
         ("score_accepted", False),
+        ("execute_terminal_cause", "model_error"),
+        ("score_terminal_cause", "judge_error"),
+        ("persisted_output_empty", True),
+        ("persisted_per_icp_score", float("nan")),
         ("company_count", 0),
         ("valid_company_with_https_evidence_count", 0),
         ("https_evidence_url_count", 0),
+        ("scored_company_count", 0),
         ("successful_openrouter_execute_call_count", 0),
         ("successful_openrouter_score_settlement_count", 0),
     ):
@@ -6480,6 +6585,65 @@ def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence(
         broken["icp_results"][7][key] = value
         per_icp_broken_values.append(broken)
     for broken in per_icp_broken_values:
+        with pytest.raises(FullParityError, match="evidence is incomplete"):
+            full_host._validate_arena_rebenchmark_evidence(
+                broken,
+                candidate_sha=SHA,
+                run_id="pp-1-1",
+                artifact_bucket=bucket,
+            )
+
+    empty_score_mismatch = json.loads(json.dumps(mixed))
+    empty_score_mismatch["icp_results"][7]["persisted_per_icp_score"] = 1.0
+    all_empty = json.loads(json.dumps(mixed))
+    for item in all_empty["icp_results"]:
+        item["persisted_output_empty"] = True
+        item["persisted_per_icp_score"] = 0.0
+        for field in (
+            "company_count",
+            "valid_company_with_https_evidence_count",
+            "https_evidence_url_count",
+            "scored_company_count",
+            "successful_openrouter_execute_call_count",
+            "successful_openrouter_score_settlement_count",
+        ):
+            item[field] = 0
+    all_empty["counts"].update({
+        "company_count": 0,
+        "valid_company_with_https_evidence_count": 0,
+        "evidence_url_count": 0,
+        "scored_company_count": 0,
+    })
+    all_empty["providers"].update({
+        "successful_openrouter_execute_call_count": 0,
+        "successful_openrouter_score_settlement_count": 0,
+    })
+    missing_empty_marker = json.loads(json.dumps(mixed))
+    missing_empty_marker["icp_results"][7].pop("persisted_output_empty")
+    bad_aggregate_total = json.loads(json.dumps(mixed))
+    bad_aggregate_total["counts"]["company_count"] += 1
+    too_many_evidence_companies = json.loads(json.dumps(mixed))
+    too_many_evidence_companies["icp_results"][9][
+        "valid_company_with_https_evidence_count"
+    ] = 2
+    too_many_evidence_companies["counts"][
+        "valid_company_with_https_evidence_count"
+    ] += 1
+    scored_without_provider = json.loads(json.dumps(mixed))
+    scored_without_provider["icp_results"][9][
+        "successful_openrouter_score_settlement_count"
+    ] = 0
+    scored_without_provider["icp_results"][10][
+        "successful_openrouter_score_settlement_count"
+    ] = 2
+    for broken in (
+        empty_score_mismatch,
+        all_empty,
+        missing_empty_marker,
+        bad_aggregate_total,
+        too_many_evidence_companies,
+        scored_without_provider,
+    ):
         with pytest.raises(FullParityError, match="evidence is incomplete"):
             full_host._validate_arena_rebenchmark_evidence(
                 broken,

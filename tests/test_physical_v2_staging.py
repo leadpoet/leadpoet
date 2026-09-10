@@ -1385,21 +1385,11 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}" in source
     assert 'get("external_write_boundaries", {}).get("arweave")' in source
     assert '!= "blocked-production-parity"' in source
-    assert "leadpoet.production_parity_arena_rebenchmark_evidence.v1" in source
-    assert (
-        "https://github.com/leadpoet/pydantic-harness/"
-        "archive/refs/heads/lab.tar.gz"
-    ) in source
-    assert 'arena_counts.get("accepted_execute_runs")' in source
-    assert 'arena_counts.get("accepted_score_runs")' in source
-    assert "configured_icps != 20" in source
-    assert "per_icp_evidence_is_complete" in source
-    assert 'item.get("execute_accepted") is True' in source
-    assert 'item.get("score_accepted") is True' in source
-    assert '"valid_company_with_https_evidence_count"' in source
-    assert '"successful_openrouter_execute_call_count"' in source
-    assert '"successful_openrouter_score_settlement_count"' in source
-    assert 'arena_recovery.get("service_restarted") is not True' in source
+    assert "_validate_arena_rebenchmark_evidence" in source
+    assert 'candidate_sha=sys.argv[2]' in source
+    assert 'run_id=sys.argv[3]' in source
+    assert 'artifact_bucket=sys.argv[4]' in source
+    assert "per_icp_evidence_is_complete" not in source
 
 
 def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main_ancestry():

@@ -226,13 +226,14 @@ for durable in "$STATE_PATH" "$RUNNER_PATH"; do
 done
 
 # Validate all durable inputs before starting or stopping anything.
-( cd "$RELEASE" && sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" - "$CANDIDATE_SERVICE_ENV" "$POLICY_FILE" "$MANIFEST" "$EIF_FILE" <<'PY'
+( cd "$RELEASE" && sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" - "$CANDIDATE_SERVICE_ENV" "$POLICY_FILE" "$MANIFEST" "$EIF_FILE" "$(id -u)" <<'PY'
 import hashlib,json,os,stat,sys
 from pathlib import Path
 from scripts.run_arena_validator import load_environment
 from validator_tee.enclave.arena_hotkey import validate_policy
 from leadpoet_canonical.lab_arena_rewards import sha256_json
-env,policy_path,manifest_path,eif_path=map(Path,sys.argv[1:])
+env,policy_path,manifest_path,eif_path=map(Path,sys.argv[1:5])
+operator_uid=int(sys.argv[5])
 load_environment(env)
 for path in (policy_path,manifest_path,eif_path):
     if not path.is_file() or path.is_symlink(): raise SystemExit("Arena signer input must be a regular non-symlink file")
@@ -244,6 +245,9 @@ if not state.is_absolute() or not state.is_dir() or state.is_symlink(): raise Sy
 if state.stat().st_mode & 0o077: raise SystemExit("Arena validator state directory must be private")
 runsc=Path(os.environ["LAB_ARENA_RUNSC_PATH"])
 if not runsc.is_absolute() or not runsc.is_file() or runsc.is_symlink() or not os.access(runsc,os.X_OK): raise SystemExit("Arena runsc must be an executable regular file")
+policy_metadata=policy_path.stat()
+if policy_metadata.st_mode & 0o077 or policy_metadata.st_uid not in (0,operator_uid):
+    raise SystemExit("Arena signer policy must be a private owned file before restart")
 policy=validate_policy(json.loads(policy_path.read_text()))
 envelope_value=os.environ.get("LAB_ARENA_HOTKEY_ENVELOPE", "").strip()
 if envelope_value:

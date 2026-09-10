@@ -69,7 +69,7 @@ policy_bytes=json.dumps(policy,sort_keys=True,separators=(",",":"),ensure_ascii=
 manifest={"schema_version":"leadpoet.arena.signer_manifest.v1","eif_sha256":"sha256:"+digest,"pcr0":pcr0,"policy_sha256":"sha256:"+hashlib.sha256(policy_bytes).hexdigest()}
 Path(output).write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n")
 PY
-install -m 0644 "$EIF_TMP" "$OUTPUT_ROOT/validator-enclave.eif"
-install -m 0644 "$WORK/manifest.json" "$OUTPUT_ROOT/manifest.json"
-install -m 0644 "$FROZEN_POLICY" "$OUTPUT_ROOT/arena_signer_policy.json"
+install -m 0600 "$EIF_TMP" "$OUTPUT_ROOT/validator-enclave.eif"
+install -m 0600 "$WORK/manifest.json" "$OUTPUT_ROOT/manifest.json"
+install -m 0600 "$FROZEN_POLICY" "$OUTPUT_ROOT/arena_signer_policy.json"
 echo "Arena signer artifact ready: commit=$COMMIT_SHA output=$OUTPUT_ROOT"

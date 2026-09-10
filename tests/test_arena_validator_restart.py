@@ -276,6 +276,21 @@ def test_arena_to_arena_handoff_drains_service_and_validates_old_image_first():
     assert text.index("SIGNER_HANDOFF_COMMITTED=1", candidate) < text.rindex("SIGNER_HANDOFF_COMMITTED=1")
 
 
+def test_policy_permissions_fail_before_service_drain(tmp_path):
+    text = SCRIPT.read_text()
+    start = text.index("policy_metadata=policy_path.stat()")
+    end = text.index("policy=validate_policy", start)
+    assert end < text.index('timeout "$STOP_TIMEOUT" sudo systemctl stop "$SERVICE"', end)
+    path = tmp_path / "policy.json"
+    path.write_text("{}")
+    path.chmod(0o644)
+    scope = {"policy_path": path, "operator_uid": path.stat().st_uid}
+    with pytest.raises(SystemExit, match="private owned file before restart"):
+        exec(text[start:end], scope)
+    path.chmod(0o600)
+    exec(text[start:end], scope)
+
+
 def test_arena_candidate_failure_restores_previous_signer_and_service(tmp_path):
     text = SCRIPT.read_text()
     cleanup = text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]

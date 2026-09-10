@@ -61,7 +61,6 @@ ENTRYPOINT_MODULES = (
     "gateway.tee.tee_service",
     "gateway.tee.scoring_executor",
     "qualification.scoring.lead_scorer",
-    "leadpoet_canonical.attested_receipts",
     "leadpoet_canonical.attested_v2",
     "gateway.tee.protected_workflows",
 )
@@ -98,7 +97,6 @@ ROLE_ENTRYPOINT_MODULES = {
         "gateway.tee.topology",
         "gateway.tee.protected_workflows",
         "leadpoet_canonical.attested_v2",
-        "gateway.research_lab.attested_v2_store",
     ),
     "gateway_scoring": ENTRYPOINT_MODULES
     + DYNAMIC_IMPORT_MODULES

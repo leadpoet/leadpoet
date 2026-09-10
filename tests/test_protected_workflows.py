@@ -219,24 +219,9 @@ def test_scoring_receipt_failure_policy_is_protected():
         "_job_input_limit_bytes",
         "ExecutionContextV2.record_transport",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/execution_job_manager_v2.py"])
-    assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
-        "gateway/research_lab/attested_scoring_v2.py"
-    ]
-def test_ancestry_unknown_commit_recovery_is_protected():
-    assert {
-        "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",
-        "_ancestry_checkpoint_unknown_commit_sleep",
-        "persist_ancestry_checkpoint_v2",
-    } <= set(
-        PROTECTED_SYMBOLS["gateway/research_lab/attested_v2_store.py"]
-    )
 
 
 def test_inter_enclave_replay_and_identity_boundaries_are_protected():
-    assert {
-        "_select_committed_encrypted_artifacts",
-        "persist_execution_transport_artifacts_v2",
-    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/attested_artifacts_v2.py"])
     assert {
         "ATTESTED_TLS_CERTIFICATE_LIFETIME",
         "ATTESTED_TLS_CERTIFICATE_CLOCK_SKEW",

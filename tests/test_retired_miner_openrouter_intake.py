@@ -1,4 +1,3 @@
-from gateway.research_lab import attested_coordinator_v2
 from gateway.tee.coordinator_executor_v2 import COORDINATOR_OPERATIONS_V2
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
@@ -23,12 +22,6 @@ def test_miner_openrouter_credential_intake_is_not_exposed() -> None:
     assert not hasattr(TEEClient, "v2_seal_openrouter_ingress_credential")
     assert not hasattr(
         TEEClient, "v2_provision_job_sealed_openrouter_secret"
-    )
-    assert not hasattr(
-        attested_coordinator_v2, "register_openrouter_credentials_v2"
-    )
-    assert not hasattr(
-        attested_coordinator_v2, "preflight_openrouter_key_ref_v2"
     )
     assert "register_openrouter_credential_v2" not in COORDINATOR_OPERATIONS_V2
     assert "preflight_openrouter_credential_v2" not in COORDINATOR_OPERATIONS_V2

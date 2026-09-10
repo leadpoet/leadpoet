@@ -335,19 +335,13 @@ class _HostChain:
             get_account_nonce=lambda _hotkey: 0,
             get_block_hash=lambda block_id: "0x" + (source.genesis if block_id == 0 else "1" * 64),
             rpc_request=self._broadcast,
-            query=self._query,
         )
-    def _query(self, *, module, storage_function, params, block_hash):
-        assert module == "SubtensorModule"
-        assert block_hash == "0x" + "2" * 64
-        if storage_function == "Uids": return SimpleNamespace(value=7)
-        if storage_function == "LastUpdate": return SimpleNamespace(value=[0] * 8)
-        if storage_function == "WeightsSetRateLimit": return SimpleNamespace(value=100)
-        raise AssertionError(storage_function)
     def _broadcast(self, method, params):
         assert method == "author_submitExtrinsic"; self.broadcasts.append(params[0]); self.source.extrinsic = params[0]
     def finalized_head(self): return SimpleNamespace(number=104, hash="0x" + "2" * 64)
     def refresh_metagraph(self): return SimpleNamespace(hotkeys=tuple(self.source.hotkeys))
+    def finalized_weight_submission_context(self, _hotkey):
+        return self.finalized_head(), self.refresh_metagraph(), True
 
 
 class _Api:

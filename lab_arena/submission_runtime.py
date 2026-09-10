@@ -42,7 +42,7 @@ class SubmissionProviderKeys:
             if not secret:
                 raise BrokerError("broker_unavailable")
             return secret
-        if provider not in ("openrouter", "deepline"):
+        if provider not in ("openrouter", "deepline", "scrapingdog"):
             raise BrokerError("miner_provider_not_configured")
         if self._credentials is None:
             raise BrokerError("miner_credentials_unavailable")

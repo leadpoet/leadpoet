@@ -43,10 +43,17 @@ class MinerSubmissionError(RuntimeError):
         return self.code if not detail else "%s (%s)" % (self.code, detail)
 
 
-SUBMISSION_CREDENTIAL_ENV_VARS = {
+REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS = {
     "openrouter_api_key": "OPENROUTER_API_KEY",
     "openrouter_management_key": "OPENROUTER_MANAGEMENT_KEY",
     "deepline_api_key": "DEEPLINE_API_KEY",
+}
+OPTIONAL_SUBMISSION_CREDENTIAL_ENV_VARS = {
+    "scrapingdog_api_key": "SCRAPINGDOG_API_KEY",
+}
+SUBMISSION_CREDENTIAL_ENV_VARS = {
+    **REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS,
+    **OPTIONAL_SUBMISSION_CREDENTIAL_ENV_VARS,
 }
 SUBMISSION_CREDENTIAL_MIN_LENGTH = 16
 SUBMISSION_CREDENTIAL_MAX_LENGTH = 4096
@@ -55,14 +62,17 @@ SUBMISSION_CREDENTIAL_MAX_LENGTH = 4096
 def validate_submission_credentials(
     credentials: Mapping[str, str] | None,
 ) -> dict[str, str]:
-    """Return the exact, non-empty credential mapping required for a model run."""
+    """Return required credentials plus one valid optional Scrapingdog key."""
 
     if not isinstance(credentials, Mapping):
         raise MinerSubmissionError("submission_credentials_required")
-    if set(credentials) != set(SUBMISSION_CREDENTIAL_ENV_VARS):
+    submitted = set(credentials)
+    if not set(REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS).issubset(submitted):
+        raise MinerSubmissionError("submission_credentials_required")
+    if not submitted.issubset(set(SUBMISSION_CREDENTIAL_ENV_VARS)):
         raise MinerSubmissionError("submission_credentials_required")
     normalized: dict[str, str] = {}
-    for name in SUBMISSION_CREDENTIAL_ENV_VARS:
+    for name in credentials:
         value = credentials.get(name)
         if (
             not isinstance(value, str)
@@ -71,7 +81,12 @@ def validate_submission_credentials(
             <= len(value)
             <= SUBMISSION_CREDENTIAL_MAX_LENGTH
         ):
-            raise MinerSubmissionError("submission_credentials_required")
+            code = (
+                "submission_credentials_required"
+                if name in REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS
+                else "submission_credentials_invalid"
+            )
+            raise MinerSubmissionError(code)
         normalized[name] = value
     return normalized
 
@@ -79,15 +94,17 @@ def validate_submission_credentials(
 def submission_credentials_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Load all model credentials from environment variables or fail closed."""
+    """Load required keys and omit an absent optional Scrapingdog key."""
 
     values = os.environ if environ is None else environ
-    return validate_submission_credentials(
-        {
-            name: values.get(environment_name, "")
-            for name, environment_name in SUBMISSION_CREDENTIAL_ENV_VARS.items()
-        }
-    )
+    credentials = {
+        name: values.get(environment_name, "")
+        for name, environment_name in REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS.items()
+    }
+    for name, environment_name in OPTIONAL_SUBMISSION_CREDENTIAL_ENV_VARS.items():
+        if values.get(environment_name, ""):
+            credentials[name] = values[environment_name]
+    return validate_submission_credentials(credentials)
 
 
 def prompt_submission_credentials(
@@ -103,6 +120,7 @@ def prompt_submission_credentials(
         "openrouter_api_key": "OpenRouter API key: ",
         "openrouter_management_key": "OpenRouter management key: ",
         "deepline_api_key": "Deepline API key: ",
+        "scrapingdog_api_key": "Scrapingdog API key (optional; press Enter to omit): ",
     }
     for name, environment_name in SUBMISSION_CREDENTIAL_ENV_VARS.items():
         value = values.get(environment_name, "")
@@ -112,9 +130,12 @@ def prompt_submission_credentials(
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", getpass.GetPassWarning)
-                credentials[name] = getpass_fn(prompts[name])
+                prompted = getpass_fn(prompts[name])
         except (getpass.GetPassWarning, EOFError) as exc:
             raise MinerSubmissionError("credential_prompt_unavailable") from exc
+        if name in OPTIONAL_SUBMISSION_CREDENTIAL_ENV_VARS and prompted == "":
+            continue
+        credentials[name] = prompted
     return validate_submission_credentials(credentials)
 
 
@@ -169,7 +190,9 @@ _SAFE_ADMISSION_ERRORS = frozenset({
     "submission_rejected:openrouter_api_key_no_credit",
     "submission_rejected:openrouter_management_key_invalid",
     "submission_rejected:deepline_api_key_invalid",
+    "submission_rejected:scrapingdog_api_key_invalid",
     "submission_rejected:submission_credentials_invalid",
+    "submission_credentials_immutable",
 })
 
 
@@ -399,6 +422,7 @@ def run_interactive_submission(
     output_fn("Your source must contain harness.py with synchronous run_icp(icp).")
     output_fn("Do not put API keys in your source; credentials are sent separately.")
     output_fn("The OpenRouter API key and Deepline API key pay for model execution and scoring.")
+    output_fn("A Scrapingdog API key is optional and pays only when your model uses Scrapingdog.")
     output_fn("The OpenRouter management key is used by the gateway only.")
     output_fn("If this agent wins, its source will be published as the public baseline.")
     source_dir = input_fn("Agent source directory: ").strip()

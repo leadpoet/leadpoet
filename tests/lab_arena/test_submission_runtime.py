@@ -63,7 +63,13 @@ def test_only_the_organizer_baseline_uses_host_keys(credentials):
     assert vault is None or not vault.calls
 
 
-@pytest.mark.parametrize("provider", ["scrapingdog", "openrouter_management_key", "unknown"])
+def test_scrapingdog_uses_only_the_submitted_miner_key():
+    keys, context, vault = resolver()
+    assert keys.credential_for(context, "scrapingdog") == "miner-runtime-key"
+    assert vault.calls == [(context.submission_id, "scrapingdog")]
+
+
+@pytest.mark.parametrize("provider", ["openrouter_management_key", "unknown"])
 def test_no_unsubmitted_provider_or_management_key_route(provider):
     keys, context, vault = resolver()
     with pytest.raises(BrokerError, match="miner_provider_not_configured"):

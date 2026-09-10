@@ -769,6 +769,7 @@ SUBMISSION_FINALIZE_BODY_FIELDS = (
         F("openrouter_api_key", "str", minimum=16, maximum=4096),
         F("openrouter_management_key", "str", minimum=16, maximum=4096),
         F("deepline_api_key", "str", minimum=16, maximum=4096),
+        F("scrapingdog_api_key", "str", required=False, minimum=16, maximum=4096),
     )),
 )
 
@@ -804,6 +805,10 @@ def validate_submission_finalize_body(body: Any) -> Dict[str, Any]:
     """Validate the facts repeated after the source upload."""
 
     document = validate_document(body, SUBMISSION_FINALIZE_BODY_FIELDS)
+    if document["credentials"].get("scrapingdog_api_key") is None and (
+        "scrapingdog_api_key" in document["credentials"]
+    ):
+        raise ArenaContractError("$.credentials.scrapingdog_api_key must be a string")
     if not SUBMISSION_ID_RE.match(document["submission_id"]):
         raise ArenaContractError("submission_id has an invalid shape")
     if not re.match(r"^arena/[A-Za-z0-9._:-]{1,64}/sources/[A-Za-z0-9._:-]{1,64}\.tar\.gz$", document["source_ref"]):

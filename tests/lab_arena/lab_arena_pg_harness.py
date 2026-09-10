@@ -39,6 +39,7 @@ LAB_ARENA_SOURCE_DISCLOSURE_MIGRATION = "199-lab-arena-source-disclosure-time.sq
 LAB_ARENA_NEXT_DAY_ICP_MIGRATION = "200-lab-arena-next-day-icp-disclosure.sql"
 LAB_ARENA_ACCEPTED_WEIGHT_STATE_MIGRATION = "202-arena-accepted-weight-state.sql"
 LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION = "203-retire-legacy-incentive-weight-bridge.sql"
+LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION = "205-lab-arena-optional-scrapingdog-credential.sql"
 DEFAULT_MIGRATIONS = (
     LAB_ARENA_MIGRATION,
     LAB_ARENA_DAILY_COMPETITION_MIGRATION,

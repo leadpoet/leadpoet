@@ -982,13 +982,21 @@ class ArenaService:
             if body[field] != row.get(field):
                 raise ServiceError("submission_transport_mismatch", 409)
         if row.get("status") == "accepted":
-            if all(
-                self._store.get_submission_credential(
+            stored_credentials = {
+                provider: self._store.get_submission_credential(
                     submission_id, validated["hotkey"], provider
                 )
-                is not None
                 for provider in credentials_module.RUNTIME_PROVIDERS
+            }
+            if all(
+                stored_credentials[provider] is not None
+                for provider in credentials_module.REQUIRED_RUNTIME_PROVIDERS
             ):
+                if (
+                    "scrapingdog_api_key" in body["credentials"]
+                    and stored_credentials["scrapingdog"] is None
+                ):
+                    raise ServiceError("submission_credentials_immutable", 409)
                 return {"status": "accepted", "submission_id": submission_id}
             raise ServiceError("submission_credentials_missing", 409)
         if row.get("status") != "uploading":
@@ -1038,6 +1046,8 @@ class ArenaService:
                 encrypted_credentials,
             )
         except ArenaStoreError as exc:
+            if "lab_arena_submission_credentials_immutable" in str(exc):
+                raise ServiceError("submission_credentials_immutable", 409) from exc
             if "lab_arena_round_full" not in str(exc):
                 raise
             self._store.update_submission(

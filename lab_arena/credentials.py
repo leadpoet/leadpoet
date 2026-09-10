@@ -2,7 +2,8 @@
 
 The OpenRouter management key is an admission-only proof.  It is never
 returned from this module, encrypted, or stored.  Runtime callers can decrypt
-only the submitted OpenRouter runtime key and Deepline workspace key.
+only the submitted OpenRouter runtime key, Deepline workspace key, and an
+optional Scrapingdog API key.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import hashlib
 import json
 import re
 from typing import Any, Callable, Mapping, Optional
+from urllib.parse import urlencode
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -20,6 +22,7 @@ from urllib.error import HTTPError, URLError
 OPENROUTER_CURRENT_KEY_URL = "https://openrouter.ai/api/v1/key"
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/keys/{key_hash}"
 DEEPLINE_BALANCE_URL = "https://code.deepline.com/api/v2/billing/balance"
+SCRAPINGDOG_ACCOUNT_URL = "https://api.scrapingdog.com/account"
 MAX_PROBE_RESPONSE_BYTES = 1_048_576
 MAX_CREDENTIAL_BYTES = 4096
 
@@ -37,11 +40,16 @@ _DIRECT_URLOPEN = urlrequest.build_opener(
     urlrequest.ProxyHandler({}), _RejectRedirect()
 ).open
 
-RUNTIME_PROVIDERS = ("openrouter", "deepline")
-SUBMITTED_CREDENTIAL_FIELDS = (
+REQUIRED_RUNTIME_PROVIDERS = ("openrouter", "deepline")
+RUNTIME_PROVIDERS = REQUIRED_RUNTIME_PROVIDERS + ("scrapingdog",)
+REQUIRED_SUBMITTED_CREDENTIAL_FIELDS = (
     "openrouter_api_key",
     "openrouter_management_key",
     "deepline_api_key",
+)
+OPTIONAL_SUBMITTED_CREDENTIAL_FIELDS = ("scrapingdog_api_key",)
+SUBMITTED_CREDENTIAL_FIELDS = (
+    REQUIRED_SUBMITTED_CREDENTIAL_FIELDS + OPTIONAL_SUBMITTED_CREDENTIAL_FIELDS
 )
 
 
@@ -64,9 +72,14 @@ HttpGet = Callable[[str, str, int], Mapping[str, Any]]
 
 
 def _default_http_get(url: str, bearer_token: str, timeout_seconds: int) -> Mapping[str, Any]:
+    headers = {"Accept": "application/json"}
+    if url == SCRAPINGDOG_ACCOUNT_URL:
+        url = url + "?" + urlencode({"api_key": bearer_token})
+    else:
+        headers["Authorization"] = "Bearer " + bearer_token
     request = urlrequest.Request(
         url,
-        headers={"Authorization": "Bearer " + bearer_token, "Accept": "application/json"},
+        headers=headers,
         method="GET",
     )
     try:
@@ -122,11 +135,16 @@ def kms_encryption_context(
     submission, hotkey = _identity(submission_id, miner_hotkey)
     if provider not in RUNTIME_PROVIDERS:
         raise CredentialError("miner_provider_not_configured")
+    credential_kinds = {
+        "openrouter": "openrouter_runtime",
+        "deepline": "deepline",
+        "scrapingdog": "scrapingdog",
+    }
     return {
         "purpose": "leadpoet_lab_arena_miner_runtime_credential",
         "submission_id": submission,
         "miner_hotkey": hotkey,
-        "credential_kind": "openrouter_runtime" if provider == "openrouter" else "deepline",
+        "credential_kind": credential_kinds[provider],
     }
 
 
@@ -200,6 +218,25 @@ class CredentialManager:
     def _validate_deepline(self, deepline_key: str) -> None:
         self._probe(DEEPLINE_BALANCE_URL, deepline_key, "deepline_api_key_invalid")
 
+    def _validate_scrapingdog(self, scrapingdog_key: str) -> None:
+        account = self._probe(
+            SCRAPINGDOG_ACCOUNT_URL,
+            scrapingdog_key,
+            "scrapingdog_api_key_invalid",
+        )
+        request_limit = account.get("requestLimit")
+        request_used = account.get("requestUsed")
+        if (
+            account.get("apiKey") != scrapingdog_key
+            or isinstance(request_limit, bool)
+            or not isinstance(request_limit, int)
+            or request_limit < 0
+            or isinstance(request_used, bool)
+            or not isinstance(request_used, int)
+            or request_used < 0
+        ):
+            raise CredentialError("scrapingdog_api_key_invalid")
+
     def _encrypt(
         self, plaintext: str, *, submission_id: str, miner_hotkey: str, provider: str
     ) -> str:
@@ -232,9 +269,12 @@ class CredentialManager:
         """Validate all submitted keys and return only runtime ciphertexts."""
 
         _identity(submission_id, miner_hotkey)
-        if not isinstance(credentials, Mapping) or set(credentials) != set(
-            SUBMITTED_CREDENTIAL_FIELDS
-        ):
+        if not isinstance(credentials, Mapping):
+            raise CredentialError("submission_credentials_invalid")
+        submitted_fields = set(credentials)
+        if not set(REQUIRED_SUBMITTED_CREDENTIAL_FIELDS).issubset(
+            submitted_fields
+        ) or not submitted_fields.issubset(set(SUBMITTED_CREDENTIAL_FIELDS)):
             raise CredentialError("submission_credentials_invalid")
         runtime_key = _openrouter_key(
             credentials.get("openrouter_api_key"), "openrouter_api_key_invalid"
@@ -246,10 +286,18 @@ class CredentialManager:
         deepline_key = _bounded_secret(
             credentials.get("deepline_api_key"), "deepline_api_key_invalid"
         )
+        scrapingdog_key = None
+        if "scrapingdog_api_key" in credentials:
+            scrapingdog_key = _bounded_secret(
+                credentials.get("scrapingdog_api_key"),
+                "scrapingdog_api_key_invalid",
+            )
 
         self._validate_openrouter(runtime_key, management_key)
         self._validate_deepline(deepline_key)
-        return {
+        if scrapingdog_key is not None:
+            self._validate_scrapingdog(scrapingdog_key)
+        encrypted = {
             "openrouter": self._encrypt(
                 runtime_key,
                 submission_id=submission_id,
@@ -263,6 +311,14 @@ class CredentialManager:
                 provider="deepline",
             ),
         }
+        if scrapingdog_key is not None:
+            encrypted["scrapingdog"] = self._encrypt(
+                scrapingdog_key,
+                submission_id=submission_id,
+                miner_hotkey=miner_hotkey,
+                provider="scrapingdog",
+            )
+        return encrypted
 
     def runtime_key(self, row: Mapping[str, Any], provider: str) -> str:
         """Decrypt one provider runtime key; management has no runtime slot."""
@@ -311,7 +367,11 @@ __all__ = [
     "DEEPLINE_BALANCE_URL",
     "OPENROUTER_CURRENT_KEY_URL",
     "OPENROUTER_KEY_URL",
+    "OPTIONAL_SUBMITTED_CREDENTIAL_FIELDS",
+    "REQUIRED_RUNTIME_PROVIDERS",
+    "REQUIRED_SUBMITTED_CREDENTIAL_FIELDS",
     "RUNTIME_PROVIDERS",
+    "SCRAPINGDOG_ACCOUNT_URL",
     "SUBMITTED_CREDENTIAL_FIELDS",
     "kms_encryption_context",
 ]

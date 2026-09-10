@@ -23,6 +23,7 @@ CREDENTIALS = {
     "openrouter_api_key": "openrouter-execution-secret",
     "openrouter_management_key": "openrouter-management-secret",
     "deepline_api_key": "deepline-execution-secret",
+    "scrapingdog_api_key": "scrapingdog-execution-secret",
 }
 
 
@@ -245,6 +246,7 @@ def test_credential_prompts_are_masked_and_environment_values_skip_prompts():
         "OpenRouter API key: ",
         "OpenRouter management key: ",
         "Deepline API key: ",
+        "Scrapingdog API key (optional; press Enter to omit): ",
     ]
 
     def fail_prompt(_prompt):  # pragma: no cover - must not run
@@ -257,6 +259,7 @@ def test_credential_prompts_are_masked_and_environment_values_skip_prompts():
                 "openrouter_management_key"
             ],
             "DEEPLINE_API_KEY": CREDENTIALS["deepline_api_key"],
+            "SCRAPINGDOG_API_KEY": CREDENTIALS["scrapingdog_api_key"],
         },
         getpass_fn=fail_prompt,
     ) == CREDENTIALS
@@ -298,7 +301,7 @@ def test_interactive_submission_keeps_credentials_out_of_input_and_output(monkey
         environ={},
     )
     assert len(ordinary_prompts) == 2
-    assert len(masked_prompts) == 3
+    assert len(masked_prompts) == 4
     assert submitted["credentials"] == CREDENTIALS
     rendered = "\n".join(output + ordinary_prompts + masked_prompts)
     assert all(secret not in rendered for secret in CREDENTIALS.values())

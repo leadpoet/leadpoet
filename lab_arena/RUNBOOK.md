@@ -66,7 +66,10 @@ public baseline:
 
 The host keys are used for baseline traffic. A competing model's
 OpenRouter runtime key and Deepline key are submitted separately, encrypted in
-the gateway vault, and attached to that submission's execution and judge calls. The
+the gateway vault, and attached to that submission's execution and judge calls. An
+optional miner Scrapingdog key is encrypted in the same vault and used only when
+that model calls Scrapingdog. The sandbox receives a fixed non-secret runtime
+handle; the actual Scrapingdog key stays in the broker. The
 matching OpenRouter management key is used for admission validation and then
 discarded. The miner funds those upstream calls. The validator receives an
 opaque runtime lease and cannot read the credentials; submitted code receives
@@ -135,6 +138,7 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/193-lab-arena-upload-recovery.sql`,
 `scripts/194-lab-arena-open-scorer-refresh.sql`, then
 `scripts/197-lab-arena-reward-chain-scope.sql` with the database owner
+and then `scripts/205-lab-arena-optional-scrapingdog-credential.sql`
 before service startup. Then check the service wiring:
 
 `scripts/191-lab-arena-upload-recovery.sql` remains byte-identical only because
@@ -242,9 +246,10 @@ python3 scripts/run_lab_arena_runner.py
 
 Choose **Submit Model** in `neurons/miner.py`. It reads the local source
 directory and the miner's OpenRouter API key, OpenRouter management key, and
-Deepline API key from environment variables or masked prompts. It archives,
-uploads, signs, and finalizes the source. Runtime API keys are sent separately
-and encrypted for the model's runs. The management key is used only to check
+Deepline API key from environment variables or masked prompts. It also accepts
+an optional Scrapingdog key from `SCRAPINGDOG_API_KEY` or a masked prompt. It
+archives, uploads, signs, and finalizes the source. Runtime API keys are sent
+separately and encrypted for the model's runs. The management key is used only to check
 admission and is not stored. No Dockerfile or image tag is required. The
 same helper can run directly with those credentials in the environment:
 

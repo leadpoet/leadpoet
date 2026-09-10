@@ -40,12 +40,60 @@ def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     authorize = script.index("--phase gateway_destructive", drain)
     destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1", authorize)
     ready = script.index("--phase gateway_ready", destructive)
+    final_runtime = script.index('GATEWAY_DEPLOY_STAGE="miner_maintenance_runtime_verify"', ready)
+    release = script.index('GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"', final_runtime)
+    completed = script.index('GATEWAY_DEPLOY_STAGE="completed"', release)
 
-    assert drain < authorize < destructive < ready
+    assert drain < authorize < destructive < ready < final_runtime < release < completed
     assert "abort_lab_arena_restart_guard_before_destructive" in _shell_function_source(
         script, "on_gateway_restart_exit"
     )
     assert "-u GATEWAY_ACTIVE_RELEASE_COMPONENT" in script
+
+
+@pytest.mark.parametrize("release_status", [0, 1])
+def test_gateway_restart_releases_owned_guard_only_after_final_checks(
+    tmp_path: Path, release_status: int,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    start = script.index('GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"')
+    end = script.index('GATEWAY_DEPLOY_STAGE="completed"', start)
+    release = script[start:end]
+    capture = tmp_path / "guard-argv"
+    harness = tmp_path / "release-guard.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"LEADPOET_REPO_ROOT={shlex.quote(str(tmp_path / 'release'))}\n"
+        "LAB_ARENA_RESTART_GUARD_GENERATION=17\n"
+        f"CAPTURE={shlex.quote(str(capture))}\n"
+        f"RELEASE_STATUS={release_status}\n"
+        "run_lab_arena_restart_guard() {\n"
+        "  printf '%s\\n' \"$@\" > \"$CAPTURE\"\n"
+        "  return \"$RELEASE_STATUS\"\n"
+        "}\n"
+        + release
+        + "printf 'generation=%s\\n' \"$LAB_ARENA_RESTART_GUARD_GENERATION\"\n",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        str(tmp_path / "release"), "release", "--generation", "17"
+    ]
+    if release_status:
+        assert completed.returncode != 0
+        assert "restart guard release failed after gateway readiness" in completed.stderr
+        assert "generation=" not in completed.stdout
+    else:
+        assert completed.returncode == 0
+        assert completed.stdout == "generation=\n"
 
 
 def _run_post_activate_guard_reexec(

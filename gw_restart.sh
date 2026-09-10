@@ -3372,6 +3372,14 @@ if ! PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
   stop_failed_miner_maintenance_runtime
   exit 1
 fi
+GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"
+export GATEWAY_DEPLOY_STAGE
+if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" release \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" >/dev/null; then
+  echo "ERROR: Lab Arena restart guard release failed after gateway readiness" >&2
+  exit 1
+fi
+LAB_ARENA_RESTART_GUARD_GENERATION=""
 GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null

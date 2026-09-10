@@ -147,6 +147,25 @@ def test_auditor_archive_endpoint_rejects_unsafe_origins(endpoint):
         )
 
 
+@pytest.mark.parametrize("variable", ("AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT", "BITTENSOR_ARCHIVE_ENDPOINT"))
+@pytest.mark.parametrize("value", ("", "   ", "wss://archive.example:443"))
+def test_auditor_archive_environment_preserves_official_default(monkeypatch, variable, value):
+    from Leadpoet.utils import subnet_epoch
+
+    monkeypatch.delenv("AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT", raising=False)
+    monkeypatch.delenv("BITTENSOR_ARCHIVE_ENDPOINT", raising=False)
+    monkeypatch.setenv(variable, value)
+
+    official = "wss://archive.chain.opentensor.ai:443"
+    assert auditor_module._auditor_archive_endpoint() == (value.strip() or official)
+    assert subnet_epoch.OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT == official
+    subnet_epoch.assert_official_archive_subtensor(SimpleNamespace(chain_endpoint=official))
+    with pytest.raises(subnet_epoch.SubnetEpochError, match="unexpected archive endpoint"):
+        subnet_epoch.assert_official_archive_subtensor(
+            SimpleNamespace(chain_endpoint="wss://archive.example:443")
+        )
+
+
 def test_auditor_archive_endpoint_rejects_conflicting_aliases():
     with pytest.raises(auditor_module.SubnetEpochError, match="conflicting"):
         auditor_module._auditor_archive_endpoint(

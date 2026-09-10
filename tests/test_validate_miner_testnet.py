@@ -136,3 +136,23 @@ def test_managed_driver_is_pinned_and_does_not_create_daily_rounds():
 def test_serve_pins_the_runtime_service_to_the_requested_round():
     source = inspect.getsource(SCRIPT._serve)
     assert "pinned_round_id=round_id" in source
+
+
+def test_testnet_database_uses_current_arena_schema_and_review_migration():
+    from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS
+
+    assert SCRIPT.EXPECTED_SCHEMA_VERSION == 197
+    assert SCRIPT.MIGRATIONS == tuple(
+        "scripts/" + migration for migration in DEFAULT_MIGRATIONS
+    )
+
+
+def test_testnet_service_wires_a_separate_full_code_review_worker():
+    source = inspect.getsource(SCRIPT._serve)
+    assert "SubmissionCodeReviewer(" in source
+    assert "credential_for=submission_keys.code_review_key" in source
+    assert "code_reviewer=SubmissionCodeReviewer(" in source
+    assert "service.review_pending_submissions()" in source
+    assert 'name="testnet-arena-code-review"' in source
+    assert "review_thread.start()" in source
+    assert "review_thread.join(timeout=5)" in source

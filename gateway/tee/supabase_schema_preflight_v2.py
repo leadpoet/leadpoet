@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 REQUIRED_SUPABASE_V2_SCHEMA = (
+    ("scripts/207-lab-arena-code-review.sql", "lab_arena_submissions", ("submission_id", "code_review_status", "code_review_doc")),
     ("scripts/125-research-lab-artifact-key-lineage.sql", "research_lab_provider_evidence_cache_v2", ("artifact_master_key_ref_hash",)),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutovers_v1", ("mapping_hash", "network_genesis_hash", "netuid", "first_subnet_epoch_index", "first_settlement_epoch_id")),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_state_v1", ("lifecycle_state", "mapping_hash", "network_genesis_hash", "netuid", "updated_at")),
@@ -15,6 +16,9 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_chain_outcomes", ("network", "netuid", "epoch", "validator_hotkey", "request_id", "extrinsic_hash", "outcome_doc", "created_at")),
 )
 REQUIRED_SUPABASE_V2_RPCS = (
+    ("scripts/207-lab-arena-code-review.sql", "lab_arena_code_review_schema_v1"),
+    ("scripts/207-lab-arena-code-review.sql", "lab_arena_begin_submission_review"),
+    ("scripts/207-lab-arena-code-review.sql", "lab_arena_finish_submission_review"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "put_research_lab_provider_evidence_cache_v2"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "research_lab_provider_persistence_batch_contract_v1"),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
@@ -25,6 +29,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
     ("scripts/203-retire-legacy-incentive-weight-bridge.sql", "lab_arena_incentive_retirement_schema_v1"),
 )
 SCHEMA_CAPABILITIES = (
+    ("lab_arena_code_review_schema_v1", {"schema_version": "leadpoet.lab_arena.code_review.v1", "version": 207}),
     ("lab_arena_schema_version_v1", {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197}),
     ("lab_arena_weight_state_schema_v1", {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}),
     ("lab_arena_incentive_retirement_schema_v1", {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203}),

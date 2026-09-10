@@ -35,6 +35,32 @@ A miner submits one local source directory. The helper:
 4. uploads the archive; and
 5. signs a final request so the Arena can validate and accept the bytes.
 
+Acceptance queues a full-source review. A separate gateway worker sends every
+file and bundled prompt to `anthropic/claude-sonnet-5`, using the OpenRouter
+runtime key encrypted for that exact submission and miner. It has no organizer
+key fallback. The daily organizer baseline is exempt; a miner submitting the
+same baseline code still requires review with the miner's key.
+
+Only `code_review_status=passed` can freeze a miner into evaluation. The source
+must be complete UTF-8 text and fit in the 1M-token judge context, including
+output headroom. Requests disable context compression. Missing file coverage,
+truncated output, malformed verdicts, and unknown charges are incomplete reviews.
+The worker retries incomplete reviews at most three times, with a 60-second
+backoff. A live review claim expires after ten minutes so a restart can recover.
+After the normal submission cutoff, unresolved reviews may finish within the
+existing benchmark preparation window. Four reviews can run at once. At the
+benchmark deadline, submissions without a pass are excluded with
+`code_review_incomplete`; a confirmed rejection uses `code_review_rejected`.
+This does not change the daily evaluation schedule or numerical scoring.
+
+Review charges use `openrouter.code_review` in `lab_arena_ledger`, with
+`funding_source=miner_key`. They remain separate from sourcing cost eligibility.
+The submission status API exposes review status, file/byte counts, and cost.
+Only verdicts, counts, and category codes are persisted. Unknown provider charges retain their reservation
+as uncertain; neither a worker crash nor a malformed response makes a free pass.
+Apply migration `207-lab-arena-code-review.sql` after migration 206 before
+restarting the gateway. The gateway preflight checks the review schema.
+
 No Dockerfile, public registry, image tag, commit identity, receipt, source
 digest, or release manifest is part of miner admission. The service validates
 the declared archive size and safe source structure, then uses its own

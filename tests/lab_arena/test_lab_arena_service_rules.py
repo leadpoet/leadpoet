@@ -1888,7 +1888,10 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
 
     class Store:
         def claim_assignment(self, **_kwargs):
-            return {"status": "leased", "kind": "score", "scored_run_id": "execute-1", "icp_position": 0}
+            return {"status": "leased", "kind": "score", "submission_id": "sub-1", "scored_run_id": "execute-1", "icp_position": 0}
+
+        def get_submission(self, _submission_id):
+            return {"code_review_status": "passed"}
 
         def get_run(self, _run_id):
             return {"output_ref": "out.json"}
@@ -2024,6 +2027,10 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image(c
     }
 
     class Store:
+        @staticmethod
+        def get_submission(_submission_id):
+            return dict(participant, code_review_status="passed")
+
         @staticmethod
         def get_submission_credential(submission_id, hotkey, provider):
             assert not is_baseline  # Host-funded baseline needs no miner row.

@@ -34,6 +34,7 @@ from lab_arena.service import (
 from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
+from lab_arena.code_review_runtime import SubmissionCodeReviewer
 
 
 _DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
@@ -445,6 +446,10 @@ def build_service_from_environment(mode: str):
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         baseline_source_fetcher=fetch_public_source_archive,
         credential_manager=credential_manager,
+        code_reviewer=SubmissionCodeReviewer(
+            store=store, objects=objects, credential_for=submission_keys.code_review_key,
+            price_table=price_table, transport=broker_module.HttpxProviderTransport(),
+        ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),

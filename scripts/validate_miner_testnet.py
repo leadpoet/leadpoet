@@ -47,8 +47,18 @@ MIGRATIONS = tuple(
         (193, "upload-recovery"),
         (194, "open-scorer-refresh"),
     )
+) + (
+    "scripts/197-lab-arena-reward-chain-scope.sql",
+    "scripts/199-lab-arena-source-disclosure-time.sql",
+    "scripts/200-lab-arena-next-day-icp-disclosure.sql",
+    "scripts/201-lab-arena-daily-capacity.sql",
+    "scripts/202-arena-accepted-weight-state.sql",
+    "scripts/203-retire-legacy-incentive-weight-bridge.sql",
+    "scripts/205-lab-arena-optional-scrapingdog-credential.sql",
+    "scripts/206-lab-arena-combined-provider-budget.sql",
+    "scripts/207-lab-arena-code-review.sql",
 )
-EXPECTED_SCHEMA_VERSION = 194
+EXPECTED_SCHEMA_VERSION = 197
 TESTNET_NETUID = 401
 TESTNET_NETWORK = "test"
 DEFAULT_DATABASE = "miner_testnet"
@@ -506,6 +516,7 @@ def _serve(args: argparse.Namespace) -> int:
     from lab_arena import contracts, images
     from lab_arena.api import create_app
     from lab_arena.credentials import CredentialManager
+    from lab_arena.code_review_runtime import SubmissionCodeReviewer
     from lab_arena.driver import drive_once
     from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig
     from lab_arena.store import ArenaStore, PsycopgTransport
@@ -525,6 +536,7 @@ def _serve(args: argparse.Namespace) -> int:
         request_timeout_seconds=30,
     )
     arena_chain = chain_module.ArenaChain(chain_config, chain_module.connect_substrate(chain_config))
+    review_transport = None
     try:
         snapshot = arena_chain.metagraph()
         miner_uid = chain_module.uid_for_hotkey(snapshot, args.miner_hotkey)
@@ -558,6 +570,7 @@ def _serve(args: argparse.Namespace) -> int:
             store=store, credentials=credential_manager, organizer_keys=provider_keys
         )
         price_table = broker_module.fetch_openrouter_price_table()
+        review_transport = broker_module.HttpxProviderTransport()
 
         def broker_factory(service: ArenaService, round_row: Mapping[str, Any]):
             del round_row
@@ -614,6 +627,13 @@ def _serve(args: argparse.Namespace) -> int:
                 baseline_source_fetcher=fetch_public_source_archive,
                 reward_signer_factory=None,
                 credential_manager=credential_manager,
+                code_reviewer=SubmissionCodeReviewer(
+                    store=store,
+                    objects=objects,
+                    credential_for=submission_keys.code_review_key,
+                    price_table=price_table,
+                    transport=review_transport,
+                ),
             )
         )
         checks = service.startup_checks()
@@ -677,8 +697,26 @@ def _serve(args: argparse.Namespace) -> int:
                 if "failed" in outcome:
                     print("Arena driver tick failed", file=sys.stderr)
 
+        def review_submissions() -> None:
+            while not stop.is_set():
+                try:
+                    service.review_pending_submissions()
+                except Exception as exc:
+                    # Keep source, provider responses, and credentials out of logs.
+                    print(
+                        "Arena code review worker failed: %s" % type(exc).__name__,
+                        file=sys.stderr,
+                    )
+                stop.wait(5)
+
         driver_thread = threading.Thread(target=driver, name="testnet-arena-driver", daemon=True)
+        review_thread = threading.Thread(
+            target=review_submissions,
+            name="testnet-arena-code-review",
+            daemon=True,
+        )
         driver_thread.start()
+        review_thread.start()
         import uvicorn
 
         try:
@@ -686,7 +724,10 @@ def _serve(args: argparse.Namespace) -> int:
         finally:
             stop.set()
             driver_thread.join(timeout=5)
+            review_thread.join(timeout=5)
     finally:
+        if review_transport is not None:
+            review_transport.close()
         arena_chain.close()
         transport.close()
     return 0

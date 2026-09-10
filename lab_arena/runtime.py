@@ -494,6 +494,20 @@ def runsc_delete_command(config: RuntimeConfig, runsc_root: Path, sandbox_id: st
     return [str(config.runsc_path), "--root=%s" % runsc_root, "delete", "--force", sandbox_id]
 
 
+def cleanup_runsc_namespace(runsc_root: Path, process_runner: ProcessRunner, *, timeout: int) -> None:
+    """Release gVisor's shared empty network namespace in this run's root."""
+
+    namespace = runsc_root / "null-netns"
+    # Recent gVisor versions retain this bind mount after container deletion.
+    # This runtime owns a separate root per run, so nothing else uses it.
+    for _ in range(8):
+        if not os.path.ismount(namespace):
+            return
+        if _run_command(process_runner, ["umount", "--lazy", "--", str(namespace)], timeout=timeout) != 0:
+            raise ArenaRuntimeError("runsc namespace unmount failed")
+    raise ArenaRuntimeError("runsc namespace mounts remain")
+
+
 def output_mount_command(spec: SandboxSpec) -> List[str]:
     """Size-bound host tmpfs behind ``/output`` (requires root)."""
 
@@ -843,6 +857,10 @@ def run_sandbox(
                 cleanup_errors.append("delete: nonzero exit")
         except (ArenaRuntimeError, OSError) as exc:
             cleanup_errors.append("delete: %s" % type(exc).__name__)
+        try:
+            cleanup_runsc_namespace(runsc_root, process_runner, timeout=config.cleanup_timeout_seconds)
+        except (ArenaRuntimeError, OSError) as exc:
+            cleanup_errors.append("namespace: %s" % type(exc).__name__)
         if output_mounted:
             try:
                 if _run_command(process_runner, output_unmount_command(spec), timeout=config.cleanup_timeout_seconds) != 0:

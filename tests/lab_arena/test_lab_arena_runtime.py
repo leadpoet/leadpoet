@@ -716,3 +716,25 @@ def test_fake_runtime_records_specs_and_returns_preset_results(tmp_path):
     with pytest.raises(rt.ArenaRuntimeError):
         fake.run_icp(spec)
     assert fake.read_output(spec) is None
+
+
+def test_retained_runsc_namespace_mounts_are_released_before_root_removal(tmp_path, monkeypatch):
+    mounted = iter((True, True, False))
+    commands = []
+    monkeypatch.setattr(rt.os.path, "ismount", lambda path: next(mounted))
+    monkeypatch.setattr(rt, "_run_command", lambda runner, argv, timeout: commands.append(argv) or 0)
+    root = tmp_path / "owned-runsc-root"
+    rt.cleanup_runsc_namespace(root, object(), timeout=5)
+    assert commands == [["umount", "--lazy", "--", str(root / "null-netns")]] * 2
+
+
+def test_namespace_cleanup_failure_and_repeated_mounts_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt.os.path, "ismount", lambda path: True)
+    monkeypatch.setattr(rt, "_run_command", lambda *args, **kwargs: 1)
+    with pytest.raises(rt.ArenaRuntimeError, match="unmount failed"):
+        rt.cleanup_runsc_namespace(tmp_path, object(), timeout=5)
+    commands = []
+    monkeypatch.setattr(rt, "_run_command", lambda *args, **kwargs: commands.append(args) or 0)
+    with pytest.raises(rt.ArenaRuntimeError, match="mounts remain"):
+        rt.cleanup_runsc_namespace(tmp_path, object(), timeout=5)
+    assert len(commands) == 8

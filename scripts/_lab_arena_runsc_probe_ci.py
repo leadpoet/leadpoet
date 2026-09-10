@@ -24,17 +24,46 @@ executing anything, which is what the repository test exercises.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import io
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import tarfile
 import threading
 import urllib.request
 from pathlib import Path
+
+MOUNTINFO = Path("/proc/self/mountinfo")
+
+
+def cleanup_probe_work_dir(work: Path, *, inspect_mounts: bool) -> None:
+    if inspect_mounts:
+        # Bind mounts can share a device with their parent, so ismount() is
+        # insufficient. Never let rmtree traverse a retained host /usr mount.
+        prefix = str(work.resolve()).replace("\\", "\\134").replace(" ", "\\040")
+        prefix = prefix.replace("\t", "\\011").replace("\n", "\\012")
+        for line in MOUNTINFO.read_text().splitlines():
+            mounted = line.split()[4]
+            if mounted == prefix or mounted.startswith(prefix + "/"):
+                raise RuntimeError("Probe directory retained because a mount remains: %s" % work)
+    shutil.rmtree(work)
+
+
+@contextmanager
+def probe_work_dir(*, dry_run: bool):
+    work = Path(tempfile.mkdtemp(
+        prefix="lab-arena-runsc-probe-", dir="/var/tmp" if os.path.isdir("/var/tmp") else None
+    )).resolve()
+    try:
+        yield work
+    finally:
+        cleanup_probe_work_dir(work, inspect_mounts=not dry_run)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -113,7 +142,7 @@ def probe_runsc(destination: Path) -> Path:
     return destination
 
 
-def make_spec(work: Path, name: str, model_source: str, *, wall_clock: int) -> runtime.SandboxSpec:
+def make_spec(work: Path, name: str, model_source: str, *, wall_clock: int, rootfs_path: Path = Path("/")) -> runtime.SandboxSpec:
     model_dir = work / name / "model"
     input_dir = work / name / "input"
     output_dir = work / name / "output"
@@ -123,14 +152,24 @@ def make_spec(work: Path, name: str, model_source: str, *, wall_clock: int) -> r
     (model_dir / "main.py").write_text(model_source, encoding="utf-8")
     (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps({"schema_version": "leadpoet.lab_arena.icp_input.v1", "icp": {"prompt": "probe", "max_companies": 5}, "evaluation_date": "2026-09-02", "company_limit": 5, "provider_operations": sorted(__import__("lab_arena.operations", fromlist=["OPERATIONS"]).OPERATIONS)}), encoding="utf-8")
     os.chmod(output_dir, 0o777)
+    entrypoint = model_dir / "main.py"
+    if rootfs_path != Path("/"):
+        image_model = rootfs_path / "model" / name
+        image_model.mkdir(parents=True)
+        (image_model / "main.py").write_text(model_source, encoding="utf-8")
+        image_package = rootfs_path / "model" / "lab_arena"
+        image_package.mkdir(parents=True, exist_ok=True)
+        for filename in ("__init__.py", "contracts.py", "operations.py", "shim.py"):
+            (image_package / filename).write_bytes((ROOT / "lab_arena" / filename).read_bytes())
+        entrypoint = Path("/model") / name / "main.py"
     return runtime.SandboxSpec(
-        sandbox_id="lab-arena-probe-%s" % name, rootfs_path=Path("/"), input_dir=input_dir, output_dir=output_dir,
-        # The probe runs on the host root filesystem, so the model's host path is its path inside the sandbox.
-        socket_path=socket_dir / runtime.SANDBOX_SOCKET_NAME, entry_command=("python3", str(model_dir / "main.py")), evaluation_date="2026-09-02", random_seed=7, wall_clock_seconds=wall_clock,
+        sandbox_id="lab-arena-probe-%s" % name, rootfs_path=rootfs_path, input_dir=input_dir, output_dir=output_dir,
+        # Real probes use an independent root; dry runs can use the host path.
+        socket_path=socket_dir / runtime.SANDBOX_SOCKET_NAME, entry_command=("python3", str(entrypoint)), evaluation_date="2026-09-02", random_seed=7, wall_clock_seconds=wall_clock,
     )
 
 
-def make_agent_spec(work: Path) -> runtime.SandboxSpec:
+def make_agent_spec(work: Path, *, rootfs_path: Path = Path("/")) -> runtime.SandboxSpec:
     source_dir = work / "agent" / "source"
     dependency_dir = work / "agent" / "deps"
     input_dir = work / "agent" / "input"
@@ -143,7 +182,7 @@ def make_agent_spec(work: Path) -> runtime.SandboxSpec:
     (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps({"schema_version": "leadpoet.lab_arena.icp_input.v1", "icp": {"prompt": "probe", "max_companies": 5}, "evaluation_date": "2026-09-02", "company_limit": 5, "provider_operations": sorted(__import__("lab_arena.operations", fromlist=["OPERATIONS"]).OPERATIONS)}), encoding="utf-8")
     entrypoint = _stage_agent_entrypoint(ROOT / "lab_arena" / "agent_entrypoint.py", run_dir)
     return runtime.SandboxSpec(
-        sandbox_id="lab-arena-probe-agent", rootfs_path=Path("/"), input_dir=input_dir, output_dir=output_dir,
+        sandbox_id="lab-arena-probe-agent", rootfs_path=rootfs_path, input_dir=input_dir, output_dir=output_dir,
         socket_path=socket_dir / runtime.SANDBOX_SOCKET_NAME, source_dir=source_dir, dependency_dir=dependency_dir,
         agent_entrypoint_path=entrypoint, entry_command=runtime.AGENT_ENTRY_COMMAND, working_dir=runtime.AGENT_WORKING_DIR,
         evaluation_date="2026-09-02", random_seed=7, wall_clock_seconds=60,
@@ -155,64 +194,88 @@ def run_probe(*, dry_run: bool, runsc_path: Path = None) -> int:
         if os.geteuid() != 0:
             raise RuntimeError("the Lab Arena runsc probe must execute as root")
         runtime.require_linux_x86_64()
-    with tempfile.TemporaryDirectory(prefix="lab-arena-runsc-probe-", dir="/var/tmp" if os.path.isdir("/var/tmp") else None) as raw:
-        work = Path(raw)
+    with probe_work_dir(dry_run=dry_run) as work:
         work.chmod(0o755)
-        specs = {
-            "ok": make_spec(work, "ok", MODEL_OK, wall_clock=120),
-            "timeout": make_spec(work, "timeout", MODEL_SLEEP, wall_clock=30),
-            "big": make_spec(work, "big", MODEL_BIG, wall_clock=60),
-            "agent": make_agent_spec(work),
-        }
-        for name, spec in specs.items():
-            document = runtime.oci_spec(spec)
-            assert document["root"]["readonly"] is True and document["process"]["user"]["uid"] == runtime.SANDBOX_UID
-            assert "network" not in json.dumps(document.get("linux", {}).get("namespaces", []))
-            config = runtime.RuntimeConfig(runsc_path=runsc_path or work / "runsc", work_dir=work / "sandboxes")
-            bundle = work / ("bundle-" + name)
-            command = runtime.runsc_run_command(
-                config,
-                work / "runsc-root",
-                bundle,
-                spec.sandbox_id,
-                pid_file=bundle / "sandbox.pid",
-            )
-            assert (
-                "--network=none" in command
-                and "--rootless=false" in command
-                and "--pid-file=%s" % (bundle / "sandbox.pid") in command
-            )
-            print("PLAN", name, json.dumps({"command": command, "wall_clock_seconds": spec.wall_clock_seconds, "entry": list(spec.argv)}))
-        if dry_run:
-            print("LAB_ARENA_RUNSC_PROBE_DRY_RUN_OK")
-            return 0
-        runsc = runtime.require_runsc_executable(runsc_path) if runsc_path else probe_runsc(work / "runsc")
-        sandbox_work = work / "sandboxes"
-        sandbox_work.mkdir(mode=0o700)
-        config = runtime.RuntimeConfig(runsc_path=runsc, work_dir=sandbox_work)
-        sandbox_runtime = runtime.RunscRuntime(config)
-        api = ProbeApi()
-        outcomes = {}
-        for name, spec in specs.items():
-            state = RunState(lease={"run_id": "probe-" + name}, lease_token="probe")
-            server = WorkerSocketServer(spec.socket_path, api, state)
-            server.start()
+        # A literal host "/" is not a valid production analogue with current
+        # directfs: bind sources beneath it alias destinations such as /input.
+        # Construct a small independent root, as production image extraction
+        # does, while reusing only the host's read-only Python installation.
+        rootfs = Path("/")
+        rootfs_mounts = []
+        if not dry_run:
+            rootfs = work / "host-rootfs"
+            rootfs.mkdir()
+            for relative in ("etc", "input", "output", "run/lab_arena", "agent", "model"):
+                (rootfs / relative).mkdir(parents=True, exist_ok=True)
+            for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib64")):
+                (rootfs / name).symlink_to(target)
+            (rootfs / "usr").mkdir()
+            subprocess.run(["mount", "--bind", "/usr", str(rootfs / "usr")], check=True)
+            rootfs_mounts.append(rootfs / "usr")
             try:
-                result = sandbox_runtime.run_icp(spec)
-            finally:
-                server.stop()
-            outcomes[name] = {"exit_code": result.exit_code, "timed_out": result.timed_out, "has_output": result.output_bytes is not None, "output_error": result.output_error, "stdout": result.stdout.decode(errors="replace")[-200:], "stderr": result.stderr.decode(errors="replace")[-2000:], "output": json.loads(result.output_bytes) if result.output_bytes is not None else None}
-        checks = {
-            "ok_exit": outcomes["ok"]["exit_code"] == 0 and "LAB_ARENA_MODEL_OK" in outcomes["ok"]["stdout"] and outcomes["ok"]["has_output"],
-            "ok_provider_call": len(api.frames) == 1 and api.frames[0]["operation_id"] == "exa.search",
-            "timeout_killed": outcomes["timeout"]["timed_out"] is True,
-            "big_rejected": outcomes["big"]["output_error"] is not None,
-            "agent_entrypoint": outcomes["agent"]["exit_code"] == 0 and outcomes["agent"]["output"] == {"companies": []},
-            "agent_no_provider_call": len(api.frames) == 1,
-        }
-        print(json.dumps({"outcomes": outcomes, "checks": checks}))
-        if not all(checks.values()):
-            raise RuntimeError("Lab Arena runsc probe failed: %s" % json.dumps(checks))
+                subprocess.run(["mount", "-o", "remount,bind,ro", str(rootfs / "usr")], check=True)
+            except BaseException:
+                subprocess.run(["umount", "--lazy", "--", str(rootfs / "usr")], check=False)
+                raise
+        try:
+            specs = {
+                "ok": make_spec(work, "ok", MODEL_OK, wall_clock=120, rootfs_path=rootfs),
+                "timeout": make_spec(work, "timeout", MODEL_SLEEP, wall_clock=30, rootfs_path=rootfs),
+                "big": make_spec(work, "big", MODEL_BIG, wall_clock=60, rootfs_path=rootfs),
+                "agent": make_agent_spec(work, rootfs_path=rootfs),
+            }
+            for name, spec in specs.items():
+                document = runtime.oci_spec(spec)
+                assert document["root"]["readonly"] is True and document["process"]["user"]["uid"] == runtime.SANDBOX_UID
+                assert "network" not in json.dumps(document.get("linux", {}).get("namespaces", []))
+                config = runtime.RuntimeConfig(runsc_path=runsc_path or work / "runsc", work_dir=work / "sandboxes")
+                bundle = work / ("bundle-" + name)
+                command = runtime.runsc_run_command(
+                    config,
+                    work / "runsc-root",
+                    bundle,
+                    spec.sandbox_id,
+                    pid_file=bundle / "sandbox.pid",
+                )
+                assert (
+                    "--network=none" in command
+                    and "--rootless=false" in command
+                    and "--pid-file=%s" % (bundle / "sandbox.pid") in command
+                )
+                print("PLAN", name, json.dumps({"command": command, "wall_clock_seconds": spec.wall_clock_seconds, "entry": list(spec.argv)}))
+            if dry_run:
+                print("LAB_ARENA_RUNSC_PROBE_DRY_RUN_OK")
+                return 0
+            runsc = runtime.require_runsc_executable(runsc_path) if runsc_path else probe_runsc(work / "runsc")
+            sandbox_work = work / "sandboxes"
+            sandbox_work.mkdir(mode=0o700)
+            config = runtime.RuntimeConfig(runsc_path=runsc, work_dir=sandbox_work)
+            sandbox_runtime = runtime.RunscRuntime(config)
+            api = ProbeApi()
+            outcomes = {}
+            for name, spec in specs.items():
+                state = RunState(lease={"run_id": "probe-" + name}, lease_token="probe")
+                server = WorkerSocketServer(spec.socket_path, api, state)
+                server.start()
+                try:
+                    result = sandbox_runtime.run_icp(spec)
+                finally:
+                    server.stop()
+                outcomes[name] = {"exit_code": result.exit_code, "timed_out": result.timed_out, "has_output": result.output_bytes is not None, "output_error": result.output_error, "stdout": result.stdout.decode(errors="replace")[-200:], "stderr": result.stderr.decode(errors="replace")[-2000:], "output": json.loads(result.output_bytes) if result.output_bytes is not None else None}
+            checks = {
+                "ok_exit": outcomes["ok"]["exit_code"] == 0 and "LAB_ARENA_MODEL_OK" in outcomes["ok"]["stdout"] and outcomes["ok"]["has_output"],
+                "ok_provider_call": len(api.frames) == 1 and api.frames[0]["operation_id"] == "exa.search",
+                "timeout_killed": outcomes["timeout"]["timed_out"] is True,
+                "big_rejected": outcomes["big"]["output_error"] is not None,
+                "agent_entrypoint": outcomes["agent"]["exit_code"] == 0 and outcomes["agent"]["output"] == {"companies": []},
+                "agent_no_provider_call": len(api.frames) == 1,
+            }
+            print(json.dumps({"outcomes": outcomes, "checks": checks}))
+            if not all(checks.values()):
+                raise RuntimeError("Lab Arena runsc probe failed: %s" % json.dumps(checks))
+        finally:
+            for mounted in reversed(rootfs_mounts):
+                subprocess.run(["umount", "--lazy", "--", str(mounted)], check=True)
     print("LAB_ARENA_RUNSC_PROBE_SUCCESS")
     return 0
 

@@ -221,6 +221,8 @@ class SubstrateClient(Protocol):
 
     def query(self, module: str, storage_function: str, params: Any = None, block_hash: Any = None) -> Any: ...
 
+    def runtime_call(self, runtime_api: str, method: str, params: Any = None, block_hash: Any = None) -> Any: ...
+
 
 def connect_substrate(config: ArenaChainConfig) -> Any:
     """Open one ``SubstrateInterface`` on ``config.endpoint``.
@@ -384,13 +386,11 @@ MetagraphSource = Callable[[Any, int, str], MetagraphSnapshot]
 
 
 def bittensor_metagraph_source(config: ArenaChainConfig) -> MetagraphSource:
-    """Production source: ``bittensor.Subtensor(network=endpoint).metagraph(netuid, block=n)``.
+    """Read lite neurons through the runtime API at the finalized hash.
 
-    Targets the pinned Bittensor 10.5.0 API. ``bittensor`` is imported lazily
-    on first use, the endpoint is ``config.endpoint`` (never the environment),
-    and ``n`` is the number of the finalized ``block_hash`` resolved through
-    the Arena's own client. A Bittensor build without ``Subtensor.metagraph``
-    (the local 11.x install) raises instead of falling back.
+    Bittensor 9.12.2 passes a scalar ``u16`` to recent substrate metadata that
+    describes this argument as a one-field composite. Retry only that known
+    encoding mismatch and validate every returned UID and account.
     """
 
     if not isinstance(config, ArenaChainConfig):
@@ -399,39 +399,71 @@ def bittensor_metagraph_source(config: ArenaChainConfig) -> MetagraphSource:
     def source(client: Any, netuid: int, block_hash: str) -> MetagraphSnapshot:
         normalized = normalize_block_hash(block_hash)
         try:
-            import bittensor
-        except ImportError as exc:
-            raise ArenaChainError("bittensor is not installed") from exc
-        try:
             block_number = _chain_int(client.get_block_number(normalized), "block number")
         except ArenaChainError:
             raise
         except Exception as exc:
             raise ArenaChainError("chain call get_block_number failed") from exc
-        subtensor_cls = getattr(bittensor, "Subtensor", None)
-        if subtensor_cls is None:
-            raise ArenaChainError("bittensor.Subtensor is unavailable")
         try:
-            subtensor = subtensor_cls(network=config.endpoint)
-        except Exception as exc:
-            raise ArenaChainError("failed to open the metagraph endpoint") from exc
-        try:
-            reader = getattr(subtensor, "metagraph", None)
-            if not callable(reader):
-                raise ArenaChainError("pinned Subtensor.metagraph API is unavailable in this bittensor build")
+            reader = getattr(client, "runtime_call")
             try:
-                metagraph = reader(netuid, block=block_number)
-            except Exception as exc:
-                raise ArenaChainError("finalized metagraph read failed") from exc
-        finally:
-            closer = getattr(subtensor, "close", None)
-            if callable(closer):
-                closer()
-        return metagraph_snapshot_from_object(
-            metagraph, netuid=netuid, block_number=block_number, block_hash=normalized
+                response = reader("NeuronInfoRuntimeApi", "get_neurons_lite", [netuid], normalized)
+            except ValueError as exc:
+                message = str(exc)
+                if "type_def: Composite" not in message or 'type_name: Some("u16")' not in message:
+                    raise
+                response = reader("NeuronInfoRuntimeApi", "get_neurons_lite", [[netuid]], normalized)
+        except Exception as exc:
+            raise ArenaChainError("finalized metagraph runtime read failed") from exc
+        neurons = _unwrap(response)
+        if not isinstance(neurons, list):
+            raise ArenaChainError("finalized metagraph runtime result is invalid")
+        rows = []
+        for raw in neurons:
+            if not isinstance(raw, Mapping):
+                raise ArenaChainError("finalized neuron row is invalid")
+            uid = _chain_int(_runtime_scalar(raw.get("uid")), "neuron uid")
+            if _chain_int(_runtime_scalar(raw.get("netuid")), "neuron netuid") != netuid:
+                raise ArenaChainError("finalized neuron netuid differs")
+            rows.append((uid, raw))
+        rows.sort(key=lambda item: item[0])
+        if [uid for uid, _raw in rows] != list(range(len(rows))):
+            raise ArenaChainError("finalized neuron UIDs are not contiguous")
+        return MetagraphSnapshot(
+            netuid=netuid, block_number=block_number, block_hash=normalized,
+            hotkeys=tuple(_runtime_account(row.get("hotkey"), "neuron hotkey") for _uid, row in rows),
+            coldkeys=tuple(_runtime_account(row.get("coldkey"), "neuron coldkey") for _uid, row in rows),
+            validator_permit=tuple(_runtime_bool(row.get("validator_permit"), "validator permit") for _uid, row in rows),
         )
 
     return source
+
+
+def _runtime_scalar(value: Any) -> Any:
+    value = _unwrap(value)
+    while isinstance(value, (tuple, list)) and len(value) == 1:
+        value = _unwrap(value[0])
+    return value
+
+
+def _runtime_account(value: Any, field_name: str) -> str:
+    value = _runtime_scalar(value)
+    if isinstance(value, str) and SS58_RE.fullmatch(value):
+        return value
+    if isinstance(value, (tuple, list)) and len(value) == 32:
+        try:
+            from leadpoet_canonical.chain_source_v2 import ss58_encode_account_id
+            return ss58_encode_account_id(bytes(value))
+        except (TypeError, ValueError):
+            pass
+    raise ArenaChainError("%s is not a chain account" % field_name)
+
+
+def _runtime_bool(value: Any, field_name: str) -> bool:
+    value = _runtime_scalar(value)
+    if not isinstance(value, bool):
+        raise ArenaChainError("%s is not boolean" % field_name)
+    return value
 
 
 # ---------------------------------------------------------------------------

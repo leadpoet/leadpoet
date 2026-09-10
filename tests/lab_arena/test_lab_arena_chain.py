@@ -642,50 +642,85 @@ def test_metagraph_snapshot_from_object():
 
 
 def test_bittensor_metagraph_source_uses_the_endpoint_and_pinned_api(monkeypatch):
-    instances = []
+    class RuntimeSubstrate(FakeSubstrate):
+        def __init__(self): super().__init__(); self.runtime_calls = []
+        def runtime_call(self, api, method, params, block_hash):
+            self.runtime_calls.append((api, method, params, block_hash))
+            if params == [NETUID]:
+                raise ValueError('Invalid type data; type_def: Composite; type_name: Some("u16")')
+            return [{"uid": 0, "netuid": (NETUID,),
+                     "hotkey": (tuple(ALICE.public_key),),
+                     "coldkey": (tuple(BOB.public_key),),
+                     "validator_permit": (True,)}]
 
-    class FakeSubtensor:
-        def __init__(self, network):
-            self.network = network
-            self.requested = None
-            self.closed = False
-            instances.append(self)
-
-        def metagraph(self, netuid, block=None):
-            self.requested = (netuid, block)
-            return _FakeMetagraph(block)
-
-        def close(self):
-            self.closed = True
-
-    module = types.ModuleType("bittensor")
-    module.Subtensor = FakeSubtensor
-    monkeypatch.setitem(sys.modules, "bittensor", module)
-    monkeypatch.setenv("BITTENSOR_NETWORK", "test")
-
-    fake = FakeSubstrate()
+    fake = RuntimeSubstrate()
     chain = ArenaChain(make_config(), fake, metagraph_source=bittensor_metagraph_source(make_config()), clock=FakeClock())
     snapshot = chain.metagraph()
     assert snapshot.block_number == FINALIZED_NUMBER
-    assert instances[0].network == ENDPOINT
-    assert instances[0].requested == (NETUID, FINALIZED_NUMBER)
-    assert instances[0].closed is True
+    assert snapshot.hotkeys == (ALICE.ss58_address,)
+    assert fake.runtime_calls == [
+        ("NeuronInfoRuntimeApi", "get_neurons_lite", [NETUID], canonical_hash(FINALIZED_NUMBER)),
+        ("NeuronInfoRuntimeApi", "get_neurons_lite", [[NETUID]], canonical_hash(FINALIZED_NUMBER)),
+    ]
 
-    class ElevenShaped:
-        def __init__(self, network):
-            self.closed = False
 
-        def close(self):
-            self.closed = True
-
-    module.Subtensor = ElevenShaped
+def test_runtime_metagraph_rejects_noncontiguous_uids_and_unknown_encoding_error():
+    class RuntimeSubstrate(FakeSubstrate):
+        def runtime_call(self, *_args):
+            return [{"uid": 1, "netuid": NETUID, "hotkey": ALICE.ss58_address,
+                     "coldkey": BOB.ss58_address, "validator_permit": True}]
     source = bittensor_metagraph_source(make_config())
-    with pytest.raises(ArenaChainError, match="pinned Subtensor.metagraph API"):
-        source(chain.client, NETUID, canonical_hash(FINALIZED_NUMBER))
+    with pytest.raises(ArenaChainError, match="not contiguous"):
+        source(RuntimeSubstrate(), NETUID, canonical_hash(FINALIZED_NUMBER))
 
-    monkeypatch.setitem(sys.modules, "bittensor", None)
-    with pytest.raises(ArenaChainError, match="not installed"):
-        source(chain.client, NETUID, canonical_hash(FINALIZED_NUMBER))
+    class OtherFailure(FakeSubstrate):
+        def runtime_call(self, *_args): raise ValueError("unrelated decoder failure")
+    with pytest.raises(ArenaChainError, match="runtime read"):
+        source(OtherFailure(), NETUID, canonical_hash(FINALIZED_NUMBER))
+
+    class NonBooleanPermit(FakeSubstrate):
+        def runtime_call(self, *_args):
+            return [{"uid": 0, "netuid": NETUID, "hotkey": ALICE.ss58_address,
+                     "coldkey": BOB.ss58_address, "validator_permit": 1}]
+    with pytest.raises(ArenaChainError, match="not boolean"):
+        source(NonBooleanPermit(), NETUID, canonical_hash(FINALIZED_NUMBER))
+
+
+def test_runtime_metagraph_scalar_encoding_succeeds_without_retry():
+    class ScalarRuntime(FakeSubstrate):
+        def __init__(self): super().__init__(); self.runtime_calls = []
+        def runtime_call(self, api, method, params, block_hash):
+            self.runtime_calls.append((api, method, params, block_hash))
+            return [{"uid": 0, "netuid": NETUID, "hotkey": ALICE.ss58_address,
+                     "coldkey": BOB.ss58_address, "validator_permit": False}]
+    client = ScalarRuntime()
+    snapshot = bittensor_metagraph_source(make_config())(
+        client, NETUID, canonical_hash(FINALIZED_NUMBER)
+    )
+    assert snapshot.hotkeys == (ALICE.ss58_address,)
+    assert snapshot.validator_permit == (False,)
+    assert len(client.runtime_calls) == 1 and client.runtime_calls[0][2] == [NETUID]
+
+
+@pytest.mark.parametrize(("rows", "message"), [
+    ([{"uid": 0, "netuid": NETUID + 1, "hotkey": ALICE.ss58_address,
+       "coldkey": BOB.ss58_address, "validator_permit": True}], "netuid differs"),
+    ([{"uid": 0, "netuid": NETUID, "hotkey": ALICE.ss58_address,
+       "coldkey": BOB.ss58_address, "validator_permit": True},
+      {"uid": 0, "netuid": NETUID, "hotkey": CHARLIE.ss58_address,
+       "coldkey": BOB.ss58_address, "validator_permit": False}], "not contiguous"),
+    ([{"uid": 0, "netuid": NETUID, "hotkey": (1, 2),
+       "coldkey": BOB.ss58_address, "validator_permit": True}], "not a chain account"),
+    ([{"uid": 0, "netuid": NETUID, "hotkey": ALICE.ss58_address,
+       "coldkey": BOB.ss58_address, "validator_permit": "true"}], "not boolean"),
+])
+def test_runtime_metagraph_rejects_ownership_shape_failures(rows, message):
+    class Runtime(FakeSubstrate):
+        def runtime_call(self, *_args): return rows
+    with pytest.raises(ArenaChainError, match=message):
+        bittensor_metagraph_source(make_config())(
+            Runtime(), NETUID, canonical_hash(FINALIZED_NUMBER)
+        )
 
 
 # ---------------------------------------------------------------------------

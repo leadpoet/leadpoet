@@ -450,6 +450,11 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+traded\b", re.I),
     re.compile(r"\bpublicly\s+listed\s+(?:shares?|stock)\b", re.I),
     re.compile(
+        r"(?:^|[.!?;:\n]\s*)"
+        r"(?:[A-Z][A-Za-z0-9&.'’+-]*\s+){1,8}"
+        r"\((?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\)",
+    ),
+    re.compile(
         r"\b(?:shares?|stock)\b.{0,35}\b(?:listed|trad(?:e|es|ed))\s+on\b",
         re.I,
     ),

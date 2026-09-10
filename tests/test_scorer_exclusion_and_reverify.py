@@ -644,6 +644,20 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             "Public",
             "Public",
             True,
+            "Old National Bancorp (NASDAQ: ONB)",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
+            "Acme Corporation (NYSE: ACME)",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
             "Acme shares are publicly traded on Nasdaq and will be delisted next year.",
             COMPANY_FIT_MATCH,
         ),
@@ -733,6 +747,20 @@ def test_stage_decision_requires_category_specific_proof(
         ("Public", False, "Privately Held · Founded 1992 · 51-200 employees"),
         ("Public", True, "Acme is not publicly traded."),
         ("Public", True, "Acme stock is not traded on Nasdaq."),
+        ("Public", True, "(NASDAQ: ONB)"),
+        ("Public", True, "Old National Bancorp (OTC: ONB)"),
+        (
+            "Public",
+            True,
+            "Jane Doe commented on Old National Bancorp (NASDAQ: ONB).",
+        ),
+        ("Public", True, "Formerly Old National Bancorp (NASDAQ: ONB)"),
+        (
+            "Public",
+            True,
+            "Old National Bancorp (NASDAQ: ONB), delisted in 2024.",
+        ),
+        ("Public", True, "Not Old National Bancorp (NASDAQ: ONB)."),
         ("Series C+", False, "Acme closed its Series B financing."),
         ("Series B", True, "Acme was formerly a Series B company."),
         (
@@ -825,6 +853,11 @@ def test_stage_decision_rejects_unproven_or_contradictory_observations(
             "Public",
             "Public",
             "Acme shares will be listed on Nasdaq next year.",
+        ),
+        (
+            "Public",
+            "Public",
+            "Old National Bancorp (NASDAQ: ONB) will begin trading next year.",
         ),
         (
             "Private Equity",

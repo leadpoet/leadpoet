@@ -21,7 +21,7 @@ from leadpoet_canonical.subtensor_events_v2 import (
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = (
-    ROOT / "tests" / "fixtures" / "subtensor_events_spec452_block8984916.json"
+    ROOT / "tests" / "fixtures" / "subtensor_events_spec455_block9039648.json"
 )
 
 
@@ -68,17 +68,17 @@ def _measured_pair_bytes(fixture):
     )
 
 
-def test_real_spec452_archive_events_prove_exact_adjacent_reveal():
+def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
     profile = load_subtensor_events_profile_v2()
     fixture, events_raw, event_count_raw = _fixture()
 
-    assert profile["spec_version"] == 452
+    assert profile["spec_version"] == 455
     assert profile["transaction_version"] == 1
     assert profile["metadata_raw_sha256"] == (
-        "79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+        "74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7"
     )
     assert profile["runtime_code_storage_hash"] == (
-        "0x40a8c3c99a47d6739b086236308535fab26d5fd4cc5c88eb83f6a3c8b928f7cc"
+        "0x329a9e79cfcd553b8151e65ac474696ee03b36057605a71bc4c9acc811025567"
     )
     assert profile["storage"]["events"]["key"] == SYSTEM_EVENTS_STORAGE_KEY
     assert profile["storage"]["event_count"]["key"] == SYSTEM_EVENT_COUNT_STORAGE_KEY
@@ -97,7 +97,7 @@ def test_real_spec452_archive_events_prove_exact_adjacent_reveal():
     validated = validate_subtensor_events_profile_v2(
         profile,
         genesis_hash=profile["genesis_hash"],
-        spec_version=452,
+        spec_version=455,
         transaction_version=1,
         metadata_sha256=profile["metadata_raw_sha256"],
         runtime_code_hash=profile["runtime_code_storage_hash"],
@@ -105,13 +105,13 @@ def test_real_spec452_archive_events_prove_exact_adjacent_reveal():
     records = decode_system_events_v2(
         events_raw, profile=validated, event_count_raw=event_count_raw
     )
-    assert len(records) == 196
-    assert records[1]["phase"] == "Initialization"
-    assert records[1]["runtime_event"] == "SubtensorModule"
-    assert records[1]["pallet_event"] == "WeightsSet"
-    assert records[1]["fields"] == [71, 23]
-    assert records[2]["pallet_event"] == "TimelockedWeightsRevealed"
-    assert records[2]["fields"] == [
+    assert len(records) == 304
+    assert records[55]["phase"] == "Initialization"
+    assert records[55]["runtime_event"] == "SubtensorModule"
+    assert records[55]["pallet_event"] == "WeightsSet"
+    assert records[55]["fields"] == [71, 0]
+    assert records[56]["pallet_event"] == "TimelockedWeightsRevealed"
+    assert records[56]["fields"] == [
         71,
         "0x" + fixture["expected"]["account_id_hex"],
     ]
@@ -119,15 +119,15 @@ def test_real_spec452_archive_events_prove_exact_adjacent_reveal():
     proof = _proof(validated, fixture, events_raw, event_count_raw)
     assert proof == {
         "schema_version": PROOF_SCHEMA_VERSION,
-        "profile_sha256": "sha256:fb0520a776397baad431a13cddf8ab093e350757c349c0d6b052a70d0faac4ec",
-        "events_sha256": "sha256:eaf06128da2f1bdf48b98209ba43bdf2c7f37b1a9398b7164f8b63387cb0e27a",
-        "event_count": 196,
-        "weights_set_record_index": 1,
-        "weights_set_record_sha256": "sha256:d4d2dfdc11a036a14a7f726822bf5dbb82f13c50ae4d4f794c919d814288979d",
-        "reveal_record_index": 2,
-        "reveal_record_sha256": "sha256:ea4d2d7ef3d181d12b54ef0fb0db4a571b46f30086fea2f8b3a5b7aeca6f871f",
+        "profile_sha256": "sha256:026cde124b9061ed80a924466b22c45f1578a23222d47bcf59caff7aa958c13c",
+        "events_sha256": "sha256:1bcd34eff64b0499881ea19b59005825dcd7979380c6cd45bf4941b4d8985430",
+        "event_count": 304,
+        "weights_set_record_index": 55,
+        "weights_set_record_sha256": "sha256:55041fe8cf2b7b6e2e2bedafc0c8b8e9cc14d18b61ac1d6822e805f9fed360af",
+        "reveal_record_index": 56,
+        "reveal_record_sha256": "sha256:1b686f6b4e3a8d7b1feab391fc649780cc07d435e37276adda742fafd0c5f8a3",
         "netuid": 71,
-        "uid": 23,
+        "uid": 0,
         "account_id_hex": fixture["expected"]["account_id_hex"],
         "phase": "Initialization",
         "runtime_event_index": 7,
@@ -168,9 +168,9 @@ def test_duplicate_matching_pair_is_ambiguous_not_success():
     fixture, events_raw, _event_count_raw = _fixture()
     pair = _measured_pair_bytes(fixture)
     assert pair in events_raw
-    duplicated = _compact(198) + events_raw[2:] + pair
+    duplicated = _compact(306) + events_raw[2:] + pair
     with pytest.raises(SubtensorEventsV2Error, match="absent or ambiguous"):
-        _proof(profile, fixture, duplicated, (198).to_bytes(4, "little"))
+        _proof(profile, fixture, duplicated, (306).to_bytes(4, "little"))
 
 
 @pytest.mark.parametrize(

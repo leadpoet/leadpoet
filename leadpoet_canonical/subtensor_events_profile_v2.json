@@ -16,22 +16,22 @@
   "genesis_hash": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
   "measurement": {
     "archive_host": "archive.chain.opentensor.ai",
-    "block_hash": "0xb1134ec8eace2d3d9d3190195453e701fa3ac3bc234940aa08cafb27e0152769",
-    "block_number": 8984916,
-    "metadata_raw_bytes": 334487,
-    "parent_hash": "0x778f613d158c058fb76d8db00e2a8d17668f735f68434867619eb62f868cc246",
-    "system_event_count": 196,
-    "system_event_count_raw_sha256": "e2893c3b4596774161caeb4c06812b4c6055b844686f72690f926dd69a9c13e3",
-    "system_events_bytes": 10239,
-    "system_events_sha256": "eaf06128da2f1bdf48b98209ba43bdf2c7f37b1a9398b7164f8b63387cb0e27a"
+    "block_hash": "0x3ad5b325d82560501cd3f0c3353ecab0ee8bacf5f7d0b3437bffa74fb166b69e",
+    "block_number": 9039648,
+    "metadata_raw_bytes": 334642,
+    "parent_hash": "0xdfe6bb927eebc7ca2d7b1b509dcb14b832e681840fdee21f02a7f9942cb65db2",
+    "system_event_count": 304,
+    "system_event_count_raw_sha256": "cbd6abceadd573e94bdf9ec8ce4691b2d0cafdf0f4069d30cef8835631e95bd4",
+    "system_events_bytes": 13086,
+    "system_events_sha256": "1bcd34eff64b0499881ea19b59005825dcd7979380c6cd45bf4941b4d8985430"
   },
-  "metadata_raw_sha256": "79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195",
+  "metadata_raw_sha256": "74c4067de4bf2eba95156e8a46c793b52fcd9862dfeb28502632e46416979ec7",
   "metadata_version": 14,
   "network": "finney",
-  "runtime_code_storage_hash": "0x40a8c3c99a47d6739b086236308535fab26d5fd4cc5c88eb83f6a3c8b928f7cc",
+  "runtime_code_storage_hash": "0x329a9e79cfcd553b8151e65ac474696ee03b36057605a71bc4c9acc811025567",
   "runtime_code_storage_key": "0x3a636f6465",
   "schema_version": "leadpoet.subtensor_events_profile.v2",
-  "spec_version": 452,
+  "spec_version": 455,
   "storage": {
     "event_count": {
       "key": "0x26aa394eea5630e07c48ae0c9558cef70a98fdbe9ce6c55837576c60c7af3850",

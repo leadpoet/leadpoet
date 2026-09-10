@@ -121,3 +121,33 @@ def test_preflight_fails_closed_for_missing_arena_table_and_wrong_retirement_cap
 def test_preflight_requires_credentials():
     with pytest.raises(SupabaseSchemaPreflightV2Error, match="credentials"):
         verify_required_supabase_v2_schema({})
+
+
+def test_arena_table_probes_execute_against_committed_migration_202():
+    """JSON document fields must not become nonexistent PostgREST columns."""
+    from tests.lab_arena.lab_arena_pg_harness import (
+        DEFAULT_MIGRATIONS,
+        LAB_ARENA_ACCEPTED_WEIGHT_STATE_MIGRATION,
+        database_with_lab_arena_migration,
+    )
+
+    end = DEFAULT_MIGRATIONS.index(LAB_ARENA_ACCEPTED_WEIGHT_STATE_MIGRATION) + 1
+    database = database_with_lab_arena_migration(DEFAULT_MIGRATIONS[:end])
+    psycopg2, dsn = next(database)
+    connection = psycopg2.connect(**dsn)
+    try:
+        from psycopg2 import sql
+
+        with connection.cursor() as cursor:
+            probes = [row for row in REQUIRED_SUPABASE_V2_SCHEMA
+                      if row[0] == "scripts/" + LAB_ARENA_ACCEPTED_WEIGHT_STATE_MIGRATION]
+            assert len(probes) == 2
+            for _, table, columns in probes:
+                cursor.execute(sql.SQL("SELECT {} FROM public.{} LIMIT 0").format(
+                    sql.SQL(", ").join(map(sql.Identifier, columns)),
+                    sql.Identifier(table),
+                ))
+                assert cursor.fetchall() == []
+    finally:
+        connection.close()
+        database.close()

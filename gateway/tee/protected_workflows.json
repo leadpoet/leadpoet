@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "a7829f92664a3f4b1b244c21f97a4df9e063350e",
+  "baseline_commit": "21e1f5125e063a48af8432ca62e19a06af4d1b02",
   "entries": [
     {
       "ast_sha256": "sha256:3b0e06adab3d4d8093d2686426273807fdfc79b86bd9f0f1e9a90dc57930ae8d",
@@ -1687,7 +1687,7 @@
       "symbol": "verify_archive_index"
     },
     {
-      "ast_sha256": "sha256:b948f33deb9ad3c6191348962d142b48bbe1ed357808173ff8552cc8c260f4ab",
+      "ast_sha256": "sha256:b97f3c71ceef64e1145d3a88f32898c8fadae470b25def2a1edb2f881bcd6de4",
       "path": "gateway/tee/release_channel_v2.py",
       "symbol": "__module__"
     },
@@ -1722,7 +1722,7 @@
       "symbol": "validate_release_channel_v2"
     },
     {
-      "ast_sha256": "sha256:ad41f0822927f7cd980a6a758304f016120ee0af0da8112ba22626e43b2fa5f7",
+      "ast_sha256": "sha256:a62581574fe93ff5d9f349d76cd3680fb81566685320589f4b25b19f4a55e6fc",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "__module__"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:7af4c6a92d0a7fbd98955c9dc12c41a85c55e93f119b4842bf19b2d4392755bf",
-  "protected_source_commit": "a7829f92664a3f4b1b244c21f97a4df9e063350e",
+  "manifest_hash": "sha256:aaed87159f423cac44bf27bd600db36cc9efe75874c0f1a3f6748de597234eb7",
+  "protected_source_commit": "21e1f5125e063a48af8432ca62e19a06af4d1b02",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

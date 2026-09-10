@@ -5,6 +5,8 @@ import json
 import os
 import types
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "validator_restart.sh"
@@ -195,6 +197,7 @@ def test_candidate_host_module_is_loaded_from_release_not_stale_source(tmp_path)
     program = f"""set -euo pipefail
 fail() {{ echo "ERROR: $*" >&2; exit 1; }}
 cd "$SOURCE_ROOT"
+ignore_tree_args=()
 {identity_call}
 printf '%s %s' "$old_pid" "$old_start"
 """
@@ -239,7 +242,9 @@ def test_single_enclave_transition_has_bounded_automatic_rollback():
     start_candidate = text.index('run-enclave --eif-path "$EIF_FILE"')
     protected_ready = text.index("--check-only", start_candidate)
     stop_runner = text.index('stop_owned_process "$old_runner_pgid"')
-    assert public_preflight < stop_weight < stop_old_signer < start_candidate < protected_ready < stop_runner
+    stop_workers = text.index("for worker_container_id in ${legacy_worker_container_ids[@]+")
+    assert public_preflight < stop_weight < stop_old_signer < start_candidate < protected_ready < stop_runner < stop_workers
+    assert "docker rm" not in text
     cleanup = text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]
     assert 'run-enclave --eif-path "$LEGACY_EIF_SNAPSHOT"' in cleanup
     assert "runtime_v2_bootstrap" in cleanup
@@ -291,6 +296,92 @@ def test_process_identity_cli_handles_n_minus_one_and_second_restart(tmp_path):
         cwd=ROOT, text=True, capture_output=True, check=True,
     )
     assert second.stdout.strip() == "202 1202"
+
+
+def test_process_identity_ignores_only_each_captured_container_tree(tmp_path):
+    from validator_tee.host.arena_restart_identity import find_validator_process
+
+    source = tmp_path / "source"; current = tmp_path / "current"; proc = tmp_path / "proc"
+    for root in (source, current, proc): (root / "scripts").mkdir(parents=True)
+    _proc_entry(proc, 101, source, source / "scripts/run_arena_validator.py")
+    _proc_entry(proc, 201, source, source / "neurons/validator.py")
+    _proc_entry(proc, 202, source, source / "neurons/validator.py")
+    assert find_validator_process(
+        source, current, 0, proc, ignored_tree_roots=(201, 202)
+    ) == (101, "1101")
+
+
+def _legacy_container(name, command, pid, *, image="sha256:" + "b" * 64, revision="a" * 40):
+    return {
+        "Id": ("%064x" % (abs(hash(name)) or 1))[-64:],
+        "Name": name,
+        "Image": image,
+        "Config": {
+            "Entrypoint": ["python3", "neurons/validator.py"],
+            "WorkingDir": "/app",
+            "Cmd": command,
+            "Labels": {"org.opencontainers.image.revision": revision},
+        },
+        "State": {"Running": pid > 0, "Pid": pid},
+        "Mounts": [{
+            "Type": "bind", "Source": "/source/validator_weights",
+            "Destination": "/app/validator_weights",
+        }],
+    }
+
+
+def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
+    from validator_tee.host.arena_restart_identity import (
+        validate_legacy_container_inventory,
+    )
+
+    containers = [_legacy_container(
+        "/leadpoet-validator-main", ["--mode", "coordinator", "--container-id", "0"], 100,
+    )]
+    containers.extend(
+        _legacy_container(
+            f"/leadpoet-ff-worker-{index}",
+            ["--mode", "fulfillment_worker", "--container-id", str(index)],
+            100 + index,
+        )
+        for index in range(1, 11)
+    )
+    inventory = validate_legacy_container_inventory(containers, Path("/source"))
+    assert inventory["main_pid"] == 100
+    assert [item["worker_id"] for item in inventory["workers"]] == list(range(1, 11))
+    assert [item["pid"] for item in inventory["workers"]] == list(range(101, 111))
+
+    # A retry after partial drain still binds the retained stopped containers.
+    containers[3]["State"] = {"Running": False, "Pid": 0}
+    assert validate_legacy_container_inventory(containers, Path("/source"))["workers"][2]["pid"] == 0
+
+    for field, value in (("Image", "sha256:other"), ("Name", "/leadpoet-ff-worker-99")):
+        changed = json.loads(json.dumps(containers))
+        changed[1][field] = value
+        with pytest.raises(RuntimeError):
+            validate_legacy_container_inventory(changed, Path("/source"))
+    subset = validate_legacy_container_inventory(containers[:-1], Path("/source"))
+    assert [item["worker_id"] for item in subset["workers"]] == list(range(1, 10))
+    malformed = json.loads(json.dumps(containers))
+    malformed[1]["State"]["Pid"] = True
+    with pytest.raises(RuntimeError, match="runtime identity"):
+        validate_legacy_container_inventory(malformed, Path("/source"))
+    for path, value in (
+        ((1, "Id"), "short"),
+        ((0, "Image"), "sha256:" + "g" * 64),
+        ((0, "revision"), "a" * 39),
+        ((1, "Running"), "true"),
+    ):
+        malformed = json.loads(json.dumps(containers))
+        index, field = path
+        if field == "revision":
+            malformed[index]["Config"]["Labels"]["org.opencontainers.image.revision"] = value
+        elif field == "Running":
+            malformed[index]["State"][field] = value
+        else:
+            malformed[index][field] = value
+        with pytest.raises(RuntimeError):
+            validate_legacy_container_inventory(malformed, Path("/source"))
 
 
 def test_process_identity_cli_owns_legacy_runner_group_and_relay(tmp_path):

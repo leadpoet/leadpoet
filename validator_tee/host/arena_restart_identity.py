@@ -2,8 +2,107 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
+
+
+def validate_legacy_container_inventory(
+    items: Sequence[Mapping[str, Any]], source_root: Path
+) -> Mapping[str, Any]:
+    """Bind the retired coordinator and any discovered FF workers to one image."""
+
+    if not items:
+        return {"main_id": "", "main_pid": 0, "workers": []}
+    by_name = {item.get("Name"): item for item in items}
+    if len(by_name) != len(items) or "/leadpoet-validator-main" not in by_name:
+        raise RuntimeError("legacy validator container identity is ambiguous")
+    main = by_name.pop("/leadpoet-validator-main")
+    config = main.get("Config") or {}
+    revision = (config.get("Labels") or {}).get(
+        "org.opencontainers.image.revision"
+    )
+    image = main.get("Image")
+    weights_source = str(source_root / "validator_weights")
+
+    def common(item: Mapping[str, Any]) -> bool:
+        item_config = item.get("Config") or {}
+        mounts = item.get("Mounts") or []
+        weight_mounts = [
+            mount
+            for mount in mounts
+            if mount.get("Type") == "bind"
+            and mount.get("Source") == weights_source
+            and mount.get("Destination") == "/app/validator_weights"
+        ]
+        return (
+            (item_config.get("Entrypoint") or [])
+            == ["python3", "neurons/validator.py"]
+            and item_config.get("WorkingDir") == "/app"
+            and item.get("Image") == image
+            and (item_config.get("Labels") or {}).get(
+                "org.opencontainers.image.revision"
+            )
+            == revision
+            and len(weight_mounts) == 1
+        )
+
+    def runtime_identity(item: Mapping[str, Any]) -> Tuple[str, int]:
+        container_id = item.get("Id")
+        state = item.get("State") or {}
+        running = state.get("Running")
+        pid = state.get("Pid")
+        if (
+            not isinstance(container_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", container_id) is None
+            or not isinstance(running, bool)
+            or isinstance(pid, bool)
+            or not isinstance(pid, int)
+            or pid < 0
+            or (running and pid == 0)
+        ):
+            raise RuntimeError("legacy validator container runtime identity is invalid")
+        return container_id, pid if running else 0
+
+    if (
+        not isinstance(image, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        or not common(main)
+        or (config.get("Cmd") or [])
+        != ["--mode", "coordinator", "--container-id", "0"]
+    ):
+        raise RuntimeError("legacy validator container identity is invalid")
+    workers = []
+    for name, item in by_name.items():
+        match = re.fullmatch(r"/leadpoet-ff-worker-([1-9][0-9]*)", str(name))
+        if not match:
+            raise RuntimeError("legacy validator worker identity is ambiguous")
+        worker_id = int(match.group(1))
+        command = (item.get("Config") or {}).get("Cmd") or []
+        if not common(item) or command != [
+            "--mode",
+            "fulfillment_worker",
+            "--container-id",
+            str(worker_id),
+        ]:
+            raise RuntimeError("legacy validator worker identity is invalid")
+        container_id, pid = runtime_identity(item)
+        workers.append(
+            {
+                "worker_id": worker_id,
+                "container_id": container_id,
+                "pid": pid,
+            }
+        )
+    workers.sort(key=lambda item: item["worker_id"])
+    main_id, main_pid = runtime_identity(main)
+    return {
+        "main_id": main_id,
+        "main_pid": main_pid,
+        "workers": workers,
+    }
 
 
 def _stat(entry: Path) -> List[str]:
@@ -25,7 +124,7 @@ def _is_descendant(proc_root: Path, pid: int, ancestor: int) -> bool:
 
 def find_validator_process(
     source_root: Path, current_root: Path, service_pid: int, proc_root: Path = Path("/proc"),
-    ignored_tree_root: int = 0,
+    ignored_tree_roots: Sequence[int] = (),
 ) -> Optional[Tuple[int, str]]:
     source_root = source_root.resolve()
     current_root = current_root.resolve(strict=False)
@@ -35,7 +134,10 @@ def find_validator_process(
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
-        if ignored_tree_root and _is_descendant(proc_root, pid, ignored_tree_root):
+        if any(
+            root > 0 and _is_descendant(proc_root, pid, root)
+            for root in ignored_tree_roots
+        ):
             continue
         try:
             args = [
@@ -126,7 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("current_root", type=Path)
     parser.add_argument("service_pid", type=int)
     parser.add_argument("--proc-root", type=Path, default=Path("/proc"))
-    parser.add_argument("--ignore-tree-root", type=int, default=0)
+    parser.add_argument("--ignore-tree-root", type=int, action="append", default=[])
     parser.add_argument("--kind", choices=("validator", "runner", "relay"), default="validator")
     args = parser.parse_args()
     found = (find_validator_process(

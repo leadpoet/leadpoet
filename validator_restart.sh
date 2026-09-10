@@ -252,25 +252,31 @@ service_active=0
 sudo systemctl is-active --quiet "$SERVICE" && service_active=1 || true
 service_pid="$(sudo systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)"
 [[ "$service_pid" =~ ^[0-9]+$ ]] || service_pid=0
-legacy_container_ids="$(sudo docker container ls -a --filter 'name=^/leadpoet-validator-main$' --format '{{.ID}}')" || fail "Docker cannot enumerate the legacy validator"
+legacy_container_ids="$(
+  sudo docker container ls -a \
+    --filter 'name=^/leadpoet-validator-main$' \
+    --filter 'name=^/leadpoet-ff-worker-' \
+    --format '{{.ID}}'
+)" || fail "Docker cannot enumerate the legacy validator inventory"
 if [ -z "$legacy_container_ids" ]; then
   legacy_container_json='[]'
-elif [ "$(printf '%s\n' "$legacy_container_ids" | wc -l)" -eq 1 ]; then
-  legacy_container_json="$(sudo docker inspect "$legacy_container_ids")" || fail "Docker cannot inspect the legacy validator"
 else
-  fail "legacy validator container identity is ambiguous"
+  legacy_container_json="$(sudo docker inspect $legacy_container_ids)" || fail "Docker cannot inspect the legacy validator inventory"
 fi
-read -r legacy_container_id legacy_container_pid < <(printf '%s' "$legacy_container_json" | "$PYTHON" -c '
-import json,sys
-items=json.load(sys.stdin)
-if not items: print("", ""); raise SystemExit
-if len(items)!=1: raise SystemExit("legacy validator container identity is ambiguous")
-x=items[0]; entry=x.get("Config",{}).get("Entrypoint") or []
-if x.get("Name")!="/leadpoet-validator-main" or entry != ["python3","neurons/validator.py"] or x.get("Config",{}).get("WorkingDir")!="/app":
-    raise SystemExit("legacy validator container identity is invalid")
-print(x["Id"], x["State"]["Pid"] if x.get("State",{}).get("Running") else 0)
-') || fail "legacy validator container identity is invalid"
+legacy_inventory_json="$(cd "$RELEASE" && printf '%s' "$legacy_container_json" | SOURCE_ROOT="$SOURCE_ROOT" PYTHONPATH="$RELEASE" "$PYTHON" -c '
+import json,os,sys
+from pathlib import Path
+from validator_tee.host.arena_restart_identity import validate_legacy_container_inventory
+print(json.dumps(validate_legacy_container_inventory(json.load(sys.stdin),Path(os.environ["SOURCE_ROOT"])),sort_keys=True,separators=(",",":")))
+')" || fail "legacy validator container inventory is invalid"
+read -r legacy_container_id legacy_container_pid < <(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; x=json.load(sys.stdin); print(x["main_id"],x["main_pid"])')
+mapfile -t legacy_worker_container_ids < <(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; [print(x["container_id"]) for x in json.load(sys.stdin)["workers"]]')
+mapfile -t legacy_worker_pids < <(printf '%s' "$legacy_inventory_json" | "$PYTHON" -c 'import json,sys; [print(x["pid"]) for x in json.load(sys.stdin)["workers"]]')
 [[ -z "$legacy_container_pid" || "$legacy_container_pid" =~ ^[0-9]+$ ]] || fail "legacy validator container PID is invalid"
+ignore_tree_args=()
+for container_pid in "$legacy_container_pid" "${legacy_worker_pids[@]}"; do
+  if [ "${container_pid:-0}" -gt 0 ]; then ignore_tree_args+=(--ignore-tree-root "$container_pid"); fi
+done
 old_cid=""
 if [ "$service_active" -eq 1 ]; then
   sudo test -r "$RUNTIME_ENV" || fail "active validator lacks its enclave identity"
@@ -315,7 +321,7 @@ fi
 read -r old_pid old_start < <(
   cd "$RELEASE" || exit
   sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" -m validator_tee.host.arena_restart_identity \
-    "$SOURCE_ROOT" "$CURRENT_LINK" "$service_pid" --ignore-tree-root "${legacy_container_pid:-0}"
+    "$SOURCE_ROOT" "$CURRENT_LINK" "$service_pid" ${ignore_tree_args[@]+"${ignore_tree_args[@]}"}
 ) || fail "validator process ownership is ambiguous"
 read -r old_runner_pgid old_runner_start < <(
   cd "$RELEASE" || exit
@@ -390,6 +396,11 @@ stop_owned_process() {
   ! sudo kill -0 "$pid" 2>/dev/null || fail "$label did not stop"
 }
 stop_owned_process "$old_runner_pgid" "$old_runner_start" "standalone Arena runner"
+for worker_container_id in ${legacy_worker_container_ids[@]+"${legacy_worker_container_ids[@]}"}; do
+  sudo docker stop --time "$STOP_TIMEOUT" "$worker_container_id" >/dev/null
+  [ "$(sudo docker inspect -f '{{.State.Running}}' "$worker_container_id")" = false ] \
+    || fail "legacy fulfillment worker did not stop"
+done
 if [ -n "$legacy_container_id" ] && [ "${legacy_container_pid:-0}" -gt 0 ] && [ "$LEGACY_CONTAINER_STOPPED" -eq 0 ]; then
   sudo docker stop --time "$STOP_TIMEOUT" "$legacy_container_id" >/dev/null
   [ "$(sudo docker inspect -f '{{.State.Running}}' "$legacy_container_id")" = false ] || fail "legacy validator container did not stop"

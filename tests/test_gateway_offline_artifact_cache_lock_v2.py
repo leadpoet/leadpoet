@@ -18,16 +18,16 @@ def test_offline_artifact_downloads_remain_unlocked_but_publication_is_locked() 
     script = PREPARE_SCRIPT.read_text(encoding="utf-8")
 
     download = script.index("python3 -m pip download")
-    validator_download = script.index("--allow-download")
+    runtime_download = script.index("curl --fail --location")
     acquire = script.index("leadpoet_acquire_docker_operation_lock_v2")
-    publish = script.index('rm -rf "$WHEELHOUSE" "$VALIDATOR_RUNTIME"')
+    publish = script.index('rm -rf "$WHEELHOUSE"')
     exact_readback = script.index(
-        '--offline-artifact-root "$VALIDATOR_RUNTIME" >/dev/null', publish
+        '--lock "$RUNSC_LOCK" --artifact "$ARTIFACT_ROOT/$RUNSC_NAME"', publish
     )
     release = script.index("leadpoet_release_docker_operation_lock_v2")
 
     assert download < acquire
-    assert validator_download < acquire
+    assert runtime_download < acquire
     assert acquire < publish < exact_readback < release
 
 

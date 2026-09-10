@@ -11,7 +11,7 @@ import base64
 import hashlib
 import json
 import re
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
 BOOT_IDENTITY_SCHEMA_VERSION = "leadpoet.attested_boot_identity.v2"
@@ -40,7 +40,6 @@ ROUTING_PROVIDER_EVIDENCE_PURPOSE_V2 = "research_lab.routing_provider_evidence.v
 COORDINATOR_ROLE = "gateway_coordinator"
 SCORING_ROLE = "gateway_scoring"
 AUTORESEARCH_ROLE = "gateway_autoresearch"
-WEIGHT_ROLE = "validator_weights"
 
 ROLE_PURPOSES = {
     COORDINATOR_ROLE: frozenset(
@@ -51,32 +50,9 @@ ROLE_PURPOSES = {
             "leadpoet.artifact_persistence.v2",
             "research_lab.ranking.v2",
             "research_lab.promotion_decision.v2",
-            "research_lab.reward_decision.v2",
-            "research_lab.legacy_finalized_allocation.v2",
-            "research_lab.chain_weight_observation.v1",
-            "research_lab.chain_realized_epoch_settlement.v1",
             "research_lab.subnet_epoch_cutover.v2",
-            # Historical receipts remain verifiable after the runtime is retired.
-            "research_lab.source_add_provenance.v2",
-            "research_lab.source_add_functional_probe.v2",
-            "research_lab.source_add_catalog_snapshot.v2",
-            "research_lab.source_add_credential.v2",
-            # Historical weight receipts remain verifiable; no runtime operation
-            # is registered for this retired purpose.
-            "research_lab.source_add_reward_input.v2",
             "research_lab.openrouter_credential.v2",
             "research_lab.openrouter_credit_preflight.v2",
-            "research_lab.allocation.v2",
-            "research_lab.champion_input.v2",
-            "research_lab.reimbursement_input.v2",
-            "research_lab.sourcing_input.v2",
-            "research_lab.fulfillment_input.v2",
-            "research_lab.leaderboard_input.v2",
-            "research_lab.ban_input.v2",
-            "research_lab.anomaly_adjustment_input.v2",
-            "research_lab.ancestry_checkpoint_bootstrap.v2",
-            "research_lab.allocation_settlement_frontier_bootstrap.v2",
-            "gateway.weights.publication.v2",
         }
     ),
     SCORING_ROLE: frozenset(
@@ -98,7 +74,6 @@ ROLE_PURPOSES = {
             "research_lab.benchmark.v2",
             "research_lab.rebenchmark.v2",
             "research_lab.confirmation_score.v2",
-            "research_lab.source_add_judge.v2",
             "qualification.lead_decision.v2",
             "qualification.email_evidence.v2",
             "qualification.sourcing_epoch.v2",
@@ -118,23 +93,20 @@ ROLE_PURPOSES = {
             "research_lab.openrouter_guard.v2",
         }
     ),
-    WEIGHT_ROLE: frozenset(
-        {
-            "validator.weight_snapshot.v2",
-            "validator.weights.computed.v2",
-            "validator.chain_state.v2",
-            "validator.subnet_epoch_snapshot.v2",
-            "validator.metagraph_state.v2",
-            "validator.burn_ownership.v2",
-            "validator.feature_flags.v2",
-            "validator.constants.v2",
-            "validator.hotkey_signature.v2",
-            "validator.serve_axon_extrinsic.v2",
-            "validator.set_weights_extrinsic.v2",
-            "validator.weights.finalized.v2",
-        }
-    ),
+
 }
+
+ARENA_CHAIN_TRANSPORT_PURPOSES = frozenset({
+    "validator.chain_state.v2",
+    "validator.subnet_epoch_snapshot.v2",
+    "validator.metagraph_state.v2",
+    "validator.weights.finalized.v2",
+})
+
+
+def _known_nonexecution_purpose(purpose: str) -> bool:
+    return purpose in ARENA_CHAIN_TRANSPORT_PURPOSES
+
 
 PHYSICAL_ROLES_BY_SERVICE_ROLE = {
     COORDINATOR_ROLE: frozenset({"gateway_coordinator"}),
@@ -144,7 +116,6 @@ PHYSICAL_ROLES_BY_SERVICE_ROLE = {
         {"gateway_scoring", "gateway_scoring_a", "gateway_scoring_b"}
     ),
     AUTORESEARCH_ROLE: frozenset({"gateway_autoresearch"}),
-    WEIGHT_ROLE: frozenset({"validator_weights"}),
 }
 
 RECEIPT_STATUSES = frozenset({"succeeded", "failed"})
@@ -490,7 +461,6 @@ def verify_boot_identity_nitro(
         expected_pcr0=normalized_expected,
         expected_pubkey=str(identity["signing_pubkey"]),
         expected_purpose=BOOT_ATTESTATION_PURPOSE,
-        role="gateway" if str(identity["role"]).startswith("gateway_") else "validator",
         certificate_validity_at_attestation_time=(
             certificate_validity_at_attestation_time
         ),
@@ -572,7 +542,8 @@ def build_transport_attempt(
     _require(bool(_REQUEST_ID_RE.fullmatch(normalized_request_id)), "request_id must be 16-byte lowercase hex")
     normalized_purpose = _identifier(purpose, "purpose")
     _require(
-        any(normalized_purpose in purposes for purposes in ROLE_PURPOSES.values()),
+        (_known_nonexecution_purpose(normalized_purpose)
+         or any(normalized_purpose in purposes for purposes in ROLE_PURPOSES.values())),
         "transport purpose is unsupported",
     )
     _require(isinstance(attempt_number, int) and attempt_number >= 0, "attempt_number must be non-negative")

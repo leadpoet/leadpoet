@@ -1,8 +1,7 @@
 """One normal Arena validator: score leases and publish independently derived weights.
 
-This module is the opt-in replacement for the role-specific primary/auditor
-startup graph.  It intentionally depends only on the Arena public API,
-finalized chain reads, and the narrow protected hotkey signer.
+It depends only on the Arena public API, finalized chain reads, and the narrow
+protected hotkey signer.
 """
 
 from __future__ import annotations
@@ -231,7 +230,9 @@ class ArenaWeightOrchestrator:
             return status
         if status not in {"finalized", "not_included_expired"}:
             raise ArenaValidatorError("protected Arena finalization status is invalid")
-        if status == "finalized" and not {"finalized_block_hash", "finalized_block"}.issubset(outcome):
+        if status == "finalized" and not {
+            "finalized_block_hash", "finalized_block", "commit_included_block"
+        }.issubset(outcome):
             raise ArenaValidatorError("protected Arena finalization result is incomplete")
         if status == "finalized" and (
             outcome.get("weights_hash") != signed.get("weights_hash")
@@ -239,7 +240,7 @@ class ArenaWeightOrchestrator:
             != [list(item) for item in zip(signed["sparse_uids"], signed["sparse_weights_u16"])]
             or isinstance(outcome.get("validator_uid"), bool)
             or not isinstance(outcome.get("validator_uid"), int)
-            or int(outcome.get("last_update", -1)) < int(outcome["finalized_block"])
+            or int(outcome.get("last_update", -1)) < int(outcome["commit_included_block"])
         ):
             raise ArenaValidatorError("protected Arena finalized readback differs from signed weights")
         report_document = None
@@ -480,9 +481,6 @@ class ArenaWeightOrchestrator:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one normal Leadpoet Arena validator", add_help=True)
-    parser.add_argument("--wallet.name", "--wallet_name", dest="wallet_name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))
-    parser.add_argument("--wallet.hotkey", "--wallet_hotkey", dest="hotkey_name", default=os.environ.get("LAB_ARENA_HOTKEY_NAME", "default"))
-    parser.add_argument("--wallet.path", "--wallet_path", dest="wallet_path", default=os.environ.get("LAB_ARENA_WALLET_PATH", "~/.bittensor/wallets"))
     parser.add_argument("--netuid", type=int, default=int(os.environ.get("LAB_ARENA_NETUID", "71")))
     parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"))
     parser.add_argument("--arena-api-base-url", dest="api_base_url", default=os.environ.get("LAB_ARENA_API_BASE_URL", ""))

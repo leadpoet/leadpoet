@@ -22,7 +22,57 @@ from tests.lab_arena.test_lab_arena_service_round import (
 )
 from tests.postgres_migration_harness import SCRIPTS
 from validator_tee.enclave.arena_weight_signer import ArenaWeightSigner
-from validator_tee.enclave.hotkey_authority_v2 import load_chain_signing_profile
+from validator_tee.enclave.arena_hotkey import load_chain_signing_profile
+
+RETIRED_INCENTIVE_TABLES = (
+    "research_reimbursement_awards",
+    "research_reimbursement_schedules",
+    "research_reimbursement_award_events",
+    "research_weight_input_snapshots",
+    "research_lab_champion_reward_obligations",
+    "research_lab_champion_reward_events",
+    "research_lab_emission_allocation_snapshots",
+    "research_lab_arweave_epoch_audit_anchors",
+    "research_lab_arweave_epoch_audit_anchor_events",
+    "research_lab_signed_audit_bundles",
+    "research_lab_signed_audit_bundle_events",
+    "research_lab_attested_weight_bundles",
+    "research_lab_attested_weight_bundles_v2",
+    "research_lab_attested_publication_events_v2",
+    "research_lab_attested_weight_finalizations_v2",
+    "research_lab_chain_realized_settlement_activation_v1",
+    "research_lab_chain_realized_epoch_settlements_v1",
+    "research_lab_chain_realized_obligation_credits_v1",
+    "research_lab_allocation_settlement_frontiers_v2",
+    "research_lab_allocation_settlement_frontier_activation_v2",
+    "research_lab_compact_weight_submissions_v2",
+    "research_lab_compact_weight_publication_intents_v2",
+    "research_lab_compact_weight_authorities_v2",
+)
+SHARED_EPOCH_TABLES = (
+    "research_lab_stateful_subnet_epoch_candidates_v1",
+    "research_lab_stateful_subnet_epoch_cutovers_v1",
+    "research_lab_stateful_subnet_epoch_boundaries_v1",
+    "research_lab_stateful_subnet_epoch_snapshots_v1",
+    "research_lab_stateful_subnet_epoch_cutover_state_v1",
+)
+RETIRED_EPOCH_WRITE_FUNCTIONS = (
+    "research_lab_stateful_subnet_epoch_cutover_preflight_v1",
+    "research_lab_stateful_subnet_epoch_legacy_high_water_v1",
+    "research_lab_stateful_subnet_epoch_cutover_fence_v1",
+    "research_lab_stateful_subnet_epoch_cutover_bind_v1",
+    "research_lab_stateful_subnet_epoch_cutover_bind_v2",
+    "research_lab_stateful_subnet_epoch_stage_v1",
+    "research_lab_stateful_subnet_epoch_stage_v2",
+    "research_lab_stateful_subnet_epoch_activate_v1",
+    "research_lab_stateful_subnet_epoch_refresh_fence_v1",
+    "research_lab_fresh_network_epoch_cutover_public_state_v1",
+    "research_lab_champion_lifetime_credit_contract_v1",
+)
+TEMPORARY_WEIGHT_TRIGGER_FUNCTIONS = (
+    "enforce_temporary_testnet401_execution_result_epoch_scope_v1",
+    "enforce_temporary_testnet401_weight_submission_epoch_scope_v1",
+)
 
 
 @pytest.fixture(scope="module")
@@ -33,10 +83,151 @@ def integrated_database():
     connection.autocommit = True
     try:
         with connection.cursor() as cursor:
-            cursor.execute("CREATE TABLE public.research_lab_emission_allocation_snapshots (epoch bigint, netuid integer, snapshot_status text, allocation_doc jsonb, lab_cap_alpha_percent numeric)")
-            cursor.execute("CREATE TABLE public.fulfillment_score_consensus (miner_hotkey text, reward_pct numeric, reward_expires_epoch bigint, is_winner boolean, computed_at timestamptz)")
-            cursor.execute("CREATE TABLE public.banned_hotkeys (hotkey text)")
+            # Production has these legacy objects. A fresh Arena database does
+            # not, so seed their names to prove the retirement upgrade path.
+            for table in RETIRED_INCENTIVE_TABLES:
+                cursor.execute(f"CREATE TABLE public.{table} (id BIGINT)")
+            for table in SHARED_EPOCH_TABLES:
+                cursor.execute(f"CREATE TABLE public.{table} (id BIGINT)")
+            # These are the production dependency directions that determine
+            # safe drop order. Minimal columns keep the workflow test small.
+            dependency_edges = (
+                ("research_reimbursement_award_events", "research_reimbursement_awards"),
+                ("research_lab_champion_reward_events", "research_lab_champion_reward_obligations"),
+                ("research_lab_attested_publication_events_v2", "research_lab_attested_weight_bundles_v2"),
+                ("research_lab_attested_weight_finalizations_v2", "research_lab_attested_publication_events_v2"),
+                ("research_lab_compact_weight_publication_intents_v2", "research_lab_compact_weight_submissions_v2"),
+                ("research_lab_compact_weight_authorities_v2", "research_lab_compact_weight_submissions_v2"),
+                ("research_lab_chain_realized_obligation_credits_v1", "research_lab_chain_realized_epoch_settlements_v1"),
+                ("research_lab_allocation_settlement_frontier_activation_v2", "research_lab_allocation_settlement_frontiers_v2"),
+                ("research_lab_stateful_subnet_epoch_cutovers_v1", "research_lab_attested_weight_bundles_v2"),
+                ("research_lab_stateful_subnet_epoch_cutovers_v1", "research_lab_attested_weight_finalizations_v2"),
+                ("research_lab_stateful_subnet_epoch_cutovers_v1", "research_lab_stateful_subnet_epoch_candidates_v1"),
+                ("research_lab_stateful_subnet_epoch_boundaries_v1", "research_lab_stateful_subnet_epoch_cutovers_v1"),
+                ("research_lab_stateful_subnet_epoch_snapshots_v1", "research_lab_stateful_subnet_epoch_cutovers_v1"),
+            )
+            parents = {parent for _, parent in dependency_edges}
+            for parent in parents:
+                cursor.execute(f"ALTER TABLE public.{parent} ADD PRIMARY KEY (id)")
+            for index, (child, parent) in enumerate(dependency_edges):
+                cursor.execute(
+                    f"ALTER TABLE public.{child} ADD CONSTRAINT retired_fk_{index} "
+                    f"FOREIGN KEY (id) REFERENCES public.{parent}(id)"
+                )
+            for table in RETIRED_INCENTIVE_TABLES + SHARED_EPOCH_TABLES:
+                cursor.execute(f"INSERT INTO public.{table} VALUES (1)")
+            cursor.execute(
+                "CREATE FUNCTION public.research_lab_stateful_subnet_epoch_cutover_public_state_v1() "
+                "RETURNS TABLE(id BIGINT) LANGUAGE sql STABLE AS "
+                "'SELECT id FROM public.research_lab_stateful_subnet_epoch_cutover_state_v1'"
+            )
+            for function in RETIRED_EPOCH_WRITE_FUNCTIONS:
+                cursor.execute(
+                    f"CREATE FUNCTION public.{function}() RETURNS void "
+                    "LANGUAGE sql AS 'SELECT'"
+                )
+            cursor.execute(
+                "CREATE TABLE public.research_lab_attested_execution_results_v2 (id BIGINT)"
+            )
+            cursor.execute("CREATE TABLE public.transparency_log (id BIGINT)")
+            for function in TEMPORARY_WEIGHT_TRIGGER_FUNCTIONS:
+                cursor.execute(
+                    f"CREATE FUNCTION public.{function}() RETURNS trigger "
+                    "LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'"
+                )
+            cursor.execute(
+                "CREATE TRIGGER enforce_temporary_testnet401_execution_result_epoch_scope_v1 "
+                "BEFORE INSERT ON public.research_lab_attested_execution_results_v2 "
+                "FOR EACH ROW EXECUTE FUNCTION public.enforce_temporary_testnet401_execution_result_epoch_scope_v1()"
+            )
+            cursor.execute(
+                "CREATE TRIGGER enforce_temporary_testnet401_weight_submission_epoch_scope_v1 "
+                "BEFORE INSERT ON public.transparency_log FOR EACH ROW EXECUTE FUNCTION "
+                "public.enforce_temporary_testnet401_weight_submission_epoch_scope_v1()"
+            )
+            cursor.execute("INSERT INTO public.research_lab_attested_execution_results_v2 VALUES (9)")
+            cursor.execute("INSERT INTO public.transparency_log VALUES (10)")
+            cursor.execute(
+                "CREATE VIEW public.research_lab_stateful_subnet_epoch_mapping_v1 "
+                "AS SELECT id FROM public.research_lab_stateful_subnet_epoch_cutovers_v1"
+            )
+            cursor.execute(
+                "CREATE TABLE public.research_lab_scoring_runs (id BIGINT)"
+            )
+            cursor.execute("INSERT INTO public.research_lab_scoring_runs VALUES (7)")
+            cursor.execute(
+                "CREATE FUNCTION public.persist_research_lab_chain_realized_test() "
+                "RETURNS void LANGUAGE sql AS 'SELECT'"
+            )
+            cursor.execute(
+                "CREATE FUNCTION public.research_lab_compact_checkpoint_graph_contract_v1() "
+                "RETURNS JSONB LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb'"
+            )
             cursor.execute((SCRIPTS / DEFAULT_MIGRATIONS[-1]).read_text(encoding="utf-8"))
+            cursor.execute(
+                "SELECT to_regclass('public.' || name) FROM unnest(%s::text[]) name",
+                (list(RETIRED_INCENTIVE_TABLES),),
+            )
+            assert all(row[0] is None for row in cursor.fetchall())
+            cursor.execute(
+                "SELECT to_regprocedure('public.' || name || '()') "
+                "FROM unnest(%s::text[]) name",
+                (list(TEMPORARY_WEIGHT_TRIGGER_FUNCTIONS),),
+            )
+            assert all(row[0] is None for row in cursor.fetchall())
+            cursor.execute(
+                "SELECT (SELECT id FROM public.research_lab_attested_execution_results_v2), "
+                "(SELECT id FROM public.transparency_log)"
+            )
+            assert cursor.fetchone() == (9, 10)
+            cursor.execute(
+                "SELECT to_regclass('public.research_lab_scoring_runs'), "
+                "to_regclass('public.lab_arena_accepted_weight_states'), "
+                "to_regprocedure('public.persist_research_lab_chain_realized_test()')"
+            )
+            assert cursor.fetchone() == (
+                "research_lab_scoring_runs",
+                "lab_arena_accepted_weight_states",
+                None,
+            )
+            cursor.execute("SELECT id FROM public.research_lab_scoring_runs")
+            assert cursor.fetchone() == (7,)
+            cursor.execute(
+                "SELECT to_regprocedure('public.research_lab_compact_checkpoint_graph_contract_v1()')"
+            )
+            assert cursor.fetchone()[0] is not None
+            cursor.execute(
+                "SELECT id FROM public.research_lab_stateful_subnet_epoch_cutover_public_state_v1()"
+            )
+            assert cursor.fetchone() == (1,)
+            cursor.execute(
+                "SELECT to_regprocedure('public.' || name || '()') "
+                "FROM unnest(%s::text[]) name",
+                (list(RETIRED_EPOCH_WRITE_FUNCTIONS),),
+            )
+            assert all(row[0] is None for row in cursor.fetchall())
+            cursor.execute(
+                "SELECT to_regclass('public.research_lab_stateful_subnet_epoch_mapping_v1'), "
+                "to_regprocedure('public.research_lab_stateful_subnet_epoch_cutover_public_state_v1()')"
+            )
+            mapping_view, public_reader = cursor.fetchone()
+            assert mapping_view is None and public_reader is not None
+            cursor.execute(
+                "SELECT to_regclass('public.' || name) FROM unnest(%s::text[]) name",
+                (list(SHARED_EPOCH_TABLES),),
+            )
+            assert all(row[0] is not None for row in cursor.fetchall())
+            cursor.execute(
+                "SELECT confrelid::regclass::text FROM pg_constraint "
+                "WHERE conrelid = 'public.research_lab_stateful_subnet_epoch_cutovers_v1'::regclass "
+                "AND contype = 'f'"
+            )
+            assert cursor.fetchall() == [
+                ("research_lab_stateful_subnet_epoch_candidates_v1",)
+            ]
+            cursor.execute((SCRIPTS / DEFAULT_MIGRATIONS[-1]).read_text(encoding="utf-8"))
+            cursor.execute("SELECT public.lab_arena_incentive_retirement_schema_v1()")
+            assert cursor.fetchone()[0]["version"] == 203
         yield psycopg2, dsn
     finally:
         connection.close()
@@ -143,42 +334,7 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integra
     assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
 
     burn = Keypair.create_from_uri("//ArenaFlowBurn").ss58_address
-    fulfillment = Keypair.create_from_uri("//ArenaFlowFulfillment").ss58_address
-    with connect() as db, db.cursor() as cursor:
-        cursor.execute("INSERT INTO public.research_lab_emission_allocation_snapshots VALUES (31999,71,'active','{}'::jsonb,30)")
-        db.commit()
-    with pytest.raises(ArenaStoreError, match="allocation_invalid"):
-        harness.service.store.weight_inputs(
-            31999, 71, burn, fulfillment_enabled=True, leaderboard_enabled=True,
-        )
-    invalid_row = {"lab_cap_percent": 30, "unallocated_percent": 0,
-        "reimbursement_allocations": [{"miner_hotkey": fulfillment, "paid_alpha_percent": -1}],
-        "champion_allocations": [], "queued_champion_allocations": []}
-    with connect() as db, db.cursor() as cursor:
-        cursor.execute("UPDATE public.research_lab_emission_allocation_snapshots SET allocation_doc = %s::jsonb WHERE epoch = 31999 AND netuid = 71", (json.dumps(invalid_row),))
-        db.commit()
-    with pytest.raises(ArenaStoreError, match="allocation_invalid"):
-        harness.service.store.weight_inputs(
-            31999, 71, burn, fulfillment_enabled=True, leaderboard_enabled=True,
-        )
-    invalid_row["reimbursement_allocations"][0]["paid_alpha_percent"] = 31
-    with connect() as db, db.cursor() as cursor:
-        cursor.execute("UPDATE public.research_lab_emission_allocation_snapshots SET allocation_doc = %s::jsonb WHERE epoch = 31999 AND netuid = 71", (json.dumps(invalid_row),))
-        db.commit()
-    with pytest.raises(ArenaStoreError, match="allocation_over_cap"):
-        harness.service.store.weight_inputs(
-            31999, 71, burn, fulfillment_enabled=True, leaderboard_enabled=True,
-        )
-    with connect() as db, db.cursor() as cursor:
-        cursor.execute("DELETE FROM public.research_lab_emission_allocation_snapshots WHERE epoch = 31999 AND netuid = 71")
-        allocation = {"lab_cap_percent": 30, "unallocated_percent": 30,
-            "reimbursement_allocations": [], "champion_allocations": [], "queued_champion_allocations": []}
-        cursor.execute("INSERT INTO public.research_lab_emission_allocation_snapshots VALUES (%s,71,'active',%s::jsonb,30)", (32001, json.dumps(allocation)))
-        cursor.execute("INSERT INTO public.fulfillment_score_consensus VALUES (%s,0.40,32002,TRUE,now())", (fulfillment,))
-        db.commit()
     harness.service.config.accepted_burn_hotkey = burn
-    harness.service.config.fulfillment_enabled = True
-    harness.service.config.leaderboard_emissions_enabled = True
     harness.chain.accepted_weight_epoch_scope = lambda: {"genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03", "epoch": 32001, "valid_from_block": 100, "valid_until_block": 459}
     harness.chain.epoch = 32001
     state = harness.service.public_weight_state(32001)["state"]
@@ -191,11 +347,10 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integra
     harness.clock.now = datetime.now(timezone.utc)
 
     profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
-    monkeypatch.setattr("validator_tee.enclave.hotkey_authority_v2.load_chain_signing_profile", lambda: profile)
     outcomes = []
     for index in range(2):
         key = Keypair.create_from_uri("//ArenaNormalValidator%d" % index)
-        hotkeys = [burn, fulfillment]
+        hotkeys = [burn]
         if state["reward_basis"]["king_hotkey"]:
             hotkeys.append(state["reward_basis"]["king_hotkey"])
         source = _ExternalSource(hotkeys, key.public_key.hex(), profile["genesis_hash"])

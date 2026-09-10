@@ -2,27 +2,20 @@ import ast
 from pathlib import Path
 
 
-ENCLAVE_ROOT = Path(__file__).parents[1] / "validator_tee" / "enclave"
-CANONICAL_FRONTIER = (
-    Path(__file__).parents[1]
-    / "leadpoet_canonical"
-    / "allocation_settlement_frontier_v2.py"
+ROOT = Path(__file__).parents[1]
+ENCLAVE_ROOT = ROOT / "validator_tee" / "enclave"
+ARENA_SOURCES = (
+    ENCLAVE_ROOT / "arena_hotkey.py",
+    ENCLAVE_ROOT / "arena_weight_signer.py",
+    ENCLAVE_ROOT / "chain_source_v2.py",
+    ENCLAVE_ROOT / "tee_service.py",
+    ROOT / "leadpoet_canonical" / "arena_weights.py",
 )
 
 
-def test_validator_enclave_sources_are_python37_compatible() -> None:
-    for path in sorted(ENCLAVE_ROOT.glob("*.py")):
+def test_measured_arena_signer_sources_are_python37_compatible():
+    for path in ARENA_SOURCES:
         source = path.read_text(encoding="utf-8")
         ast.parse(source, filename=str(path), feature_version=(3, 7))
-
-        # The measured enclave is pinned to CPython 3.7. These methods were
-        # added in Python 3.9 and fail only after the signed extrinsic exists.
         assert ".removeprefix(" not in source
         assert ".removesuffix(" not in source
-
-
-def test_allocation_settlement_frontier_is_python37_compatible() -> None:
-    source = CANONICAL_FRONTIER.read_text(encoding="utf-8")
-    ast.parse(source, filename=str(CANONICAL_FRONTIER), feature_version=(3, 7))
-    assert ".removeprefix(" not in source
-    assert ".removesuffix(" not in source

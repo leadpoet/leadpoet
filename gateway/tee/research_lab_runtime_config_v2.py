@@ -1,14 +1,13 @@
 """Secret-free runtime settings for current gateway enclave work.
 
 The document contains normal qualification behavior, provider preflight,
-retained reward allocation and the shared chain/provider
+and the shared chain/provider
 boundary. It intentionally contains no model repository, autoresearch,
 code-edit, private holdout, or miner-credential configuration.
 """
 
 from __future__ import annotations
 
-from dataclasses import fields
 import json
 import math
 import os
@@ -21,7 +20,6 @@ from Leadpoet.utils.subnet_epoch import (
     SubnetEpochError,
     load_subnet_epoch_cutover,
 )
-from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.tee.scoring_executor import SCORING_CONFIG_ENV_NAMES
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from leadpoet_canonical.hotkey_authority_v2 import validate_chain_signing_profile
@@ -32,9 +30,8 @@ from leadpoet_canonical.production_parity_boundary_v2 import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v10"
+SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v11"
 
-HOST_ONLY_SECRET_FIELDS = frozenset({"internal_api_key"})
 
 PROVIDER_PREFLIGHT_BEHAVIOR_ENV_NAMES = (
     "RESEARCH_LAB_PROVIDER_PREFLIGHT_ENABLED",
@@ -53,11 +50,6 @@ ADDITIONAL_QUALIFICATION_BEHAVIOR_ENV_NAMES = (
 )
 
 
-LAB_ARENA_REWARD_BEHAVIOR_ENV_NAMES = (
-    "LAB_ARENA_REWARDS_ENABLED",
-    "LAB_ARENA_SIGNING_PUBLIC_KEY_HASH",
-)
-
 BEHAVIOR_DEFAULTS = {
     "RESEARCH_LAB_INTENT_CORROBORATION_RESCUE": "false",
     "RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE": "shadow",
@@ -70,7 +62,6 @@ BEHAVIOR_ENV_NAMES = tuple(
         set(SCORING_CONFIG_ENV_NAMES)
         | set(PROVIDER_PREFLIGHT_BEHAVIOR_ENV_NAMES)
         | set(ADDITIONAL_QUALIFICATION_BEHAVIOR_ENV_NAMES)
-        | set(LAB_ARENA_REWARD_BEHAVIOR_ENV_NAMES)
         | set(PRODUCTION_PARITY_ENV_NAMES)
     )
 )
@@ -91,13 +82,6 @@ class ResearchLabRuntimeConfigV2Error(ValueError):
     """The measured gateway configuration is incomplete or unsafe."""
 
 
-def _field_names() -> tuple[str, ...]:
-    names = tuple(sorted(item.name for item in fields(ResearchLabGatewayConfig)))
-    if not HOST_ONLY_SECRET_FIELDS.issubset(names):
-        raise ResearchLabRuntimeConfigV2Error(
-            "host-only Research Lab field classification is invalid"
-        )
-    return names
 
 
 def _validate_string(value: str, field: str) -> str:
@@ -113,40 +97,8 @@ def _validate_string(value: str, field: str) -> str:
     return value
 
 
-def _normalize_scalar(value: Any, default: Any, field: str) -> Any:
-    if isinstance(default, bool):
-        if not isinstance(value, bool):
-            raise ResearchLabRuntimeConfigV2Error("%s must be boolean" % field)
-        return value
-    if isinstance(default, int) and not isinstance(default, bool):
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ResearchLabRuntimeConfigV2Error("%s must be integer" % field)
-        return value
-    if isinstance(default, float):
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise ResearchLabRuntimeConfigV2Error("%s must be numeric" % field)
-        normalized = float(value)
-        if not math.isfinite(normalized):
-            raise ResearchLabRuntimeConfigV2Error("%s must be finite" % field)
-        return normalized
-    if not isinstance(value, str):
-        raise ResearchLabRuntimeConfigV2Error("%s must be text" % field)
-    return _validate_string(value, field)
 
 
-def _normalized_fields(value: Mapping[str, Any]) -> Dict[str, Any]:
-    safe_names = tuple(
-        name for name in _field_names() if name not in HOST_ONLY_SECRET_FIELDS
-    )
-    if not isinstance(value, Mapping) or set(value) != set(safe_names):
-        raise ResearchLabRuntimeConfigV2Error(
-            "Research Lab execution fields do not match the current schema"
-        )
-    defaults = ResearchLabGatewayConfig()
-    return {
-        name: _normalize_scalar(value[name], getattr(defaults, name), name)
-        for name in safe_names
-    }
 
 
 def _normalized_environment(
@@ -226,13 +178,11 @@ def _normalized_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
 
 def build_research_lab_execution_config(
     *,
-    config: Optional[ResearchLabGatewayConfig] = None,
     environment: Optional[Mapping[str, Any]] = None,
     network: Optional[str] = None,
     netuid: Optional[int] = None,
     chain_signing_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    resolved = config or ResearchLabGatewayConfig.from_env()
     source_environment = os.environ if environment is None else environment
     resolved_network = str(
         network
@@ -266,11 +216,6 @@ def build_research_lab_execution_config(
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab epoch authority is invalid"
         ) from exc
-    values = {
-        item.name: getattr(resolved, item.name)
-        for item in fields(ResearchLabGatewayConfig)
-        if item.name not in HOST_ONLY_SECRET_FIELDS
-    }
     return validate_research_lab_execution_config(
         {
             "schema_version": SCHEMA_VERSION,
@@ -278,8 +223,6 @@ def build_research_lab_execution_config(
                 "network": resolved_network,
                 "netuid": resolved_netuid,
             },
-            "fields": _normalized_fields(values),
-            "host_only_secret_fields": sorted(HOST_ONLY_SECRET_FIELDS),
             "epoch_authority": _normalized_epoch_authority(
                 {
                     "mode": "stateful_v1",
@@ -307,8 +250,6 @@ def validate_research_lab_execution_config(
     if not isinstance(value, Mapping) or set(value) != {
         "schema_version",
         "deployment",
-        "fields",
-        "host_only_secret_fields",
         "epoch_authority",
         "behavior_environment",
     }:
@@ -339,10 +280,6 @@ def validate_research_lab_execution_config(
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab deployment configuration is invalid"
         )
-    if value.get("host_only_secret_fields") != sorted(HOST_ONLY_SECRET_FIELDS):
-        raise ResearchLabRuntimeConfigV2Error(
-            "Research Lab host-only field classification differs"
-        )
     environment = _normalized_environment(value.get("behavior_environment"))
     try:
         validate_production_parity_boundary_v2(
@@ -366,19 +303,12 @@ def validate_research_lab_execution_config(
     normalized = {
         "schema_version": SCHEMA_VERSION,
         "deployment": {"network": network, "netuid": netuid},
-        "fields": _normalized_fields(value.get("fields")),
-        "host_only_secret_fields": sorted(HOST_ONLY_SECRET_FIELDS),
         "epoch_authority": epoch_authority,
         "behavior_environment": environment,
     }
     return json.loads(canonical_json(normalized))
 
 
-def research_lab_config_from_document(
-    document: Mapping[str, Any],
-) -> ResearchLabGatewayConfig:
-    normalized = validate_research_lab_execution_config(document)
-    return ResearchLabGatewayConfig(**dict(normalized["fields"]))
 
 
 def apply_behavior_environment(document: Mapping[str, Any]) -> None:

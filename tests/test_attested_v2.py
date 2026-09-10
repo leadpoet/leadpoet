@@ -13,7 +13,6 @@ from leadpoet_canonical.attested_v2 import (
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
     SCORING_ROLE,
-    WEIGHT_ROLE,
     AttestedV2Error,
     build_boot_identity_body,
     build_execution_receipt_body,
@@ -56,7 +55,6 @@ def _boot(role: str, private_key, public_key: str):
         COORDINATOR_ROLE: "gateway_coordinator",
         SCORING_ROLE: "gateway_scoring",
         AUTORESEARCH_ROLE: "gateway_autoresearch",
-        WEIGHT_ROLE: "validator_weights",
     }[role]
     body = build_boot_identity_body(
         role=role,
@@ -367,7 +365,7 @@ def test_graph_rejects_disconnected_valid_receipt():
     )
     second = _receipt(
         role=COORDINATOR_ROLE,
-        purpose="research_lab.allocation.v2",
+        purpose="research_lab.admission.v2",
         job_id="run-2",
         boot=boot,
         private_key=key,
@@ -390,8 +388,8 @@ def test_tampered_receipt_signature_is_rejected():
     boot = _boot(COORDINATOR_ROLE, key, pub)
     receipt = _receipt(
         role=COORDINATOR_ROLE,
-        purpose="research_lab.allocation.v2",
-        job_id="allocation-1",
+        purpose="research_lab.admission.v2",
+        job_id="admission-1",
         boot=boot,
         private_key=key,
         public_key=pub,

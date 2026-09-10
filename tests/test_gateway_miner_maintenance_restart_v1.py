@@ -88,6 +88,7 @@ def _installed_controller_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     controller_commit: str = CONTROLLER_COMMIT,
+    wrapper_bytes: bytes = b"#!/bin/bash\nexit 0\n",
 ):
     tmp_path.mkdir(parents=True, exist_ok=True)
     controller_parent = tmp_path / "restart-controller"
@@ -102,10 +103,9 @@ def _installed_controller_fixture(
     (release / "gateway/tee").mkdir(parents=True)
     release.chmod(0o700)
     files = {
-        "gw_restart.sh": b"#!/bin/bash\nexit 0\n",
+        "gw_restart.sh": wrapper_bytes,
         "scripts/gateway_git_deploy.py": b"HELPER = True\n",
         "scripts/manage_owned_process_group.py": b"PROCESS = True\n",
-        "Leadpoet/utils/exact_commit_restart_v2.py": b"EXACT = True\n",
         "gateway/tee/host_memory_guard_v2.py": b"GUARD = True\n",
     }
     for relative, payload in files.items():
@@ -144,6 +144,31 @@ def _verified_controller_commit(**kwargs: object) -> str:
             "controller_commit"
         ]
     )
+
+
+def test_legacy_auditor_controller_must_be_replaced_before_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, _, _, current, host_restart = _installed_controller_fixture(
+        tmp_path,
+        monkeypatch,
+        wrapper_bytes=(
+            b"#!/bin/bash\n"
+            b"python3 -m Leadpoet.utils.exact_commit_restart_v2\n"
+        ),
+    )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="install the exact gateway-only controller before restart",
+    ):
+        maintenance._verified_installed_controller_bundle(
+            repo_root=tmp_path,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+        )
 
 
 class FakeSecretsClient:
@@ -2049,9 +2074,6 @@ def test_partial_controller_cutover_reconciles_exact_old_host_under_lock(
         "scripts/gateway_git_deploy.py": (
             release / "scripts/gateway_git_deploy.py"
         ).read_bytes(),
-        "Leadpoet/utils/exact_commit_restart_v2.py": (
-            release / "Leadpoet/utils/exact_commit_restart_v2.py"
-        ).read_bytes(),
         "gateway/tee/host_memory_guard_v2.py": (
             release / "gateway/tee/host_memory_guard_v2.py"
         ).read_bytes(),
@@ -2187,11 +2209,9 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
         assert close_set in command
         assert "-u GATEWAY_MINER_MAINTENANCE_PROOF_FD" in command
         assert "-u GATEWAY_GIT_HELPER" in command
-        assert "-u GATEWAY_EXACT_COMMIT_HELPER" in command
         assert "-u GATEWAY_HOST_MEMORY_GUARD_PATH" in command
     for function_name, marker in (
         ("start_gateway_offline_artifact_prepare", '"${prepare_command[@]}"'),
-        ("start_gateway_ancestry_checkpoint_bootstrap", '"${checkpoint_command[@]}"'),
     ):
         function_start = restart.index(f"{function_name}() {{")
         command_start = restart.index("env -u", function_start)
@@ -2200,7 +2220,6 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
         assert close_set in command
         assert "-u GATEWAY_MINER_MAINTENANCE_PROOF_FD" in command
         assert "-u GATEWAY_GIT_HELPER" in command
-        assert "-u GATEWAY_EXACT_COMMIT_HELPER" in command
         assert "-u GATEWAY_HOST_MEMORY_GUARD_PATH" in command
 
 
@@ -2209,7 +2228,6 @@ def test_hydrated_and_live_env_clones_reserve_invocation_only_keys():
         Path(__file__).resolve().parents[1] / "gw_restart.sh"
     ).read_text(encoding="utf-8")
     assert restart.count('"GATEWAY_MINER_MAINTENANCE_PROOF_FD",') >= 3
-    assert restart.count('"GATEWAY_EXACT_COMMIT_HELPER",') >= 3
     assert restart.count('"GATEWAY_HOST_MEMORY_GUARD_PATH",') >= 3
 
 
@@ -2231,7 +2249,6 @@ def test_controller_install_recovers_every_publication_crash_point(
     candidate_payloads = {
         "gw_restart.sh": b"#!/bin/bash\necho candidate\n",
         "scripts/gateway_git_deploy.py": b"CANDIDATE_HELPER = True\n",
-        "Leadpoet/utils/exact_commit_restart_v2.py": b"CANDIDATE_EXACT = True\n",
         "gateway/tee/host_memory_guard_v2.py": b"CANDIDATE_GUARD = True\n",
         "scripts/manage_owned_process_group.py": b"PROCESS_HELPER = True\n",
     }

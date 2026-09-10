@@ -17,43 +17,6 @@ T_EPOCHS = int(os.getenv("FULFILLMENT_T_EPOCHS", "1"))
 T_SECONDS_OVERRIDE = int(os.getenv("FULFILLMENT_T_SECONDS", "0"))
 M_MINUTES = int(os.getenv("FULFILLMENT_M_MINUTES", "15"))
 BLOCK_TIME_SECONDS = 12
-# Per-winning-lead emission share, paid every epoch for L_EPOCHS (100) epochs
-# after the lead is fulfilled.  Trajectory:
-#   2026-04-30: 0.001  → 0.0015 (per-lead bump over pool-share rebalance,
-#               L_EPOCHS still 30, total per lead = 30 × 0.15% = 4.5%)
-#   2026-05-11: 0.0015 → 0.0005 AND L_EPOCHS 30 → 100.  Total per lead is
-#               now 100 × 0.05% = 5.0% (slight bump, ~11% lift).  The real
-#               change is the reward runway: 100 epochs × 72 min/epoch =
-#               7200 min = 120 hours = 5 days, up from ~36 hours.  Goal is
-#               de-reg protection — a single fulfilled lead now keeps a
-#               miner earning emission for ~5 days, so miners with even
-#               one win in a low-volume window don't get pushed off the
-#               subnet by the daily de-reg sweep.  Co-founder call.
-#   2026-05-22: 0.0005 → 0.001 (true 2× lift; per epoch 0.05% → 0.1%;
-#               total per lead 5% → 10% over the 100-epoch runway).  At
-#               any epoch the validator caps SUM(active reward_pct) at
-#               fulfillment_pool (neurons/validator.py::
-#               _get_fulfillment_emission_share lines 3134–3139), so this
-#               2× bump only translates to higher miner payouts during
-#               LOW-VOLUME periods — when only one or two leads are
-#               paying out simultaneously and the raw_total is below the
-#               pool ceiling.  In high-volume periods the proportional
-#               normalization absorbs the bump and per-miner payouts
-#               are unchanged.  Goal: stronger de-reg protection for
-#               miners with sparse wins, without inflating payouts
-#               during busy periods.
-#   2026-06-23: 0.001 → 0.004 (4× lift; per epoch 0.1% → 0.4%; total per
-#               lead 10% → 40% over the 100-epoch runway).  Same pool-cap
-#               caveat as 2026-05-22: the validator caps SUM(active
-#               reward_pct) at fulfillment_pool, so this mainly raises
-#               per-miner payouts during low-volume periods.
-# Existing reward rows stay at their original (reward_pct, reward_expires_epoch)
-# until expiry; only newly-fulfilled leads use the new rate AND new runway,
-# so the rollover is gradual.  Old rows pay at their original per-epoch
-# claim size for the remainder of their 100-epoch window (~5 days), at
-# which point all live rows are paying the new 0.004 rate.
-Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.004"))
-L_EPOCHS = int(os.getenv("FULFILLMENT_L_EPOCHS", "100"))
 FULFILLMENT_MAX_CONCURRENT_SOURCES = int(os.getenv("FULFILLMENT_MAX_CONCURRENT_SOURCES", "2"))
 FULFILLMENT_OPENROUTER_API_KEY = os.getenv("FULFILLMENT_OPENROUTER_API_KEY", "")
 FULFILLMENT_LIFECYCLE_INTERVAL_SECONDS = int(os.getenv("FULFILLMENT_LIFECYCLE_INTERVAL_SECONDS", "30"))

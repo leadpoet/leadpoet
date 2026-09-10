@@ -551,15 +551,6 @@ class RuntimeIdentityV2:
                 raise RuntimeIdentityV2Error("V2 runtime identity is not configured")
             return json.loads(canonical_json(self._runtime_configuration))
 
-    def research_lab_config(self):
-        from gateway.tee.research_lab_runtime_config_v2 import (
-            research_lab_config_from_document,
-        )
-
-        configuration = self.runtime_configuration()["configuration"]
-        return research_lab_config_from_document(
-            configuration["research_lab_execution_config"]
-        )
 
     def apply_research_lab_behavior_environment(self) -> None:
         from gateway.tee.research_lab_runtime_config_v2 import (

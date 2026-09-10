@@ -40,6 +40,9 @@ REWARD_CHAIN_SCOPE_SQL = (
 WEIGHT_STATE_SQL = (
     SCRIPTS / "202-arena-accepted-weight-state.sql"
 ).read_text(encoding="utf-8")
+RETIRED_INCENTIVE_BRIDGE_SQL = (
+    SCRIPTS / "203-retire-legacy-incentive-weight-bridge.sql"
+).read_text(encoding="utf-8")
 HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
 HISTORICAL_UPLOAD_SHA256 = (
     "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
@@ -105,6 +108,7 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[200] == ["200-lab-arena-next-day-icp-disclosure.sql"]
     assert numbered[201] == ["201-lab-arena-daily-capacity.sql"]
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
+    assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
     assert all(len(paths) == 1 for paths in numbered.values()), numbered
 
 
@@ -122,6 +126,82 @@ def test_weight_state_migration_keeps_core_schema_rollback_compatible():
     assert "CREATE OR REPLACE FUNCTION public.lab_arena_schema_version_v1()" not in WEIGHT_STATE_SQL
     assert "CREATE OR REPLACE FUNCTION public.lab_arena_weight_state_schema_v1()" in WEIGHT_STATE_SQL
     assert "'leadpoet.lab_arena.weight_state_schema.v1', 'version', 202" in WEIGHT_STATE_SQL
+    assert "research_lab_emission_allocation_snapshots" not in WEIGHT_STATE_SQL
+    assert "fulfillment_score_consensus" not in WEIGHT_STATE_SQL
+
+
+def test_retired_incentive_schema_is_removed_without_scoring_scope_growth():
+    assert "DROP FUNCTION IF EXISTS public.lab_arena_weight_inputs_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
+    for table in (
+        "research_reimbursement_awards",
+        "research_lab_champion_reward_obligations",
+        "research_lab_emission_allocation_snapshots",
+        "research_lab_attested_weight_bundles_v2",
+        "research_lab_chain_realized_epoch_settlements_v1",
+        "research_lab_compact_weight_authorities_v2",
+    ):
+        assert f"DROP TABLE IF EXISTS public.{table}" in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "DROP TABLE IF EXISTS public.research_lab_scoring_runs" not in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "DROP TABLE IF EXISTS public.lab_arena_" not in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "DROP TABLE IF EXISTS public.fulfillment_score_consensus" not in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "lab_arena_incentive_retirement_schema_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "DROP TABLE IF EXISTS public.research_lab_stateful_subnet_epoch_cutovers_v1" not in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "DROP TABLE IF EXISTS public.research_lab_stateful_subnet_epoch_cutover_state_v1" not in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "detach_retired_weight_history" in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "DROP VIEW IF EXISTS public.research_lab_stateful_subnet_epoch_mapping_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "research_lab_stateful_subnet_epoch_stage_v2" in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "research_lab_stateful_subnet_epoch_cutover_public_state_v1'" not in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "research_lab_champion_lifetime_credit_contract_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "enforce_temporary_testnet401_execution_result_epoch_scope_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
+    assert "enforce_temporary_testnet401_weight_submission_epoch_scope_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
+
+
+def test_historical_reward_and_weight_function_inventory_is_classified():
+    create_function = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?([a-zA-Z0-9_]+)",
+        re.I | re.S,
+    )
+    historical = {
+        name
+        for path in SCRIPTS.glob("*.sql")
+        for name in create_function.findall(path.read_text(encoding="utf-8"))
+    }
+    retired = {
+        name for name in historical
+        if (
+            name.startswith("persist_research_lab_allocation_")
+            or name.startswith("persist_research_lab_chain_realized_")
+            or name.startswith("research_lab_allocation_frontier_")
+            or name.startswith("research_lab_compact_weight_")
+            or name == "research_lab_champion_lifetime_credit_contract_v1"
+            or name.startswith("enforce_temporary_testnet401_")
+        )
+    }
+    assert retired == {
+        "persist_research_lab_allocation_frontier_bootstrap_v2",
+        "persist_research_lab_allocation_settlement_frontier_v2",
+        "persist_research_lab_chain_realized_lifetime_settlement_v2",
+        "persist_research_lab_chain_realized_settlement_v1",
+        "persist_research_lab_chain_realized_unattributed_v2",
+        "research_lab_allocation_frontier_bootstrap_contract_v2",
+        "research_lab_allocation_frontier_historical_source_contract_v1",
+        "research_lab_champion_lifetime_credit_contract_v1",
+        "research_lab_compact_weight_settlement_contract_v1",
+        "enforce_temporary_testnet401_execution_result_epoch_scope_v1",
+        "enforce_temporary_testnet401_weight_submission_epoch_scope_v1",
+    }
+    for pattern in (
+        "persist_research_lab_chain_realized_%",
+        "persist_research_lab_allocation_%",
+        "research_lab_allocation_frontier_%",
+        "research_lab_compact_weight_%",
+    ):
+        assert pattern in RETIRED_INCENTIVE_BRIDGE_SQL
+    # These similarly named functions remain by design: current Arena state,
+    # generic epoch-table integrity, and the one public namespace reader.
+    assert "lab_arena_publish_weight_state_v1" not in retired
+    assert "validate_research_lab_stateful_subnet_epoch_v1" not in retired
+    assert "research_lab_stateful_subnet_epoch_cutover_public_state_v1" not in retired
 
 
 def test_historical_upload_migration_is_retained_byte_for_byte():

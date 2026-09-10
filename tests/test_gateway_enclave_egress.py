@@ -2408,100 +2408,12 @@ def test_enclave_proxy_accepts_tunnel_framing_with_upstream_proxy():
     assert parsed["upstream_proxy_url"].startswith("https://worker:secret@")
 
 
-def test_measured_assigned_proxy_raw_transport_scenario(monkeypatch):
-    monkeypatch.syspath_prepend(
-        str(Path(__file__).parent / "restart_rehearsal")
-    )
-    from production_workflow_runner import (
-        _exercise_measured_assigned_proxy_raw_transport,
-    )
-
-    evidence = _exercise_measured_assigned_proxy_raw_transport()
-
-    assert evidence == {
-        "exact_httpx_enclave_parent_proxy_provider_path": True,
-        "assigned_proxy_raw_parent_tunnel_verified": True,
-        "nested_tls_verified": True,
-        "proxy_auth_remained_in_enclave": True,
-        "provider_first_close_verified": True,
-        "bounded_cleanup_verified": True,
-        "production_http_connect_proxy_verified": True,
-        "request_scoped_connection_cleanup_verified": True,
-        "one_connect_per_request_verified": True,
-        "failure_recovery_on_fresh_tunnel_verified": True,
-        "classified_failure_health_verified": True,
-        "stable_process_resource_count_verified": True,
-        "repeated_request_count": 8,
-        "attempt_count": 9,
-    }
 
 
-def test_company_fit_numeric_observation_rehearsal_scenario(monkeypatch):
-    monkeypatch.syspath_prepend(
-        str(Path(__file__).parent / "restart_rehearsal")
-    )
-    from production_workflow_runner import (
-        _company_fit_numeric_observation_projection_evidence_is_complete,
-        _exercise_company_fit_numeric_observation_projection,
-    )
-
-    evidence = _exercise_company_fit_numeric_observation_projection()
-    assert evidence == {
-        "numeric_observation_with_web_evidence_matched": True,
-        "raw_observation_committed": True,
-        "contradictory_boolean_failed_closed": True,
-        "malformed_range_decimal_negative_failed_closed": True,
-    }
-    assert _company_fit_numeric_observation_projection_evidence_is_complete(evidence)
-    for field in evidence:
-        assert not _company_fit_numeric_observation_projection_evidence_is_complete(
-            {**evidence, field: False}
-        )
 
 
-def test_measured_coordinator_raw_transport_scenario(monkeypatch):
-    monkeypatch.syspath_prepend(
-        str(Path(__file__).parent / "restart_rehearsal")
-    )
-    from production_workflow_runner import (
-        _exercise_measured_coordinator_raw_transport,
-    )
-
-    evidence = _exercise_measured_coordinator_raw_transport()
-
-    assert evidence == {
-        "exact_httpx_enclave_parent_proxy_provider_path": True,
-        "nested_tls_verified": True,
-        "proxy_auth_remained_in_enclave": True,
-        "provider_first_close_verified": True,
-        "bounded_cleanup_verified": True,
-        "production_http_connect_proxy_verified": True,
-        "request_scoped_connection_cleanup_verified": True,
-        "one_connect_per_request_verified": True,
-        "failure_recovery_on_fresh_tunnel_verified": True,
-        "classified_failure_health_verified": True,
-        "stable_process_resource_count_verified": True,
-        "repeated_request_count": 8,
-        "attempt_count": 9,
-        "raw_parent_tunnel_verified": True,
-    }
 
 
-def test_coordinator_direct_transport_rehearsal_contract(monkeypatch):
-    monkeypatch.syspath_prepend(
-        str(Path(__file__).parent / "restart_rehearsal")
-    )
-    from production_workflow_runner import (
-        _exercise_artifact_egress_sustained_readback,
-    )
-
-    evidence = _exercise_artifact_egress_sustained_readback()
-
-    assert evidence["ordinary_provider_transport_request_scoped"] is True
-    assert (
-        evidence["ordinary_direct_serialized_generation_recovery_verified"]
-        is True
-    )
 
 
 def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():

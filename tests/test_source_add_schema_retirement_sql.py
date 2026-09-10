@@ -58,7 +58,7 @@ def test_source_add_retirement_does_not_rewrite_applied_migrations() -> None:
 def test_historical_upgrade_retires_source_add_and_preserves_arena() -> None:
     generator = _database_with_migrations(
         HISTORICAL_SOURCE_ADD_UPGRADE_MIGRATIONS
-        + tuple(ARENA_MIGRATIONS),
+        + tuple(name for name in ARENA_MIGRATIONS if not name.startswith("203-")),
         setup_sql=_DAILY_SOURCE_SHIM_SQL,
     )
     psycopg2, dsn = next(generator)

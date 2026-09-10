@@ -369,10 +369,10 @@ def test_gateway_restart_uses_bounded_memory_gates_without_async_termination() -
     restart_gate = restart.index(
         'echo "Capturing the official subnet restart window before release acquisition"'
     )
-    weight_preflight = restart.index(
-        'echo "Preflighting durable V2 validator weight authority before production shutdown"'
+    release_preflight = restart.index(
+        'echo "Validating the prepared V2 release before production shutdown"'
     )
-    assert prepared_cleanup < restart_gate < weight_preflight
+    assert prepared_cleanup < restart_gate < release_preflight
     assert (
         '"$GATEWAY_PREFLIGHT_TREE/gateway/tee/host_memory_guard_v2.py"'
         in restart

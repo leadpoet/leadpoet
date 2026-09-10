@@ -40,7 +40,7 @@ def load_environment(path: Path) -> None:
         name = name.strip()
         if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
             raise ValueError("Arena validator env file has an invalid assignment")
-        if not (name.startswith("LAB_ARENA_") or name in ("LEADPOET_WEIGHT_MODE", "ENCLAVE_CID")):
+        if not (name.startswith("LAB_ARENA_") or name == "ENCLAVE_CID"):
             raise ValueError("Arena validator env file contains an unrelated setting")
         try:
             parts = shlex.split("VALUE=" + value, comments=True, posix=True)
@@ -49,8 +49,6 @@ def load_environment(path: Path) -> None:
         if len(parts) != 1 or not parts[0].startswith("VALUE=") or name in values:
             raise ValueError("Arena validator env file has a duplicate or invalid value")
         values[name] = parts[0][6:]
-    if values.get("LEADPOET_WEIGHT_MODE") != "arena":
-        raise ValueError("Arena validator env file must select LEADPOET_WEIGHT_MODE=arena")
     os.environ.update(values)
 
 

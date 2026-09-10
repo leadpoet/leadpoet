@@ -2,9 +2,6 @@ from pathlib import Path
 import re
 
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
-from tests.historical_sql_purpose_contract import (
-    canonical_purposes_before_routing_experiment_v2,
-)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,11 +39,8 @@ def test_bootstrap_purpose_migration_is_additive_and_validated() -> None:
     )
 
 
-def test_bootstrap_purpose_migration_matches_canonical_allowlist_exactly() -> None:
-    later_purposes = {
-        "gateway_coordinator": {
-            "research_lab.allocation_settlement_frontier_bootstrap.v2"
-        },
+def test_bootstrap_purpose_migration_preserves_only_current_generic_purposes() -> None:
+    purposes_added_after_migration = {
         "gateway_scoring": {
             "research_lab.candidate_hybrid_test.v2",
             "research_lab.candidate_hybrid_discovery.v2",
@@ -64,9 +58,19 @@ def test_bootstrap_purpose_migration_matches_canonical_allowlist_exactly() -> No
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        historical_purposes = canonical_purposes_before_routing_experiment_v2(
-            role
-        ) - later_purposes.get(
+        current_at_migration = set(expected_purposes) - purposes_added_after_migration.get(
             role, set()
         )
-        assert migrated_purposes == historical_purposes, role
+        assert current_at_migration <= migrated_purposes, role
+
+    retired = {
+        "gateway.weights.publication.v2",
+        "research_lab.allocation.v2",
+        "research_lab.reward_decision.v2",
+        "research_lab.source_add_judge.v2",
+        "research_lab.source_add_reward_input.v2",
+    }
+    assert retired.isdisjoint(
+        purpose for purposes in ROLE_PURPOSES.values() for purpose in purposes
+    )
+    assert retired <= set(re.findall(r"'([^']+)'", SQL))

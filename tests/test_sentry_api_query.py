@@ -529,17 +529,6 @@ def test_repository_guides_match_and_sentry_runbook_keeps_safe_access_workflow()
             "export LEADPOET_SENTRY_API_TOKEN='" + FAKE_TOKEN + "'\n"
             "export SAFE_VALUE=present\n",
         ),
-        (
-            "validator_restart.sh",
-            'python3 - "$SECRET_TMP" "$VALIDATOR_ENV_FILE" "$VALIDATOR_ENV_EXPORT"',
-            json.dumps(
-                {
-                    "LEADPOET_SENTRY_ENABLED": "1",
-                    "LEADPOET_SENTRY_API_TOKEN": FAKE_TOKEN,
-                    "SAFE_VALUE": "present",
-                }
-            ),
-        ),
     ],
 )
 def test_restart_hydration_never_caches_or_exports_api_token(
@@ -555,9 +544,6 @@ def test_restart_hydration_never_caches_or_exports_api_token(
     export_file = tmp_path / "exports.sh"
     secret.write_text(secret_document, encoding="utf-8")
     arguments = ["python3", "-c", block, str(secret), str(cache)]
-    if relative == "validator_restart.sh":
-        arguments.append(str(export_file))
-
     subprocess.run(arguments, check=True, capture_output=True, text=True)
 
     assert "SAFE_VALUE" in cache.read_text(encoding="utf-8")

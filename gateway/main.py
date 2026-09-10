@@ -83,7 +83,7 @@ from gateway.db.client import create_http1_sync_client
 # Import API routers
 # NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
 # submit hash+values in one request to /validate. No separate reveal phase needed.
-from gateway.api import epoch, validate, manifest, submit, attest, weights, attestation
+from gateway.api import epoch, validate, manifest, submit, attest, attestation
 from gateway.api import role_translate
 from gateway.api.arena_proxy import router as arena_proxy_router
 from gateway.api.arena_proxy import testnet_router as arena_testnet_proxy_router
@@ -91,7 +91,6 @@ from gateway.api import metrics as metrics_api
 
 # Research Lab is an authoritative V2 service. Import failures must abort
 # startup instead of silently launching a gateway without its protected path.
-from gateway.research_lab.api import router as research_lab_router
 
 # Import fulfillment router (Lead Fulfillment System)
 try:
@@ -303,7 +302,6 @@ async def lifespan(app: FastAPI):
     icp_task = None
     fulfillment_task_handle = None
     hotkey_bucket_cleanup_task = None
-    pcr0_builder_task_handle = None
 
     # Now use async_subtensor in a try/finally to ensure cleanup
     try:
@@ -446,15 +444,6 @@ async def lifespan(app: FastAPI):
                 fulfillment_task_handle = asyncio.create_task(fulfillment_lifecycle_task())
                 print("✅ Fulfillment lifecycle task started")
 
-        # The dynamic validator PCR0 cache belongs to the gateway verification
-        # boundary, not to the retired Research Lab worker fleets.  Keep its
-        # independent Git rebuild running in this API process so weight
-        # submissions can verify the exact validator commit and measurement.
-        from gateway.utils.pcr0_builder import start_pcr0_builder
-
-        pcr0_builder_task_handle = start_pcr0_builder()
-        print("✅ PCR0 builder started (trustless validator verification)")
-        
         app.state.event_signing_identity = dict(event_signing_identity)
         
         print("")
@@ -489,7 +478,6 @@ async def lifespan(app: FastAPI):
             hotkey_bucket_cleanup_task,
             icp_task,
             fulfillment_task_handle,
-            pcr0_builder_task_handle,
         ]
         
         # Filter out None tasks (when DISABLE_BACKGROUND_TASKS=true)
@@ -617,11 +605,9 @@ app.include_router(manifest.router)
 # app.include_router(submit.router)
 app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
-app.include_router(weights.router)  # Weights submission for auditor validators
 app.include_router(role_translate.router)  # POST /fulfillment/translate-role (DeepL-backed cache)
 app.include_router(metrics_api.router)
 
-app.include_router(research_lab_router)
 app.include_router(arena_proxy_router)
 app.include_router(arena_testnet_proxy_router)
 

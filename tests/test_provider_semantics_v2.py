@@ -409,10 +409,10 @@ def test_infrastructure_routes_bypass_paid_provider_cache_and_outcomes():
     request = {
         **_request(
             provider="supabase",
-            url="https://fixture.supabase.co/rest/v1/allocation_inputs",
+            url="https://fixture.supabase.co/rest/v1/provider_evidence",
             body=b"",
             headers={"Accept": "application/json"},
-            purpose="research_lab.allocation.v2",
+            purpose="research_lab.provider_evidence.v2",
         ),
         "method": "GET",
     }

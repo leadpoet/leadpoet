@@ -26,8 +26,6 @@ def build_accepted_weight_state(
     valid_from_block: int,
     valid_until_block: int,
     reward_basis: Mapping[str, Any],
-    fixed_allocations: Any,
-    fulfillment_demands: Any,
     burn_hotkey: str,
     issued_at: str,
 ) -> Dict[str, Any]:
@@ -42,8 +40,6 @@ def build_accepted_weight_state(
         "valid_from_block": int(valid_from_block),
         "valid_until_block": int(valid_until_block),
         "reward_basis": dict(reward_basis),
-        "fixed_allocations": list(fixed_allocations),
-        "fulfillment_demands": list(fulfillment_demands),
         "burn_hotkey": str(burn_hotkey),
         "issued_at": str(issued_at),
     }

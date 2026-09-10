@@ -2104,47 +2104,6 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     assert {score["icp_position"] for score in public_scores} == public_positions
     assert benchmark.json()["disclosure_policy"] == "all_20_next_day"
     assert benchmark.json()["private_icp_count"] == 0
-    # Full parity must validate all persisted baseline outputs while respecting
-    # the same public HTTP partition used by the dashboard.
-    from scripts.run_production_parity_full_host import (
-        FullParityError,
-        _arena_rebenchmark_icp_set_id,
-        _verify_arena_daily_public_results,
-    )
-
-    assert _arena_rebenchmark_icp_set_id(row["evaluation_date"]) == int(
-        str(row["icp_set_date"]).replace("-", "")
-    )
-    baseline_id = next(p["submission_id"] for p in row["participants"] if p["is_king"])
-    baseline_public = original_get(
-        "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, baseline_id)
-    ).json()
-    verify_args = dict(
-        service=harness.service, round_id=harness.round_id,
-        baseline_submission_id=baseline_id,
-        icps=harness.service.benchmark_icps(harness.round_id),
-        round_view=public.json(), benchmark_view=benchmark.json(),
-        results_view=baseline_public,
-    )
-    baseline_runs, persisted_outputs = _verify_arena_daily_public_results(**verify_args)
-    assert len(baseline_runs) == len(persisted_outputs) == 20
-    assert len(baseline_public["outputs"]) == 20
-    missing = dict(baseline_public, scores={**baseline_public["scores"], "stage_1": []})
-    with pytest.raises(FullParityError, match="public daily scores differ"):
-        _verify_arena_daily_public_results(**dict(verify_args, results_view=missing))
-    original_read = harness.service._objects.get_bounded
-
-    missing_run = baseline_runs[0]
-
-    def missing_persisted_output(ref, maximum):
-        if ref == missing_run["output_ref"]:
-            raise FileNotFoundError("private output unavailable")
-        return original_read(ref, maximum)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(harness.service._objects, "get_bounded", missing_persisted_output)
-        with pytest.raises(FullParityError, match="persisted company output is invalid"):
-            _verify_arena_daily_public_results(**verify_args)
     current = original_get("http://localhost/arena/v1/current")
     assert current.status_code == 200
     assert row["king_outcome"] == "no_king"

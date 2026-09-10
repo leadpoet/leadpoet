@@ -44,7 +44,6 @@ MEASURED_DATA_PATHS = (
     "leadpoet_canonical/subtensor_events_profile_v2.json",
     "schemas/evidence_bundle.schema.json",
     "schemas/execution_trace.schema.json",
-    "schemas/research_reimbursement.schema.json",
     "schemas/results_ledger_row.schema.json",
 )
 
@@ -82,11 +81,7 @@ ROLE_ENTRYPOINT_MODULES = {
         "gateway.tee.tee_service",
         "gateway.tee.artifact_persistence_v2",
         "gateway.tee.artifact_vault_v2",
-        "gateway.tee.coordinator_allocation_source_v2",
-        "gateway.tee.coordinator_chain_source_v2",
-        "gateway.tee.coordinator_epoch_cutover_v2",
         "gateway.tee.coordinator_executor_v2",
-        "gateway.tee.coordinator_weight_source_v2",
         "gateway.tee.egress_framing",
         "gateway.tee.egress_policy",
         "gateway.tee.egress_proxy",
@@ -102,9 +97,7 @@ ROLE_ENTRYPOINT_MODULES = {
         "gateway.tee.runtime_identity_v2",
         "gateway.tee.topology",
         "gateway.tee.protected_workflows",
-        "leadpoet_canonical.allocation_handoff_v2",
         "leadpoet_canonical.attested_v2",
-        "leadpoet_canonical.weight_authority_v2",
         "gateway.research_lab.attested_v2_store",
     ),
     "gateway_scoring": ENTRYPOINT_MODULES

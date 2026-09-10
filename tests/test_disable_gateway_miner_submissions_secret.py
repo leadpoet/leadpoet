@@ -546,7 +546,6 @@ def test_frozen_n_minus_one_keeps_legacy_aws_pair_only_in_canonical_cache(
     [
         ("AWS_ENDPOINT_URL", "https://attacker.invalid", "restart or AWS"),
         ("AWS_CONFIG_FILE", "/tmp/config", "restart or AWS"),
-        ("GATEWAY_EXACT_COMMIT_HELPER", "", "restart or AWS"),
         ("AWS_REGION", "us-west-2", "conflicting AWS"),
         ("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "false", "conflicting AWS"),
     ],

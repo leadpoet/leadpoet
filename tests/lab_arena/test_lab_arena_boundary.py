@@ -2,9 +2,8 @@
 
 1. The runtime import closure of every Arena module and entrypoint, in a
    fresh interpreter, contains no ``gateway.tee`` and no ``gateway.db``.
-2. The enclave staging allowlists contain no ``lab_arena`` path.
-3. No measured package imports ``lab_arena`` (the closure builder would not
-   flag it and the enclave would fail at import time).
+2. Gateway enclave staging excludes Arena; the Arena signer stages only its small request contract.
+3. Measured code cannot import the Arena service or scoring runtime.
 """
 
 from __future__ import annotations
@@ -110,9 +109,9 @@ def test_enclave_staging_allowlists_exclude_lab_arena():
     assert "lab_arena" not in staging
     code_hash = (ROOT / "gateway/tee/code_hash.py").read_text(encoding="utf-8")
     assert "lab_arena" not in code_hash
-    dockerfile = (ROOT / "validator_tee/Dockerfile.enclave").read_text(encoding="utf-8")
-    copy_lines = [line for line in dockerfile.splitlines() if line.startswith("COPY ")]
-    assert copy_lines and not any("lab_arena" in line for line in copy_lines)
+    dockerfile = (ROOT / "validator_tee/Dockerfile.arena-signer").read_text(encoding="utf-8")
+    arena_copies = [line for line in dockerfile.splitlines() if line.startswith("COPY ") and "lab_arena/" in line]
+    assert arena_copies == ["COPY lab_arena/__init__.py lab_arena/contracts.py /app/lab_arena/"]
     gateway_dockerfile = (ROOT / "gateway/tee/Dockerfile.enclave").read_text(encoding="utf-8")
     assert "lab_arena" not in gateway_dockerfile
     closure = (ROOT / "gateway/tee/scoring_import_closure.py").read_text(encoding="utf-8")
@@ -150,11 +149,16 @@ def test_no_measured_package_imports_lab_arena():
         for path in base.rglob("*.py"):
             if _imports_lab_arena(path):
                 offenders.append(str(path.relative_to(ROOT)))
-    for extra in (ROOT / "neurons", ROOT / "validator_tee"):
+    for extra in (ROOT / "validator_tee" / "enclave",):
         for path in extra.rglob("*.py"):
             if _imports_lab_arena(path):
                 offenders.append(str(path.relative_to(ROOT)))
-    assert offenders == []
+    # Only the canonical signing-message validator can import the small Arena
+    # request contract. No protected code imports the service, scorer or store.
+    assert offenders == ["leadpoet_canonical/arena_weights.py"]
+    source = (ROOT / offenders[0]).read_text(encoding="utf-8")
+    imports = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom) and node.module == "lab_arena"]
+    assert len(imports) == 1 and [item.name for item in imports[0].names] == ["contracts"]
     # And the dynamic-import string form, which AST cannot see.
     text_offenders = []
     for package in MEASURED_PACKAGES:

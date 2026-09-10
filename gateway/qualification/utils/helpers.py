@@ -19,7 +19,6 @@ This module provides helper functions used across the qualification system:
 
 3. Bittensor Utilities:
    - get_current_bittensor_epoch() - Get current block/epoch
-   - get_tao_price_usd() - Get TAO price from oracle
    - is_hotkey_registered() - Check if hotkey is registered
 
 CRITICAL: These are NEW helper utilities for qualification only.
@@ -761,27 +760,6 @@ async def get_current_bittensor_epoch() -> int:
     from gateway.utils.epoch import get_current_epoch_id_async
 
     return await get_current_epoch_id_async()
-
-
-async def get_tao_price_usd() -> float:
-    """
-    Get current TAO price in USD from CoinGecko.
-    
-    Returns:
-        TAO price in USD
-    """
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "bittensor", "vs_currencies": "usd"},
-            timeout=10.0
-        )
-        response.raise_for_status()
-        data = response.json()
-    price = data.get("bittensor", {}).get("usd", 0.0)
-    if not price:
-        raise RuntimeError("CoinGecko returned no TAO price")
-    return float(price)
 
 
 async def is_hotkey_registered(hotkey: str, netuid: int = SUBNET_NETUID) -> bool:

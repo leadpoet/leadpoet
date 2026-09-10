@@ -9,7 +9,6 @@ from leadpoet_canonical.arena_weights import verify_accepted_weight_state_signat
 
 KING = Keypair.create_from_uri("//ArenaWeightKing").ss58_address
 BURN = Keypair.create_from_uri("//ArenaWeightBurn").ss58_address
-FULFILLMENT = Keypair.create_from_uri("//ArenaWeightFulfillment").ss58_address
 
 
 def _basis(signer):
@@ -26,8 +25,6 @@ def test_accepted_weight_state_binds_scope_economics_and_nested_reward_basis():
         signer, network="finney", genesis_hash="11" * 32, netuid=71,
         epoch=25000, valid_from_block=100, valid_until_block=459,
         reward_basis=_basis(signer),
-        fixed_allocations=[{"hotkey": BURN, "share_ppb": 300_000_000}],
-        fulfillment_demands=[{"hotkey": FULFILLMENT, "share_ppb": 605_000_000}],
         burn_hotkey=BURN, issued_at="2026-09-10T00:00:00Z",
     )
     assert verify_accepted_weight_state_signature(

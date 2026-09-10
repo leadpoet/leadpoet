@@ -28,13 +28,8 @@ from gateway.tee.release_manifest_v2 import (
     validate_release_manifest,
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
-from validator_tee.host.release_v2 import (
-    VALIDATOR_LOCAL_RELEASE_SCHEMA_VERSION,
-    validate_validator_release_manifest,
-)
-
-
-SCHEMA_VERSION = "leadpoet.attested_release_channel.v2"
+SCHEMA_VERSION = "leadpoet.gateway_release_channel.v3"
+HISTORICAL_SCHEMA_VERSION = "leadpoet.attested_release_channel.v2"
 LINEAGE_SCHEMA_VERSION = "leadpoet.attested_release_lineage.v1"
 DEFAULT_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 DEFAULT_PREFIX = "attested-v2/releases"
@@ -43,7 +38,6 @@ MAX_LINEAGE_RELEASES = 512
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _LOCAL_COMMIT_ENV = "LEADPOET_LOCAL_RELEASE_COMMIT_SHA"
 _LOCAL_GATEWAY_ENV = "LEADPOET_LOCAL_GATEWAY_RELEASE"
-_LOCAL_VALIDATOR_ENV = "LEADPOET_LOCAL_VALIDATOR_RELEASE"
 _LOCAL_PRIOR_LINEAGE_ENV = "LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE"
 
 
@@ -61,54 +55,32 @@ def release_channel_key(commit_sha: str, *, prefix: str = DEFAULT_PREFIX) -> str
     return f"{normalized_prefix}/{commit}/release-channel-v2.json"
 
 
-def _build_release_channel_v2(
-    *,
-    gateway_release_manifest: Mapping[str, Any],
-    validator_release_manifest: Mapping[str, Any],
-    gateway_validator: Any,
-) -> Dict[str, Any]:
+def _build_release_channel_v2(*, gateway_release_manifest: Mapping[str, Any], gateway_validator: Any) -> Dict[str, Any]:
     gateway = gateway_validator(gateway_release_manifest)
-    validator = validate_validator_release_manifest(validator_release_manifest)
     commit = gateway["commit_sha"]
-    if validator["release"]["commit_sha"] != commit:
-        raise ReleaseChannelV2Error(
-            "gateway and validator release commits differ"
-        )
     body = {
         "schema_version": SCHEMA_VERSION,
         "commit_sha": commit,
         "gateway_release_manifest": gateway,
-        "validator_release_manifest": validator,
     }
-    gateway_is_local = gateway["schema_version"] == LOCAL_RELEASE_SCHEMA_VERSION
-    validator_is_local = (
-        validator["schema_version"] == VALIDATOR_LOCAL_RELEASE_SCHEMA_VERSION
-    )
-    if gateway_is_local != validator_is_local:
-        raise ReleaseChannelV2Error(
-            "gateway and validator release identity modes differ"
-        )
-    hash_body = body
-    if gateway_is_local:
-        hash_body = {
+    hash_body = (
+        {
             "schema_version": SCHEMA_VERSION,
             "commit_sha": commit,
             "gateway_release_hash": gateway["release_hash"],
-            "validator_release_hash": validator["release_manifest_hash"],
         }
+        if gateway["schema_version"] == LOCAL_RELEASE_SCHEMA_VERSION else body
+    )
     return {**body, "channel_hash": sha256_json(hash_body)}
 
 
 def build_release_channel_v2(
-    *,
-    gateway_release_manifest: Mapping[str, Any],
-    validator_release_manifest: Mapping[str, Any],
+    *, gateway_release_manifest: Mapping[str, Any]
 ) -> Dict[str, Any]:
-    """Build a release channel for the canonical current topology."""
+    """Build the current gateway-only release channel."""
 
     return _build_release_channel_v2(
         gateway_release_manifest=gateway_release_manifest,
-        validator_release_manifest=validator_release_manifest,
         gateway_validator=validate_release_manifest,
     )
 
@@ -121,14 +93,15 @@ def build_historical_release_channel_v2(
 ) -> Dict[str, Any]:
     """Build a channel for the explicitly selected known old topology."""
 
-    return _build_release_channel_v2(
-        gateway_release_manifest=gateway_release_manifest,
-        validator_release_manifest=validator_release_manifest,
-        gateway_validator=lambda value: validate_historical_release_manifest(
-            value,
-            expected_topology_hash=expected_topology_hash,
-        ),
+    gateway = validate_historical_release_manifest(
+        gateway_release_manifest, expected_topology_hash=expected_topology_hash
     )
+    if not isinstance(validator_release_manifest, Mapping):
+        raise ReleaseChannelV2Error("historical validator release data is invalid")
+    body = {"schema_version": HISTORICAL_SCHEMA_VERSION, "commit_sha": gateway["commit_sha"],
+            "gateway_release_manifest": gateway,
+            "validator_release_manifest": dict(validator_release_manifest)}
+    return {**body, "channel_hash": sha256_json(body)}
 
 
 def _validate_release_channel_v2(
@@ -137,20 +110,13 @@ def _validate_release_channel_v2(
     expected_commit: Optional[str],
     gateway_validator: Any,
 ) -> Dict[str, Any]:
-    fields = {
-        "schema_version",
-        "commit_sha",
-        "gateway_release_manifest",
-        "validator_release_manifest",
-        "channel_hash",
-    }
+    fields = {"schema_version", "commit_sha", "gateway_release_manifest", "channel_hash"}
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ReleaseChannelV2Error("release channel fields are invalid")
     if value.get("schema_version") != SCHEMA_VERSION:
         raise ReleaseChannelV2Error("release channel schema is invalid")
     normalized = _build_release_channel_v2(
         gateway_release_manifest=value["gateway_release_manifest"],
-        validator_release_manifest=value["validator_release_manifest"],
         gateway_validator=gateway_validator,
     )
     if value.get("commit_sha") != normalized["commit_sha"]:
@@ -184,14 +150,21 @@ def validate_historical_release_channel_v2(
 ) -> Dict[str, Any]:
     """Validate a channel for the explicitly selected known old topology."""
 
-    return _validate_release_channel_v2(
-        value,
-        expected_commit=expected_commit,
-        gateway_validator=lambda manifest: validate_historical_release_manifest(
-            manifest,
-            expected_topology_hash=expected_topology_hash,
-        ),
+    fields = {"schema_version", "commit_sha", "gateway_release_manifest",
+              "validator_release_manifest", "channel_hash"}
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema_version") != HISTORICAL_SCHEMA_VERSION:
+        raise ReleaseChannelV2Error("historical release channel fields are invalid")
+    gateway = validate_historical_release_manifest(
+        value["gateway_release_manifest"], expected_topology_hash=expected_topology_hash
     )
+    if not isinstance(value["validator_release_manifest"], Mapping):
+        raise ReleaseChannelV2Error("historical validator release data is invalid")
+    body = {key: value[key] for key in fields - {"channel_hash"}}
+    if value["channel_hash"] != sha256_json(body) or value["commit_sha"] != gateway["commit_sha"]:
+        raise ReleaseChannelV2Error("historical release channel hash differs")
+    if expected_commit is not None and gateway["commit_sha"] != str(expected_commit).lower():
+        raise ReleaseChannelV2Error("release channel is for another commit")
+    return {**body, "channel_hash": value["channel_hash"]}
 
 
 def validate_prior_release_channel_v2(
@@ -199,11 +172,21 @@ def validate_prior_release_channel_v2(
 ) -> Dict[str, Any]:
     """Validate a prior channel from the current or one known old topology."""
 
-    return _validate_release_channel_v2(
-        value,
-        expected_commit=expected_commit,
-        gateway_validator=validate_prior_release_manifest,
-    )
+    if value.get("schema_version") == SCHEMA_VERSION:
+        return _validate_release_channel_v2(value, expected_commit=expected_commit, gateway_validator=validate_prior_release_manifest)
+    fields = {"schema_version", "commit_sha", "gateway_release_manifest",
+              "validator_release_manifest", "channel_hash"}
+    if not isinstance(value, Mapping) or set(value) != fields or value.get("schema_version") != HISTORICAL_SCHEMA_VERSION:
+        raise ReleaseChannelV2Error("prior release channel fields are invalid")
+    gateway = validate_prior_release_manifest(value["gateway_release_manifest"])
+    body = {key: value[key] for key in fields - {"channel_hash"}}
+    if not isinstance(value["validator_release_manifest"], Mapping) or value["channel_hash"] != sha256_json(body):
+        raise ReleaseChannelV2Error("prior release channel hash differs")
+    if value["commit_sha"] != gateway["commit_sha"] or (
+        expected_commit is not None and gateway["commit_sha"] != str(expected_commit).lower()
+    ):
+        raise ReleaseChannelV2Error("release channel commit differs")
+    return {**body, "gateway_release_manifest": gateway, "channel_hash": value["channel_hash"]}
 
 
 def _load_json(path: Path, label: str) -> Dict[str, Any]:
@@ -257,15 +240,12 @@ def install_release_channel_v2(
     *,
     expected_commit: str,
     gateway_output: Optional[Path] = None,
-    validator_output: Optional[Path] = None,
 ) -> Dict[str, Any]:
     normalized = validate_release_channel_v2(
         channel, expected_commit=expected_commit
     )
     if gateway_output is not None:
         _atomic_json(gateway_output, normalized["gateway_release_manifest"])
-    if validator_output is not None:
-        _atomic_json(validator_output, normalized["validator_release_manifest"])
     return normalized
 
 
@@ -273,7 +253,6 @@ def local_release_inputs_match(
     *,
     expected_commit: str,
     gateway_output: Optional[Path],
-    validator_output: Optional[Path],
 ) -> bool:
     try:
         if gateway_output is not None:
@@ -282,15 +261,9 @@ def local_release_inputs_match(
             )
             if gateway["commit_sha"] != expected_commit:
                 return False
-        if validator_output is not None:
-            validator = validate_validator_release_manifest(
-                _load_json(validator_output, "local validator release manifest")
-            )
-            if validator["release"]["commit_sha"] != expected_commit:
-                return False
     except Exception:
         return False
-    return gateway_output is not None or validator_output is not None
+    return gateway_output is not None
 
 
 def fetch_release_channel_v2(
@@ -300,26 +273,18 @@ def fetch_release_channel_v2(
     prefix: str = DEFAULT_PREFIX,
     s3_client: Any = None,
 ) -> Dict[str, Any]:
-    local_values = (
-        os.environ.get(_LOCAL_COMMIT_ENV),
-        os.environ.get(_LOCAL_GATEWAY_ENV),
-        os.environ.get(_LOCAL_VALIDATOR_ENV),
-    )
+    local_values = (os.environ.get(_LOCAL_COMMIT_ENV), os.environ.get(_LOCAL_GATEWAY_ENV))
     if any(local_values):
         if not all(local_values):
             raise ReleaseChannelV2Error(
                 "local release identity environment is incomplete"
             )
-        local_commit, gateway_path, validator_path = local_values
+        local_commit, gateway_path = local_values
         if str(local_commit).lower() == str(commit_sha).lower():
             gateway = _load_json(Path(str(gateway_path)), "local gateway release")
-            validator = _load_json(
-                Path(str(validator_path)), "local validator release"
-            )
             return validate_release_channel_v2(
                 build_release_channel_v2(
                     gateway_release_manifest=gateway,
-                    validator_release_manifest=validator,
                 ),
                 expected_commit=str(commit_sha).lower(),
             )
@@ -437,13 +402,6 @@ def _build_release_lineage_v2(
                 "build_manifest_hash": summary["execution_manifest_hash"],
                 "dependency_lock_hash": summary["dependency_lock_hash"],
             }
-        validator = channel["validator_release_manifest"]["release"]
-        roles["validator_weights"] = {
-            "commit_sha": validator["commit_sha"],
-            "pcr0": validator["pcr0"],
-            "build_manifest_hash": validator["app_manifest_hash"],
-            "dependency_lock_hash": validator["dependency_lock_hash"],
-        }
         releases[channel_commit] = {
             "channel_hash": channel["channel_hash"],
             "gateway_release_hash": gateway["release_hash"],
@@ -493,39 +451,6 @@ def release_channel_role_identities_v2(
             (normalized,), current_commit=commit
         )["releases"][commit]["roles"]
     )
-
-
-def build_paired_local_release_channel_v2(
-    *,
-    gateway_host_gateway_manifest: Mapping[str, Any],
-    gateway_host_validator_manifest: Mapping[str, Any],
-    validator_host_gateway_manifest: Mapping[str, Any],
-    validator_host_validator_manifest: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Select a paired channel only after both hosts prove identical roles."""
-
-    gateway_host = build_release_channel_v2(
-        gateway_release_manifest=gateway_host_gateway_manifest,
-        validator_release_manifest=gateway_host_validator_manifest,
-    )
-    validator_host = build_release_channel_v2(
-        gateway_release_manifest=validator_host_gateway_manifest,
-        validator_release_manifest=validator_host_validator_manifest,
-    )
-    paired = build_release_channel_v2(
-        gateway_release_manifest=gateway_host_gateway_manifest,
-        validator_release_manifest=validator_host_validator_manifest,
-    )
-    expected_roles = release_channel_role_identities_v2(gateway_host)
-    if release_channel_role_identities_v2(validator_host) != expected_roles:
-        raise ReleaseChannelV2Error(
-            "independent host release role identities differ"
-        )
-    if release_channel_role_identities_v2(paired) != expected_roles:
-        raise ReleaseChannelV2Error(
-            "paired release role identities differ from independent hosts"
-        )
-    return paired
 
 
 def build_historical_release_lineage_v2(
@@ -989,11 +914,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     mode.add_argument("--publish", type=Path)
     mode.add_argument("--ensure", action="store_true")
     parser.add_argument("--gateway-manifest", type=Path)
-    parser.add_argument("--validator-manifest", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--expected-commit")
     parser.add_argument("--gateway-output", type=Path)
-    parser.add_argument("--validator-output", type=Path)
     parser.add_argument("--lineage-output", type=Path)
     parser.add_argument("--lineage-repository", type=Path)
     parser.add_argument("--lineage-authority-commit")
@@ -1004,14 +927,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.build:
-        if not args.gateway_manifest or not args.validator_manifest or not args.output:
+        if not args.gateway_manifest or not args.output:
             raise ReleaseChannelV2Error("channel build inputs are incomplete")
         result = build_release_channel_v2(
             gateway_release_manifest=_load_json(
                 args.gateway_manifest, "gateway release manifest"
-            ),
-            validator_release_manifest=_load_json(
-                args.validator_manifest, "validator release manifest"
             ),
         )
         _atomic_json(args.output, result)
@@ -1034,7 +954,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if local_release_inputs_match(
             expected_commit=commit,
             gateway_output=args.gateway_output,
-            validator_output=args.validator_output,
         ):
             result = {"status": "local_verified", "commit_sha": commit}
         else:
@@ -1044,7 +963,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ),
                 expected_commit=commit,
                 gateway_output=args.gateway_output,
-                validator_output=args.validator_output,
             )
         if args.lineage_output is not None:
             if args.lineage_repository is None:

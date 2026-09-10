@@ -918,14 +918,10 @@ def submit_validation_assessment(
             bt.logging.error("Supabase client not available")
             return False
         
-        # Get current epoch number
-        try:
-            from Leadpoet.validator.reward import _calculate_epoch_number, _get_current_block
-            current_block = _get_current_block()  # Function takes no arguments
-            epoch_number = _calculate_epoch_number(current_block)
-        except Exception as e:
-            bt.logging.warning(f"Could not get epoch number: {e}, using 0")
-            epoch_number = 0
+        # Use the shared finalized epoch authority, not an incentive calculator.
+        # Failure must stop this write rather than attach it to a fabricated epoch.
+        from gateway.utils.epoch import get_current_epoch_id
+        epoch_number = get_current_epoch_id()
         
         # Prepare validation data
         validation_data = {
@@ -1187,12 +1183,6 @@ def fetch_miner_curation_result(wallet: bt.Wallet) -> dict:
     r    = requests.post(f"{API_URL}/curate/miner_result/fetch", json=body, timeout=10)
     r.raise_for_status()
     return r.json()
-
-def push_validator_weights(wallet: bt.Wallet, uid: int, weights: dict):
-    body   = _signed_body(wallet, {"uid": uid, "weights": weights})
-    r      = requests.post(f"{API_URL}/validator_weights", json=body, timeout=10)
-    r.raise_for_status()
-    print("📝 Stored weights in Firestore via Cloud-Run")
 
 # ──────────────────── BROADCAST API REQUESTS ─────────────────────────────
 
@@ -2675,42 +2665,6 @@ def gateway_submit_fulfillment_scores(
     ) from last_err
 
 
-def gateway_get_fulfillment_leaderboard_snapshot(
-    wallet: bt.Wallet, limit: int = 3
-) -> Dict[str, Any]:
-    """Fetch the unchanged leaderboard response including its exact time window."""
-
-    last_err: Optional[Exception] = None
-    backoffs = [1, 3]
-    for attempt in range(len(backoffs) + 1):
-        try:
-            response = requests.get(
-                f"{GATEWAY_URL}/fulfillment/leaderboard",
-                params={"limit": limit},
-                timeout=45,
-            )
-            response.raise_for_status()
-            data = response.json()
-            if (
-                not isinstance(data, dict)
-                or not isinstance(data.get("leaderboard"), list)
-                or not isinstance(data.get("period_start"), str)
-                or not isinstance(data.get("period_end"), str)
-            ):
-                raise RuntimeError("gateway fulfillment leaderboard response is incomplete")
-            return data
-        except Exception as e:
-            last_err = e
-            if attempt < len(backoffs):
-                delay = backoffs[attempt]
-                bt.logging.warning(
-                    f"gateway_get_fulfillment_leaderboard attempt {attempt + 1} failed "
-                    f"({type(e).__name__}: {e}); retrying in {delay}s"
-                )
-                time.sleep(delay)
-    raise RuntimeError(
-        f"gateway_get_fulfillment_leaderboard failed after {len(backoffs) + 1} attempts: {last_err}"
-    )
 
 
 def gateway_get_lab_arena_reward_basis(wallet: bt.Wallet, epoch: int) -> Dict[str, Any]:
@@ -2796,83 +2750,4 @@ def gateway_get_banned_hotkeys_snapshot(wallet: bt.Wallet) -> Dict[str, Any]:
     raise RuntimeError(
         "gateway_get_banned_hotkeys_snapshot failed after "
         f"{len(backoffs) + 1} attempts: {last_err}"
-    )
-
-
-def gateway_get_fulfillment_leaderboard(wallet: bt.Wallet, limit: int = 3) -> List[Dict]:
-    """Fetch the top-N fulfillment miners ranked by wins in the last 140 epochs.
-
-    Window: rolling 140-epoch window (~7.0 days) anchored to current wall-clock
-    time.  Server-side filtering on fulfillment_score_consensus.computed_at.
-
-    Mirrors gateway_get_all_fulfillment_rewards' retry/backoff pattern.
-    Used by the validator each set_weights cycle to allocate the
-    LEADERBOARD_BONUS_SHARE (5% / 3% / 1.5% to ranks 1/2/3).  Banned
-    hotkeys are filtered server-side; an empty leaderboard list is a
-    legitimate response (e.g., a fresh week with no winners yet, or
-    very early subnet life) and the caller should burn the entire
-    bonus pool in that case.
-
-    Args:
-        wallet: validator wallet (unused for this endpoint, kept for
-            signature consistency with other gateway helpers).
-        limit: max number of top entries to return (default 3).
-
-    Returns:
-        Ordered list of {"rank", "miner_hotkey", "wins", "total_reward_pct"},
-        rank 1 first.  Empty list if no winners exist yet or every winner
-        is banned.
-
-    Raises:
-        RuntimeError when all retries are exhausted — caller should
-        treat this as "no leaderboard available, full bonus pool to burn"
-        rather than silently retry forever.
-    """
-    return gateway_get_fulfillment_leaderboard_snapshot(wallet, limit=limit)[
-        "leaderboard"
-    ]
-
-
-def gateway_get_all_fulfillment_rewards(wallet: bt.Wallet, current_epoch: int) -> Dict[str, float]:
-    """Fetch active fulfillment rewards grouped by miner hotkey.
-
-    Returns {miner_hotkey: sum_of_reward_pct} for all rewards where
-    reward_expires_epoch > current_epoch. Used by the validator during
-    weight calculation to determine the fulfillment emission carve-out.
-
-    3 total attempts with 1s and 3s backoff between them; per-attempt
-    timeout 45s.  Worst-case budget: ~139s.  Raises ``RuntimeError`` when
-    all retries are exhausted.  No cross-epoch caching is performed — the
-    caller treats an exhausted fetch as "no active rewards for this epoch"
-    so stale snapshots never drive weight decisions.
-    """
-    last_err: Optional[Exception] = None
-    backoffs = [1, 3]  # 3 attempts total (initial + 2 retries), 4s cumulative sleep
-    for attempt in range(len(backoffs) + 1):
-        try:
-            response = requests.get(
-                f"{GATEWAY_URL}/fulfillment/rewards/active",
-                params={"current_epoch": current_epoch},
-                timeout=45,
-            )
-            response.raise_for_status()
-            data = response.json()
-            rewards = data.get("rewards") if isinstance(data, dict) else None
-            if not isinstance(rewards, dict):
-                raise RuntimeError(
-                    "fulfillment rewards response malformed: "
-                    "missing/invalid 'rewards'"
-                )
-            return rewards
-        except Exception as e:
-            last_err = e
-            if attempt < len(backoffs):
-                delay = backoffs[attempt]
-                bt.logging.warning(
-                    f"gateway_get_all_fulfillment_rewards attempt {attempt + 1} failed "
-                    f"({type(e).__name__}: {e}); retrying in {delay}s"
-                )
-                time.sleep(delay)
-    raise RuntimeError(
-        f"gateway_get_all_fulfillment_rewards failed after {len(backoffs) + 1} attempts: {last_err}"
     )

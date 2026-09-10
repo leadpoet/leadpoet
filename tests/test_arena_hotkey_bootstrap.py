@@ -11,11 +11,10 @@ from lab_arena import contracts, signing
 from leadpoet_canonical.lab_arena_rewards import sha256_json
 from leadpoet_canonical.chain_source_v2 import ss58_encode_account_id
 from tests.test_kms_recipient_v2 import _kms_cms_encrypt
-from tests.test_validator_runtime_v2 import _stateful_configuration
 from validator_tee.enclave.arena_hotkey import (
     ArenaHotkeyAuthority, ArenaHotkeyError, POLICY_SCHEMA, sealed_payload,
+    load_chain_signing_profile,
 )
-from validator_tee.enclave.hotkey_authority_v2 import load_chain_signing_profile
 from validator_tee.host import arena_hotkey_bootstrap, arena_state_relay
 
 
@@ -23,11 +22,18 @@ def _policy(seed=b"a" * 32):
     public, _private = sr25519.pair_from_seed(seed)
     arena_signer = signing.LocalSigner.generate()
     profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
-    runtime = _stateful_configuration()
-    epoch = deepcopy(runtime["epoch_authority"])
-    epoch["cutover_manifest"]["network_genesis_hash"] = "0x" + profile["genesis_hash"]
-    body = {key: value for key, value in epoch["cutover_manifest"].items() if key != "mapping_hash"}
-    epoch["cutover_manifest"]["mapping_hash"] = sha256_json(body)
+    cutover = {
+        "schema_version": "leadpoet.subnet_epoch_cutover.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": "0x" + profile["genesis_hash"],
+        "netuid": 71, "cutover_block": 8_637_156,
+        "cutover_block_hash": "0x" + "2" * 64,
+        "first_subnet_epoch_index": 23_927,
+        "first_settlement_epoch_id": 23_992, "last_legacy_epoch_id": 23_991,
+    }
+    epoch = {"mode": "stateful_v1", "cutover_manifest": {
+        **cutover, "mapping_hash": sha256_json(cutover),
+    }}
     return {
         "schema_version": POLICY_SCHEMA, "network": profile["network"], "netuid": 71,
         "validator_hotkey": ss58_encode_account_id(public), "hotkey_public_key": public.hex(),
@@ -178,14 +184,14 @@ def test_relay_exact_policy_private_dns_rejection_and_cleanup(monkeypatch):
 
 
 def test_tee_service_arena_boot_wire_does_not_require_legacy_configuration(monkeypatch):
-    from validator_tee.enclave import runtime_v2, tee_service
+    from validator_tee.enclave import arena_hotkey, tee_service
     from validator_tee.enclave import drand_v2
 
     seed = b"a" * 32
     policy, _ = _policy(seed)
     captured = {}
     monkeypatch.setenv("LEADPOET_ENCLAVE_MODE", "arena")
-    monkeypatch.setattr(runtime_v2, "_nsm_attest", lambda **kwargs: captured.update(kwargs) or b"measured-nsm")
+    monkeypatch.setattr(arena_hotkey, "_nsm_attest", lambda **kwargs: captured.update(kwargs) or b"measured-nsm")
 
     class ExternalDrandBoundary:
         def __init__(self, *, library_path, expected_sha256):
@@ -194,8 +200,7 @@ def test_tee_service_arena_boot_wire_does_not_require_legacy_configuration(monke
 
     monkeypatch.setattr(drand_v2, "CtypesDrandCommitBackendV2", ExternalDrandBoundary)
     for name in (
-        "validator_runtime_v2", "validator_weight_authority_v2",
-        "validator_hotkey_authority_v2", "validator_chain_source_v2",
+        "validator_chain_source_v2",
         "validator_arena_weight_signer_v1", "validator_arena_hotkey_authority_v1",
     ):
         monkeypatch.setattr(tee_service, name, None)

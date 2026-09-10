@@ -21,14 +21,13 @@ FAIL-CLOSED: This module returns False (or raises) on ANY verification failure.
 """
 
 import base64
-import hashlib
 import json
 import logging
 import os
 import time
 import threading
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List
 
 from leadpoet_canonical.constants import TRUST_LEVEL_FULL_NITRO, TRUST_LEVEL_SIGNATURE_ONLY
 
@@ -139,7 +138,6 @@ PCR0_CACHE_TTL_SECONDS = int(os.environ.get("PCR0_CACHE_TTL_SECONDS", "300"))
 # Thread-safe cache for PCR0 allowlist
 _pcr0_cache: Dict[str, Any] = {
     "gateway_pcr0": [],
-    "validator_pcr0": [],
     "last_fetch": 0,
     "fetch_error": None,
 }
@@ -152,18 +150,13 @@ _pcr0_refresh_in_flight = False
 FALLBACK_GATEWAY_PCR0_VALUES: List[str] = [
     "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
 ]
-FALLBACK_VALIDATOR_PCR0_VALUES: List[str] = [
-    "46b34413f6a5fbc08058f401b23ea8ae7faf787d056e79d981d4a4c438b3e96e80bef77a3aa9bac9391f29efd9ebd934",  # 2026-06-23 build (commit d267acb)
-    "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85",
-]
-
 
 def _fetch_pcr0_allowlist_from_github() -> Dict[str, List[str]]:
     """
     Fetch PCR0 allowlist from GitHub.
     
     Returns:
-        Dictionary with "gateway_pcr0" and "validator_pcr0" lists
+        Dictionary with the gateway PCR0 list
         
     Raises:
         Exception on fetch failure
@@ -182,14 +175,8 @@ def _fetch_pcr0_allowlist_from_github() -> Dict[str, List[str]]:
         
         # Extract PCR0 values from the structured format
         gateway_pcr0 = [item["pcr0"] for item in data.get("gateway_pcr0", [])]
-        validator_pcr0 = [item["pcr0"] for item in data.get("validator_pcr0", [])]
-        
-        logger.info(f"[PCR0] Fetched allowlist from GitHub: {len(gateway_pcr0)} gateway, {len(validator_pcr0)} validator PCR0 values")
-        
-        return {
-            "gateway_pcr0": gateway_pcr0,
-            "validator_pcr0": validator_pcr0,
-        }
+        logger.info(f"[PCR0] Fetched allowlist from GitHub: {len(gateway_pcr0)} gateway PCR0 values")
+        return {"gateway_pcr0": gateway_pcr0}
         
     except urllib.error.URLError as e:
         raise Exception(f"Failed to fetch PCR0 allowlist from GitHub: {e}")
@@ -204,7 +191,7 @@ def _refresh_pcr0_cache_if_needed() -> None:
     Refresh the PCR0 cache if TTL has expired.
     Thread-safe implementation.
     """
-    global _pcr0_cache, _pcr0_refresh_in_flight
+    global _pcr0_refresh_in_flight
     
     current_time = time.time()
     
@@ -216,7 +203,6 @@ def _refresh_pcr0_cache_if_needed() -> None:
             # allowlist and spuriously rejecting valid attestations.
             if (
                 _pcr0_cache["gateway_pcr0"]
-                and _pcr0_cache["validator_pcr0"]
             ):
                 return
             while _pcr0_refresh_in_flight:
@@ -250,10 +236,9 @@ def _refresh_pcr0_cache_if_needed() -> None:
                 _pcr0_cache["fetch_error"] = str(e)
 
                 # If this is the first fetch (cache is empty), use fallback values
-                if not _pcr0_cache["gateway_pcr0"] and not _pcr0_cache["validator_pcr0"]:
+                if not _pcr0_cache["gateway_pcr0"]:
                     logger.warning("[PCR0] Using fallback PCR0 values")
                     _pcr0_cache["gateway_pcr0"] = FALLBACK_GATEWAY_PCR0_VALUES.copy()
-                    _pcr0_cache["validator_pcr0"] = FALLBACK_VALIDATOR_PCR0_VALUES.copy()
             finally:
                 _pcr0_refresh_in_flight = False
                 _pcr0_cache_condition.notify_all()
@@ -267,7 +252,6 @@ def _refresh_pcr0_cache_if_needed() -> None:
     with _pcr0_cache_condition:
         try:
             _pcr0_cache["gateway_pcr0"] = allowlist["gateway_pcr0"]
-            _pcr0_cache["validator_pcr0"] = allowlist["validator_pcr0"]
             _pcr0_cache["last_fetch"] = time.time()
             _pcr0_cache["fetch_error"] = None
         finally:
@@ -288,21 +272,7 @@ def get_allowed_gateway_pcr0() -> List[str]:
         return _pcr0_cache["gateway_pcr0"].copy()
 
 
-def get_allowed_validator_pcr0() -> List[str]:
-    """
-    Get the list of allowed validator PCR0 values.
-    Automatically refreshes from GitHub if cache is stale.
-    
-    Returns:
-        List of allowed PCR0 hex strings
-    """
-    _refresh_pcr0_cache_if_needed()
-    with _pcr0_cache_lock:
-        return _pcr0_cache["validator_pcr0"].copy()
 
-
-# Legacy aliases for backward compatibility (simple functions, not properties)
-# Note: Code should use get_allowed_gateway_pcr0() and get_allowed_validator_pcr0() directly
 
 
 # =============================================================================
@@ -314,9 +284,7 @@ def verify_nitro_attestation_full(
     expected_pcr0: str = None,
     expected_pubkey: str = None,
     expected_purpose: str = None,
-    expected_epoch_id: Optional[int] = None,
-    role: str = "gateway",  # "gateway" or "validator"
-    skip_pcr0_verification: bool = False,  # For auditors without nitro-cli
+    skip_pcr0_verification: bool = False,  # For callers that verify PCR policy separately
     certificate_validity_at_attestation_time: bool = False,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
@@ -331,15 +299,11 @@ def verify_nitro_attestation_full(
         expected_pcr0: Expected PCR0 value (hex string). If None, checks against
                       ALLOWED_GATEWAY_PCR0_VALUES or ALLOWED_VALIDATOR_PCR0_VALUES
         expected_pubkey: Expected enclave public key (hex string). If None, skips check.
-        expected_purpose: Expected purpose in user_data ("gateway_event_signing" or 
-                         "validator_weights"). If None, purpose check is skipped.
-        expected_epoch_id: Expected epoch_id for validator attestations (required if
-                          purpose is "validator_weights")
-        role: "gateway" or "validator" - determines which PCR0 allowlist to use
+        expected_purpose: Expected purpose in user_data. If None, purpose check is skipped.
         skip_pcr0_verification: If True, skip PCR0 verification against allowlist/GitHub.
                                STILL verifies AWS cert chain + COSE signature (proves REAL
                                Nitro enclave), but doesn't verify the specific CODE.
-                               Use for auditors without nitro-cli who cannot independently
+                               Use when the caller will separately
                                verify PCR0. Trust level will be "aws_verified".
         certificate_validity_at_attestation_time: Validate the leaf certificate at
                                the signed Nitro document timestamp. This is only for
@@ -510,9 +474,8 @@ def verify_nitro_attestation_full(
         result["pcr2"] = pcrs.get(2, b"").hex() if pcrs.get(2) else None
         
         # PCR0 verification mode:
-        # - If skip_pcr0_verification: extract PCR0 but don't verify (for auditors without nitro-cli)
+        # - If skip_pcr0_verification: extract PCR0 but don't verify (caller verifies measurement policy separately)
         # - If expected_pcr0 is provided: strict match required
-        # - If role == "validator": use dynamic PCR0 builder (gateway computes from GitHub)
         # - Otherwise: check against static allowlist
         
         if skip_pcr0_verification:
@@ -522,10 +485,10 @@ def verify_nitro_attestation_full(
             # - COSE signature (proves attestation is authentic)
             # - Certificate validity (not expired)
             # We extract PCR0 for logging but DON'T verify it against any allowlist
-            result["verification_steps"].append("⚠️ PCR0 verification SKIPPED (auditor mode)")
+            result["verification_steps"].append("⚠️ PCR0 verification SKIPPED (external PCR policy check)")
             result["pcr0_verification_mode"] = "skipped"
             result["trust_level"] = "aws_verified"  # Lower trust level - proves real enclave, not specific code
-            logger.info(f"[NITRO] ⚠️ PCR0 verification skipped (auditor mode), PCR0: {pcr0_hex[:32]}...")
+            logger.info(f"[NITRO] ⚠️ PCR0 verification skipped (external PCR policy check), PCR0: {pcr0_hex[:32]}...")
         elif expected_pcr0:
             # Strict mode: must match specific PCR0
             if pcr0_hex != expected_pcr0:
@@ -535,67 +498,12 @@ def verify_nitro_attestation_full(
                     f"  Expected: {expected_pcr0[:32]}..."
                 )
             result["verification_steps"].append("✓ PCR0 matches expected value")
-        elif role == "validator":
-            # Dynamic verification: Gateway computes PCR0 from GitHub code
-            # This is TRUSTLESS - gateway builds enclave itself, no human input
-            try:
-                from gateway.utils.pcr0_builder import verify_pcr0, get_cache_status
-                
-                verification = verify_pcr0(pcr0_hex)
-                
-                if verification["valid"]:
-                    commit_hash = verification.get("commit_hash", "unknown")
-                    content_hash = verification.get("content_hash", "unknown")
-                    result["verification_steps"].append(
-                        f"✓ PCR0 matches GitHub (content: {content_hash}, commit: {commit_hash[:8]})"
-                    )
-                    result["pcr0_verification_mode"] = "dynamic_github"
-                    result["pcr0_commit"] = commit_hash
-                    result["pcr0_content_hash"] = content_hash
-                    logger.info(f"[NITRO] ✅ PCR0 verified against GitHub: {pcr0_hex[:32]}...")
-                else:
-                    # The gateway's dynamically-built PCR0 didn't match. The
-                    # enclave build is NOT byte-reproducible, so the gateway's
-                    # computed PCR0 can differ from the validator's actual
-                    # measurement — fall back to the static allowlist of
-                    # manually-approved PCR0s (pcr0_allowlist.json / fallback)
-                    # before rejecting.
-                    allowed_pcr0_list = get_allowed_validator_pcr0()
-                    if pcr0_hex in allowed_pcr0_list:
-                        result["verification_steps"].append("✓ PCR0 matches static allowlist (manual approval)")
-                        result["pcr0_verification_mode"] = "static_allowlist"
-                        logger.info(f"[NITRO] ✅ PCR0 matched static allowlist: {pcr0_hex[:32]}...")
-                    else:
-                        cache_status = get_cache_status()
-                        raise AttestationError(
-                            f"PCR0 not recognized (not in dynamic GitHub cache or static allowlist)!\n"
-                            f"  Got:       {pcr0_hex[:48]}...\n"
-                            f"  Cached:    {cache_status['cache_size']} commits\n"
-                            f"  Allowlist: {len(allowed_pcr0_list)} approved\n"
-                        )
-            except ImportError:
-                # pcr0_builder not available (e.g., running outside gateway)
-                # Fall back to static allowlist
-                logger.warning("[NITRO] pcr0_builder not available, using static allowlist")
-                allowed_pcr0_list = get_allowed_validator_pcr0()
-                
-                if not allowed_pcr0_list:
-                    raise AttestationError("No allowed PCR0 values configured for validators")
-                
-                if pcr0_hex not in allowed_pcr0_list:
-                    raise AttestationError(
-                        f"PCR0 mismatch!\n"
-                        f"  Got:      {pcr0_hex}\n"
-                        f"  Expected: {allowed_pcr0_list[0][:32]}..."
-                    )
-                result["verification_steps"].append("✓ PCR0 matches static allowlist")
-                result["pcr0_verification_mode"] = "static_allowlist"
         else:
             # Gateway mode: check against static allowlist
             allowed_pcr0_list = get_allowed_gateway_pcr0()
             
             if not allowed_pcr0_list:
-                raise AttestationError(f"No allowed PCR0 values configured for role '{role}'")
+                raise AttestationError("No allowed gateway PCR0 values configured")
             
             if pcr0_hex not in allowed_pcr0_list:
                 raise AttestationError(
@@ -675,22 +583,6 @@ def verify_nitro_attestation_full(
                 result["verification_steps"].append(f"⚠ Purpose not in attestation (expected: {expected_purpose})")
         
         # =================================================================
-        # Step 10: Verify epoch binding for validators
-        # =================================================================
-        if expected_purpose == "validator_weights":
-            if expected_epoch_id is None:
-                raise AttestationError("expected_epoch_id required for validator attestations (replay protection)")
-            
-            actual_epoch = result.get("epoch_id")
-            if actual_epoch != expected_epoch_id:
-                raise AttestationError(
-                    f"Epoch mismatch (potential replay attack)!\n"
-                    f"  Got:      {actual_epoch}\n"
-                    f"  Expected: {expected_epoch_id}"
-                )
-            result["verification_steps"].append(f"✓ Epoch binding verified: {expected_epoch_id}")
-        
-        # =================================================================
         # ALL CHECKS PASSED
         # =================================================================
         result["verified"] = True
@@ -744,15 +636,9 @@ def _verify_certificate_chain(
     """
     from cryptography import x509
     from cryptography.hazmat.backends import default_backend
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.serialization import Encoding
     
     try:
-        # Parse pinned root certificate
-        pinned_root = x509.load_der_x509_certificate(root_cert_der, default_backend())
-        
         # Parse all certificates from cabundle
         ca_certs = []
         for ca_der in cabundle:
@@ -834,7 +720,6 @@ def verify_nitro_attestation_signature_only(
     attestation_b64: str,
     expected_pubkey: str = None,
     expected_purpose: str = None,
-    expected_epoch_id: Optional[int] = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Parse attestation and verify user_data WITHOUT full Nitro verification.
@@ -851,7 +736,6 @@ def verify_nitro_attestation_signature_only(
         attestation_b64: Base64-encoded Nitro attestation document
         expected_pubkey: Expected enclave public key (hex string)
         expected_purpose: Expected purpose in user_data (optional)
-        expected_epoch_id: Expected epoch_id for validator attestations (optional)
         
     Returns:
         Tuple of (success, extracted_data)
@@ -927,13 +811,6 @@ def verify_nitro_attestation_signature_only(
                     **extracted
                 }
         
-        if expected_purpose == "validator_weights" and expected_epoch_id is not None:
-            if extracted["epoch_id"] != expected_epoch_id:
-                return False, {
-                    "error": f"Epoch mismatch: got {extracted['epoch_id']}, expected {expected_epoch_id}",
-                    **extracted
-                }
-        
         return True, extracted
         
     except Exception as e:
@@ -945,190 +822,12 @@ def verify_nitro_attestation_signature_only(
 # =============================================================================
 
 def is_nitro_verification_available() -> bool:
-    """
-    Check if full Nitro attestation verification is available.
-    
-    Returns:
-        True if all requirements are met for full verification:
-        - NITRO_ROOT_CERT_DER is populated
-        - Required libraries are available (cbor2, cryptography)
-        - PCR0 allowlists are populated (either from GitHub or fallback)
-        
-    Use this to determine trust level in verification outputs.
-    """
-    if NITRO_ROOT_CERT_DER is None or len(NITRO_ROOT_CERT_DER) == 0:
+    """Return whether full gateway Nitro verification dependencies are ready."""
+    if not NITRO_ROOT_CERT_DER or not get_allowed_gateway_pcr0():
         return False
-    
-    # Check if we have any PCR0 values (will trigger fetch if cache is stale)
-    gateway_pcr0 = get_allowed_gateway_pcr0()
-    validator_pcr0 = get_allowed_validator_pcr0()
-    
-    if not gateway_pcr0 and not validator_pcr0:
-        return False
-    
     try:
-        import cbor2
-        from cryptography.x509 import load_der_x509_certificate
-        from cryptography.hazmat.primitives.asymmetric import ec
-        return True
+        __import__("cbor2")
+        __import__("cryptography.x509")
     except ImportError:
         return False
-
-
-def get_current_trust_level() -> str:
-    """
-    Get the current trust level based on available verification capabilities.
-    
-    Returns:
-        TRUST_LEVEL_FULL_NITRO if full verification is available
-        TRUST_LEVEL_SIGNATURE_ONLY otherwise
-    """
-    if is_nitro_verification_available():
-        return TRUST_LEVEL_FULL_NITRO
-    return TRUST_LEVEL_SIGNATURE_ONLY
-
-
-def get_allowed_pcr0_values(role: str = "gateway") -> List[str]:
-    """
-    Get the list of allowed PCR0 values for a given role.
-    
-    Args:
-        role: "gateway" or "validator"
-        
-    Returns:
-        List of allowed PCR0 hex strings
-    """
-    if role == "gateway":
-        return get_allowed_gateway_pcr0()
-    elif role == "validator":
-        return get_allowed_validator_pcr0()
-    else:
-        return []
-
-
-def add_allowed_pcr0(pcr0_hex: str, role: str = "gateway") -> None:
-    """
-    Add a PCR0 value to the runtime allowlist cache.
-    
-    ⚠️ WARNING: This only modifies the runtime cache. For permanent changes,
-    update pcr0_allowlist.json in the GitHub repo.
-    
-    Args:
-        pcr0_hex: PCR0 value to add (hex string, 96 characters for SHA-384)
-        role: "gateway" or "validator"
-    """
-    global _pcr0_cache
-    
-    if len(pcr0_hex) != 96:
-        raise ValueError(f"PCR0 must be 96 hex characters (SHA-384), got {len(pcr0_hex)}")
-    
-    with _pcr0_cache_lock:
-        if role == "gateway":
-            if pcr0_hex not in _pcr0_cache["gateway_pcr0"]:
-                _pcr0_cache["gateway_pcr0"].append(pcr0_hex)
-        elif role == "validator":
-            if pcr0_hex not in _pcr0_cache["validator_pcr0"]:
-                _pcr0_cache["validator_pcr0"].append(pcr0_hex)
-        else:
-            raise ValueError(f"Unknown role: {role}")
-
-
-# =============================================================================
-# UNIT TESTS
-# =============================================================================
-
-def test_is_nitro_verification_available():
-    """Test availability check."""
-    available = is_nitro_verification_available()
-    print(f"Nitro verification available: {available}")
-    if available:
-        print("✅ Full Nitro verification is AVAILABLE")
-    else:
-        print("⚠️ Nitro verification not available (missing libraries or config)")
-
-
-def test_get_current_trust_level():
-    """Test trust level reporting."""
-    level = get_current_trust_level()
-    print(f"Current trust level: {level}")
-    if level == TRUST_LEVEL_FULL_NITRO:
-        print("✅ Trust level: FULL_NITRO")
-    else:
-        print(f"⚠️ Trust level: {level}")
-
-
-def test_pinned_values():
-    """Test that pinned values are populated."""
-    print("\n--- Pinned Values Check ---")
-    
-    if NITRO_ROOT_CERT_DER:
-        print(f"✅ NITRO_ROOT_CERT_DER: {len(NITRO_ROOT_CERT_DER)} bytes")
-    else:
-        print("❌ NITRO_ROOT_CERT_DER: Not populated")
-    
-    gateway_pcr0 = get_allowed_gateway_pcr0()
-    if gateway_pcr0:
-        print(f"✅ Gateway PCR0 values: {len(gateway_pcr0)} value(s)")
-        for pcr0 in gateway_pcr0:
-            print(f"   - {pcr0[:32]}...{pcr0[-16:]}")
-    else:
-        print("❌ Gateway PCR0 values: Empty")
-    
-    validator_pcr0 = get_allowed_validator_pcr0()
-    if validator_pcr0:
-        print(f"✅ Validator PCR0 values: {len(validator_pcr0)} value(s)")
-        for pcr0 in validator_pcr0:
-            print(f"   - {pcr0[:32]}...{pcr0[-16:]}")
-    else:
-        print("⚠️ Validator PCR0 values: Empty (validator TEE not deployed)")
-
-
-def test_root_cert_parsing():
-    """Test that the pinned root certificate can be parsed."""
-    print("\n--- Root Certificate Test ---")
-    
-    if not NITRO_ROOT_CERT_DER:
-        print("❌ Cannot test: NITRO_ROOT_CERT_DER not populated")
-        return
-    
-    try:
-        from cryptography import x509
-        from cryptography.hazmat.backends import default_backend
-        
-        root_cert = x509.load_der_x509_certificate(NITRO_ROOT_CERT_DER, default_backend())
-        print(f"✅ Root certificate parsed successfully")
-        print(f"   Subject: {root_cert.subject}")
-        print(f"   Issuer: {root_cert.issuer}")
-        print(f"   Valid from: {_get_cert_not_valid_before(root_cert)}")
-        print(f"   Valid until: {_get_cert_not_valid_after(root_cert)}")
-    except Exception as e:
-        print(f"❌ Failed to parse root certificate: {e}")
-
-
-def test_verify_signature_only_invalid_input():
-    """Test signature-only mode with invalid input."""
-    print("\n--- Signature-Only Invalid Input Test ---")
-    
-    success, result = verify_nitro_attestation_signature_only(
-        attestation_b64="invalid_base64!!!",
-        expected_pubkey="abc123",
-    )
-    assert success == False, "Should fail on invalid input"
-    assert "error" in result, "Should have error message"
-    print(f"✅ Invalid input correctly rejected: {result['error'][:50]}...")
-
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("LeadPoet Nitro Attestation Verification - Unit Tests")
-    print("=" * 60)
-    
-    test_is_nitro_verification_available()
-    test_get_current_trust_level()
-    test_pinned_values()
-    test_root_cert_parsing()
-    test_verify_signature_only_invalid_input()
-    
-    print("\n" + "=" * 60)
-    print("Tests completed!")
-    print("=" * 60)
+    return True

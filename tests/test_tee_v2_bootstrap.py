@@ -75,12 +75,6 @@ def _lineage(release):
         }
         for role, summary in release["roles"].items()
     }
-    roles["validator_weights"] = {
-        "commit_sha": release["commit_sha"],
-        "pcr0": "9" * 96,
-        "build_manifest_hash": _hash("8"),
-        "dependency_lock_hash": _hash("7"),
-    }
     body = {
         "schema_version": "leadpoet.attested_release_lineage.v1",
         "current_commit_sha": release["commit_sha"],

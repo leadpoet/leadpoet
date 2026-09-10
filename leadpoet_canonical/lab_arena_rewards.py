@@ -1,11 +1,7 @@
 """Lab Arena reward kernel: the champion triple from a signed reward basis.
 
-This is the one kernel every side of the weight path runs: the validator host
-proposes with it, the gateway coordinator re-derives with it against the
-measured database row, and the Arena adapter checks with it that a snapshot's
-champion triple is exactly what its basis implies before it calls the frozen
-canonical weight computation. It is pure: no I/O, no environment, no chain
-state. ``verify_reward_basis_signature`` is the only function that touches a
+The normal validator and protected signer use this same reward arithmetic.
+It is pure: no I/O, no environment, no chain state. ``verify_reward_basis_signature`` is the only function that touches a
 dependency (``cryptography``), imported lazily, so importing this module needs
 the standard library alone.
 
@@ -35,8 +31,8 @@ SIGNING_ALGORITHM = "ECDSA_SHA_256"
 SIGNING_KEY_SPEC = "ECC_NIST_P256"
 POOL_BASIS_TOTAL_EMISSIONS = "total_emissions"
 KING_OUTCOMES = ("crowned", "defended", "retained_ineligible", "no_king")
-# Outcomes that pay the king (labarena.md 13.3). Every other outcome returns the
-# whole Arena amount to fulfillment.
+# Outcomes that pay the king. Every other outcome leaves the Arena amount for
+# the accepted weight-state kernel to route to burn.
 PAYING_KING_OUTCOMES = ("crowned", "defended")
 # The validator and the coordinator pin the Arena signing key by this variable.
 SIGNING_KEY_HASH_ENV = "LAB_ARENA_SIGNING_PUBLIC_KEY_HASH"
@@ -309,9 +305,8 @@ def reward_week_index(epoch_id: int, king_start_epoch: int, constants: Mapping[s
 def champion_share_for_week(week_index: int, constants: Mapping[str, Any]) -> float:
     """``pool_percent / 100 * week_share / 100`` of total emissions, exactly.
 
-    The pool basis is total emissions: the king's share never shrinks when the
-    Research Lab or leaderboard allocations grow. The product is evaluated
-    with ``fractions.Fraction`` and converted once, so the weekly values are
+    The pool basis is total emissions. The product is evaluated with
+    ``fractions.Fraction`` and converted once, so the weekly values are
     exactly the floats every side compares (0.25, 0.2, 0.15, 0.1, 0.05 at 25%).
     """
 
@@ -437,24 +432,3 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
         "reward_week_index": week_index,
         "eligible": eligible,
     }
-
-
-def check_snapshot_champion_triple(snapshot: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-    """Require a snapshot's champion triple to be exactly what its basis implies.
-
-    A snapshot without ``lab_arena_reward_basis`` is untouched (the legacy
-    slot keeps its meaning). One that carries a basis must carry the triple
-    :func:`champion_values` derives from it for the snapshot's epoch and
-    metagraph, else the snapshot is rejected on every side of the weight path.
-    Returns the derived values, or ``None`` when no basis is present.
-    """
-
-    if "lab_arena_reward_basis" not in snapshot:
-        return None
-    basis = validate_reward_basis(snapshot["lab_arena_reward_basis"])
-    values = champion_values(basis, int(snapshot["epoch_id"]), list(snapshot["metagraph_hotkeys"] or []))
-    proposed = (snapshot.get("champion_share"), snapshot.get("effective_champion_share"), snapshot.get("champion_uid"))
-    derived = (values["champion_share"], values["effective_champion_share"], values["champion_uid"])
-    if canonical_json(proposed) != canonical_json(derived):
-        raise LabArenaRewardError("champion triple differs from the reward basis it names")
-    return values

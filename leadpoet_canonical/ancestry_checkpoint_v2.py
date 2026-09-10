@@ -87,7 +87,6 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _EXTENDED_PARENT_AUTHORITY_PURPOSES = frozenset(
     {
-        "research_lab.allocation.v2",
         "research_lab.ancestry_checkpoint_bootstrap.v2",
     }
 )

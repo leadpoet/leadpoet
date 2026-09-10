@@ -3,7 +3,7 @@ import pytest
 from gateway.research_lab import attested_coordinator_v2
 from gateway.tee.coordinator_executor_v2 import (
     COORDINATOR_OPERATIONS_V2,
-    OP_RESEARCH_LAB_ALLOCATION,
+    OP_ATTEST_QUALIFICATION_ADMISSION,
     coordinator_receipt_output_v2,
 )
 
@@ -18,8 +18,8 @@ async def test_coordinator_bridge_uses_strict_coordinator_role(monkeypatch):
 
     monkeypatch.setattr(attested_coordinator_v2, "execute_scoring_v2", execute)
     result = await attested_coordinator_v2.execute_coordinator_v2(
-        operation=OP_RESEARCH_LAB_ALLOCATION,
-        purpose="research_lab.allocation.v2",
+        operation=OP_ATTEST_QUALIFICATION_ADMISSION,
+        purpose="research_lab.admission.v2",
         epoch_id=9,
         sequence=1,
         payload={"epoch": 9},
@@ -58,8 +58,8 @@ async def test_coordinator_bridge_preserves_explicit_provider_profile_loader(
 
     monkeypatch.setattr(attested_coordinator_v2, "execute_scoring_v2", execute)
     await attested_coordinator_v2.execute_coordinator_v2(
-        operation=OP_RESEARCH_LAB_ALLOCATION,
-        purpose="research_lab.allocation.v2",
+        operation=OP_ATTEST_QUALIFICATION_ADMISSION,
+        purpose="research_lab.admission.v2",
         epoch_id=9,
         sequence=1,
         payload={"epoch": 9},

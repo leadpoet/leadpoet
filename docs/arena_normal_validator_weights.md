@@ -1,70 +1,90 @@
 # Normal Arena validators
 
-The Arena service accepts competition results and publishes a signed reward
-state. Each normal validator reads that state and finalized chain data, then
-constructs its own weight vector. A protected signer checks the state, chain
-scope, UID ownership, and exact transaction before it signs. Chain observations
-are stored separately from the reward decision.
-An observation does not settle or reduce an outstanding reward obligation.
+Arena / Open Source Agent Competition is the only emission incentive. Arena
+accepts competition scores and publishes the signed reward state. Every normal
+validator scores miner submissions through the standard lease and completion
+API, then independently derives weights from that state and finalized chain
+inputs. Miner provider credentials stay in the existing credential broker.
 
-The same validator process scores miner submissions through the existing Arena
-lease and completion API. Provider calls use the miner's credentials through
-the existing broker. The scoring process must not load a plaintext validator
-hotkey. It uses the protected application's claim and completion signatures.
+The accepted state contains the signed Arena reward basis, chain identity,
+subnet, epoch, validity window, and burn hotkey. It contains no reimbursement,
+legacy champion, SOURCE_ADD, fulfillment, or leaderboard allocations. The Arena
+reward share, decay, promotion threshold, and effective epoch rules are
+unchanged. The eligible registered Arena winner receives its share. All
+remaining weight goes to the registered burn hotkey. A missing or invalid
+accepted state stops submission; it never becomes a fabricated burn-only state.
 
-## Trust boundary
+## Trust and signing
 
-Arena remains trusted to accept scores and choose the winner. Independent
-weight calculation does not make an incorrect accepted score correct. The
-signed accepted state makes the allocation decision explicit and reproducible.
-The protected signer limits what a compromised validator host can sign.
+Arena is trusted to accept scores and choose the winner. Independent weight
+construction makes that accepted decision reproducible; it does not independently
+prove that Arena accepted the correct scores.
 
-A state is identified by network, genesis, subnet, epoch, and its content hash.
-One immutable state is accepted per epoch. A changed governing reward basis is
-a conflict, not a replacement. Missing inputs stop weight construction. They
-must not become an empty reward or a burn-only vector.
+One immutable state is accepted per network, genesis, subnet, and epoch. A
+conflicting governing reward basis cannot replace it. Validators resolve hotkeys
+to UIDs from finalized chain state. The protected verifier checks the signed
+state, epoch window, UID ownership, nonce, runtime, and exact transaction. It
+then signs only the permitted mortal time-locked weight commitment.
 
-Recipients are hotkeys. Validators resolve current UID ownership from finalized
-chain state. An unregistered fixed recipient burns its allocation. An
-unregistered Arena winner follows the existing Arena rule: its share returns
-to the fulfillment pool. Fulfillment requests retain their absolute shares,
-are reduced proportionally only when they exceed the available pool, and burn
-the unused pool. The existing u16 conversion is retained.
+The dedicated `validator_tee/Dockerfile.arena-signer` image exposes only Arena
+RPCs. The validator seed and its public policy are sealed together with KMS.
+That policy binds the Arena signing key and HTTPS host, chain and subnet,
+epoch mapping, burn hotkey, transaction profile, and drand library. A MAC derived
+from the seed also binds the policy inside the recipient envelope. The host
+cannot replace the policy while retaining the key.
 
-The first transition preserves existing fulfillment and obligation economics.
-A gateway database adapter reads accepted fulfillment consensus and the
-current accepted obligation allocation. Only plain recipient amounts enter
-the new state. Receipt graphs, model manifests, ancestry, and audit-validator
-roles are not part of the normal validator's weight input. This adapter is a
-temporary migration bridge; removing the remaining obligation producer needs
-an explicit decision about any unpaid obligations.
-The bridge currently requires a current-epoch allocation snapshot produced by
-the legacy validator allocation request. There is no background producer for
-that snapshot. Thus this bridge is a cutover blocker: the last legacy producer
-cannot be retired while the new state still reads it. Do not enable an all-normal
-validator deployment until the legacy-obligation policy and its replacement
-input source are complete. The new route does not call the old attested builder.
+TLS to Arena and the chain terminates inside the protected signer. The host
+relays can interrupt traffic but cannot substitute an authenticated response.
+The scorer obtains narrowly scoped claim and completion signatures from the
+same protected service. It does not load a plaintext validator hotkey.
 
-## Process and restart
+No GitHub commit identity, model manifest, receipt graph, historical ancestry,
+or audit-validator role is required by the Arena weight path. Existing generic
+qualification and artifact verification services retain their own evidence
+checks. Those services do not construct Arena weights.
 
-`LEADPOET_WEIGHT_MODE=arena` selects the normal path in `neurons/validator.py`.
-The default remains the legacy path during migration. All validators that
-join the new mechanism use this same Arena mode.
+## Persistence and recovery
 
-Apply `scripts/202-arena-accepted-weight-state.sql` through the normal migration
-process before enabling Arena weights. This adds the accepted-state and outcome
-tables. It keeps the core Arena schema at version 197, so the previous scoring
-service can still run during rollback. The separate weight-state capability is
-version 202.
+The host persists signed transaction bytes before broadcast. Retries and restart
+recovery use those exact bytes. A new attempt is permitted only after the
+protected verifier proves expiry, absence of the previous transaction, and an
+unchanged nonce. Attempts are bounded and the old journals remain available.
 
-`scripts/run_arena_validator.py` loads a private environment file as data. It
-does not execute shell assignments. It accepts `LAB_ARENA_*`, `ENCLAVE_CID`,
-and the mode setting. Keep the file mode at `0600`.
+Each epoch has a separate journal. An older reveal or report retry does not
+block a new epoch. Final success requires chain readback of the time-locked
+reveal, the exact weight vector, and unchanged rewarded UID ownership at that
+transition. Commitment inclusion alone is insufficient.
+
+Chain outcomes are separate signed observations. They do not modify the reward
+state or maintain a reimbursement ledger. Delayed report delivery can resume
+after a gateway outage without signing another weight transaction.
+
+## Installation and restart
+
+Use the migration process for `scripts/202-arena-accepted-weight-state.sql`
+and `scripts/203-retire-legacy-incentive-weight-bridge.sql`. Migration 202 adds
+accepted states and chain outcomes. Migration 203 requires SOURCE_ADD migration
+198 and removes retired incentive schema. Stop the old incentive producers
+before applying 203, then start the new release. Historical migration files
+remain for database upgrades; they are not runtime producers.
+
+The first deployment also requires the gateway-only restart controller from
+the exact verified release to be installed and verified through the trusted
+operator bootstrap before restart. The currently installed legacy controller
+can still demand deleted auditor artifacts. Its checks must fail closed; a
+successful code push does not prove that this controller upgrade has occurred.
+Stage and verify the replacement controller and release artifacts before
+stopping the working gateway. Apply 203 during that coordinated transition;
+the new release must pass its schema check before startup.
+
+`neurons/validator.py` starts the normal Arena validator. The sample
+`deploy/leadpoet-arena-validator.service` supervises that same implementation.
+Set its interpreter and checkout paths for the installed environment.
+`scripts/run_arena_validator.py` reads a mode-0600 environment file as data.
 
 Required settings include:
 
 ```dotenv
-LEADPOET_WEIGHT_MODE=arena
 LAB_ARENA_API_BASE_URL=https://your-arena-host.example
 LAB_ARENA_CHAIN_ENDPOINT=wss://your-finalized-chain-endpoint.example
 LAB_ARENA_SIGNING_KEY_HASH=sha256:<trusted-Arena-public-key-hash>
@@ -76,37 +96,17 @@ LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
 LAB_ARENA_HOTKEY_ENVELOPE=/home/ec2-user/.config/leadpoet/arena-hotkey-envelope.json
 ```
 
-The normal validator gets its public hotkey from the protected signer. It does
-not need a wallet seed file. Use the existing sandbox configuration for the
-scorer. Do not place miner provider keys in this file.
+Use the existing sandbox settings for scoring. Do not put miner provider keys
+or the validator seed in this environment file.
 
-The dedicated `validator_tee/Dockerfile.arena-signer` image admits only Arena
-RPCs. The seed and its allowed public policy are sealed together with KMS.
-The policy binds the Arena signing key and HTTPS host, chain and subnet,
-epoch mapping, burn identity, and transaction rules. A MAC from the seed also
-protects the policy inside the KMS recipient envelope. A parent process cannot
-replace that policy while retaining the validator's key.
-
-Prepare the encrypted envelope once from the owner's protected seed and
+Prepare the encrypted envelope once from the owner's protected seed and the
 reviewed public policy with
-`python3 -m validator_tee.host.arena_hotkey_bootstrap seal`. The normal validator host
-receives only the encrypted envelope. On a fresh enclave boot,
-`LAB_ARENA_HOTKEY_ENVELOPE` permits automatic KMS recipient provisioning. KMS
-must permit the approved Arena signer image and enforce recipient-only
-decryption through [KMS recipient attestation](https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html).
-The old raw-seed envelope format is deliberately rejected by this
-new mode. No GitHub commit or gateway release history is part of the policy.
+`python3 -m validator_tee.host.arena_hotkey_bootstrap seal`. The host receives
+only that envelope. On a fresh enclave boot, the configured envelope permits
+KMS recipient provisioning. KMS must permit the approved signer image and
+require recipient-only decryption. The old raw-seed envelope format is rejected.
 
-The validator owns the chain relay on vsock port 5002 and the Arena relay on
-port 5003. TLS terminates inside the enclave. A host relay can interrupt reads,
-but it cannot impersonate the configured Arena or chain endpoint. Stop the old
-host relay during the explicit migration to the new service; two processes
-must not share ownership of these ports.
-
-The sample `deploy/leadpoet-arena-validator.service` supervises one normal
-validator process. Set its interpreter and checkout paths to the installed
-environment. It runs readiness checks before start. Before stopping a working
-service, run the same check directly:
+Before stopping a working service, run its local readiness check:
 
 ```bash
 python3 scripts/run_arena_validator.py \
@@ -114,39 +114,20 @@ python3 scripts/run_arena_validator.py \
   --check-only
 ```
 
-Once installed, restart the host process with the normal systemd command. A
-SIGTERM stops new claims and lets work in progress drain. Preserve the state
-directory across updates. Signed bytes are persisted before broadcast, and a
-retry uses those exact bytes. A submitted transaction and a finalized, revealed
-weight vector are different outcomes; readiness alone proves neither.
-Each epoch has its own journal. An older reveal or outcome-report retry does
-not prevent a new epoch from submitting. Outcome delivery can resume after a
-gateway outage. It does not need a new weight transaction.
+Preserve the validator state directory across updates. SIGTERM stops new claims
+and drains current work. The validator owns chain relay port 5002 and Arena
+relay port 5003. One process must own each port. Do not run an old validator
+and the Arena validator with the same hotkey at the same time.
 
-Do not run a legacy validator and an Arena validator with the same hotkey at
-the same time. The host service restart does not rebuild or replace the
-protected signer. A signer image change still needs its measured-image and
-key-unsealing checks.
+The legacy `/weights` and `/research-lab/allocations/*` routes, old audit client,
+allocation producers, automatic validator Git rebuilds, and paired weight
+restart machinery are removed from this release. There is no retirement flag
+or fallback. A code push does not change the currently deployed old release.
 
-## Legacy API retirement
+## Validation
 
-The legacy `/weights` API remains enabled during migration. This includes the
-primary publication API used by old audit clients. New normal validators use
-`/arena/v1/weight-state` and `/arena/v1/chain-outcomes`.
-
-Retirement is a local operator control read on each request. Write `retired`
-to the root-owned file
-`/home/ec2-user/.config/leadpoet/legacy-audit-weights.retired` with file mode
-`0644`. The gateway must be able to read this public flag; only root can write
-the default file. The path can be overridden by
-`LEADPOET_LEGACY_AUDIT_WEIGHT_RETIREMENT_FILE`. The next legacy request returns
-HTTP 410. This does not need a gateway restart or code change. Retire the old
-routes only after their clients have moved to normal Arena mode. Preserve
-their existing code and records until that cutover is complete.
-
-## Validation limits
-
-Local tests exercise the scoring, reward-state, and submission logic using
-disposable PostgreSQL and controlled provider and chain boundaries. They do not
-prove a new Nitro image can unseal a production key, or that a live chain has
-accepted and revealed weights. Record those as separate deployment checks.
+The local end-to-end gate uses disposable PostgreSQL and controlled model,
+provider, and chain boundaries. It exercises scoring, winner selection,
+accepted state, weight construction, protected submission, restart recovery,
+and chain readback. Production Nitro key unsealing and a live chain reveal
+remain deployment checks; local success does not prove either occurred.

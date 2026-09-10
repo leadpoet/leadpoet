@@ -1723,7 +1723,6 @@ def _gateway_ancestry_manager_kwargs(runtime: Any) -> Dict[str, Any]:
             "gateway_autoresearch",
             "gateway_coordinator",
             "gateway_scoring",
-            "validator_weights",
         ),
     }
 
@@ -1762,7 +1761,6 @@ def get_v2_scoring_job_manager():
         executor = ScoringExecutorV2(
             provider_execute=execute_v2_provider_request,
             retry_policy_hashes=retry_hashes,
-            config_supplier=runtime.research_lab_config,
             execution_config=configuration["research_lab_execution_config"],
         )
         v2_scoring_job_manager = ExecutionJobManagerV2(
@@ -1801,21 +1799,6 @@ def get_v2_coordinator_job_manager():
             retry_hashes.get("supabase"), str
         ):
             raise RuntimeError("V2 Supabase retry policy is unavailable")
-        from gateway.tee.coordinator_weight_source_v2 import (
-            CoordinatorWeightSourceV2,
-        )
-        from gateway.tee.coordinator_allocation_source_v2 import (
-            CoordinatorAllocationSourceV2,
-        )
-        from gateway.tee.coordinator_allocation_frontier_bootstrap_v2 import (
-            CoordinatorAllocationFrontierBootstrapV2,
-        )
-        from gateway.tee.coordinator_chain_source_v2 import (
-            CoordinatorChainSourceV2,
-        )
-        from gateway.tee.coordinator_legacy_settlement_v2 import (
-            CoordinatorLegacySettlementSourceV2,
-        )
         from gateway.tee.qualification_admission_v2 import (
             CoordinatorQualificationAdmissionV2,
         )
@@ -1824,62 +1807,6 @@ def get_v2_coordinator_job_manager():
             execute_provider=get_v2_provider_broker().execute,
             retry_policy_hash=retry_hashes["supabase"],
             origin=_v2_supabase_origin(configuration),
-        )
-        weight_source = CoordinatorWeightSourceV2(
-            source_reader,
-            network_name=configuration["research_lab_execution_config"][
-                "epoch_authority"
-            ]["chain_signing_profile"]["network"],
-        )
-        chain_source = CoordinatorChainSourceV2(
-            execute_provider=get_v2_provider_broker().execute,
-            retry_policy_hashes=retry_hashes,
-            epoch_authority=configuration[
-                "research_lab_execution_config"
-            ]["epoch_authority"],
-        )
-        legacy_settlement_source = CoordinatorLegacySettlementSourceV2(
-            reader=source_reader,
-            chain_source=chain_source,
-            execute_provider=get_v2_provider_broker().execute,
-            retry_policy_hash=retry_hashes["arweave"],
-        )
-        from gateway.tee.coordinator_chain_realized_settlement_v1 import (
-            CoordinatorChainRealizedSettlementV1,
-        )
-        from leadpoet_canonical.chain_source_v2 import (
-            CHAIN_ENDPOINT_HOST,
-            CHAIN_ENDPOINT_PORT,
-        )
-
-        chain_realized_settlement_source = (
-            CoordinatorChainRealizedSettlementV1(
-                reader=source_reader,
-                chain_source=chain_source,
-                expected_lineage_id=_gateway_ancestry_manager_kwargs(runtime)[
-                    "ancestry_lineage_id"
-                ],
-                expected_chain=(
-                    f"wss://{CHAIN_ENDPOINT_HOST}:{CHAIN_ENDPOINT_PORT}"
-                ),
-                chain_signing_profile=configuration[
-                    "research_lab_execution_config"
-                ]["epoch_authority"]["chain_signing_profile"],
-                boot_verifier=runtime.verify_release_lineage_boot,
-            )
-        )
-        allocation_source = CoordinatorAllocationSourceV2(
-            reader=source_reader,
-            chain_source=chain_source,
-            config_supplier=runtime.research_lab_config,
-            network_supplier=lambda: str(
-                configuration["research_lab_execution_config"]["deployment"][
-                    "network"
-                ]
-            ),
-        )
-        allocation_frontier_bootstrap = (
-            CoordinatorAllocationFrontierBootstrapV2(source_reader)
         )
         qualification_admission = CoordinatorQualificationAdmissionV2(
             source_reader
@@ -1893,55 +1820,10 @@ def get_v2_coordinator_job_manager():
                     get_v2_artifact_vault().persistence_evidence(artifact_id)
                     for artifact_id in artifact_ids
                 ),
-                weight_source_resolver=lambda payload, context: weight_source.resolve(
-                    payload=payload,
-                    context=context,
-                ),
                 qualification_admission_resolver=lambda payload, context: (
                     qualification_admission.resolve(
                         payload=payload,
                         context=context,
-                    )
-                ),
-                allocation_source_resolver=lambda payload, context: (
-                    allocation_source.resolve(payload=payload, context=context)
-                ),
-                allocation_frontier_bootstrap_resolver=(
-                    lambda payload, context: (
-                        allocation_frontier_bootstrap.resolve(
-                            payload=payload,
-                            context=context,
-                        )
-                    )
-                ),
-                legacy_settlement_source_resolver=lambda payload, context: (
-                    legacy_settlement_source.resolve(
-                        payload=payload,
-                        context=context,
-                    )
-                ),
-                legacy_allocation_classification_resolver=(
-                    lambda payload, context: (
-                        legacy_settlement_source.resolve_classification(
-                            payload=payload,
-                            context=context,
-                        )
-                    )
-                ),
-                chain_weight_observation_resolver=(
-                    lambda payload, context: (
-                        chain_realized_settlement_source.observe(
-                            payload=payload,
-                            context=context,
-                        )
-                    )
-                ),
-                chain_realized_settlement_resolver=(
-                    lambda payload, context: (
-                        chain_realized_settlement_source.settle(
-                            payload=payload,
-                            context=context,
-                        )
                     )
                 ),
             ),

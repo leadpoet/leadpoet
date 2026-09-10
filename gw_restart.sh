@@ -39,32 +39,18 @@ LAB_ARENA_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
 GATEWAY_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_SERVICE_STATE_FILE"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
 GATEWAY_ACTIVE_RELEASE_COMPONENT="${GATEWAY_ACTIVE_RELEASE_COMPONENT:-gateway}"
-GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="${GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
-GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="${GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT:-standalone}"
-GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE:-}"
-GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE:-}"
-GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS:-9300}"
 GATEWAY_GIT_HELPER_DEFAULT="$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py"
-GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$LEADPOET_REPO_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
 GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"
 if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ] \
     && [ -r "$GATEWAY_RESTART_AUTHORITY_ROOT/scripts/gateway_git_deploy.py" ]; then
   GATEWAY_GIT_HELPER_DEFAULT="$GATEWAY_RESTART_AUTHORITY_ROOT/scripts/gateway_git_deploy.py"
-  GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$GATEWAY_RESTART_AUTHORITY_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
   GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$GATEWAY_RESTART_AUTHORITY_ROOT/gateway/tee/host_memory_guard_v2.py"
 elif [ -r "$GATEWAY_RESTART_CONTROLLER_CURRENT/scripts/gateway_git_deploy.py" ]; then
   GATEWAY_GIT_HELPER_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/scripts/gateway_git_deploy.py"
-  GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py"
   GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/gateway/tee/host_memory_guard_v2.py"
 fi
 GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$GATEWAY_GIT_HELPER_DEFAULT}"
-GATEWAY_EXACT_COMMIT_HELPER="${GATEWAY_EXACT_COMMIT_HELPER:-$GATEWAY_EXACT_COMMIT_HELPER_DEFAULT}"
 GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
-GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
-GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
-GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360
-GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS:-3}"
-GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"
 GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
 GATEWAY_V2_HEALTH_MAX_ATTEMPTS="${GATEWAY_V2_HEALTH_MAX_ATTEMPTS:-120}"
 GATEWAY_V2_HEALTH_RETRY_SECONDS="${GATEWAY_V2_HEALTH_RETRY_SECONDS:-5}"
@@ -93,47 +79,6 @@ if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
     exit 2
   fi
 fi
-case "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" in
-  0|1) ;;
-  *)
-    echo "ERROR: GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED must be 0 or 1" >&2
-    exit 2
-    ;;
-esac
-case "$GATEWAY_ACTIVE_RELEASE_COMPONENT" in
-  gateway|all) ;;
-  *)
-    echo "ERROR: GATEWAY_ACTIVE_RELEASE_COMPONENT must be gateway or all" >&2
-    exit 2
-    ;;
-esac
-case "$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" in
-  standalone|cutover|full-parity) ;;
-  *)
-    echo "ERROR: unsupported active release fallback context" >&2
-    exit 2
-    ;;
-esac
-paired_handoff_count=0
-[ -n "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ] && paired_handoff_count=$((paired_handoff_count + 1))
-[ -n "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" ] && paired_handoff_count=$((paired_handoff_count + 1))
-if [ "$paired_handoff_count" -ne 0 ] && [ "$paired_handoff_count" -ne 2 ]; then
-  echo "ERROR: paired gateway destructive handoff authority is incomplete" >&2
-  exit 2
-fi
-if [ "$paired_handoff_count" -eq 2 ]; then
-  if ! [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-paired-restart\.[A-Za-z0-9._-]+\.ready$ ]] \
-      || ! [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" =~ ^[0-9a-f]{64}$ ]] \
-      || ! [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
-      || [ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" -gt 10800 ]; then
-    echo "ERROR: paired gateway destructive handoff authority is invalid" >&2
-    exit 2
-  fi
-elif [ "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" = "1" ]; then
-  echo "ERROR: paired gateway restart requires a destructive handoff" >&2
-  exit 2
-fi
-
 gateway_restart_invocation_id_from_timing_file() {
   local ledger_name ledger_epoch ledger_pid expected_ledger
   if [ -L "$GATEWAY_RESTART_TIMING_FILE" ]; then
@@ -459,16 +404,7 @@ GATEWAY_RELEASE_SUPERSESSION_COUNT="${GATEWAY_RELEASE_SUPERSESSION_COUNT:-0}"
 GATEWAY_RELEASE_SUPERSESSION_MAX="${GATEWAY_RELEASE_SUPERSESSION_MAX:-20}"
 GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
 GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG="${GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.offline-artifacts.log}"
-GATEWAY_ANCESTRY_CHECKPOINT_PID=""
-GATEWAY_ANCESTRY_CHECKPOINT_STATE="not_started"
-GATEWAY_ANCESTRY_CHECKPOINT_LOG="${GATEWAY_ANCESTRY_CHECKPOINT_LOG:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.ancestry-checkpoint.log}"
-GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT="${GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.running-release.json}"
-GATEWAY_ANCESTRY_SAFE_EPOCH="${GATEWAY_ANCESTRY_SAFE_EPOCH:-}"
 GATEWAY_RESTART_EPOCH_REPORT=""
-GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH=""
-GATEWAY_WEIGHT_INPUT_REPAIR_REPORT=""
-GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
-GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
 GATEWAY_RESTART_LOCK_FILE="${GATEWAY_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/gateway-restart.lock}"
 GATEWAY_RESTART_RECOVERY_LOCK_FILE="${GATEWAY_RESTART_RECOVERY_LOCK_FILE:-${GATEWAY_RESTART_LOCK_FILE}.recovery}"
@@ -485,28 +421,18 @@ GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES="${GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
 RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
-GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/validator-v2-release-manifest.json}"
 GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-lineage.json}"
-GATEWAY_V2_RELEASE_REQUIREMENTS="${GATEWAY_V2_RELEASE_REQUIREMENTS:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-requirements.json}"
 # Release acquisition happens while the existing gateway is still serving.
 # Keep candidate evidence restart-scoped so its fail-closed verifier remains
 # bound to the release that actually booted it until destructive cutover.
 GATEWAY_PREPARED_V2_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release.json}"
-GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-validator-release.json}"
 GATEWAY_PREPARED_V2_RELEASE_LINEAGE="${GATEWAY_PREPARED_V2_RELEASE_LINEAGE:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-lineage.json}"
-GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="${GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-requirements.json}"
-# The paired restart controller installs the validator's independently selected
-# active authority here before starting this controller. It is intentionally
-# required rather than inferred from a lifetime release catalog.
-GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="${GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS:-}"
-GATEWAY_COUNTERPART_RELEASE_LINEAGE="${GATEWAY_COUNTERPART_RELEASE_LINEAGE:-}"
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
 GATEWAY_V2_RELEASE_BUCKET="${GATEWAY_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="${RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET:-$GATEWAY_V2_RELEASE_BUCKET}"
 GATEWAY_V2_RELEASE_PREFIX="${GATEWAY_V2_RELEASE_PREFIX:-attested-v2/releases}"
 GATEWAY_V2_KMS_KEY_ID="${GATEWAY_V2_KMS_KEY_ID:-arn:aws:kms:us-east-1:493765492819:key/c5412928-093e-4bf5-aafc-7b27c02f1445}"
 export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
-export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/validator-runtime}"
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
 GATEWAY_DESTRUCTIVE_PHASE_STARTED="${GATEWAY_DESTRUCTIVE_PHASE_STARTED:-0}"
@@ -531,27 +457,15 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   LAB_ARENA_PROCESS_HELPER
   LAB_ARENA_SERVICE_STATE_FILE
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID
-  GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED
-  GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT
-  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE
-  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE
-  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS
   GATEWAY_RESTART_RECOVERY_LOCK_FILE
   LEADPOET_DOCKER_OPERATION_LOCK_FILE
   GATEWAY_V2_CONFIG_DIR
   GATEWAY_V2_RELEASE_MANIFEST
-  GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST
   GATEWAY_V2_RELEASE_LINEAGE
-  GATEWAY_V2_RELEASE_REQUIREMENTS
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST
-  GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE
-  GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS
-  GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS
-  GATEWAY_COUNTERPART_RELEASE_LINEAGE
   GATEWAY_V2_ARTIFACT_POLICY
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT
-  VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT
   GATEWAY_V2_RELEASE_PREFIX
   GATEWAY_V2_RELEASE_BUCKET
   GATEWAY_V2_KMS_KEY_ID
@@ -779,7 +693,6 @@ emit_gateway_restart_sentry_summary() {
     --release-attempts "$GATEWAY_RELEASE_ATTEMPTS_USED" \
     --candidate-sha "$candidate_sha" \
     --evidence "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" \
-    --evidence "$GATEWAY_ANCESTRY_CHECKPOINT_LOG" \
     "${shutdown_flag[@]}" >/dev/null 2>&1 || true
   return 0
 }
@@ -911,19 +824,11 @@ start_gateway_offline_artifact_prepare() {
     -u GATEWAY_CONTROLLER_PROCESS_HELPER \
     -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_GIT_HELPER \
-    -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
     -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
-    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
-    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
-    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
-    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
     python3 -c '
 import os
 import sys
@@ -986,15 +891,6 @@ cancel_gateway_offline_artifact_prepare() {
   GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
 }
 
-cancel_gateway_ancestry_checkpoint_bootstrap() {
-  local checkpoint_pid process_group_marker
-  checkpoint_pid="$GATEWAY_ANCESTRY_CHECKPOINT_PID"
-  [ -n "$checkpoint_pid" ] || return 0
-  process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
-  cancel_gateway_owned_process_group "$checkpoint_pid" "$process_group_marker"
-  GATEWAY_ANCESTRY_CHECKPOINT_PID=""
-}
-
 follow_superseding_gateway_release() {
   local helper latest_sha next_count superseding_tree
 
@@ -1048,8 +944,6 @@ follow_superseding_gateway_release() {
   echo "Forward gateway release moved from $PREPARED_GATEWAY_SHA to $latest_sha; re-executing before shutdown"
   record_gateway_restart_timing "release_superseded"
   cancel_gateway_offline_artifact_prepare
-  cancel_gateway_ancestry_checkpoint_bootstrap
-  rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
   rm -rf -- "$GATEWAY_PREFLIGHT_TREE"
   GATEWAY_PREFLIGHT_TREE=""
 
@@ -1065,13 +959,7 @@ follow_superseding_gateway_release() {
     GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
     GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
     GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
-    GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
-    GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
-    GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
-    GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" \
-    GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" \
     GATEWAY_GIT_HELPER="$superseding_tree/scripts/gateway_git_deploy.py" \
-    GATEWAY_EXACT_COMMIT_HELPER="$superseding_tree/Leadpoet/utils/exact_commit_restart_v2.py" \
     GATEWAY_HOST_MEMORY_GUARD_PATH="$superseding_tree/gateway/tee/host_memory_guard_v2.py" \
     GATEWAY_RESTART_PHASE=prepare \
     GATEWAY_RESTART_LOCK_HELD=1 \
@@ -1095,495 +983,16 @@ follow_superseding_gateway_release() {
     GATEWAY_V2_RELEASE_ARCHIVE_ROOT="$GATEWAY_V2_RELEASE_ARCHIVE_ROOT" \
     GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
     GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
-    GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST" \
     GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
-    GATEWAY_V2_RELEASE_REQUIREMENTS="$GATEWAY_V2_RELEASE_REQUIREMENTS" \
     GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
     GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-    GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
-    GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" \
-    GATEWAY_COUNTERPART_RELEASE_LINEAGE="$GATEWAY_COUNTERPART_RELEASE_LINEAGE" \
     GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
     GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
     GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
     RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \
     GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
-    GATEWAY_STATEFUL_CUTOVER_CEREMONY="$GATEWAY_STATEFUL_CUTOVER_CEREMONY" \
     GATEWAY_DEPLOY_STAGE=bootstrap \
     exec bash "$superseding_tree/gw_restart.sh"
-}
-
-prepare_gateway_ancestry_checkpoint_bootstrap() {
-  local build_info authority_health checkpoint_module
-  checkpoint_module="$GATEWAY_PREFLIGHT_TREE/gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py"
-  if [ "$GATEWAY_ANCESTRY_CHECKPOINT_STATE" != "not_started" ]; then
-    echo "ERROR: active ancestry checkpoint bootstrap was already prepared" >&2
-    return 1
-  fi
-  if [ ! -r "$checkpoint_module" ]; then
-    echo "ERROR: prepared active ancestry checkpoint helper is unavailable" >&2
-    return 1
-  fi
-  if ! mkdir -p "$(dirname "$GATEWAY_ANCESTRY_CHECKPOINT_LOG")" \
-      || ! : > "$GATEWAY_ANCESTRY_CHECKPOINT_LOG" \
-      || ! chmod 600 "$GATEWAY_ANCESTRY_CHECKPOINT_LOG"; then
-    echo "ERROR: active ancestry checkpoint log is unavailable" >&2
-    return 1
-  fi
-
-  # This is an availability optimization only.  Do not send candidate code to
-  # an unverified or partially ready old runtime.  The candidate performs the
-  # same bootstrap again, fail-closed, after its own enclave is ready.
-  if ! build_info="$(timeout 10 curl -fsS http://localhost:8000/build-info 2>/dev/null)" \
-      || ! authority_health="$(timeout 15 curl -fsS http://localhost:8000/health/v2-authority 2>/dev/null)"; then
-    GATEWAY_ANCESTRY_CHECKPOINT_STATE="skipped"
-    record_gateway_restart_timing "ancestry_precheckpoint_skipped" "old_gateway_unavailable"
-    echo "Old gateway V2 authority is unavailable; deferring ancestry checkpoint bootstrap to the candidate runtime"
-    return 0
-  fi
-  if ! rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" \
-      || ! "$GATEWAY_PYTHON_BIN" - \
-        "$GATEWAY_V2_RELEASE_MANIFEST" \
-        "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" \
-        "$build_info" \
-        "$authority_health" <<'PY'
-import json
-import os
-from pathlib import Path
-import re
-import stat
-import sys
-
-source_path, destination_path, raw_build_info, raw_health = sys.argv[1:]
-build_info = json.loads(raw_build_info)
-health = json.loads(raw_health)
-commit = str(build_info.get("git_commit") or "").lower()
-if not re.fullmatch(r"[0-9a-f]{40}", commit):
-    raise SystemExit("running gateway build identity is invalid")
-if health.get("status") not in {"ready", "healthy"}:
-    raise SystemExit("running gateway V2 authority is not ready")
-
-flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-descriptor = os.open(source_path, flags)
-try:
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4 * 1024 * 1024:
-        raise SystemExit("running gateway release manifest is not a bounded regular file")
-    with os.fdopen(descriptor, "rb", closefd=False) as handle:
-        raw_manifest = handle.read(4 * 1024 * 1024 + 1)
-finally:
-    os.close(descriptor)
-manifest = json.loads(raw_manifest)
-if str(manifest.get("commit_sha") or "").lower() != commit:
-    raise SystemExit("running gateway release differs from its build identity")
-
-output_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-output = os.open(destination_path, output_flags, 0o600)
-try:
-    with os.fdopen(output, "wb") as handle:
-        handle.write(raw_manifest)
-        handle.flush()
-        os.fsync(handle.fileno())
-finally:
-    try:
-        os.close(output)
-    except OSError:
-        pass
-PY
-  then
-    GATEWAY_ANCESTRY_CHECKPOINT_STATE="skipped"
-    record_gateway_restart_timing "ancestry_precheckpoint_skipped" "running_release_unverified"
-    echo "Running gateway release could not be bound exactly; deferring ancestry checkpoint bootstrap to the candidate runtime"
-    rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
-    return 0
-  fi
-
-  GATEWAY_ANCESTRY_CHECKPOINT_STATE="prepared"
-  echo "Prepared exact running-release ancestry checkpoint authority"
-}
-
-start_gateway_ancestry_checkpoint_bootstrap() {
-  local process_group_marker
-  local -a checkpoint_command
-  case "$GATEWAY_ANCESTRY_CHECKPOINT_STATE" in
-    skipped)
-      return 0
-      ;;
-    prepared)
-      ;;
-    *)
-      echo "ERROR: active ancestry checkpoint bootstrap was not prepared" >&2
-      return 1
-      ;;
-  esac
-  if [ "${GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY:-}" = "supported" ] \
-      && [ -z "$GATEWAY_ANCESTRY_SAFE_EPOCH" ]; then
-    echo "ERROR: active ancestry checkpoint bootstrap lacks a proven-safe epoch" >&2
-    return 1
-  fi
-
-  checkpoint_command=(
-    bash -c '
-set -a
-. "$1"
-set +a
-export PYTHONPATH="$2"
-epoch_args=()
-if [ -n "$5" ]; then
-  epoch_args=(--epoch "$5")
-fi
-exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
-  --release-manifest "$4" "${epoch_args[@]}"
-' checkpoint-bootstrap \
-      "$ENV_CLONE" \
-      "$GATEWAY_PREFLIGHT_TREE" \
-      "$GATEWAY_PYTHON_BIN" \
-      "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" \
-      "${GATEWAY_ANCESTRY_SAFE_EPOCH:-}"
-  )
-  if command -v ionice >/dev/null 2>&1; then
-    checkpoint_command=(ionice -c2 -n7 "${checkpoint_command[@]}")
-  fi
-  record_gateway_restart_timing "ancestry_precheckpoint_started"
-  process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
-  rm -f -- "$process_group_marker"
-  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_GIT_HELPER \
-    -u GATEWAY_EXACT_COMMIT_HELPER \
-    -u GATEWAY_HOST_MEMORY_GUARD_PATH \
-    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
-    -u LAB_ARENA_PROCESS_HELPER \
-    -u GATEWAY_RESTART_AUTHORITY_ROOT \
-    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
-    -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
-    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
-    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
-    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
-    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
-    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
-    python3 -c '
-import os
-import sys
-
-os.chdir(sys.argv[1])
-os.setsid()
-os.nice(10)
-marker_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-marker = os.open(sys.argv[2], marker_flags, 0o600)
-with os.fdopen(marker, "w", encoding="ascii") as handle:
-    handle.write(str(os.getpid()) + "\n")
-    handle.flush()
-    os.fsync(handle.fileno())
-os.execvp(sys.argv[3], sys.argv[3:])
-' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${checkpoint_command[@]}" \
-    >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
-  GATEWAY_ANCESTRY_CHECKPOINT_PID="$!"
-  if ! wait_for_gateway_owned_process_group \
-      "$GATEWAY_ANCESTRY_CHECKPOINT_PID" \
-      "$process_group_marker" \
-      "active ancestry checkpoint bootstrap"; then
-    GATEWAY_ANCESTRY_CHECKPOINT_PID=""
-    GATEWAY_ANCESTRY_CHECKPOINT_STATE="failed"
-    return 1
-  fi
-  GATEWAY_ANCESTRY_CHECKPOINT_STATE="running"
-  echo "Started old-runtime active ancestry checkpoint bootstrap as PID $GATEWAY_ANCESTRY_CHECKPOINT_PID"
-  echo "Ancestry checkpoint log: $GATEWAY_ANCESTRY_CHECKPOINT_LOG"
-}
-
-wait_for_gateway_ancestry_checkpoint_bootstrap() {
-  local checkpoint_pid status=0
-  case "$GATEWAY_ANCESTRY_CHECKPOINT_STATE" in
-    skipped|unsupported|passed)
-      return 0
-      ;;
-    running)
-      ;;
-    *)
-      echo "ERROR: active ancestry checkpoint bootstrap was not initialized" >&2
-      return 1
-      ;;
-  esac
-  checkpoint_pid="$GATEWAY_ANCESTRY_CHECKPOINT_PID"
-  if wait "$checkpoint_pid"; then
-    status=0
-  else
-    status="$?"
-  fi
-  GATEWAY_ANCESTRY_CHECKPOINT_PID=""
-  rm -f -- "${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
-  cat "$GATEWAY_ANCESTRY_CHECKPOINT_LOG"
-  case "$status" in
-    0)
-      GATEWAY_ANCESTRY_CHECKPOINT_STATE="passed"
-      record_gateway_restart_timing "ancestry_precheckpoint_complete" "passed"
-      ;;
-    3)
-      # Expected exactly once when the running N-1 enclave predates the new
-      # measured operation.  The candidate-side bootstrap below is mandatory.
-      GATEWAY_ANCESTRY_CHECKPOINT_STATE="unsupported"
-      record_gateway_restart_timing "ancestry_precheckpoint_complete" "unsupported"
-      echo "Running N-1 coordinator predates measured ancestry bootstrap; candidate runtime will perform the one-time conversion"
-      ;;
-    *)
-      GATEWAY_ANCESTRY_CHECKPOINT_STATE="failed"
-      record_gateway_restart_timing "ancestry_precheckpoint_complete" "failed"
-      echo "ERROR: old-runtime ancestry checkpoint bootstrap failed before shutdown" >&2
-      return "$status"
-      ;;
-  esac
-}
-
-verify_gateway_active_ancestry_checkpoints() {
-  local epoch="${1:-}"
-  local timing_stage="${2:-ancestry_postcheckpoint}"
-  local -a epoch_args=()
-  if [ -n "$epoch" ]; then
-    epoch_args=(--epoch "$epoch")
-  fi
-  record_gateway_restart_timing "${timing_stage}_started"
-  if ! (
-      cd "$LEADPOET_REPO_ROOT"
-      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-        -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
-        --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-        "${epoch_args[@]}"
-    ); then
-    record_gateway_restart_timing "${timing_stage}_complete" "failed"
-    echo "ERROR: candidate runtime did not durably bound active receipt ancestry" >&2
-    return 1
-  fi
-  record_gateway_restart_timing "${timing_stage}_complete" "passed"
-}
-
-gateway_ancestry_safe_epoch_from_report() {
-  "$GATEWAY_PYTHON_BIN" - "$1" <<'PY'
-import json
-import sys
-
-report = json.loads(sys.argv[1])
-if (
-    report.get("schema_version")
-    != "leadpoet.weight_submission_storage_readiness.v2"
-    or report.get("status") != "readable"
-):
-    raise SystemExit("weight storage preflight report is invalid")
-epoch = int(report["epoch"])
-safe_epoch = int(report["ancestry_safe_epoch"])
-if epoch < 0 or safe_epoch < 0 or safe_epoch > epoch:
-    raise SystemExit("weight storage preflight ancestry epoch is invalid")
-print(safe_epoch)
-PY
-}
-
-gateway_weight_preflight_epoch_from_restart_report() {
-  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" - \
-    "$1" "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
-
-report = json.loads(sys.argv[1])
-if not isinstance(report, dict) or report.get("restart_allowed") is not True:
-    raise SystemExit("restart epoch gate report is invalid")
-
-schema_version = report.get("schema_version")
-if schema_version == "leadpoet.restart_epoch_gate.v1":
-    snapshot_doc = report.get("snapshot")
-elif schema_version == "leadpoet.restart_epoch_start.v1":
-    snapshot_doc = report.get("current_snapshot")
-else:
-    raise SystemExit("restart epoch gate report schema is unsupported")
-if not isinstance(snapshot_doc, dict):
-    raise SystemExit("restart epoch gate snapshot is missing")
-
-cutover_doc = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-if not isinstance(cutover_doc, dict):
-    raise SystemExit("stateful epoch cutover manifest is invalid")
-snapshot = SubnetEpochSnapshot.from_mapping(snapshot_doc)
-cutover = SubnetEpochCutover.from_mapping(cutover_doc)
-print(snapshot.settlement_epoch_id(cutover))
-PY
-}
-
-ensure_gateway_ancestry_safe_epoch() {
-  local recovery_report
-  if [ -n "$GATEWAY_ANCESTRY_SAFE_EPOCH" ]; then
-    if ! [[ "$GATEWAY_ANCESTRY_SAFE_EPOCH" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: inherited active ancestry safe epoch is invalid" >&2
-      return 1
-    fi
-    return 0
-  fi
-
-  echo "Re-proving the active ancestry frontier after an N-1 controller handoff"
-  record_gateway_restart_timing "ancestry_frontier_recovery_started"
-  if ! recovery_report="$(
-      cd "$LEADPOET_REPO_ROOT"
-      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-        -m gateway.tee.verify_weight_submission_ready_v2 \
-        --storage-read-preflight
-    )"; then
-    record_gateway_restart_timing "ancestry_frontier_recovery_complete" "failed"
-    echo "ERROR: candidate could not recover the active ancestry frontier" >&2
-    return 1
-  fi
-  printf '%s\n' "$recovery_report"
-  if ! GATEWAY_ANCESTRY_SAFE_EPOCH="$(
-      gateway_ancestry_safe_epoch_from_report "$recovery_report"
-    )"; then
-    record_gateway_restart_timing "ancestry_frontier_recovery_complete" "failed"
-    echo "ERROR: candidate ancestry frontier report did not validate" >&2
-    return 1
-  fi
-  export GATEWAY_ANCESTRY_SAFE_EPOCH
-  record_gateway_restart_timing "ancestry_frontier_recovery_complete" "passed"
-  echo "Recovered active ancestry bootstrap at proven-safe epoch $GATEWAY_ANCESTRY_SAFE_EPOCH"
-}
-
-if [ "$GATEWAY_RESTART_TIMING_INITIALIZED" = "1" ]; then
-  record_gateway_restart_timing "controller_reexec"
-else
-  record_gateway_restart_timing "invoked"
-  GATEWAY_RESTART_TIMING_INITIALIZED=1
-  export GATEWAY_RESTART_TIMING_INITIALIZED
-fi
-
-repair_and_verify_gateway_weight_input() {
-  local epoch="${1:-}"
-  local attempt status
-  local -a epoch_args=()
-  if [ -n "$epoch" ]; then
-    epoch_args=(--epoch "$epoch")
-  fi
-  if ! [[ "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS must be a positive integer" >&2
-    return 2
-  fi
-  if ! [[ "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS must be a non-negative integer" >&2
-    return 2
-  fi
-
-  for attempt in $(seq 1 "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS"); do
-    echo "Authoritative V2 validator weight input repair attempt ${attempt}/${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS}"
-    if GATEWAY_WEIGHT_INPUT_REPAIR_REPORT="$(
-      (
-      cd "$LEADPOET_REPO_ROOT"
-      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-        -m gateway.tee.verify_weight_submission_ready_v2 \
-        --repair "${epoch_args[@]}"
-      )
-    )"; then
-      printf '%s\n' "$GATEWAY_WEIGHT_INPUT_REPAIR_REPORT"
-      return 0
-    else
-      status=$?
-    fi
-    if [ "$attempt" -ge "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" ]; then
-      echo "ERROR: authoritative V2 validator weight input repair failed after ${attempt} attempt(s)" >&2
-      return "$status"
-    fi
-    echo "Authoritative repair did not complete; retrying after durable readback in ${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS}s" >&2
-    sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"
-  done
-  return 1
-}
-
-repair_chain_settlements_and_prepare_current_weight_input() {
-  local attempt status chain_epochs chain_report epoch observed_epoch
-  local readiness_epochs requested_epoch
-  for attempt in $(seq 1 "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS"); do
-    echo "Measured chain settlement and current ancestry attempt ${attempt}/${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS}"
-    record_gateway_restart_timing "chain_settlement_repair_started"
-    if chain_report="$(
-      cd "$LEADPOET_REPO_ROOT"
-      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-        -m gateway.tee.verify_weight_submission_ready_v2 \
-        --repair-chain-settlements
-    )"; then
-      printf '%s\n' "$chain_report"
-    else
-      status=$?
-      record_gateway_restart_timing "chain_settlement_repair_complete" "failed"
-      return "$status"
-    fi
-    record_gateway_restart_timing "chain_settlement_repair_complete" "passed"
-    if ! chain_epochs="$(
-      "$GATEWAY_PYTHON_BIN" - "$chain_report" <<'PY'
-import json
-import sys
-
-report = json.loads(sys.argv[1])
-if (
-    report.get("schema_version")
-    != "leadpoet.chain_realized_settlement_repair.v1"
-    or report.get("status") != "ready"
-):
-    raise SystemExit("chain settlement repair report is invalid")
-epoch = int(report["epoch"])
-observed = int(report["observed_epoch"])
-if epoch < 0 or observed < epoch:
-    raise SystemExit("chain settlement repair epoch is invalid")
-if int(report["settled_through_epoch"]) != epoch - 1:
-    raise SystemExit("chain settlement repair readback is incomplete")
-print(epoch, observed)
-PY
-    )"; then
-      echo "ERROR: chain settlement repair report did not validate" >&2
-      return 1
-    fi
-    read -r epoch observed_epoch <<<"$chain_epochs"
-    if [ "$observed_epoch" != "$epoch" ]; then
-      echo "Research Lab epoch advanced during settlement repair (${epoch} -> ${observed_epoch}); rebuilding from the durable suffix"
-      continue
-    fi
-
-    echo "Verifying current-epoch active receipt ancestry at epoch $epoch"
-    verify_gateway_active_ancestry_checkpoints \
-      "$epoch" "ancestry_current_checkpoint"
-
-    requested_epoch="$epoch"
-    repair_and_verify_gateway_weight_input "$requested_epoch"
-    if ! readiness_epochs="$(
-      "$GATEWAY_PYTHON_BIN" - \
-        "$GATEWAY_WEIGHT_INPUT_REPAIR_REPORT" "$requested_epoch" <<'PY'
-import json
-import sys
-
-report = json.loads(sys.argv[1])
-requested = int(sys.argv[2])
-if (
-    report.get("schema_version") != "leadpoet.weight_submission_readiness.v2"
-    or report.get("status") != "ready"
-):
-    raise SystemExit("weight submission readiness report is invalid")
-epoch = int(report["epoch"])
-observed = int(report["observed_epoch"])
-if epoch != requested or observed < epoch:
-    raise SystemExit("weight submission readiness epoch is invalid")
-print(epoch, observed)
-PY
-    )"; then
-      echo "ERROR: weight submission readiness report did not validate" >&2
-      return 1
-    fi
-    read -r epoch observed_epoch <<<"$readiness_epochs"
-    if [ "$observed_epoch" = "$epoch" ]; then
-      return 0
-    fi
-    echo "Research Lab epoch advanced during authoritative weight preparation (${epoch} -> ${observed_epoch}); repeating from live-chain settlement"
-  done
-  echo "ERROR: Research Lab epoch did not stabilize during bounded weight preparation" >&2
-  return 1
 }
 
 install_gateway_python_dependencies() {
@@ -1684,7 +1093,6 @@ report_gateway_v2_bootstrap_pending() {
   local missing=() path
   for path in \
     "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
     "$GATEWAY_V2_ARTIFACT_POLICY" \
     "${V2_CREDENTIAL_ENVELOPES[@]}"; do
     [ -e "$path" ] || missing+=("$path")
@@ -1785,7 +1193,6 @@ validate_gateway_aws_authority() {
 
 on_gateway_restart_exit() {
   local status="$?"
-  local -a active_release_cleanup_paths=()
   if [ "$status" -ne 0 ]; then
     abort_lab_arena_restart_guard_before_destructive
   fi
@@ -1795,24 +1202,10 @@ on_gateway_restart_exit() {
   fi
   emit_gateway_restart_sentry_summary "$status"
   cancel_gateway_offline_artifact_prepare
-  cancel_gateway_ancestry_checkpoint_bootstrap
   cleanup_gateway_miner_maintenance_bootstrap
-  rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" 2>/dev/null || true
-  if [[ "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
-    active_release_cleanup_paths+=("$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS")
-  fi
-  if [[ "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
-    active_release_cleanup_paths+=("$GATEWAY_COUNTERPART_RELEASE_LINEAGE")
-  fi
-  if [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-paired-restart\.[A-Za-z0-9._-]+\.ready$ ]]; then
-    active_release_cleanup_paths+=("$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE")
-  fi
   rm -f -- \
     "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
     "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
-    "${active_release_cleanup_paths[@]}" \
     2>/dev/null || true
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
@@ -2020,467 +1413,6 @@ run_prepared_gateway_module() {
   )
 }
 
-run_gateway_active_release_controller_module() {
-  local authority_root
-  authority_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$GATEWAY_PREFLIGHT_TREE}"
-  if [ -z "$authority_root" ] || [ ! -r "$authority_root/gateway/tee/prepare_active_release_lineage_v2.py" ]; then
-    echo "ERROR: exact active release authority controller is unavailable" >&2
-    return 1
-  fi
-  (
-    cd "$authority_root"
-    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$authority_root" \
-      "$GATEWAY_PYTHON_BIN" -m "$@"
-  )
-}
-
-prepare_gateway_active_release_lineage() {
-  local authority_commit counterpart_historical_topology_hash fallback_context
-  local lineage_id running_gateway_manifest
-  local selected_local_release_commit selected_local_prior_release_lineage
-  local -a validator_authority_args=()
-  local -a topology_authority_args=()
-  counterpart_historical_topology_hash=""
-  selected_local_release_commit="${LEADPOET_LOCAL_RELEASE_COMMIT_SHA:-}"
-  selected_local_prior_release_lineage="${LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE:-}"
-
-  if [ -n "$selected_local_release_commit" ] \
-      && [ "$selected_local_release_commit" != "$PREPARED_GATEWAY_SHA" ]; then
-    echo "ERROR: selected local release identity differs from the prepared candidate" >&2
-    return 1
-  fi
-
-  if [ -n "${GATEWAY_HISTORICAL_TOPOLOGY_HASH:-}" ] \
-      && [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
-    counterpart_historical_topology_hash="$GATEWAY_HISTORICAL_TOPOLOGY_HASH"
-    topology_authority_args=(
-      --historical-topology-hash "$GATEWAY_HISTORICAL_TOPOLOGY_HASH"
-    )
-  fi
-
-  if [ -n "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ]; then
-    if ! [[ "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]] \
-        || [ ! -f "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ] \
-        || [ -L "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ] \
-        || [ ! -r "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ]; then
-      echo "ERROR: paired validator active release requirements are unavailable" >&2
-      return 1
-    fi
-    validator_authority_args=(
-      --validator-requirements "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS"
-    )
-  elif [ "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" = "1" ]; then
-    echo "ERROR: paired validator active release requirements are unavailable" >&2
-    return 1
-  else
-    if [ ! -s "$GATEWAY_V2_RELEASE_LINEAGE" ] \
-        || [ ! -f "$GATEWAY_V2_RELEASE_LINEAGE" ] \
-        || [ -L "$GATEWAY_V2_RELEASE_LINEAGE" ]; then
-      echo "ERROR: standalone gateway compact-lineage fallback is unavailable" >&2
-      return 1
-    fi
-    fallback_context="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT"
-    if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ] \
-        && [ "$fallback_context" = "standalone" ]; then
-      fallback_context="cutover"
-    fi
-    validator_authority_args=(
-      --fallback-lineage "$GATEWAY_V2_RELEASE_LINEAGE"
-      --fallback-context "$fallback_context"
-    )
-  fi
-  if ! [[ "$GATEWAY_ANCESTRY_SAFE_EPOCH" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: active release selection lacks a proven-safe epoch" >&2
-    return 1
-  fi
-
-  running_gateway_manifest="$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
-  if [ ! -s "$running_gateway_manifest" ]; then
-    running_gateway_manifest="$GATEWAY_V2_RELEASE_MANIFEST"
-  fi
-  if [ ! -r "$running_gateway_manifest" ]; then
-    echo "ERROR: running gateway release authority is unavailable" >&2
-    return 1
-  fi
-
-  lineage_id="$(
-    set -a
-    . "$ENV_CLONE"
-    set +a
-    cd "$GATEWAY_PREFLIGHT_TREE"
-    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" - <<'PY'
-from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id
-
-print(_lineage_id())
-PY
-  )" || {
-    echo "ERROR: immutable active ancestry lineage identity is unavailable" >&2
-    return 1
-  }
-  if ! [[ "$lineage_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "ERROR: immutable active ancestry lineage identity is invalid" >&2
-    return 1
-  fi
-  authority_commit="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
-  if [ -z "$authority_commit" ]; then
-    authority_commit="$(
-      git -C "$LEADPOET_REPO_ROOT" rev-parse --verify 'origin/main^{commit}'
-    )" || return 1
-  fi
-  if ! [[ "$authority_commit" =~ ^[0-9a-f]{40}$ ]] \
-      || ! [[ "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$ ]]; then
-    echo "ERROR: active release controller authority is invalid" >&2
-    return 1
-  fi
-
-  rm -f -- \
-    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
-    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"
-  if ! (
-      set -a
-      . "$ENV_CLONE"
-      set +a
-      # Persisted runtime state must not replace this invocation's local build.
-      if [ -n "$selected_local_release_commit" ]; then
-        export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$selected_local_release_commit"
-        export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
-        export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"
-        if [ -n "$selected_local_prior_release_lineage" ]; then
-          export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$selected_local_prior_release_lineage"
-        else
-          unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
-        fi
-      else
-        unset LEADPOET_LOCAL_RELEASE_COMMIT_SHA
-        unset LEADPOET_LOCAL_GATEWAY_RELEASE
-        unset LEADPOET_LOCAL_VALIDATOR_RELEASE
-        unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
-      fi
-      run_gateway_active_release_controller_module \
-        gateway.tee.prepare_active_release_lineage_v2 \
-        --phase gateway-final \
-        --candidate-commit "$PREPARED_GATEWAY_SHA" \
-        --authority-commit "$authority_commit" \
-        --restart-invocation-id "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
-        --running-gateway-manifest "$running_gateway_manifest" \
-        "${validator_authority_args[@]}" \
-        --epoch "$GATEWAY_ANCESTRY_SAFE_EPOCH" \
-        --netuid "${BITTENSOR_NETUID:-71}" \
-        --repository "$LEADPOET_REPO_ROOT" \
-        --lineage-id "$lineage_id" \
-        --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
-        --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-        "${topology_authority_args[@]}" \
-        --requirements-output "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
-        --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"
-    ); then
-    echo "ERROR: compact active release lineage could not be prepared" >&2
-    return 1
-  fi
-  if [ ! -s "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" ] \
-      || [ ! -s "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" ]; then
-    echo "ERROR: compact active release lineage outputs are unavailable" >&2
-    return 1
-  fi
-  if [ -n "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ]; then
-    if ! [[ "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]] \
-        || [ ! -s "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ] \
-        || [ ! -f "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ] \
-        || [ -L "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ]; then
-      echo "ERROR: component-only counterpart compact lineage is unavailable" >&2
-      return 1
-    fi
-    if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${GATEWAY_RESTART_AUTHORITY_ROOT:-$GATEWAY_PREFLIGHT_TREE}" \
-        "$GATEWAY_PYTHON_BIN" - \
-          "$PREPARED_GATEWAY_SHA" \
-          "$counterpart_historical_topology_hash" \
-          "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" \
-          "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" <<'PY'
-import json
-import os
-import stat
-import sys
-
-from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
-
-expected = sys.argv[1]
-historical_topology_hash = sys.argv[2] or None
-max_document_bytes = 4 * 1024 * 1024
-
-
-def load_bounded_json(path: str, label: str):
-    try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-        )
-    except OSError as exc:
-        raise SystemExit(f"{label} cannot be opened securely: {exc}") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_size <= 0
-            or metadata.st_size > max_document_bytes
-        ):
-            raise SystemExit(f"{label} is not a bounded regular file")
-        payload = os.read(descriptor, max_document_bytes + 1)
-        if len(payload) != metadata.st_size or len(payload) > max_document_bytes:
-            raise SystemExit(f"{label} changed during its bounded read")
-    finally:
-        os.close(descriptor)
-    try:
-        return json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"{label} is not valid UTF-8 JSON") from exc
-
-
-validator = validate_compact_release_lineage_v2
-validator_kwargs = {"expected_current_commit": expected}
-if historical_topology_hash is not None:
-    from gateway.tee.release_lineage_v2 import (
-        validate_historical_compact_release_lineage_v2,
-    )
-
-    validator = validate_historical_compact_release_lineage_v2
-    validator_kwargs["expected_topology_hash"] = historical_topology_hash
-counterpart = validator(
-    load_bounded_json(sys.argv[3], "component counterpart compact lineage"),
-    **validator_kwargs,
-)
-selected = validator(
-    load_bounded_json(sys.argv[4], "selected compact lineage"),
-    **validator_kwargs,
-)
-if counterpart != selected:
-    raise SystemExit("component-only counterpart compact lineage differs")
-PY
-    then
-      echo "ERROR: component-only restart would diverge from the running validator lineage" >&2
-      return 1
-    fi
-  fi
-  echo "Prepared exact compact active release lineage"
-}
-
-wait_for_paired_gateway_destructive_handoff() {
-  local deadline marker_commit marker_nonce
-  if [ -z "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ]; then
-    return 0
-  fi
-  deadline=$((SECONDS + GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS))
-  echo "Gateway pre-shutdown checks complete; awaiting paired validator liveness handoff"
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if [ -L "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ] \
-        || [ -d "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ]; then
-      echo "ERROR: paired gateway destructive handoff is not a plain file" >&2
-      return 1
-    fi
-    if [ -s "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ] \
-        && [ -f "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ]; then
-      read -r marker_commit marker_nonce < "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" || true
-      case "$marker_commit" in
-        "$PREPARED_GATEWAY_SHA")
-          if [ "$marker_nonce" != "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" ]; then
-            echo "ERROR: paired gateway destructive handoff nonce differs" >&2
-            return 1
-          fi
-          rm -f -- "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE"
-          echo "Paired validator liveness handoff accepted immediately before gateway shutdown"
-          return 0
-          ;;
-        "failed:$PREPARED_GATEWAY_SHA")
-          echo "ERROR: paired validator exited before gateway shutdown" >&2
-          return 1
-          ;;
-        *)
-          echo "ERROR: paired gateway destructive handoff commit differs" >&2
-          return 1
-          ;;
-      esac
-    fi
-    sleep 1
-  done
-  echo "ERROR: paired validator liveness handoff did not arrive before timeout" >&2
-  return 1
-}
-
-ensure_activated_gateway_release_lineage() {
-  local authority_commit
-
-  authority_commit="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
-  if [ -z "$authority_commit" ]; then
-    authority_commit="$(
-      git -C "$LEADPOET_REPO_ROOT" rev-parse --verify 'origin/main^{commit}'
-    )" || {
-      echo "ERROR: activated gateway cannot resolve the fetched main authority" >&2
-      return 1
-    }
-  fi
-  if ! [[ "$authority_commit" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "ERROR: fetched main authority is not an exact commit" >&2
-    return 1
-  fi
-  if ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
-      "$GATEWAY_DEPLOY_SHA" "$authority_commit"; then
-    echo "ERROR: activated gateway release is absent from fetched main ancestry" >&2
-    return 1
-  fi
-
-  # The old runtime selected and twice verified the exact active authority
-  # before shutdown. Revalidate those hash-bound candidate files under the
-  # activated code, then atomically install them without listing the lifetime
-  # release catalog or changing the selected authority set.
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - \
-    "$GATEWAY_DEPLOY_SHA" \
-    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
-    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
-    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-    "$GATEWAY_V2_RELEASE_MANIFEST" \
-    "$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST" \
-    "$GATEWAY_V2_RELEASE_REQUIREMENTS" \
-    "$GATEWAY_V2_RELEASE_LINEAGE" <<'PY'
-import json
-import os
-from pathlib import Path
-import stat
-import sys
-import tempfile
-
-from gateway.tee.active_release_requirements_v2 import (
-    validate_active_release_requirements_v2,
-)
-from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
-from gateway.tee.release_manifest_v2 import validate_release_manifest
-from leadpoet_canonical.attested_v2 import canonical_json
-from validator_tee.host.release_v2 import validate_validator_release_manifest
-
-(
-    expected_commit,
-    prepared_manifest_path,
-    prepared_validator_manifest_path,
-    prepared_requirements_path,
-    prepared_lineage_path,
-    manifest_output_path,
-    validator_manifest_output_path,
-    requirements_output_path,
-    lineage_output_path,
-) = sys.argv[1:]
-
-
-def read_document(path_value: str, label: str) -> tuple[bytes, dict]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path_value, flags)
-    except OSError as exc:
-        raise SystemExit(f"{label} is unavailable") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4 * 1024 * 1024:
-            raise SystemExit(f"{label} is not a bounded regular file")
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            raw = handle.read(4 * 1024 * 1024 + 1)
-    finally:
-        os.close(descriptor)
-    try:
-        value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"{label} is invalid JSON") from exc
-    if not isinstance(value, dict):
-        raise SystemExit(f"{label} must be an object")
-    return raw, value
-
-
-raw_manifest, manifest_value = read_document(
-    prepared_manifest_path, "prepared gateway release manifest"
-)
-raw_validator_manifest, validator_manifest_value = read_document(
-    prepared_validator_manifest_path, "prepared validator release manifest"
-)
-raw_requirements, requirements_value = read_document(
-    prepared_requirements_path, "prepared active release requirements"
-)
-raw_lineage, lineage_value = read_document(
-    prepared_lineage_path, "prepared compact release lineage"
-)
-manifest = validate_release_manifest(manifest_value)
-validator_manifest = validate_validator_release_manifest(validator_manifest_value)
-requirements = validate_active_release_requirements_v2(requirements_value)
-lineage = validate_compact_release_lineage_v2(
-    lineage_value,
-    expected_current_commit=expected_commit,
-    expected_current_gateway_release_hash=str(manifest.get("release_hash") or ""),
-)
-if manifest.get("commit_sha") != expected_commit:
-    raise SystemExit("prepared gateway release manifest commit differs")
-if validator_manifest["release"].get("commit_sha") != expected_commit:
-    raise SystemExit("prepared validator release manifest commit differs")
-if requirements.get("candidate_commit_sha") != expected_commit:
-    raise SystemExit("prepared active release requirements commit differs")
-if set(lineage["releases"]) != set(requirements["required_commits"]):
-    raise SystemExit("prepared compact lineage differs from active requirements")
-
-documents = (
-    (
-        raw_manifest,
-        manifest,
-        Path(manifest_output_path),
-        "prepared gateway release manifest",
-    ),
-    (
-        raw_validator_manifest,
-        validator_manifest,
-        Path(validator_manifest_output_path),
-        "prepared validator release manifest",
-    ),
-    (
-        raw_requirements,
-        requirements,
-        Path(requirements_output_path),
-        "prepared active release requirements",
-    ),
-    (
-        raw_lineage,
-        lineage,
-        Path(lineage_output_path),
-        "prepared compact release lineage",
-    ),
-)
-staged: list[tuple[Path, Path]] = []
-try:
-    for raw, normalized, destination, label in documents:
-        encoded = (canonical_json(normalized) + "\n").encode("utf-8")
-        if raw != encoded:
-            raise SystemExit(f"{label} is not exact canonical JSON")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{destination.name}.", dir=str(destination.parent)
-        )
-        temporary = Path(temporary_name)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        staged.append((temporary, destination))
-    for temporary, destination in staged:
-        os.replace(temporary, destination)
-    for directory in {destination.parent for _, destination in staged}:
-        directory_descriptor = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-finally:
-    for temporary, _ in staged:
-        temporary.unlink(missing_ok=True)
-
-print("Installed exact compact active release lineage")
-PY
-}
-trap on_gateway_restart_exit EXIT
-
 validate_runtime_secret_paths() {
   local key value
   for key in GATEWAY_PRIVATE_KEY_PATH ARWEAVE_KEYFILE_PATH; do
@@ -2510,15 +1442,11 @@ enforce_deployment_environment() {
   export GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
-  export GATEWAY_STATEFUL_CUTOVER_CEREMONY
   export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_RELEASE_LINEAGE
-  export GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST
-  export GATEWAY_V2_RELEASE_REQUIREMENTS
   export GATEWAY_V2_ARTIFACT_POLICY
   export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET
   export LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
-  export LEADPOET_LOCAL_VALIDATOR_RELEASE
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
   export GITHUB_SHA="$GATEWAY_DEPLOY_SHA"
@@ -2559,9 +1487,6 @@ install_successful_restart_script() {
     "$temporary_dir/gw_restart.sh"
   install -m 600 "$controller_source_root/scripts/gateway_git_deploy.py" \
     "$temporary_dir/scripts/gateway_git_deploy.py"
-  install -m 600 \
-    "$controller_source_root/Leadpoet/utils/exact_commit_restart_v2.py" \
-    "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py"
   install -m 600 "$controller_source_root/gateway/tee/host_memory_guard_v2.py" \
     "$temporary_dir/gateway/tee/host_memory_guard_v2.py"
   install -m 600 "$controller_source_root/scripts/manage_owned_process_group.py" \
@@ -2572,11 +1497,9 @@ install_successful_restart_script() {
         || [ "$(stat -c '%u:%g:%a' "$release_dir")" != "$(id -u):$(id -g):700" ] \
         || [ "$(stat -c '%u:%g:%a' "$release_dir/gw_restart.sh")" != "$(id -u):$(id -g):700" ] \
         || [ "$(stat -c '%u:%g:%a' "$release_dir/scripts/gateway_git_deploy.py")" != "$(id -u):$(id -g):600" ] \
-        || [ "$(stat -c '%u:%g:%a' "$release_dir/Leadpoet/utils/exact_commit_restart_v2.py")" != "$(id -u):$(id -g):600" ] \
         || [ "$(stat -c '%u:%g:%a' "$release_dir/gateway/tee/host_memory_guard_v2.py")" != "$(id -u):$(id -g):600" ] \
         || ! cmp -s "$temporary_dir/gw_restart.sh" "$release_dir/gw_restart.sh" \
         || ! cmp -s "$temporary_dir/scripts/gateway_git_deploy.py" "$release_dir/scripts/gateway_git_deploy.py" \
-        || ! cmp -s "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py" "$release_dir/Leadpoet/utils/exact_commit_restart_v2.py" \
         || ! cmp -s "$temporary_dir/gateway/tee/host_memory_guard_v2.py" "$release_dir/gateway/tee/host_memory_guard_v2.py"; then
       rm -rf -- "$temporary_dir"
       echo "ERROR: installed gateway restart controller release differs from the exact candidate" >&2
@@ -3068,18 +1991,12 @@ restart_only_keys = {
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
-    "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
-    "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_CONTROLLER_PROCESS_HELPER",
     "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_GIT_HELPER",
-    "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
@@ -3090,13 +2007,8 @@ restart_only_keys = {
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
     "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
-    "GATEWAY_V2_RELEASE_REQUIREMENTS",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
-    "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
-    "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS",
-    "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS",
-    "GATEWAY_COUNTERPART_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -3105,7 +2017,6 @@ restart_only_keys = {
     "LEADPOET_GATEWAY_ENV_SECRET_ID",
     "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
-    "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
 }
 
 try:
@@ -3209,11 +2120,6 @@ skip_keys = {
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
-    "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
-    "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
@@ -3223,20 +2129,14 @@ skip_keys = {
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
     "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
-    "GATEWAY_V2_RELEASE_REQUIREMENTS",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
-    "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
-    "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS",
-    "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS",
-    "GATEWAY_COUNTERPART_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
-    "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_CONTROLLER_PROCESS_HELPER",
     "LAB_ARENA_PROCESS_HELPER",
@@ -3250,9 +2150,6 @@ skip_keys = {
     "GATEWAY_RELEASE_FOLLOW_ROOT",
     "GATEWAY_RELEASE_SUPERSESSION_COUNT",
     "GATEWAY_RELEASE_SUPERSESSION_MAX",
-    "GATEWAY_ANCESTRY_SAFE_EPOCH",
-    "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
-    "LEADPOET_RESTART_START_PATH",
     "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
     "LEADPOET_GATEWAY_ENV_SECRET_ID",
@@ -3281,7 +2178,6 @@ skip_keys = {
     "RESEARCH_LAB_RUNTIME_SOURCE_ROOT",
     "ATTESTED_RUNTIME_COMMIT_SHA",
     "ATTESTED_RUNTIME_GIT_REPO_URL",
-    "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
 }
 
 out = []
@@ -3374,11 +2270,6 @@ skip_keys = {
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
-    "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
-    "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
-    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
@@ -3388,20 +2279,14 @@ skip_keys = {
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
     "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
-    "GATEWAY_V2_RELEASE_REQUIREMENTS",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
-    "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
-    "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS",
-    "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS",
-    "GATEWAY_COUNTERPART_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
-    "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_CONTROLLER_PROCESS_HELPER",
     "LAB_ARENA_PROCESS_HELPER",
@@ -3415,9 +2300,6 @@ skip_keys = {
     "GATEWAY_RELEASE_FOLLOW_ROOT",
     "GATEWAY_RELEASE_SUPERSESSION_COUNT",
     "GATEWAY_RELEASE_SUPERSESSION_MAX",
-    "GATEWAY_ANCESTRY_SAFE_EPOCH",
-    "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
-    "LEADPOET_RESTART_START_PATH",
     "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
     "LEADPOET_GATEWAY_ENV_SECRET_ID",
@@ -3445,7 +2327,6 @@ skip_keys = {
     "RESEARCH_LAB_RUNTIME_SOURCE_ROOT",
     "ATTESTED_RUNTIME_COMMIT_SHA",
     "ATTESTED_RUNTIME_GIT_REPO_URL",
-    "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
 }
 data = open(f"/proc/{pid}/environ", "rb").read()
 out = []
@@ -3490,44 +2371,6 @@ if [ -n "$GATEWAY_RESTART_GIT_SSH_COMMAND" ]; then
     "$GATEWAY_RESTART_GIT_SSH_COMMAND" >> "$ENV_CLONE"
 fi
 
-if [ -f "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" ]; then
-  echo "Loading the canonical stateful epoch cutover manifest"
-  export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$GATEWAY_STATEFUL_CUTOVER_MANIFEST"
-  unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON
-  python3 - "$ENV_CLONE" "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" <<'PY'
-import shlex
-import sys
-from pathlib import Path
-
-env_path = Path(sys.argv[1])
-manifest_path = sys.argv[2]
-cutover_keys = {
-    "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON",
-    "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH",
-}
-kept = []
-for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-    line = raw_line.strip()
-    candidate = line[7:].strip() if line.startswith("export ") else line
-    key = candidate.split("=", 1)[0].strip() if "=" in candidate else ""
-    if key not in cutover_keys:
-        kept.append(raw_line)
-kept.append(
-    "export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=" + shlex.quote(manifest_path)
-)
-env_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
-PY
-fi
-if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
-  test -s "$GATEWAY_RESTART_START_PATH" || {
-    echo "ERROR: one-time cutover restart-start capture is missing" >&2
-    exit 1
-  }
-  export LEADPOET_RESTART_START_PATH="$GATEWAY_RESTART_START_PATH"
-  printf 'export LEADPOET_RESTART_START_PATH=%q\n' \
-    "$GATEWAY_RESTART_START_PATH" >> "$ENV_CLONE"
-fi
-
 grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
   echo "ERROR: hydrated/cloned env missing SUPABASE_SERVICE_ROLE_KEY"
   exit 1
@@ -3547,13 +2390,6 @@ RESEARCH_LAB_TEE_PROTOCOL="$(
   set +a
   printf '%s' "${RESEARCH_LAB_TEE_PROTOCOL:-v2}"
 )"
-case "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" in
-  0|1) ;;
-  *)
-    echo "ERROR: GATEWAY_STATEFUL_CUTOVER_CEREMONY must be 0 or 1" >&2
-    exit 1
-    ;;
-esac
 RESEARCH_LAB_TEE_PROTOCOL="$(
   printf '%s' "$RESEARCH_LAB_TEE_PROTOCOL" | tr '[:upper:]' '[:lower:]'
 )"
@@ -3618,14 +2454,6 @@ if [ "$PREPARED_GATEWAY_TOPOLOGY_BLOB" = "$HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB" 
       "$PREPARED_GATEWAY_SHA:gateway/tee/local_release_v2.py" 2>/dev/null; then
   GATEWAY_HISTORICAL_TOPOLOGY_HASH="$HISTORICAL_THREE_ROLE_TOPOLOGY_HASH"
 fi
-if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
-  echo "Validating exact-commit V2 rollback compatibility"
-  python3 "$GATEWAY_EXACT_COMMIT_HELPER" \
-    --repo-root "$LEADPOET_REPO_ROOT" \
-    --selected-commit "$PREPARED_GATEWAY_SHA" \
-    --branch-ref origin/main
-fi
-
 POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT"
 ORIGIN_MAIN_GATEWAY_SHA="$(git -C "$LEADPOET_REPO_ROOT" rev-parse origin/main)"
 if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
@@ -3662,12 +2490,7 @@ RESTART_GATE_ARGS=(
   --network "${BITTENSOR_NETWORK:-finney}"
   --netuid "${BITTENSOR_NETUID:-71}"
 )
-if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
-  echo "Validating the official restart start captured at operator invocation"
-  RESTART_GATE_ARGS+=(--captured-report "$GATEWAY_RESTART_START_PATH")
-else
-  echo "Capturing the official subnet restart window before release acquisition"
-fi
+echo "Capturing the official subnet restart window before release acquisition"
 if ! GATEWAY_RESTART_EPOCH_REPORT="$(
     run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
       "${RESTART_GATE_ARGS[@]}"
@@ -3676,12 +2499,6 @@ if ! GATEWAY_RESTART_EPOCH_REPORT="$(
   exit 75
 fi
 printf '%s\n' "$GATEWAY_RESTART_EPOCH_REPORT"
-
-echo "Snapshotting active legacy ancestry authority while release acquisition proceeds"
-if ! prepare_gateway_ancestry_checkpoint_bootstrap; then
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 75
-fi
 
 echo "Preparing exact hash-locked V2 build artifacts during release acquisition"
 if ! start_gateway_offline_artifact_prepare; then
@@ -3718,26 +2535,22 @@ if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
     && [ -f "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
     && [ -r "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
     && [ ! -L "$GATEWAY_LOCAL_RELEASE_MODULE" ]; then
-  echo "Building the exact local gateway and validator runtime identities"
+  echo "Building the exact local gateway runtime identity"
   GATEWAY_DEPLOY_STAGE="local_release_build"
   export GATEWAY_DEPLOY_STAGE
   if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
       GATEWAY_V2_BUILD_WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}" \
-      VALIDATOR_V2_BUILD_WORK_ROOT="${VALIDATOR_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/validator-pcr0-normalizer-v2}" \
       GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-      VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
       bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh" \
         --repository "$LEADPOET_REPO_ROOT" \
         --revision "$PREPARED_GATEWAY_SHA" \
-        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-        --validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"; then
+        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
     echo "ERROR: exact local runtime identity build failed" >&2
     echo "Gateway remains running; production shutdown has not started." >&2
     exit 75
   fi
   export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$PREPARED_GATEWAY_SHA"
   export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
-  export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"
   if [ -e "$GATEWAY_V2_RELEASE_LINEAGE" ] \
       || [ -L "$GATEWAY_V2_RELEASE_LINEAGE" ]; then
     export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"
@@ -3759,7 +2572,6 @@ elif [ ! -e "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
   GATEWAY_DEPLOY_STAGE="historical_release_acquisition"
   export GATEWAY_DEPLOY_STAGE
   unset LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
-  unset LEADPOET_LOCAL_VALIDATOR_RELEASE LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
   record_gateway_restart_timing "release_wait_started"
   V2_RELEASE_READY=0
   for attempt in $(seq 1 300); do
@@ -3770,8 +2582,7 @@ elif [ ! -e "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
         --expected-commit "$PREPARED_GATEWAY_SHA" \
         --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
         --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-        --validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"; then
+        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
       V2_RELEASE_READY=1
       break
     fi
@@ -3876,106 +2687,6 @@ if ! install_gateway_python_dependencies; then
 fi
 record_gateway_restart_timing "dependency_preflight_complete"
 
-echo "Preflighting durable V2 validator weight authority before production shutdown"
-GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"
-export GATEWAY_DEPLOY_STAGE
-GATEWAY_WEIGHT_READINESS_SOURCE="$(
-  printf '%s/%s' \
-    "$GATEWAY_PREFLIGHT_TREE" \
-    "gateway/tee/verify_weight_submission_ready_v2.py"
-)"
-if ! GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY="$(
-    "$GATEWAY_PYTHON_BIN" - "$GATEWAY_WEIGHT_READINESS_SOURCE" <<'PY'
-import ast
-from pathlib import Path
-import sys
-
-source_path = Path(sys.argv[1])
-tree = ast.parse(
-    source_path.read_text(encoding="utf-8"),
-    filename=str(source_path),
-)
-supported_arguments = {
-    node.args[0].value
-    for node in ast.walk(tree)
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "add_argument"
-        and bool(node.args)
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, str)
-    )
-}
-required_arguments = {"--storage-read-preflight", "--epoch"}
-print(
-    "supported"
-    if required_arguments.issubset(supported_arguments)
-    else "unsupported"
-)
-PY
-  )"; then
-  echo "ERROR: unable to inspect selected weight-readiness CLI capability" >&2
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 1
-fi
-case "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY" in
-  supported)
-    if ! GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH="$(
-      gateway_weight_preflight_epoch_from_restart_report \
-        "$GATEWAY_RESTART_EPOCH_REPORT"
-    )"; then
-      echo "ERROR: official restart epoch could not be mapped to durable storage" >&2
-      echo "Gateway remains running; production shutdown has not started." >&2
-      exit 1
-    fi
-    if GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT="$(
-      (
-        set -a
-        . "$ENV_CLONE"
-        set +a
-        run_prepared_gateway_module \
-          gateway.tee.verify_weight_submission_ready_v2 \
-          --storage-read-preflight \
-          --epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"
-      )
-    )"; then
-      printf '%s\n' "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT"
-      GATEWAY_ANCESTRY_SAFE_EPOCH="$(
-        gateway_ancestry_safe_epoch_from_report \
-          "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT"
-      )"
-      export GATEWAY_ANCESTRY_SAFE_EPOCH
-      echo "Pinned active ancestry bootstrap to proven-safe epoch $GATEWAY_ANCESTRY_SAFE_EPOCH"
-    else
-      echo "ERROR: durable V2 validator weight authority is not readable" >&2
-      echo "Gateway remains running; production shutdown has not started." >&2
-      exit 1
-    fi
-    ;;
-  unsupported)
-    if [ -z "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
-        || [ "$PREPARED_GATEWAY_SHA" = "$ORIGIN_MAIN_GATEWAY_SHA" ]; then
-      echo "ERROR: selected current release lacks the required weight storage preflight" >&2
-      echo "Gateway remains running; production shutdown has not started." >&2
-      exit 1
-    fi
-    printf '%s\n' \
-      "Selected attested rollback release predates the optional weight storage preflight; continuing with its original fail-closed runtime gates."
-    ;;
-  *)
-    echo "ERROR: selected weight-readiness CLI capability result is invalid" >&2
-    echo "Gateway remains running; production shutdown has not started." >&2
-    exit 1
-    ;;
-esac
-
-echo "Checkpointing active legacy ancestry at the proven durable settlement frontier"
-if ! start_gateway_ancestry_checkpoint_bootstrap; then
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 75
-fi
-
 echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
   export GATEWAY_DEPLOY_STAGE
@@ -4006,68 +2717,6 @@ echo "Validating the prepared V2 release before production shutdown"
     echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
     exit 1
   fi
-if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
-  echo "Validating the one-time receipt-backed cutover before production shutdown"
-  GATEWAY_DEPLOY_STAGE="stateful_epoch_cutover_preflight"
-  export GATEWAY_DEPLOY_STAGE
-  if [ ! -s "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" ]; then
-    echo "ERROR: cutover validator V2 release manifest is unavailable" >&2
-    exit 1
-  fi
-  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" - \
-    "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" <<'PY'
-import sys
-
-from gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1 import (
-    load_validator_release_manifest_v2,
-)
-
-load_validator_release_manifest_v2(sys.argv[1])
-print("Cutover validator V2 release manifest is valid")
-PY
-  CUTOVER_PREFLIGHT_REPORT="$(
-    export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
-    run_prepared_gateway_module \
-      gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-      --release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-      --validator-release-manifest "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" \
-      --use-attested-historical-predecessor
-  )"
-  printf '%s\n' "$CUTOVER_PREFLIGHT_REPORT"
-  "$GATEWAY_PYTHON_BIN" - "$CUTOVER_PREFLIGHT_REPORT" <<'PY'
-import json
-import sys
-
-report = json.loads(sys.argv[1])
-status = str(report.get("status") or "")
-if status not in {
-    "eligible",
-    "already_stateful_staged",
-    "already_stateful_active",
-}:
-    raise SystemExit(
-        "stateful epoch cutover is not eligible before production shutdown"
-    )
-if status == "eligible":
-    if report.get("predecessor_kind") != "legacy_finalized_chain_migration_v2":
-        raise SystemExit("stateful epoch cutover selected an unexpected predecessor")
-    if report.get("would_write") is not False:
-        raise SystemExit("stateful epoch cutover preflight was not read-only")
-else:
-    authority = str(report.get("cutover_authority_hash") or "")
-    if not authority.startswith("sha256:") or len(authority) != 71:
-        raise SystemExit("durable stateful epoch authority hash is invalid")
-PY
-fi
-
-echo "Joining the old-runtime active ancestry checkpoint bootstrap before production shutdown"
-GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"
-export GATEWAY_DEPLOY_STAGE
-if ! wait_for_gateway_ancestry_checkpoint_bootstrap; then
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 1
-fi
-
 DOCKER_LOCK_HELPER="$GATEWAY_PREFLIGHT_TREE/validator_tee/scripts/docker_operation_lock_v2.sh"
 if [ ! -r "$DOCKER_LOCK_HELPER" ]; then
   echo "ERROR: prepared Docker operation lock helper is unavailable" >&2
@@ -4083,18 +2732,6 @@ PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" \
 wait_for_foreign_docker_builds
 wait_for_gateway_build_memory 1
 record_gateway_restart_timing "pre_shutdown_checks_complete"
-
-if ! wait_for_paired_gateway_destructive_handoff; then
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 1
-fi
-echo "Selecting the exact active release authority immediately before shutdown"
-GATEWAY_DEPLOY_STAGE="active_release_lineage_selection"
-export GATEWAY_DEPLOY_STAGE
-if ! prepare_gateway_active_release_lineage; then
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 1
-fi
 
 GATEWAY_DEPLOY_STAGE="lab_arena_claim_drain"
 export GATEWAY_DEPLOY_STAGE
@@ -4205,7 +2842,6 @@ export GATEWAY_DEPLOY_STAGE
 unset GATEWAY_DEPLOY_COMMIT
 exec env \
   GATEWAY_RESTART_PHASE=post_activate \
-  GATEWAY_STATEFUL_CUTOVER_CEREMONY="$GATEWAY_STATEFUL_CUTOVER_CEREMONY" \
   GATEWAY_RESTART_LOCK_HELD=1 \
   LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" \
   GATEWAY_ROOT="$GATEWAY_ROOT" \
@@ -4221,11 +2857,6 @@ exec env \
   GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
   GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
-  GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
-  GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
-  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
-  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" \
-  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" \
   GATEWAY_DEPLOY_PLAN_FILE="$GATEWAY_DEPLOY_PLAN_FILE" \
   GATEWAY_DEPLOYMENT_DIR="$GATEWAY_DEPLOYMENT_DIR" \
   GATEWAY_DEPLOYMENT_MANIFEST="$GATEWAY_DEPLOYMENT_MANIFEST" \
@@ -4249,25 +2880,17 @@ exec env \
   GATEWAY_RELEASE_FOLLOW_ROOT="$GATEWAY_RELEASE_FOLLOW_ROOT" \
   GATEWAY_RELEASE_SUPERSESSION_COUNT="$GATEWAY_RELEASE_SUPERSESSION_COUNT" \
   GATEWAY_RELEASE_SUPERSESSION_MAX="$GATEWAY_RELEASE_SUPERSESSION_MAX" \
-  GATEWAY_ANCESTRY_SAFE_EPOCH="$GATEWAY_ANCESTRY_SAFE_EPOCH" \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
-  GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST" \
   GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
-  GATEWAY_V2_RELEASE_REQUIREMENTS="$GATEWAY_V2_RELEASE_REQUIREMENTS" \
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-  GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-  GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
-  GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" \
-  GATEWAY_COUNTERPART_RELEASE_LINEAGE="$GATEWAY_COUNTERPART_RELEASE_LINEAGE" \
   GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
   GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
   GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
   RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-  VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
   GATEWAY_DEPLOY_STAGE="$GATEWAY_DEPLOY_STAGE" \
   bash "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" "$@"
 fi
@@ -4290,17 +2913,6 @@ export GATEWAY_DEPLOY_STAGE
     "$GATEWAY_V2_CONFIG_DIR/gateway-candidate-tree-preflight.json" \
   --activated-root "$LEADPOET_REPO_ROOT"
 enforce_deployment_environment
-
-echo "Revalidating the exact local V2 build identity after activation"
-GATEWAY_DEPLOY_STAGE="v2_release_lineage_revalidation"
-export GATEWAY_DEPLOY_STAGE
-if ! ensure_activated_gateway_release_lineage; then
-  echo "ERROR: activated gateway V2 build identity is unavailable or invalid" >&2
-  exit 1
-fi
-export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$GATEWAY_DEPLOY_SHA"
-export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_V2_RELEASE_MANIFEST"
-export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST"
 
 echo "Recording exact gateway Git build provenance"
 GATEWAY_DEPLOY_STAGE="build_provenance"
@@ -4347,13 +2959,6 @@ if [ "${FREE_KB:-0}" -lt "$MIN_FREE_KB" ]; then
   exit 1
 fi
 
-echo "Resetting gateway PCR0 builder checkout/cache"
-sudo rm -rf /tmp/pcr0_builder
-
-echo "Deleting validator-base:v1 and Docker build cache so PCR0 builder independently rebuilds it"
-sudo docker rmi -f validator-base:v1 2>/dev/null || true
-sudo docker builder prune -af
-
 echo "Loading gateway runtime env for AWS/ECR checks"
 GATEWAY_DEPLOY_STAGE="runtime_env_and_ecr"
 export GATEWAY_DEPLOY_STAGE
@@ -4363,9 +2968,6 @@ set +a
 restore_gateway_restart_path_authority
 enforce_deployment_environment
 validate_runtime_secret_paths
-GATEWAY_DEPLOY_STAGE="ancestry_frontier_recovery"
-export GATEWAY_DEPLOY_STAGE
-ensure_gateway_ancestry_safe_epoch
 GATEWAY_DEPLOY_STAGE="runtime_env_and_ecr"
 export GATEWAY_DEPLOY_STAGE
 export AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -4394,8 +2996,7 @@ record_gateway_restart_timing "attested_runtime_staged"
 # runtime before building the enclave or relaunching anything.
 # A gateway/ tree that imports names the staged top-level packages do not
 # export would otherwise crash-loop every worker on its next respawn
-# (2026-07-09 incident: config.py imported a constant an unstaged
-# _attested_runtime/leadpoet_verifier/economics.py did not have).
+# This catches missing or incorrectly staged imports before shutdown.
 echo "Preflight: importing gateway dependencies from the canonical Git checkout"
 GATEWAY_DEPLOY_STAGE="dependency_import_preflight"
 export GATEWAY_DEPLOY_STAGE
@@ -4413,7 +3014,6 @@ if str(bt.__version__) != "10.5.0":
 repo_root = Path(os.environ["LEADPOET_REPO_ROOT"]).resolve()
 modules = (
     "gateway.research_lab.config",
-    "leadpoet_verifier.economics",
     "leadpoet_canonical",
     "qualification",
     "validator_models",
@@ -4446,7 +3046,6 @@ sys.path = [str(attested_root), str(repo_root)] + [
 ]
 importlib.import_module("gateway.research_lab.config")
 for module_name in (
-    "leadpoet_verifier.economics",
     "leadpoet_canonical",
     "qualification",
     "validator_models",
@@ -4484,19 +3083,11 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
     -u GATEWAY_GIT_HELPER \
-    -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
     -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
-    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
-    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
-    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
-    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
     >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
@@ -4513,7 +3104,6 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
     -u GATEWAY_GIT_HELPER \
-    -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
     -u GATEWAY_CONTROLLER_PROCESS_HELPER \
     -u LAB_ARENA_PROCESS_HELPER \
@@ -4521,13 +3111,6 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
     -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
-    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
-    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
-    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
-    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
-    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
     >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
@@ -4591,84 +3174,6 @@ export GATEWAY_DEPLOY_STAGE
 PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready
 record_gateway_restart_timing "v2_runtime_ready"
 
-if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
-  echo "Executing the one-time receipt-backed stateful epoch cutover"
-  GATEWAY_DEPLOY_STAGE="stateful_epoch_cutover"
-  export GATEWAY_DEPLOY_STAGE
-  CUTOVER_MAPPING_HASH="$(
-    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - <<'PY'
-from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover
-
-print(load_subnet_epoch_cutover().mapping_hash)
-PY
-  )"
-  CUTOVER_STAGE_REPORT="$(
-    cd "$LEADPOET_REPO_ROOT"
-    export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
-    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-      -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-      --validator-release-manifest "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" \
-      --apply \
-      --use-attested-historical-predecessor \
-      --confirm-mapping-hash "$CUTOVER_MAPPING_HASH" \
-      --confirm-all-writers-stopped
-  )"
-  printf '%s\n' "$CUTOVER_STAGE_REPORT"
-  read -r CUTOVER_STAGE_STATUS CUTOVER_AUTHORITY_HASH < <(
-    "$GATEWAY_PYTHON_BIN" - "$CUTOVER_STAGE_REPORT" <<'PY'
-import json
-import sys
-
-report = json.loads(sys.argv[1])
-status = str(report.get("status") or "")
-authority = str(report.get("cutover_authority_hash") or "")
-if status not in {
-    "stateful_staged",
-    "already_stateful_staged",
-    "already_stateful_active",
-}:
-    raise SystemExit("stateful epoch cutover staging did not reach a durable state")
-if not authority.startswith("sha256:") or len(authority) != 71:
-    raise SystemExit("stateful epoch cutover authority hash is invalid")
-print(status, authority)
-PY
-  )
-  if [ "$CUTOVER_STAGE_STATUS" != "already_stateful_active" ]; then
-    CUTOVER_ACTIVATION_REPORT="$(
-      cd "$LEADPOET_REPO_ROOT"
-      export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
-      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-        -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-        --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-        --validator-release-manifest "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" \
-        --activate-staged \
-        --confirm-mapping-hash "$CUTOVER_MAPPING_HASH" \
-        --confirm-cutover-authority-hash "$CUTOVER_AUTHORITY_HASH" \
-        --confirm-all-writers-stopped \
-        --confirm-stateful-release-prepared
-    )"
-    printf '%s\n' "$CUTOVER_ACTIVATION_REPORT"
-    "$GATEWAY_PYTHON_BIN" - "$CUTOVER_ACTIVATION_REPORT" <<'PY'
-import json
-import sys
-
-report = json.loads(sys.argv[1])
-if report.get("status") != "stateful_active":
-    raise SystemExit("stateful epoch cutover activation did not become active")
-PY
-  fi
-  echo "Stateful epoch cutover is active; continuing the normal V2 restart"
-  unset LEADPOET_RESTART_START_PATH
-  sed -i '/^export LEADPOET_RESTART_START_PATH=/d' "$ENV_CLONE"
-  rm -f "$GATEWAY_RESTART_START_PATH"
-fi
-
-echo "Verifying active receipt ancestry is durably bounded before authoritative weight preparation"
-GATEWAY_DEPLOY_STAGE="ancestry_postcheckpoint"
-export GATEWAY_DEPLOY_STAGE
-verify_gateway_active_ancestry_checkpoints "$GATEWAY_ANCESTRY_SAFE_EPOCH"
-
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"
 export GATEWAY_DEPLOY_STAGE
@@ -4693,25 +3198,13 @@ unset RESEARCH_LAB_EVIDENCE_PROXY_URL
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
 
-echo "Repairing live-chain settlements and verifying the authoritative V2 validator weight input"
-GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"
-export GATEWAY_DEPLOY_STAGE
-repair_chain_settlements_and_prepare_current_weight_input
-record_gateway_restart_timing "validator_weight_input_ready"
-
-# Keep attestation/PCR0 Docker builds off this host while the pre-launch
-# authority verifier is reconstructing the canonical allocation. The verifier
-# is memory-intensive and runs after enclave creation; releasing the shared
-# lock at enclave launch allowed a newer attestation build to contend with it
-# and lengthen the production outage. Gateway workers may use Docker after
-# launch, so release immediately after the fail-closed verifier completes.
+# Release the build lock after the protected gateway runtime is ready.
 . "$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
 env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_GIT_HELPER \
-  -u GATEWAY_EXACT_COMMIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
   -u GATEWAY_CONTROLLER_PROCESS_HELPER \
   -u LAB_ARENA_PROCESS_HELPER \
@@ -4721,13 +3214,6 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
   -u PREPARED_GATEWAY_SHA \
   -u LAB_ARENA_RESTART_GUARD_GENERATION \
-  -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
-  -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
-  -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
-  -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
-  -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
-  -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
-  -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
   > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
   9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
@@ -4787,15 +3273,6 @@ if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" ready \
   echo "ERROR: Lab Arena gateway readiness could not be recorded" >&2
   exit 1
 fi
-echo "Verifying the exact HTTP handoff consumed by automatic validator weights"
-GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"
-export GATEWAY_DEPLOY_STAGE
-PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-  -m gateway.tee.verify_weight_submission_ready_v2 \
-  --gateway-url http://localhost:8000 \
-  --http-timeout-seconds "$GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS"
-record_gateway_restart_timing "validator_weight_http_handoff_ready"
-
 BUILD_INFO_RESPONSE="$(timeout 15 curl -fsS http://localhost:8000/build-info)"
 python3 - "$GATEWAY_DEPLOY_SHA" "$BUILD_INFO_RESPONSE" <<'VERIFY_BUILD_INFO'
 import json
@@ -4836,7 +3313,6 @@ finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
 if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
   exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-
   unset GATEWAY_MINER_MAINTENANCE_PROOF_FD
-  unset GATEWAY_GIT_HELPER GATEWAY_EXACT_COMMIT_HELPER
   unset GATEWAY_HOST_MEMORY_GUARD_PATH
   unset GATEWAY_CONTROLLER_PROCESS_HELPER LAB_ARENA_PROCESS_HELPER
 fi

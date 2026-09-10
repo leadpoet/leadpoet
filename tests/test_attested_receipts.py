@@ -8,8 +8,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from leadpoet_canonical.attested_receipts import (
     SCORING_ROLE,
-    WEIGHT_PURPOSE,
-    WEIGHT_ROLE,
     ReceiptError,
     artifact_commitment,
     artifact_merkle_root,
@@ -77,7 +75,7 @@ def test_receipt_rejects_tampered_output():
 
 def test_receipt_lineage_requires_every_parent():
     parent = _receipt()
-    child = _receipt(purpose="research_lab.allocation.v1", parents=(parent["receipt_hash"],))
+    child = _receipt(purpose="research_lab.candidate_score.v1", parents=(parent["receipt_hash"],))
     assert verify_receipt_lineage(child, {parent["receipt_hash"]: parent}) == (
         parent["receipt_hash"],
         child["receipt_hash"],
@@ -86,23 +84,6 @@ def test_receipt_lineage_requires_every_parent():
         verify_receipt_lineage(child, {})
 
 
-def test_weight_purpose_cannot_be_signed_by_scoring_role():
-    with pytest.raises(ReceiptError, match="purpose"):
-        build_receipt_body(
-            role=SCORING_ROLE,
-            purpose=WEIGHT_PURPOSE,
-            job_id="job:weights",
-            epoch_id=123,
-            commit_sha=COMMIT,
-            build_manifest_hash=HASH_A,
-            config_hash=HASH_B,
-            input_root=HASH_A,
-            output_root=HASH_C,
-            evidence_roots={},
-            parent_receipt_hashes=(),
-            status="succeeded",
-            issued_at="2026-07-10T12:00:00Z",
-        )
 
 
 def test_artifact_merkle_root_is_order_independent_and_content_sensitive():
@@ -111,8 +92,3 @@ def test_artifact_merkle_root_is_order_independent_and_content_sensitive():
     assert artifact_merkle_root([first, second]) == artifact_merkle_root([second, first])
     changed = artifact_commitment("provider_evidence", b"changed")
     assert artifact_merkle_root([first, second]) != artifact_merkle_root([first, changed])
-
-
-def test_weight_receipt_role_is_supported():
-    receipt = _receipt(role=WEIGHT_ROLE, purpose=WEIGHT_PURPOSE)
-    validate_signed_receipt(receipt)

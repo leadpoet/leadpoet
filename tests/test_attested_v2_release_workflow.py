@@ -126,7 +126,7 @@ def test_release_workflow_reclaims_only_images_created_by_the_build():
     ) == 4
     assert source.count('"$RUNNER_TEMP/release-evidence" \\') == 4
     assert "Reclaim gateway-parent storage after evidence generation" in source
-    assert "Reclaim validator-parent storage after evidence generation" in source
+    assert "Reclaim gateway-parent-b storage after evidence generation" in source
     assert "docker image prune --force" not in source
 
     workflow = yaml.safe_load(source)
@@ -173,11 +173,11 @@ def test_release_workflow_reclaims_only_images_created_by_the_build():
         == (step is gateway_prebuild)
         for step in reclaim_steps
     )
-    for job_name in ("gateway-parent", "validator-parent"):
+    for job_name in ("gateway-parent", "gateway-parent-b"):
         build_step = next(
             step
             for step in workflow["jobs"][job_name]["steps"]
-            if step.get("name") == "Build gateway and validator evidence"
+            if step.get("name") in ("Build gateway evidence", "Build independent gateway evidence")
         )
         subprocess.run(
             ["bash", "-n"],
@@ -190,7 +190,8 @@ def test_release_workflow_reclaims_only_images_created_by_the_build():
 def test_release_workflow_is_valid_yaml():
     document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
-    assert document["name"] == "Attested V2 Release"
+    assert document["name"] == "Gateway Attested Release"
+    assert set(document["jobs"]) == {"gateway-parent", "gateway-parent-b", "publish"}
 
 
 def test_attested_release_builders_are_not_block_gated():
@@ -201,13 +202,32 @@ def test_attested_release_builders_are_not_block_gated():
     assert "chain.get_current_block()" not in workflow
 
 
+def test_gateway_release_uses_two_exact_source_gateway_builds_only():
+    source = WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(source)
+
+    assert source.count("Require exact main source") == 3
+    assert source.count('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"') == 3
+    assert source.count(
+        'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"'
+    ) == 3
+    assert source.count("gateway/tee/build_release_evidence_v2.sh") == 2
+    assert "--validator-manifest" not in source
+    assert "--validator-output" not in source
+    assert "scripts/admit_gateway_runner_v2.py" not in source
+    assert "Assemble gateway six-build manifest" in source
+    assert workflow["jobs"]["gateway-parent"]["runs-on"] != workflow["jobs"][
+        "gateway-parent-b"
+    ]["runs-on"]
+
+
 def test_release_workflow_resets_exact_runner_workspace_before_checkout():
     source = WORKFLOW.read_text(encoding="utf-8")
     workflow = yaml.safe_load(source)
 
     step_name = "Reset stale V2 runner workspace before checkout"
     assert source.count(step_name) == 3
-    for job_name in ("gateway-parent", "validator-parent", "publish"):
+    for job_name in ("gateway-parent", "gateway-parent-b", "publish"):
         steps = workflow["jobs"][job_name]["steps"]
         repair_index = next(
             index

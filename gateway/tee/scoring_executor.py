@@ -1,4 +1,4 @@
-"""In-enclave entrypoint for Research Lab allocation."""
+"""Measured runtime environment helpers for qualification."""
 
 from __future__ import annotations
 
@@ -9,10 +9,6 @@ import re
 from typing import Any, Dict, Mapping
 
 SCORING_EXECUTOR_SCHEMA_VERSION = "leadpoet.gateway_scoring_executor.v1"
-OP_RESEARCH_LAB_ALLOCATION = "research_lab_allocation"
-
-SUPPORTED_OPERATIONS = frozenset({OP_RESEARCH_LAB_ALLOCATION})
-
 # Only values that can change scoring behavior are committed here. Provider
 # credentials and infrastructure locations are intentionally excluded; their
 # accepted responses are committed separately through evidence roots.
@@ -49,14 +45,6 @@ MAX_RUNTIME_ENV_TOTAL_BYTES = 128 * 1024
 
 class ScoringExecutorError(ValueError):
     """Raised when a scoring operation or payload is unsupported."""
-
-
-class ScoringExecutionResult:
-    """Internal result plus evidence roots derived inside the enclave."""
-
-    def __init__(self, result: Mapping[str, Any], evidence_roots: Mapping[str, str]) -> None:
-        self.result = dict(result)
-        self.evidence_roots = dict(evidence_roots)
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -136,49 +124,3 @@ def configuration_snapshot(values: Mapping[str, Any] = None) -> Dict[str, Any]:
 
 def configuration_hash(values: Mapping[str, Any] = None) -> str:
     return "sha256:" + hashlib.sha256(_canonical_json(configuration_snapshot(values))).hexdigest()
-
-
-def purpose_allowed_for_operation(operation: str, purpose: str) -> bool:
-    allowed = {OP_RESEARCH_LAB_ALLOCATION: {"research_lab.allocation.v1"}}
-    return purpose in allowed.get(operation, set())
-
-
-async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) -> Any:
-    """Execute one existing pure/scoring entrypoint without changing its logic."""
-
-    if operation not in SUPPORTED_OPERATIONS:
-        raise ScoringExecutorError("unsupported scoring operation")
-    if not isinstance(payload, Mapping):
-        raise ScoringExecutorError("scoring payload must be an object")
-
-    from leadpoet_verifier.economics import allocate_research_lab_epoch
-
-    policy = payload.get("policy")
-    reimbursements = payload.get("active_reimbursement_obligations")
-    champions = payload.get("active_champion_obligations")
-    fallback_reimbursements = payload.get(
-        "fallback_reimbursement_obligations",
-        [],
-    )
-    if not isinstance(policy, Mapping):
-        raise ScoringExecutorError("policy must be an object")
-    if (
-        not isinstance(reimbursements, list)
-        or not isinstance(champions, list)
-        or not isinstance(fallback_reimbursements, list)
-    ):
-        raise ScoringExecutorError("allocation obligations must be lists")
-    allocation = allocate_research_lab_epoch(
-        int(payload.get("epoch", -1)),
-        policy,
-        reimbursements,
-        champions,
-        fallback_reimbursement_obligations=fallback_reimbursements,
-    )
-    allocation_hash = str(allocation.get("allocation_hash") or "")
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", allocation_hash):
-        raise ScoringExecutorError("allocation hash is invalid")
-    return ScoringExecutionResult(
-        {"allocation": allocation},
-        {"allocation": allocation_hash},
-    )

@@ -275,40 +275,14 @@ See [`env.example`](env.example) for the full configuration template.
 
 ## Rewards
 
-Rewards are designed around both the Research Lab competition and Fulfillment:
-
-- Research Lab miners submit agent bundles that are scored against the daily public baseline.
-- Existing reimbursement and settlement records remain available to the weight-allocation path.
-- Fulfillment rewards winning leads from client requests.
-- The weekly leaderboard rewards top fulfillment performance.
-
-Exact weights are computed from the gateway's canonical allocation bundle and current subnet policy. The validator and auditor verify and submit the same bundle.
-
-## Auditor archive endpoint
-
-Auditors use `wss://archive.chain.opentensor.ai:443` by default. To use an
-archive node you operate and trust, export the optional setting before starting
-the auditor with your usual arguments:
-
-```bash
-export BITTENSOR_ARCHIVE_ENDPOINT="wss://your-archive.example:443"
-python neurons/auditor_validator.py --netuid 71 --wallet.name my_wallet --wallet.hotkey default
-```
-
-`AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT` is also supported. Set only one variable;
-conflicting values stop startup. If both are unset or blank, the official
-default remains in use. Public endpoints require `wss://`; `ws://` is accepted
-only for private or loopback addresses. The node must provide historical archive
-state for the configured chain.
-
-This setting applies only to the auditor. Gateway, primary-validator, and
-restart checks keep their official endpoint. Chain identity, cutover, and weight
-verification remain required. No source-code patch or Git autostash is needed
-for this setting. Restart the auditor after changing its environment.
+Rewards come from the Open Source Competition Arena. Validators score the
+submitted models, read the signed accepted reward state, independently derive
+the same champion and burn weights from finalized chain ownership, and submit
+their own protected transaction. There is no separate auditor validator role.
 
 ## Transparency
 
-The validator weight path remains attested. Validators and auditors verify the gateway bundle and use validator enclave attestation for weight submission. These controls protect the subnet weight path; they are not admission or scoring requirements for Research Lab agent bundles.
+Each normal validator derives the Arena weight vector independently. A small protected verifier checks the accepted reward state, finalized UID ownership, and exact transaction before signing. Chain outcomes are recorded separately. See [the validator architecture](docs/arena_normal_validator_weights.md).
 
 Agent submissions use the documented competition input and output contract. The competition does not require a Git identity, release manifest, receipt chain, or repository attestation from miners.
 

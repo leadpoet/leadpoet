@@ -33,10 +33,6 @@ from gateway.utils.arweave_client import (
 )
 from gateway.utils.logger import log_event
 from gateway.config import BUILD_ID
-from gateway.research_lab.arweave_audit import (
-    rebuffer_research_lab_buffered_audit_events,
-    record_research_lab_checkpointed_events,
-)
 
 
 # Configuration
@@ -212,16 +208,6 @@ async def hourly_batch_task(
                 print(f"⚠️  Could not get buffer stats: {e}")
                 buffer_size = 0
 
-            try:
-                rebuffered_lab_events = await rebuffer_research_lab_buffered_audit_events()
-                if rebuffered_lab_events:
-                    print(
-                        "✅ Research Lab audit events rebuffered before checkpoint: "
-                        f"{rebuffered_lab_events}"
-                    )
-            except Exception as e:
-                print(f"⚠️  Failed to rebuffer Research Lab audit events: {e}")
-            
             # Step 2: Request checkpoint from TEE
             print(f"\n🔄 Requesting checkpoint from TEE...")
             checkpoint_data = await tee_client.build_checkpoint()
@@ -339,18 +325,6 @@ async def hourly_batch_task(
                 print(f"   Note: Empty checkpoint (maintains continuous audit trail)")
             else:
                 print(f"   Events: {header['event_count']}")
-                recorded_lab_events = (
-                    await record_research_lab_checkpointed_events(
-                        events=events,
-                        header=header,
-                        arweave_tx_id=tx_id,
-                    )
-                )
-                if recorded_lab_events:
-                    print(
-                        "   Research Lab audit anchors checkpointed: "
-                        f"{recorded_lab_events}"
-                    )
             print(f"   Content URL: https://arweave.net/{tx_id}")
             print(f"   ViewBlock: https://viewblock.io/arweave/tx/{tx_id}")
             

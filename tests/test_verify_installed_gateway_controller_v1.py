@@ -117,8 +117,6 @@ def _controller_fixture(
         directory.chmod(0o775)
     nested_directories = (
         release / "scripts",
-        release / "Leadpoet",
-        release / "Leadpoet/utils",
         release / "gateway",
         release / "gateway/tee",
     )
@@ -129,7 +127,6 @@ def _controller_fixture(
     payloads = {
         "gw_restart.sh": b"#!/bin/bash\nexit 0\n",
         "scripts/gateway_git_deploy.py": b"HELPER = True\n",
-        "Leadpoet/utils/exact_commit_restart_v2.py": b"EXACT = True\n",
         "gateway/tee/host_memory_guard_v2.py": b"GUARD = True\n",
     }
     candidate_payloads = {
@@ -525,8 +522,6 @@ def _installed_controller_directories(
         controller_root / "releases",
         release,
         release / "scripts",
-        release / "Leadpoet",
-        release / "Leadpoet/utils",
         release / "gateway",
         release / "gateway/tee",
     )
@@ -654,9 +649,7 @@ def test_controller_directory_hardening_is_retry_safe_and_idempotent(
         stat.S_IMODE(directory.stat().st_mode) == 0o775
         for directory in (
             release / "scripts",
-            release / "Leadpoet",
-            release / "Leadpoet/utils",
-            release / "gateway",
+                    release / "gateway",
             release / "gateway/tee",
         )
     )
@@ -727,9 +720,7 @@ def test_unreviewed_nested_group_writable_directory_remains_rejected(
     assert reviewed_nested_paths == frozenset(
         {
             release / "scripts",
-            release / "Leadpoet",
-            release / "Leadpoet/utils",
-            release / "gateway",
+                    release / "gateway",
             release / "gateway/tee",
         }
     )

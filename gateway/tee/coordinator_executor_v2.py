@@ -14,71 +14,23 @@ from gateway.tee.execution_job_manager_v2 import (
     ExecutionJobV2Error,
     ExecutionResultV2,
 )
-from gateway.tee.scoring_executor import (
-    OP_RESEARCH_LAB_ALLOCATION,
-    ScoringExecutionResult,
-    execute_scoring_operation,
-)
-from leadpoet_canonical.attested_v2 import (
-    RECEIPT_GRAPH_SCHEMA_VERSION,
-    sha256_json,
-    transport_root,
-    validate_transport_attempt,
-)
-from leadpoet_canonical.allocation_settlement_frontier_v2 import (
-    frontier_artifact_hashes_v2,
-)
-from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
-    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
-    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
-    frontier_bootstrap_artifact_hashes_v2,
-)
-from leadpoet_canonical.ancestry_checkpoint_v2 import (
-    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
-    MAX_ALLOCATION_PARENT_AUTHORITIES,
-)
-from leadpoet_canonical.weight_authority_v2 import (
-    WEIGHT_INPUT_PURPOSES,
-)
-from gateway.tee.reward_executor_v2 import (
-    OP_RESEARCH_LAB_REWARD_DECISION,
-    execute_reward_decision_v2,
-    reward_receipt_projection_v2,
-)
-from gateway.tee.coordinator_epoch_cutover_v2 import (
-    OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
-    attest_subnet_epoch_cutover_v2,
-)
-from gateway.tee.coordinator_chain_realized_settlement_v1 import (
-    CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
-    CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
-    OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
-    OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
-)
-
+from leadpoet_canonical.attested_v2 import sha256_json, transport_root, validate_transport_attempt
 
 OP_ATTEST_ARTIFACT_PERSISTENCE = "attest_artifact_persistence"
 OP_ATTEST_QUALIFICATION_ADMISSION = "attest_qualification_admission"
-OP_ATTEST_WEIGHT_INPUT = "attest_weight_input"
-OP_ATTEST_WEIGHT_PUBLICATION = "attest_weight_publication"
-OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
-    "attest_legacy_finalized_allocation_v2"
-)
-OP_CLASSIFY_LEGACY_ALLOCATION_V2 = "classify_legacy_allocation_v2"
-OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2 = (
-    "ancestry_checkpoint_bootstrap_v2"
-)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
 _ARTIFACT_PERSISTENCE_PROVIDER = "aws_s3_object_lock"
 _PROVIDER_CREDENTIAL_REFS_FIELD = "_v2_provider_credential_ref_hashes"
 _PROVIDER_CREDENTIAL_PROFILE_FIELD = "_v2_provider_credential_profile"
-
-_COORDINATOR_WEIGHT_INPUT_PURPOSES = {
-    category: purpose
-    for category, (role, purpose) in WEIGHT_INPUT_PURPOSES.items()
-    if role == "gateway_coordinator"
+COORDINATOR_OPERATIONS_V2 = {
+    OP_ATTEST_ARTIFACT_PERSISTENCE: frozenset({_ARTIFACT_PERSISTENCE_PURPOSE}),
+    OP_ATTEST_QUALIFICATION_ADMISSION: frozenset({"research_lab.admission.v2"}),
 }
+
+
+def coordinator_receipt_output_v2(operation, output):
+    return dict(output)
 
 
 def _validated_artifact_persistence_attempts(
@@ -170,69 +122,6 @@ def _validated_artifact_persistence_attempts(
         raise ValueError("artifact persistence transport root differs")
     return normalized
 
-
-COORDINATOR_OPERATIONS_V2 = {
-    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION: frozenset(
-        {ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE}
-    ),
-    OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2: frozenset(
-        {"research_lab.ancestry_checkpoint_bootstrap.v2"}
-    ),
-    OP_RESEARCH_LAB_ALLOCATION: frozenset({"research_lab.allocation.v2"}),
-    OP_RESEARCH_LAB_REWARD_DECISION: frozenset(
-        {"research_lab.reward_decision.v2"}
-    ),
-    OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2: frozenset(
-        {"research_lab.legacy_finalized_allocation.v2"}
-    ),
-    OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1: frozenset(
-        {CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1}
-    ),
-    OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1: frozenset(
-        {CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1}
-    ),
-    OP_CLASSIFY_LEGACY_ALLOCATION_V2: frozenset(
-        {"research_lab.legacy_finalized_allocation.v2"}
-    ),
-    OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2: frozenset(
-        {"research_lab.subnet_epoch_cutover.v2"}
-    ),
-    OP_ATTEST_ARTIFACT_PERSISTENCE: frozenset(
-        {"leadpoet.artifact_persistence.v2"}
-    ),
-    OP_ATTEST_QUALIFICATION_ADMISSION: frozenset(
-        {"research_lab.admission.v2"}
-    ),
-    OP_ATTEST_WEIGHT_INPUT: frozenset(
-        _COORDINATOR_WEIGHT_INPUT_PURPOSES.values()
-    ),
-    OP_ATTEST_WEIGHT_PUBLICATION: frozenset(
-        {"gateway.weights.publication.v2"}
-    ),
-}
-
-
-def coordinator_receipt_output_v2(
-    operation: str,
-    output: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Return the authoritative output projection signed by the coordinator."""
-
-    if operation == OP_RESEARCH_LAB_REWARD_DECISION:
-        return reward_receipt_projection_v2(output)
-    if operation == OP_RESEARCH_LAB_ALLOCATION:
-        allocation = output.get("allocation")
-        if not isinstance(allocation, Mapping):
-            raise ValueError("allocation receipt output is invalid")
-        return {"allocation": dict(allocation)}
-    if operation == OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1:
-        settlement = output.get("settlement_doc")
-        if not isinstance(settlement, Mapping):
-            raise ValueError("chain-realized settlement receipt output is invalid")
-        return dict(settlement)
-    return dict(output)
-
-
 def coordinator_failed_parent_graph_policy_v2(
     manifest: Mapping[str, Any],
     payload: Mapping[str, Any],
@@ -267,66 +156,11 @@ def coordinator_failed_parent_graph_policy_v2(
 
 
 class CoordinatorExecutorV2:
-    """Invoke existing pure functions without owning any business formulas."""
+    """Protect qualification admission and artifact persistence."""
 
-    def __init__(
-        self,
-        *,
-        artifact_evidence_supplier: Optional[
-            Callable[
-                [Iterable[str], ExecutionContextV2],
-                Iterable[Mapping[str, Any]],
-            ]
-        ] = None,
-        weight_source_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        qualification_admission_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        allocation_source_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        allocation_frontier_bootstrap_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        reward_source_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        legacy_settlement_source_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        legacy_allocation_classification_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        chain_weight_observation_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        chain_realized_settlement_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-    ) -> None:
+    def __init__(self, *, artifact_evidence_supplier=None, qualification_admission_resolver=None):
         self._artifact_evidence_supplier = artifact_evidence_supplier
-        self._weight_source_resolver = weight_source_resolver
         self._qualification_admission_resolver = qualification_admission_resolver
-        self._allocation_source_resolver = allocation_source_resolver
-        self._allocation_frontier_bootstrap_resolver = (
-            allocation_frontier_bootstrap_resolver
-        )
-        self._reward_source_resolver = reward_source_resolver
-        self._legacy_settlement_source_resolver = (
-            legacy_settlement_source_resolver
-        )
-        self._legacy_allocation_classification_resolver = (
-            legacy_allocation_classification_resolver
-        )
-        self._chain_weight_observation_resolver = (
-            chain_weight_observation_resolver
-        )
-        self._chain_realized_settlement_resolver = (
-            chain_realized_settlement_resolver
-        )
-
     async def __call__(
         self,
         operation: str,
@@ -363,305 +197,11 @@ class CoordinatorExecutorV2:
             raise ValueError(
                 "V2 provider credential profile differs from job manifest"
             )
-        if operation == OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2:
-            return self._ancestry_checkpoint_bootstrap(payload, context)
-        if operation == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION:
-            if self._allocation_frontier_bootstrap_resolver is None:
-                raise ValueError(
-                    "measured allocation frontier bootstrap is unavailable"
-                )
-            document = dict(
-                self._allocation_frontier_bootstrap_resolver(payload, context)
-            )
-            return ExecutionResultV2(
-                output=document,
-                artifact_hashes=frontier_bootstrap_artifact_hashes_v2(
-                    document
-                ),
-            )
         if operation == OP_ATTEST_ARTIFACT_PERSISTENCE:
             return self._attest_artifact_persistence(payload, context)
         if operation == OP_ATTEST_QUALIFICATION_ADMISSION:
             return self._attest_qualification_admission(payload, context)
-        if operation == OP_ATTEST_WEIGHT_INPUT:
-            return self._attest_weight_input(payload, context)
-        if operation == OP_ATTEST_WEIGHT_PUBLICATION:
-            return self._attest_weight_publication(payload, context)
-        if operation == OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2:
-            if self._legacy_settlement_source_resolver is None:
-                raise ValueError("measured legacy settlement source is unavailable")
-            document = dict(
-                self._legacy_settlement_source_resolver(payload, context)
-            )
-            return ExecutionResultV2(
-                output=document,
-                artifact_hashes=(
-                    str(document["settlement_hash"]),
-                    str(document["allocation_hash"]),
-                    str(document["chain_compare_hash"]),
-                    str(document["audit_event_hash"]),
-                    str(document["checkpoint_merkle_root"]),
-                ),
-            )
-        if operation == OP_CLASSIFY_LEGACY_ALLOCATION_V2:
-            if self._legacy_allocation_classification_resolver is None:
-                raise ValueError(
-                    "measured legacy allocation classifier is unavailable"
-                )
-            document = dict(
-                self._legacy_allocation_classification_resolver(
-                    payload,
-                    context,
-                )
-            )
-            if "settlement_hash" in document:
-                artifacts = (
-                    str(document["settlement_hash"]),
-                    str(document["allocation_hash"]),
-                    str(document["chain_compare_hash"]),
-                    str(document["audit_event_hash"]),
-                    str(document["checkpoint_merkle_root"]),
-                )
-            elif "finding_hash" in document:
-                artifacts = (
-                    str(document["finding_hash"]),
-                    str(document["allocation_hash"]),
-                    str(document["chain_compare_hash"]),
-                    str(document["audit_event_hash"]),
-                    str(document["difference_hash"]),
-                )
-            else:
-                raise ValueError(
-                    "legacy allocation classification result is invalid"
-                )
-            return ExecutionResultV2(
-                output=document,
-                artifact_hashes=artifacts,
-            )
-        if operation == OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1:
-            if self._chain_weight_observation_resolver is None:
-                raise ValueError(
-                    "measured chain weight observation source is unavailable"
-                )
-            document = dict(
-                self._chain_weight_observation_resolver(payload, context)
-            )
-            return ExecutionResultV2(
-                output=document,
-                artifact_hashes=(sha256_json(document),),
-            )
-        if operation == OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1:
-            if self._chain_realized_settlement_resolver is None:
-                raise ValueError(
-                    "measured chain-realized settlement source is unavailable"
-                )
-            document = dict(
-                self._chain_realized_settlement_resolver(payload, context)
-            )
-            credit_hashes = [
-                str(item["credit_hash"])
-                for item in document.get("credits") or ()
-                if isinstance(item, Mapping)
-            ]
-            return ExecutionResultV2(
-                output=document,
-                receipt_output=coordinator_receipt_output_v2(
-                    operation,
-                    document,
-                ),
-                artifact_hashes=(
-                    str(document["settlement_hash"]),
-                    *credit_hashes,
-                ),
-            )
-        if operation == OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2:
-            document = attest_subnet_epoch_cutover_v2(payload, context)
-            if "predecessor_authority_hash" in document:
-                predecessor_artifacts = (
-                    str(document["predecessor_allocation_hash"]),
-                    str(document["predecessor_authority_hash"]),
-                )
-            else:
-                predecessor_artifacts = (
-                    str(document["last_legacy_bundle_hash"]),
-                    str(
-                        document[
-                            "last_legacy_weight_finalization_event_hash"
-                        ]
-                    ),
-                )
-            return ExecutionResultV2(
-                output=document,
-                artifact_hashes=(
-                    str(document["mapping_hash"]),
-                    str(document["first_snapshot_hash"]),
-                    *predecessor_artifacts,
-                ),
-            )
-        if operation == OP_RESEARCH_LAB_ALLOCATION:
-            return await self._research_lab_allocation(payload, context)
-        if operation == OP_RESEARCH_LAB_REWARD_DECISION:
-            decision_kind = str(payload.get("decision_kind") or "")
-            measured_payload = payload
-            if decision_kind == "champion_migration":
-                if self._reward_source_resolver is None:
-                    raise ValueError("measured reward source is unavailable")
-                measured_payload = self._reward_source_resolver(payload, context)
-            self._validate_reward_ancestry(measured_payload, context)
-            output = execute_reward_decision_v2(measured_payload)
-            return ExecutionResultV2(
-                output=output,
-                receipt_output=coordinator_receipt_output_v2(operation, output),
-                artifact_hashes=(sha256_json(output),),
-            )
         raise ValueError("unsupported V2 coordinator operation")
-
-    @staticmethod
-    def _ancestry_checkpoint_bootstrap(
-        payload: Mapping[str, Any],
-        context: ExecutionContextV2,
-    ) -> ExecutionResultV2:
-        if context.purpose != "research_lab.ancestry_checkpoint_bootstrap.v2":
-            raise ValueError("ancestry checkpoint bootstrap purpose is incorrect")
-        if not isinstance(payload, Mapping) or set(payload) != {
-            "schema_version",
-            "selected_root_receipt_hashes",
-        }:
-            raise ValueError("ancestry checkpoint bootstrap request is invalid")
-        if (
-            payload.get("schema_version")
-            != ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
-        ):
-            raise ValueError("ancestry checkpoint bootstrap request is invalid")
-        selected = payload.get("selected_root_receipt_hashes")
-        if (
-            not isinstance(selected, list)
-            or not selected
-            or len(selected) > MAX_ALLOCATION_PARENT_AUTHORITIES
-            or any(
-                not isinstance(item, str) or not _HASH_RE.fullmatch(item)
-                for item in selected
-            )
-            or selected != sorted(selected)
-            or len(selected) != len(set(selected))
-        ):
-            raise ValueError(
-                "ancestry checkpoint bootstrap selected roots are invalid"
-            )
-        graphs = list(context.external_receipt_graphs)
-        if not graphs or any(
-            not isinstance(graph, Mapping)
-            or graph.get("schema_version") != RECEIPT_GRAPH_SCHEMA_VERSION
-            for graph in graphs
-        ):
-            raise ValueError(
-                "ancestry checkpoint bootstrap requires legacy full graphs"
-            )
-        graph_roots = [str(graph.get("root_receipt_hash") or "") for graph in graphs]
-        if graph_roots != sorted(graph_roots) or graph_roots != selected:
-            raise ValueError(
-                "ancestry checkpoint bootstrap roots differ from full graphs"
-            )
-        proofs = list(context.external_ancestry_proofs)
-        if len(proofs) > MAX_ALLOCATION_PARENT_AUTHORITIES:
-            raise ValueError(
-                "ancestry checkpoint bootstrap resume proofs exceed bound"
-            )
-        proof_roots = [
-            str(
-                proof.get("certificate", {})
-                .get("claim", {})
-                .get("output_root_receipt_hash", "")
-            )
-            for proof in proofs
-        ]
-        if proof_roots != sorted(proof_roots) or len(proof_roots) != len(
-            set(proof_roots)
-        ):
-            raise ValueError(
-                "ancestry checkpoint bootstrap resume proofs are not canonical"
-            )
-        graph_receipts = {
-            str(receipt.get("receipt_hash") or "")
-            for graph in graphs
-            for receipt in graph.get("receipts") or ()
-            if isinstance(receipt, Mapping)
-        }
-        if not set(proof_roots).issubset(graph_receipts):
-            raise ValueError(
-                "ancestry checkpoint bootstrap resume proof is outside full graphs"
-            )
-        return ExecutionResultV2(
-            output={
-                "schema_version": (
-                    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
-                ),
-                "selected_root_receipt_hashes": list(selected),
-            },
-            ancestry_checkpoint_bootstrap=True,
-        )
-
-    @staticmethod
-    def _validate_reward_ancestry(
-        payload: Mapping[str, Any],
-        context: ExecutionContextV2,
-    ) -> None:
-        kind = str(payload.get("decision_kind") or "")
-        if kind == "champion_migration":
-            if (
-                context.external_receipt_graphs
-                or context.external_ancestry_proofs
-                or context.parent_receipt_hashes
-            ):
-                raise ValueError(
-                    "reward migration cannot inherit host-selected ancestry"
-                )
-            return
-        raise ValueError("reward ancestry kind is unsupported")
-
-    async def _research_lab_allocation(
-        self,
-        payload: Mapping[str, Any],
-        context: ExecutionContextV2,
-    ) -> ExecutionResultV2:
-        if self._allocation_source_resolver is None:
-            raise ValueError("measured allocation source is unavailable")
-        authority = dict(self._allocation_source_resolver(payload, context))
-        required = {
-            "allocation",
-            "allocation_inputs",
-            "source_state",
-            "source_state_hash",
-        }
-        if set(authority) != required:
-            raise ValueError("allocation authority result fields are invalid")
-        result = await execute_scoring_operation(
-            OP_RESEARCH_LAB_ALLOCATION,
-            authority["allocation_inputs"],
-        )
-        if not isinstance(result, ScoringExecutionResult):
-            raise ValueError("allocation kernel result is invalid")
-        allocation = result.result.get("allocation")
-        if allocation != authority["allocation"]:
-            raise ValueError("allocation source and protected kernel differ")
-        artifact_hashes = list(result.evidence_roots.values())
-        artifact_hashes.append(str(authority["source_state_hash"]))
-        source_state = authority.get("source_state")
-        if not isinstance(source_state, Mapping):
-            raise ValueError("allocation source state is invalid")
-        artifact_hashes.extend(
-            frontier_artifact_hashes_v2(
-                source_state.get("settlement_frontier")
-            )
-        )
-        return ExecutionResultV2(
-            output=authority,
-            receipt_output=coordinator_receipt_output_v2(
-                OP_RESEARCH_LAB_ALLOCATION,
-                authority,
-            ),
-            artifact_hashes=tuple(artifact_hashes),
-        )
 
     def _attest_artifact_persistence(
         self,
@@ -752,27 +292,6 @@ class CoordinatorExecutorV2:
             artifact_hashes=tuple(artifact_hashes),
         )
 
-    def _attest_weight_input(
-        self,
-        payload: Mapping[str, Any],
-        context: ExecutionContextV2,
-    ) -> ExecutionResultV2:
-        if self._weight_source_resolver is None:
-            raise ValueError("measured weight input source is unavailable")
-        category = str(payload.get("category") or "")
-        expected_purpose = _COORDINATOR_WEIGHT_INPUT_PURPOSES.get(category)
-        if expected_purpose is None:
-            raise ValueError("weight input category is not coordinator-owned")
-        if context.purpose != expected_purpose:
-            raise ValueError("weight input category purpose is incorrect")
-        document = dict(self._weight_source_resolver(payload, context))
-        if int(document["epoch_id"]) != int(context.epoch_id):
-            raise ValueError("weight input epoch differs from execution scope")
-        return ExecutionResultV2(
-            output=document,
-            artifact_hashes=(sha256_json(document["value"]),),
-        )
-
     def _attest_qualification_admission(
         self,
         payload: Mapping[str, Any],
@@ -791,42 +310,4 @@ class CoordinatorExecutorV2:
         return ExecutionResultV2(
             output=document,
             artifact_hashes=(sha256_json(leads),),
-        )
-
-    def _attest_weight_publication(
-        self,
-        payload: Mapping[str, Any],
-        context: ExecutionContextV2,
-    ) -> ExecutionResultV2:
-        if set(payload) != {
-            "bundle_hash",
-            "root_receipt_hash",
-            "durable_readback_hash",
-            "transparency_event_hash",
-        }:
-            raise ValueError("weight publication payload fields are invalid")
-        if context.purpose != "gateway.weights.publication.v2":
-            raise ValueError("weight publication purpose is incorrect")
-        normalized = {
-            key: str(payload.get(key) or "").lower()
-            for key in (
-                "bundle_hash",
-                "root_receipt_hash",
-                "durable_readback_hash",
-                "transparency_event_hash",
-            )
-        }
-        if any(not _HASH_RE.fullmatch(value) for value in normalized.values()):
-            raise ValueError("weight publication hash is invalid")
-        document = {
-            "schema_version": "leadpoet.weight_publication.v2",
-            **normalized,
-        }
-        return ExecutionResultV2(
-            output=document,
-            artifact_hashes=(
-                normalized["bundle_hash"],
-                normalized["durable_readback_hash"],
-                normalized["transparency_event_hash"],
-            ),
         )

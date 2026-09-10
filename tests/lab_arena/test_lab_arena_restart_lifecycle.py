@@ -22,9 +22,9 @@ def test_gateway_restart_replaces_and_checks_the_arena_sidecar() -> None:
         'record_gateway_restart_timing "gateway_v2_health_ready"'
     )
     start = script.index("start_lab_arena_service", gateway_health)
-    handoff = script.index("gateway.tee.verify_weight_submission_ready_v2", start)
+    completed = script.index('GATEWAY_DEPLOY_STAGE="completed"', start)
 
-    assert stop_helper < destructive < stop < gateway_health < start < handoff
+    assert stop_helper < destructive < stop < gateway_health < start < completed
     assert 'stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"' in script
     assert (
         'GATEWAY_CONTROLLER_PROCESS_HELPER="$GATEWAY_RESTART_AUTHORITY_ROOT/'
@@ -127,62 +127,18 @@ def test_arena_service_rejects_invalid_scoped_values_before_restore(
     assert "LAB_ARENA_MODE" not in os.environ
 
 
-def test_validator_restart_replaces_runner_after_gateway_alignment() -> None:
-    script = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
-
-    destructive = script.index(
-        'record_validator_restart_timing "destructive_phase_started"'
-    )
-    preflight = script.index("python3 -m validator_tee.host.restart_preflight_v2")
-    stop_helper = script.index(
-        'VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER="$VALIDATOR_CONTROLLER_PROCESS_HELPER"'
-    )
-    stop = script.index("stop_lab_arena_runner", destructive)
-    application = script.index(
-        'record_validator_restart_timing "validator_application_ready"'
-    )
-    alignment = script.index("verify_pinned_gateway_release", application)
-    start = script.index("start_lab_arena_runner", alignment)
-    complete = script.index('VALIDATOR_DEPLOY_STAGE="completed"', start)
-
-    assert (
-        preflight
-        < stop_helper
-        < destructive
-        < stop
-        < application
-        < alignment
-        < start
-        < complete
-    )
-    assert 'stop_lab_arena_runner "$VALIDATOR_LAB_ARENA_STOP_PROCESS_HELPER"' in script
-    assert (
-        'VALIDATOR_CONTROLLER_PROCESS_HELPER="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/'
-        'scripts/manage_owned_process_group.py"'
-        in script
-    )
-    assert '"$VALIDATOR_CONTROLLER_PROCESS_HELPER" record' in script
-    assert '"$VALIDATOR_CONTROLLER_PROCESS_STATE_FILE"' in script
-    assert script.count('"VALIDATOR_CONTROLLER_PROCESS_HELPER",') == 2
-    assert script.count('"VALIDATOR_CONTROLLER_PROCESS_STATE_FILE",') == 2
-    assert script.count('"LAB_ARENA_PROCESS_HELPER",') == 2
-    assert script.count('"LAB_ARENA_RUNNER_STATE_FILE",') == 2
-    assert "scripts/run_lab_arena_runner.py" in script
-    assert (
-        'LAB_ARENA_WALLET_PATH="${LAB_ARENA_WALLET_PATH:-$VALIDATOR_WALLET_ROOT}"'
-        in script
-    )
-    assert "LAB_ARENA_API_BASE_URL:-$VALIDATOR_V2_GATEWAY_URL" in script
-    assert "gateway/tee/runsc-runtime.lock.json" in script
-    assert "manage_owned_process_group.py" in script
-    assert 'pkill -TERM -f "scripts/run_lab_arena_runner' not in script
+def test_normal_validator_service_checks_readiness_before_start() -> None:
+    service = (ROOT / "deploy/leadpoet-arena-validator.service").read_text(encoding="utf-8")
+    launcher = "scripts/run_arena_validator.py --environment-file"
+    assert "ExecStartPre=/usr/bin/python3 " + launcher in service
+    assert "--check-only" in service
+    assert "ExecStart=/usr/bin/python3 " + launcher in service
+    assert service.index("ExecStartPre=") < service.index("ExecStart=")
+    assert "TimeoutStopSec=9300" in service
 
 
-def test_restart_scripts_leave_arena_disabled_by_default() -> None:
+def test_gateway_arena_sidecar_remains_explicitly_configured() -> None:
     gateway = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    validator = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
 
     assert 'mode="${LAB_ARENA_MODE:-off}"' in gateway
-    assert 'mode="${LAB_ARENA_MODE:-off}"' in validator
     assert "Lab Arena service is disabled" in gateway
-    assert "Lab Arena runner is disabled" in validator

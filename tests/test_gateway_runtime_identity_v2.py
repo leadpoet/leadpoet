@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -97,15 +98,7 @@ def _configuration():
             "gateway_scoring",
         )
     }
-    lineage_roles = {
-        **release_roles,
-        "validator_weights": {
-            "commit_sha": "c" * 40,
-            "pcr0": "5" * 96,
-            "build_manifest_hash": HASH,
-            "dependency_lock_hash": "sha256:" + "d" * 64,
-        },
-    }
+    lineage_roles = dict(release_roles)
     lineage_body = {
         "schema_version": "leadpoet.attested_release_lineage.v1",
         "current_commit_sha": "c" * 40,
@@ -272,11 +265,11 @@ def test_config_hash_is_canonical_and_order_independent(tmp_path: Path):
     )
 
 
-def test_runtime_reconstructs_exact_measured_research_lab_config(tmp_path: Path):
+def test_runtime_applies_exact_measured_qualification_environment(tmp_path: Path, monkeypatch):
     manager, _, _ = _manager(tmp_path)
     configuration = _configuration()
-    fields = configuration["research_lab_execution_config"]["fields"]
-    fields["lab_champion_threshold_points"] = 2.75
+    behavior = configuration["research_lab_execution_config"]["behavior_environment"]
+    behavior["QUAL_LEADS_PER_ICP"] = "17"
     configuration["research_lab_execution_config_hash"] = (
         research_lab_execution_config_hash(
             configuration["research_lab_execution_config"]
@@ -286,7 +279,9 @@ def test_runtime_reconstructs_exact_measured_research_lab_config(tmp_path: Path)
         configuration=configuration,
         expected_config_hash=_configuration_hash(configuration),
     )
-    assert manager.research_lab_config().lab_champion_threshold_points == 2.75
+    monkeypatch.delenv("QUAL_LEADS_PER_ICP", raising=False)
+    manager.apply_research_lab_behavior_environment()
+    assert os.environ["QUAL_LEADS_PER_ICP"] == "17"
 
 
 def test_runtime_configuration_accepts_the_fixed_512_release_bound(tmp_path: Path):

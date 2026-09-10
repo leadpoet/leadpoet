@@ -6,10 +6,9 @@ imported back here unchanged, so there is exactly one kernel. This module
 keeps what only the Arena needs: the reward constants a round publishes, the
 king start-epoch rule, and the reward-basis document builder.
 
-Arithmetic: the king's pool is ``pool_percent`` of total emissions
-(``pool_basis`` is ``total_emissions``: it does not depend on the Research Lab
-or leaderboard allocations, which the weight computation shrinks to make
-room). ``pool_percent`` defaults to ``contracts.LAB_ARENA_POOL_PERCENT`` and
+Arithmetic: the king's pool is ``pool_percent`` of total emissions. The
+remaining emission is sent to the configured burn hotkey. ``pool_percent``
+defaults to ``contracts.LAB_ARENA_POOL_PERCENT`` and
 is set per round from ``LAB_ARENA_POOL_PERCENT``; every published basis
 carries the constants it was computed with, so a change reaches validators
 through the next round's signed basis and never rewrites an old one.
@@ -17,7 +16,6 @@ through the next round's signed basis and never rewrites an old one.
 
 from __future__ import annotations
 
-from fractions import Fraction
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from lab_arena.contracts import (
@@ -53,21 +51,6 @@ def _require_epoch(value: Any, name: str) -> int:
     return value
 
 
-def _require_share(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("%s must be a number" % name)
-    number = float(value)
-    if number != number or number in (float("inf"), float("-inf")):
-        raise ValueError("%s must be finite" % name)
-    if number < 0.0:
-        raise ValueError("%s must not be negative" % name)
-    return number
-
-
-def _exact(value: float) -> Fraction:
-    return Fraction(repr(float(value)))
-
-
 def reward_week_index(epoch_id: int, king_start_epoch: int, constants: Optional[Mapping[str, Any]] = None) -> int:
     """The kernel's week index with this Arena's constants unless a basis's constants are given."""
 
@@ -92,27 +75,6 @@ def king_pool_share_percent(week_index: int) -> int:
     if week_index < 0 or week_index > MAX_REWARD_WEEK_INDEX:
         raise ValueError("week_index must be within 0..%d" % MAX_REWARD_WEEK_INDEX)
     return int(KING_POOL_SHARE_PERCENT_BY_WEEK[week_index])
-
-
-def derive_research_lab_share(allocation_doc: Any, fallback_share: float) -> float:
-    """Exact re-implementation of ``weight_computation._doc_percent_share``."""
-
-    fallback = _require_share(fallback_share, "fallback_share")
-    if isinstance(allocation_doc, dict) and allocation_doc.get("lab_cap_percent") not in (None, ""):
-        try:
-            return max(0.0, min(1.0, float(allocation_doc.get("lab_cap_percent")) / 100.0))
-        except (TypeError, ValueError):
-            return fallback
-    return fallback
-
-
-def fulfillment_residual(research_lab_share: float, leaderboard_bonus_share: float) -> float:
-    """``max(0, 1 - research_lab_share - leaderboard_bonus_share)``: what fulfillment keeps before the king."""
-
-    lab = _exact(_require_share(research_lab_share, "research_lab_share"))
-    leaderboard = _exact(_require_share(leaderboard_bonus_share, "leaderboard_bonus_share"))
-    residual = Fraction(1) - lab - leaderboard
-    return float(residual if residual > 0 else Fraction(0))
 
 
 def reward_constants_document(pool_percent: Optional[int] = None) -> Dict[str, Any]:

@@ -359,7 +359,7 @@ def test_fleet_probe_fails_closed_when_role_has_no_verified_profile():
         )
 
 
-def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
+def test_tls_connect_fixture_exercises_verified_authenticated_connect(
     tmp_path,
     monkeypatch,
 ):
@@ -369,13 +369,13 @@ def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
     listener.close()
     environment = {
         **os.environ,
-        "REHEARSAL_STATE_ROOT": str(tmp_path),
-        "REHEARSAL_TLS_CONNECT_PROXY_PORT": str(port),
+        "TEST_TLS_CONNECT_STATE_ROOT": str(tmp_path),
+        "TEST_TLS_CONNECT_PROXY_PORT": str(port),
     }
     service = subprocess.Popen(
         [
             sys.executable,
-            "tests/restart_rehearsal/tls_connect_proxy_service.py",
+            "tests/fixtures/tls_connect_proxy_service.py",
         ],
         cwd=Path(__file__).resolve().parents[1],
         env=environment,
@@ -390,7 +390,7 @@ def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
             if service.poll() is not None:
                 stdout, stderr = service.communicate(timeout=1)
                 pytest.fail(
-                    "TLS CONNECT rehearsal service exited early: "
+                    "TLS CONNECT test service exited early: "
                     f"{stdout!r} {stderr!r}"
                 )
             time.sleep(0.02)
@@ -415,7 +415,7 @@ def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
         )
         for destination in destinations:
             verify_tls_proxy_connect_v2(
-                "https://rehearsal-auto:rehearsal-auto-password@"
+                "https://test-auto:test-auto-password@"
                 "autoresearch-proxy.example.com:443",
                 destination_host=destination,
                 attempts=1,
@@ -427,7 +427,7 @@ def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
             match="authenticated CONNECT preflight",
         ):
             verify_tls_proxy_connect_v2(
-                "https://rehearsal-auto:wrong@"
+                "https://test-auto:wrong@"
                 "autoresearch-proxy.example.com:443",
                 destination_host="openrouter.ai",
                 attempts=1,

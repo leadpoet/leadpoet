@@ -8,16 +8,14 @@ import contextvars
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import errno
-import hashlib
 import json
-import os
 import re
 import secrets
 import socket
 import ssl
 import threading
 import time
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import weakref
 import zlib
@@ -140,9 +138,6 @@ _TRANSPORT_ROUTES = ("direct", "assigned_proxy")
 _PROVIDER_TERMINAL_STATUSES = (
     "authenticated_response",
     "transport_failure",
-)
-_CHAIN_WEIGHT_OBSERVATION_PURPOSE = (
-    "research_lab.chain_weight_observation.v1"
 )
 _EXPLICIT_HTTP_TRANSPORT_ATTRIBUTE = "_leadpoet_explicit_http_transport"
 _BROKER_OWNED_HTTPX_CLIENTS_LOCK = threading.Lock()
@@ -394,12 +389,6 @@ BUILTIN_PROVIDER_ROUTES = {
         provider_id="arweave",
         hosts=("arweave.net",),
         path_prefixes=("/",),
-        allowed_methods=("GET",),
-    ),
-    "coingecko": ProviderRouteV2(
-        provider_id="coingecko",
-        hosts=("api.coingecko.com",),
-        path_prefixes=("/api/v3/simple/price",),
         allowed_methods=("GET",),
     ),
     "wayback": ProviderRouteV2(
@@ -2047,7 +2036,6 @@ class ProviderBrokerV2:
             provider_id: {route: 0 for route in _TRANSPORT_ROUTES}
             for provider_id in sorted(BUILTIN_PROVIDER_ROUTES)
         }
-        self._chain_weight_observation_success_count = 0
         self._lock = threading.Lock()
         self._transaction_state = threading.local()
 
@@ -2058,7 +2046,6 @@ class ProviderBrokerV2:
         provider_id = str(record.get("provider_id") or "")
         route = str(record.get("egress_route") or "")
         terminal_status = str(record.get("terminal_status") or "")
-        purpose = str(record.get("purpose") or "")
         http_status = int(record.get("http_status") or 0)
         if provider_id not in self._provider_terminal_counts:
             # Keep this non-secret production health projection fixed-shape.
@@ -2077,13 +2064,6 @@ class ProviderBrokerV2:
         )
         if healthy_success:
             self._provider_2xx_success_counts[provider_id][route] += 1
-        if (
-            provider_id == "supabase"
-            and route == "direct"
-            and healthy_success
-            and purpose == _CHAIN_WEIGHT_OBSERVATION_PURPOSE
-        ):
-            self._chain_weight_observation_success_count += 1
 
     @contextmanager
     def transient_terminal_transaction(self):
@@ -2326,9 +2306,6 @@ class ProviderBrokerV2:
                 provider_id: dict(routes)
                 for provider_id, routes in self._provider_2xx_success_counts.items()
             }
-            chain_weight_observation_success_count = (
-                self._chain_weight_observation_success_count
-            )
         missing = sorted(expected_slots - configured_slots)
         result = {
             "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
@@ -2346,9 +2323,6 @@ class ProviderBrokerV2:
             ),
             "provider_terminal_counts": provider_terminal_counts,
             "provider_2xx_success_counts": provider_2xx_success_counts,
-            "chain_weight_observation_success_count": (
-                chain_weight_observation_success_count
-            ),
         }
         transport_health = getattr(self._transport, "health", None)
         if callable(transport_health):

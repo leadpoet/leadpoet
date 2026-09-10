@@ -22,7 +22,6 @@ from gateway.tee.qualification_network_v2 import SecureQualificationNetworkV2
 from gateway.tee.qualification_epoch_guard_v2 import QualificationEpochGuardV2
 from leadpoet_canonical.attested_v2 import sha256_json
 from gateway.research_lab.provider_preflight import ProviderPreflight
-from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.tee.research_lab_runtime_config_v2 import (
     build_research_lab_execution_config,
     validate_research_lab_execution_config,
@@ -53,19 +52,15 @@ class ScoringExecutorV2:
         provider_execute: Callable[[Mapping[str, Any]], Mapping[str, Any]],
         retry_policy_hashes: Mapping[str, str],
         qualification_executor: QualificationExecutorV2 | None = None,
-        config_supplier: Callable[[], ResearchLabGatewayConfig] = (
-            ResearchLabGatewayConfig
-        ),
         execution_config: Mapping[str, Any] | None = None,
     ) -> None:
         self._provider_execute = provider_execute
         self._retry_policy_hashes = dict(retry_policy_hashes)
         self._transport = BrokeredProviderTransportV2(self._provider_execute)
-        self._config = config_supplier()
         self._execution_config = validate_research_lab_execution_config(
             execution_config
             if execution_config is not None
-            else build_research_lab_execution_config(config=self._config)
+            else build_research_lab_execution_config()
         )
         self._transport.install()
         try:

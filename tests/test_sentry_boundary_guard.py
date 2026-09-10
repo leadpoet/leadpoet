@@ -40,12 +40,8 @@ ENCLAVE_SURFACE_PREFIXES = ("validator_tee/enclave/", "gateway/tee/")
 
 WIRED_ENTRY_POINTS = (
     "gateway/main.py",
-    "neurons/validator.py",
     "neurons/miner.py",
-    "neurons/auditor_validator.py",
     "validator_tee/host/gateway_pcr0_builder.py",
-    "validator_tee/host/runtime_v2_bootstrap.py",
-    "validator_tee/host/verify_release_gate_v2.py",
 )
 
 
@@ -167,28 +163,6 @@ def test_bootstrap_hard_off_options_present() -> None:
     )
 
 
-def test_validator_containers_receive_only_namespaced_sentry_settings() -> None:
-    source = _read("validator_models/containerizing/deploy_dynamic.sh")
-    assert '"${LEADPOET_SENTRY_ENV_ARGS[@]}"' in source
-    assert source.count('"${LEADPOET_SENTRY_ENV_ARGS[@]}"') == source.count("docker run -d")
-    for name in (
-        "LEADPOET_SENTRY_ENABLED",
-        "LEADPOET_SENTRY_DSN",
-        "LEADPOET_SENTRY_ENVIRONMENT",
-        "LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES",
-        "LEADPOET_SENTRY_MESSAGE_MODE",
-        "LEADPOET_SENTRY_TRACES_SAMPLE_RATE",
-        "LEADPOET_RESTART_INVOCATION_ID",
-    ):
-        assert f"-e {name}" in source
-        assert f"-e {name}=" not in source
-    exact_release = (
-        '-e LEADPOET_SENTRY_RELEASE="$VALIDATOR_V2_DEPLOY_COMMIT"'
-    )
-    assert source.count(exact_release) == source.count("docker run -d")
-    assert "    -e LEADPOET_SENTRY_RELEASE\n" not in source
-
-
 def test_bootstrap_fails_closed_and_swallows_wiring_failures() -> None:
     source = _read(BOOTSTRAP)
     assert "leadpoet_sentry_scrub_failed" in source and "return None" in source, (
@@ -226,11 +200,4 @@ def test_every_wired_entry_point_initializes_sentry() -> None:
     assert not missing, (
         "a wired host entry point lost its init_sentry call — process "
         f"coverage silently regressed: {missing}"
-    )
-
-
-def test_auditor_initializes_before_auto_update_handoff() -> None:
-    source = _read("neurons/auditor_validator.py")
-    assert source.index("_init_sentry(component=\"auditor-validator\")") < source.index(
-        "AUTO-UPDATER: Automatically updates entire repo"
     )

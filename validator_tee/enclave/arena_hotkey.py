@@ -14,6 +14,7 @@ import json
 import re
 import secrets
 import threading
+from pathlib import Path
 from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
 
@@ -30,10 +31,79 @@ POLICY_SCHEMA = "leadpoet.arena.signer_policy.v1"
 PAYLOAD_SCHEMA = "leadpoet.arena.sealed_hotkey.v1"
 RECIPIENT_SCHEMA = "leadpoet.arena.hotkey_recipient.v1"
 ENCRYPTION_ALGORITHM = "RSAES_OAEP_SHA_256"
+MEASURED_DRAND_LIBRARY_PATH = "/app/validator_tee/enclave/libbittensor_drand_v2.so"
+_STATEFUL_EPOCH_MODE = "stateful_v1"
+_EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
+_CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
 
 
 class ArenaHotkeyError(RuntimeError):
     pass
+
+
+def _validate_epoch_authority(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"mode", "cutover_manifest"}:
+        raise ArenaHotkeyError("Arena epoch authority fields are invalid")
+    if value.get("mode") != _STATEFUL_EPOCH_MODE:
+        raise ArenaHotkeyError("Arena epoch authority mode is invalid")
+    manifest = value.get("cutover_manifest")
+    fields = {
+        "schema_version", "epoch_scheme", "network_genesis_hash", "netuid",
+        "cutover_block", "cutover_block_hash", "first_subnet_epoch_index",
+        "first_settlement_epoch_id", "last_legacy_epoch_id", "mapping_hash",
+    }
+    if not isinstance(manifest, Mapping) or set(manifest) != fields:
+        raise ArenaHotkeyError("Arena epoch cutover fields are invalid")
+    normalized = dict(manifest)
+    if (normalized.get("schema_version") != _CUTOVER_SCHEMA_VERSION
+            or normalized.get("epoch_scheme") != _EPOCH_SCHEME):
+        raise ArenaHotkeyError("Arena epoch cutover identity is invalid")
+    for field in (
+        "netuid", "cutover_block", "first_subnet_epoch_index",
+        "first_settlement_epoch_id", "last_legacy_epoch_id",
+    ):
+        raw = normalized.get(field)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ArenaHotkeyError("Arena epoch cutover %s is invalid" % field)
+    if normalized["netuid"] <= 0:
+        raise ArenaHotkeyError("Arena epoch cutover netuid is invalid")
+    for field in ("network_genesis_hash", "cutover_block_hash"):
+        raw_hash = str(normalized.get(field) or "").lower()
+        if not re.fullmatch(r"0x[0-9a-f]{64}", raw_hash):
+            raise ArenaHotkeyError("Arena epoch cutover %s is invalid" % field)
+        normalized[field] = raw_hash
+    if normalized["first_settlement_epoch_id"] != normalized["last_legacy_epoch_id"] + 1:
+        raise ArenaHotkeyError("Arena epoch settlement mapping is not monotonic")
+    body = {key: normalized[key] for key in fields if key != "mapping_hash"}
+    if normalized.get("mapping_hash") != sha256_json(body):
+        raise ArenaHotkeyError("Arena epoch cutover hash mismatch")
+    return {"mode": _STATEFUL_EPOCH_MODE,
+            "cutover_manifest": {**body, "mapping_hash": normalized["mapping_hash"]}}
+
+
+def _nsm_attest(*, user_data: bytes, public_key: bytes) -> bytes:
+    try:
+        from validator_tee.enclave.nsm_lib import get_attestation_document
+        document = get_attestation_document(
+            user_data=bytes(user_data), public_key=bytes(public_key)
+        )["Attestation"]["document"]
+    except Exception as exc:
+        raise ArenaHotkeyError("hardware Nitro attestation is unavailable") from exc
+    if not isinstance(document, (bytes, bytearray)) or not document:
+        raise ArenaHotkeyError("hardware Nitro attestation is empty")
+    return bytes(document)
+
+
+def load_chain_signing_profile(
+    path: Path = Path("/app/validator_tee/enclave/chain_signing_profile_v2.json"),
+) -> Dict[str, Any]:
+    """Load the measured Arena chain profile from the image."""
+    try:
+        return validate_chain_signing_profile(
+            json.loads(Path(path).read_text(encoding="utf-8"))
+        )
+    except (OSError, ValueError) as exc:
+        raise ArenaHotkeyError("measured Arena chain profile is unavailable") from exc
 
 
 def validate_policy(value: Any) -> Dict[str, Any]:
@@ -56,8 +126,6 @@ def validate_policy(value: Any) -> Dict[str, Any]:
         netuid = policy["netuid"]
         if isinstance(netuid, bool) or not isinstance(netuid, int) or not 1 <= netuid <= 65535:
             raise ValueError("netuid")
-        from validator_tee.enclave.runtime_v2 import _validate_epoch_authority
-
         epoch = _validate_epoch_authority(policy["epoch_authority"])
         cutover = epoch["cutover_manifest"]
         if cutover["netuid"] != netuid or cutover["network_genesis_hash"] != "0x" + profile["genesis_hash"]:
@@ -100,7 +168,6 @@ def sealed_payload(seed: bytes, policy: Mapping[str, Any]) -> bytes:
 class ArenaHotkeyAuthority:
     def __init__(self, *, attestation_supplier=None, decrypt_recipient=None) -> None:
         if attestation_supplier is None:
-            from validator_tee.enclave.runtime_v2 import _nsm_attest
             attestation_supplier = _nsm_attest
         self._attest = attestation_supplier
         self._decrypt = decrypt_recipient or decrypt_kms_recipient_ciphertext

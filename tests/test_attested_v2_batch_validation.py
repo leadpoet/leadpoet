@@ -77,12 +77,12 @@ def _overlapping_graphs():
     shared = receipt("shared-job", "research_lab.provider_evidence.v2")
     child_a = receipt(
         "child-a",
-        "research_lab.allocation.v2",
+        "research_lab.admission.v2",
         (shared["receipt_hash"],),
     )
     child_b = receipt(
         "child-b",
-        "research_lab.reward_decision.v2",
+        "research_lab.ranking.v2",
         (shared["receipt_hash"],),
     )
     graph_a = attested_v2.build_receipt_graph(

@@ -41,11 +41,6 @@ def _signed_state(epoch=100, winner=HOTKEYS[2], valid_until_block=1100):
         "network": "finney", "genesis_hash": "1" * 64, "netuid": 71,
         "epoch": epoch, "valid_from_block": 1000, "valid_until_block": valid_until_block,
         "reward_basis": basis,
-        "fixed_allocations": [{"hotkey": HOTKEYS[0], "share_ppb": 100_000_000}],
-        "fulfillment_demands": [
-            {"hotkey": HOTKEYS[0], "share_ppb": 250_000_000},
-            {"hotkey": HOTKEYS[1], "share_ppb": 750_000_000},
-        ],
         "burn_hotkey": HOTKEYS[0], "issued_at": "2026-09-10T00:00:00Z",
     }
     state_hash = sha256_json(body)
@@ -63,20 +58,19 @@ def test_signed_state_derives_exact_finalized_uid_vector():
     assert arena_weights.verify_accepted_weight_state_signature(state, public_key_der=der, expected_public_key_hash=key_hash) == state["state_hash"]
     result = arena_weights.derive_arena_weights(state, HOTKEYS)
     assert result["champion_share_ppb"] == 50_000_000
-    assert result["fixed_share_ppb"] == 100_000_000
-    assert result["fulfillment_capacity_ppb"] == 850_000_000
-    assert result["sparse_uids"] == [0, 1, 2]
-    assert result["sparse_weights_u16"] == [32125, 65535, 5140]
+    assert result["burned_residual_ppb"] == 950_000_000
+    assert result["sparse_uids"] == [0, 2]
+    assert result["sparse_weights_u16"] == [65535, 3449]
     # The dependency-free enclave kernel must quantize exactly like Bittensor.
-    float_weights = [0.1 + (0.85 * 0.25), 0.85 * 0.75, 0.05]
-    assert normalize_to_u16_with_uids([0, 1, 2], float_weights) == (
+    float_weights = [0.95, 0.05]
+    assert normalize_to_u16_with_uids([0, 2], float_weights) == (
         result["sparse_uids"], result["sparse_weights_u16"]
     )
 
 
 @pytest.mark.parametrize("mutation,error", [
     (lambda state: state.update(epoch=101), "state_hash"),
-    (lambda state: state["fulfillment_demands"].__setitem__(0, {"hotkey": HOTKEYS[0], "ratio_ppb": 249_999_999}), "entry fields"),
+    (lambda state: state.update(fixed_allocations=[]), "fields"),
     (lambda state: state.update(valid_until_block=999), "validity window"),
 ])
 def test_state_tampering_and_bad_bounds_fail_closed(mutation, error):
@@ -92,27 +86,26 @@ def test_wrong_key_and_changed_finalized_uid_ownership_fail_safe():
     with pytest.raises(arena_weights.ArenaWeightError, match="pinned Arena key"):
         arena_weights.verify_accepted_weight_state_signature(state, public_key_der=other, expected_public_key_hash=key_hash)
     moved = arena_weights.derive_arena_weights(state, [HOTKEYS[2], HOTKEYS[0], HOTKEYS[1]])
-    assert moved["sparse_uids"] == [0, 1, 2]
-    assert moved["sparse_weights_u16"] == [5140, 32125, 65535]
+    assert moved["sparse_uids"] == [0, 1]
+    assert moved["sparse_weights_u16"] == [3449, 65535]
 
 
-def test_unregistered_champion_returns_its_share_to_fulfillment():
+def test_unregistered_champion_returns_all_emissions_to_burn():
     state, _der, _key_hash = _signed_state(winner="5" + ("D" * 47))
     result = arena_weights.derive_arena_weights(state, HOTKEYS)
     assert result["champion_share_ppb"] == 0
-    assert result["fulfillment_capacity_ppb"] == 900_000_000
-    assert result["sparse_weights_u16"] == [31554, 65535]
+    assert result["burned_residual_ppb"] == 1_000_000_000
+    assert result["sparse_uids"] == [0]
+    assert result["sparse_weights_u16"] == [65535]
 
 
-def test_unregistered_allocations_and_unused_capacity_route_to_registered_burn():
+def test_burn_hotkey_must_be_registered():
     state, _der, _key_hash = _signed_state()
-    state["fixed_allocations"] = [{"hotkey": "5" + ("D" * 47), "share_ppb": 100_000_000}]
-    state["fulfillment_demands"] = [{"hotkey": HOTKEYS[1], "share_ppb": 100_000_000}]
+    state["burn_hotkey"] = "5" + ("D" * 47)
     body = arena_weights.accepted_weight_state_body(state)
     state["state_hash"] = sha256_json(body)  # derivation checks content hash; signature is tested separately
-    result = arena_weights.derive_arena_weights(state, HOTKEYS)
-    assert result["burned_residual_ppb"] == 750_000_000
-    assert result["sparse_uids"] == [0, 1, 2]
+    with pytest.raises(arena_weights.ArenaWeightError, match="burn_hotkey is not registered"):
+        arena_weights.derive_arena_weights(state, HOTKEYS)
 
 
 def test_protected_application_signer_accepts_only_canonical_arena_claim():
@@ -311,11 +304,10 @@ def test_signed_authorization_binds_rewarded_uids_to_finalized_hotkeys():
                              "block_hash": "2" * 64})
     assert signed["recipient_uid_hotkeys"] == [
         {"uid": 0, "hotkey": HOTKEYS[0]},
-        {"uid": 1, "hotkey": HOTKEYS[1]},
         {"uid": 2, "hotkey": HOTKEYS[2]},
     ]
     tampered = deepcopy(signed["recovery_record"])
-    tampered["authorization"]["recipient_uid_hotkeys"][1]["hotkey"] = HOTKEYS[2]
+    tampered["authorization"]["recipient_uid_hotkeys"][1]["hotkey"] = HOTKEYS[1]
     restarted = ArenaWeightSigner(
         validator_hotkey=HOTKEYS[0], hotkey_public_key_hex="3" * 64,
         chain_profile=_chain_profile(), chain_source=_ArenaChain(state),

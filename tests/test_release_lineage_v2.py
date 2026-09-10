@@ -19,10 +19,6 @@ from gateway.tee.release_manifest_v2 import (
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
-from tests.test_release_channel_v2 import (
-    _historical_gateway_manifest,
-    _validator_manifest,
-)
 
 
 def test_lineage_import_does_not_require_validator_package():
@@ -125,13 +121,6 @@ def _compact_lineage(current, *historical):
             }
             for role, summary in gateway["roles"].items()
         }
-        validator = _validator_manifest(commit)["release"]
-        roles["validator_weights"] = {
-            "commit_sha": validator["commit_sha"],
-            "pcr0": validator["pcr0"],
-            "build_manifest_hash": validator["app_manifest_hash"],
-            "dependency_lock_hash": validator["dependency_lock_hash"],
-        }
         releases[commit] = {
             "channel_hash": _hash(commit[0]),
             "gateway_release_hash": gateway["release_hash"],
@@ -146,7 +135,7 @@ def _compact_lineage(current, *historical):
     return {**body, "lineage_hash": release_lineage_v2.sha256_json(body)}
 
 
-def test_compact_lineage_verifies_historical_gateway_and_validator_boots():
+def test_compact_lineage_verifies_historical_gateway_boots():
     current = _release("1")
     historical = _release("2")
     lineage = validate_compact_release_lineage_v2(
@@ -163,22 +152,10 @@ def test_compact_lineage_verifies_historical_gateway_and_validator_boots():
         or identity,
     )
     gateway_boot = _identity(historical)
-    validator_boot = _validator_identity("2")
     assert verifier(gateway_boot) == gateway_boot
-    assert verifier(validator_boot) == validator_boot
-    assert observed == [
-        ("gateway_scoring", gateway_boot["pcr0"]),
-        ("validator_weights", validator_boot["pcr0"]),
-    ]
+    assert observed == [("gateway_scoring", gateway_boot["pcr0"])]
 
 
-def test_installed_prior_lineage_accepts_exact_legacy_current_role_set():
-    historical = _historical_gateway_manifest("2" * 40)
-    lineage = _compact_lineage(historical)
-
-    with pytest.raises(ReleaseLineageV2Error, match="roles are incomplete"):
-        validate_compact_release_lineage_v2(lineage)
-    assert validate_prior_compact_release_lineage_v2(lineage) == lineage
 
 
 def test_compact_lineage_fails_closed_on_hash_role_and_pcr_drift():
@@ -295,32 +272,8 @@ def test_lineage_verifier_accepts_historical_release_and_rejects_drift(
         verifier({**identity, "dependency_lock_hash": _hash("9")})
 
 
-def _validator_identity(commit_char="a"):
-    release = _validator_manifest(commit_char * 40)["release"]
-    return {
-        "role": "validator_weights",
-        "physical_role": "validator_weights",
-        "commit_sha": release["commit_sha"],
-        "pcr0": release["pcr0"],
-        "boot_identity_hash": "sha256:" + "7" * 64,
-        "build_manifest_hash": release["app_manifest_hash"],
-        "dependency_lock_hash": release["dependency_lock_hash"],
-    }
 
 
-def test_required_commits_includes_validator_boots():
-    gateway = _release("1")
-    graphs = (
-        {
-            "boot_identities": [
-                _identity(gateway, role="gateway_scoring"),
-                _validator_identity(),
-            ]
-        },
-    )
-    commits = release_lineage_v2._required_commits(graphs)
-    assert gateway["roles"]["gateway_scoring"]["commit_sha"] in commits
-    assert _validator_identity()["commit_sha"] in commits
 
 
 def test_required_commits_includes_historical_checkpoint_issuer():
@@ -368,109 +321,4 @@ def test_lineage_rejects_checkpoint_without_issuer_boot_identity():
                     "ancestry_proof": {"certificate": {}},
                 },
             ),
-        )
-
-
-def test_load_lineage_fetches_validator_release_manifest():
-    gateway = _release("1")
-    validator = _validator_identity()
-    calls = []
-
-    def load(commit):
-        calls.append(commit)
-        return {
-            "gateway_release_manifest": _release(commit[0]),
-            "validator_release_manifest": _validator_manifest(commit),
-        }
-
-    releases = load_approved_release_lineage_v2(
-        current_release=gateway,
-        parent_graphs=({"boot_identities": [validator]},),
-        release_channel_loader=load,
-    )
-    assert set(releases) == {"1" * 40, "a" * 40}
-    assert calls == ["a" * 40]
-    assert releases["a" * 40]["validator_release_manifest"]["release"][
-        "pcr0"
-    ] == validator["pcr0"]
-
-
-def test_verifier_routes_validator_boot_to_immutable_release(monkeypatch):
-    gateway = _release("1")
-    validator = _validator_identity()
-    nitro = []
-    monkeypatch.setattr(
-        release_lineage_v2,
-        "verify_boot_identity_nitro",
-        lambda identity, *, expected_pcr0, certificate_validity_at_attestation_time: nitro.append(
-            (expected_pcr0, certificate_validity_at_attestation_time)
-        )
-        or {"verified": True},
-    )
-
-    verifier = build_release_lineage_boot_verifier_v2(
-        {
-            gateway["commit_sha"]: gateway,
-            validator["commit_sha"]: {
-                "gateway_release_manifest": _release("a"),
-                "validator_release_manifest": _validator_manifest("a" * 40),
-            },
-        }
-    )
-    assert verifier(validator) == {"verified": True}
-    assert nitro == [(validator["pcr0"], True)]
-
-
-def test_verifier_validator_boot_fails_without_release_manifest():
-    gateway = _release("1")
-    verifier = build_release_lineage_boot_verifier_v2(
-        {gateway["commit_sha"]: gateway}
-    )
-    with pytest.raises(ReleaseLineageV2Error, match="validator boot commit"):
-        verifier(_validator_identity())
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    (
-        ("role", "gateway_coordinator"),
-        ("physical_role", "validator_weights_other"),
-        ("pcr0", "9" * 96),
-        ("build_manifest_hash", _hash("9")),
-        ("dependency_lock_hash", _hash("9")),
-    ),
-)
-def test_verifier_validator_boot_rejects_release_drift(field, value):
-    gateway = _release("1")
-    validator = _validator_identity()
-    verifier = build_release_lineage_boot_verifier_v2(
-        {
-            gateway["commit_sha"]: gateway,
-            validator["commit_sha"]: {
-                "gateway_release_manifest": _release("a"),
-                "validator_release_manifest": _validator_manifest("a" * 40),
-            },
-        }
-    )
-    expected_error = (
-        ReleaseManifestV2Error
-        if field == "physical_role"
-        else ReleaseLineageV2Error
-    )
-    with pytest.raises(expected_error):
-        verifier({**validator, field: value})
-
-
-def test_load_lineage_rejects_missing_validator_manifest():
-    gateway = _release("1")
-    with pytest.raises(
-        ReleaseLineageV2Error,
-        match="validator release manifest is unavailable",
-    ):
-        load_approved_release_lineage_v2(
-            current_release=gateway,
-            parent_graphs=({"boot_identities": [_validator_identity()]},),
-            release_channel_loader=lambda _commit: {
-                "gateway_release_manifest": _release("a")
-            },
         )

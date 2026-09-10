@@ -26,8 +26,6 @@ from gateway.research_lab.attested_execution_upload_v2 import (
 )
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
-    MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
-    MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES,
     MAX_EXTERNAL_RECEIPT_GRAPHS,
     MAX_INPUT_BYTES,
     PARENT_ANCESTRY_PROOFS_FIELD,
@@ -91,7 +89,6 @@ _GATEWAY_ANCESTRY_ISSUER_ROLES = (
     "gateway_autoresearch",
     "gateway_coordinator",
     "gateway_scoring",
-    "validator_weights",
 )
 
 
@@ -945,8 +942,6 @@ async def execute_scoring_v2(
     persist_sidecars: Any = None,
     receipt_output_projector: Any = None,
     allow_persistence_bound_artifact_descriptors: bool = False,
-    load_replayable_result: Any = None,
-    persist_replayable_result: Any = None,
 ) -> Dict[str, Any]:
     """Execute one scoring operation as V2 authority and persist its graph."""
 
@@ -1220,13 +1215,7 @@ async def execute_scoring_v2(
         parent_graphs=transport_parent_graphs,
         provider_credential_profile=normalized_profile,
         provider_credential_ref_hashes=credential_refs,
-        max_parent_graph_count=min(
-            max_parent_authorities,
-            max(
-                MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
-                MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES,
-            ),
-        ),
+        max_parent_graph_count=max_parent_authorities,
     )
     payload_bytes = _canonical_bytes(payload_document)
     if transport_metadata["encoding"] == "receipt_graph_set":
@@ -1258,150 +1247,7 @@ async def execute_scoring_v2(
         release_hash=release["release_hash"],
         physical_role=physical_role,
     )
-    from gateway.research_lab.attested_v2_store import (
-        replayable_execution_result_v2,
-    )
 
-    replayable_result = (
-        physical_role == "gateway_coordinator"
-        and replayable_execution_result_v2(
-            operation=operation,
-            purpose=purpose,
-        )
-    )
-    if replayable_result:
-        if load_replayable_result is None:
-            from gateway.research_lab.attested_v2_store import (
-                load_execution_result_v2,
-            )
-
-            load_replayable_result = load_execution_result_v2
-        replay = await load_replayable_result(
-            role=expected_service_role,
-            operation=operation,
-            purpose=purpose,
-            job_id=job_id,
-        )
-        if replay is not None:
-            replay_result = replay.get("result")
-            replay_receipt = replay.get("receipt")
-            replay_graph = replay.get("receipt_graph")
-            replay_artifacts = replay.get("artifact_hashes")
-            replay_row = replay.get("row")
-            if (
-                not isinstance(replay_result, Mapping)
-                or not isinstance(replay_receipt, Mapping)
-                or not isinstance(replay_graph, Mapping)
-                or not isinstance(replay_artifacts, list)
-                or not isinstance(replay_row, Mapping)
-            ):
-                raise AttestedScoringV2Error(
-                    "V2 durable execution replay is incomplete"
-                )
-            await _validate_receipt_graph_async(
-                replay_graph,
-                required_purposes=(purpose,),
-                boot_attestation_verifier=verifier,
-                require_boot_attestation_verification=True,
-            )
-            replay_boots = {
-                str(item.get("boot_identity_hash") or ""): item
-                for item in replay_graph.get("boot_identities") or ()
-                if isinstance(item, Mapping)
-            }
-            replay_boot = replay_boots.get(
-                str(replay_receipt.get("boot_identity_hash") or "")
-            )
-            if not isinstance(replay_boot, Mapping):
-                raise AttestedScoringV2Error(
-                    "V2 durable execution replay boot identity is missing"
-                )
-            current_release_verifier(replay_boot)
-            projected_replay = dict(replay_result)
-            if receipt_output_projector is not None:
-                projected_replay = receipt_output_projector(
-                    operation,
-                    replay_result,
-                )
-            # The job ID commits the logical payload and direct parent roots.
-            # input_root commits only the selected transport representation;
-            # an equivalent compact proof and full graph intentionally differ.
-            if (
-                replay_graph.get("root_receipt_hash")
-                != replay_receipt.get("receipt_hash")
-                or replay_receipt.get("role") != expected_service_role
-                or replay_receipt.get("purpose") != purpose
-                or replay_receipt.get("job_id") != job_id
-                or replay_receipt.get("epoch_id") != epoch_id
-                or replay_receipt.get("sequence") != sequence
-                or replay_receipt.get("parent_receipt_hashes") != parent_roots
-                or replay_receipt.get("output_root")
-                != sha256_bytes(_canonical_bytes(dict(projected_replay)))
-                or replay_receipt.get("artifact_root")
-                != merkle_root(
-                    replay_artifacts,
-                    domain="leadpoet-artifact-v2",
-                )
-                or replay_row.get("release_hash") != release["release_hash"]
-            ):
-                raise AttestedScoringV2Error(
-                    "V2 durable execution replay differs from current authority"
-                )
-            replay_attempts = [
-                dict(item)
-                for item in replay_graph.get("transport_attempts") or ()
-                if item.get("job_id") == job_id
-                and item.get("purpose") == purpose
-            ]
-            persistence = {
-                "graph_hash": sha256_json(dict(replay_graph)),
-                "root_receipt_hash": str(replay_graph["root_receipt_hash"]),
-                "boot_count": len(replay_graph["boot_identities"]),
-                "receipt_count": len(replay_graph["receipts"]),
-                "transport_attempt_count": len(
-                    replay_graph["transport_attempts"]
-                ),
-                "host_operation_count": len(
-                    replay_graph["host_operations"]
-                ),
-            }
-            replay_proofs = load_ancestry_proofs(
-                (str(replay_graph["root_receipt_hash"]),),
-                expected_lineage_id=ancestry_lineage_id,
-                boot_attestation_verifier=verifier,
-                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
-            )
-            if inspect.isawaitable(replay_proofs):
-                replay_proofs = await replay_proofs
-            if not isinstance(replay_proofs, Mapping):
-                raise AttestedScoringV2Error(
-                    "V2 durable replay ancestry checkpoint lookup is invalid"
-                )
-            replay_proof = replay_proofs.get(
-                str(replay_graph["root_receipt_hash"])
-            )
-            return {
-                "status": "succeeded",
-                "result": dict(replay_result),
-                "receipt": dict(replay_receipt),
-                "execution_receipt": dict(replay_receipt),
-                "execution_receipt_graph": dict(replay_graph),
-                "receipt_graph": dict(replay_graph),
-                "transitions": [],
-                "transport_attempts": replay_attempts,
-                "artifact_persistence": [],
-                "artifact_hashes": list(replay_artifacts),
-                "persistence": persistence,
-                "sidecar_persistence": {},
-                "release_hash": release["release_hash"],
-                "physical_role": physical_role,
-                "replay_status": "durable_exact",
-                "ancestry_compact_proof": (
-                    dict(replay_proof)
-                    if isinstance(replay_proof, Mapping)
-                    else None
-                ),
-            }
     raw_additional_envelopes = additional_job_credential_envelopes
     if additional_job_credential_envelope_builder is not None:
         if additional_job_credential_envelopes:
@@ -2217,20 +2063,6 @@ async def execute_scoring_v2(
             artifacts=artifact_persistence,
             transitions=transitions,
         )
-        if replayable_result:
-            if persist_replayable_result is None:
-                from gateway.research_lab.attested_v2_store import (
-                    persist_execution_result_v2,
-                )
-
-                persist_replayable_result = persist_execution_result_v2
-            await persist_replayable_result(
-                operation=operation,
-                result=result,
-                receipt=receipt,
-                artifact_hashes=job_artifact_hashes,
-                release_hash=release["release_hash"],
-            )
         return {
             "status": "succeeded",
             "result": result,
@@ -2283,20 +2115,6 @@ async def execute_scoring_v2(
             artifact_receipt_hash=str(receipt["receipt_hash"]),
             artifacts=(),
             transitions=transitions,
-        )
-    if replayable_result:
-        if persist_replayable_result is None:
-            from gateway.research_lab.attested_v2_store import (
-                persist_execution_result_v2,
-            )
-
-            persist_replayable_result = persist_execution_result_v2
-        await persist_replayable_result(
-            operation=operation,
-            result=result,
-            receipt=receipt,
-            artifact_hashes=job_artifact_hashes,
-            release_hash=release["release_hash"],
         )
     return {
         "status": "succeeded",

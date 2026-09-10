@@ -19,23 +19,9 @@ model and must be coordinated across all deployments.
 # This matches Bittensor's tempo setting for the subnet
 EPOCH_LENGTH = 360
 
-# Block within the official subnet epoch when current-epoch weight authority
-# preparation and submission begin. Starting at block 240 leaves 120 blocks
-# (~24 minutes at 12s blocks) for measured input reconstruction, enclave
-# signing, durable gateway publication, bounded retries, chain finalization,
-# and current-epoch auditor mirroring. The 2026-07-30/31 outage (epochs
-# 24256-24270) measured the degraded end-to-end pipeline at ~947s (~79
-# blocks); the previous 60-block window closed the official epoch before the
-# extrinsic staleness gate every time, so signed bundles published durably
-# in-epoch but no set_weights reached the chain. The gateway's acceptance
-# windows derive from this constant, so the gateway must deploy at or before
-# the validator when this value changes.
+# Historical gateway qualification scheduling boundary. Arena weight validity
+# is derived separately from accepted state and finalized epoch inputs.
 WEIGHT_SUBMISSION_BLOCK = 240
-
-# Begin the expensive, deterministic Research Lab allocation preparation well
-# before the submission window. This does not authorize or publish weights; it
-# only gives the primary time to reconstruct and validate durable ancestry.
-ALLOCATION_PREPARATION_BLOCK = 180
 
 # Maximum allowed drift between gateway-observed block and submission block
 # Submissions with larger drift are rejected to prevent replay attacks

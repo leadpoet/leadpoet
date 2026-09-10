@@ -1,4 +1,4 @@
-name: Attested V2 Release
+name: Gateway Attested Release
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: attested-v2-release-main
+  group: gateway-attested-release-main
   cancel-in-progress: true
 
 permissions:
@@ -19,44 +19,8 @@ env:
   ACCEPTANCE_SIGNER_PUBKEY_HASH: sha256:cdc20e17d9ecee5da04b30604ac72bc015326640ab98501646551f075d60ef36
 
 jobs:
-  gateway-runner-admission:
-    name: Release gateway runner from superseded full parity
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Check out exact release source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-
-      - name: Require exact main source before runner admission
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test "$GITHUB_REF" = refs/heads/main
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git fetch --no-tags origin \
-            refs/heads/main:refs/remotes/origin/main
-          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-
-      - name: Await cleanup of superseded automatic full parity
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/admit_gateway_runner_v2.py \
-            --repository "$GITHUB_REPOSITORY" \
-            --current-sha "$GITHUB_SHA" \
-            --current-run-id "$GITHUB_RUN_ID" \
-            --current-ref "$GITHUB_REF" \
-            --timeout-seconds 1800
-
   gateway-parent:
     name: Independent gateway-parent builds
-    needs: gateway-runner-admission
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
     timeout-minutes: 720
     env:
@@ -95,6 +59,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Require exact main source
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 
       - name: Guard gateway builder host memory
         id: host_memory_guard
@@ -136,8 +108,8 @@ jobs:
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
 
-      - name: Build gateway and validator evidence
-        id: gateway_validator_build
+      - name: Build gateway evidence
+        id: gateway_build
         run: |
           . validator_tee/scripts/docker_operation_lock_v2.sh
           leadpoet_acquire_docker_operation_lock_v2
@@ -181,24 +153,15 @@ jobs:
           cleanup_release_build_images
           df -h /
 
-          export VALIDATOR_V2_BUILDER_DOMAIN=gateway
-          export VALIDATOR_V2_BUILDER_ID="gateway-parent-${RUNNER_NAME}"
-          export VALIDATOR_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/validator-build-work"
-          export VALIDATOR_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/validator-evidence"
-          export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts/validator-runtime"
-          nice -n 10 ionice -c2 -n7 bash validator_tee/scripts/build_release_evidence_v2.sh
-
           mkdir -p "$RUNNER_TEMP/release-evidence"
           cp "$RUNNER_TEMP/gateway-evidence/gateway-gateway-evidence.json" \
-            "$RUNNER_TEMP/release-evidence/"
-          cp "$RUNNER_TEMP/validator-evidence"/validator-gateway-*.json \
             "$RUNNER_TEMP/release-evidence/"
 
       - name: Upload gateway-parent evidence
         id: evidence_upload
         uses: actions/upload-artifact@v4
         with:
-          name: v2-evidence-gateway-${{ github.sha }}
+          name: v2-evidence-gateway-a-${{ github.sha }}
           retention-days: 7
           if-no-files-found: error
           path: ${{ runner.temp }}/release-evidence/*.json
@@ -233,7 +196,7 @@ jobs:
           HOST_MEMORY_GUARD: ${{ steps.host_memory_guard.outcome }}
           STORAGE_RECLAIM: ${{ steps.storage_reclaim.outcome }}
           SOURCE_PREPARE: ${{ steps.source_prepare.outcome }}
-          GATEWAY_VALIDATOR_BUILD: ${{ steps.gateway_validator_build.outcome }}
+          GATEWAY_BUILD: ${{ steps.gateway_build.outcome }}
           EVIDENCE_UPLOAD: ${{ steps.evidence_upload.outcome }}
           FINAL_CLEANUP: ${{ steps.final_cleanup.outcome }}
           LEADPOET_GITHUB_JOB_TOKEN: ${{ github.token }}
@@ -257,14 +220,14 @@ jobs:
             --stage-status "host_memory_guard=${HOST_MEMORY_GUARD:-unexercised}" \
             --stage-status "storage_reclaim=${STORAGE_RECLAIM:-unexercised}" \
             --stage-status "source_prepare=${SOURCE_PREPARE:-unexercised}" \
-            --stage-status "gateway_validator_build=${GATEWAY_VALIDATOR_BUILD:-unexercised}" \
+            --stage-status "gateway_build=${GATEWAY_BUILD:-unexercised}" \
             --stage-status "evidence_upload=${EVIDENCE_UPLOAD:-unexercised}" \
             --stage-status "final_cleanup=${FINAL_CLEANUP:-unexercised}" \
             "${timing_args[@]}" \
             "${duration_args[@]}"
 
-  validator-parent:
-    name: Independent validator-parent builds
+  gateway-parent-b:
+    name: Independent gateway-parent-b builds
     runs-on: [self-hosted, linux, x64, leadpoet-validator-v2-builder]
     timeout-minutes: 720
     env:
@@ -304,7 +267,15 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Reclaim unreferenced validator build space
+      - name: Require exact main source
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+
+      - name: Reclaim unreferenced gateway build space
         id: storage_reclaim
         run: |
           sudo rm -rf -- \
@@ -327,8 +298,8 @@ jobs:
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
 
-      - name: Build gateway and validator evidence
-        id: gateway_validator_build
+      - name: Build independent gateway evidence
+        id: gateway_build
         run: |
           . validator_tee/scripts/docker_operation_lock_v2.sh
           leadpoet_acquire_docker_operation_lock_v2
@@ -336,7 +307,7 @@ jobs:
             --wait \
             --timeout-seconds 1800 \
             --interval-seconds 3
-          release_image_inventory="$RUNNER_TEMP/validator-parent-preexisting-images.txt"
+          release_image_inventory="$RUNNER_TEMP/gateway-parent-b-preexisting-images.txt"
           bash validator_tee/scripts/reclaim_release_build_images_v2.sh \
             snapshot "$release_image_inventory"
           cleanup_release_build_images() {
@@ -358,7 +329,7 @@ jobs:
 
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           export GATEWAY_V2_BUILDER_DOMAIN=validator
-          export GATEWAY_V2_BUILDER_ID="validator-parent-${RUNNER_NAME}"
+          export GATEWAY_V2_BUILDER_ID="gateway-parent-b-${RUNNER_NAME}"
           export GATEWAY_V2_BUILD_REVISION="$GITHUB_SHA"
           export GATEWAY_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/gateway-evidence"
           export GATEWAY_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/gateway-build-work"
@@ -369,29 +340,20 @@ jobs:
           cleanup_release_build_images
           df -h /
 
-          export VALIDATOR_V2_BUILDER_DOMAIN=validator
-          export VALIDATOR_V2_BUILDER_ID="validator-parent-${RUNNER_NAME}"
-          export VALIDATOR_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/validator-build-work"
-          export VALIDATOR_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/validator-evidence"
-          export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts/validator-runtime"
-          nice -n 10 ionice -c2 -n7 bash validator_tee/scripts/build_release_evidence_v2.sh
-
           mkdir -p "$RUNNER_TEMP/release-evidence"
           cp "$RUNNER_TEMP/gateway-evidence/gateway-validator-evidence.json" \
             "$RUNNER_TEMP/release-evidence/"
-          cp "$RUNNER_TEMP/validator-evidence"/validator-validator-*.json \
-            "$RUNNER_TEMP/release-evidence/"
 
-      - name: Upload validator-parent evidence
+      - name: Upload gateway-parent-b evidence
         id: evidence_upload
         uses: actions/upload-artifact@v4
         with:
-          name: v2-evidence-validator-${{ github.sha }}
+          name: v2-evidence-gateway-b-${{ github.sha }}
           retention-days: 7
           if-no-files-found: error
           path: ${{ runner.temp }}/release-evidence/*.json
 
-      - name: Reclaim validator-parent storage after evidence generation
+      - name: Reclaim gateway-parent-b storage after evidence generation
         id: final_cleanup
         if: always()
         run: |
@@ -409,7 +371,7 @@ jobs:
             bash validator_tee/scripts/reclaim_docker_storage_v2.sh
           df -h /
 
-      - name: Emit bounded validator-parent release summary
+      - name: Emit bounded gateway-parent-b release summary
         if: always()
         continue-on-error: true
         timeout-minutes: 1
@@ -419,11 +381,11 @@ jobs:
           SOURCE_CHECKOUT: ${{ steps.source_checkout.outcome }}
           STORAGE_RECLAIM: ${{ steps.storage_reclaim.outcome }}
           SOURCE_PREPARE: ${{ steps.source_prepare.outcome }}
-          GATEWAY_VALIDATOR_BUILD: ${{ steps.gateway_validator_build.outcome }}
+          GATEWAY_BUILD: ${{ steps.gateway_build.outcome }}
           EVIDENCE_UPLOAD: ${{ steps.evidence_upload.outcome }}
           FINAL_CLEANUP: ${{ steps.final_cleanup.outcome }}
           LEADPOET_GITHUB_JOB_TOKEN: ${{ github.token }}
-          LEADPOET_GITHUB_JOB_NAME: Independent validator-parent builds
+          LEADPOET_GITHUB_JOB_NAME: Independent gateway-parent-b builds
         run: |
           test -f leadpoet_observability/sentry_cli.py || exit 0
           status=failed
@@ -434,15 +396,15 @@ jobs:
           fi
           timing_args=(--github-job-name "$LEADPOET_GITHUB_JOB_NAME")
           python3 -m leadpoet_observability.sentry_cli release-summary \
-            --component release-validator-parent \
-            --physical-role validator-parent-builder \
+            --component release-gateway-parent-b \
+            --physical-role gateway-parent-b-builder \
             --status "$status" \
             --candidate-sha "$GITHUB_SHA" \
             --stage-status "stale_cleanup=${STALE_CLEANUP:-unexercised}" \
             --stage-status "source_checkout=${SOURCE_CHECKOUT:-unexercised}" \
             --stage-status "storage_reclaim=${STORAGE_RECLAIM:-unexercised}" \
             --stage-status "source_prepare=${SOURCE_PREPARE:-unexercised}" \
-            --stage-status "gateway_validator_build=${GATEWAY_VALIDATOR_BUILD:-unexercised}" \
+            --stage-status "gateway_build=${GATEWAY_BUILD:-unexercised}" \
             --stage-status "evidence_upload=${EVIDENCE_UPLOAD:-unexercised}" \
             --stage-status "final_cleanup=${FINAL_CLEANUP:-unexercised}" \
             "${timing_args[@]}" \
@@ -450,7 +412,7 @@ jobs:
 
   publish:
     name: Assemble and immutably publish exact-commit channel
-    needs: [gateway-parent, validator-parent]
+    needs: [gateway-parent, gateway-parent-b]
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
     timeout-minutes: 30
     env:
@@ -490,6 +452,14 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
+      - name: Require exact main source
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+
       - name: Download independent release evidence
         id: evidence_download
         uses: actions/download-artifact@v4
@@ -498,7 +468,7 @@ jobs:
           path: ${{ runner.temp }}/evidence
           merge-multiple: true
 
-      - name: Assemble both six-build manifests
+      - name: Assemble gateway six-build manifest
         id: manifest_assembly
         run: |
           mkdir -p "$RUNNER_TEMP/release"
@@ -508,20 +478,9 @@ jobs:
               "$RUNNER_TEMP/evidence/gateway-validator-evidence.json" \
               "$RUNNER_TEMP/release/gateway-v2-release-manifest.json"
 
-          python3 -m validator_tee.host.verify_release_gate_v2 \
-            --build-manifest \
-            --evidence "$RUNNER_TEMP/evidence/validator-gateway-1.json" \
-            --evidence "$RUNNER_TEMP/evidence/validator-gateway-2.json" \
-            --evidence "$RUNNER_TEMP/evidence/validator-gateway-3.json" \
-            --evidence "$RUNNER_TEMP/evidence/validator-validator-1.json" \
-            --evidence "$RUNNER_TEMP/evidence/validator-validator-2.json" \
-            --evidence "$RUNNER_TEMP/evidence/validator-validator-3.json" \
-            --output "$RUNNER_TEMP/release/validator-v2-release-manifest.json"
-
           python3 -m gateway.tee.release_channel_v2 \
             --build \
             --gateway-manifest "$RUNNER_TEMP/release/gateway-v2-release-manifest.json" \
-            --validator-manifest "$RUNNER_TEMP/release/validator-v2-release-manifest.json" \
             --output "$RUNNER_TEMP/release/release-channel-v2.json"
 
       - name: Publish with COMPLIANCE Object Lock

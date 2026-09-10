@@ -1,7 +1,7 @@
 """
 Fulfillment lifecycle background task.
 
-Manages request state transitions, consensus aggregation, reward expiry,
+Manages request state transitions, consensus aggregation, delivery,
 and request recycling.
 """
 
@@ -17,11 +17,9 @@ from gateway.fulfillment.config import (
     FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES,
     FULFILLMENT_MAX_PARALLEL_REQUESTS,
     FULFILLMENT_MIN_REMAINING_WINDOW_MINUTES,
-    L_EPOCHS,
     M_MINUTES,
     T_EPOCHS,
     T_SECONDS_OVERRIDE,
-    Z_PERCENT,
     epochs_to_seconds,
 )
 from gateway.fulfillment.consensus import compute_fulfillment_consensus
@@ -226,7 +224,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
                     # status.  Predecessors with status='partially_fulfilled'
                     # signal a chain in flight — successors get the
                     # 'continued_open' label so miners (and dashboards)
-                    # know prior held leads exist and rewards won't flow
+                    # know prior held leads exist and delivery remains pending
                     # for this cycle alone.
                     target_status = "open"
                     try:
@@ -446,7 +444,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
     #   * Time-bounded to FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES past
     #     reveal_window_end so we don't re-aggregate ancient requests forever.
     #   * fulfilled and recycled are NOT included — fulfilled would risk
-    #     double-paying via a second _finalize_chain_rewards; recycled is a
+    #     duplicate delivery via a second _finalize_chain_winners; recycled is a
     #     separate (and rarer) failure mode handled in a follow-up.
     # The time-bound on `reveal_window_end` exists to prevent infinite
     # re-aggregation of `partially_fulfilled` requests when late validator
@@ -713,9 +711,9 @@ async def _lifecycle_tick_inner(supabase) -> None:
             #   * Updates the is_chain_held flag for the entire chain
             #     (sets TRUE on the new top-K, clears FALSE on displaced
             #     leads that lost their slot to a higher-scoring entry).
-            #   * Does NOT distribute rewards yet; rewards only flow when
+            #   * Does NOT finalize delivered winners yet; delivery happens when
             #     the chain reaches its full quota (see fulfilled branch
-            #     below).  Held leads earn nothing until then — by design.
+            #     below). Held leads remain pending until then.
             chain = await _resolve_chain_topk(rid, consensus_results, num_requested)
             chain_target = chain["chain_target"]
             topk = chain["topk"]
@@ -740,22 +738,10 @@ async def _lifecycle_tick_inner(supabase) -> None:
 
             if held_count >= chain_target:
                 # ────────────────────────────────────────────────────────
-                # FULFILLED: chain reached full quota.  Distribute rewards
-                # NOW for the entire top-K (including held leads from
-                # earlier generations — their request_id stays in their
-                # original generation, but reward_pct/expires_epoch is
-                # written via calculate_lead_rewards keyed on
-                # (request_id, submission_id, lead_id)).
-                #
-                # Re-aggregation path: if was_partially_fulfilled, the
-                # successor was already created during the original
-                # partial-fulfill recycle.  We mark the predecessor as
-                # fulfilled and distribute rewards normally; the existing
-                # successor will naturally terminate when its own scoring
-                # cycle runs (chain top-K sees the chain quota already met
-                # via the predecessor's held leads).
-                # ────────────────────────────────────────────────────────
-                winner_lead_ids = await _finalize_chain_rewards(
+                # Mark all delivered top-K winners, including held leads from
+                # earlier generations. Keep each row's original request ID.
+                # An existing successor sees the fulfilled quota on its next tick.
+                winner_lead_ids = await _finalize_chain_winners(
                     rid, topk, chain["tied_groups"],
                 )
                 supabase.table("fulfillment_requests").update({
@@ -860,9 +846,8 @@ async def _lifecycle_tick_inner(supabase) -> None:
                     # but didn't hit the quota.  Successor inherits the
                     # in-flight held set (held companies become
                     # excluded_companies) and asks miners only for the
-                    # remaining quota.  No rewards distributed yet; held
-                    # leads sit in DB with is_chain_held=TRUE and earn $0
-                    # until the chain eventually reaches `fulfilled`.
+                    # remaining quota. Held leads retain is_chain_held=TRUE
+                    # until the chain reaches `fulfilled`.
                     # ────────────────────────────────────────────────────
                     remaining = chain_target - held_count
                     print(
@@ -922,11 +907,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
             import traceback
             traceback.print_exc()
 
-    # Step 4: reward expiry
-    try:
-        await _expire_rewards(supabase)
-    except Exception as e:
-        print(f"❌ Reward expiry error: {e}")
+
 
 
 def _chain_held_state_for_recycle(supabase, request_id: str, current_num_leads: int) -> dict:
@@ -1016,8 +997,8 @@ def _retire_completed_chain_continuation(
 ) -> bool:
     """Mark an already-complete zero-quota continuation as recycled.
 
-    Rewards are already written on predecessor consensus rows. This helper
-    deliberately avoids creating a new successor or redistributing rewards.
+    Winners are already recorded on predecessor consensus rows. This helper
+    deliberately avoids creating a new successor or changing the selected winners.
     """
     rid = request["request_id"]
     try:
@@ -1298,11 +1279,8 @@ async def _resolve_chain_topk(
     is_chain_held flags across the entire chain accordingly, and returns
     a structured decision dict.
 
-    Crucially: NO REWARDS ARE WRITTEN HERE.  Reward distribution only
-    happens when the chain reaches its full quota; until then, held
-    leads sit in DB with is_chain_held=TRUE but is_winner=FALSE and
-    reward_pct=NULL.  See ``_finalize_chain_rewards`` for the
-    fulfillment-time payout.
+    Held leads remain is_winner=FALSE until the full quota is ready.
+    `_finalize_chain_winners` marks the delivered leads at fulfillment.
 
     Returned dict:
       {
@@ -1477,7 +1455,7 @@ async def _resolve_chain_topk(
     for r in topk:
         # Within a single (request_id, lead_id) pair the validator scoring
         # may have produced multiple consensus rows from tied miners.  We
-        # surface the tied set so reward_pct is split correctly.
+        # surface the tied set so all tied miners remain represented.
         tied = supabase.table("fulfillment_score_consensus") \
             .select("submission_id, lead_id, miner_hotkey, request_id, intent_signal_mapping") \
             .eq("request_id", r["request_id"]) \
@@ -1509,26 +1487,12 @@ async def _resolve_chain_topk(
     }
 
 
-async def _finalize_chain_rewards(
+async def _finalize_chain_winners(
     request_id: str,
     topk: list,
     tied_groups: list,
 ) -> set:
-    """Distribute rewards for a fulfilled chain.  Sets is_winner=TRUE and
-    reward_pct on each top-K consensus row.  Called ONLY when the chain
-    has reached its full quota and the current request is about to
-    transition to status='fulfilled'.
-
-    Tie handling: when multiple miners produced consensus rows for the
-    same (request_id, lead_id) — i.e., they submitted identical leads
-    that all passed validation — Z_PERCENT is split evenly between
-    them (Z_PERCENT / tie_count).  A miner whose lead was held in an
-    earlier generation gets paid by the request_id where their row
-    actually lives, not the chain head.
-
-    Returns the set of lead_ids that were rewarded.
-    """
-    from gateway.fulfillment.rewards import calculate_lead_rewards
+    """Persist the selected delivered leads without creating emission rewards."""
     supabase = _get_supabase()
 
     tied_by_lead = {lead_id: tied_rows for lead_id, tied_rows in tied_groups}
@@ -1551,11 +1515,12 @@ async def _finalize_chain_rewards(
     if not winners:
         return set()
 
-    current_epoch = await _get_current_epoch()
-    # ``calculate_lead_rewards`` keys on (request_id, submission_id, lead_id)
-    # so cross-generation winners (whose request_id is a predecessor) get
-    # their own rows updated — no need to remap to the chain head.
-    calculate_lead_rewards(request_id, winners, Z_PERCENT, current_epoch, L_EPOCHS)
+    for winner in winners:
+        supabase.table("fulfillment_score_consensus").update({
+            "is_winner": True,
+        }).eq("request_id", winner.get("request_id", request_id)) \
+          .eq("submission_id", winner["submission_id"]) \
+          .eq("lead_id", winner["lead_id"]).execute()
 
     # Enrich each winner with the client-ready "Intent Details" paragraph.
     # Runs ONCE per winner (not per validator) because this happens post-consensus
@@ -1976,7 +1941,7 @@ def _recycle_request(
 
         # Append in-flight held companies (chain-aware) to excluded_companies.
         # These are leads currently in is_chain_held=TRUE for this chain;
-        # they're not yet "delivered" to the client (no rewards distributed
+        # they're not yet "delivered" to the client (no winners delivered
         # yet — that happens only on chain fulfillment), but miners should
         # not waste work re-submitting at the same companies.  When a held
         # lead is later displaced, its company drops off naturally because
@@ -2064,58 +2029,3 @@ def _recycle_request(
 def _normalize_company(name: str) -> str:
     from gateway.fulfillment.normalize import normalize_company
     return normalize_company(name)
-
-
-async def _get_current_epoch() -> int:
-    """Return the current Bittensor epoch ID (async-safe).
-
-    MUST be awaited.  Called from inside the gateway's running event loop
-    (fulfillment_lifecycle_task), which means the synchronous variant
-    ``get_current_epoch_id()`` is unsafe: it internally runs
-    ``_get_current_block()``, which explicitly raises ``RuntimeError`` when
-    invoked from a thread that already has a running loop.  The previous
-    implementation swallowed that error and returned 0, causing every
-    newly-awarded ``reward_expires_epoch`` to be ``0 + L_EPOCHS`` (e.g. 100)
-    instead of ``current_epoch + L_EPOCHS`` (e.g. 22264) — making every
-    winner expired-at-birth and silently zeroing out fulfillment emission.
-
-    Assigning a reward without the official mapped epoch would corrupt its
-    expiry key, so an authority outage fails closed.
-    """
-    from gateway.utils.epoch import get_current_epoch_id_async
-
-    try:
-        return int(await get_current_epoch_id_async())
-    except Exception as e:
-        logger.error(
-            "fulfillment_epoch_authority_unavailable type=%s error=%s",
-            type(e).__name__,
-            str(e)[:200],
-        )
-        raise RuntimeError(
-            "fulfillment reward epoch authority is unavailable"
-        ) from e
-
-
-async def _expire_rewards(supabase) -> None:
-    """NULL out reward_pct on expired consensus rows (async)."""
-    current_epoch = await _get_current_epoch()
-    if current_epoch <= 0:
-        return
-    try:
-        supabase.table("fulfillment_score_consensus").update({
-            "reward_pct": None,
-        }).lte("reward_expires_epoch", current_epoch).not_is("reward_pct", None).execute()
-    except Exception:
-        try:
-            resp = supabase.table("fulfillment_score_consensus") \
-                .select("consensus_id, reward_pct") \
-                .lte("reward_expires_epoch", current_epoch) \
-                .execute()
-            for row in (resp.data or []):
-                if row.get("reward_pct") is not None:
-                    supabase.table("fulfillment_score_consensus").update({
-                        "reward_pct": None,
-                    }).eq("consensus_id", row["consensus_id"]).execute()
-        except Exception as e:
-            logger.error(f"Reward expiry fallback failed: {e}")

@@ -15,7 +15,6 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 RECEIPT_SCHEMA_VERSION = "leadpoet.attested_receipt.v1"
 SCORING_ROLE = "gateway_scoring"
-WEIGHT_ROLE = "validator_weights"
 
 SCORING_PURPOSES = frozenset(
     {
@@ -25,13 +24,10 @@ SCORING_PURPOSES = frozenset(
         "research_lab.rebenchmark.v1",
         "research_lab.promotion_metric.v1",
         "research_lab.promotion_decision.v1",
-        "research_lab.allocation.v1",
     }
 )
-WEIGHT_PURPOSE = "validator.weights.computed.v2"
 ROLE_PURPOSES = {
     SCORING_ROLE: SCORING_PURPOSES,
-    WEIGHT_ROLE: frozenset({WEIGHT_PURPOSE}),
 }
 RECEIPT_STATUSES = frozenset({"succeeded", "failed"})
 

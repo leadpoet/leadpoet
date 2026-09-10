@@ -185,7 +185,7 @@ def test_gateway_schema_preflight_requires_the_checkpoint_sidecar() -> None:
     ]
 
 
-def test_compact_weight_sidecar_is_bound_indexed_and_preflighted() -> None:
+def test_historical_compact_weight_sidecar_is_not_preflighted() -> None:
     assert "CREATE TABLE IF NOT EXISTS\npublic.%s" % COMPACT_WEIGHT_TABLE in SQL
     for marker in (
         "UNIQUE (netuid, epoch_id, validator_hotkey, authority_stage)",
@@ -206,27 +206,7 @@ def test_compact_weight_sidecar_is_bound_indexed_and_preflighted() -> None:
         for migration, relation, columns in REQUIRED_SUPABASE_V2_SCHEMA
         if relation == COMPACT_WEIGHT_TABLE
     ]
-    assert matches == [
-        (
-            MIGRATION_NAME,
-            COMPACT_WEIGHT_TABLE,
-            (
-                "bundle_hash",
-                "netuid",
-                "epoch_id",
-                "validator_hotkey",
-                "authority_stage",
-                "schema_version",
-                "lineage_id",
-                "authority_hash",
-                "compact_submission_hash",
-                "publication_receipt_hash",
-                "compact_finalization_hash",
-                "finalization_receipt_hash",
-                "authority_doc",
-            ),
-        )
-    ]
+    assert matches == []
 
 
 def test_checkpoint_rpc_is_required_before_gateway_shutdown() -> None:

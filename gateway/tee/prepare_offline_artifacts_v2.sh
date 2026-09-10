@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
 WHEELHOUSE="$ARTIFACT_ROOT/scoring-wheelhouse-py39"
-VALIDATOR_RUNTIME="$ARTIFACT_ROOT/validator-runtime"
 RUNSC_LOCK="$SCRIPT_DIR/runsc-runtime.lock.json"
 SCORING_INPUT="$SCRIPT_DIR/requirements-scoring-py39.in"
 SCORING_LOCK="$SCRIPT_DIR/requirements-scoring-py39.lock"
@@ -77,46 +76,22 @@ PYTHONPATH="$REPO_ROOT" python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify
 chmod 755 "$TEMP_ROOT/$RUNSC_NAME"
 normalize_mtime "$TEMP_ROOT/$RUNSC_NAME"
 
-echo "Preparing hash-locked validator binary artifacts"
-if ! PYTHONPATH="$REPO_ROOT" python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
-    --lock "$REPO_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
-    --output-dir "$TEMP_ROOT/validator-runtime" \
-    --offline-artifact-root "$VALIDATOR_RUNTIME" >/dev/null 2>&1; then
-  rm -rf "$TEMP_ROOT/validator-runtime"
-  PYTHONPATH="$REPO_ROOT" python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
-    --lock "$REPO_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
-    --output-dir "$TEMP_ROOT/validator-runtime" \
-    --allow-download >/dev/null
-fi
 
-# The live gateway PCR0 builder stages validator artifacts from this same
-# cache while holding the repository-wide Docker operation lock.  Downloads
-# and temporary verification remain outside the lock, but publication and its
-# exact readback must not cross a consumer's multi-file copy or another
-# producer's publication window.
+# Keep publication and exact readback exclusive with gateway cache consumers.
+# Downloads and temporary verification above do not hold the shared host lock.
 . "$REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 leadpoet_acquire_docker_operation_lock_v2
 
-rm -rf "$WHEELHOUSE" "$VALIDATOR_RUNTIME"
+rm -rf "$WHEELHOUSE"
 mkdir -p "$(dirname "$WHEELHOUSE")"
 mv "$TEMP_ROOT/wheelhouse" "$WHEELHOUSE"
-mv "$TEMP_ROOT/validator-runtime" "$VALIDATOR_RUNTIME"
 install -m 755 "$TEMP_ROOT/$RUNSC_NAME" "$ARTIFACT_ROOT/$RUNSC_NAME"
 normalize_mtime "$ARTIFACT_ROOT/$RUNSC_NAME"
 rm -rf "$TEMP_ROOT"
 
 python3 "$SCRIPT_DIR/scoring_wheelhouse.py" verify-wheelhouse \
-  --input "$SCORING_INPUT" \
-  --lock "$SCORING_LOCK" \
-  --wheelhouse "$WHEELHOUSE"
+  --input "$SCORING_INPUT" --lock "$SCORING_LOCK" --wheelhouse "$WHEELHOUSE"
 PYTHONPATH="$REPO_ROOT" python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify \
-  --lock "$RUNSC_LOCK" \
-  --artifact "$ARTIFACT_ROOT/$RUNSC_NAME"
-VALIDATOR_CHECK_DIR="$(mktemp -d "$ARTIFACT_ROOT/.validator-check.XXXXXX")"
-PYTHONPATH="$REPO_ROOT" python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
-  --lock "$REPO_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
-  --output-dir "$VALIDATOR_CHECK_DIR" \
-  --offline-artifact-root "$VALIDATOR_RUNTIME" >/dev/null
-rm -rf "$VALIDATOR_CHECK_DIR"
+  --lock "$RUNSC_LOCK" --artifact "$ARTIFACT_ROOT/$RUNSC_NAME"
 leadpoet_release_docker_operation_lock_v2
 echo "All V2 release artifacts are prepared and hash verified in $ARTIFACT_ROOT"

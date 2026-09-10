@@ -1,4 +1,4 @@
-"""Strict V2 bridge for measured ranking, promotion, and allocation decisions."""
+"""Strict V2 bridge for protected qualification and artifact decisions."""
 
 from __future__ import annotations
 

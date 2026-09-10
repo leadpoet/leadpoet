@@ -80,7 +80,6 @@ PROOF_FD_ENV_NAME = "GATEWAY_MINER_MAINTENANCE_PROOF_FD"
 PROOF_FD_NUMBER = 190
 CONTROLLER_WRAPPER_FD_NUMBER = 191
 CONTROLLER_GIT_HELPER_FD_NUMBER = 192
-CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER = 193
 CONTROLLER_MEMORY_GUARD_FD_NUMBER = 194
 CONTROLLER_PROCESS_HELPER_FD_NUMBER = 195
 CONTROLLER_PROCESS_HELPER_PATH = "scripts/manage_owned_process_group.py"
@@ -128,13 +127,12 @@ _RESTART_AUTHORITY_NAMES = frozenset(
     {
         PROOF_FD_ENV_NAME,
         "GATEWAY_GIT_HELPER",
-        "GATEWAY_EXACT_COMMIT_HELPER",
         "GATEWAY_HOST_MEMORY_GUARD_PATH",
         "GATEWAY_CONTROLLER_PROCESS_HELPER",
         "LAB_ARENA_PROCESS_HELPER",
     }
 )
-_PROOF_FIELDS = frozenset({'schema_version', 'candidate_commit', 'candidate_tree_hash', 'candidate_blob_manifest_sha256', 'pre_hydration_runtime_commit', 'n_minus_one_controller_commit', 'current_secret_version_id', 'current_document_commitment', 'current_hydrated_environment_commitment', 'current_stage_topology_commitment', 'controller_wrapper_sha256', 'controller_git_helper_sha256', 'controller_exact_commit_helper_sha256', 'controller_memory_guard_sha256', 'controller_process_helper_sha256', 'pre_hydration_live_process_commitment', 'restart_invocation_id', 'prepared_at', 'proof_hash'})
+_PROOF_FIELDS = frozenset({'schema_version', 'candidate_commit', 'candidate_tree_hash', 'candidate_blob_manifest_sha256', 'pre_hydration_runtime_commit', 'n_minus_one_controller_commit', 'current_secret_version_id', 'current_document_commitment', 'current_hydrated_environment_commitment', 'current_stage_topology_commitment', 'controller_wrapper_sha256', 'controller_git_helper_sha256', 'controller_memory_guard_sha256', 'controller_process_helper_sha256', 'pre_hydration_live_process_commitment', 'restart_invocation_id', 'prepared_at', 'proof_hash'})
 
 
 class GatewayMinerMaintenanceRestartError(RuntimeError):
@@ -1361,15 +1359,15 @@ def _verified_installed_controller_bundle(
         expected_mode=0o700,
         label="installed N-1 controller wrapper",
     )
+    if b"exact_commit_restart_v2" in controller_restart:
+        raise GatewayMinerMaintenanceRestartError(
+            "installed N-1 controller still requires the retired auditor protocol; "
+            "install the exact gateway-only controller before restart"
+        )
     controller_helper = _read_exact_installed_file(
         resolved / "scripts/gateway_git_deploy.py",
         expected_mode=0o600,
         label="installed N-1 deployment helper",
-    )
-    controller_exact_restart = _read_exact_installed_file(
-        resolved / "Leadpoet/utils/exact_commit_restart_v2.py",
-        expected_mode=0o600,
-        label="installed N-1 exact-commit helper",
     )
     controller_memory_guard = _read_exact_installed_file(
         resolved / "gateway/tee/host_memory_guard_v2.py",
@@ -1414,12 +1412,6 @@ def _verified_installed_controller_bundle(
             repo_root,
             "show",
             f"{controller_commit}:scripts/gateway_git_deploy.py",
-        )
-        or controller_exact_restart
-        != _run_git_bytes(
-            repo_root,
-            "show",
-            f"{controller_commit}:Leadpoet/utils/exact_commit_restart_v2.py",
         )
         or controller_memory_guard
         != _run_git_bytes(
@@ -1494,7 +1486,6 @@ def _verified_installed_controller_bundle(
     payloads = {
         "wrapper": controller_restart,
         "git_helper": controller_helper,
-        "exact_commit_helper": controller_exact_restart,
         "memory_guard": controller_memory_guard,
     }
     payloads["process_helper"] = controller_process_helper
@@ -1606,7 +1597,7 @@ def _validate_candidate_identity(
 def _proof_body(*, candidate_commit: str, tree_evidence: Mapping[str, Any], final_secret_result: Mapping[str, str], restart_invocation_id: str, live_process_commitment: str) -> dict[str, str]:
     controller = tree_evidence['controller_bundle']
     commitments = controller['commitments']
-    body = {'schema_version': SCHEMA_VERSION, 'candidate_commit': str(candidate_commit), 'candidate_tree_hash': str(tree_evidence['tree_hash']), 'candidate_blob_manifest_sha256': 'sha256:' + str(tree_evidence['blob_manifest_sha256']), 'pre_hydration_runtime_commit': str(tree_evidence['previous_sha']), 'n_minus_one_controller_commit': str(tree_evidence['n_minus_one_controller_commit']), 'current_secret_version_id': str(final_secret_result['current_version_id']), 'current_document_commitment': str(final_secret_result['current_document_commitment']), 'current_hydrated_environment_commitment': str(final_secret_result['current_hydrated_environment_commitment']), 'current_stage_topology_commitment': str(final_secret_result['current_stage_topology_commitment']), 'controller_wrapper_sha256': str(commitments['wrapper']), 'controller_git_helper_sha256': str(commitments['git_helper']), 'controller_exact_commit_helper_sha256': str(commitments['exact_commit_helper']), 'controller_memory_guard_sha256': str(commitments['memory_guard']), 'controller_process_helper_sha256': str(commitments['process_helper']), 'pre_hydration_live_process_commitment': str(live_process_commitment), 'restart_invocation_id': str(restart_invocation_id), 'prepared_at': _utc_now()}
+    body = {'schema_version': SCHEMA_VERSION, 'candidate_commit': str(candidate_commit), 'candidate_tree_hash': str(tree_evidence['tree_hash']), 'candidate_blob_manifest_sha256': 'sha256:' + str(tree_evidence['blob_manifest_sha256']), 'pre_hydration_runtime_commit': str(tree_evidence['previous_sha']), 'n_minus_one_controller_commit': str(tree_evidence['n_minus_one_controller_commit']), 'current_secret_version_id': str(final_secret_result['current_version_id']), 'current_document_commitment': str(final_secret_result['current_document_commitment']), 'current_hydrated_environment_commitment': str(final_secret_result['current_hydrated_environment_commitment']), 'current_stage_topology_commitment': str(final_secret_result['current_stage_topology_commitment']), 'controller_wrapper_sha256': str(commitments['wrapper']), 'controller_git_helper_sha256': str(commitments['git_helper']), 'controller_memory_guard_sha256': str(commitments['memory_guard']), 'controller_process_helper_sha256': str(commitments['process_helper']), 'pre_hydration_live_process_commitment': str(live_process_commitment), 'restart_invocation_id': str(restart_invocation_id), 'prepared_at': _utc_now()}
     return {**body, 'proof_hash': sha256_json(body)}
 
 
@@ -1615,7 +1606,7 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
         raise GatewayMinerMaintenanceRestartError('miner-maintenance invocation proof fields are invalid')
     normalized = {name: str(value[name]) for name in _PROOF_FIELDS}
     body = {name: normalized[name] for name in _PROOF_FIELDS if name != 'proof_hash'}
-    commitment_fields = ('candidate_blob_manifest_sha256', 'current_document_commitment', 'current_hydrated_environment_commitment', 'current_stage_topology_commitment', 'controller_wrapper_sha256', 'controller_git_helper_sha256', 'controller_exact_commit_helper_sha256', 'controller_memory_guard_sha256', 'controller_process_helper_sha256', 'pre_hydration_live_process_commitment')
+    commitment_fields = ('candidate_blob_manifest_sha256', 'current_document_commitment', 'current_hydrated_environment_commitment', 'current_stage_topology_commitment', 'controller_wrapper_sha256', 'controller_git_helper_sha256', 'controller_memory_guard_sha256', 'controller_process_helper_sha256', 'pre_hydration_live_process_commitment')
     if not _COMMIT_RE.fullmatch(normalized['candidate_commit']) or not _TREE_RE.fullmatch(normalized['candidate_tree_hash']) or (not _COMMIT_RE.fullmatch(normalized['pre_hydration_runtime_commit'])) or (not _COMMIT_RE.fullmatch(normalized['n_minus_one_controller_commit'])) or any((not _SHA256_RE.fullmatch(normalized[name]) for name in commitment_fields)) or (not _VERSION_ID_RE.fullmatch(normalized['current_secret_version_id'])) or (not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._:-]{0,199}', normalized['restart_invocation_id'])) or (not normalized['prepared_at'].endswith('Z')) or (normalized['proof_hash'] != sha256_json(body)):
         raise GatewayMinerMaintenanceRestartError('miner-maintenance invocation proof commitments are invalid')
     return normalized
@@ -1653,7 +1644,6 @@ def _require_reserved_memfd_numbers_available() -> None:
         PROOF_FD_NUMBER,
         CONTROLLER_WRAPPER_FD_NUMBER,
         CONTROLLER_GIT_HELPER_FD_NUMBER,
-        CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
         CONTROLLER_MEMORY_GUARD_FD_NUMBER,
         CONTROLLER_PROCESS_HELPER_FD_NUMBER,
     ):
@@ -1862,7 +1852,7 @@ def _verify_proof_against_state(*, proof: Mapping[str, str], deploy_commit: str,
     if tree_evidence is not None:
         controller = tree_evidence['controller_bundle']
         commitments = controller['commitments']
-        if validated['candidate_blob_manifest_sha256'] != 'sha256:' + str(tree_evidence['blob_manifest_sha256']) or validated['pre_hydration_runtime_commit'] != str(tree_evidence['previous_sha']) or validated['n_minus_one_controller_commit'] != str(controller['controller_commit']) or (validated['controller_wrapper_sha256'] != str(commitments['wrapper'])) or (validated['controller_git_helper_sha256'] != str(commitments['git_helper'])) or (validated['controller_exact_commit_helper_sha256'] != str(commitments['exact_commit_helper'])) or (validated['controller_memory_guard_sha256'] != str(commitments['memory_guard'])) or (validated['controller_process_helper_sha256'] != str(commitments['process_helper'])):
+        if validated['candidate_blob_manifest_sha256'] != 'sha256:' + str(tree_evidence['blob_manifest_sha256']) or validated['pre_hydration_runtime_commit'] != str(tree_evidence['previous_sha']) or validated['n_minus_one_controller_commit'] != str(controller['controller_commit']) or (validated['controller_wrapper_sha256'] != str(commitments['wrapper'])) or (validated['controller_git_helper_sha256'] != str(commitments['git_helper'])) or (validated['controller_memory_guard_sha256'] != str(commitments['memory_guard'])) or (validated['controller_process_helper_sha256'] != str(commitments['process_helper'])):
             raise GatewayMinerMaintenanceRestartError('verified N-1 controller differs from the invocation proof')
     return {'status': 'invocation_verified', 'candidate_commit': validated['candidate_commit'], 'current_secret_version_id': validated['current_secret_version_id'], 'proof_hash': validated['proof_hash']}
 
@@ -2111,7 +2101,6 @@ def _install_controller_bundle_memfds(
     assignments = (
         ("wrapper", CONTROLLER_WRAPPER_FD_NUMBER),
         ("git_helper", CONTROLLER_GIT_HELPER_FD_NUMBER),
-        ("exact_commit_helper", CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER),
         ("memory_guard", CONTROLLER_MEMORY_GUARD_FD_NUMBER),
         ("process_helper", CONTROLLER_PROCESS_HELPER_FD_NUMBER),
     )
@@ -2177,13 +2166,13 @@ def bootstrap_gateway_miner_maintenance_restart(*, repo_root: Path, candidate_ro
         _verify_proof_against_state(proof=_proof_from_fd(PROOF_FD_NUMBER), deploy_commit=expected_commit, candidate_tree_hash=str(final_tree['tree_hash']), client=secrets_client, tree_evidence=final_tree, restart_invocation_id=restart_invocation_id, live_process_commitment=final_live_process_commitment)
         _install_controller_bundle_memfds(final_tree['controller_bundle'])
         controller_fds_open = True
-        for descriptor in (PROOF_FD_NUMBER, CONTROLLER_WRAPPER_FD_NUMBER, CONTROLLER_GIT_HELPER_FD_NUMBER, CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER, CONTROLLER_MEMORY_GUARD_FD_NUMBER, CONTROLLER_PROCESS_HELPER_FD_NUMBER):
+        for descriptor in (PROOF_FD_NUMBER, CONTROLLER_WRAPPER_FD_NUMBER, CONTROLLER_GIT_HELPER_FD_NUMBER, CONTROLLER_MEMORY_GUARD_FD_NUMBER, CONTROLLER_PROCESS_HELPER_FD_NUMBER):
             os.set_inheritable(descriptor, True)
         _require_canonical_restart_lock_fd()
         _leave_and_close_bootstrap_tree(bootstrap_root)
         cleaned = True
         environment = _controller_exec_environment(os.environ)
-        environment.update({PROOF_FD_ENV_NAME: str(PROOF_FD_NUMBER), 'GATEWAY_GIT_HELPER': f'/proc/self/fd/{CONTROLLER_GIT_HELPER_FD_NUMBER}', 'GATEWAY_EXACT_COMMIT_HELPER': f'/proc/self/fd/{CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER}', 'GATEWAY_HOST_MEMORY_GUARD_PATH': f'/proc/self/fd/{CONTROLLER_MEMORY_GUARD_FD_NUMBER}', 'GATEWAY_CONTROLLER_PROCESS_HELPER': f'/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}', 'LAB_ARENA_PROCESS_HELPER': f'/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}', 'LEADPOET_GATEWAY_ENV_SECRET_ID': GATEWAY_SECRET_ID, 'AWS_REGION': EXPECTED_AWS_REGION, 'AWS_DEFAULT_REGION': EXPECTED_AWS_REGION, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_NO_REPLACE_OBJECTS': '1', 'GATEWAY_RESTART_LOCK_HELD': '1', 'GATEWAY_RESTART_PHASE': 'prepare'})
+        environment.update({PROOF_FD_ENV_NAME: str(PROOF_FD_NUMBER), 'GATEWAY_GIT_HELPER': f'/proc/self/fd/{CONTROLLER_GIT_HELPER_FD_NUMBER}', 'GATEWAY_HOST_MEMORY_GUARD_PATH': f'/proc/self/fd/{CONTROLLER_MEMORY_GUARD_FD_NUMBER}', 'GATEWAY_CONTROLLER_PROCESS_HELPER': f'/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}', 'LAB_ARENA_PROCESS_HELPER': f'/proc/self/fd/{CONTROLLER_PROCESS_HELPER_FD_NUMBER}', 'LEADPOET_GATEWAY_ENV_SECRET_ID': GATEWAY_SECRET_ID, 'AWS_REGION': EXPECTED_AWS_REGION, 'AWS_DEFAULT_REGION': EXPECTED_AWS_REGION, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_NO_REPLACE_OBJECTS': '1', 'GATEWAY_RESTART_LOCK_HELD': '1', 'GATEWAY_RESTART_PHASE': 'prepare'})
         for name in ('GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN', 'GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT', 'GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE', 'GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE'):
             environment.pop(name, None)
         os.execve('/bin/bash', ['bash', f'/proc/self/fd/{CONTROLLER_WRAPPER_FD_NUMBER}', '--commit', str(expected_commit)], environment)
@@ -2194,7 +2183,7 @@ def bootstrap_gateway_miner_maintenance_restart(*, repo_root: Path, candidate_ro
             except GatewayMinerMaintenanceRestartError:
                 pass
         if controller_fds_open:
-            for descriptor in (CONTROLLER_WRAPPER_FD_NUMBER, CONTROLLER_GIT_HELPER_FD_NUMBER, CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER, CONTROLLER_MEMORY_GUARD_FD_NUMBER, CONTROLLER_PROCESS_HELPER_FD_NUMBER):
+            for descriptor in (CONTROLLER_WRAPPER_FD_NUMBER, CONTROLLER_GIT_HELPER_FD_NUMBER, CONTROLLER_MEMORY_GUARD_FD_NUMBER, CONTROLLER_PROCESS_HELPER_FD_NUMBER):
                 try:
                     os.close(descriptor)
                 except OSError:

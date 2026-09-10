@@ -109,12 +109,14 @@ def test_simple_stage_and_completion_rpc_shapes():
     ]
 
 
-def test_removed_durable_state_has_no_store_boundary():
+def test_store_boundary_contains_only_current_arena_durable_state():
     assert TABLES == (
         "lab_arena_rounds",
         "lab_arena_submissions",
         "lab_arena_runs",
         "lab_arena_ledger",
+        "lab_arena_accepted_weight_states",
+        "lab_arena_chain_outcomes",
     )
     for removed in (
         "lab_arena_append_generation_attempt",

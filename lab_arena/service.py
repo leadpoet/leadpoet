@@ -310,10 +310,7 @@ class ServiceConfig:
     baseline_promoter_factory: Optional[Callable[[], Any]] = None
     # Supplies plain accepted economic inputs. It must not return receipts,
     # ancestry, release identity, or a preconstructed weight vector.
-    accepted_weight_inputs_source: Optional[Callable[[int], Mapping[str, Any]]] = None
     accepted_burn_hotkey: str = ""
-    fulfillment_enabled: bool = False
-    leaderboard_emissions_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -2401,16 +2398,10 @@ class ArenaService:
             epoch_scope = dict(self._config.chain.accepted_weight_epoch_scope())
             if int(epoch_scope.get("epoch", -1)) != requested_epoch:
                 raise ServiceError("accepted_weight_epoch_not_current", 409)
-            source = self._config.accepted_weight_inputs_source
-            inputs = dict(source(requested_epoch)) if source is not None else self._store.weight_inputs(
-                requested_epoch, netuid, self._config.accepted_burn_hotkey,
-                fulfillment_enabled=self._config.fulfillment_enabled,
-                leaderboard_enabled=self._config.leaderboard_emissions_enabled,
-            )
         except ServiceError:
             raise
         except Exception as exc:
-            raise ServiceError("accepted_weight_inputs_unavailable", 503) from exc
+            raise ServiceError("accepted_weight_epoch_scope_unavailable", 503) from exc
         try:
             state = weight_state.build_accepted_weight_state(
                 self._reward_signer(), network=network,
@@ -2419,9 +2410,7 @@ class ArenaService:
                 valid_from_block=epoch_scope["valid_from_block"],
                 valid_until_block=epoch_scope["valid_until_block"],
                 reward_basis=basis,
-                fixed_allocations=inputs["fixed_allocations"],
-                fulfillment_demands=inputs["fulfillment_demands"],
-                burn_hotkey=inputs["burn_hotkey"],
+                burn_hotkey=self._config.accepted_burn_hotkey,
                 issued_at=str(basis["published_at"]),
             )
             stored = self._store.publish_weight_state(

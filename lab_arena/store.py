@@ -77,7 +77,6 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
     "lab_arena_publish_weight_state_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_state_hash", "text"), ("p_state_doc", "jsonb")),
     "lab_arena_record_chain_outcome_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_validator_hotkey", "text"), ("p_request_id", "text"), ("p_extrinsic_hash", "text"), ("p_outcome_doc", "jsonb")),
-    "lab_arena_weight_inputs_v1": (("p_epoch", "bigint"), ("p_netuid", "integer"), ("p_burn_hotkey", "text"), ("p_fulfillment_enabled", "boolean"), ("p_leaderboard_enabled", "boolean")),
 }
 
 TABLES = (
@@ -539,15 +538,6 @@ class ArenaStore:
         if len(rows) > 1:
             raise ArenaStoreError("multiple accepted weight states exist for one epoch")
         return rows[0] if rows else None
-
-    def weight_inputs(self, epoch: int, netuid: int, burn_hotkey: str, *, fulfillment_enabled: bool, leaderboard_enabled: bool) -> Dict[str, Any]:
-        return _require_mapping(
-            self._transport.rpc(
-                "lab_arena_weight_inputs_v1",
-                {"p_epoch": int(epoch), "p_netuid": int(netuid), "p_burn_hotkey": str(burn_hotkey), "p_fulfillment_enabled": bool(fulfillment_enabled), "p_leaderboard_enabled": bool(leaderboard_enabled)},
-            ),
-            "weight_inputs",
-        )
 
     def publish_weight_state(self, network: str, netuid: int, epoch: int, state_hash: str, state_doc: Mapping[str, Any]) -> Dict[str, Any]:
         return _require_mapping(

@@ -13,19 +13,17 @@ def _env(tmp_path, text):
 
 
 def test_environment_is_data_and_overrides_ambient_settings(tmp_path, monkeypatch):
-    monkeypatch.setenv("LEADPOET_WEIGHT_MODE", "legacy")
     monkeypatch.setenv("LAB_ARENA_API_BASE_URL", "old")
-    path = _env(tmp_path, 'LEADPOET_WEIGHT_MODE=arena\nLAB_ARENA_API_BASE_URL="https://arena.example/$(false)"\n')
+    path = _env(tmp_path, 'LAB_ARENA_API_BASE_URL="https://arena.example/$(false)"\n')
     load_environment(path)
-    assert os.environ["LEADPOET_WEIGHT_MODE"] == "arena"
     assert os.environ["LAB_ARENA_API_BASE_URL"] == "https://arena.example/$(false)"
 
 
 @pytest.mark.parametrize("body", [
     "LEADPOET_WEIGHT_MODE=legacy\n",
-    "LEADPOET_WEIGHT_MODE=arena\nPATH=/tmp\n",
-    "LEADPOET_WEIGHT_MODE=arena\nLEADPOET_WEIGHT_MODE=arena\n",
-    "LEADPOET_WEIGHT_MODE=arena\nLAB_ARENA_SECRET=private value\n",
+    "PATH=/tmp\n",
+    "LAB_ARENA_API_BASE_URL=one\nLAB_ARENA_API_BASE_URL=two\n",
+    "LAB_ARENA_SECRET=private value\n",
 ])
 def test_invalid_configuration_is_rejected_without_values_in_errors(tmp_path, body):
     with pytest.raises(ValueError) as error:
@@ -34,7 +32,7 @@ def test_invalid_configuration_is_rejected_without_values_in_errors(tmp_path, bo
 
 
 def test_public_or_symlinked_environment_is_rejected(tmp_path):
-    path = _env(tmp_path, "LEADPOET_WEIGHT_MODE=arena\n")
+    path = _env(tmp_path, "# Arena validator environment\n")
     path.chmod(0o644)
     with pytest.raises(ValueError, match="private regular"):
         load_environment(path)

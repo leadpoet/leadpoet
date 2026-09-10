@@ -171,12 +171,6 @@ def test_shared_docker_host_veto_is_protected():
         "shared_docker_operation_lock",
         "shared_docker_operation_source_paths",
     } <= set(PROTECTED_SYMBOLS["research_lab/docker_operation_lock_v2.py"])
-    assert {
-        "_docker_operation_admission_lock_file",
-        "_docker_operation_lock_scope",
-        "_run_sync_build_step_to_completion",
-        "_communicate_build_process_to_completion",
-    } <= set(PROTECTED_SYMBOLS["gateway/utils/pcr0_builder.py"])
 
 
 def test_enclave_surface_stages_every_external_protected_source(tmp_path: Path):
@@ -232,8 +226,6 @@ def test_ancestry_unknown_commit_recovery_is_protected():
     assert {
         "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",
         "_ancestry_checkpoint_unknown_commit_sleep",
-        "_rehydrate_compact_execution_graph_v2",
-        "load_execution_result_v2",
         "persist_ancestry_checkpoint_v2",
     } <= set(
         PROTECTED_SYMBOLS["gateway/research_lab/attested_v2_store.py"]
@@ -306,7 +298,6 @@ def test_artifact_egress_transport_boundaries_are_protected():
         "PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION",
         "EGRESS_POLICY_DIRECT_ONLY",
         "_PROVIDER_TERMINAL_STATUSES",
-        "_CHAIN_WEIGHT_OBSERVATION_PURPOSE",
         "_SAFE_ERROR_TYPE_RE",
         "_PROVIDER_ID_RE",
         "_PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_FIELDS",

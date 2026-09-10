@@ -3172,49 +3172,6 @@ def test_failed_artifact_transaction_removes_terminal_record_before_retry():
     }
 
 
-def test_chain_weight_health_counts_only_committed_direct_2xx_supabase():
-    class HealthyTransport(FakeTransport):
-        def __call__(self, **request):
-            self.calls.append(request)
-            return {
-                "http_status": 200,
-                "headers": {"content-type": "application/json"},
-                "body": b'{"rows":[]}',
-                "tls_peer_chain_hash": "sha256:" + "b" * 64,
-                "tls_protocol": "TLSv1.3",
-            }
-
-    transport = HealthyTransport()
-    broker = _broker(transport)
-    proxy_url = "https://worker:test-secret@proxy.example.com:443"
-    broker.provision_job_credential(
-        job_id="job-1",
-        slot="egress_proxy",
-        credential=proxy_url,
-        credential_value_hash_expected=credential_value_hash(proxy_url),
-    )
-    request = _request(
-        provider_id="supabase",
-        method="GET",
-        url=(
-            "https://qplwoislplkcegvdmbim.supabase.co/"
-            "rest/v1/research_lab_chain_weight_observations"
-        ),
-        purpose="research_lab.chain_weight_observation.v1",
-        body_b64=base64.b64encode(b"").decode("ascii"),
-    )
-
-    with broker.transient_terminal_transaction():
-        result = broker.execute(request)
-
-    assert result["terminal_status"] == "authenticated_response"
-    assert "upstream_proxy_url" not in transport.calls[0]
-    health = broker.health()
-    assert health["provider_2xx_success_counts"]["supabase"] == {
-        "direct": 1,
-        "assigned_proxy": 0,
-    }
-    assert health["chain_weight_observation_success_count"] == 1
 
 
 @pytest.mark.parametrize("commit", [False, True])

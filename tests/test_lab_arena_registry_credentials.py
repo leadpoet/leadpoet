@@ -53,8 +53,3 @@ def test_ecr_credentials_refresh_before_expiry(monkeypatch):
     now[0] = 1800
     assert client._credentials(host) == ("AWS", "second")
     assert len(calls) == 2
-
-
-def test_validator_restart_passes_registry_repository_to_sudo():
-    restart = (wiring.Path(__file__).resolve().parents[1] / "validator_restart.sh").read_text()
-    assert 'LAB_ARENA_REGISTRY_REPOSITORY="${LAB_ARENA_REGISTRY_REPOSITORY:-}"' in restart

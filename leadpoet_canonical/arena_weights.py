@@ -34,7 +34,7 @@ U16_MAX = 65_535
 _BODY_FIELDS = (
     "schema_version", "network", "genesis_hash", "netuid", "epoch",
     "valid_from_block", "valid_until_block", "reward_basis",
-    "fixed_allocations", "fulfillment_demands", "burn_hotkey", "issued_at",
+    "burn_hotkey", "issued_at",
 )
 _HOTKEY_CHARS = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$")
@@ -107,26 +107,6 @@ def _hotkey(value: Any, name: str) -> str:
     return text
 
 
-def _distribution(value: Any, *, field: str, share_field: str, exact_total: bool) -> List[Dict[str, Any]]:
-    _require(isinstance(value, list), "%s must be a list" % field)
-    _require(len(value) <= 4096, "%s has too many entries" % field)
-    result = []
-    for item in value:
-        _require(isinstance(item, Mapping) and set(item) == {"hotkey", share_field}, "%s entry fields are invalid" % field)
-        maximum = PARTS_PER_BILLION if field == "fixed_allocations" else (1 << 64) - 1
-        share = _integer(item[share_field], "%s.%s" % (field, share_field), maximum)
-        _require(share > 0, "%s shares must be positive" % field)
-        result.append({"hotkey": _hotkey(item["hotkey"], "%s.hotkey" % field), share_field: share})
-    hotkeys = [item["hotkey"] for item in result]
-    _require(hotkeys == sorted(hotkeys) and len(set(hotkeys)) == len(hotkeys), "%s must have sorted unique hotkeys" % field)
-    total = sum(item[share_field] for item in result)
-    if exact_total:
-        _require(total == PARTS_PER_BILLION, "%s total is invalid" % field)
-    elif field == "fixed_allocations":
-        _require(total <= PARTS_PER_BILLION, "%s total is invalid" % field)
-    return result
-
-
 def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     _require(isinstance(value, Mapping), "accepted weight state must be an object")
     _require(set(value) == set(_BODY_FIELDS) | {"state_hash", "signature"}, "accepted weight state fields are invalid")
@@ -143,8 +123,6 @@ def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     _require(isinstance(value.get("issued_at"), str) and bool(_TIMESTAMP_RE.fullmatch(value["issued_at"])), "issued_at is invalid")
     reward_basis = validate_reward_basis(value.get("reward_basis"))
     _require(int(reward_basis["effective_reward_epoch"]) <= epoch, "reward basis is not effective for epoch")
-    fixed = _distribution(value.get("fixed_allocations"), field="fixed_allocations", share_field="share_ppb", exact_total=False)
-    _distribution(value.get("fulfillment_demands"), field="fulfillment_demands", share_field="share_ppb", exact_total=False)
     _hotkey(value.get("burn_hotkey"), "burn_hotkey")
     body = accepted_weight_state_body(value)
     expected_hash = sha256_json(body)
@@ -186,30 +164,15 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
     registered_hotkeys = set(hotkeys)
     burn_hotkey = str(state["burn_hotkey"])
     _require(burn_hotkey in registered_hotkeys, "burn_hotkey is not registered at finalized state")
-    fixed_total = 0
-    for item in state["fixed_allocations"]:
-        fixed_total += int(item["share_ppb"])
-        recipient = item["hotkey"] if item["hotkey"] in registered_hotkeys else burn_hotkey
-        by_hotkey[recipient] = by_hotkey.get(recipient, Fraction(0)) + Fraction(int(item["share_ppb"]), PARTS_PER_BILLION)
     champion = champion_values(state["reward_basis"], int(state["epoch"]), hotkeys)
     champion_share = Fraction(str(champion["champion_share"]))
-    _require(Fraction(fixed_total, PARTS_PER_BILLION) + champion_share <= 1, "fixed and Arena allocations exceed total emissions")
+    _require(champion_share <= 1, "Arena allocation exceeds total emissions")
     if champion["champion_uid"] is not None and champion_share:
         champion_hotkey = hotkeys[int(champion["champion_uid"])]
         by_hotkey[champion_hotkey] = by_hotkey.get(champion_hotkey, Fraction(0)) + champion_share
     else:
         champion_share = Fraction(0)
-    residual = Fraction(1) - Fraction(fixed_total, PARTS_PER_BILLION) - champion_share
-    demand_total = sum(int(item["share_ppb"]) for item in state["fulfillment_demands"])
-    demand_fraction = Fraction(demand_total, PARTS_PER_BILLION)
-    scale = min(Fraction(1), residual / demand_fraction) if demand_fraction else Fraction(0)
-    paid_fulfillment = Fraction(0)
-    for item in state["fulfillment_demands"]:
-        amount = Fraction(int(item["share_ppb"]), PARTS_PER_BILLION) * scale
-        paid_fulfillment += amount
-        recipient = item["hotkey"] if item["hotkey"] in registered_hotkeys else burn_hotkey
-        by_hotkey[recipient] = by_hotkey.get(recipient, Fraction(0)) + amount
-    unused = residual - paid_fulfillment
+    unused = Fraction(1) - champion_share
     if unused:
         by_hotkey[burn_hotkey] = by_hotkey.get(burn_hotkey, Fraction(0)) + unused
     registered = []
@@ -232,7 +195,5 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
         "sparse_uids": uids, "sparse_weights_u16": weights,
         "weights_hash": compare_weights_hash(int(state["netuid"]), int(state["epoch"]), sparse),
         "champion_share_ppb": int(champion_share * PARTS_PER_BILLION),
-        "fixed_share_ppb": fixed_total, "fulfillment_capacity_ppb": int(residual * PARTS_PER_BILLION),
-        "fulfillment_paid_ppb": int(paid_fulfillment * PARTS_PER_BILLION),
         "burned_residual_ppb": int(unused * PARTS_PER_BILLION),
     }

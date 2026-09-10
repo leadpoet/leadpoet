@@ -22,7 +22,6 @@ def _fresh_cache(monkeypatch):
         "_pcr0_cache",
         {
             "gateway_pcr0": ["aa" * 48],
-            "validator_pcr0": ["bb" * 48],
             "last_fetch": 0,
             "fetch_error": None,
         },
@@ -52,7 +51,7 @@ def test_successful_refresh_installs_new_values(monkeypatch):
     monkeypatch.setattr(
         nitro,
         "_fetch_pcr0_allowlist_from_github",
-        lambda: {"gateway_pcr0": ["cc" * 48], "validator_pcr0": ["dd" * 48]},
+        lambda: {"gateway_pcr0": ["cc" * 48]},
     )
     nitro._refresh_pcr0_cache_if_needed()
     assert nitro._pcr0_cache["gateway_pcr0"] == ["cc" * 48]
@@ -65,7 +64,7 @@ def test_slow_fetch_does_not_block_concurrent_readers(monkeypatch):
 
     def slow_fetch():
         release.wait(5)
-        return {"gateway_pcr0": ["ee" * 48], "validator_pcr0": ["ff" * 48]}
+        return {"gateway_pcr0": ["ee" * 48]}
 
     monkeypatch.setattr(nitro, "_fetch_pcr0_allowlist_from_github", slow_fetch)
     worker = threading.Thread(target=nitro._refresh_pcr0_cache_if_needed)
@@ -94,7 +93,7 @@ def test_in_flight_refresh_remains_single_flight_after_ttl(monkeypatch):
         calls.append(1)
         fetch_started.set()
         assert release_fetch.wait(5)
-        return {"gateway_pcr0": ["33" * 48], "validator_pcr0": ["44" * 48]}
+        return {"gateway_pcr0": ["33" * 48]}
 
     monkeypatch.setattr(nitro, "PCR0_CACHE_TTL_SECONDS", 0)
     monkeypatch.setattr(nitro, "_fetch_pcr0_allowlist_from_github", slow_fetch)
@@ -104,7 +103,6 @@ def test_in_flight_refresh_remains_single_flight_after_ttl(monkeypatch):
 
     try:
         assert nitro.get_allowed_gateway_pcr0() == ["aa" * 48]
-        assert nitro.get_allowed_validator_pcr0() == ["bb" * 48]
         assert calls == [1]
     finally:
         release_fetch.set()
@@ -120,7 +118,6 @@ def test_first_fetch_waits_instead_of_returning_empty_allowlist(monkeypatch):
         "_pcr0_cache",
         {
             "gateway_pcr0": [],
-            "validator_pcr0": [],
             "last_fetch": 0,
             "fetch_error": None,
         },
@@ -133,7 +130,7 @@ def test_first_fetch_waits_instead_of_returning_empty_allowlist(monkeypatch):
     def slow_fetch():
         fetch_started.set()
         assert release_fetch.wait(5)
-        return {"gateway_pcr0": ["11" * 48], "validator_pcr0": ["22" * 48]}
+        return {"gateway_pcr0": ["11" * 48]}
 
     def read_allowlist():
         observed.extend(nitro.get_allowed_gateway_pcr0())

@@ -1,80 +1,75 @@
-"""The retired intake cannot be reached through public or measured surfaces."""
-
-import inspect
+"""Retired incentive systems have no executable producer or allocation path."""
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
-from gateway.research_lab import api
-from gateway.research_lab.admin import build_parser
-from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.tee.coordinator_executor_v2 import COORDINATOR_OPERATIONS_V2
-from gateway.tee.reward_executor_v2 import execute_reward_decision_v2
 from gateway.tee.supabase_source_v2 import QUERY_POLICIES
-from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_live_status_exposes_shared_restart_latch_without_source_controls(monkeypatch, enabled):
-    from gateway.tee import gateway_miner_maintenance_restart_v1 as maintenance
-
-    monkeypatch.setenv("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED", str(enabled).lower())
-    app = FastAPI()
-    app.include_router(api.router)
-    response = TestClient(app).get("/research-lab/status")
-    assert response.status_code == 200
-    status = response.json()
-    assert status["miner_submissions_enabled"] is enabled
-    assert not any("source_add" in key for key in status)
-    monkeypatch.setattr(maintenance, "_production_parity_clone_authority", lambda *a, **k: {"verified": True})
-    kwargs = {
-        "deploy_commit": "a" * 40,
-        "candidate_tree_hash": "b" * 40,
-        "runtime_environment": {"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false"},
-        "runtime_status": status,
-    }
-    if enabled:
-        with pytest.raises(maintenance.GatewayMinerMaintenanceRestartError, match="not disabled"):
-            maintenance.verify_gateway_miner_maintenance_runtime_state(**kwargs)
-    else:
-        assert maintenance.verify_gateway_miner_maintenance_runtime_state(**kwargs)["runtime_status"] == "disabled"
-
-
-def test_source_intake_routes_operations_and_configuration_are_absent():
-    assert not any("source-adapter" in route.path for route in api.router.routes)
-    assert not any("source_add" in name for name in COORDINATOR_OPERATIONS_V2)
-    assert not any("source_add" in name for name in QUERY_POLICIES)
-    assert not any("source_add" in name for name in inspect.signature(ResearchLabGatewayConfig).parameters)
+def test_retired_incentive_producers_are_absent():
     root = Path(__file__).resolve().parents[1]
     for path in (
         "research_lab/source_add.py",
-        "research_lab/source_add_miner.py",
         "research_lab/source_add_rewards.py",
-        "gateway/research_lab/source_add_workflow.py",
-        "gateway/tee/coordinator_source_add_v2.py",
-        "gateway/tee/source_add_runtime_v2.py",
+        "research_lab/validator_integration.py",
+        "gateway/research_lab/allocations.py",
+        "gateway/research_lab/maintenance.py",
+        "gateway/research_lab/champion_settlement_v2.py",
+        "gateway/tee/reward_executor_v2.py",
+        "gateway/tee/coordinator_allocation_source_v2.py",
+        "leadpoet_verifier/economics.py",
+        "gateway/api/weights.py",
+        "gateway/fulfillment/rewards.py",
+        "neurons/auditor_validator.py",
     ):
-        assert not (root / path).exists()
+        assert not (root / path).exists(), path
 
 
-@pytest.mark.parametrize("command", (
-    "pause-source-add", "resume-source-add", "reconcile-source-add-reward-statuses",
-))
-def test_source_intake_admin_commands_are_not_available(command):
-    with pytest.raises(SystemExit):
-        build_parser().parse_args([command])
+def test_qualification_cannot_execute_retired_incentive_operations():
+    assert set(COORDINATOR_OPERATIONS_V2) == {
+        "attest_artifact_persistence", "attest_qualification_admission",
+    }
+    assert set(QUERY_POLICIES) == {
+        "qualification_epoch_assignment", "qualification_leads_by_ids", "banned_hotkeys",
+    }
 
 
-@pytest.mark.parametrize("kind", ("source_add_leg1", "source_add_leg2", "source_add_migration"))
-def test_source_reward_decisions_cannot_execute(kind):
-    with pytest.raises(ValueError, match="unsupported"):
-        execute_reward_decision_v2({"decision_kind": kind, "decision_payload": {}})
+@pytest.mark.asyncio
+async def test_fulfillment_preserves_delivered_winners_without_emission_writes(monkeypatch):
+    from gateway.fulfillment import lifecycle
 
+    writes = []
+    enriched = []
 
-def test_current_allocator_has_no_source_obligations_or_reward_section():
-    assert "active_source_add_obligations" not in inspect.signature(allocate_research_lab_epoch).parameters
-    allocation = allocate_research_lab_epoch(1, {}, [], [])
-    assert not any("source_add" in name for name in allocation)
-    assert allocation["unallocated_percent"] == allocation["lab_cap_percent"]
+    class Query:
+        def update(self, fields):
+            writes.append({"fields": fields, "keys": {}})
+            return self
+
+        def eq(self, field, value):
+            writes[-1]["keys"][field] = value
+            return self
+
+        def execute(self):
+            return None
+
+    class Database:
+        def table(self, name):
+            assert name == "fulfillment_score_consensus"
+            return Query()
+
+    async def enrich(database, request_id, winners):
+        enriched.extend(winners)
+
+    monkeypatch.setattr(lifecycle, "_get_supabase", Database)
+    monkeypatch.setattr(lifecycle, "_attach_intent_details_for_winners", enrich)
+    first = {"request_id": "earlier", "submission_id": "a", "lead_id": "lead"}
+    tied = {"request_id": "current", "submission_id": "b", "lead_id": "lead"}
+    result = await lifecycle._finalize_chain_winners(
+        "current", [first], [("lead", [first, tied])],
+    )
+    assert result == {"lead"}
+    assert [row["keys"]["request_id"] for row in writes] == ["earlier", "current"]
+    assert all(row["fields"] == {"is_winner": True} for row in writes)
+    assert len(enriched) == 2

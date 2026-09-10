@@ -457,10 +457,6 @@ def build_service_from_environment(mode: str):
                 if chain_config.network_name != "test" else ""
             )
         ),
-        fulfillment_enabled=os.environ.get("ENABLE_FULFILLMENT", "false").strip().lower() == "true",
-        leaderboard_emissions_enabled=os.environ.get(
-            "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED", "true"
-        ).strip().lower() == "true",
     )
     service = ArenaService(config)
     app = create_app(service)
@@ -470,13 +466,13 @@ def build_service_from_environment(mode: str):
 def build_runner_from_environment(args, *, keypair=None):
     from lab_arena import runner as runner_module
 
-    from bittensor_wallet import Wallet
-
-    wallet_arguments = {"name": args.wallet_name, "hotkey": args.hotkey_name}
-    wallet_path = str(getattr(args, "wallet_path", "") or "").strip()
-    if wallet_path:
-        wallet_arguments["path"] = wallet_path
     if keypair is None:
+        from bittensor_wallet import Wallet
+
+        wallet_arguments = {"name": args.wallet_name, "hotkey": args.hotkey_name}
+        wallet_path = str(getattr(args, "wallet_path", "") or "").strip()
+        if wallet_path:
+            wallet_arguments["path"] = wallet_path
         wallet = Wallet(**wallet_arguments)
         keypair = wallet.hotkey
     runner_root = Path(args.work_dir)

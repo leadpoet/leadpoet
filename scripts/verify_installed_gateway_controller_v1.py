@@ -39,7 +39,6 @@ LEGACY_FOUR_FILE_CONTROLLER_COMMITS = frozenset(
 CONTROLLER_FILES: Mapping[str, tuple[int, str]] = {
     "gw_restart.sh": (0o700, "100755"),
     "scripts/gateway_git_deploy.py": (0o600, "100644"),
-    "Leadpoet/utils/exact_commit_restart_v2.py": (0o600, "100644"),
     "gateway/tee/host_memory_guard_v2.py": (0o600, "100644"),
 }
 OPTIONAL_CONTROLLER_FILES: Mapping[str, tuple[int, str]] = {

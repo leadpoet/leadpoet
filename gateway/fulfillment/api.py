@@ -1850,66 +1850,8 @@ def get_results(request_id: str):
 # ---------------------------------------------------------------
 # GET /fulfillment/rewards/active  — validator fetches active rewards
 # ---------------------------------------------------------------
-@fulfillment_router.get("/rewards/active")
-async def get_active_rewards(current_epoch: int):
-    """Return active (unexpired) fulfillment rewards grouped by miner hotkey.
-
-    Used by the validator during weight calculation to determine the
-    fulfillment emission carve-out from the sourcing allocation.
-
-    The DB pagination runs in a worker thread (asyncio.to_thread) so the
-    synchronous Supabase calls never block the gateway event loop. The
-    validator's client times out at 45s/attempt and treats an exhausted
-    fetch as "no active rewards" — which zeroes the fulfillment emission
-    share and burns it. Run inline, this query queued behind the lifecycle
-    tick and exceeded 50s under PostgREST latency, so the validator was
-    dropping ALL fulfillment rewards some epochs. Offloading keeps it well
-    under the 45s budget even during slow spells.
-    """
-    return await run_db(_collect_active_rewards_sync, current_epoch)
 
 
-def _collect_active_rewards_sync(current_epoch: int) -> dict:
-    """Synchronous body of GET /fulfillment/rewards/active — runs in a worker
-    thread so it never blocks the event loop.  See the endpoint docstring."""
-    supabase = _get_supabase()
-
-    all_rows: List[dict] = []
-    offset = 0
-    for page_index in range(50):
-        page = supabase.table("fulfillment_score_consensus") \
-            .select(
-                "consensus_id, miner_hotkey, reward_pct, reward_expires_epoch"
-            ) \
-            .not_.is_("reward_pct", "null") \
-            .gt("reward_expires_epoch", current_epoch) \
-            .order("consensus_id") \
-            .range(offset, offset + 999) \
-            .execute()
-        if not page.data:
-            break
-        all_rows.extend(page.data)
-        if len(page.data) < 1000:
-            break
-        if page_index == 49:
-            raise RuntimeError(
-                "active fulfillment rewards exceed the pagination limit"
-            )
-        offset += 1000
-
-    per_miner: dict = {}
-    for row in all_rows:
-        hk = row["miner_hotkey"]
-        pct = float(row["reward_pct"])
-        per_miner[hk] = per_miner.get(hk, 0.0) + pct
-
-    return {
-        "rewards": {
-            hotkey: per_miner[hotkey]
-            for hotkey in sorted(per_miner)
-        },
-        "total_active_rows": len(all_rows),
-    }
 
 
 def _collect_banned_hotkeys_sync() -> dict:
@@ -2066,30 +2008,8 @@ def get_fulfillment_leaderboard(limit: int = 3):
     any winning row whose ``computed_at`` falls within the last 140 epochs
     is counted.
 
-    Used by the validator each weight-set cycle to identify the top-3
-    miners eligible for the leaderboard emission bonus
-    (LEADERBOARD_BONUS_SHARE in neurons/validator.py — split 5 / 3 / 1.5%
-    across rank 1, 2, 3).  Also intended to power a public dashboard.
-
-    Banned hotkeys are filtered out — we don't surface or pay them.
-    Ties are broken by total `reward_pct` (sums the partial-fulfillment
-    weighting) so a miner who won 10 leads at full weight ranks above
-    one who won 10 at half weight.
-
-    Args:
-        limit: max number of top miners to return (default 3, capped at 100).
-
-    Returns:
-        {
-          "leaderboard": [
-            {"rank": 1, "miner_hotkey": "5...", "wins": 87, "total_reward_pct": 4.32},
-            ...
-          ],
-          "computed_at": "2026-05-17T03:14:00Z",
-          "period_start": "2026-05-10T03:14:00+00:00",
-          "period_end": "2026-05-17T03:14:00+00:00",
-          "total_unique_winners": 12
-        }
+    The leaderboard reports fulfilled leads and has no emission allocation.
+    Ties use the hotkey as a stable ordering key.
     """
     if limit < 1:
         limit = 1
@@ -2109,7 +2029,7 @@ def get_fulfillment_leaderboard(limit: int = 3):
     offset = 0
     for _ in range(50):
         page = supabase.table("fulfillment_score_consensus") \
-            .select("miner_hotkey, reward_pct") \
+            .select("miner_hotkey") \
             .eq("is_winner", True) \
             .gte("computed_at", window_start.isoformat()) \
             .lte("computed_at", now_iso) \
@@ -2142,17 +2062,11 @@ def get_fulfillment_leaderboard(limit: int = 3):
         hk = row["miner_hotkey"]
         if hk in banned_set:
             continue
-        rec = per_miner.setdefault(hk, {"wins": 0, "total_reward_pct": 0.0})
+        rec = per_miner.setdefault(hk, {"wins": 0})
         rec["wins"] += 1
-        try:
-            rec["total_reward_pct"] += float(row.get("reward_pct") or 0.0)
-        except (TypeError, ValueError):
-            pass
-
-    # Rank: wins desc, total_reward_pct desc as tiebreaker
     ranked = sorted(
         per_miner.items(),
-        key=lambda kv: (-kv[1]["wins"], -kv[1]["total_reward_pct"]),
+        key=lambda kv: (-kv[1]["wins"], kv[0]),
     )[:limit]
 
     leaderboard = [
@@ -2160,7 +2074,6 @@ def get_fulfillment_leaderboard(limit: int = 3):
             "rank": i + 1,
             "miner_hotkey": hk,
             "wins": rec["wins"],
-            "total_reward_pct": round(rec["total_reward_pct"], 4),
         }
         for i, (hk, rec) in enumerate(ranked)
     ]
@@ -2231,7 +2144,6 @@ async def request_ban(
         raise HTTPException(500, detail="Ban execution failed")
 
     q = supabase.table("fulfillment_score_consensus").update({
-        "reward_pct": None,
     }).eq("miner_hotkey", hotkey)
     if request_id:
         q = q.eq("request_id", request_id)

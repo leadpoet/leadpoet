@@ -38,8 +38,8 @@ if [ "$RUNNING" -gt 0 ]; then
 fi
 
 # Start enclave.
-# Production default is non-debug. Debug enclaves return all-zero PCRs in
-# attestation documents, which the gateway correctly rejects for weight bundles.
+# Production default is non-debug. Debug enclaves return all-zero PCRs and must
+# not be used for a sealed production Arena policy.
 echo ""
 echo "📦 Starting enclave..."
 echo "   EIF: $EIF_FILE"
@@ -85,5 +85,5 @@ echo "  nitro-cli console --enclave-id <ENCLAVE_ID>"
 echo ""
 echo "To test connection from host:"
 echo "  cd ~/leadpoet/leadpoet"
-echo "  python3 -c \"from validator_tee.host.vsock_client import ValidatorEnclaveClient; c = ValidatorEnclaveClient(); print('Public Key:', c.get_public_key())\""
+echo "  python3 -c \"from validator_tee.host.vsock_client import ValidatorEnclaveClient; print(ValidatorEnclaveClient().get_arena_hotkey_state_v1())\""
 echo ""

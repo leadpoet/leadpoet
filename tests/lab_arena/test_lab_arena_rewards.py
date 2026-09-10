@@ -9,12 +9,9 @@ import pytest
 
 from lab_arena import contracts, rewards
 from lab_arena.contracts import ArenaContractError
-from leadpoet_canonical.weight_computation import _doc_percent_share
 
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 BOB = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
-LAB_SHARE = 0.30
-LEADERBOARD_SHARE = 0.095
 EXACT_WEEKLY_SHARES = (0.25, 0.2, 0.15, 0.1, 0.05)  # 25% of total emissions, decaying by week
 METAGRAPH = ["5C" + "1" * 46, ALICE, BOB]
 
@@ -102,29 +99,6 @@ def test_champion_values_yield_exact_shares_across_the_schedule():
         }
 
 
-def test_fulfillment_residual_and_lab_share_derivation_match_canonical_kernel():
-    assert rewards.fulfillment_residual(LAB_SHARE, LEADERBOARD_SHARE) == 0.605
-    assert rewards.fulfillment_residual(0.9, 0.2) == 0.0
-    cases = [
-        ({"lab_cap_percent": 30}, 0.25),
-        ({"lab_cap_percent": "30"}, 0.25),
-        ({"lab_cap_percent": 30.5}, 0.25),
-        ({"lab_cap_percent": 250}, 0.25),
-        ({"lab_cap_percent": -5}, 0.25),
-        ({"lab_cap_percent": ""}, 0.25),
-        ({"lab_cap_percent": None}, 0.25),
-        ({"lab_cap_percent": "thirty"}, 0.25),
-        ({}, 0.25),
-        (None, 0.25),
-        ([], 0.25),
-        ("30", 0.25),
-    ]
-    for doc, fallback in cases:
-        assert rewards.derive_research_lab_share(doc, fallback) == _doc_percent_share(doc, "lab_cap_percent", fallback)
-    with pytest.raises(ValueError):
-        rewards.derive_research_lab_share({}, -0.1)
-
-
 def test_share_is_a_fraction_of_total_emissions_independent_of_the_other_allocations():
     """The pool basis is total emissions: no allocation document changes the king's share."""
 
@@ -132,9 +106,7 @@ def test_share_is_a_fraction_of_total_emissions_independent_of_the_other_allocat
         share = rewards.champion_share_for_week(week)
         assert share == contracts.LAB_ARENA_POOL_PERCENT / 100 * contracts.KING_POOL_SHARE_PERCENT_BY_WEEK[week] / 100
         assert 0.0 < share <= contracts.LAB_ARENA_POOL_PERCENT / 100
-    # The residual the adapter shrinks is still the canonical kernel's number, and the share fits inside it today.
-    assert rewards.champion_share_for_week(0) <= rewards.fulfillment_residual(LAB_SHARE, LEADERBOARD_SHARE)
-    # An ineligible epoch returns everything to fulfillment: zero champion share.
+    # An ineligible epoch sends the complete emission to burn: zero champion share.
     basis = _basis(outcome="crowned", finalized_epoch=999)
     assert _values(basis, 1000 + 46)["champion_share"] == 0.0
 

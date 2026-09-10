@@ -6,7 +6,7 @@
 #
 # TWO-STAGE REPRODUCIBILITY:
 # 1. Base image (Dockerfile.base) - built ONCE with yum install, cached
-# 2. Enclave image (Dockerfile.enclave) - uses base, only COPY operations
+# 2. Arena signer image (Dockerfile.arena-signer)
 # 3. Post-build normalization - all timestamps set to epoch 0
 # 4. EIF build from normalized image → Reproducible PCR0!
 #
@@ -201,11 +201,11 @@ fi
 echo ""
 echo "📦 Step 2: Building enclave Docker image..."
 echo "   Build context: $REPO_ROOT"
-echo "   Dockerfile: $VALIDATOR_TEE_DIR/Dockerfile.enclave"
+echo "   Dockerfile: $VALIDATOR_TEE_DIR/Dockerfile.arena-signer"
 
 # Build with --no-cache for code layers (base image is cached)
 docker build --no-cache \
-    -f "$VALIDATOR_TEE_DIR/Dockerfile.enclave" \
+    -f "$VALIDATOR_TEE_DIR/Dockerfile.arena-signer" \
     -t validator-tee-enclave:raw \
     "$REPO_ROOT"
 
@@ -403,35 +403,6 @@ echo "IMPORTANT - SAVE THESE VALUES:"
 echo "═══════════════════════════════════════════════════════════"
 grep -E "PCR0|PCR1|PCR2" enclave_build_output.txt || echo "(PCR values not found)"
 echo "═══════════════════════════════════════════════════════════"
-echo ""
-
-# Step 6: Emit canonical V2 release metadata from the normalized image and
-# exact EIF. This does not alter the image or PCR0 build procedure.
-echo "🔏 Step 6: Writing validator V2 release metadata..."
-APP_MANIFEST_HASH="$(
-    docker run --rm --entrypoint python3 validator-tee-enclave:latest \
-        -c 'from validator_tee.enclave.runtime_v2 import compute_app_manifest_hash; print(compute_app_manifest_hash())'
-)"
-DEPENDENCY_LOCK_HASH="$(
-    docker run --rm --entrypoint python3 validator-tee-enclave:latest \
-        -c 'from validator_tee.enclave.runtime_v2 import dependency_lock_hash; print(dependency_lock_hash())'
-)"
-NORMALIZED_IMAGE_HASH="$(docker image inspect -f '{{.Id}}' validator-tee-enclave:latest)"
-VALIDATOR_RELEASE_COMMIT_ARGS=()
-if [ -n "${VALIDATOR_V2_BUILD_COMMIT:-}" ]; then
-    VALIDATOR_RELEASE_COMMIT_ARGS=(--commit-sha "$VALIDATOR_V2_BUILD_COMMIT")
-fi
-PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m validator_tee.host.release_v2 \
-    --repo-root "$REPO_ROOT" \
-    --measurements "$VALIDATOR_TEE_DIR/enclave_build_output.txt" \
-    --eif "$VALIDATOR_TEE_DIR/validator-enclave.eif" \
-    --app-manifest-hash "$APP_MANIFEST_HASH" \
-    --dependency-lock-hash "$DEPENDENCY_LOCK_HASH" \
-    --normalized-image-hash "$NORMALIZED_IMAGE_HASH" \
-    "${VALIDATOR_RELEASE_COMMIT_ARGS[@]}" \
-    --output "$VALIDATOR_TEE_DIR/validator-v2-release.json"
-echo "   ✓ Validator V2 release metadata written"
 echo ""
 
 echo "Next steps:"

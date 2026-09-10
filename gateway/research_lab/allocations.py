@@ -928,7 +928,6 @@ def _champion_obligation_caps(
     for row in champion_rows:
         reward_id = str(
             row.get("champion_reward_id")
-            or row.get("source_add_reward_id")
             or row.get("source_id")
             or ""
         )

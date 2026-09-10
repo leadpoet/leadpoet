@@ -307,7 +307,7 @@ class _ExternalSource:
         if not self.revealed:
             return None
         return {
-            "reveal_block": 110, "reveal_block_hash": "0x" + "4" * 64,
+            "reveal_block": 110, "reveal_block_hash": "4" * 64,
             "validator_uid": 7, "last_update": 110,
             "weights": list(self.expected_weights),
             "transition_hash": "sha256:" + "6" * 64,
@@ -430,12 +430,23 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integra
     assert len(harness.service.public_chain_outcomes(32001)["outcomes"]) == 2
     assert outcomes[0] != outcomes[1]
     first_report = harness.service.public_chain_outcomes(32001)["outcomes"][0]
+    assert first_report["finalized_block_hash"] == "4" * 64
+    assert first_report["extrinsic_hash"].startswith("0x")
     with connect() as db, db.cursor() as cursor:
         cursor.execute("DELETE FROM public.lab_arena_chain_outcomes WHERE request_id = %s", (first_report["request_id"],))
         db.commit()
     harness.clock.now += timedelta(minutes=10)
     assert harness.service.record_chain_outcome(first_report) == {"status": "recorded"}
     assert harness.service.record_chain_outcome(first_report) == {"status": "recorded"}
+    for invalid_hash in ("0x" + "4" * 64, "4" * 63, "g" * 64, "A" * 64):
+        with pytest.raises(Exception, match="finalized_block_hash is invalid"):
+            harness.service.record_chain_outcome(
+                {
+                    **first_report,
+                    "finalized_block_hash": invalid_hash,
+                    "request_id": "sha256:" + "f" * 64,
+                }
+            )
     assert_canary_absent(harness, connect)
     with pytest.raises(Exception, match="not_current"):
         harness.service.public_weight_state(32002)

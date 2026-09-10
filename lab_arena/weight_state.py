@@ -83,11 +83,19 @@ def validate_chain_outcome(value: Any, *, now: datetime, max_age_seconds: int = 
     if len(weights_hash) != 64 or any(c not in "0123456789abcdef" for c in weights_hash):
         raise contracts.ArenaContractError("weights_hash is invalid")
     document["weights_hash"] = weights_hash
-    for field in ("extrinsic_hash", "finalized_block_hash"):
-        text = str(document[field]).lower()
-        if len(text) != 66 or not text.startswith("0x") or any(c not in "0123456789abcdef" for c in text[2:]):
-            raise contracts.ArenaContractError("%s is invalid" % field)
-        document[field] = text
+    extrinsic_hash = str(document["extrinsic_hash"]).lower()
+    if (
+        len(extrinsic_hash) != 66
+        or not extrinsic_hash.startswith("0x")
+        or any(c not in "0123456789abcdef" for c in extrinsic_hash[2:])
+    ):
+        raise contracts.ArenaContractError("extrinsic_hash is invalid")
+    document["extrinsic_hash"] = extrinsic_hash
+    finalized_block_hash = document["finalized_block_hash"]
+    if not isinstance(finalized_block_hash, str) or len(finalized_block_hash) != 64 or any(
+        c not in "0123456789abcdef" for c in finalized_block_hash
+    ):
+        raise contracts.ArenaContractError("finalized_block_hash is invalid")
     try:
         observed = datetime.strptime(str(document["observed_at"]), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError as exc:

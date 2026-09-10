@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from lab_arena import contracts
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
+from lab_arena.store import ArenaStoreUnavailable
 
 MAX_JSON_BODY_BYTES = 1_048_576
 
@@ -98,6 +99,18 @@ def create_app(service: ArenaService) -> FastAPI:
     @app.exception_handler(ArenaContractError)
     async def _contract_error(request: Request, exc: ArenaContractError) -> JSONResponse:
         return JSONResponse(status_code=400, content={"status": "rejected", "code": "contract:%s" % str(exc)[:100]})
+
+    @app.exception_handler(ArenaStoreUnavailable)
+    async def _store_unavailable(request: Request, exc: ArenaStoreUnavailable) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "code": "arena_store_unavailable"},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Retry-After": "1",
+            },
+        )
 
     # -- public -----------------------------------------------------------
 

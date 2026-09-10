@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, Dict
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from lab_arena import contracts
 from lab_arena.api import MAX_JSON_BODY_BYTES, create_app
-from lab_arena.service import ServiceError
+from lab_arena.service import ArenaService, ServiceConfig, ServiceError
+from lab_arena.store import ArenaStore, PostgrestTransport
 
 
 class StubStore:
@@ -121,6 +124,60 @@ def client():
     service = StubService()
     app = create_app(service)
     return TestClient(app), service
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
+@pytest.mark.parametrize("recovers", [True, False])
+def test_current_handles_failed_reward_basis_read(error_type, recovers):
+    """Exercise the production /current -> reward-basis SELECT failure path."""
+    reward_reads = []
+    configuration = {"mode": "live", "network_name": "finney", "netuid": 71}
+    active = {"round_id": "arena-2026-09-11", "status": "open", "configuration_doc": configuration}
+    published = {"round_id": "arena-2026-09-10", "status": "published", "configuration_doc": configuration, "published_at": "2026-09-10T11:15:32Z"}
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/rest/v1/lab_arena_rounds"
+        assert request.url.params["configuration_doc->>mode"] == "eq.live"
+        assert request.url.params["arena_network_name"] == "eq.finney"
+        assert request.url.params["arena_netuid"] == "eq.71"
+        if "reward_basis_doc" in request.url.params["select"]:
+            reward_reads.append(request)
+            if len(reward_reads) == 1 or not recovers:
+                raise error_type("private database diagnostic", request=request)
+            # A completed round without an activated reward must not invent a king.
+            return httpx.Response(200, json=[published])
+        rows = [published] if request.url.params["status"] == "eq.published" else [active]
+        return httpx.Response(200, json=rows)
+
+    def unused(*args, **kwargs):
+        pytest.fail("public read called a write/provider dependency")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as database:
+        store = ArenaStore(PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=database))
+        service = ArenaService(ServiceConfig(
+            mode="live", store=store, object_store=None, signer=None,
+            chain=SimpleNamespace(current_settlement_epoch=lambda: 25040),
+            verify_signature=unused, daily_icp_source=unused,
+            banned_hotkeys_source=unused, broker_factory=unused,
+        ))
+        with TestClient(create_app(service)) as http:
+            response = http.get("/arena/v1/current")
+    assert len(reward_reads) == 2
+    if recovers:
+        assert response.status_code == 200
+        body = response.json()
+        assert body["open_round"]["round_id"] == active["round_id"]
+        assert body["published_round"]["round_id"] == published["round_id"]
+        assert body["current_epoch"] == 25040
+        assert body["king"] is None and body["epoch_eligible"] is False
+    else:
+        assert response.status_code == 503
+        assert response.json() == {"status": "unavailable", "code": "arena_store_unavailable"}
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["retry-after"] == "1"
+        assert "private database diagnostic" not in response.text
 
 
 def test_public_routes(client):

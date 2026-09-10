@@ -101,6 +101,10 @@ class ArenaStoreError(RuntimeError):
     """A durable-state operation failed. Messages never carry credentials."""
 
 
+class ArenaStoreUnavailable(ArenaStoreError):
+    """A transient database read failed after one bounded retry."""
+
+
 class ArenaRoleError(ArenaStoreError):
     """The database identity is not the least-privilege Arena service role."""
 
@@ -280,14 +284,23 @@ class PostgrestTransport(StoreTransport):
             if offset < 0:
                 raise ArenaStoreError("offset must be nonnegative")
             query.append(("offset", str(offset)))
-        try:
-            response = self._client.get(
-                "%s/rest/v1/%s" % (self._base_url, table),
-                headers=self._headers,
-                params=query,
-            )
-        except httpx.HTTPError as exc:
-            raise ArenaStoreError("select %s transport failure: %s" % (table, type(exc).__name__)) from exc
+        # Only SELECT is safe to replay after an ambiguous read failure.
+        # RPCs can mutate state and retain their separate retry policy.
+        for attempt in range(2):
+            try:
+                response = self._client.get(
+                    "%s/rest/v1/%s" % (self._base_url, table),
+                    headers=self._headers,
+                    params=query,
+                )
+                break
+            except (httpx.ReadError, httpx.ReadTimeout) as exc:
+                if attempt:
+                    raise ArenaStoreUnavailable(
+                        "select %s transport failure: %s" % (table, type(exc).__name__)
+                    ) from exc
+            except httpx.HTTPError as exc:
+                raise ArenaStoreError("select %s transport failure: %s" % (table, type(exc).__name__)) from exc
         self._raise_for_status(response, "select %s" % table)
         rows = response.json()
         if not isinstance(rows, list):

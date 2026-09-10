@@ -2588,7 +2588,9 @@ def _validate_arena_rebenchmark_evidence(
         counts.get("scored_icp_count"),
         counts.get("unique_icp_positions"),
         counts.get("company_count"),
+        counts.get("valid_company_with_https_evidence_count"),
         counts.get("evidence_url_count"),
+        counts.get("scored_company_count"),
         providers.get("settled_provider_call_count"),
         providers.get("execute_settled_provider_call_count"),
         providers.get("score_settled_provider_call_count"),
@@ -2616,26 +2618,67 @@ def _validate_arena_rebenchmark_evidence(
         "company_count",
         "valid_company_with_https_evidence_count",
         "https_evidence_url_count",
+        "scored_company_count",
         "successful_openrouter_execute_call_count",
         "successful_openrouter_score_settlement_count",
     )
+    per_icp_totals = {name: 0 for name in per_icp_count_fields}
+    per_icp_maxima = {name: 0 for name in per_icp_count_fields}
     positions: set[int] = set()
     for result in icp_results:
         if not isinstance(result, Mapping):
             raise FullParityError("Arena rebenchmark evidence is incomplete")
         position = result.get("icp_position")
         per_icp_counts = tuple(result.get(name) for name in per_icp_count_fields)
+        persisted_score = result.get("persisted_per_icp_score")
         if (
             isinstance(position, bool)
             or not isinstance(position, int)
             or result.get("execute_accepted") is not True
             or result.get("score_accepted") is not True
+            or result.get("execute_terminal_cause") != "accepted"
+            or result.get("score_terminal_cause") != "accepted"
+            or not isinstance(result.get("persisted_output_empty"), bool)
+            or isinstance(persisted_score, bool)
+            or not isinstance(persisted_score, (int, float))
+            or not math.isfinite(float(persisted_score))
+            or not 0.0 <= float(persisted_score) <= 100.0
             or any(
-                isinstance(item, bool) or not isinstance(item, int) or item < 1
+                isinstance(item, bool) or not isinstance(item, int) or item < 0
                 for item in per_icp_counts
             )
         ):
             raise FullParityError("Arena rebenchmark evidence is incomplete")
+        assert all(isinstance(item, int) for item in per_icp_counts)
+        counts_by_name = dict(zip(per_icp_count_fields, per_icp_counts))
+        if result["persisted_output_empty"]:
+            if (
+                any(counts_by_name[name] != 0 for name in per_icp_count_fields[:4])
+                or float(persisted_score) != 0.0
+            ):
+                raise FullParityError("Arena rebenchmark evidence is incomplete")
+        elif any(counts_by_name[name] < 1 for name in per_icp_count_fields[:3]):
+            raise FullParityError("Arena rebenchmark evidence is incomplete")
+        if (
+            counts_by_name["valid_company_with_https_evidence_count"]
+            > counts_by_name["company_count"]
+            or counts_by_name["scored_company_count"]
+            > counts_by_name["company_count"]
+            or (
+                counts_by_name["scored_company_count"] == 0
+                and float(persisted_score) != 0.0
+            )
+            or (
+                counts_by_name["scored_company_count"] > 0
+                and counts_by_name[
+                    "successful_openrouter_score_settlement_count"
+                ] < 1
+            )
+        ):
+            raise FullParityError("Arena rebenchmark evidence is incomplete")
+        for name, count in counts_by_name.items():
+            per_icp_totals[name] += count
+            per_icp_maxima[name] = max(per_icp_maxima[name], count)
         positions.add(position)
     if positions != set(range(configured)):
         raise FullParityError("Arena rebenchmark evidence is incomplete")
@@ -2665,6 +2708,15 @@ def _validate_arena_rebenchmark_evidence(
             "scored_icp_count",
             "unique_icp_positions",
         ))
+        or counts.get("company_count") != per_icp_totals["company_count"]
+        or counts.get("valid_company_with_https_evidence_count")
+        != per_icp_totals["valid_company_with_https_evidence_count"]
+        or counts.get("evidence_url_count")
+        > per_icp_totals["https_evidence_url_count"]
+        or counts.get("evidence_url_count")
+        < per_icp_maxima["https_evidence_url_count"]
+        or counts.get("scored_company_count")
+        != per_icp_totals["scored_company_count"]
         or int(counts.get("company_count") or 0) < 1
         or int(counts.get("evidence_url_count") or 0) < 1
         or not math.isfinite(final_score)
@@ -2675,12 +2727,21 @@ def _validate_arena_rebenchmark_evidence(
         or int(providers.get("settled_provider_call_count") or 0) < 2
         or int(providers.get("execute_settled_provider_call_count") or 0) < 1
         or int(providers.get("score_settled_provider_call_count") or 0) < 1
+        or providers.get("settled_provider_call_count")
+        != providers.get("execute_settled_provider_call_count")
+        + providers.get("score_settled_provider_call_count")
         or int(providers.get("successful_openrouter_execute_call_count") or 0)
-        < configured
+        != per_icp_totals["successful_openrouter_execute_call_count"]
         or int(
             providers.get("successful_openrouter_score_settlement_count") or 0
         )
-        < configured
+        != per_icp_totals["successful_openrouter_score_settlement_count"]
+        or int(providers.get("successful_openrouter_execute_call_count") or 0)
+        < 1
+        or int(
+            providers.get("successful_openrouter_score_settlement_count") or 0
+        )
+        < 1
         or providers.get("transport") != "live-httpx"
         or runtime.get("runner") != "lab_arena.runner.Runner"
         or runtime.get("sandbox") != "gvisor-runsc"
@@ -3358,6 +3419,51 @@ def _verify_arena_daily_public_results(
     return runs, outputs
 
 
+def _arena_persisted_score_company_count(
+    *,
+    service: Any,
+    score_row: Mapping[str, Any],
+    execute_row: Mapping[str, Any],
+    icp: Mapping[str, Any],
+    companies: Sequence[Mapping[str, Any]],
+) -> int:
+    """Re-read one accepted score output and bind it to its execution."""
+
+    from lab_arena import scoring as arena_scoring
+    from lab_arena import verify as arena_verify
+
+    try:
+        if (
+            score_row.get("status") != "accepted"
+            or score_row.get("terminal_cause") != "accepted"
+            or score_row.get("scored_run_id") != execute_row.get("run_id")
+        ):
+            raise ValueError("score row is not the accepted execution judgment")
+        score_raw = service._objects.get_bounded(
+            str(score_row["output_ref"]),
+            arena_scoring.MAX_SCORING_OUTPUT_BYTES,
+        )
+        score_output = arena_scoring.validate_scoring_output_document(
+            json.loads(score_raw.decode("utf-8"))
+        )
+        if score_output.get("scored_run_id") != execute_row.get("run_id"):
+            raise ValueError("score output names another execution")
+        sliced = arena_verify.slice_first_n(
+            companies, arena_verify.icp_company_goal(icp)
+        )
+        breakdowns = arena_scoring.validate_breakdowns_for_item(
+            score_output["breakdowns"],
+            icp=icp,
+            companies=sliced,
+            max_scored_companies=int(
+                service.scorer_policy["max_scored_companies"]
+            ),
+        )
+    except Exception as exc:
+        raise FullParityError("Arena persisted score output is invalid") from exc
+    return len(breakdowns)
+
+
 def _run_arena_rebenchmark_child(
     request: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -3632,6 +3738,8 @@ def _run_arena_rebenchmark_child(
             int(row["icp_position"]): row for row in all_score
         }
         company_count = 0
+        valid_company_with_https_evidence_count = 0
+        scored_company_count = 0
         evidence_urls: set[str] = set()
         execute_settlements = 0
         score_settlements = 0
@@ -3668,6 +3776,9 @@ def _run_arena_rebenchmark_child(
                     valid_companies_with_https_evidence += 1
                     position_evidence_urls.update(valid_company_urls)
             evidence_urls.update(position_evidence_urls)
+            valid_company_with_https_evidence_count += (
+                valid_companies_with_https_evidence
+            )
 
             execute_ledger = service.store.list_ledger(
                 run_id=str(execute_row["run_id"])
@@ -3701,16 +3812,38 @@ def _run_arena_rebenchmark_child(
             )
             successful_openrouter_execute_calls += execute_openrouter_successes
             successful_openrouter_score_settlements += score_openrouter_successes
+            position_scored_company_count = (
+                _arena_persisted_score_company_count(
+                    service=service,
+                    score_row=score_row,
+                    execute_row=execute_row,
+                    icp=icps[position],
+                    companies=validated_companies,
+                )
+            )
+            scored_company_count += position_scored_company_count
+            persisted_score = execute_row.get("per_icp_score")
+            if (
+                isinstance(persisted_score, bool)
+                or not isinstance(persisted_score, (int, float))
+                or not math.isfinite(float(persisted_score))
+            ):
+                raise FullParityError("Arena persisted score is invalid")
             icp_results.append(
                 {
                     "icp_position": position,
                     "execute_accepted": execute_row.get("status") == "accepted",
                     "score_accepted": score_row.get("status") == "accepted",
+                    "execute_terminal_cause": execute_row.get("terminal_cause"),
+                    "score_terminal_cause": score_row.get("terminal_cause"),
+                    "persisted_output_empty": not validated_companies,
+                    "persisted_per_icp_score": float(persisted_score),
                     "company_count": len(validated_companies),
                     "valid_company_with_https_evidence_count": (
                         valid_companies_with_https_evidence
                     ),
                     "https_evidence_url_count": len(position_evidence_urls),
+                    "scored_company_count": position_scored_company_count,
                     "successful_openrouter_execute_call_count": (
                         execute_openrouter_successes
                     ),
@@ -3746,7 +3879,11 @@ def _run_arena_rebenchmark_child(
                 "scored_icp_count": len(all_score),
                 "unique_icp_positions": len(positions),
                 "company_count": company_count,
+                "valid_company_with_https_evidence_count": (
+                    valid_company_with_https_evidence_count
+                ),
                 "evidence_url_count": len(evidence_urls),
+                "scored_company_count": scored_company_count,
             },
             "providers": {
                 "transport": "live-httpx",

@@ -7,6 +7,7 @@ import base64
 import json
 import hashlib
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -18,6 +19,23 @@ from validator_tee.enclave.arena_hotkey import (
 
 ENVELOPE_SCHEMA = "leadpoet.arena.hotkey_envelope.v1"
 LEGACY_ENVELOPE_SCHEMA = "leadpoet.validator_hotkey_envelope.v2"
+
+
+def kms_region(key_id):
+    """Use a key ARN's region even in a clean service environment."""
+    if not isinstance(key_id, str) or not key_id:
+        raise ArenaHotkeyError("KMS key identity is invalid")
+    if not key_id.startswith("arn:"):
+        return None
+    match = re.fullmatch(r"arn:aws(?:-us-gov|-cn)?:kms:([a-z0-9-]+):[0-9]{12}:(?:key|alias)/[A-Za-z0-9/_-]+", key_id)
+    if match is None:
+        raise ArenaHotkeyError("KMS key ARN is invalid")
+    return match.group(1)
+
+
+def create_kms_client(key_id):
+    import boto3
+    return boto3.client("kms", region_name=kms_region(key_id))
 
 
 def _sha256_bytes(value):
@@ -115,7 +133,7 @@ def provision_legacy(envelope, *, expected_policy, kms_key_id, client, kms_clien
         ciphertext = base64.b64decode(envelope["ciphertext_blob_b64"], validate=True)
     except Exception:
         raise ArenaHotkeyError("Legacy ciphertext encoding is invalid") from None
-    if (not ciphertext or envelope["ciphertext_blob_hash"] != _sha256_bytes(ciphertext)
+    if (not ciphertext or envelope["ciphertext_blob_hash"] != "sha256:" + _sha256_bytes(ciphertext)
             or envelope["encryption_context_hash"] != sha256_json(envelope["encryption_context"])
             or envelope["kms_key_id_hash"] != _kms_key_reference_hash(kms_key_id)):
         raise ArenaHotkeyError("Legacy envelope integrity differs")
@@ -181,8 +199,8 @@ def main(argv=None):
     migrate.add_argument("--policy", type=Path, required=True)
     migrate.add_argument("--kms-key-id", required=True)
     args = parser.parse_args(argv)
-    import boto3
-    kms = boto3.client("kms")
+    envelope = json.loads(_private_read(args.envelope)) if args.command == "provision" else None
+    kms = create_kms_client(envelope["kms_key_id"] if envelope is not None else args.kms_key_id)
     if args.command == "seal":
         seed = bytearray(_private_read(args.seed_file))
         try:
@@ -198,7 +216,7 @@ def main(argv=None):
         print("Arena encrypted envelope created")
     elif args.command == "provision":
         from validator_tee.host.vsock_client import ValidatorEnclaveClient
-        result = provision(json.loads(_private_read(args.envelope)), client=ValidatorEnclaveClient(), kms_client=kms)
+        result = provision(envelope, client=ValidatorEnclaveClient(), kms_client=kms)
         print("Arena hotkey provisioned: %s" % result["validator_hotkey"])
     else:
         from validator_tee.host.vsock_client import ValidatorEnclaveClient

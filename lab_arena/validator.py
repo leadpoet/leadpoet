@@ -523,14 +523,13 @@ def main(argv=None) -> int:
             raise ArenaValidatorError(
                 "protected Arena hotkey is not provisioned; LAB_ARENA_HOTKEY_ENVELOPE is required"
             )
-        import boto3
-        from validator_tee.host.arena_hotkey_bootstrap import _private_read, provision
+        from validator_tee.host.arena_hotkey_bootstrap import _private_read, create_kms_client, provision
 
         try:
             envelope = json.loads(_private_read(Path(envelope_path)))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise ArenaValidatorError("Arena hotkey envelope is invalid") from exc
-        provision(envelope, client=client, kms_client=boto3.client("kms"))
+        provision(envelope, client=client, kms_client=create_kms_client(envelope.get("kms_key_id")))
     keypair = build_arena_protected_keypair(client=client)
     config = chain_module.ArenaChainConfig(
         endpoint=required[1],

@@ -1,6 +1,9 @@
 import base64
 from copy import deepcopy
 import json
+import hashlib
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -75,7 +78,8 @@ def _legacy_envelope(seed, policy, key_id="kms-key"):
     return {
         "schema_version": arena_hotkey_bootstrap.LEGACY_ENVELOPE_SCHEMA,
         "ciphertext_blob_b64": base64.b64encode(ciphertext).decode(),
-        "ciphertext_blob_hash": arena_hotkey_bootstrap._sha256_bytes(ciphertext),
+        # Exact wire format emitted by the retired v2 envelope writer.
+        "ciphertext_blob_hash": "sha256:" + hashlib.sha256(ciphertext).hexdigest(),
         "encryption_context": context,
         "encryption_context_hash": sha256_json(context),
         "hotkey_public_key": policy["hotkey_public_key"],
@@ -108,6 +112,54 @@ def test_legacy_raw_seed_migrates_only_to_measured_policy():
     )
     assert state["policy"] == policy and state["validator_hotkey"] == policy["validator_hotkey"]
     assert client.provisions == 1 and kms.decrypts == 1
+
+
+def test_legacy_migration_cli_without_aws_region_uses_key_arn(tmp_path, monkeypatch):
+    seed = b"a" * 32
+    policy, _ = _policy(seed)
+    captured = {}
+    authority = ArenaHotkeyAuthority(
+        attestation_supplier=lambda **kwargs: captured.update(kwargs) or b"nsm",
+        measured_policy=policy,
+    )
+    key_id = "arn:aws:kms:us-east-1:123456789012:key/test-key"
+    kms = _LegacyKms(captured, seed, key_id=key_id)
+    calls = []
+    def create(service, **kwargs):
+        calls.append((service, kwargs))
+        return kms
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=create))
+    client = _Client(authority)
+    monkeypatch.setattr("validator_tee.host.vsock_client.ValidatorEnclaveClient", lambda: client)
+    envelope_path = tmp_path / "envelope.json"
+    policy_path = tmp_path / "policy.json"
+    for path, document in ((envelope_path, _legacy_envelope(seed, policy, key_id)), (policy_path, policy)):
+        path.write_text(json.dumps(document)); path.chmod(0o600)
+    assert arena_hotkey_bootstrap.main([
+        "migrate-legacy", "--legacy-envelope", str(envelope_path),
+        "--policy", str(policy_path), "--kms-key-id", key_id,
+    ]) == 0
+    assert calls == [("kms", {"region_name": "us-east-1"})]
+    assert client.provisions == kms.decrypts == 1
+    assert client.get_arena_hotkey_state_v1()["policy"] == policy
+
+
+@pytest.mark.parametrize("key_id", ["arn:aws:s3:us-east-1:123456789012:key/x", "arn:aws:kms::123456789012:key/x", "arn:aws:kms:us-east-1:bad:key/x"])
+def test_kms_region_rejects_malformed_arn(key_id):
+    with pytest.raises(ArenaHotkeyError, match="ARN"):
+        arena_hotkey_bootstrap.kms_region(key_id)
+
+
+def test_legacy_migration_rejects_unprefixed_ciphertext_hash():
+    policy, _ = _policy()
+    envelope = _legacy_envelope(b"a" * 32, policy)
+    envelope["ciphertext_blob_hash"] = envelope["ciphertext_blob_hash"].removeprefix("sha256:")
+    with pytest.raises(ArenaHotkeyError, match="integrity"):
+        arena_hotkey_bootstrap.provision_legacy(
+            envelope, expected_policy=policy, kms_key_id="kms-key", client=None, kms_client=None,
+        )
 
 
 def test_legacy_migration_rejects_tampered_policy_identity_and_plaintext():

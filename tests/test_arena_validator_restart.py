@@ -242,7 +242,7 @@ printf '%s %s' "$old_pid" "$old_start"
 def test_single_enclave_transition_has_bounded_automatic_rollback():
     text = SCRIPT.read_text()
     public_preflight = text.index("Arena public preflight is valid")
-    stop_weight = text.index('docker stop --time "$STOP_TIMEOUT" "$legacy_container_id"')
+    stop_weight = text.index('docker stop --time "$LEGACY_COORDINATOR_STOP_TIMEOUT" "$legacy_container_id"')
     stop_old_signer = text.index('terminate-enclave --enclave-id "$OLD_ENCLAVE_ID"')
     start_candidate = text.index('run-enclave --eif-path "$EIF_FILE"')
     protected_ready = text.index("--check-only", start_candidate)
@@ -655,6 +655,10 @@ esac
     python.write_text('''#!/bin/sh
 if [ "$1" = "-c" ]; then cat >/dev/null; echo oldpcr; exit 0; fi
 echo "bootstrap:$ENCLAVE_CID:$*" >> "$CALL_LOG"
+if [ "$2" = validator_tee.host.runtime_v2_bootstrap ]; then
+  test "$LEADPOET_SUBNET_EPOCH_CUTOVER_PATH" = /cutover || exit 3
+  test -z "${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" || exit 4
+fi
 '''); python.chmod(0o755)
     snapshot = tmp_path / "old.eif"; snapshot.write_text("old")
     program = f"""set -euo pipefail
@@ -665,6 +669,8 @@ SIGNER_HANDOFF_COMMITTED=0; OLD_ENCLAVE_TERMINATED=1; LEGACY_EIF_SNAPSHOT={snaps
 OLD_ENCLAVE_CPUS=2; OLD_ENCLAVE_MEMORY=1024; OLD_ENCLAVE_CID=81; OLD_ENCLAVE_NAME=validator-enclave; OLD_PCR0=oldpcr
 PYTHON={python}; SOURCE_ROOT={tmp_path}; LEGACY_RELEASE_MANIFEST=/release; LEGACY_GATEWAY_MANIFEST=/gateway
 LEGACY_GATEWAY_LINEAGE=/lineage; LEGACY_HOTKEY_CONFIG=/hotkey; LEGACY_ENVELOPE=/envelope
+LEGACY_CUTOVER=/cutover
+export LEADPOET_SUBNET_EPOCH_CUTOVER_JSON=stale
 LEGACY_CONTAINER_STOPPED=1; legacy_container_id=container-id
 READY_TIMEOUT=2
 {cleanup}

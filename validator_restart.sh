@@ -19,12 +19,15 @@ LEGACY_HOTKEY_CONFIG="${VALIDATOR_LEGACY_HOTKEY_CONFIG:-/home/ec2-user/.config/l
 LEGACY_RELEASE_MANIFEST="${VALIDATOR_LEGACY_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 LEGACY_GATEWAY_MANIFEST="${VALIDATOR_LEGACY_GATEWAY_MANIFEST:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
 LEGACY_GATEWAY_LINEAGE="${VALIDATOR_LEGACY_GATEWAY_LINEAGE:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
+LEGACY_CUTOVER="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 MIGRATION_KMS_KEY_ID="${VALIDATOR_ARENA_MIGRATION_KMS_KEY_ID:-arn:aws:kms:us-east-1:493765492819:key/6822c852-4bf2-4b2a-be0b-91a61057f92d}"
 SERVICE="${VALIDATOR_SERVICE_NAME:-leadpoet-arena-validator.service}"
 UNIT_PATH="${VALIDATOR_SERVICE_UNIT_PATH:-/etc/systemd/system/$SERVICE}"
 PYTHON="${VALIDATOR_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
 READY_TIMEOUT="${VALIDATOR_READY_TIMEOUT_SECONDS:-90}"
 STOP_TIMEOUT="${VALIDATOR_STOP_TIMEOUT_SECONDS:-9300}"
+# The retired coordinator owns no model leases. Scoring keeps its longer drain.
+LEGACY_COORDINATOR_STOP_TIMEOUT=300
 LOCK_FILE="${VALIDATOR_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/arena-validator-restart.lock}"
 TARGET_REQUEST="${VALIDATOR_DEPLOY_COMMIT:-origin/main}"
 CANDIDATE_ENCLAVE_ID=""
@@ -98,7 +101,7 @@ cleanup() {
         if ( cd "$SOURCE_ROOT" && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; ValidatorEnclaveClient().health_check()' ) >/dev/null 2>&1; then legacy_rpc_ready=1; break; fi
         sleep 1
       done
-      if [ "$legacy_rpc_ready" -eq 1 ] && ( cd "$SOURCE_ROOT" && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.runtime_v2_bootstrap --validator-release "$LEGACY_RELEASE_MANIFEST" --gateway-release "$LEGACY_GATEWAY_MANIFEST" --gateway-release-lineage "$LEGACY_GATEWAY_LINEAGE" --hotkey-config "$LEGACY_HOTKEY_CONFIG" ) >/dev/null 2>&1 \
+      if [ "$legacy_rpc_ready" -eq 1 ] && ( cd "$SOURCE_ROOT" && unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON && LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$LEGACY_CUTOVER" ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.runtime_v2_bootstrap --validator-release "$LEGACY_RELEASE_MANIFEST" --gateway-release "$LEGACY_GATEWAY_MANIFEST" --gateway-release-lineage "$LEGACY_GATEWAY_LINEAGE" --hotkey-config "$LEGACY_HOTKEY_CONFIG" ) >/dev/null 2>&1 \
           && ( cd "$SOURCE_ROOT" && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.hotkey_bootstrap_v2 --hotkey-config "$LEGACY_HOTKEY_CONFIG" --hotkey-envelope "$LEGACY_ENVELOPE" ) >/dev/null 2>&1; then
         [ "$LEGACY_CONTAINER_STOPPED" -eq 0 ] || sudo docker start "$legacy_container_id" >/dev/null 2>&1 || echo "ERROR: legacy validator container recovery failed" >&2
       else
@@ -143,6 +146,11 @@ if [ -d "$RELEASE" ]; then
 else
   mv "$STAGE" "$RELEASE"; STAGE=""
 fi
+
+# Bootstrap and rollback must not depend on the SSH login's AWS configuration.
+AWS_DEFAULT_REGION="$(cd "$RELEASE" && PYTHONPATH="$RELEASE" "$PYTHON" -c 'import sys; from validator_tee.host.arena_hotkey_bootstrap import kms_region; region=kms_region(sys.argv[1]); assert region, "migration requires a KMS key ARN"; print(region)' "$MIGRATION_KMS_KEY_ID")"
+export AWS_DEFAULT_REGION
+export AWS_REGION="$AWS_DEFAULT_REGION"
 
 # Freeze a root-owned candidate configuration without replacing the active
 # service snapshot. It is promoted only after the old validator has drained.
@@ -307,7 +315,7 @@ if [ -n "$old_enclave_id" ] && [ "${discovered_pcr0,,}" = "${EXPECTED_PCR0,,}" ]
   old_enclave_id=""
   reuse_candidate=1
 elif [ -n "$old_enclave_id" ]; then
-  for legacy_input in "$LEGACY_EIF" "$LEGACY_HOTKEY_CONFIG" "$LEGACY_RELEASE_MANIFEST" "$LEGACY_GATEWAY_MANIFEST" "$LEGACY_GATEWAY_LINEAGE" "$LEGACY_ENVELOPE"; do
+  for legacy_input in "$LEGACY_EIF" "$LEGACY_HOTKEY_CONFIG" "$LEGACY_RELEASE_MANIFEST" "$LEGACY_GATEWAY_MANIFEST" "$LEGACY_GATEWAY_LINEAGE" "$LEGACY_ENVELOPE" "$LEGACY_CUTOVER"; do
     [ -f "$legacy_input" ] && [ ! -L "$legacy_input" ] || fail "legacy rollback input is unavailable"
   done
   [ -s "$LEGACY_EIF" ] && [ ! -L "$LEGACY_EIF" ] || fail "exact legacy signer EIF is unavailable"
@@ -344,7 +352,7 @@ if [ "$reuse_candidate" -eq 0 ]; then
   # Stop only the exact legacy weight producer before switching signer
   # semantics. Scoring and the relay remain live until protected readiness.
   if [ -n "$legacy_container_id" ] && [ "${legacy_container_pid:-0}" -gt 0 ]; then
-    sudo docker stop --time "$STOP_TIMEOUT" "$legacy_container_id" >/dev/null
+    sudo docker stop --time "$LEGACY_COORDINATOR_STOP_TIMEOUT" "$legacy_container_id" >/dev/null
     LEGACY_CONTAINER_STOPPED=1
   fi
   if [ -n "$OLD_ENCLAVE_ID" ]; then
@@ -403,7 +411,7 @@ stop_owned_process() {
 }
 stop_owned_process "$old_runner_pgid" "$old_runner_start" "standalone Arena runner"
 if [ -n "$legacy_container_id" ] && [ "${legacy_container_pid:-0}" -gt 0 ] && [ "$LEGACY_CONTAINER_STOPPED" -eq 0 ]; then
-  sudo docker stop --time "$STOP_TIMEOUT" "$legacy_container_id" >/dev/null
+  sudo docker stop --time "$LEGACY_COORDINATOR_STOP_TIMEOUT" "$legacy_container_id" >/dev/null
   [ "$(sudo docker inspect -f '{{.State.Running}}' "$legacy_container_id")" = false ] || fail "legacy validator container did not stop"
 fi
 stop_owned_process "$old_relay_pid" "$old_relay_start" "legacy chain relay"

@@ -64,14 +64,46 @@ def validate_legacy_container_inventory(
             raise RuntimeError("legacy validator container runtime identity is invalid")
         return container_id, pid if running else 0
 
+    def coordinator_command_is_valid(command: Any) -> bool:
+        if not isinstance(command, list) or len(command) % 2:
+            return False
+        allowed = {
+            "--netuid",
+            "--subtensor_network",
+            "--wallet_name",
+            "--wallet_hotkey",
+            "--container-id",
+            "--total-containers",
+            "--mode",
+        }
+        parsed = {}
+        for offset in range(0, len(command), 2):
+            flag, value = command[offset : offset + 2]
+            if (
+                not isinstance(flag, str)
+                or flag not in allowed
+                or flag in parsed
+                or not isinstance(value, str)
+                or not value
+            ):
+                return False
+            parsed[flag] = value
+        return (
+            set(parsed) == allowed
+            and parsed["--netuid"] == "71"
+            and parsed["--subtensor_network"] == "finney"
+            and parsed["--container-id"] == "0"
+            and parsed["--total-containers"] == "1"
+            and parsed["--mode"] == "coordinator"
+        )
+
     if (
         not isinstance(image, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None
         or not isinstance(revision, str)
         or re.fullmatch(r"[0-9a-f]{40}", revision) is None
         or not common(main)
-        or (config.get("Cmd") or [])
-        != ["--mode", "coordinator", "--container-id", "0"]
+        or not coordinator_command_is_valid(config.get("Cmd"))
     ):
         raise RuntimeError("legacy validator container identity is invalid")
     workers = []

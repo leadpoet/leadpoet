@@ -335,8 +335,17 @@ def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
         validate_legacy_container_inventory,
     )
 
+    coordinator_command = [
+        "--netuid", "71",
+        "--subtensor_network", "finney",
+        "--wallet_name", "wallet-name",
+        "--wallet_hotkey", "wallet-hotkey",
+        "--container-id", "0",
+        "--total-containers", "1",
+        "--mode", "coordinator",
+    ]
     containers = [_legacy_container(
-        "/leadpoet-validator-main", ["--mode", "coordinator", "--container-id", "0"], 100,
+        "/leadpoet-validator-main", coordinator_command, 100,
     )]
     containers.extend(
         _legacy_container(
@@ -381,6 +390,16 @@ def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
         else:
             malformed[index][field] = value
         with pytest.raises(RuntimeError):
+            validate_legacy_container_inventory(malformed, Path("/source"))
+
+    for bad_command in (
+        coordinator_command + ["--mode", "coordinator"],
+        [value if value != "coordinator" else "fulfillment_worker" for value in coordinator_command],
+        coordinator_command + ["--unknown", "value"],
+    ):
+        malformed = json.loads(json.dumps(containers))
+        malformed[0]["Config"]["Cmd"] = bad_command
+        with pytest.raises(RuntimeError, match="container identity is invalid"):
             validate_legacy_container_inventory(malformed, Path("/source"))
 
 

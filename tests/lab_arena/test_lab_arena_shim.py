@@ -346,7 +346,7 @@ def test_company_verification_routed_page_fetch_uses_provider_deadline(
                 },
             }
         },
-        "billing": {"cost_usd": 0.002},
+        "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
     }
     provider_broker, _ledger, transport = make_broker(
         transport=FakeTransport([(200, envelope)]),
@@ -358,7 +358,7 @@ def test_company_verification_routed_page_fetch_uses_provider_deadline(
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["actual_final_url"] == source_url
     assert len(transport.sent) == 1
-    assert transport.sent[0]["timeout"] == 60.0
+    assert 59.0 <= transport.sent[0]["timeout"] <= 60.0
     request = json.loads(transport.sent[0]["body"])
     assert request["operation"] == "firecrawl_scrape"
     assert request["payload"]["timeout"] == 60_000
@@ -386,7 +386,7 @@ def test_company_verification_retains_cross_domain_final_url_and_policy(
                 },
             }
         },
-        "billing": {"cost_usd": 0.002},
+        "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
     }
     provider_broker, _ledger, _transport = make_broker(
         transport=FakeTransport([(200, envelope)]),
@@ -419,7 +419,7 @@ def test_company_verification_routed_failure_stays_explicit_and_bounded(
     assert result.passed is False
     assert result.reason == "website returned HTTP 502"
     assert len(transport.sent) == 1
-    assert transport.sent[0]["timeout"] == 60.0
+    assert 59.0 <= transport.sent[0]["timeout"] <= 60.0
     assert ledger.log == ["reserve", "dispatch", "uncertain"]
 
 

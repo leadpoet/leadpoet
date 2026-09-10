@@ -67,8 +67,33 @@ def test_environment_contains_only_public_handle_not_host_key(tmp_path, monkeypa
     monkeypatch.setenv("LAB_ARENA_SCRAPINGDOG_API_KEY", secret)
     spec = make_spec(tmp_path, extra_environment={"SCRAPINGDOG_API_KEY": secret})
     environment = runtime.sandbox_environment(spec)
-    assert environment["SCRAPINGDOG_API_KEY"] == operations.SCRAPINGDOG_RUNTIME_HANDLE
+    assert "SCRAPINGDOG_API_KEY" not in environment
     assert secret not in repr(environment)
+    configured = make_spec(tmp_path, extra_environment={
+        "SCRAPINGDOG_API_KEY": operations.SCRAPINGDOG_RUNTIME_HANDLE,
+    })
+    assert runtime.sandbox_environment(configured)["SCRAPINGDOG_API_KEY"] == operations.SCRAPINGDOG_RUNTIME_HANDLE
+
+
+@pytest.mark.parametrize("configured", [True, False, None, "true"])
+def test_runner_exposes_optional_handle_only_when_gateway_confirms_it(tmp_path, configured):
+    from lab_arena import runner
+    from tests.lab_arena.test_lab_arena_runner import BridgingRuntime, FakeApi, lease, make_config
+
+    claim = lease()
+    if configured is not None:
+        claim["scrapingdog_configured"] = configured
+    api = FakeApi([claim])
+    sandbox = BridgingRuntime(output={"companies": []}, calls=0)
+    (tmp_path / "work").mkdir()
+    worker = runner.Runner(make_config(tmp_path, api, sandbox))
+    try:
+        assert worker.run_once() == 1
+        environment = runtime.sandbox_environment(sandbox.specs[0])
+        assert bool(environment.get("SCRAPINGDOG_API_KEY")) is (configured is True)
+        assert api.completions[0]["body"]["result"]["terminal_status"] == "accepted"
+    finally:
+        worker.close()
 
 
 def test_standard_http_client_handle_crosses_worker_without_credentials():

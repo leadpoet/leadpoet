@@ -2010,7 +2010,8 @@ def test_finney_claim_does_not_add_the_testnet_validator_permit_gate():
     assert service.handle_claim({}) == {"status": "empty"}
 
 
-def test_execute_lease_uses_private_source_and_the_common_trusted_python_image():
+@pytest.mark.parametrize("configured,is_baseline", [(False, False), (True, False), (False, True)])
+def test_execute_lease_uses_private_source_and_the_common_trusted_python_image(configured, is_baseline):
     runner = "5" * 48
     digest = "sha256:" + "a" * 64
     reference = "registry.example/lab/scorer@" + digest
@@ -2019,10 +2020,18 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image()
         "miner_hotkey": "5" + "A" * 47,
         "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
         "source_size_bytes": 123,
-        "is_king": False,
+        "is_king": is_baseline,
     }
 
     class Store:
+        @staticmethod
+        def get_submission_credential(submission_id, hotkey, provider):
+            assert not is_baseline  # Host-funded baseline needs no miner row.
+            assert (submission_id, hotkey, provider) == (
+                participant["submission_id"], participant["miner_hotkey"], "scrapingdog"
+            )
+            return {"ciphertext_b64": "private-ciphertext"} if configured else None
+
         @staticmethod
         def claim_assignment(**_kwargs):
             return {
@@ -2062,6 +2071,8 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image()
     service.benchmark_icps = lambda _round_id: [{}]
 
     lease = service.handle_claim({})
+    assert lease["scrapingdog_configured"] is (configured or is_baseline)
+    assert "private-ciphertext" not in repr(lease)
     assert (lease["image_digest"], lease["image_reference"]) == (digest, reference)
     assert {
         key: lease[key]

@@ -68,8 +68,8 @@ The host keys are used for baseline traffic. A competing model's
 OpenRouter runtime key and Deepline key are submitted separately, encrypted in
 the gateway vault, and attached to that submission's execution and judge calls. An
 optional miner Scrapingdog key is encrypted in the same vault and used only when
-that model calls Scrapingdog. The sandbox receives a fixed non-secret runtime
-handle; the actual Scrapingdog key stays in the broker. The
+that model calls Scrapingdog. Only submissions with that key receive a fixed
+non-secret `SCRAPINGDOG_API_KEY` runtime handle; the actual key stays in the broker. The
 matching OpenRouter management key is used for admission validation and then
 discarded. The miner funds those upstream calls. The validator receives an
 opaque runtime lease and cannot read the credentials; submitted code receives

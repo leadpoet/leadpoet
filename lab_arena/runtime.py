@@ -294,10 +294,13 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LAB_ARENA_WORKER_SOCKET": SANDBOX_SOCKET_PATH,
     })
     environment.update(PROVIDER_BASE_URLS)
-    # Models may use the normal API-key parameter through the worker socket.
-    # Only the broker has the actual key; a missing submitted key fails there.
-    environment["SCRAPINGDOG_API_KEY"] = SCRAPINGDOG_RUNTIME_HANDLE
     for name, value in spec.extra_environment.items():
+        if name == "SCRAPINGDOG_API_KEY":
+            # Only the lease-selected public handle may enter the sandbox.
+            # No handle means the optional provider was not configured.
+            if value == SCRAPINGDOG_RUNTIME_HANDLE:
+                environment[name] = value
+            continue
         environment.setdefault(name, value)  # the fixed model environment always wins
     return environment
 

@@ -2037,6 +2037,15 @@ class ArenaService:
             {
                 "source_ref": participant["source_ref"],
                 "source_size_bytes": int(participant["source_size_bytes"]),
+                # Availability only: neither ciphertext nor the provider key
+                # belongs in a validator lease or the model environment.
+                "scrapingdog_configured": bool(participant.get("is_king")) or (
+                    self._store.get_submission_credential(
+                        str(participant["submission_id"]),
+                        str(participant["miner_hotkey"]),
+                        "scrapingdog",
+                    ) is not None
+                ),
             }
         )
         return lease

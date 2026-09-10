@@ -126,9 +126,9 @@ python scripts/lab_arena_miner.py interactive \
   --api-base-url https://gateway.subnet71.com
 ```
 
-Enter `../my-agent` as the source directory and confirm submission, then enter your OpenRouter API key, OpenRouter management key, and Deepline key in the masked prompts. Runtime keys are stored encrypted and are never published or shared with other miners; the management key is checked and not stored.
+Enter `../my-agent` as the source directory and confirm submission, then enter your OpenRouter API key, OpenRouter management key, and Deepline key in the masked prompts. Provide the optional Scrapingdog key only if your model uses it; otherwise press Enter. Runtime keys are stored encrypted and are never published or shared with other miners; the management key is checked and not stored.
 
-For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEPLINE_API_KEY`, then replace `interactive` with `submit-model --source ../my-agent` in the command above.
+For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEPLINE_API_KEY`, optionally set `SCRAPINGDOG_API_KEY`, then replace `interactive` with `submit-model --source ../my-agent` in the command above. When provided, the sandbox exposes `SCRAPINGDOG_API_KEY` as a non-secret handle for the existing broker transport. The actual key stays in the gateway; it is never placed in model code or the validator environment.
 
 Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files. Each hotkey can have one accepted model per round; daily capacity is limited. Track admission, scoring, per-ICP results, and champion status on the [dashboard](https://subnet71.com).
 

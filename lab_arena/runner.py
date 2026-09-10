@@ -1354,6 +1354,8 @@ class AssignmentExecutor:
                     "provider_operations": sorted(operations.OPERATIONS),
                 }
                 extra_environment = {}
+                if lease.get("scrapingdog_configured") is True:
+                    extra_environment["SCRAPINGDOG_API_KEY"] = operations.SCRAPINGDOG_RUNTIME_HANDLE
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
             staged_agent_entrypoint = (
                 None

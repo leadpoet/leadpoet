@@ -1676,6 +1676,14 @@ def _has_explicitly_unproven_fit_dimensions(
             "employee_size_evidence_url",
             "employee_size_evidence_quote",
         ),
+        "industry": (
+            "observed_industry",
+            "observed_subindustry",
+            "industry_matches",
+            "industry_activity_role",
+            "industry_evidence_url",
+            "industry_evidence_quote",
+        ),
         "stage": (
             "observed_company_stage",
             "stage_matches",
@@ -1692,6 +1700,35 @@ def _has_explicitly_unproven_fit_dimensions(
             if not (
                 _is_same_domain_unproven_web_identity(identity_receipt)
                 or _is_verified_homepage_web_identity_conflict(identity_receipt)
+            ):
+                return False
+            continue
+        if dimension == "industry":
+            if not all(field in verdict for field in fields[dimension]):
+                return False
+            observed_industry = verdict.get("observed_industry")
+            observed_subindustry = verdict.get("observed_subindustry")
+            effective_evidence = _dimension_web_evidence(verdict, dimension)
+            if (
+                icp is None
+                or not isinstance(observed_industry, str)
+                or not observed_industry.strip()
+                or not isinstance(observed_subindustry, str)
+                or verdict.get("industry_matches") is not False
+                or verdict.get("industry_activity_role") != "supplier_operator"
+                or not effective_evidence.get("url")
+                or not effective_evidence.get("quote")
+                or _industry_evidence_decision(
+                    observed_industry,
+                    observed_subindustry,
+                    icp.industry,
+                    verdict.get("industry_matches"),
+                    semantic_evidence=effective_evidence,
+                    industry_activity_role=verdict.get(
+                        "industry_activity_role"
+                    ),
+                )
+                != COMPANY_FIT_UNAVAILABLE
             ):
                 return False
             continue

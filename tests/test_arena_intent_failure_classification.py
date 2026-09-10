@@ -254,6 +254,23 @@ def _structured_fit_verdict_with_unproven(dimension: str) -> dict:
     return verdict
 
 
+def _structured_fit_verdict_with_unproven_industry() -> dict:
+    verdict = _structured_fit_verdict_with_unproven("employee_size")
+    verdict.update(
+        employee_size_evidence_url="https://evidence.example/employee-size",
+        observed_industry="Sales Software",
+        observed_subindustry="Revenue intelligence",
+        industry_matches=False,
+        industry_activity_role="supplier_operator",
+        industry_evidence_url="https://evidence.example/industry",
+        industry_evidence_quote=(
+            "The platform helps sales teams identify and prioritize buyers."
+        ),
+        reason="The industry relationship could not be resolved.",
+    )
+    return verdict
+
+
 def test_arena_scorer_does_not_turn_ambiguous_identity_into_fabrication(
     monkeypatch,
 ):
@@ -456,6 +473,82 @@ def test_unproven_structured_fit_scores_zero_without_arena_retry(
         arena_scoring.build_scorer_policy(),
     )
     assert row["per_icp_score"] == 0.0
+
+
+def test_complete_unproven_industry_scores_zero_without_arena_retry(
+    monkeypatch,
+):
+    verdict = _structured_fit_verdict_with_unproven_industry()
+    provider_calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return dict(verdict), ""
+
+    scorer_calls = 0
+
+    async def counted_scorer(*_args):
+        nonlocal scorer_calls
+        scorer_calls += 1
+        result = await lead_scorer.score_company_competition_intent(
+            _company(), _icp(), 0.0, 0.0, set()
+        )
+        return [result.model_dump(mode="json")]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", provider
+    )
+
+    companies = [_company().model_dump(mode="json")]
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": "unproven-industry"},
+        icp=_icp().model_dump(mode="json"),
+        companies=companies,
+        scorer=counted_scorer,
+        max_retries=3,
+    )
+
+    breakdown = accepted[0]
+    receipt = breakdown["verifier_gate_receipts"][0]
+    assert scorer_calls == 1
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert breakdown["final_score"] == 0.0
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert receipt["company_fit_dimensions"]["industry"] == "unavailable"
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("industry_evidence_url", "javascript:alert(1)"),
+        ("industry_evidence_quote", ""),
+    ],
+)
+def test_malformed_unproven_industry_remains_retryable(field, value):
+    verdict = _structured_fit_verdict_with_unproven_industry()
+    verdict[field] = value
+
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict,
+        ("industry",),
+        icp=_icp(),
+    )
 
 
 @pytest.mark.parametrize(

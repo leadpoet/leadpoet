@@ -129,7 +129,7 @@ def test_signed_bytes_are_durable_before_broadcast_and_restart_reuses_them(tmp_p
     signer = _Signer(_protected(), [
         {"status": "pending", "finalized": False},
         {"status": "finalized", "finalized": True,
-         "finalized_block_hash": "0x" + "8" * 64, "finalized_block": 1060,
+         "finalized_block_hash": "8" * 64, "finalized_block": 1060,
          "commit_included_block": 1050,
          "weights_hash": "sha256:" + "5" * 64, "validator_uid": 4,
          "last_update": 1050, "revealed_weights": [[0, 65535], [1, 100]]},

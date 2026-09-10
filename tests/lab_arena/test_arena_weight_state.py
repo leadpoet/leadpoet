@@ -47,7 +47,7 @@ def test_chain_outcome_is_fresh_and_request_id_is_content_addressed():
         "validator_hotkey": KING, "state_hash": "sha256:" + "1" * 64,
         "weights_hash": "2" * 64,
         "extrinsic_hash": "0x" + "3" * 64,
-        "finalized_block_hash": "0x" + "4" * 64,
+        "finalized_block_hash": "4" * 64,
         "finalized_block_number": 123, "observed_at": "2026-09-10T00:00:00Z",
     }
     document = {**core, "request_id": contracts.document_hash(core), "signature": "0x1234"}

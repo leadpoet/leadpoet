@@ -10,21 +10,24 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 
 def validate_legacy_container_inventory(
-    items: Sequence[Mapping[str, Any]], source_root: Path
+    items: Sequence[Mapping[str, Any]], source_root: Path,
+    expected_revision: Optional[str] = None,
 ) -> Mapping[str, Any]:
     """Bind the retired coordinator and any discovered FF workers to one image."""
 
     if not items:
         return {"main_id": "", "main_pid": 0, "workers": []}
     by_name = {item.get("Name"): item for item in items}
-    if len(by_name) != len(items) or "/leadpoet-validator-main" not in by_name:
+    if len(by_name) != len(items):
         raise RuntimeError("legacy validator container identity is ambiguous")
-    main = by_name.pop("/leadpoet-validator-main")
-    config = main.get("Config") or {}
+    main = by_name.pop("/leadpoet-validator-main", None)
+    config = (main or {}).get("Config") or {}
     revision = (config.get("Labels") or {}).get(
         "org.opencontainers.image.revision"
-    )
-    image = main.get("Image")
+    ) if main is not None else expected_revision
+    image = main.get("Image") if main is not None else next(
+        iter(by_name.values()), {}
+    ).get("Image")
     weights_source = str(source_root / "validator_weights")
 
     def common(item: Mapping[str, Any]) -> bool:
@@ -100,7 +103,7 @@ def validate_legacy_container_inventory(
             and parsed["--mode"] == "coordinator"
         )
 
-    if (
+    if main is not None and (
         not isinstance(image, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None
         or not isinstance(revision, str)
@@ -109,6 +112,20 @@ def validate_legacy_container_inventory(
         or not coordinator_command_is_valid(config.get("Cmd"))
     ):
         raise RuntimeError("legacy validator container identity is invalid")
+    if main is None and (
+        not isinstance(expected_revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None
+    ):
+        raise RuntimeError("orphaned legacy worker source revision is unavailable")
+    if expected_revision is not None and revision != expected_revision:
+        raise RuntimeError("legacy validator source revision differs")
+    if (
+        not isinstance(image, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+    ):
+        raise RuntimeError("legacy validator image identity is invalid")
     workers = []
     for name, item in by_name.items():
         match = re.fullmatch(r"/leadpoet-ff-worker-(10|[1-9])", str(name))
@@ -145,7 +162,7 @@ def validate_legacy_container_inventory(
             }
         )
     workers.sort(key=lambda item: item["worker_id"])
-    main_id, main_pid = runtime_identity(main)
+    main_id, main_pid = runtime_identity(main) if main is not None else ("", 0)
     return {
         "main_id": main_id,
         "main_pid": main_pid,

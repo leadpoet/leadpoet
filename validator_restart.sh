@@ -132,6 +132,8 @@ DOCKER_LOCK_HELPER="$SOURCE_ROOT/validator_tee/scripts/docker_operation_lock_v2.
 leadpoet_acquire_docker_operation_lock_v2
 git diff --quiet && git diff --cached --quiet || fail "installed checkout has tracked changes"
 git fetch origin --prune
+INSTALLED_SOURCE_REVISION="$(git rev-parse HEAD)"
+[[ "$INSTALLED_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || fail "installed source revision is invalid"
 TARGET_SHA="$(git rev-parse --verify "$TARGET_REQUEST^{commit}")"
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "target commit is invalid"
 git merge-base --is-ancestor "$TARGET_SHA" origin/main || fail "target commit is not on origin/main"
@@ -273,11 +275,11 @@ read_legacy_inventory_json() {
   else
     container_json="$(sudo docker inspect $container_ids)" || return
   fi
-  cd "$RELEASE" && printf '%s' "$container_json" | SOURCE_ROOT="$SOURCE_ROOT" PYTHONPATH="$RELEASE" "$PYTHON" -c '
+  cd "$RELEASE" && printf '%s' "$container_json" | SOURCE_ROOT="$SOURCE_ROOT" EXPECTED_SOURCE_REVISION="$INSTALLED_SOURCE_REVISION" PYTHONPATH="$RELEASE" "$PYTHON" -c '
 import json,os,sys
 from pathlib import Path
 from validator_tee.host.arena_restart_identity import validate_legacy_container_inventory
-print(json.dumps(validate_legacy_container_inventory(json.load(sys.stdin),Path(os.environ["SOURCE_ROOT"])),sort_keys=True,separators=(",",":")))
+print(json.dumps(validate_legacy_container_inventory(json.load(sys.stdin),Path(os.environ["SOURCE_ROOT"]),expected_revision=os.environ["EXPECTED_SOURCE_REVISION"]),sort_keys=True,separators=(",",":")))
 '
 }
 legacy_inventory_json="$(read_legacy_inventory_json)" || fail "legacy validator container inventory is invalid"

@@ -380,6 +380,13 @@ def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
     assert inventory["main_pid"] == 100
     assert [item["worker_id"] for item in inventory["workers"]] == list(range(1, 11))
     assert [item["pid"] for item in inventory["workers"]] == list(range(101, 111))
+    assert validate_legacy_container_inventory(
+        containers, Path("/source"), expected_revision="a" * 40
+    ) == inventory
+    with pytest.raises(RuntimeError, match="source revision differs"):
+        validate_legacy_container_inventory(
+            containers, Path("/source"), expected_revision="c" * 40
+        )
     assert validate_legacy_container_inventory([], Path("/source")) == {
         "main_id": "", "main_pid": 0, "workers": []
     }
@@ -439,6 +446,51 @@ def test_legacy_fulfillment_worker_inventory_is_exact_and_restart_safe():
         malformed[0]["Config"]["Cmd"] = bad_command
         with pytest.raises(RuntimeError, match="container identity is invalid"):
             validate_legacy_container_inventory(malformed, Path("/source"))
+
+
+def test_orphaned_workers_require_the_exact_installed_source_revision():
+    from validator_tee.host.arena_restart_identity import (
+        validate_legacy_container_inventory,
+    )
+
+    revision = "a" * 40
+    workers = [
+        _legacy_container(
+            f"/leadpoet-ff-worker-{index}",
+            ["--mode", "fulfillment_worker", "--container-id", str(index)],
+            100 + index,
+            revision=revision,
+        )
+        for index in range(1, 11)
+    ]
+    inventory = validate_legacy_container_inventory(
+        workers, Path("/source"), expected_revision=revision
+    )
+    assert inventory["main_id"] == "" and inventory["main_pid"] == 0
+    assert [item["worker_id"] for item in inventory["workers"]] == list(range(1, 11))
+
+    with pytest.raises(RuntimeError, match="source revision is unavailable"):
+        validate_legacy_container_inventory(workers, Path("/source"))
+    with pytest.raises(RuntimeError, match="worker identity is invalid"):
+        validate_legacy_container_inventory(
+            workers, Path("/source"), expected_revision="b" * 40
+        )
+    changed = json.loads(json.dumps(workers))
+    changed[3]["Config"]["Labels"]["org.opencontainers.image.revision"] = "b" * 40
+    with pytest.raises(RuntimeError, match="worker identity is invalid"):
+        validate_legacy_container_inventory(
+            changed, Path("/source"), expected_revision=revision
+        )
+    assert validate_legacy_container_inventory(
+        [], Path("/source"), expected_revision=revision
+    ) == {"main_id": "", "main_pid": 0, "workers": []}
+
+
+def test_restart_binds_legacy_inventory_to_installed_git_revision():
+    text = SCRIPT.read_text()
+    assert 'INSTALLED_SOURCE_REVISION="$(git rev-parse HEAD)"' in text
+    assert 'EXPECTED_SOURCE_REVISION="$INSTALLED_SOURCE_REVISION"' in text
+    assert 'expected_revision=os.environ["EXPECTED_SOURCE_REVISION"]' in text
 
 
 def _run_legacy_worker_retirement(

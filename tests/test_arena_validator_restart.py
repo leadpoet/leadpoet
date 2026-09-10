@@ -172,6 +172,7 @@ def test_candidate_host_module_is_loaded_from_release_not_stale_source(tmp_path)
         (host / "arena_restart_identity.py").write_text(
             f'print("{identity} 123")\n'
         )
+        (host / "vsock_client.py").write_text(f'MARKER = "{identity}"\n')
     stale = subprocess.run(
         [sys.executable, "-m", "validator_tee.host.arena_restart_identity"],
         cwd=source,
@@ -214,6 +215,20 @@ printf '%s %s' "$old_pid" "$old_start"
         check=True,
     )
     assert selected.stdout == "candidate 123"
+
+    inline = "from validator_tee.host.vsock_client import MARKER; print(MARKER)"
+    candidate_inline = subprocess.run(
+        [sys.executable, "-c", inline], cwd=release,
+        env={**os.environ, "PYTHONPATH": str(release)}, text=True,
+        capture_output=True, check=True,
+    )
+    rollback_inline = subprocess.run(
+        [sys.executable, "-c", inline], cwd=source,
+        env={**os.environ, "PYTHONPATH": str(source)}, text=True,
+        capture_output=True, check=True,
+    )
+    assert candidate_inline.stdout.strip() == "candidate"
+    assert rollback_inline.stdout.strip() == "stale"
 
 
 def test_single_enclave_transition_has_bounded_automatic_rollback():

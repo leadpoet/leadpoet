@@ -711,7 +711,7 @@ class ArenaChain:
         last_update = _chain_int(updates[uid], "validator last update")
         if last_update < 0 or last_update > head.number:
             raise ArenaChainError("finalized validator last update is invalid")
-        ready = head.number - last_update >= rate_limit
+        ready = last_update == 0 or head.number - last_update >= rate_limit
         return head, snapshot, ready
 
 

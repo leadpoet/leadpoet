@@ -436,6 +436,10 @@ def test_weight_submission_context_is_pinned_and_enforces_last_update_rate_limit
     fake.storage["LastUpdate"][0] = FINALIZED_NUMBER - 100
     assert chain.finalized_weight_submission_context(ALICE.ss58_address)[2] is True
 
+    fake.storage["WeightsSetRateLimit"] = FINALIZED_NUMBER + 1
+    fake.storage["LastUpdate"][0] = 0
+    assert chain.finalized_weight_submission_context(ALICE.ss58_address)[2] is True
+
 
 def test_weight_submission_context_fails_closed_when_rate_limit_read_fails():
     fake = FakeSubstrate()
@@ -445,6 +449,27 @@ def test_weight_submission_context_fails_closed_when_rate_limit_read_fails():
 
     with pytest.raises(ArenaChainError, match="chain call query failed"):
         chain.finalized_weight_submission_context(ALICE.ss58_address)
+
+
+def test_weight_submission_context_rejects_missing_uid_and_invalid_pinned_state():
+    fake = FakeSubstrate()
+    fake.storage.update({"WeightsSetRateLimit": 100, "LastUpdate": [0, 0, 0]})
+    chain = ArenaChain(make_config(), fake, metagraph_source=CountingSource())
+    with pytest.raises(ArenaChainError, match="hotkey is absent"):
+        chain.finalized_weight_submission_context(BOB.ss58_address)
+
+    fake.storage["LastUpdate"] = [0]
+    with pytest.raises(ArenaChainError, match="rate-limit state is invalid"):
+        chain.finalized_weight_submission_context(EVE.ss58_address)
+
+    bad_source = CountingSource(
+        lambda _client, _netuid, _block_hash: make_snapshot(
+            FINALIZED_NUMBER - 1, canonical_hash(FINALIZED_NUMBER - 1)
+        )
+    )
+    bad_chain = ArenaChain(make_config(), fake, metagraph_source=bad_source)
+    with pytest.raises(ArenaChainError, match="not pinned"):
+        bad_chain.finalized_weight_submission_context(ALICE.ss58_address)
 
 
 def test_import_closure_is_lazy_and_boundary_clean():

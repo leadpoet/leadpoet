@@ -42,6 +42,16 @@ class StubService:
     def public_reward_basis(self, epoch):
         return {"round_id": "arena-2026-09-02", "effective_reward_epoch": epoch} if epoch == 24801 else None
 
+    def public_weight_state(self, epoch):
+        return {"state": {"epoch": epoch}, "lookup_ok": True}
+
+    def record_chain_outcome(self, document):
+        self.calls["chain_outcome"] = document
+        return {"status": "recorded"}
+
+    def public_chain_outcomes(self, epoch):
+        return {"outcomes": [{"epoch": epoch}], "lookup_ok": True}
+
     def public_round(self, round_id):
         if round_id != "arena-2026-09-02":
             raise ServiceError("round_missing", 404)
@@ -121,6 +131,11 @@ def test_public_routes(client):
     assert http.get("/arena/v1/recipient").status_code == 404
     assert http.get("/arena/v1/reward-basis", params={"epoch": 24801}).json()["effective_reward_epoch"] == 24801
     assert http.get("/arena/v1/reward-basis", params={"epoch": 1}).status_code == 404
+    assert http.get("/arena/v1/weight-state", params={"epoch": 24801}).json()["state"]["epoch"] == 24801
+    outcome = {"epoch": 24801}
+    assert http.post("/arena/v1/chain-outcomes", json=outcome).json()["status"] == "recorded"
+    assert _service.calls["chain_outcome"] == outcome
+    assert http.get("/arena/v1/chain-outcomes", params={"epoch": 24801}).json()["outcomes"] == [outcome]
     assert http.get("/arena/v1/rounds/arena-2026-09-02").json()["status"] == "open"
     missing = http.get("/arena/v1/rounds/arena-2026-01-01")
     assert missing.status_code == 404 and missing.json() == {"status": "rejected", "code": "round_missing"}

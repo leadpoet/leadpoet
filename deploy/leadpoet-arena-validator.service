@@ -1,0 +1,21 @@
+[Unit]
+Description=Leadpoet normal Arena validator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/leadpoet/leadpoet
+ExecStartPre=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator.env --check-only
+ExecStart=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator.env
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGTERM
+KillMode=mixed
+# Allow current model/scoring leases to finish. New claims stop on SIGTERM.
+TimeoutStopSec=9300
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

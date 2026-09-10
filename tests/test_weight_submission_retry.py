@@ -114,19 +114,20 @@ def _authoritative_args():
 
 def test_primary_serializes_concurrent_weight_submission_triggers():
     validator = validator_module.Validator.__new__(validator_module.Validator)
-    started = asyncio.Event()
-    release = asyncio.Event()
     calls = []
 
-    async def submit_locked():
-        calls.append("started")
-        started.set()
-        await release.wait()
-        return True
-
-    validator._submit_weights_at_epoch_end_locked = submit_locked
-
     async def run():
+        # Python 3.9 binds Events to the loop at creation time.
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def submit_locked():
+            calls.append("started")
+            started.set()
+            await release.wait()
+            return True
+
+        validator._submit_weights_at_epoch_end_locked = submit_locked
         first = asyncio.create_task(validator.submit_weights_at_epoch_end())
         await started.wait()
         duplicate = await validator.submit_weights_at_epoch_end()

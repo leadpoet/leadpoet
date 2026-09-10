@@ -24,6 +24,7 @@ Security:
 
 import asyncio
 import os
+import stat
 import base64
 import gzip
 import hashlib
@@ -38,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.datastructures import QueryParams
@@ -112,7 +113,50 @@ from leadpoet_observability import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/weights", tags=["weights"])
+LEGACY_AUDIT_WEIGHT_RETIREMENT_FILE_ENV = (
+    "LEADPOET_LEGACY_AUDIT_WEIGHT_RETIREMENT_FILE"
+)
+DEFAULT_LEGACY_AUDIT_WEIGHT_RETIREMENT_FILE = (
+    "/home/ec2-user/.config/leadpoet/legacy-audit-weights.retired"
+)
+
+
+def _require_legacy_audit_weight_path() -> None:
+    """Keep legacy audit routes live until an operator flips one local file.
+
+    The file is read for every request. This makes retirement immediate without
+    adding a public control endpoint or requiring a gateway restart. Missing,
+    unreadable, and non-matching files preserve the compatibility path.
+    """
+
+    configured_path = os.environ.get(LEGACY_AUDIT_WEIGHT_RETIREMENT_FILE_ENV)
+    path = (configured_path or DEFAULT_LEGACY_AUDIT_WEIGHT_RETIREMENT_FILE).strip()
+    try:
+        expected_owner = os.getuid() if configured_path is not None else 0
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as flag:
+            metadata = os.fstat(flag.fileno())
+            retired = (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_size <= 32
+                and metadata.st_uid == expected_owner
+                and metadata.st_mode & 0o022 == 0
+                and flag.read(32).strip() == "retired"
+            )
+    except (OSError, UnicodeError):
+        retired = False
+    if retired:
+        raise HTTPException(
+            status_code=410,
+            detail="legacy audit-validator weight endpoints are retired",
+        )
+
+
+router = APIRouter(
+    prefix="/weights",
+    tags=["weights"],
+    dependencies=[Depends(_require_legacy_audit_weight_path)],
+)
 _WEIGHT_AUTHORITY_GZIP_MIN_BYTES = 1024
 _WEIGHT_AUTHORITY_LOADS_INFLIGHT: Dict[
     tuple[int, int, int, str, bool],

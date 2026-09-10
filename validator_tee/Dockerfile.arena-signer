@@ -1,0 +1,24 @@
+# Dedicated signer image. Host model/scoring changes do not require rebuilding it.
+# Uses the same approved dependency pins and staged runtime artifacts as the
+# existing validator image. Its measured mode rejects legacy signing RPCs.
+FROM validator-base:v1
+ENV SOURCE_DATE_EPOCH=0
+ENV LEADPOET_ENCLAVE_MODE=arena
+WORKDIR /app
+
+COPY validator_tee/enclave/requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir --no-compile -r /tmp/requirements.txt
+COPY .validator-tee-artifacts/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl /tmp/sr25519.whl
+# pip requires the original wheel filename.
+RUN mv /tmp/sr25519.whl /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
+    && python3 -m pip install --no-cache-dir --no-compile --no-deps /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
+    && rm /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+
+COPY validator_tee/enclave/ /app/validator_tee/enclave/
+COPY .validator-tee-artifacts/libbittensor_drand_v2.so /app/validator_tee/enclave/libbittensor_drand_v2.so
+COPY leadpoet_canonical/ /app/leadpoet_canonical/
+COPY lab_arena/__init__.py lab_arena/contracts.py /app/lab_arena/
+
+RUN find /app /usr/lib/python3.7 /usr/lib64/python3.7 -name '*.pyc' -delete \
+    && find /app /usr/lib/python3.7 /usr/lib64/python3.7 -type f -exec touch -t 197001010000.00 {} +
+ENTRYPOINT ["python3", "-u", "/app/validator_tee/enclave/tee_service.py"]

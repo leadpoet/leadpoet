@@ -330,6 +330,32 @@ def _twox64_concat(value: bytes) -> bytes:
     return xxhash64(raw, seed=0).to_bytes(8, "little") + raw
 
 
+def system_account_storage_key(account_id: bytes) -> str:
+    """Storage key for ``System.Account(AccountId32)`` (Blake2_128Concat)."""
+
+    raw = bytes(account_id)
+    if len(raw) != 32:
+        raise ChainSourceV2Error("system account id must be 32 bytes")
+    key = _twox128(b"System") + _twox128(b"Account")
+    key += hashlib.blake2b(raw, digest_size=16).digest() + raw
+    return "0x" + key.hex()
+
+
+def decode_system_account_nonce(value: Any) -> int:
+    """Decode the leading nonce from Substrate's AccountInfo value."""
+
+    text = str(value or "")
+    if not text.startswith("0x"):
+        raise ChainSourceV2Error("system account state is invalid")
+    try:
+        raw = bytes.fromhex(text[2:])
+    except ValueError as exc:
+        raise ChainSourceV2Error("system account state is invalid") from exc
+    if len(raw) < 4:
+        raise ChainSourceV2Error("system account state is truncated")
+    return int.from_bytes(raw[:4], "little")
+
+
 _SUBNET_EPOCH_STORAGE_WIDTHS = {
     "Tempo": 2,
     "LastEpochBlock": 8,

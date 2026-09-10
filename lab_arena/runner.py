@@ -1704,9 +1704,11 @@ class Runner:
             sign_message=self._config.identity.sign,
         )
 
-    def run_once(self, *, max_claims: int = 1000) -> int:
+    def run_once(self, *, max_claims: int = 1000, stop_event: Any = None) -> int:
         """Refill free local slots until no lease remains or ``max_claims`` is met."""
 
+        if stop_event is not None and stop_event.is_set():
+            return 0
         if not self._pinned:
             try:
                 self.refresh_round()
@@ -1718,6 +1720,8 @@ class Runner:
             # Oldest round first: its deadline is nearer. Each round is claimed
             # until it has nothing to lease or this call reaches its claim cap.
             while taken < max_claims:
+                if stop_event is not None and stop_event.is_set():
+                    break
                 if not self._slots.acquire(blocking=False):
                     if not futures:
                         break

@@ -83,6 +83,7 @@ COPY .validator-tee-artifacts/manifest.json /app/validator_tee/runtime-artifacts
 
 # Copy leadpoet_canonical module (for canonical weight hashing)
 COPY leadpoet_canonical/ /app/leadpoet_canonical/
+COPY lab_arena/__init__.py lab_arena/contracts.py /app/lab_arena/
 
 # Copy Research Lab verifier and gateway-owned scoring source inputs.
 # These files are included so PCR0 changes whenever Research Lab scoring,

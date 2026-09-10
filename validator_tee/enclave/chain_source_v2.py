@@ -35,6 +35,7 @@ from leadpoet_canonical.chain_source_v2 import (
     ChainSourceV2Error,
     chain_source_policy_hash,
     decode_timestamp_now_storage,
+    decode_runtime_metadata_commitment,
     decode_timelocked_weight_commits,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
@@ -45,11 +46,25 @@ from leadpoet_canonical.chain_source_v2 import (
     parse_json_rpc_response,
     parse_runtime_version,
     decode_subnet_epoch_storage,
+    decode_system_account_nonce,
+    decode_last_update_storage,
+    decode_weights_storage,
     subnet_epoch_storage_key,
+    system_account_storage_key,
+    system_event_count_storage_key,
+    system_events_storage_key,
+    last_update_storage_key,
+    weights_storage_key,
     timestamp_now_storage_key,
     timelocked_weight_commits_storage_key,
 )
 from leadpoet_canonical.hotkey_authority_v2 import signed_extrinsic_hash_v2
+from leadpoet_canonical.subtensor_events_v2 import (
+    RUNTIME_CODE_STORAGE_KEY,
+    load_subtensor_events_profile_v2,
+    prove_timelocked_weights_reveal_v2,
+    validate_subtensor_events_profile_v2,
+)
 
 
 AF_VSOCK = 40
@@ -62,6 +77,20 @@ FINALIZATION_RPC_PACING_SECONDS = 1.05
 
 class ValidatorChainSourceV2Error(RuntimeError):
     """The validator enclave could not authenticate a complete chain snapshot."""
+
+
+def validate_rewarded_uid_ownership(
+    hotkeys: Sequence[str], bindings: Sequence[Mapping[str, Any]]
+) -> None:
+    """Require every signed rewarded UID to retain its finalized owner."""
+    normalized = {int(item["uid"]): str(item["hotkey"]) for item in bindings}
+    if len(normalized) != len(bindings):
+        raise ValidatorChainSourceV2Error("signed recipient UID bindings are not unique")
+    for uid, expected_hotkey in normalized.items():
+        if uid < 0 or uid >= len(hotkeys) or hotkeys[uid] != expected_hotkey:
+            raise ValidatorChainSourceV2Error(
+                "rewarded UID ownership changed before reveal"
+            )
 
 
 class ValidatorChainTransportCleanupError(ValidatorChainSourceV2Error):
@@ -516,6 +545,21 @@ class EnclaveChainRpcTransportV2:
 
 
 class ValidatorChainSourceV2:
+    def read_finalized_head(self) -> Dict[str, Any]:
+        finalized = self._call(
+            method="chain_getFinalizedHead", params=[], request_id=1,
+            job_id="arena-finalized-head", purpose="validator.chain_state.v2",
+            logical_operation_id="arena-finalized-head",
+        )
+        block_hash = normalize_raw_hash(finalized["result"], "finalized head")
+        header = self._call(
+            method="chain_getHeader", params=["0x" + block_hash], request_id=2,
+            job_id="arena-finalized-head", purpose="validator.chain_state.v2",
+            logical_operation_id="arena-finalized-header",
+        )
+        parsed = parse_finalized_header(header["result"])
+        return {"block": int(parsed["block"]), "block_hash": block_hash}
+
     def __init__(
         self,
         *,
@@ -644,6 +688,249 @@ class ValidatorChainSourceV2:
             "genesis_hash": genesis_hash,
             "attempts": attempts,
             "artifacts": artifacts,
+        }
+
+    def read_finalized_account_nonce(
+        self, *, account_public_key_hex: str, finalized_block_hash: str
+    ) -> int:
+        """Read nonce from authenticated System.Account at one finalized hash."""
+
+        try:
+            account = bytes.fromhex(str(account_public_key_hex or ""))
+        except ValueError as exc:
+            raise ValidatorChainSourceV2Error("account public key is invalid") from exc
+        target = normalize_raw_hash(finalized_block_hash, "finalized block hash")
+        result = self._call(
+            method="state_getStorage",
+            params=[system_account_storage_key(account), "0x" + target],
+            request_id=1,
+            job_id="arena-account-nonce:" + target,
+            purpose="validator.chain_state.v2",
+            logical_operation_id="arena-account-nonce:" + target,
+        )
+        try:
+            return decode_system_account_nonce(result["result"])
+        except ChainSourceV2Error as exc:
+            raise ValidatorChainSourceV2Error("finalized account nonce is invalid") from exc
+
+    def read_canonical_block_hash(self, *, block: int) -> str:
+        result = self._call(
+            method="chain_getBlockHash", params=[int(block)], request_id=1,
+            job_id="arena-canonical-block:%d" % int(block),
+            purpose="validator.chain_state.v2",
+            logical_operation_id="arena-canonical-block:%d" % int(block),
+        )
+        return normalize_raw_hash(result["result"], "canonical block hash")
+
+    def read_finalized_weight_state(
+        self, *, netuid: int, validator_hotkey: str,
+        hotkey_public_key_hex: str, subnet_epoch_index: int,
+        commitment_hex: str, reveal_round: int,
+    ) -> Dict[str, Any]:
+        """Read the revealed vector and LastUpdate at one finalized head."""
+
+        head = self.read_finalized_head()
+        job = "arena-weight-readback:%d:%d" % (int(netuid), int(head["block"]))
+        metagraph_result = self._call(
+            method="state_call",
+            params=[CHAIN_RPC_METHOD, encode_selective_metagraph_params(netuid=int(netuid)), "0x" + head["block_hash"]],
+            request_id=1, job_id=job, purpose="validator.metagraph_state.v2",
+            logical_operation_id=job + ":metagraph",
+        )
+        metagraph = decode_selective_metagraph_result(metagraph_result["result"])
+        matches = [index for index, hotkey in enumerate(metagraph["hotkeys"]) if hotkey == validator_hotkey]
+        if len(matches) != 1:
+            raise ValidatorChainSourceV2Error("validator hotkey has no unique finalized UID")
+        uid = matches[0]
+        weights_result = self._call(
+            method="state_getStorage",
+            params=[weights_storage_key(netuid=int(netuid), validator_uid=uid), "0x" + head["block_hash"]],
+            request_id=2, job_id=job, purpose="validator.weights.finalized.v2",
+            logical_operation_id=job + ":weights",
+        )
+        updates_result = self._call(
+            method="state_getStorage",
+            params=[last_update_storage_key(netuid=int(netuid)), "0x" + head["block_hash"]],
+            request_id=3, job_id=job, purpose="validator.weights.finalized.v2",
+            logical_operation_id=job + ":last-update",
+        )
+        commits_result = self._call(
+            method="state_getStorage",
+            params=[timelocked_weight_commits_storage_key(
+                netuid=int(netuid), subnet_epoch_index=int(subnet_epoch_index)
+            ), "0x" + head["block_hash"]],
+            request_id=4, job_id=job, purpose="validator.weights.finalized.v2",
+            logical_operation_id=job + ":commitments",
+        )
+        weights = list(decode_weights_storage(weights_result["result"]))
+        updates = list(decode_last_update_storage(updates_result["result"]))
+        if uid >= len(updates):
+            raise ValidatorChainSourceV2Error("validator LastUpdate entry is absent")
+        commits = decode_timelocked_weight_commits(commits_result["result"])
+        commit_present = any(
+            item["hotkey_public_key"] == str(hotkey_public_key_hex)
+            and item["commitment_hex"] == str(commitment_hex)
+            and int(item["reveal_round"]) == int(reveal_round)
+            for item in commits
+        )
+        return {
+            "block": int(head["block"]), "block_hash": head["block_hash"],
+            "validator_uid": uid, "weights": weights, "last_update": int(updates[uid]),
+            "commit_present": commit_present,
+        }
+
+    def prove_timelocked_reveal_transition(
+        self, *, netuid: int, validator_hotkey: str,
+        hotkey_public_key_hex: str, subnet_epoch_index: int,
+        commitment_hex: str, reveal_round: int, inclusion_block: int,
+        reveal_deadline_block: int, expected_weights: Sequence[Tuple[int, int]],
+        expected_recipient_uid_hotkeys: Sequence[Mapping[str, Any]],
+        chain_profile: Mapping[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Prove the first present-to-absent commit transition and its weights.
+
+        The storage transition is read at exact finalized historical blocks.
+        A failed reveal rolls back its storage mutation. Expiry cleanup cannot
+        satisfy the simultaneous exact Weights and LastUpdate-at-block checks.
+        """
+
+        if self._archive_rpc_call is None:
+            raise ValidatorChainSourceV2Error("archive RPC is required for Arena reveal proof")
+        head = self.read_finalized_head()
+        start = int(inclusion_block)
+        end = min(int(reveal_deadline_block), int(head["block"]))
+        if end <= start:
+            return None
+        request_id = 1
+        job = "arena-reveal-proof:%d:%d" % (int(netuid), start)
+
+        def archive(method: str, params: Sequence[Any], operation: str) -> Any:
+            nonlocal request_id
+            result = self._archive_call(
+                method=method, params=list(params), request_id=request_id,
+                job_id=job, purpose="validator.weights.finalized.v2",
+                logical_operation_id=job + ":" + operation,
+            )
+            request_id += 1
+            return result["result"]
+
+        commit_key = timelocked_weight_commits_storage_key(
+            netuid=int(netuid), subnet_epoch_index=int(subnet_epoch_index)
+        )
+
+        def block_hash(number: int) -> str:
+            return normalize_raw_hash(
+                archive("chain_getBlockHash", [int(number)], "hash:%d" % int(number)),
+                "reveal proof block hash",
+            )
+
+        def is_present(number: int) -> bool:
+            digest = block_hash(number)
+            commits = decode_timelocked_weight_commits(archive(
+                "state_getStorage", [commit_key, "0x" + digest],
+                "commits:%d" % int(number),
+            ))
+            return any(
+                item["hotkey_public_key"] == str(hotkey_public_key_hex)
+                and item["commitment_hex"] == str(commitment_hex)
+                and int(item["reveal_round"]) == int(reveal_round)
+                for item in commits
+            )
+
+        if not is_present(start):
+            raise ValidatorChainSourceV2Error("Arena commitment is absent at inclusion block")
+        if is_present(end):
+            return None
+        low, high = start, end
+        while high - low > 1:
+            middle = (low + high) // 2
+            if is_present(middle):
+                low = middle
+            else:
+                high = middle
+        transition = high
+        digest = block_hash(transition)
+        metagraph = decode_selective_metagraph_result(archive(
+            "state_call", [CHAIN_RPC_METHOD, encode_selective_metagraph_params(netuid=int(netuid)), "0x" + digest],
+            "metagraph:%d" % transition,
+        ))
+        matches = [uid for uid, hotkey in enumerate(metagraph["hotkeys"]) if hotkey == validator_hotkey]
+        if len(matches) != 1:
+            raise ValidatorChainSourceV2Error("validator hotkey has no unique UID at reveal transition")
+        uid = matches[0]
+        validate_rewarded_uid_ownership(
+            metagraph["hotkeys"], expected_recipient_uid_hotkeys
+        )
+        weights = list(decode_weights_storage(archive(
+            "state_getStorage", [weights_storage_key(netuid=int(netuid), validator_uid=uid), "0x" + digest],
+            "weights:%d" % transition,
+        )))
+        updates = list(decode_last_update_storage(archive(
+            "state_getStorage", [last_update_storage_key(netuid=int(netuid)), "0x" + digest],
+            "last-update:%d" % transition,
+        )))
+        if uid >= len(updates) or int(updates[uid]) != transition:
+            raise ValidatorChainSourceV2Error("LastUpdate does not prove the reveal transition")
+        if weights != [(int(uid_), int(weight)) for uid_, weight in expected_weights]:
+            raise ValidatorChainSourceV2Error("revealed weights differ at commit transition")
+
+        # A queue entry is removed even when automatic decryption or weight
+        # application fails. Therefore disappearance alone is not a reveal
+        # proof. Require the runtime's exact successful initialization event.
+        pre_transition_hash = block_hash(transition - 1)
+        runtime = parse_runtime_version(archive(
+            "state_getRuntimeVersion", ["0x" + pre_transition_hash],
+            "runtime:%d" % (transition - 1),
+        ))
+        metadata_value = archive(
+            "state_getMetadata", ["0x" + pre_transition_hash],
+            "metadata:%d" % (transition - 1),
+        )
+        if not isinstance(metadata_value, str) or not metadata_value.startswith("0x"):
+            raise ValidatorChainSourceV2Error("reveal runtime metadata is absent")
+        metadata_raw = bytes.fromhex(metadata_value[2:])
+        decode_runtime_metadata_commitment(metadata_value)
+        runtime_code_hash = normalize_raw_hash(archive(
+            "state_getStorageHash", [RUNTIME_CODE_STORAGE_KEY, "0x" + pre_transition_hash],
+            "runtime-code:%d" % (transition - 1),
+        ), "reveal runtime code hash")
+        event_profile = validate_subtensor_events_profile_v2(
+            load_subtensor_events_profile_v2(),
+            genesis_hash=str(chain_profile["genesis_hash"]),
+            spec_version=int(runtime["spec_version"]),
+            transaction_version=int(runtime["transaction_version"]),
+            metadata_raw=metadata_raw,
+            runtime_code_hash="0x" + runtime_code_hash,
+        )
+        events_value = archive(
+            "state_getStorage", [system_events_storage_key(), "0x" + digest],
+            "events:%d" % transition,
+        )
+        event_count_value = archive(
+            "state_getStorage", [system_event_count_storage_key(), "0x" + digest],
+            "event-count:%d" % transition,
+        )
+        if (not isinstance(events_value, str) or not events_value.startswith("0x")
+                or not isinstance(event_count_value, str)
+                or not event_count_value.startswith("0x")):
+            raise ValidatorChainSourceV2Error("reveal event storage is absent")
+        event_witness = prove_timelocked_weights_reveal_v2(
+            bytes.fromhex(events_value[2:]), profile=event_profile,
+            event_count_raw=bytes.fromhex(event_count_value[2:]),
+            expected_netuid=int(netuid), expected_uid=int(uid),
+            expected_account_id_hex=str(hotkey_public_key_hex),
+        )
+        return {
+            "reveal_block": transition, "reveal_block_hash": digest,
+            "validator_uid": uid, "last_update": int(updates[uid]),
+            "weights": weights, "event_witness": event_witness,
+            "transition_hash": sha256_json({
+                "commitment_hex": str(commitment_hex), "present_at": low,
+                "absent_at": transition, "weights": [list(item) for item in weights],
+                "last_update": int(updates[uid]),
+                "event_witness": event_witness,
+                "recipient_uid_hotkeys": list(expected_recipient_uid_hotkeys),
+            }),
         }
 
     def _read_stateful_epoch_authority(

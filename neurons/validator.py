@@ -12,6 +12,17 @@ from pathlib import Path
 # This ensures all local modules can be imported regardless of how the script is run
 sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
 
+# Arena validators use a deliberately small startup graph. Dispatch before the
+# legacy validator imports so an Arena host does not load the primary/auditor
+# receipt, release-attestation, or historical-settlement runtime.
+_weight_mode = os.environ.get("LEADPOET_WEIGHT_MODE", "").strip().lower()
+if _weight_mode not in ("", "legacy", "arena"):
+    raise SystemExit("LEADPOET_WEIGHT_MODE must be 'legacy' or 'arena'")
+if _weight_mode == "arena":
+    from lab_arena.validator import main as _arena_validator_main
+
+    raise SystemExit(_arena_validator_main(sys.argv[1:]))
+
 os.environ["PYTHONWARNINGS"] = "ignore::UserWarning"
 
 # Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).

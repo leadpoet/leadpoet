@@ -440,7 +440,7 @@ class ValidatorEnclaveClient:
             },
             timeout_seconds=120,
         )
-        return dict(response["hotkey_state"])
+        return dict(response["arena_hotkey_state"])
 
     def get_hotkey_recipient_v2(self) -> Dict[str, Any]:
         response = self._send_request({"command": "get_hotkey_recipient_v2"})
@@ -506,6 +506,94 @@ class ValidatorEnclaveClient:
             {
                 "command": "sign_weight_extrinsic_v2",
                 "signature_request": signature_request,
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["signature_result"])
+
+    def configure_arena_weight_signer_v1(
+        self, configuration: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {"command": "configure_arena_weight_signer_v1", "configuration": dict(configuration)},
+            timeout_seconds=120,
+        )
+        return dict(response["arena_signer_state"])
+
+    def get_arena_hotkey_state_v1(self) -> Dict[str, Any]:
+        response = self._send_request({"command": "get_arena_hotkey_state_v1"})
+        return dict(response["arena_hotkey_state"])
+
+    def get_arena_hotkey_recipient_v1(self) -> Dict[str, Any]:
+        response = self._send_request({"command": "get_arena_hotkey_recipient_v1"})
+        return dict(response["recipient_request"])
+
+    def provision_arena_hotkey_v1(self, ciphertext_for_recipient_b64: str) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "provision_arena_hotkey_v1",
+                "ciphertext_for_recipient_b64": str(ciphertext_for_recipient_b64),
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["arena_hotkey_state"])
+
+    def sign_arena_application_v1(self, message: bytes) -> Dict[str, Any]:
+        if not isinstance(message, bytes):
+            raise TypeError("Arena application message must be bytes")
+        response = self._send_request(
+            {"command": "sign_arena_application_v1", "message_hex": message.hex()},
+            timeout_seconds=120,
+        )
+        return dict(response["signature_result"])
+
+    def prepare_arena_weight_extrinsic_v1(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Ask the protected signer to verify and sign one Arena weight call."""
+
+        response = self._send_request(
+            {
+                "command": "prepare_arena_weight_extrinsic_v1",
+                "signature_request": dict(request),
+            },
+            timeout_seconds=600,
+        )
+        return dict(response["signature_result"])
+
+    def confirm_arena_weight_extrinsic_v1(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Return protected finalized-chain evidence for one signed call."""
+
+        response = self._send_request(
+            {
+                "command": "confirm_arena_weight_extrinsic_v1",
+                "confirmation_request": dict(request),
+            },
+            timeout_seconds=600,
+        )
+        return dict(response["confirmation_result"])
+
+    def recover_arena_weight_extrinsic_v1(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "recover_arena_weight_extrinsic_v1",
+                "recovery_request": dict(request),
+            },
+            timeout_seconds=600,
+        )
+        return dict(response["recovery_result"])
+
+    def sign_arena_chain_outcome_v1(
+        self, outcome_document: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "sign_arena_chain_outcome_v1",
+                "outcome_document": dict(outcome_document),
             },
             timeout_seconds=120,
         )

@@ -1,0 +1,127 @@
+"""Seal an Arena seed/policy once, or provision ciphertext into Nitro."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import stat
+from pathlib import Path
+
+from leadpoet_canonical.lab_arena_rewards import sha256_json
+from validator_tee.enclave.arena_hotkey import (
+    ENCRYPTION_ALGORITHM, PAYLOAD_SCHEMA, RECIPIENT_SCHEMA,
+    ArenaHotkeyError, sealed_payload, validate_policy,
+)
+
+ENVELOPE_SCHEMA = "leadpoet.arena.hotkey_envelope.v1"
+
+
+def seal(seed, policy, *, kms_key_id, kms_client):
+    normalized = validate_policy(policy)
+    policy_hash = sha256_json(normalized)
+    context = {"purpose": PAYLOAD_SCHEMA, "validator_hotkey": normalized["validator_hotkey"], "policy_hash": policy_hash}
+    response = kms_client.encrypt(KeyId=kms_key_id, Plaintext=sealed_payload(seed, normalized), EncryptionContext=context)
+    if not response.get("KeyId") or not isinstance(response.get("CiphertextBlob"), bytes):
+        raise ArenaHotkeyError("KMS did not return an Arena envelope")
+    return {
+        "schema_version": ENVELOPE_SCHEMA, "kms_key_id": response["KeyId"],
+        "policy": normalized, "policy_hash": policy_hash, "encryption_context": context,
+        "ciphertext_blob_b64": base64.b64encode(response["CiphertextBlob"]).decode(),
+    }
+
+
+def provision(envelope, *, client, kms_client):
+    fields = {"schema_version", "kms_key_id", "policy", "policy_hash", "encryption_context", "ciphertext_blob_b64"}
+    if not isinstance(envelope, dict) or set(envelope) != fields or envelope["schema_version"] != ENVELOPE_SCHEMA:
+        raise ArenaHotkeyError("Arena envelope fields are invalid")
+    policy = validate_policy(envelope["policy"])
+    expected_hash = sha256_json(policy)
+    context = {"purpose": PAYLOAD_SCHEMA, "validator_hotkey": policy["validator_hotkey"], "policy_hash": expected_hash}
+    if envelope["policy_hash"] != expected_hash or envelope["encryption_context"] != context:
+        raise ArenaHotkeyError("Arena envelope policy differs")
+    current = client.get_arena_hotkey_state_v1()
+    if current.get("provisioned") is True:
+        if current.get("policy_hash") != expected_hash or current.get("policy") != policy:
+            raise ArenaHotkeyError("Provisioned Arena policy differs")
+        return current
+    recipient = client.get_arena_hotkey_recipient_v1()
+    if (recipient.get("schema_version") != RECIPIENT_SCHEMA
+            or recipient.get("purpose") != PAYLOAD_SCHEMA
+            or recipient.get("key_encryption_algorithm") != ENCRYPTION_ALGORITHM):
+        raise ArenaHotkeyError("Arena recipient identity is invalid")
+    try:
+        ciphertext = base64.b64decode(envelope["ciphertext_blob_b64"], validate=True)
+        attestation = base64.b64decode(recipient["attestation_document_b64"], validate=True)
+        if not ciphertext or not attestation:
+            raise ValueError("empty ciphertext or attestation")
+    except Exception:
+        raise ArenaHotkeyError("Arena envelope or attestation encoding is invalid") from None
+    response = kms_client.decrypt(
+        KeyId=envelope["kms_key_id"], CiphertextBlob=ciphertext, EncryptionContext=context,
+        Recipient={"KeyEncryptionAlgorithm": ENCRYPTION_ALGORITHM, "AttestationDocument": attestation},
+    )
+    # AWS documents a null/empty Plaintext field for recipient responses.
+    if response.get("Plaintext") not in (None, b"", ""):
+        raise ArenaHotkeyError("KMS returned plaintext to the parent")
+    if response.get("KeyId") != envelope["kms_key_id"]:
+        raise ArenaHotkeyError("KMS returned a different key identity")
+    recipient_ciphertext = response.get("CiphertextForRecipient")
+    if not isinstance(recipient_ciphertext, bytes) or not recipient_ciphertext:
+        raise ArenaHotkeyError("KMS recipient ciphertext is missing")
+    result = client.provision_arena_hotkey_v1(base64.b64encode(recipient_ciphertext).decode())
+    if (result.get("provisioned") is not True or result.get("policy_hash") != expected_hash
+            or result.get("policy") != policy or client.get_arena_hotkey_state_v1() != result):
+        raise ArenaHotkeyError("Arena provisioned policy readback differs")
+    return result
+
+
+def _private_read(path):
+    descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as source:
+        metadata = os.fstat(source.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077
+                or metadata.st_uid not in (0, os.geteuid())):
+            raise ArenaHotkeyError("Arena bootstrap input must be a private owned file")
+        raw = source.read(65537)
+        if len(raw) > 65536:
+            raise ArenaHotkeyError("Arena bootstrap input is too large")
+        return raw
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    prepare = commands.add_parser("seal", help="owner workstation only; seed input is never a command argument")
+    prepare.add_argument("--seed-file", type=Path, required=True, help="private file with the 32 raw seed bytes")
+    prepare.add_argument("--policy", type=Path, required=True)
+    prepare.add_argument("--kms-key-id", required=True)
+    prepare.add_argument("--output", type=Path, required=True)
+    unseal = commands.add_parser("provision", help="validator host; accepts encrypted envelope only")
+    unseal.add_argument("--envelope", type=Path, required=True)
+    args = parser.parse_args(argv)
+    import boto3
+    kms = boto3.client("kms")
+    if args.command == "seal":
+        seed = bytearray(_private_read(args.seed_file))
+        try:
+            envelope = seal(bytes(seed), json.loads(_private_read(args.policy)), kms_key_id=args.kms_key_id, kms_client=kms)
+        finally:
+            for index in range(len(seed)):
+                seed[index] = 0
+        descriptor = os.open(str(args.output), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+            json.dump(envelope, target, sort_keys=True)
+            target.flush()
+            os.fsync(target.fileno())
+        print("Arena encrypted envelope created")
+    else:
+        from validator_tee.host.vsock_client import ValidatorEnclaveClient
+        result = provision(json.loads(_private_read(args.envelope)), client=ValidatorEnclaveClient(), kms_client=kms)
+        print("Arena hotkey provisioned: %s" % result["validator_hotkey"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

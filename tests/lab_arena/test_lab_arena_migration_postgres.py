@@ -262,7 +262,7 @@ def test_migration_applies_twice_and_roles_have_exact_attributes(fresh_superuser
         assert all(row[1] for row in cursor.fetchall())
         cursor.execute("SELECT tablename, policyname FROM pg_policies WHERE tablename LIKE 'lab_arena_%' ORDER BY 1")
         policies = cursor.fetchall()
-        assert len(policies) == 4 and all(name.endswith("_service_read") for _, name in policies)
+        assert len(policies) == 6 and all(name.endswith("_service_read") for _, name in policies)
 
 
 def test_next_day_icp_migration_is_repeatable(superuser):

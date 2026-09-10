@@ -158,6 +158,8 @@ validator_runtime_v2: Optional[Any] = None
 validator_weight_authority_v2: Optional[Any] = None
 validator_hotkey_authority_v2: Optional[Any] = None
 validator_chain_source_v2: Optional[Any] = None
+validator_arena_weight_signer_v1: Optional[Any] = None
+validator_arena_hotkey_authority_v1: Optional[Any] = None
 
 
 # ============================================================================
@@ -254,6 +256,8 @@ def configure_authoritative_v2(
     """Configure the hardware-only V2 release and weight authority once."""
 
     global validator_runtime_v2, validator_weight_authority_v2, validator_chain_source_v2
+    if validator_arena_hotkey_authority_v1 is not None:
+        raise RuntimeError("Arena and legacy authorities cannot share one boot")
     from validator_tee.enclave.runtime_v2 import ValidatorRuntimeIdentityV2
 
     if validator_runtime_v2 is None:
@@ -309,6 +313,8 @@ def configure_hotkey_authority_v2(
     """Configure the measured drand backend and KMS-sealed sr25519 authority."""
 
     global validator_hotkey_authority_v2, validator_chain_source_v2
+    if validator_arena_hotkey_authority_v1 is not None:
+        raise RuntimeError("Arena and legacy hotkey authorities cannot share one boot")
     if validator_runtime_v2 is None:
         raise RuntimeError("validator authoritative V2 runtime is not configured")
     from leadpoet_canonical.attested_v2 import sha256_json as sha256_json_v2
@@ -363,6 +369,88 @@ def configure_hotkey_authority_v2(
             chain_source=validator_chain_source_v2,
         )
     return validator_hotkey_authority_v2.public_state()
+
+
+def get_arena_hotkey_recipient_v1() -> Dict[str, Any]:
+    global validator_arena_hotkey_authority_v1
+    if validator_hotkey_authority_v2 is not None:
+        raise RuntimeError("Arena and legacy hotkey authorities cannot share one boot")
+    if validator_arena_hotkey_authority_v1 is None:
+        from validator_tee.enclave.arena_hotkey import ArenaHotkeyAuthority
+        validator_arena_hotkey_authority_v1 = ArenaHotkeyAuthority()
+    return validator_arena_hotkey_authority_v1.recipient_request()
+
+
+def provision_arena_hotkey_v1(ciphertext: str) -> Dict[str, Any]:
+    global validator_arena_weight_signer_v1, validator_chain_source_v2
+    if validator_arena_hotkey_authority_v1 is None:
+        raise RuntimeError("Arena hotkey recipient was not configured")
+    existing = validator_arena_hotkey_authority_v1.public_state()
+    if existing.get("provisioned") is True and validator_arena_weight_signer_v1 is not None:
+        return existing
+    state = (
+        existing
+        if existing.get("provisioned") is True
+        else validator_arena_hotkey_authority_v1.provision(ciphertext)
+    )
+    policy = validator_arena_hotkey_authority_v1.policy
+    from urllib.parse import urlsplit
+    from leadpoet_canonical.chain_source_v2 import configure_chain_source_boundary_v2
+    configure_chain_source_boundary_v2(
+        chain_host=str(urlsplit(policy["chain_profile"]["chain_endpoint"]).hostname),
+        chain_archive_host=str(policy["chain_archive_host"]),
+    )
+    from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2
+    validator_chain_source_v2 = ValidatorChainSourceV2(
+        epoch_authority_supplier=lambda: policy["epoch_authority"]
+    )
+    from validator_tee.enclave.drand_v2 import CtypesDrandCommitBackendV2
+    from validator_tee.enclave.hotkey_authority_v2 import MEASURED_DRAND_LIBRARY_PATH
+    from validator_tee.enclave.arena_weight_signer import ArenaWeightSigner
+    from validator_tee.enclave.arena_state_source import ArenaStateSource
+    drand = CtypesDrandCommitBackendV2(
+        library_path=MEASURED_DRAND_LIBRARY_PATH,
+        expected_sha256=policy["drand_library_sha256"],
+    )
+    import sr25519
+    public_key = bytes.fromhex(policy["hotkey_public_key"])
+    validator_arena_weight_signer_v1 = ArenaWeightSigner(
+        validator_hotkey=policy["validator_hotkey"],
+        hotkey_public_key_hex=policy["hotkey_public_key"],
+        chain_profile=policy["chain_profile"], chain_source=validator_chain_source_v2,
+        drand_backend=drand,
+        sign_sr25519=validator_arena_hotkey_authority_v1.sign_weight_payload,
+        verify_sr25519=lambda signature, payload: bool(sr25519.verify(signature, payload, public_key)),
+        arena_public_key_der=__import__(
+            "leadpoet_canonical.lab_arena_rewards", fromlist=["signing_key_from_document"]
+        ).signing_key_from_document(policy["arena_signing_key"], policy["arena_signing_key_hash"]),
+        arena_public_key_hash=policy["arena_signing_key_hash"],
+        network=policy["network"], netuid=policy["netuid"],
+        burn_hotkey=policy["burn_hotkey"],
+        state_source=ArenaStateSource(policy),
+    )
+    return state
+
+
+def configure_arena_weight_signer_v1(configuration: Dict[str, Any]) -> Dict[str, Any]:
+    """Enable the small Arena transaction signer without release ancestry."""
+
+    global validator_arena_weight_signer_v1
+    if validator_arena_hotkey_authority_v1 is None:
+        raise RuntimeError("sealed Arena hotkey policy is not provisioned")
+    policy = validator_arena_hotkey_authority_v1.policy
+    expected = {
+        "network": policy["network"], "netuid": policy["netuid"],
+        "signing_key": policy["arena_signing_key"],
+        "expected_public_key_hash": policy["arena_signing_key_hash"],
+    }
+    if configuration != expected or validator_arena_weight_signer_v1 is None:
+        raise RuntimeError("Arena signer configuration differs from sealed policy")
+    return {
+        "configured": True, "network": policy["network"],
+        "netuid": policy["netuid"],
+        "arena_public_key_hash": policy["arena_signing_key_hash"],
+    }
 
 
 def compute_authoritative_weights_v2(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -421,6 +509,8 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     - configure_authoritative_v2: Lock the measured V2 release for this boot
     - get_authoritative_v2_boot_identity: Return the hardware V2 boot identity
     - configure_hotkey_authority_v2: Lock hotkey, chain, and drand identity
+    - configure_arena_weight_signer_v1: Pin the Arena state key and subnet
+    - prepare_arena_weight_extrinsic_v1: Verify, construct, and sign one transaction
     - get_hotkey_recipient_v2: Return an attested KMS recipient request
     - provision_hotkey_v2: Unseal the validator seed directly inside Nitro
     - get_hotkey_state_v2: Return non-secret hotkey authority state
@@ -434,6 +524,15 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     - health: Health check
     """
     command = request.get("command")
+
+    if os.environ.get("LEADPOET_ENCLAVE_MODE") == "arena" and command not in {
+        "health", "get_arena_hotkey_recipient_v1", "provision_arena_hotkey_v1",
+        "get_arena_hotkey_state_v1", "sign_arena_application_v1",
+        "configure_arena_weight_signer_v1", "prepare_arena_weight_extrinsic_v1",
+        "recover_arena_weight_extrinsic_v1", "confirm_arena_weight_extrinsic_v1",
+        "sign_arena_chain_outcome_v1",
+    }:
+        return {"status": "error", "error": "RPC is outside Arena enclave mode"}
 
     if command in {
         "get_public_key",
@@ -465,6 +564,38 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 ),
             }
 
+        elif command == "get_arena_hotkey_recipient_v1":
+            return {"status": "ok", "recipient_request": get_arena_hotkey_recipient_v1()}
+
+        elif command == "provision_arena_hotkey_v1":
+            ciphertext = request.get("ciphertext_for_recipient_b64")
+            if not isinstance(ciphertext, str):
+                return {"status": "error", "error": "Missing Arena recipient ciphertext"}
+            return {"status": "ok", "arena_hotkey_state": provision_arena_hotkey_v1(ciphertext)}
+
+        elif command == "get_arena_hotkey_state_v1":
+            if validator_arena_hotkey_authority_v1 is None:
+                return {"status": "ok", "arena_hotkey_state": {"provisioned": False}}
+            arena_state = validator_arena_hotkey_authority_v1.public_state()
+            if arena_state.get("provisioned") is True and validator_arena_weight_signer_v1 is None:
+                arena_state = dict(arena_state)
+                arena_state["provisioned"] = False
+                arena_state["key_unsealed"] = True
+            return {"status": "ok", "arena_hotkey_state": arena_state}
+
+        elif command == "sign_arena_application_v1":
+            if validator_arena_hotkey_authority_v1 is None:
+                raise RuntimeError("Arena hotkey authority is not configured")
+            message_hex = request.get("message_hex")
+            try:
+                message = bytes.fromhex(str(message_hex or ""))
+            except ValueError:
+                return {"status": "error", "error": "Arena application message is invalid hex"}
+            return {
+                "status": "ok",
+                "signature_result": validator_arena_hotkey_authority_v1.sign_application(message),
+            }
+
         elif command == "get_authoritative_v2_boot_identity":
             return {
                 "status": "ok",
@@ -487,6 +618,59 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                     configuration,
                     expected_config_hash,
                 ),
+            }
+
+        elif command == "configure_arena_weight_signer_v1":
+            configuration = request.get("configuration")
+            if not isinstance(configuration, dict):
+                return {"status": "error", "error": "Missing Arena signer configuration"}
+            return {
+                "status": "ok",
+                "arena_signer_state": configure_arena_weight_signer_v1(configuration),
+            }
+
+        elif command == "prepare_arena_weight_extrinsic_v1":
+            if validator_arena_weight_signer_v1 is None:
+                raise RuntimeError("validator Arena weight signer is not configured")
+            signature_request = request.get("signature_request")
+            if not isinstance(signature_request, dict):
+                return {"status": "error", "error": "Missing Arena weight signature request"}
+            return {
+                "status": "ok",
+                "signature_result": validator_arena_weight_signer_v1.prepare(signature_request),
+            }
+
+        elif command == "confirm_arena_weight_extrinsic_v1":
+            if validator_arena_weight_signer_v1 is None:
+                raise RuntimeError("validator Arena weight signer is not configured")
+            confirmation_request = request.get("confirmation_request")
+            if not isinstance(confirmation_request, dict):
+                return {"status": "error", "error": "Missing Arena weight confirmation request"}
+            return {
+                "status": "ok",
+                "confirmation_result": validator_arena_weight_signer_v1.confirm(confirmation_request),
+            }
+
+        elif command == "recover_arena_weight_extrinsic_v1":
+            if validator_arena_weight_signer_v1 is None:
+                raise RuntimeError("validator Arena weight signer is not configured")
+            recovery_request = request.get("recovery_request")
+            if not isinstance(recovery_request, dict):
+                return {"status": "error", "error": "Missing Arena weight recovery request"}
+            return {
+                "status": "ok",
+                "recovery_result": validator_arena_weight_signer_v1.recover(recovery_request),
+            }
+
+        elif command == "sign_arena_chain_outcome_v1":
+            if validator_arena_weight_signer_v1 is None:
+                raise RuntimeError("validator Arena weight signer is not configured")
+            outcome_document = request.get("outcome_document")
+            if not isinstance(outcome_document, dict):
+                return {"status": "error", "error": "Missing Arena chain outcome document"}
+            return {
+                "status": "ok",
+                "signature_result": validator_arena_weight_signer_v1.sign_chain_outcome(outcome_document),
             }
 
         elif command == "get_hotkey_recipient_v2":
@@ -805,6 +989,14 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 "authoritative_v2_configured": _authoritative_v2_enabled(),
                 "hotkey_authority_v2_configured": (
                     validator_hotkey_authority_v2 is not None
+                ),
+                "arena_weight_signer_v1_supported": True,
+                "arena_weight_signer_v1_configured": (
+                    validator_arena_weight_signer_v1 is not None
+                ),
+                "arena_hotkey_v1_configured": (
+                    validator_arena_hotkey_authority_v1 is not None
+                    and validator_arena_hotkey_authority_v1.public_state().get("provisioned") is True
                 ),
                 "hotkey_state_v2": hotkey_state,
             }

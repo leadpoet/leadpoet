@@ -42,6 +42,7 @@ SCORE_BATCH_SIZE = 500
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_whoami": (),
     "lab_arena_schema_version_v1": (),
+    "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_commit_round_v2": (
         ("p_round_id", "text"),
@@ -74,6 +75,9 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_close_scoring": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_cancel_round": (("p_round_id", "text"), ("p_reason", "text")),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
+    "lab_arena_publish_weight_state_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_state_hash", "text"), ("p_state_doc", "jsonb")),
+    "lab_arena_record_chain_outcome_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_validator_hotkey", "text"), ("p_request_id", "text"), ("p_extrinsic_hash", "text"), ("p_outcome_doc", "jsonb")),
+    "lab_arena_weight_inputs_v1": (("p_epoch", "bigint"), ("p_netuid", "integer"), ("p_burn_hotkey", "text"), ("p_fulfillment_enabled", "boolean"), ("p_leaderboard_enabled", "boolean")),
 }
 
 TABLES = (
@@ -81,6 +85,8 @@ TABLES = (
     "lab_arena_submissions",
     "lab_arena_runs",
     "lab_arena_ledger",
+    "lab_arena_accepted_weight_states",
+    "lab_arena_chain_outcomes",
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
 PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
@@ -520,6 +526,65 @@ class ArenaStore:
             ),
             "current_daily_icp_set",
         )
+
+    # -- accepted weight state ------------------------------------------
+
+    def get_weight_state(self, network: str, netuid: int, epoch: int) -> Optional[Dict[str, Any]]:
+        rows = self._transport.select(
+            "lab_arena_accepted_weight_states",
+            filters={"network": str(network), "netuid": int(netuid), "epoch": int(epoch)},
+            limit=2,
+            columns="network,netuid,epoch,state_hash,state_doc,created_at",
+        )
+        if len(rows) > 1:
+            raise ArenaStoreError("multiple accepted weight states exist for one epoch")
+        return rows[0] if rows else None
+
+    def weight_inputs(self, epoch: int, netuid: int, burn_hotkey: str, *, fulfillment_enabled: bool, leaderboard_enabled: bool) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_weight_inputs_v1",
+                {"p_epoch": int(epoch), "p_netuid": int(netuid), "p_burn_hotkey": str(burn_hotkey), "p_fulfillment_enabled": bool(fulfillment_enabled), "p_leaderboard_enabled": bool(leaderboard_enabled)},
+            ),
+            "weight_inputs",
+        )
+
+    def publish_weight_state(self, network: str, netuid: int, epoch: int, state_hash: str, state_doc: Mapping[str, Any]) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_publish_weight_state_v1",
+                {"p_network": str(network), "p_netuid": int(netuid), "p_epoch": int(epoch), "p_state_hash": str(state_hash), "p_state_doc": dict(state_doc)},
+            ),
+            "publish_weight_state",
+        )
+
+    def record_chain_outcome(self, *, network: str, netuid: int, epoch: int, validator_hotkey: str, request_id: str, extrinsic_hash: str, outcome_doc: Mapping[str, Any]) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_record_chain_outcome_v1",
+                {"p_network": str(network), "p_netuid": int(netuid), "p_epoch": int(epoch), "p_validator_hotkey": str(validator_hotkey), "p_request_id": str(request_id), "p_extrinsic_hash": str(extrinsic_hash), "p_outcome_doc": dict(outcome_doc)},
+            ),
+            "record_chain_outcome",
+        )
+
+    def list_chain_outcomes(self, network: str, netuid: int, epoch: int) -> List[Dict[str, Any]]:
+        return self._transport.select(
+            "lab_arena_chain_outcomes",
+            filters={"network": str(network), "netuid": int(netuid), "epoch": int(epoch)},
+            order="created_at",
+            descending=False,
+            limit=200,
+            columns="network,netuid,epoch,validator_hotkey,request_id,extrinsic_hash,outcome_doc,created_at",
+        )
+
+    def get_chain_outcome(self, network: str, netuid: int, epoch: int, validator_hotkey: str, request_id: str) -> Optional[Dict[str, Any]]:
+        rows = self._transport.select(
+            "lab_arena_chain_outcomes",
+            filters={"network": str(network), "netuid": int(netuid), "epoch": int(epoch), "validator_hotkey": str(validator_hotkey), "request_id": str(request_id)},
+            limit=1,
+            columns="network,netuid,epoch,validator_hotkey,request_id,extrinsic_hash,outcome_doc,created_at",
+        )
+        return rows[0] if rows else None
 
     # -- rounds -----------------------------------------------------------
 

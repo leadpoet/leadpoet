@@ -143,6 +143,19 @@ class ChainReadsAdapter:
             self._cutover = chain_module.load_arena_cutover()
         return chain_module.current_settlement_epoch(self._chain, self._cutover)
 
+    def accepted_weight_epoch_scope(self) -> Mapping[str, Any]:
+        """Current finalized epoch bounds used to prevent premature snapshots."""
+
+        if self._cutover is None:
+            self._cutover = chain_module.load_arena_cutover()
+        snapshot = chain_module.finalized_epoch_snapshot(self._chain)
+        return {
+            "genesis_hash": snapshot.network_genesis_hash,
+            "epoch": int(snapshot.settlement_epoch_id(self._cutover)),
+            "valid_from_block": int(snapshot.last_epoch_block),
+            "valid_until_block": int(snapshot.pending_epoch_at) - 1,
+        }
+
     def hotkeys_owned_by_same_coldkey(self, hotkey: str) -> List[str]:
         snapshot = self._chain.metagraph()
         uid = chain_module.uid_for_hotkey(snapshot, hotkey)
@@ -436,13 +449,25 @@ def build_service_from_environment(mode: str):
         netuid=chain_config.netuid,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
         baseline_promoter_factory=baseline_promoter_from_environment,
+        accepted_burn_hotkey=(
+            os.environ.get("LAB_ARENA_BURN_HOTKEY", "").strip()
+            or os.environ.get("EXPECTED_BURN_TARGET_HOTKEY", "").strip()
+            or (
+                "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
+                if chain_config.network_name != "test" else ""
+            )
+        ),
+        fulfillment_enabled=os.environ.get("ENABLE_FULFILLMENT", "false").strip().lower() == "true",
+        leaderboard_emissions_enabled=os.environ.get(
+            "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED", "true"
+        ).strip().lower() == "true",
     )
     service = ArenaService(config)
     app = create_app(service)
     return service, app
 
 
-def build_runner_from_environment(args):
+def build_runner_from_environment(args, *, keypair=None):
     from lab_arena import runner as runner_module
 
     from bittensor_wallet import Wallet
@@ -451,8 +476,9 @@ def build_runner_from_environment(args):
     wallet_path = str(getattr(args, "wallet_path", "") or "").strip()
     if wallet_path:
         wallet_arguments["path"] = wallet_path
-    wallet = Wallet(**wallet_arguments)
-    keypair = wallet.hotkey
+    if keypair is None:
+        wallet = Wallet(**wallet_arguments)
+        keypair = wallet.hotkey
     runner_root = Path(args.work_dir)
     sandbox_work = runner_root / "sandboxes"
     runs_work = runner_root / "runs"

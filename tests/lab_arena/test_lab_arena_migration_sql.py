@@ -37,6 +37,9 @@ SCORER_REFRESH_SQL = (SCRIPTS / "194-lab-arena-open-scorer-refresh.sql").read_te
 REWARD_CHAIN_SCOPE_SQL = (
     SCRIPTS / "197-lab-arena-reward-chain-scope.sql"
 ).read_text(encoding="utf-8")
+WEIGHT_STATE_SQL = (
+    SCRIPTS / "202-arena-accepted-weight-state.sql"
+).read_text(encoding="utf-8")
 HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
 HISTORICAL_UPLOAD_SHA256 = (
     "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
@@ -101,6 +104,7 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[199] == ["199-lab-arena-source-disclosure-time.sql"]
     assert numbered[200] == ["200-lab-arena-next-day-icp-disclosure.sql"]
     assert numbered[201] == ["201-lab-arena-daily-capacity.sql"]
+    assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert all(len(paths) == 1 for paths in numbered.values()), numbered
 
 
@@ -112,6 +116,12 @@ def test_reward_chain_scope_migration_scopes_every_reward_history_read():
     assert REWARD_CHAIN_SCOPE_SQL.count("arena_netuid = v_round.arena_netuid") >= 3
     assert "published_at, arena_network_name, arena_netuid" in REWARD_CHAIN_SCOPE_SQL
     assert "'version', 197" in REWARD_CHAIN_SCOPE_SQL
+
+
+def test_weight_state_migration_keeps_core_schema_rollback_compatible():
+    assert "CREATE OR REPLACE FUNCTION public.lab_arena_schema_version_v1()" not in WEIGHT_STATE_SQL
+    assert "CREATE OR REPLACE FUNCTION public.lab_arena_weight_state_schema_v1()" in WEIGHT_STATE_SQL
+    assert "'leadpoet.lab_arena.weight_state_schema.v1', 'version', 202" in WEIGHT_STATE_SQL
 
 
 def test_historical_upload_migration_is_retained_byte_for_byte():

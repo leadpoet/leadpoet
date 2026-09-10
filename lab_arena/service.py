@@ -15,7 +15,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, signing, source_bundle, source_disclosure, submission_rate_limit, verify
+from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
+from leadpoet_canonical.arena_weights import (
+    validate_accepted_weight_state,
+    verify_accepted_weight_state_signature,
+)
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -246,6 +250,8 @@ class ChainReads(Protocol):
 
     def current_settlement_epoch(self) -> int: ...
 
+    def accepted_weight_epoch_scope(self) -> Mapping[str, Any]: ...
+
     def hotkeys_owned_by_same_coldkey(self, hotkey: str) -> List[str]: ...
 
     def uid_for_hotkey(self, hotkey: str) -> Optional[int]: ...
@@ -302,6 +308,12 @@ class ServiceConfig:
     credential_manager: Optional[credentials_module.CredentialManager] = None
     # Only the host publishes accepted source. Miner code never gets GitHub access.
     baseline_promoter_factory: Optional[Callable[[], Any]] = None
+    # Supplies plain accepted economic inputs. It must not return receipts,
+    # ancestry, release identity, or a preconstructed weight vector.
+    accepted_weight_inputs_source: Optional[Callable[[int], Mapping[str, Any]]] = None
+    accepted_burn_hotkey: str = ""
+    fulfillment_enabled: bool = False
+    leaderboard_emissions_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -452,11 +464,10 @@ class ArenaService:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
         expected_schema = "leadpoet.lab_arena.schema_version.v1"
         schema_version = schema.get("version") if isinstance(schema, Mapping) else None
-        supported_versions = (197,)
         if (
             not isinstance(schema, Mapping)
             or schema.get("schema_version") != expected_schema
-            or schema_version not in supported_versions
+            or schema_version != 197
         ):
             raise ServiceError("arena_schema_version_invalid", 500)
         for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger"):
@@ -2354,6 +2365,114 @@ class ArenaService:
         return rewards.governing_reward_basis(
             self._usable_reward_bases(rows), int(epoch)
         )
+
+    def public_weight_state(self, epoch: int) -> Dict[str, Any]:
+        """Return or atomically publish one accepted state for an Arena epoch."""
+
+        if self._config.mode != "live":
+            return {"state": None, "lookup_ok": True}
+        network, netuid = self._chain_scope()
+        requested_epoch = int(epoch)
+        basis = self.public_reward_basis(requested_epoch)
+        if basis is None:
+            return {"state": None, "lookup_ok": True}
+        existing = self._store.get_weight_state(network, netuid, requested_epoch)
+        if existing is not None:
+            try:
+                state = validate_accepted_weight_state(existing.get("state_doc"))
+                signer = self._reward_signer()
+                verify_accepted_weight_state_signature(
+                    state, public_key_der=signer.public_key_der,
+                    expected_public_key_hash=signer.public_key_hash,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ServiceError("accepted_weight_state_invalid", 500) from exc
+            if state["reward_basis"].get("reward_basis_hash") != basis.get("reward_basis_hash"):
+                raise ServiceError("accepted_weight_state_reward_conflict", 409)
+            return {"state": state, "lookup_ok": True}
+        try:
+            epoch_scope = dict(self._config.chain.accepted_weight_epoch_scope())
+            if int(epoch_scope.get("epoch", -1)) != requested_epoch:
+                raise ServiceError("accepted_weight_epoch_not_current", 409)
+            source = self._config.accepted_weight_inputs_source
+            inputs = dict(source(requested_epoch)) if source is not None else self._store.weight_inputs(
+                requested_epoch, netuid, self._config.accepted_burn_hotkey,
+                fulfillment_enabled=self._config.fulfillment_enabled,
+                leaderboard_enabled=self._config.leaderboard_emissions_enabled,
+            )
+        except ServiceError:
+            raise
+        except Exception as exc:
+            raise ServiceError("accepted_weight_inputs_unavailable", 503) from exc
+        try:
+            state = weight_state.build_accepted_weight_state(
+                self._reward_signer(), network=network,
+                genesis_hash=epoch_scope["genesis_hash"], netuid=netuid,
+                epoch=requested_epoch,
+                valid_from_block=epoch_scope["valid_from_block"],
+                valid_until_block=epoch_scope["valid_until_block"],
+                reward_basis=basis,
+                fixed_allocations=inputs["fixed_allocations"],
+                fulfillment_demands=inputs["fulfillment_demands"],
+                burn_hotkey=inputs["burn_hotkey"],
+                issued_at=str(basis["published_at"]),
+            )
+            stored = self._store.publish_weight_state(
+                network, netuid, requested_epoch, state["state_hash"], state
+            )
+        except (KeyError, TypeError, ValueError, ArenaStoreError) as exc:
+            raise ServiceError("accepted_weight_state_conflict", 409) from exc
+        return {"state": validate_accepted_weight_state(stored["state"]), "lookup_ok": True}
+
+    def record_chain_outcome(self, document: Any) -> Dict[str, Any]:
+        """Record an authenticated validator observation, never settlement authority."""
+
+        # A validator journals the exact signed report before POST. If the
+        # response is lost, that same report remains idempotent after its
+        # freshness window; no altered replay receives this exception.
+        if isinstance(document, Mapping):
+            try:
+                network, netuid = self._chain_scope()
+                epoch = int(document.get("epoch"))
+                validator_hotkey = str(document.get("validator_hotkey"))
+                request_id = str(document.get("request_id"))
+                row = self._store.get_chain_outcome(
+                    network, netuid, epoch, validator_hotkey, request_id
+                )
+                if row is not None:
+                    if row.get("outcome_doc") == dict(document):
+                        return {"status": "recorded"}
+                    raise ServiceError("chain_outcome_conflict", 409)
+            except ServiceError:
+                raise
+            except (TypeError, ValueError, ArenaStoreError):
+                pass
+        validated = weight_state.validate_chain_outcome(document, now=self.now())
+        network, netuid = self._chain_scope()
+        if validated["network"] != network or int(validated["netuid"]) != netuid:
+            raise ServiceError("chain_outcome_scope_mismatch", 409)
+        if not self._config.verify_signature(
+            validated["validator_hotkey"], validated["signature"],
+            weight_state.chain_outcome_message(validated),
+        ):
+            raise ServiceError("chain_outcome_signature_invalid", 401)
+        state = self._store.get_weight_state(network, netuid, int(validated["epoch"]))
+        if state is None or state.get("state_hash") != validated["state_hash"]:
+            raise ServiceError("chain_outcome_state_unknown", 409)
+        try:
+            return self._store.record_chain_outcome(
+                network=network, netuid=netuid, epoch=int(validated["epoch"]),
+                validator_hotkey=validated["validator_hotkey"],
+                request_id=validated["request_id"],
+                extrinsic_hash=validated["extrinsic_hash"], outcome_doc=validated,
+            )
+        except ArenaStoreError as exc:
+            raise ServiceError("chain_outcome_conflict", 409) from exc
+
+    def public_chain_outcomes(self, epoch: int) -> Dict[str, Any]:
+        network, netuid = self._chain_scope()
+        rows = self._store.list_chain_outcomes(network, netuid, int(epoch))
+        return {"outcomes": [dict(row["outcome_doc"]) for row in rows], "lookup_ok": True}
 
     def public_round(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)

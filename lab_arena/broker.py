@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
@@ -28,7 +29,7 @@ from urllib.parse import unquote_to_bytes
 
 import httpx
 
-from lab_arena import contracts, operations, scoring_provider_compat
+from lab_arena import contracts, operations, provider_costs, scoring_provider_compat
 from lab_arena.contracts import ArenaContractError
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
@@ -214,8 +215,10 @@ def bounded_input_tokens(parameters: Mapping[str, Any]) -> int:
     """A conservative token ceiling for messages, tools, and reasoning input."""
 
     # Canonical JSON includes every caller-controlled input field. One token
-    # per serialized character is a conservative bound for supported models.
-    return REQUEST_TOKEN_OVERHEAD + TOKENS_PER_CHAR_BOUND * len(contracts.canonical_json(dict(parameters)))
+    # per serialized UTF-8 byte is a conservative bound for supported models.
+    return REQUEST_TOKEN_OVERHEAD + TOKENS_PER_CHAR_BOUND * len(
+        contracts.canonical_json(dict(parameters)).encode("utf-8")
+    )
 
 
 def max_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, parameters: Mapping[str, Any], *, max_output_tokens: int) -> int:
@@ -237,45 +240,15 @@ def max_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, par
 
 
 def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, response_json: Any) -> Optional[int]:
-    """Actual cost from the response usage under the pinned table.
-
-    Returns ``None`` when usage is missing, malformed, or names a different
-    model, in which case the caller settles at the full reservation. A cost
-    above the reservation is clamped by the caller (never above).
-    """
+    """Return the provider's actual charge, including cached usage or aliases."""
 
     if not isinstance(response_json, Mapping):
         return None
     pricing = price_table["models"].get(model)
     if pricing is None:
         return None
-    reported_model = response_json.get("model")
-    if reported_model is not None and str(reported_model).split(":")[0] != model.split(":")[0]:
-        return None
-    usage = response_json.get("usage")
-    if not isinstance(usage, Mapping):
-        return None
-    try:
-        prompt_tokens = int(usage.get("prompt_tokens"))
-        completion_tokens = int(usage.get("completion_tokens"))
-    except (TypeError, ValueError):
-        return None
-    if isinstance(usage.get("prompt_tokens"), bool) or prompt_tokens < 0 or completion_tokens < 0:
-        return None
-    reasoning_tokens = 0
-    details = usage.get("completion_tokens_details")
-    if isinstance(details, Mapping) and details.get("reasoning_tokens") is not None:
-        try:
-            reasoning_tokens = max(0, int(details.get("reasoning_tokens")))
-        except (TypeError, ValueError):
-            return None
-    usd = (
-        Decimal(pricing["prompt"]) * prompt_tokens
-        + Decimal(pricing["completion"]) * completion_tokens
-        + Decimal(pricing["internal_reasoning"]) * reasoning_tokens
-        + Decimal(pricing["request"])
-    )
-    return _microusd_ceiling(usd)
+    cost = provider_costs.openrouter_cost(response_json)
+    return None if cost is None else cost.microusd
 
 
 # ---------------------------------------------------------------------------
@@ -306,18 +279,15 @@ def normalized_request(operation_id: str, parameters: Mapping[str, Any]) -> Dict
     return normalized
 
 
-def deepline_cost_microusd(body: bytes) -> int:
-    """``billing.cost_usd`` from a Deepline execute envelope as micro-USD, else 0."""
+def deepline_cost_microusd(body: bytes) -> Optional[int]:
+    """Return Deepline credits charged at $0.10 each, or ``None``."""
 
     try:
         document = json.loads(bytes(body).decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return 0
-    billing = document.get("billing") if isinstance(document, Mapping) else None
-    value = billing.get("cost_usd") if isinstance(billing, Mapping) else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or value != value or value in (float("inf"),):
-        return 0
-    return int(value * 1_000_000)
+        return None
+    cost = provider_costs.deepline_cost(document)
+    return None if cost is None else cost.microusd
 
 
 def inject_credential(outbound: operations.OutboundRequest, secret: str) -> Tuple[str, Dict[str, str]]:
@@ -695,16 +665,25 @@ class Broker:
                 exc = BrokerError("broker_unavailable")
             return _error_result(exc.code, {"operation_id": operation_id, "funding_source": funding_source})
         max_output_tokens = 0
+        reservation_cost: Optional[provider_costs.ProviderCost] = None
+        reserve_remaining_budget = False
         try:
             if effective_operation.provider == "openrouter":
                 # Reserve the maximum cost allowed by the request and output cap.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
                 normalized = effective_normalized
                 amount = max_openrouter_cost_microusd(self._price_table, normalized["model"], normalized, max_output_tokens=max_output_tokens)
+            elif effective_operation.provider == "scrapingdog":
+                reservation_cost = provider_costs.scrapingdog_cost(
+                    effective_operation_id, effective_normalized
+                )
+                amount = reservation_cost.microusd
+            elif effective_operation.provider == "deepline":
+                reservation_cost = provider_costs.deepline_reservation_cost(effective_normalized)
+                reserve_remaining_budget = reservation_cost is None
+                amount = 0 if reservation_cost is None else reservation_cost.microusd
             else:
-                # Other providers are bounded by call quota, so the reservation
-                # carries no estimated amount.
-                amount = 0
+                raise BrokerError("invalid_request")
         except BrokerError as exc:
             return _error_result(exc.code, {"operation_id": operation_id})
         request_hash = contracts.document_hash(normalized)
@@ -725,9 +704,25 @@ class Broker:
             "reserved_microusd": amount,
             "action_sequence": action_sequence,
         }
+        if reservation_cost is not None:
+            summary.update(
+                {
+                    "cost_basis": reservation_cost.price_basis,
+                    "cost_units": format(reservation_cost.units, "f"),
+                    "cost_unit_name": reservation_cost.unit_name,
+                }
+            )
         if route is not None:
             summary.update(route.summary())
-        reserved = self._store.reserve_call(
+        request_accounting = {}
+        if effective_operation.provider == "openrouter":
+            request_accounting["model"] = effective_normalized["model"]
+        elif effective_operation.provider == "deepline":
+            request_accounting["tool"] = effective_normalized.get("tool") or {
+                "exa.search": "exa_search", "exa.contents": "exa_contents"
+            }.get(effective_operation_id, "")
+        summary.update(request_accounting)
+        reservation_arguments = dict(
             run_id=context.run_id,
             lease_token_hash=context.lease_token_hash,
             call_identity=call_identity,
@@ -735,9 +730,21 @@ class Broker:
             provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **(route.summary() if route else {})},
+            call_doc={"request_hash": request_hash, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
+        # Another call can hold money without having spent it. Wait briefly for
+        # settlement, using the same identity; do not dispatch or charge twice.
+        request_deadline = time.monotonic() + min(max(1, int(timeout_ms)) / 1000.0, float(effective_operation.timeout_seconds))
+        reserve_deadline = min(time.monotonic() + 20.0, request_deadline - 1.0)
+        while True:
+            reserved = self._store.reserve_call(**reservation_arguments)
+            if reserved.get("status") != "budget_busy":
+                break
+            if time.monotonic() >= reserve_deadline:
+                summary.update({"outcome": "not_dispatched", "reason": "budget_busy"})
+                return _error_result("provider_unavailable", summary)
+            time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
         if status == "stale":
             return _error_result("lease_stale", summary)
@@ -776,6 +783,16 @@ class Broker:
         if status != "reserved":
             return _error_result("broker_unavailable", summary)
 
+        # Dynamic reservations are allocated atomically by the database. Its
+        # amount, not the requested zero placeholder, is the real liability.
+        reserved_amount = reserved.get("amount_microusd")
+        if isinstance(reserved_amount, bool) or not isinstance(reserved_amount, int) or reserved_amount < 0:
+            return _error_result("broker_unavailable", summary)
+        amount = reserved_amount
+        summary["reserved_microusd"] = amount
+        if reserve_remaining_budget:
+            summary["reservation_basis"] = "remaining_budget_dynamic_deepline"
+
         dispatched = self._store.mark_dispatched(run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity)
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.
@@ -787,7 +804,7 @@ class Broker:
         outbound = operations.build_outbound_request(effective_operation_id, effective_normalized)
         try:
             url, headers = inject_credential(outbound, secret)
-            timeout_seconds = min(max(1, int(timeout_ms)) / 1000.0, float(effective_operation.timeout_seconds))
+            timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 response = self._transport.send(method=outbound.target.method, url=url, headers=headers, body=outbound.body, timeout_seconds=timeout_seconds)
                 # A provider must not echo its authorization secret into a
@@ -810,11 +827,58 @@ class Broker:
             secret = ""
             del secret
 
+        # Read charge metadata from the raw trusted provider reply.  Response
+        # adaptation and sanitization must not erase a known provider charge.
+        raw_actual: Optional[int] = None
+        raw_cost: Optional[provider_costs.ProviderCost] = None
+        if effective_operation.provider == "openrouter":
+            try:
+                raw_document = json.loads(response.body.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raw_document = None
+            raw_actual = actual_openrouter_cost_microusd(
+                self._price_table, normalized["model"], raw_document
+            )
+            raw_cost = provider_costs.openrouter_cost(raw_document)
+        elif effective_operation.provider == "deepline":
+            try:
+                raw_document = json.loads(response.body.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raw_document = None
+            raw_cost = provider_costs.deepline_cost(raw_document)
+            raw_actual = None if raw_cost is None else raw_cost.microusd
+        elif effective_operation.provider == "scrapingdog" and 200 <= response.status < 300:
+            raw_cost = provider_costs.scrapingdog_cost(
+                effective_operation_id, effective_normalized
+            )
+            raw_actual = raw_cost.microusd
+        if raw_cost is not None:
+            summary.update(
+                {
+                    "cost_basis": raw_cost.price_basis,
+                    "cost_units": format(raw_cost.units, "f"),
+                    "cost_unit_name": raw_cost.unit_name,
+                }
+            )
         failure_stage = "response_adaptation"
         adapted_response_url = ""
         try:
             if effective_operation.provider == "openrouter":
                 response = _openrouter_effective_response(response)
+            if (
+                response.status not in (400, 401, 402, 403, 404, 422, 429)
+                and effective_operation.provider in ("openrouter", "deepline")
+                and raw_actual is None
+            ):
+                result = self._store.mark_uncertain(
+                    run_id=context.run_id,
+                    lease_token_hash=context.lease_token_hash,
+                    call_identity=call_identity,
+                    call_doc={"reason": "missing_provider_cost"},
+                    lease_ttl_seconds=self._lease_ttl_seconds,
+                )
+                summary.update({"outcome": "uncertain", "actual_microusd": amount, "provider_status": int(response.status)})
+                return _error_result("provider_unavailable", summary)
             if funding_source == "miner_key" and response.status in (401, 402, 403):
                 failure_stage = "response_sanitization"
                 refused = _error_result("miner_credentials_unavailable", summary)
@@ -845,17 +909,11 @@ class Broker:
                     )
             failure_stage = "cost_accounting"
             if effective_operation.provider == "openrouter":
-                actual: Optional[int] = None
-                if 200 <= response.status < 300:
-                    try:
-                        actual = actual_openrouter_cost_microusd(self._price_table, normalized["model"], json.loads(response.body.decode("utf-8")))
-                    except (UnicodeDecodeError, ValueError):
-                        actual = None
-                # Missing, malformed, stale, or excessive usage retains the full reservation.
-                actual = amount if actual is None or actual > amount else actual
-            elif effective_operation.provider == "deepline" and 200 <= response.status < 300:
-                # Deepline reports the charge in its envelope; record it, floor-rounded.
-                actual = deepline_cost_microusd(response.body)
+                actual = 0 if raw_actual is None else raw_actual
+            elif effective_operation.provider == "deepline":
+                actual = 0 if raw_actual is None else raw_actual
+            elif effective_operation.provider == "scrapingdog":
+                actual = 0 if raw_actual is None else raw_actual
             else:
                 actual = 0  # providers without a reported charge: record the bounded call, not an invented price
             failure_stage = "terminal_response"
@@ -872,6 +930,36 @@ class Broker:
             # would block the attempt's completion and, repeated, cancel the
             # round: consume the reservation as uncertain and tell the model the
             # provider was unavailable.
+            # If the trusted raw response carried a known charge, settle that
+            # exact amount with a generic terminal error even when adaptation
+            # or sanitization rejected the provider payload.
+            if raw_actual is not None and failure_stage != "settlement":
+                refused = _error_result("provider_unavailable", summary)
+                terminal = _terminal_response_document(
+                    refused.status, refused.headers, refused.body
+                )
+                try:
+                    settled = self._store.settle_call(
+                        run_id=context.run_id,
+                        lease_token_hash=context.lease_token_hash,
+                        call_identity=call_identity,
+                        actual_microusd=raw_actual,
+                        terminal_response=terminal,
+                        lease_ttl_seconds=self._lease_ttl_seconds,
+                    )
+                    if settled.get("status") == "settled":
+                        summary.update(
+                            {
+                                "outcome": "settled",
+                                "actual_microusd": raw_actual,
+                                "error_code": "provider_unavailable",
+                            }
+                        )
+                        return BrokerResult(
+                            refused.status, refused.headers, refused.body, summary
+                        )
+                except Exception:
+                    pass
             try:
                 self._store.mark_uncertain(
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,

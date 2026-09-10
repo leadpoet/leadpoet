@@ -128,7 +128,15 @@ class FakeProviderTransport:
         if "-refused" in url or any("-refused" in str(value) for value in headers.values()):
             # The provider rejects a revoked miner key.
             return br.ProviderResponse(401, {"content-type": "application/json"}, b'{"error": "invalid key"}')
-        payload = json.dumps({"results": [{"url": "https://co1.example.com", "title": "Co"}]}).encode()
+        payload = json.dumps(
+            {
+                "results": [{"url": "https://co1.example.com", "title": "Co"}],
+                # The real Deepline response carries a numeric credit charge.
+                # Explicit zero keeps this fake free without bypassing the
+                # broker's fail-closed cost accounting contract.
+                "billing": {"credits_charged": 0},
+            }
+        ).encode()
         return br.ProviderResponse(200, {"content-type": "application/json"}, payload)
 
 

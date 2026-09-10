@@ -90,7 +90,9 @@ REWARD_BASIS_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v1"
 OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v1"
 SUBMISSION_SCHEMA_VERSION = "leadpoet.lab_arena.submission.v1"
 PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
+SUBMISSION_COSTS_SCHEMA_VERSION = "leadpoet.lab_arena.submission_costs.v1"
 SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
+JSON_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 
 SCOPE_CLAIM = "lab_arena.claim.v1"
 SCOPE_COMPLETE = "lab_arena.complete.v1"
@@ -684,6 +686,15 @@ ROUND_CONFIGURATION_FIELDS = (
     F("scoring_wall_clock_seconds", "int", minimum=30),
     F("scorer_policy", "object"),
     F("execution_cap_microusd", "int", minimum=1),
+    # New rounds freeze the final cost-per-returned-company eligibility rule.
+    # It is optional only so historical configuration documents stay valid.
+    F(
+        "cost_per_company_microusd",
+        "int",
+        required=False,
+        minimum=1,
+        maximum=JSON_SAFE_INTEGER_MAX,
+    ),
     F("scoring_cap_microusd", "int", minimum=1),
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
@@ -697,6 +708,8 @@ ROUND_CONFIGURATION_FIELDS = (
 
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
+    if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
+        raise ArenaContractError("round cost-per-company cap cannot be null")
     if ("network_name" in config) != ("netuid" in config):
         raise ArenaContractError("round network_name and netuid must be supplied together")
     if "network_name" not in config:
@@ -743,6 +756,59 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     if ordered != sorted(ordered) or len(set(ordered)) != len(ordered):
         raise ArenaContractError("stage schedule must be strictly increasing")
     return config
+
+
+SUBMISSION_COST_PROVIDER_FIELDS = (
+    F("kind", "str", choices=ASSIGNMENT_KINDS),
+    F("provider", "str", choices=PROVIDERS),
+    F("settled_microusd", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("reserved_or_uncertain_microusd", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("inflight_calls", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("uncertain_calls", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("refused_calls", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("call_count", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+)
+
+SUBMISSION_COSTS_FIELDS = (
+    F("schema_version", "str", choices=(SUBMISSION_COSTS_SCHEMA_VERSION,)),
+    F("submission_id", "str", minimum=1, maximum=128),
+    F(
+        "providers",
+        "list[object]",
+        minimum=0,
+        maximum=len(ASSIGNMENT_KINDS) * len(PROVIDERS),
+        fields=SUBMISSION_COST_PROVIDER_FIELDS,
+    ),
+)
+
+
+def validate_submission_costs(document: Any) -> Dict[str, Any]:
+    """Validate the bounded, aggregate-only submission cost RPC result."""
+
+    costs = validate_document(document, SUBMISSION_COSTS_FIELDS)
+    seen = set()
+    for row in costs["providers"]:
+        key = (row["kind"], row["provider"])
+        if key in seen:
+            raise ArenaContractError("submission costs contain a duplicate provider row")
+        seen.add(key)
+        if row["inflight_calls"] + row["uncertain_calls"] > row["call_count"]:
+            raise ArenaContractError("submission cost terminal counters exceed call count")
+        if row["refused_calls"] > row["call_count"]:
+            raise ArenaContractError("submission cost refused calls exceed call count")
+    for kind in ASSIGNMENT_KINDS:
+        matching = [row for row in costs["providers"] if row["kind"] == kind]
+        for key in (
+            "settled_microusd",
+            "reserved_or_uncertain_microusd",
+            "inflight_calls",
+            "uncertain_calls",
+            "refused_calls",
+            "call_count",
+        ):
+            if sum(int(row[key]) for row in matching) > JSON_SAFE_INTEGER_MAX:
+                raise ArenaContractError("submission cost aggregate exceeds safe integer range")
+    return costs
 
 
 # ---------------------------------------------------------------------------

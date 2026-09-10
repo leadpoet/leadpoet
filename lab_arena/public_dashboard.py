@@ -17,6 +17,25 @@ from lab_arena import contracts, icp_disclosure, source_disclosure, verify
 PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/pydantic-harness/tree/lab"
 DEFAULT_RECENT_ROUND_LIMIT = 30
 MAX_RECENT_ROUND_LIMIT = 100
+_COST_REASONS = frozenset(
+    {
+        "eligible",
+        "historical_round",
+        "stored_output_invalid",
+        "provider_calls_inflight",
+        "execution_cap_exceeded",
+        "cost_per_company_exceeded",
+    }
+)
+_COST_COUNTER_KEYS = (
+    "settled_microusd",
+    "reserved_or_uncertain_microusd",
+    "conservative_microusd",
+    "inflight_calls",
+    "uncertain_calls",
+    "refused_calls",
+    "call_count",
+)
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
@@ -64,6 +83,84 @@ def _score(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) and 0.0 <= number <= 100.0 else None
+
+
+def _safe_integer(value: Any) -> Optional[int]:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > contracts.JSON_SAFE_INTEGER_MAX
+    ):
+        return None
+    return value
+
+
+def _cost_bucket(value: Any) -> Optional[dict]:
+    if not isinstance(value, Mapping):
+        return None
+    projected = {key: _safe_integer(value.get(key)) for key in _COST_COUNTER_KEYS}
+    if any(item is None for item in projected.values()):
+        return None
+    raw_providers = value.get("providers")
+    if not isinstance(raw_providers, list) or len(raw_providers) > len(contracts.PROVIDERS):
+        return None
+    providers = []
+    seen = set()
+    for raw in raw_providers:
+        if not isinstance(raw, Mapping) or raw.get("provider") not in contracts.PROVIDERS:
+            return None
+        provider = str(raw["provider"])
+        if provider in seen:
+            return None
+        seen.add(provider)
+        row = {"provider": provider}
+        for key in _COST_COUNTER_KEYS:
+            number = _safe_integer(raw.get(key))
+            if number is None:
+                return None
+            row[key] = number
+        providers.append(row)
+    projected["providers"] = sorted(providers, key=lambda row: row["provider"])
+    return projected
+
+
+def _cost_projection(ranking: Mapping[str, Any]) -> dict:
+    """Allow-list a final cost result; never pass publication fields through."""
+
+    eligible = ranking.get("eligible")
+    reason = ranking.get("eligibility_reason")
+    if not isinstance(eligible, bool) or reason not in _COST_REASONS:
+        return {}
+    summary = ranking.get("cost_summary")
+    if summary is None and (
+        (reason == "historical_round" and eligible)
+        or (reason == "stored_output_invalid" and not eligible)
+    ):
+        return {
+            "cost_summary": None,
+            "eligible": eligible,
+            "eligibility_reason": str(reason),
+        }
+    if not isinstance(summary, Mapping):
+        return {}
+    scalar_keys = (
+        "returned_company_count",
+        "execution_cap_microusd",
+        "cost_per_company_cap_microusd",
+        "eligibility_cap_microusd",
+    )
+    projected_summary = {key: _safe_integer(summary.get(key)) for key in scalar_keys}
+    execution = _cost_bucket(summary.get("execution"))
+    judge = _cost_bucket(summary.get("judge"))
+    if any(item is None for item in projected_summary.values()) or execution is None or judge is None:
+        return {}
+    projected_summary.update({"execution": execution, "judge": judge})
+    return {
+        "cost_summary": projected_summary,
+        "eligible": eligible,
+        "eligibility_reason": str(reason),
+    }
 
 
 def _participants(row: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
@@ -118,6 +215,8 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
             "miner_hotkey": str(participant.get("miner_hotkey") or ""),
             "final_score": _score(ranking.get("final_score")),
         }
+        if published:
+            projected.update(_cost_projection(ranking))
         if is_baseline:
             baseline = projected
         elif submission_id == champion_id:
@@ -301,8 +400,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
         )
         final = final_scores.get(submission_id) or {}
         final_score = _score(final.get("final_score"))
-        submissions.append(
-            {
+        projected = {
                 "submission_id": submission_id,
                 "miner_hotkey": str(submission.get("miner_hotkey") or ""),
                 "is_baseline": is_baseline,
@@ -320,7 +418,9 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                     submission, service.now(), round_row=row
                 ),
             }
-        )
+        if round_status == "published":
+            projected.update(_cost_projection(final))
+        submissions.append(projected)
     return {"round_id": round_id, "submissions": submissions}
 
 

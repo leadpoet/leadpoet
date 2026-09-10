@@ -29,6 +29,7 @@ from lab_arena.contracts import (
     ArenaContractError,
     LEASE_TTL_SECONDS,
     canonical_json,
+    validate_submission_costs,
 )
 
 WHOAMI_SCHEMA_VERSION = "leadpoet.lab_arena.whoami.v1"
@@ -44,6 +45,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_schema_version_v1": (),
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
+    "lab_arena_submission_costs": (("p_submission_id", "text"),),
     "lab_arena_commit_round_v2": (
         ("p_round_id", "text"),
         ("p_participants", "jsonb"),
@@ -1029,6 +1031,22 @@ class ArenaStore:
         if miner_hotkey:
             filters["miner_hotkey"] = miner_hotkey
         return self._transport.select("lab_arena_ledger", filters=filters or None, order="entry_id")
+
+    def submission_costs(self, submission_id: str) -> Dict[str, Any]:
+        """Return strictly validated aggregate costs across every retry run."""
+
+        try:
+            result = validate_submission_costs(
+                self._transport.rpc(
+                    "lab_arena_submission_costs",
+                    {"p_submission_id": str(submission_id)},
+                )
+            )
+        except ArenaContractError as exc:
+            raise ArenaStoreError("submission_costs returned an invalid result") from exc
+        if result["submission_id"] != str(submission_id):
+            raise ArenaStoreError("submission_costs returned the wrong submission")
+        return result
 
     def close(self) -> None:
         self._transport.close()

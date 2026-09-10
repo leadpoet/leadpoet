@@ -28,7 +28,7 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
                 },
             }
         },
-        "billing": {"cost_usd": 0.002},
+        "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
     }
     providers = []
     class HeaderInjectionTransport(FakeTransport):
@@ -106,7 +106,7 @@ def test_miner_score_final_url_cannot_expose_its_runtime_key(percent_encoded):
                 },
             }
         },
-        "billing": {"cost_usd": 0.002},
+        "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
     }
     broker, ledger, _transport = make_broker(
         transport=FakeTransport([(200, envelope)]),
@@ -146,7 +146,7 @@ def test_cached_final_url_fails_closed_when_invalid_or_secret_bearing(corruption
                 },
             }
         },
-        "billing": {"cost_usd": 0.002},
+        "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
     }
     broker, ledger, transport = make_broker(
         transport=FakeTransport([(200, envelope)]),
@@ -240,7 +240,9 @@ def test_host_funded_score_keeps_the_direct_scrapingdog_route():
 @pytest.mark.parametrize("kind", ["execute", "score"])
 def test_each_submission_pays_with_its_own_key(kind):
     keys = {"s1": "miner-one-runtime-key", "s2": "miner-two-runtime-key"}
+    provider_response = {"choices": [], "usage": {"cost": "0.00000345"}}
     broker, ledger, transport = make_broker(
+        transport=FakeTransport([(200, provider_response), (200, provider_response)]),
         credential_for=lambda context, provider: keys[context.submission_id],
         funding_source_for=lambda context: "miner_key",
         judge_models=[CHAT["model"]],
@@ -326,15 +328,16 @@ def test_json_escaped_credential_echo_is_blocked_before_storage(operation_id, pa
     result = broker.execute(CONTEXT, **args)
     assert result.status == 502
     assert secret not in str(json.loads(result.body))
-    terminal = ledger.calls[result.call["call_identity"]]["terminal"]
-    assert secret not in str(json.loads(base64.b64decode(terminal["body_b64"])))
+    call = ledger.calls[result.call["call_identity"]]
+    assert call["kind"] == "uncertain" and "terminal" not in call
+    assert secret not in repr(call)
     replay = broker.execute(CONTEXT, **args)
-    assert replay.status == result.status and replay.body == result.body
+    assert replay.status == 409 and json.loads(replay.body) == {"error": {"code": "call_uncertain"}}
     assert len(transport.sent) == 1
 
 
 def test_valid_json_escapes_without_a_credential_keep_the_response():
-    body = b'{"choices":[{"message":{"content":"Acme\\u0020Inc"}}]}'
+    body = b'{"choices":[{"message":{"content":"Acme\\u0020Inc"}}],"usage":{"cost":"0.00000345"}}'
     broker, ledger, transport = make_broker(
         transport=FakeTransport([(200, body)]),
         credential_for=lambda context, provider: "synthetic-arena-runtime-key",
@@ -361,9 +364,10 @@ def test_provider_credential_echo_in_a_header_is_blocked():
     assert secret not in repr(ledger.calls)
 
 
-def test_json_too_deep_to_inspect_settles_a_generic_response():
+def test_json_too_deep_to_inspect_is_uncertain_without_fake_cost():
     body = b"[" * 2000 + b"0" + b"]" * 2000
     broker, ledger, _ = make_broker(transport=FakeTransport([(200, body)]))
     result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=5000)
     assert result.status == 502
-    assert ledger.log == ["reserve", "dispatch", "settle"]
+    assert result.call["outcome"] == "uncertain"
+    assert ledger.log == ["reserve", "dispatch", "uncertain"]

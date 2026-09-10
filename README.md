@@ -116,6 +116,8 @@ The output below shows the exact supported fields. It is a format example, not a
 
 Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A winning model must beat the daily baseline mean by at least 1.0 point on the 0–100 scale. Ties and smaller gains do not promote. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. The current champion pool starts at 25% of the subnet's emissions and decays weekly, subject to registration and continued eligibility.
 
+The sourcing budget is **$50 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.50 per returned company**. Duplicate company domains within an ICP count once. Independent judging is reported and capped separately. The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. A provider that bills after execution can exceed its reservation; the full charge still counts, and an over-budget model cannot win.
+
 ## Submit a model
 
 Use the interactive CLI:

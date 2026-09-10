@@ -70,18 +70,18 @@ def test_tool_responses_keep_exa_shape_and_pricing(name, expected_results, expec
 
 
 def test_cost_extraction_fails_closed_on_missing_or_malformed_billing():
-    assert br.deepline_cost_microusd(b"not json") == 0
-    assert br.deepline_cost_microusd(b'{"status": "completed"}') == 0
-    assert br.deepline_cost_microusd(b'{"billing": {"cost_usd": "0.5"}}') == 0
-    assert br.deepline_cost_microusd(b'{"billing": {"cost_usd": -1}}') == 0
-    assert br.deepline_cost_microusd(b'{"billing": {"cost_usd": true}}') == 0
-    assert br.deepline_cost_microusd(b'{"billing": {"cost_usd": 0.0123456}}') == 12345
+    assert br.deepline_cost_microusd(b"not json") is None
+    assert br.deepline_cost_microusd(b'{"status": "completed"}') is None
+    assert br.deepline_cost_microusd(b'{"billing": {"cost_usd": "0.5"}}') is None
+    assert br.deepline_cost_microusd(b'{"billing": {"credits_charged": -1}}') is None
+    assert br.deepline_cost_microusd(b'{"billing": {"credits_charged": true}}') is None
+    assert br.deepline_cost_microusd(b'{"billing": {"credits_charged": 0.0123456}}') == 1235
 
 
 def test_person_entities_are_scrubbed_except_for_the_people_search_tool():
     person = {"id": "https://exa.ai/library/person/x", "type": "person", "properties": {"name": "Jane Roe", "workHistory": [{"title": "CTO"}]}}
     company = {"id": "https://exa.ai/library/organization/y", "type": "company", "properties": {"name": "Acme"}}
-    envelope = {"job_id": "j", "status": "completed", "result": {"data": {"requestId": "r", "results": [{"id": "u", "url": "u", "text": "t", "entities": [person, company]}]}}, "billing": {"cost_usd": 0.002}}
+    envelope = {"job_id": "j", "status": "completed", "result": {"data": {"requestId": "r", "results": [{"id": "u", "url": "u", "text": "t", "entities": [person, company]}]}}, "billing": {"credits_charged": 0.02, "cost_usd": 0.002}}
     body = json.dumps(envelope).encode("utf-8")
     for tool in ("exa_search", "exa_contents", "exa_company_search", "exa_answer"):
         _status, headers, sanitized = ops.sanitize_response("deepline.execute", 200, {}, body, parameters={"tool": tool, "payload": {}})

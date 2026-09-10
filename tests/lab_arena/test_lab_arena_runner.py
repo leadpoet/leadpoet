@@ -370,7 +370,9 @@ def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_
     """Regression boundary only: this in-process test is not an end-to-end provider run."""
 
     store = Mock()
-    store.reserve_call.return_value = {"status": "reserved"}
+    store.reserve_call.side_effect = lambda **request: {
+        "status": "reserved", "amount_microusd": request["amount_microusd"]
+    }
     store.mark_dispatched.return_value = {"status": "dispatched"}
     store.settle_call.return_value = {"status": "settled"}
     transport = Mock()

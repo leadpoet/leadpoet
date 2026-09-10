@@ -91,6 +91,36 @@ own credential or budget failure retains its existing ineligibility rule.
 Malformed accepted scoring artifacts also cancel the round before scores are
 recorded; they are not company-verification failures.
 
+### Provider costs
+
+The model's twenty-ICP sourcing allowance is $50 across all three providers,
+including failed attempts and retries. OpenRouter uses the provider's
+`usage.cost`, not the admission-only management key. Scrapingdog uses the
+existing endpoint credit map at $0.00005 per credit; approved routes absent
+from that map use five credits, and a company profile uses ten. Deepline uses
+its returned billing credits at $0.10 per credit. Missing billing is uncertain,
+not free. Unknown charges retain their reservation until reconciled.
+
+Reservations and settlement share the existing submission lock. Concurrent
+ICPs cannot each claim a fresh budget. Dynamically priced Deepline calls
+reserve the remaining allowance and run one at a time per submission. Their
+upstream API has no per-call dollar cap: one completed call can exceed its
+reservation. Record the full actual charge, block further paid calls, and
+exclude over-budget challengers from promotion. Do not describe this as an
+absolute upstream charge ceiling.
+
+At publication, the gateway reports provider totals and compares sourcing
+cost with the smaller of $50 and $0.50 times returned companies. It counts
+one accepted output per ICP and unique company domains within that output.
+All retry costs still count. Quality scores remain unchanged; a cost-ineligible
+challenger cannot win. Independent judge cost has its own existing $50 cap
+and is reported separately. Credentials and provider payloads are not part of
+the public cost summary.
+
+Migration 206 changes accounting functions, not historical rows. A legacy live
+round that is still open adopts the new limits atomically when its benchmark
+commits. Already committed rounds and explicit shadow-test limits do not change.
+
 ## Required service configuration
 
 Set these values on the Arena service host:
@@ -138,7 +168,8 @@ Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/193-lab-arena-upload-recovery.sql`,
 `scripts/194-lab-arena-open-scorer-refresh.sql`, then
 `scripts/197-lab-arena-reward-chain-scope.sql` with the database owner
-and then `scripts/205-lab-arena-optional-scrapingdog-credential.sql`
+then `scripts/205-lab-arena-optional-scrapingdog-credential.sql` and
+`scripts/206-lab-arena-combined-provider-budget.sql`
 before service startup. Then check the service wiring:
 
 `scripts/191-lab-arena-upload-recovery.sql` remains byte-identical only because

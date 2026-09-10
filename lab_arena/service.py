@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
+from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     validate_accepted_weight_state,
     verify_accepted_weight_state_signature,
@@ -34,6 +35,8 @@ ACTIVE_ROUND_STATUSES = tuple(
 )
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/lab.tar.gz"
+DEFAULT_EXECUTION_CAP_MICROUSD = 50_000_000
+DEFAULT_COST_PER_COMPANY_MICROUSD = 500_000
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 240,
@@ -258,7 +261,8 @@ class ChainReads(Protocol):
 
 @dataclass
 class RoundDefaults:
-    execution_cap_microusd: int = 5_000_000
+    execution_cap_microusd: int = DEFAULT_EXECUTION_CAP_MICROUSD
+    cost_per_company_microusd: int = DEFAULT_COST_PER_COMPANY_MICROUSD
     scoring_cap_microusd: int = 50_000_000
     runner_hotkeys: Tuple[str, ...] = ()
     baseline_hotkey: str = ""
@@ -500,6 +504,22 @@ class ArenaService:
             except ArenaStoreError as exc:
                 if "lab_arena_round_missing" not in str(exc):
                     raise ServiceError("function_unavailable:%s" % function, 500) from exc
+        # The aggregate cost RPC was added after the legacy schema-version
+        # marker. Probe its service grant and its fail-closed missing-row path
+        # explicitly so an old database cannot start the new budget service.
+        cost_function = "lab_arena_submission_costs"
+        try:
+            self._store._transport.rpc(
+                cost_function,
+                {"p_submission_id": "__arena_budget_probe__"},
+            )
+        except ArenaStoreError as exc:
+            if "lab_arena_submission_missing" not in str(exc):
+                raise ServiceError(
+                    "function_unavailable:%s" % cost_function, 500
+                ) from exc
+        else:
+            raise ServiceError("function_probe_invalid:%s" % cost_function, 500)
         today = int(self.now().strftime("%Y%m%d"))
         source = self._config.daily_icp_source(set_id=today, active_at=self.now())
         if not isinstance(source, Mapping) or source.get("status") not in (
@@ -596,6 +616,7 @@ class ArenaService:
             "scoring_wall_clock_seconds": contracts.SCORING_WALL_CLOCK_SECONDS,
             "scorer_policy": self._scorer_policy,
             "execution_cap_microusd": defaults.execution_cap_microusd,
+            "cost_per_company_microusd": defaults.cost_per_company_microusd,
             "scoring_cap_microusd": defaults.scoring_cap_microusd,
             "scorer_image_digest": defaults.scorer_image_digest,
             "scorer_image_reference": defaults.scorer_image_reference,
@@ -1262,10 +1283,10 @@ class ArenaService:
             "scorer_image_digest": self._config.defaults.scorer_image_digest,
             "scorer_image_reference": self._config.defaults.scorer_image_reference,
         }
-        refreshed_configuration = {
+        refreshed_configuration = self._configuration_for_commit({
             **dict(round_row.get("configuration_doc") or {}),
             **scorer_image,
-        }
+        })
         try:
             contracts.validate_round_configuration(refreshed_configuration)
         except ArenaContractError as exc:
@@ -1346,6 +1367,21 @@ class ArenaService:
             scorer_image_reference=scorer_image["scorer_image_reference"],
         )
         return {"status": transition.get("status"), "participants": len(participants)}
+
+    @staticmethod
+    def _configuration_for_commit(configuration: Mapping[str, Any]) -> Dict[str, Any]:
+        """Mirror the one-time SQL adoption for a legacy live open round."""
+
+        refreshed = dict(configuration)
+        if (
+            refreshed.get("mode") == "live"
+            and "cost_per_company_microusd" not in refreshed
+        ):
+            refreshed["execution_cap_microusd"] = DEFAULT_EXECUTION_CAP_MICROUSD
+            refreshed["cost_per_company_microusd"] = (
+                DEFAULT_COST_PER_COMPANY_MICROUSD
+            )
+        return refreshed
 
     def benchmark_icps(self, round_id: str) -> List[Dict[str, Any]]:
         round_row = self._round(round_id)
@@ -1681,6 +1717,157 @@ class ArenaService:
             entries.append(entry)
         return entries
 
+    @staticmethod
+    def _selected_accepted_execution_runs(
+        runs: Sequence[Mapping[str, Any]], submission_id: str
+    ) -> Dict[int, Mapping[str, Any]]:
+        """Select one accepted attempt per ICP, as the scoring plan does."""
+
+        selected: Dict[int, Mapping[str, Any]] = {}
+        for run in runs:
+            if (
+                str(run.get("submission_id") or "") != submission_id
+                or run.get("status") != "accepted"
+            ):
+                continue
+            position = int(run.get("icp_position") or 0)
+            current = selected.get(position)
+            if current is None or int(run.get("attempt") or 0) > int(
+                current.get("attempt") or 0
+            ):
+                selected[position] = run
+        return selected
+
+    def _returned_company_count(
+        self,
+        submission_id: str,
+        runs: Sequence[Mapping[str, Any]],
+    ) -> int:
+        """Count unique validated company domains within each of the 20 ICPs."""
+
+        selected = self._selected_accepted_execution_runs(runs, submission_id)
+        total = 0
+        for position in range(contracts.BENCHMARK_ICP_COUNT):
+            run = selected.get(position)
+            if run is None:
+                continue
+            output_ref = str(run.get("output_ref") or "")
+            if not output_ref:
+                raise OutputInvalid("accepted output has no object reference")
+            raw = self._objects.get_bounded(output_ref, MAX_OUTPUT_BYTES)
+            try:
+                document = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise OutputInvalid("accepted output is not valid JSON") from exc
+            output = validate_output_document(document)
+            domains = set()
+            for company in output["companies"]:
+                domains.add(
+                    normalize_url(str(company["company_website"]))
+                    .domain.registrable_domain
+                )
+            # The same company in different ICPs is a different returned slot.
+            total += len(domains)
+        return total
+
+    @staticmethod
+    def _cost_kind_summary(
+        costs: Mapping[str, Any], kind: str
+    ) -> Dict[str, Any]:
+        providers = []
+        totals = {
+            "settled_microusd": 0,
+            "reserved_or_uncertain_microusd": 0,
+            "conservative_microusd": 0,
+            "inflight_calls": 0,
+            "uncertain_calls": 0,
+            "refused_calls": 0,
+            "call_count": 0,
+        }
+        counter_keys = (
+            "settled_microusd",
+            "reserved_or_uncertain_microusd",
+            "inflight_calls",
+            "uncertain_calls",
+            "refused_calls",
+            "call_count",
+        )
+        for raw in costs["providers"]:
+            if raw["kind"] != kind:
+                continue
+            row = {"provider": raw["provider"]}
+            for key in counter_keys:
+                value = int(raw[key])
+                row[key] = value
+                totals[key] += value
+            row["conservative_microusd"] = (
+                row["settled_microusd"]
+                + row["reserved_or_uncertain_microusd"]
+            )
+            providers.append(row)
+        providers.sort(key=lambda row: row["provider"])
+        totals["conservative_microusd"] = (
+            totals["settled_microusd"]
+            + totals["reserved_or_uncertain_microusd"]
+        )
+        return {**totals, "providers": providers}
+
+    def _submission_cost_eligibility(
+        self,
+        round_row: Mapping[str, Any],
+        submission_id: str,
+        runs: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build final cost reporting without changing the quality score."""
+
+        configuration = round_row.get("configuration_doc") or {}
+        if "cost_per_company_microusd" not in configuration:
+            return {
+                "cost_summary": None,
+                "eligible": True,
+                "eligibility_reason": "historical_round",
+            }
+        try:
+            returned = self._returned_company_count(submission_id, runs)
+        except (ArenaContractError, OutputInvalid, TypeError, ValueError):
+            return {
+                "cost_summary": None,
+                "eligible": False,
+                "eligibility_reason": "stored_output_invalid",
+            }
+        costs = self._store.submission_costs(submission_id)
+        execution = self._cost_kind_summary(costs, "execute")
+        judge = self._cost_kind_summary(costs, "score")
+        execution_cap = int(configuration["execution_cap_microusd"])
+        per_company_cap = int(configuration["cost_per_company_microusd"])
+        eligibility_cap = min(execution_cap, per_company_cap * returned)
+        summary = {
+            "returned_company_count": returned,
+            "execution_cap_microusd": execution_cap,
+            "cost_per_company_cap_microusd": per_company_cap,
+            "eligibility_cap_microusd": eligibility_cap,
+            "execution": execution,
+            # Judge spend is reported, but it does not enter sourcing eligibility.
+            "judge": judge,
+        }
+        if execution["inflight_calls"] or judge["inflight_calls"]:
+            return {
+                "cost_summary": summary,
+                "eligible": False,
+                "eligibility_reason": "provider_calls_inflight",
+            }
+        if execution["conservative_microusd"] > execution_cap:
+            reason = "execution_cap_exceeded"
+        elif execution["conservative_microusd"] > per_company_cap * returned:
+            reason = "cost_per_company_exceeded"
+        else:
+            reason = "eligible"
+        return {
+            "cost_summary": summary,
+            "eligible": reason == "eligible",
+            "eligibility_reason": reason,
+        }
+
     # -- publication and downstream reward activation -------------------------
 
     def publish(self, round_id: str) -> Dict[str, Any]:
@@ -1694,20 +1881,40 @@ class ArenaService:
         final_entries = self._score_entries_from_runs(
             round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
         )
+        execution_runs = self._store.list_runs(round_id, kind="execute")
+        eligibility = {
+            str(entry["submission_id"]): self._submission_cost_eligibility(
+                round_row,
+                str(entry["submission_id"]),
+                execution_runs,
+            )
+            for entry in final_entries
+        }
         king_entry = next((e for e in final_entries if e["is_king"]), None)
         if king_entry is None or king_entry["final_score"] is None:
             return self._store.cancel_round(
                 round_id, CANCEL_REASONS["scoring_incomplete"]
             )
-        decision = verify.king_decision([e for e in final_entries if not e["is_king"]], king_entry)
+        decision = verify.king_decision(
+            [
+                entry
+                for entry in final_entries
+                if not entry["is_king"]
+                and eligibility[str(entry["submission_id"])]["eligible"]
+            ],
+            king_entry,
+        )
         published_at = _iso(self.now())
+        final_ranking = verify.final_ranking(final_entries)
+        for row in final_ranking:
+            row.update(eligibility[str(row["submission_id"])])
         publication = {
             "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
             "round_id": round_id,
             "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "is_baseline": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
             "stage1_ranking": stage1_ranking,
             "finalists": finalists,
-            "final_ranking": verify.final_ranking(final_entries),
+            "final_ranking": final_ranking,
             "king_decision": decision,
             "published_at": published_at,
         }

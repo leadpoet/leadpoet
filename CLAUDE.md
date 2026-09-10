@@ -1,5 +1,9 @@
 # Agent Instructions
 
+## Scoped production authorization: combined provider competition budget
+
+On 2026-09-10 the user explicitly authorized `$overnight-rebenchmark-validation` for combined OpenRouter, Scrapingdog, and Deepline accounting and budget enforcement. This scope permits protected credential retrieval, narrow code and committed migrations, pushes, canonical gateway/validator restarts, and fresh real miner submissions through scoring and live budget-boundary tests. Preserve disclosure, credential isolation, scoring semantics, promotion, reward security, and concurrent work. Reuse only minimal accounting logic; do not add retired model-verification machinery. No auditor or SOURCE_ADD requirement applies. This scope expires when this task and its live validation complete.
+
 ## Scoped production authorization: optional miner Scrapingdog credential
 
 On 2026-09-10 the user explicitly authorized this task to use `$overnight-rebenchmark-validation` for the optional miner-provided Scrapingdog credential: protected secret retrieval, narrow code and migration changes, pushes to main, canonical gateway/normal-validator restarts, and fresh live miner submissions with and without Scrapingdog. Prove real brokered Scrapingdog data is consumed by the submitted model without manual runtime credential injection or secret disclosure. Preserve scheduling, scoring, promotion, isolation, and unrelated concurrent work. No auditor or SOURCE_ADD requirement applies. This authorization expires when this task completes.

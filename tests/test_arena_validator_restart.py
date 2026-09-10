@@ -161,6 +161,61 @@ def test_restart_supports_first_transition_and_a_second_supervised_restart():
     assert 'diff -qr "$STAGE" "$RELEASE"' in text
 
 
+def test_candidate_host_module_is_loaded_from_release_not_stale_source(tmp_path):
+    source = tmp_path / "source"
+    release = tmp_path / "release"
+    for root, identity in ((source, "stale"), (release, "candidate")):
+        host = root / "validator_tee" / "host"
+        host.mkdir(parents=True)
+        (root / "validator_tee" / "__init__.py").write_text("")
+        (host / "__init__.py").write_text("")
+        (host / "arena_restart_identity.py").write_text(
+            f'print("{identity} 123")\n'
+        )
+    stale = subprocess.run(
+        [sys.executable, "-m", "validator_tee.host.arena_restart_identity"],
+        cwd=source,
+        env={**os.environ, "PYTHONPATH": str(release)},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert stale.stdout.strip() == "stale 123"
+
+    text = SCRIPT.read_text()
+    start = text.index("read -r old_pid old_start < <(")
+    end = text.index("\nread -r old_runner_pgid", start)
+    identity_call = text[start:end]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sudo = fake_bin / "sudo"
+    sudo.write_text('#!/bin/sh\nexec "$@"\n')
+    sudo.chmod(0o755)
+    program = f"""set -euo pipefail
+fail() {{ echo "ERROR: $*" >&2; exit 1; }}
+cd "$SOURCE_ROOT"
+{identity_call}
+printf '%s %s' "$old_pid" "$old_start"
+"""
+    selected = subprocess.run(
+        ["bash", "-c", program],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "SOURCE_ROOT": str(source),
+            "RELEASE": str(release),
+            "CURRENT_LINK": str(release),
+            "PYTHON": sys.executable,
+            "service_pid": "0",
+            "legacy_container_pid": "0",
+        },
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert selected.stdout == "candidate 123"
+
+
 def test_single_enclave_transition_has_bounded_automatic_rollback():
     text = SCRIPT.read_text()
     public_preflight = text.index("Arena public preflight is valid")

@@ -95,11 +95,11 @@ cleanup() {
       legacy_rpc_ready=0
       deadline=$((SECONDS + READY_TIMEOUT))
       while [ "$SECONDS" -lt "$deadline" ]; do
-        if ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; ValidatorEnclaveClient().health_check()' >/dev/null 2>&1; then legacy_rpc_ready=1; break; fi
+        if ( cd "$SOURCE_ROOT"; ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; ValidatorEnclaveClient().health_check()' ) >/dev/null 2>&1; then legacy_rpc_ready=1; break; fi
         sleep 1
       done
-      if [ "$legacy_rpc_ready" -eq 1 ] && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.runtime_v2_bootstrap --validator-release "$LEGACY_RELEASE_MANIFEST" --gateway-release "$LEGACY_GATEWAY_MANIFEST" --gateway-release-lineage "$LEGACY_GATEWAY_LINEAGE" --hotkey-config "$LEGACY_HOTKEY_CONFIG" >/dev/null 2>&1 \
-          && ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.hotkey_bootstrap_v2 --hotkey-config "$LEGACY_HOTKEY_CONFIG" --hotkey-envelope "$LEGACY_ENVELOPE" >/dev/null 2>&1; then
+      if [ "$legacy_rpc_ready" -eq 1 ] && ( cd "$SOURCE_ROOT"; ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.runtime_v2_bootstrap --validator-release "$LEGACY_RELEASE_MANIFEST" --gateway-release "$LEGACY_GATEWAY_MANIFEST" --gateway-release-lineage "$LEGACY_GATEWAY_LINEAGE" --hotkey-config "$LEGACY_HOTKEY_CONFIG" ) >/dev/null 2>&1 \
+          && ( cd "$SOURCE_ROOT"; ENCLAVE_CID="$OLD_ENCLAVE_CID" PYTHONPATH="$SOURCE_ROOT" "$PYTHON" -m validator_tee.host.hotkey_bootstrap_v2 --hotkey-config "$LEGACY_HOTKEY_CONFIG" --hotkey-envelope "$LEGACY_ENVELOPE" ) >/dev/null 2>&1; then
         [ "$LEGACY_CONTAINER_STOPPED" -eq 0 ] || sudo docker start "$legacy_container_id" >/dev/null 2>&1 || echo "ERROR: legacy validator container recovery failed" >&2
       else
         echo "ERROR: exact legacy signer reprovisioning failed" >&2
@@ -313,14 +313,17 @@ fi
 # Adopt only the exact legacy validator from the installed checkout. A process
 # from another checkout or more than one owner is ambiguous and fails closed.
 read -r old_pid old_start < <(
+  cd "$RELEASE"
   sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" -m validator_tee.host.arena_restart_identity \
     "$SOURCE_ROOT" "$CURRENT_LINK" "$service_pid" --ignore-tree-root "${legacy_container_pid:-0}"
 ) || fail "validator process ownership is ambiguous"
 read -r old_runner_pgid old_runner_start < <(
+  cd "$RELEASE"
   sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" -m validator_tee.host.arena_restart_identity \
     "$SOURCE_ROOT" "$CURRENT_LINK" "$service_pid" --kind runner
 ) || fail "standalone Arena runner ownership is ambiguous"
 read -r old_relay_pid old_relay_start < <(
+  cd "$RELEASE"
   sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" -m validator_tee.host.arena_restart_identity \
     "$SOURCE_ROOT" "$CURRENT_LINK" "$service_pid" --kind relay
 ) || fail "legacy chain relay ownership is ambiguous"
@@ -346,16 +349,16 @@ fi
 candidate_rpc_ready=0
 deadline=$((SECONDS + READY_TIMEOUT))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  if PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" ENCLAVE_CID="$CANDIDATE_CID" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; value=ValidatorEnclaveClient().get_arena_hotkey_state_v1(); assert isinstance(value.get("provisioned"),bool)' >/dev/null 2>&1; then candidate_rpc_ready=1; break; fi
+  if ( cd "$RELEASE"; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" ENCLAVE_CID="$CANDIDATE_CID" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; value=ValidatorEnclaveClient().get_arena_hotkey_state_v1(); assert isinstance(value.get("provisioned"),bool)' ) >/dev/null 2>&1; then candidate_rpc_ready=1; break; fi
   sleep 1
 done
 [ "$candidate_rpc_ready" -eq 1 ] || fail "candidate signer RPC did not become ready"
-if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" ENCLAVE_CID="$CANDIDATE_CID" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; raise SystemExit(0 if ValidatorEnclaveClient().get_arena_hotkey_state_v1().get("provisioned") else 1)' 2>/dev/null; then
+if ! ( cd "$RELEASE"; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" ENCLAVE_CID="$CANDIDATE_CID" "$PYTHON" -c 'from validator_tee.host.vsock_client import ValidatorEnclaveClient; raise SystemExit(0 if ValidatorEnclaveClient().get_arena_hotkey_state_v1().get("provisioned") else 1)' ) 2>/dev/null; then
   [ -f "$LEGACY_ENVELOPE" ] && [ ! -L "$LEGACY_ENVELOPE" ] || fail "legacy encrypted hotkey envelope is unavailable"
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" ENCLAVE_CID="$CANDIDATE_CID" "$PYTHON" -m validator_tee.host.arena_hotkey_bootstrap migrate-legacy \
-    --legacy-envelope "$LEGACY_ENVELOPE" --policy "$POLICY_FILE" --kms-key-id "$MIGRATION_KMS_KEY_ID"
+  ( cd "$RELEASE"; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" ENCLAVE_CID="$CANDIDATE_CID" "$PYTHON" -m validator_tee.host.arena_hotkey_bootstrap migrate-legacy \
+    --legacy-envelope "$LEGACY_ENVELOPE" --policy "$POLICY_FILE" --kms-key-id "$MIGRATION_KMS_KEY_ID" )
 fi
-sudo timeout "$READY_TIMEOUT" env PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$RELEASE/scripts/run_arena_validator.py" --environment-file "$CANDIDATE_SERVICE_ENV" --enclave-cid "$CANDIDATE_CID" --check-only
+( cd "$RELEASE"; sudo timeout "$READY_TIMEOUT" env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" "$PYTHON" "$RELEASE/scripts/run_arena_validator.py" --environment-file "$CANDIDATE_SERVICE_ENV" --enclave-cid "$CANDIDATE_CID" --check-only )
 SIGNER_HANDOFF_COMMITTED=1
 
 # Only now drain the exact old supervised process. No broad process kill or

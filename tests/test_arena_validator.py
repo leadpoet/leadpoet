@@ -24,6 +24,9 @@ class _Substrate:
 
     def __init__(self, broadcasts):
         self.broadcasts = broadcasts
+        self.uid = 0
+        self.last_updates = [900]
+        self.rate_limit = 100
 
     def get_account_nonce(self, _hotkey):
         return 7
@@ -34,6 +37,20 @@ class _Substrate:
     def rpc_request(self, method, params):
         assert method == "author_submitExtrinsic"
         self.broadcasts.append(params[0])
+
+    def query(self, *, module, storage_function, params, block_hash):
+        assert module == "SubtensorModule"
+        assert block_hash == "0x" + ("2" * 64)
+        if storage_function == "Uids":
+            assert params == [71, "5" + "V" * 47]
+            return SimpleNamespace(value=self.uid)
+        if storage_function == "LastUpdate":
+            assert params == [71]
+            return SimpleNamespace(value=self.last_updates)
+        if storage_function == "WeightsSetRateLimit":
+            assert params == [71]
+            return SimpleNamespace(value=self.rate_limit)
+        raise AssertionError(storage_function)
 
 
 class _Chain:
@@ -208,6 +225,45 @@ def test_missing_finalized_nonce_fails_before_protected_signing(tmp_path):
     assert signer.prepares == 0
 
 
+@pytest.mark.parametrize(
+    ("last_update", "rate_limit", "expected"),
+    [(0, 100, "broadcast"), (950, 100, "broadcast"), (951, 100, "waiting_for_rate_limit")],
+)
+def test_new_signature_obeys_exact_finalized_rate_limit_boundary(
+    tmp_path, last_update, rate_limit, expected
+):
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    orchestrator.chain.client.last_updates = [last_update]
+    orchestrator.chain.client.rate_limit = rate_limit
+    assert orchestrator.run_once(9) == expected
+    assert signer.prepares == (1 if expected == "broadcast" else 0)
+    assert (tmp_path / "epoch-9-signed.json").exists() is (expected == "broadcast")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("uid", None, "uid"),
+        ("uid", True, "uid"),
+        ("last_updates", [], "LastUpdate"),
+        ("last_updates", [True], "LastUpdate"),
+        ("last_updates", [1051], "LastUpdate"),
+        ("rate_limit", None, "rate limit"),
+        ("rate_limit", True, "rate limit"),
+        ("rate_limit", -1, "rate limit"),
+    ],
+)
+def test_rate_limit_inputs_fail_closed_before_signing(tmp_path, field, value, message):
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    setattr(orchestrator.chain.client, field, value)
+    with pytest.raises(ArenaValidatorError, match=message):
+        orchestrator.run_once(9)
+    assert signer.prepares == 0
+    assert not (tmp_path / "epoch-9-signed.json").exists()
+
+
 def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     (tmp_path / "epoch-8-signed.json").write_text(
         '{"epoch":8,"record_hash":"sha256:bad"}\n', encoding="utf-8"
@@ -261,3 +317,20 @@ def test_expired_mortal_attempt_retries_fresh_era_within_same_epoch(tmp_path):
     assert restarted.run_once(9) == "rebroadcast"
     assert signer.prepares == 2
     assert broadcasts[-1] == "0xcafebabe"
+
+
+def test_rate_limited_retry_preserves_active_journal_without_archiving(tmp_path):
+    first = _protected()
+    signer = _Signer(first, [
+        {"status": "not_included_expired", "finalized": False,
+         "state_hash": first["state_hash"], "extrinsic_hash": first["extrinsic_hash"],
+         "finalized_head": {"block": 1050}, "finalized_nonce": 7},
+    ])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    assert orchestrator.run_once(9) == "broadcast"
+    original = (tmp_path / "epoch-9-signed.json").read_bytes()
+    orchestrator.chain.client.last_updates = [1000]
+    assert orchestrator.run_once(9) == "waiting_for_rate_limit"
+    assert (tmp_path / "epoch-9-signed.json").read_bytes() == original
+    assert not (tmp_path / "epoch-9-attempt-1-signed.json").exists()
+    assert signer.prepares == 1

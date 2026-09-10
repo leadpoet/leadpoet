@@ -299,6 +299,48 @@ class ArenaWeightOrchestrator:
             and int(death) - 1 <= int(state["valid_until_block"])
         )
 
+    @staticmethod
+    def _chain_value(value: Any) -> Any:
+        if isinstance(value, (Mapping, list, tuple, str, bytes, int)) or value is None:
+            return value
+        return getattr(value, "value", value)
+
+    def _weight_rate_limit_ready(self, head: Any) -> bool:
+        """Read the runtime's commit-rate inputs at one finalized block."""
+
+        substrate = self.chain.client
+        block_hash = str(head.hash)
+        netuid = int(self.chain.config.netuid)
+        uid = self._chain_value(substrate.query(
+            module="SubtensorModule", storage_function="Uids",
+            params=[netuid, self.validator_hotkey], block_hash=block_hash,
+        ))
+        if isinstance(uid, bool) or not isinstance(uid, int) or uid < 0:
+            raise ArenaValidatorError("finalized validator uid is unavailable or invalid")
+        updates = self._chain_value(substrate.query(
+            module="SubtensorModule", storage_function="LastUpdate",
+            params=[netuid], block_hash=block_hash,
+        ))
+        if not isinstance(updates, (list, tuple)) or uid >= len(updates):
+            raise ArenaValidatorError("finalized validator LastUpdate is unavailable or invalid")
+        last_update = self._chain_value(updates[uid])
+        if (
+            isinstance(last_update, bool)
+            or not isinstance(last_update, int)
+            or last_update < 0
+            or last_update > int(head.number)
+        ):
+            raise ArenaValidatorError("finalized validator LastUpdate is unavailable or invalid")
+        rate_limit = self._chain_value(substrate.query(
+            module="SubtensorModule", storage_function="WeightsSetRateLimit",
+            params=[netuid], block_hash=block_hash,
+        ))
+        if isinstance(rate_limit, bool) or not isinstance(rate_limit, int) or rate_limit < 0:
+            raise ArenaValidatorError("finalized weights rate limit is unavailable or invalid")
+        # This is the runtime's exact check_rate_limit predicate. A zero
+        # LastUpdate is the storage default and means weights were never set.
+        return last_update == 0 or int(head.number) - last_update >= rate_limit
+
     def _recover_protected_state(self, signed: Mapping[str, Any]) -> None:
         accepted_state = signed.get("accepted_state")
         recovery_record = signed.get("recovery_record")
@@ -336,6 +378,7 @@ class ArenaWeightOrchestrator:
         outcome_path = self.paths.outcome(epoch)
         existing = _read_hashed_json(signed_path)
         retry_state = None
+        retry_to_archive = None
         if existing is not None:
             outcome = _read_hashed_json(outcome_path)
             if outcome is not None and outcome.get("extrinsic_hash") == existing.get("extrinsic_hash"):
@@ -362,12 +405,8 @@ class ArenaWeightOrchestrator:
                         self._last_confirmation or {},
                     )
                     return "not_included_expired"
-                # Preserve the old exact bytes before the active journal is
-                # atomically replaced with the newly signed attempt.
-                _atomic_json(
-                    self.paths.archived_attempt(epoch, prior_sequence), existing
-                )
                 retry_state = dict(accepted)
+                retry_to_archive = (prior_sequence, existing)
             head = self.chain.finalized_head()
             if confirmation != "not_included_expired" and int(existing["valid_from_block"]) <= head.number <= int(existing["valid_until_block"]):
                 self._broadcast(str(existing["extrinsic_hex"]))
@@ -384,6 +423,8 @@ class ArenaWeightOrchestrator:
         head = self.chain.finalized_head()
         if not int(state["valid_from_block"]) <= head.number <= int(state["valid_until_block"]):
             return "outside_submission_window"
+        if not self._weight_rate_limit_ready(head):
+            return "waiting_for_rate_limit"
         metagraph = self.chain.refresh_metagraph()
         host_result = self._host_derivation(state, metagraph.hotkeys)
         substrate = self.chain.client
@@ -436,6 +477,14 @@ class ArenaWeightOrchestrator:
             "valid_until_block": int(state["valid_until_block"]),
         }
         record["record_hash"] = document_hash(record)
+        if retry_to_archive is not None:
+            prior_sequence, prior_record = retry_to_archive
+            # Preserve the old exact bytes only after the signer produced a
+            # complete, validated replacement and before replacing the active
+            # journal.
+            _atomic_json(
+                self.paths.archived_attempt(epoch, prior_sequence), prior_record
+            )
         _atomic_json(signed_path, record)
         self._broadcast(str(record["extrinsic_hex"]))
         return "broadcast"

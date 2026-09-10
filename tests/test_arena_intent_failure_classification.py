@@ -257,7 +257,6 @@ def _structured_fit_verdict_with_unproven(dimension: str) -> dict:
 def _structured_fit_verdict_with_unproven_industry() -> dict:
     verdict = _structured_fit_verdict_with_unproven("employee_size")
     verdict.update(
-        employee_size_evidence_url="https://evidence.example/employee-size",
         observed_industry="Sales Software",
         observed_subindustry="Revenue intelligence",
         industry_matches=False,
@@ -480,6 +479,7 @@ def test_complete_unproven_industry_scores_zero_without_arena_retry(
 ):
     verdict = _structured_fit_verdict_with_unproven_industry()
     provider_calls = []
+    profile_fetches = []
 
     async def prechecks(*_args, **_kwargs):
         return company_fit_match("prechecks passed")
@@ -490,6 +490,13 @@ def test_complete_unproven_industry_scores_zero_without_arena_retry(
     async def provider(**kwargs):
         provider_calls.append(kwargs["telemetry_purpose"])
         return dict(verdict), ""
+
+    async def no_current_size(url):
+        profile_fetches.append(url)
+        return {
+            "outcome": "insufficient_evidence",
+            "url": url,
+        }
 
     scorer_calls = 0
 
@@ -506,6 +513,11 @@ def test_complete_unproven_industry_scores_zero_without_arena_retry(
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
     monkeypatch.setattr(
         lead_scorer, "_request_company_reverify_json", provider
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        no_current_size,
     )
 
     companies = [_company().model_dump(mode="json")]
@@ -524,25 +536,55 @@ def test_complete_unproven_industry_scores_zero_without_arena_retry(
         "lead_scorer_reverify",
         "lead_scorer_reverify_schema_repair",
     ]
+    assert profile_fetches == [
+        "https://www.linkedin.com/company/strandtx"
+    ]
     assert breakdown["final_score"] == 0.0
     assert receipt["decision"] == "unavailable"
     assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert receipt["company_fit_dimensions"]["employee_size"] == (
+        "unavailable"
+    )
     assert receipt["company_fit_dimensions"]["industry"] == "unavailable"
     assert not scorer_breakdown_has_retryable_infrastructure_failure(
         breakdown
     )
+    assert count_penalizable_false_positives(
+        accepted, icp_has_intent_signals=True
+    ) == (0, 0)
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    "mutation",
     [
-        ("industry_evidence_url", "javascript:alert(1)"),
-        ("industry_evidence_quote", ""),
+        "invalid_url",
+        "empty_quote",
+        "invalid_role",
+        "string_boolean",
+        "numeric_boolean",
+        "invalid_observed_industry",
+        "invalid_observed_subindustry",
+        "omitted_required_field",
     ],
 )
-def test_malformed_unproven_industry_remains_retryable(field, value):
+def test_malformed_unproven_industry_remains_retryable(mutation):
     verdict = _structured_fit_verdict_with_unproven_industry()
-    verdict[field] = value
+    if mutation == "invalid_url":
+        verdict["industry_evidence_url"] = "javascript:alert(1)"
+    elif mutation == "empty_quote":
+        verdict["industry_evidence_quote"] = ""
+    elif mutation == "invalid_role":
+        verdict["industry_activity_role"] = "supplier"
+    elif mutation == "string_boolean":
+        verdict["industry_matches"] = "false"
+    elif mutation == "numeric_boolean":
+        verdict["industry_matches"] = 0
+    elif mutation == "invalid_observed_industry":
+        verdict["observed_industry"] = ["Sales Software"]
+    elif mutation == "invalid_observed_subindustry":
+        verdict["observed_subindustry"] = {"name": "Revenue intelligence"}
+    else:
+        verdict.pop("industry_activity_role")
 
     assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
         verdict,

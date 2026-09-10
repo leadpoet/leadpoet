@@ -85,6 +85,14 @@ and restores the old signer and container if protected readiness fails. A
 routine restart reuses a matching Arena signer. The normal validator retries
 missing accepted-state responses until the gateway transition completes.
 
+For a later signer image update, pass the new build's paths through
+`VALIDATOR_ARENA_SIGNER_EIF`, `VALIDATOR_ARENA_SIGNER_MANIFEST`, and
+`VALIDATOR_ARENA_SIGNER_POLICY` to that same restart command. Keep the installed
+signer files in place. The controller verifies and snapshots them, drains the
+old service, and activates the new signer. If activation fails, it restores the
+previous signer and service. It installs the new files only after readiness.
+Keep the previous image approved in KMS until live validation passes.
+
 After the validator restart succeeds, run the gateway controller transition:
 
 ```bash

@@ -790,8 +790,10 @@ class ValidatorChainSourceV2:
         """Prove the first present-to-absent commit transition and its weights.
 
         The storage transition is read at exact finalized historical blocks.
-        A failed reveal rolls back its storage mutation. Expiry cleanup cannot
-        satisfy the simultaneous exact Weights and LastUpdate-at-block checks.
+        LastUpdate records the timelocked commit block and is deliberately not
+        changed when commit-reveal applies the weights. A failed reveal cannot
+        satisfy the simultaneous exact event, Weights, ownership, queue, and
+        commit-block LastUpdate checks.
         """
 
         if self._archive_rpc_call is None:
@@ -869,8 +871,10 @@ class ValidatorChainSourceV2:
             "state_getStorage", [last_update_storage_key(netuid=int(netuid)), "0x" + digest],
             "last-update:%d" % transition,
         )))
-        if uid >= len(updates) or int(updates[uid]) != transition:
-            raise ValidatorChainSourceV2Error("LastUpdate does not prove the reveal transition")
+        if uid >= len(updates) or int(updates[uid]) != int(inclusion_block):
+            raise ValidatorChainSourceV2Error(
+                "LastUpdate differs from the proved Arena commitment"
+            )
         if weights != [(int(uid_), int(weight)) for uid_, weight in expected_weights]:
             raise ValidatorChainSourceV2Error("revealed weights differ at commit transition")
 

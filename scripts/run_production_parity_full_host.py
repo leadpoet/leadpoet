@@ -74,10 +74,17 @@ from scripts.production_parity_snapshot import (  # noqa: E402
 from Leadpoet.utils.restart_epoch_gate import (  # noqa: E402
     MAXIMUM_RESTART_EPOCH_BLOCK,
 )
+from Leadpoet.utils.subnet_epoch import (  # noqa: E402
+    SubnetEpochCutover,
+    SubnetEpochError,
+)
 from scripts.gateway_restart_timing_diagnostic import (  # noqa: E402
     gateway_restart_timing_diagnostic as _gateway_restart_timing_diagnostic,
 )
-from scripts.run_production_parity_fast import _DockerDatabase  # noqa: E402
+from scripts.run_production_parity_fast import (  # noqa: E402
+    FAST_REHEARSAL_TIMEOUT_SECONDS,
+    _DockerDatabase,
+)
 from qualification.competition_models import (  # noqa: E402
     public_http_url,
     validate_companies,
@@ -104,6 +111,9 @@ EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
 )
 FULL_WORK_ROOT = Path("/opt/leadpoet-production-parity")
+FULL_STATEFUL_CUTOVER_MANIFEST = Path(
+    "/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
+)
 ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
 ATTESTED_V2_KMS_KEY_ID = (
@@ -126,6 +136,7 @@ FULL_FAILURE_STAGES = frozenset(
         "runtime-identity",
         "work-root",
         "runtime-config-capture",
+        "epoch-cutover-provisioning",
         "parity-contract",
         "production-dsn",
         "snapshot-capture",
@@ -1610,6 +1621,91 @@ def _write_run_owned_secret(path: Path, payload: bytes, *, field: str) -> str:
     ):
         raise FullParityError(f"run-owned {field} identity differs")
     return str(path)
+
+
+def _materialize_full_stateful_cutover_manifest(
+    runtime_config_path: Path,
+) -> dict[str, Any]:
+    """Create the production-path epoch mapping on the isolated Full host."""
+
+    try:
+        runtime_config = json.loads(runtime_config_path.read_text(encoding="utf-8"))
+        captured_document = runtime_config["execution_config"]["epoch_authority"][
+            "cutover"
+        ]
+        candidate_document = json.loads(
+            (ROOT / "config/stateful-epoch-cutover-sn71.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        captured = SubnetEpochCutover.from_mapping(captured_document)
+        candidate = SubnetEpochCutover.from_mapping(candidate_document)
+    except (KeyError, OSError, TypeError, ValueError, SubnetEpochError) as exc:
+        raise FullParityError(
+            "Full epoch cutover authority is unavailable"
+        ) from exc
+    if captured.to_dict() != candidate.to_dict():
+        raise FullParityError("captured and candidate epoch cutover authorities differ")
+
+    manifest_path = FULL_STATEFUL_CUTOVER_MANIFEST
+    config_dir = manifest_path.parent.parent
+    try:
+        for directory in (config_dir, manifest_path.parent):
+            directory.mkdir(mode=0o700, exist_ok=True)
+            metadata = directory.lstat()
+            if (
+                directory.is_symlink()
+                or not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_mode & 0o022
+            ):
+                raise FullParityError("Full canonical config directory is unsafe")
+    except OSError as exc:
+        raise FullParityError("Full canonical config directory is unavailable") from exc
+
+    payload = (
+        json.dumps(candidate.to_dict(), sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("ascii")
+    try:
+        _write_run_owned_secret(
+            manifest_path,
+            payload,
+            field="stateful epoch cutover manifest",
+        )
+    except FileExistsError as exc:
+        raise FullParityError(
+            "Full canonical epoch cutover manifest already exists"
+        ) from exc
+    metadata = manifest_path.lstat()
+    return {
+        "path": str(manifest_path),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _cleanup_full_stateful_cutover_manifest(state: Mapping[str, Any]) -> str:
+    manifest_path = Path(str(state["path"]))
+    try:
+        metadata = manifest_path.lstat()
+    except FileNotFoundError:
+        outcome = "already_absent"
+    else:
+        if (
+            manifest_path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_dev != state.get("device")
+            or metadata.st_ino != state.get("inode")
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.getuid()
+            or hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            != state.get("sha256")
+        ):
+            raise FullParityError("Full epoch cutover cleanup identity differs")
+        manifest_path.unlink()
+        outcome = "removed"
+    return outcome
 
 
 def _b64url_uint(value: int) -> str:
@@ -3913,7 +4009,7 @@ def _run_nonforwarding_weight_path(
             "--production-allocation",
             str(production_allocation),
         ],
-        timeout=600,
+        timeout=FAST_REHEARSAL_TIMEOUT_SECONDS,
     )
     _require(result, stage="primary/audit non-forwarding submission path")
     try:
@@ -4009,6 +4105,7 @@ def run_full(
     database: _DockerDatabase | None = None
     prefix_adapter: _ClonePostgrestPrefixAdapter | None = None
     secret_created = False
+    cutover_manifest_state: dict[str, Any] | None = None
     gateway_restart_diagnostic: dict[str, Any] | None = None
     failure_stage = "initialization"
     evidence: dict[str, Any] = {
@@ -4068,6 +4165,10 @@ def run_full(
             client=secrets_client,
             secret_id=production_gateway_secret_id,
             output=runtime_config,
+        )
+        failure_stage = "epoch-cutover-provisioning"
+        cutover_manifest_state = _materialize_full_stateful_cutover_manifest(
+            runtime_config
         )
         failure_stage = "parity-contract"
         contract = build_contract(
@@ -4430,6 +4531,15 @@ def run_full(
                 )
             except Exception as exc:  # noqa: BLE001
                 cleanup["secret_error"] = _failure_identity("cleanup", exc)[1]
+        if cutover_manifest_state is not None:
+            try:
+                cleanup["cutover_manifest"] = (
+                    _cleanup_full_stateful_cutover_manifest(cutover_manifest_state)
+                )
+            except Exception as exc:  # noqa: BLE001 - cleanup evidence must survive
+                cleanup["cutover_manifest_error"] = _failure_identity(
+                    "cleanup", exc
+                )[1]
         try:
             shutil.rmtree(work)
             cleanup["work"] = "removed"
@@ -4444,6 +4554,7 @@ def run_full(
             "prefix_adapter_error" in cleanup
             or "database_error" in cleanup
             or "secret_error" in cleanup
+            or "cutover_manifest_error" in cleanup
             or "work_error" in cleanup
         ):
             evidence["status"] = "failed"

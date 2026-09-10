@@ -2060,6 +2060,16 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
     monkeypatch.setattr(full_host, "capture", lambda **_kwargs: None)
     monkeypatch.setattr(
         full_host,
+        "_materialize_full_stateful_cutover_manifest",
+        lambda _path: {"test": "owned"},
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_cleanup_full_stateful_cutover_manifest",
+        lambda _state: "removed",
+    )
+    monkeypatch.setattr(
+        full_host,
         "build_contract",
         lambda **_kwargs: {"candidate_sha": "b" * 40, "contract_hash": HASH},
     )
@@ -2386,6 +2396,16 @@ def test_gateway_restart_failure_diagnostic_survives_sensitive_work_cleanup(
     monkeypatch.setattr(full_host.boto3, "client", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(full_host, "_DockerDatabase", lambda **_kwargs: Database())
     monkeypatch.setattr(full_host, "capture", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        full_host,
+        "_materialize_full_stateful_cutover_manifest",
+        lambda _path: {"test": "owned"},
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_cleanup_full_stateful_cutover_manifest",
+        lambda _state: "removed",
+    )
     monkeypatch.setattr(
         full_host,
         "build_contract",

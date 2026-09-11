@@ -917,6 +917,54 @@ def test_actual_harvest_profile_shape_verifies_position_location_and_email() -> 
     assert result["contact_verification"]["subchecks"]["company"]["status"] == "pass"
 
 
+def test_actual_harvest_plural_current_positions_verifies() -> None:
+    profile = {
+        "id": "profile-1",
+        "publicIdentifier": "ada-lovelace",
+        "linkedinUrl": "https://www.linkedin.com/in/ada-lovelace/",
+        "firstName": "Ada",
+        "lastName": "Lovelace",
+        "location": {
+            "countryCode": "US",
+            "parsed": {
+                "city": "San Francisco",
+                "countryCode": "US",
+                "countryFull": "United States",
+                "state": "California",
+                "regionCode": "CA",
+            },
+        },
+        "currentPositions": [
+            {
+                "companyId": "acme",
+                "companyLinkedinUrl": "https://linkedin.com/company/acme/",
+                "companyName": "Acme, Inc.",
+                "position": "Vice President of Sales",
+                "endDate": None,
+            }
+        ],
+        "emails": [
+            {
+                "email": "ada@acme.com",
+                "catchAllDomain": False,
+                "deliverable": True,
+                "status": "valid",
+            }
+        ],
+    }
+    source = _source()
+    source["response"] = {
+        "status": "completed",
+        "result": {"data": {"status": 200, "element": profile, "error": None}},
+    }
+    execute = ScriptedExecute({"zerobounce_validate": [_zero("valid")]})
+
+    result = _run(source=source, execute=execute)
+
+    assert result["contact_qualified"] is True
+    assert result["contact_verification"]["subchecks"]["company"]["status"] == "pass"
+
+
 def test_sanitized_tool_response_envelopes_work_for_harvest_and_zerobounce() -> None:
     source = _source()
     source["response"] = {

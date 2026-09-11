@@ -193,16 +193,16 @@ def test_runtime_sends_every_file_and_only_the_submitting_miners_key():
 
 
 @pytest.mark.parametrize(
-    "damage",
+    ("damage", "reason"),
     (
-        "malformed_json",
-        "truncated",
-        "incomplete_coverage",
-        "missing_cost",
-        "wrong_model",
+        ("malformed_json", "content_json"),
+        ("truncated", "not_finished"),
+        ("incomplete_coverage", "coverage"),
+        ("missing_cost", None),
+        ("wrong_model", "model_mismatch"),
     ),
 )
-def test_incomplete_or_unaccounted_reviews_never_pass(damage):
+def test_incomplete_or_unaccounted_reviews_never_pass(damage, reason):
     def response(parameters):
         body = _review_body(parameters, cost=None if damage == "missing_cost" else "0.0001")
         if damage == "malformed_json":
@@ -226,6 +226,17 @@ def test_incomplete_or_unaccounted_reviews_never_pass(damage):
     assert store.finish_calls[0][4]["error_code"].startswith("code_review_") or (
         store.finish_calls[0][4]["error_code"] == "review_response_invalid"
     )
+    if reason is None:
+        assert "error_reason" not in store.finish_calls[0][4]
+    else:
+        assert store.finish_calls[0][4]["error_reason"] == reason
+        assert set(store.finish_calls[0][4]) == {
+            "error_code",
+            "error_reason",
+            "model",
+            "file_count",
+            "source_bytes",
+        }
 
 
 def test_preparation_failure_makes_no_api_or_credential_call():

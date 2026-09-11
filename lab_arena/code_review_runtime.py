@@ -109,6 +109,8 @@ class SubmissionCodeReviewer:
                     document = {"error_code": "code_review_provider_unavailable"}
         except code_review.CodeReviewError as exc:
             document = {"error_code": exc.code}
+            if exc.response_reason is not None:
+                document["error_reason"] = exc.response_reason
         except Exception:
             # Provider/credential/JSON errors must not enter logs or results.
             document = {"error_code": "code_review_provider_unavailable"}

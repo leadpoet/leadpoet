@@ -13,7 +13,7 @@ import json
 import tarfile
 import zlib
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping, NoReturn, Tuple
 
 from lab_arena import contracts, source_bundle
 
@@ -29,15 +29,39 @@ REVIEW_CATEGORIES = (
     "malicious_behavior",
     "reviewer_manipulation",
 )
+_RESPONSE_INVALID_REASONS = frozenset(
+    {
+        "envelope", "model_mismatch", "choice", "not_finished", "message",
+        "refusal_or_tools", "content", "content_json", "document_keys",
+        "verdict", "summary", "coverage", "coverage_order", "findings",
+        "verdict_findings", "finding_keys", "finding_classification",
+        "finding_evidence", "finding_evidence_mismatch", "finding_explanation",
+    }
+)
 
 
 class CodeReviewError(RuntimeError):
     """The source or judge response cannot produce a complete review."""
 
-    def __init__(self, code: str, *, path: str | None = None) -> None:
+    def __init__(
+        self, code: str, *, path: str | None = None,
+        response_reason: str | None = None,
+    ) -> None:
+        if response_reason is not None and (
+            code != "review_response_invalid"
+            or response_reason not in _RESPONSE_INVALID_REASONS
+        ):
+            raise ValueError("invalid code-review response reason")
         self.code = code
         self.path = path
+        self.response_reason = response_reason
         super().__init__(code)
+
+
+class _ReviewResponseInvalid(ValueError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -299,71 +323,95 @@ def parse_response(
 ) -> CodeReviewResult:
     """Validate a complete OpenRouter review response; never infer a pass."""
 
+    def invalid(reason: str) -> NoReturn:
+        raise _ReviewResponseInvalid(reason)
+
     try:
         if not isinstance(response_json, Mapping):
-            raise ValueError("response is not an object")
+            invalid("envelope")
         if response_json.get("model") != prepared.parameters["model"]:
-            raise ValueError("response model differs from requested model")
+            invalid("model_mismatch")
         choices = response_json.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
-            raise ValueError("response must contain one choice")
+            invalid("choice")
         choice = choices[0]
-        if not isinstance(choice, Mapping) or choice.get("finish_reason") != "stop":
-            raise ValueError("review did not finish")
+        if not isinstance(choice, Mapping):
+            invalid("choice")
+        if choice.get("finish_reason") != "stop":
+            invalid("not_finished")
         message = choice.get("message")
         if not isinstance(message, Mapping):
-            raise ValueError("choice has no message")
+            invalid("message")
         if message.get("refusal") not in (None, "") or message.get("tool_calls") not in (None, []):
-            raise ValueError("review was refused or used tools")
+            invalid("refusal_or_tools")
         content = message.get("content")
         if not isinstance(content, str) or not content:
-            raise ValueError("review content is empty")
-        document = _json_object_without_duplicates(content)
+            invalid("content")
+        try:
+            document = _json_object_without_duplicates(content)
+        except (TypeError, ValueError) as exc:
+            raise _ReviewResponseInvalid("content_json") from exc
         expected_keys = {"verdict", "reviewed_files", "findings"}
         if not expected_keys.issubset(document) or set(document) - expected_keys - {"summary"}:
-            raise ValueError("review keys are invalid")
+            invalid("document_keys")
 
         verdict = document["verdict"]
         summary = document.get("summary", "")
         reviewed_files = document["reviewed_files"]
         findings = document["findings"]
         if verdict not in ("pass", "reject"):
-            raise ValueError("verdict is invalid")
+            invalid("verdict")
         if not isinstance(summary, str) or len(summary) > 4_000:
-            raise ValueError("summary is invalid")
-        if not isinstance(reviewed_files, list) or tuple(reviewed_files) != prepared.reviewed_files:
-            raise ValueError("review coverage is incomplete")
+            invalid("summary")
+        if not isinstance(reviewed_files, list) or not all(
+            isinstance(path, str) for path in reviewed_files
+        ):
+            invalid("coverage")
+        if tuple(reviewed_files) != prepared.reviewed_files:
+            if (
+                len(reviewed_files) == len(prepared.reviewed_files)
+                and len(set(reviewed_files)) == len(reviewed_files)
+                and set(reviewed_files) == set(prepared.reviewed_files)
+            ):
+                invalid("coverage_order")
+            invalid("coverage")
         if not isinstance(findings, list) or len(findings) > 32:
-            raise ValueError("findings are invalid")
+            invalid("findings")
         if (verdict == "pass" and findings) or (verdict == "reject" and not findings):
-            raise ValueError("verdict and findings disagree")
+            invalid("verdict_findings")
 
         contents = {item.path: item.content for item in prepared.files}
         normalized_findings = []
         finding_keys = {"category", "file", "evidence", "explanation"}
         for finding in findings:
             if not isinstance(finding, Mapping) or set(finding) != finding_keys:
-                raise ValueError("finding keys are invalid")
+                invalid("finding_keys")
             category = finding["category"]
             path = finding["file"]
             evidence = finding["evidence"]
             explanation = finding["explanation"]
-            if category not in REVIEW_CATEGORIES or path not in contents:
-                raise ValueError("finding classification is invalid")
+            if category not in REVIEW_CATEGORIES or not isinstance(path, str) or path not in contents:
+                invalid("finding_classification")
             if not isinstance(evidence, str) or not 1 <= len(evidence) <= 2_000:
-                raise ValueError("finding evidence is invalid")
+                invalid("finding_evidence")
             if evidence not in contents[path]:
-                raise ValueError("finding evidence is not in the named file")
+                invalid("finding_evidence_mismatch")
             if not isinstance(explanation, str) or not 1 <= len(explanation) <= 4_000:
-                raise ValueError("finding explanation is invalid")
+                invalid("finding_explanation")
             normalized_findings.append({
                 "category": category,
                 "file": path,
                 "evidence": evidence,
                 "explanation": explanation,
             })
+    except _ReviewResponseInvalid as exc:
+        raise CodeReviewError(
+            "review_response_invalid", response_reason=exc.reason
+        ) from exc
     except (KeyError, TypeError, ValueError) as exc:
-        raise CodeReviewError("review_response_invalid") from exc
+        raise CodeReviewError(
+            "review_response_invalid", response_reason="envelope"
+        ) from exc
 
     result = CodeReviewResult(
         verdict=verdict,

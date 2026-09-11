@@ -55,7 +55,10 @@ class IntegrityHarness(fixtures.Harness):
             assert finalized
             hotkeys = tuple(key.ss58_address for key in fixtures.KEYS.values())
             return MetagraphSnapshot(netuid=71, block_number=123, block_hash="0x" + "a" * 64,
-                hotkeys=hotkeys, coldkeys=hotkeys, validator_permit=tuple(key in self.runner_keys for key in hotkeys))
+                hotkeys=hotkeys, coldkeys=hotkeys,
+                validator_permit=tuple(key in self.runner_keys for key in hotkeys),
+                stake=tuple(100_000.0 if key in self.runner_keys else 0.0 for key in hotkeys),
+                active=tuple(key in self.runner_keys for key in hotkeys))
         self.chain.metagraph = metagraph
         return service
 

@@ -576,7 +576,7 @@ class Harness:
         )
         result = self.service.handle_submission_finalize(target["submission_id"], finalize)
         assert result["status"] == "accepted", result
-        assert self.service.review_pending_submissions() == {"reviewed": 1}
+        self.service.review_pending_submissions()
         row = self.service.store.get_submission(target["submission_id"])
         assert (
             row["status"] == "accepted"

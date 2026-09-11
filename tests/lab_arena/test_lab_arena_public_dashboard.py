@@ -460,6 +460,7 @@ def test_submission_status_uses_full_round_scope_check():
             }
         ),
         _round=lambda round_id: checked.append(round_id),
+        _public_code_review=ArenaService._public_code_review,
     )
 
     assert ArenaService.submission_status(service, "sub-miner")["status"] == "accepted"

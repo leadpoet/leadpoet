@@ -19,10 +19,12 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
     claim,
     commit_round,
     complete,
+    encrypted_runtime_credentials,
     frozen_participants,
     hotkey,
     open_round,
     round_config,
+    source_submission_doc,
     stage_positions,
 )
 from tests.postgres_migration_harness import SCRIPTS
@@ -50,6 +52,62 @@ def _rpc(connection, function, *values):
     with connection.cursor() as cursor:
         cursor.execute(f"SELECT public.{function}({placeholders})", values)
         return cursor.fetchone()[0]
+
+
+def _historical_frozen_participants(
+    store: ArenaStore, round_id: str, count: int, *, prefix: str
+):
+    """Create frozen participants before the code-review RPC existed."""
+
+    participants = []
+    for index in range(count):
+        miner = hotkey("%s-miner-%d" % (prefix, index))
+        submission_id = "%s-sub-%d" % (prefix, index)
+        assert store.register_submission(
+            round_id,
+            submission_id,
+            miner,
+            source_submission_doc(round_id, submission_id),
+        )["status"] == "registered"
+        assert store.accept_submission_with_credentials(
+            round_id,
+            submission_id,
+            miner,
+            encrypted_runtime_credentials(submission_id),
+        )["status"] == "ok"
+        assert store.update_submission(
+            round_id, submission_id, "accepted", "frozen", {"is_king": False}
+        )["status"] == "ok"
+        participants.append(
+            {
+                "submission_id": submission_id,
+                "miner_hotkey": miner,
+                "is_king": False,
+            }
+        )
+    return participants
+
+
+def _historical_open_round(
+    store: ArenaStore,
+    round_id: str,
+    *,
+    participants: int,
+    runners: int,
+    prefix: str,
+):
+    """Open a round against the intentionally pre-review migration set."""
+
+    runner_keys = [hotkey("%s-runner-%d" % (prefix, index)) for index in range(runners)]
+    assert store.create_round(round_id, round_config(round_id, runner_keys))[
+        "status"
+    ] == "created"
+    parts = _historical_frozen_participants(
+        store, round_id, participants, prefix=prefix
+    )
+    commit_round(store, round_id, parts)
+    assert store.open_stage(round_id, 1, parts, stage_positions(1))["status"] == "ok"
+    return runner_keys, parts
 
 
 def _acquire(connection, *, guard=GUARD, owner=OWNER, generation=0, scope="gateway"):
@@ -511,7 +569,7 @@ def test_old_claim_queued_before_first_round_read_is_rejected_or_captured(guard_
             "arena-2099-01-04",
             round_config("arena-2099-01-04", runners),
         )
-        parts = frozen_participants(
+        parts = _historical_frozen_participants(
             store, "arena-2099-01-04", 1, prefix="drain-old"
         )
         commit_round(store, "arena-2099-01-04", parts)
@@ -586,7 +644,7 @@ def test_first_install_nowait_never_deadlocks_live_completion():
     completion = psycopg2.connect(**dsn)
     completion.autocommit = False
     try:
-        runners, _ = open_round(
+        runners, _ = _historical_open_round(
             store, "arena-2099-01-05", participants=1, runners=1,
             prefix="drain-nowait",
         )

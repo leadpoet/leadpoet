@@ -20,6 +20,7 @@ def _submission(submission_id: str, hotkey: str, *, status: str = "accepted") ->
         "source_size_bytes": 123,
         "consent": {"public_rerun": True},
         "is_king": False,
+        "code_review_status": "passed",
     }
 
 

@@ -9,6 +9,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+COMPETITION_OUTPUT_SCHEMA_V1 = "leadpoet.lab_arena.output.v1"
+COMPETITION_OUTPUT_SCHEMA_V2 = "leadpoet.lab_arena.output.v2"
+
 
 def public_http_url(value: Any, *, allow_empty: bool = False) -> str:
     """Return one normalized public HTTP URL."""
@@ -120,16 +123,36 @@ class CompetitionCompany(BaseModel):
         return [public_http_url(value) for value in values]
 
 
-def validate_companies(values: Any, *, max_companies: int) -> list[dict[str, Any]]:
+class CompetitionCompanyV2(CompetitionCompany):
+    """Company result carrying a raw contact claim for row-level verification."""
+
+    # Contact validity is intentionally not checked at the document boundary.
+    # Missing or invalid claims zero this company, rather than rejecting every
+    # otherwise parseable company in the ICP output.
+    contact: Any = None
+
+
+def validate_companies(
+    values: Any,
+    *,
+    max_companies: int,
+    schema_version: str = COMPETITION_OUTPUT_SCHEMA_V1,
+) -> list[dict[str, Any]]:
     """Validate one result list and return plain JSON-ready dictionaries."""
 
     if not isinstance(values, list):
         raise ValueError("companies must be a list")
     if len(values) > int(max_companies):
         raise ValueError("too many companies")
+    if schema_version == COMPETITION_OUTPUT_SCHEMA_V1:
+        company_model = CompetitionCompany
+    elif schema_version == COMPETITION_OUTPUT_SCHEMA_V2:
+        company_model = CompetitionCompanyV2
+    else:
+        raise ValueError("unsupported output schema version")
     rows: list[dict[str, Any]] = []
     for value in values:
         if not isinstance(value, Mapping):
             raise ValueError("each company must be an object")
-        rows.append(CompetitionCompany.model_validate(value).model_dump(mode="json"))
+        rows.append(company_model.model_validate(value).model_dump(mode="json"))
     return rows

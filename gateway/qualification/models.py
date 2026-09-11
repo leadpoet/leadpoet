@@ -11,7 +11,7 @@ See business_files/tasks10.md Phase 1.2 for specification.
 import re
 import unicodedata
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import date, datetime
 from urllib.parse import unquote, urlparse, urlunparse
 from uuid import UUID
@@ -811,6 +811,14 @@ class ICPPrompt(BaseModel):
     sub_industry: str = Field(..., description="Target sub-industry")
     target_roles: List[str] = Field(default_factory=list, description="List of target job roles/titles")
     target_seniority: str = Field("", description="Target seniority level")
+    contact_policy: Optional[Literal["contacts_v1"]] = Field(
+        default=None,
+        description="Opt-in marker requiring one verified contact per company",
+    )
+    contact_geography: Dict[str, List[str]] = Field(
+        default_factory=lambda: {"countries": [], "regions": [], "cities": []},
+        description="Optional person-level geography filters, independent of company HQ",
+    )
     employee_count: str = Field(..., description="Target employee count range (e.g., '50-200')")
     company_stage: str = Field(..., description="Target company stage (Seed, Series A, etc.)")
     
@@ -826,6 +834,33 @@ class ICPPrompt(BaseModel):
                 # Both exist - prefer employee_count, remove company_size
                 data.pop('company_size')
         return data
+
+    @field_validator('contact_geography', mode='before')
+    @classmethod
+    def validate_contact_geography(cls, value: Any) -> Dict[str, List[str]]:
+        if value is None:
+            return {"countries": [], "regions": [], "cities": []}
+        if not isinstance(value, dict):
+            raise ValueError("contact_geography must be an object")
+        allowed = {"countries", "regions", "cities"}
+        if set(value) - allowed:
+            raise ValueError("contact_geography contains unsupported fields")
+        normalized: Dict[str, List[str]] = {}
+        for key in ("countries", "regions", "cities"):
+            items = value.get(key, [])
+            if not isinstance(items, list) or len(items) > 25:
+                raise ValueError(f"contact_geography.{key} must be a bounded list")
+            cleaned: List[str] = []
+            for item in items:
+                if not isinstance(item, str):
+                    raise ValueError(f"contact_geography.{key} must contain strings")
+                text = " ".join(item.strip().split())
+                if not text or len(text) > 120 or any(ord(char) < 32 for char in item):
+                    raise ValueError(f"contact_geography.{key} contains an invalid value")
+                if text not in cleaned:
+                    cleaned.append(text)
+            normalized[key] = cleaned
+        return normalized
     geography: str = Field(..., description="Target geography (full)")
     country: str = Field("", description="Target country (extracted)")
     product_service: str = Field(..., description="Product/service being sold")

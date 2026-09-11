@@ -598,6 +598,132 @@ def _employee_count_display(value: Any) -> str:
     return str(value or "").strip()
 
 
+def contacts_generation_enabled() -> bool:
+    """Return the explicit operator opt-in for newly generated contact ICPs."""
+
+    return os.getenv("LAB_ARENA_CONTACTS_GENERATION_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+_CONTACT_ROLES_BY_INDUSTRY = {
+    "software": (["VP Engineering", "Head of IT"], "Director+"),
+    "information technology": (["Chief Information Officer", "VP IT"], "VP+"),
+    "artificial intelligence": (["VP Engineering", "Head of Data"], "Director+"),
+    "hardware": (["VP Engineering", "VP Operations"], "VP+"),
+    "data and analytics": (["Chief Data Officer", "VP Data"], "VP+"),
+    "privacy and security": (["Chief Information Security Officer", "VP Security"], "VP+"),
+    "health care": (["Chief Information Officer", "VP Clinical Operations"], "VP+"),
+    "biotechnology": (["VP Research and Development", "VP Clinical Operations"], "VP+"),
+    "financial services": (["Chief Technology Officer", "VP Operations"], "VP+"),
+    "lending and investments": (["Chief Investment Officer", "VP Operations"], "VP+"),
+    "payments": (["Chief Technology Officer", "VP Payments"], "VP+"),
+    "manufacturing": (["VP Operations", "Head of Procurement"], "Director+"),
+    "commerce and shopping": (["VP Ecommerce", "Chief Marketing Officer"], "VP+"),
+    "professional services": (["Managing Partner", "VP Operations"], "VP+"),
+    "advertising": (["Chief Marketing Officer", "VP Marketing"], "VP+"),
+    "sales and marketing": (["Chief Revenue Officer", "VP Marketing"], "VP+"),
+    "real estate": (["VP Operations", "Head of Acquisitions"], "Director+"),
+    "energy": (["VP Operations", "Head of Procurement"], "Director+"),
+    "education": (["Chief Information Officer", "VP Operations"], "VP+"),
+    "transportation": (["VP Operations", "Head of Logistics"], "Director+"),
+}
+
+_CONTACT_ROLES_BY_PRODUCT = (
+    (("security", "fraud", "identity", "siem", "compliance", "risk management"),
+     ["Chief Information Security Officer", "VP Security"], "VP+"),
+    (("crm", "sales", "revenue", "lead enrichment", "conversation intelligence", "abm"),
+     ["Chief Revenue Officer", "VP Sales"], "VP+"),
+    (("marketing", "advertising", "ad platform", "attribution", "customer data", "loyalty"),
+     ["Chief Marketing Officer", "VP Marketing"], "VP+"),
+    (("hr ", "human resources", "recruit", "workforce learning"),
+     ["Chief Human Resources Officer", "VP People"], "VP+"),
+    (("data", "analytics", "business intelligence", "ai", "ml ", "machine learning"),
+     ["Chief Data Officer", "VP Data"], "VP+"),
+    (("devops", "api", "cloud", "infrastructure", "developer", "engineering"),
+     ["VP Engineering", "Chief Technology Officer"], "VP+"),
+    (("payments", "billing", "accounting", "invoicing", "portfolio", "underwriting"),
+     ["Chief Financial Officer", "VP Finance"], "VP+"),
+    (("operations", "supply chain", "logistics", "fleet", "inventory", "erp", "management"),
+     ["Chief Operating Officer", "VP Operations"], "VP+"),
+)
+
+
+def _product_contains_term(product: str, term: str) -> bool:
+    """Match a product keyword as a word or phrase, never inside another word."""
+
+    words = [re.escape(word) for word in term.strip().split()]
+    if not words:
+        return False
+    pattern = r"(?<![a-z0-9])" + r"\s+".join(words) + r"(?![a-z0-9])"
+    return re.search(pattern, product) is not None
+
+
+def _contact_requirements_for_icp(
+    icp: Dict[str, Any], *, industry: str
+) -> tuple[list[str], str]:
+    raw_roles = icp.get("target_roles")
+    roles = []
+    if isinstance(raw_roles, list):
+        for role in raw_roles[:5]:
+            text = " ".join(str(role).strip().split()) if isinstance(role, str) else ""
+            if text and len(text) <= 120 and text not in roles:
+                roles.append(text)
+    defaults, default_seniority = _CONTACT_ROLES_BY_INDUSTRY.get(
+        industry.casefold(), (["VP Operations", "Head of Operations"], "Director+")
+    )
+    if not roles:
+        product = str(icp.get("product_service") or "").casefold()
+        product_match = next(
+            (
+                (matched_roles, matched_seniority)
+                for patterns, matched_roles, matched_seniority in _CONTACT_ROLES_BY_PRODUCT
+                if any(_product_contains_term(product, pattern) for pattern in patterns)
+            ),
+            None,
+        )
+        if product_match:
+            roles, default_seniority = list(product_match[0]), product_match[1]
+        else:
+            roles = list(defaults)
+    seniority = " ".join(str(icp.get("target_seniority") or "").strip().split())
+    if not seniority or len(seniority) > 80:
+        seniority = default_seniority
+    return roles, seniority
+
+
+def _normalize_contact_geography(value: Any) -> Dict[str, List[str]]:
+    # Contact geography is independent from company HQ. An absent filter stays
+    # globally unrestricted; callers must never fill it from ``country`` or
+    # ``geography``.
+    result: Dict[str, List[str]] = {"countries": [], "regions": [], "cities": []}
+    if not isinstance(value, dict):
+        return result
+    for key in ("regions", "cities"):
+        raw_items = value.get(key, [])
+        if not isinstance(raw_items, list):
+            continue
+        for item in raw_items[:25]:
+            text = " ".join(str(item).strip().split()) if isinstance(item, str) else ""
+            if text and len(text) <= 120 and text not in result[key]:
+                result[key].append(text)
+    raw_countries = value.get("countries", [])
+    if isinstance(raw_countries, list):
+        from qualification.contact_models import normalize_country_code
+
+        for item in raw_countries[:25]:
+            try:
+                country = normalize_country_code(item)
+            except (TypeError, ValueError):
+                continue
+            if country not in result["countries"]:
+                result["countries"].append(country)
+    return result
+
+
 def canonicalize_generated_icp(
     icp: Dict[str, Any],
     *,
@@ -605,6 +731,7 @@ def canonicalize_generated_icp(
     sub_industry: str,
     employee_bucket_radius: int | None = None,
     all_employee_buckets: bool | None = None,
+    contacts_required: bool = False,
 ) -> Dict[str, Any]:
     """Apply the shared competition ICP contract before storage."""
 
@@ -655,6 +782,26 @@ def canonicalize_generated_icp(
             }
         )
 
+    contact_fields: Dict[str, Any] = {}
+    if contacts_required:
+        target_roles, target_seniority = _contact_requirements_for_icp(
+            normalized,
+            industry=industry,
+        )
+        prompt = prompt.rstrip()
+        prompt += (
+            f" Target contacts: {', '.join(target_roles)} "
+            f"({target_seniority})."
+        )
+        contact_fields = {
+            "contact_policy": "contacts_v1",
+            "target_roles": target_roles,
+            "target_seniority": target_seniority,
+            "contact_geography": _normalize_contact_geography(
+                normalized.get("contact_geography")
+            ),
+        }
+
     normalized.update(
         {
             "prompt": prompt,
@@ -669,6 +816,7 @@ def canonicalize_generated_icp(
                 industry=industry,
                 sub_industry=sub_industry,
             ),
+            **contact_fields,
         }
     )
     normalized.pop("employee_count_buckets", None)
@@ -687,6 +835,7 @@ async def generate_icps_with_openrouter(
     total_icps: int = 20,
     *, generation_context: Optional[str] = None,
     api_key: Optional[str] = None,
+    contacts_required: bool = False,
 ) -> tuple:
     """
     Generate ICP prompts using OpenRouter LLM (o3-mini).
@@ -907,6 +1056,23 @@ FINAL CHECK before output (for every ICP):
         .replace("{selected_industries}", ", ".join(selected_industries))
         .replace("{stage_distribution}", stage_distribution)
     )
+    if contacts_required:
+        system_prompt = system_prompt.replace(
+            'Never use job titles, seniority levels, "decision-makers", "executives", or any contact-level descriptor. Company-only.',
+            "Keep the company criteria company-level. Add the required contact criteria described below.",
+        ).replace(
+            "9. No job titles, no seniority, no contact-level descriptors in the prompts?",
+            "9. Do the prompt and structured contact fields name the same roles and seniority?",
+        )
+        system_prompt += """
+
+CONTACT REQUIREMENTS
+Each ICP must also define the people to find at every qualifying company.
+- `target_roles`: 1-3 current job titles that plausibly own or buy the stated product/service.
+- `target_seniority`: one of `C-Level`, `VP`, `VP+`, `Head`, `Director`, `Director+`, or `Manager`, consistent with every target title.
+- The natural-language `prompt` must name the same roles and seniority.
+- `contact_geography`: an object with `countries`, `regions`, and `cities` lists. This is a person-level location filter independent of company HQ. Use ISO-2 country codes. Leave all three lists empty when the buyer has no person-location constraint; never copy company geography into it by default.
+"""
 
     user_prompt = f"""Generate {total_icps} ICPs for set_id={set_id}. Follow every instruction in the system message exactly. Output JSON only, no commentary."""
     if generation_context:
@@ -1085,11 +1251,6 @@ FINAL CHECK before output (for every ICP):
                 geography = "United States"
                 country = "United States"
 
-            # COMPANY-MODE ONLY: do NOT carry forward target_roles or
-            # target_seniority — they are legacy contact-mode fields. We
-            # populate them as empty defaults to satisfy any older miner
-            # code that still reads them via dict.get(), but no real role
-            # data flows through.
             # Capture the verified example company (Sonar's supply receipt) — the
             # whole point of using Sonar is that this field is non-empty, proving
             # the ICP has real-world supply. If empty, log a warning but keep
@@ -1108,8 +1269,11 @@ FINAL CHECK before output (for every ICP):
                 "prompt": prompt,
                 "industry": industry_normalized,
                 "sub_industry": sub_industry,
-                "target_roles": [],
-                "target_seniority": "",
+                "target_roles": icp.get("target_roles", []) if contacts_required else [],
+                "target_seniority": icp.get("target_seniority", "") if contacts_required else "",
+                "contact_geography": (
+                    icp.get("contact_geography", {}) if contacts_required else {}
+                ),
                 "employee_count": icp.get("employee_count", "51-200"),
                 "company_stage": icp.get("company_stage", "Series A"),
                 "geography": geography,
@@ -1128,6 +1292,7 @@ FINAL CHECK before output (for every ICP):
                 validated_icp,
                 industry=industry_normalized,
                 sub_industry=str(sub_industry or ""),
+                contacts_required=contacts_required,
             )
 
             validated_icps.append(validated_icp)
@@ -1198,7 +1363,9 @@ FINAL CHECK before output (for every ICP):
 def generate_single_icp(
     icp_id: str,
     industry: str,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    *,
+    contacts_required: bool = False,
 ) -> Dict[str, Any]:
     """
     Generate a single COMPANY-LEVEL ICP with a natural language prompt.
@@ -1291,7 +1458,12 @@ def generate_single_icp(
         "intent_signals": intent_signals,
         "buyer_description": prompt,  # Legacy alias of prompt
     }
-    return canonicalize_generated_icp(icp, industry=industry, sub_industry=sub_industry)
+    return canonicalize_generated_icp(
+        icp,
+        industry=industry,
+        sub_industry=sub_industry,
+        contacts_required=contacts_required,
+    )
 
 
 COMPANY_GOAL_MIN = 1
@@ -1463,7 +1635,9 @@ def allocate_company_goals(
 def generate_icp_set(
     set_id: int,
     total_icps: int = 20,
-    base_seed: Optional[int] = None
+    base_seed: Optional[int] = None,
+    *,
+    contacts_required: bool = False,
 ) -> tuple:
     """
     Generate a complete ICP set — one ICP per industry across the 20 distinct
@@ -1494,7 +1668,12 @@ def generate_icp_set(
             if base_seed is not None:
                 seed = base_seed + icp_counter
 
-            icp = generate_single_icp(icp_id, industry, seed)
+            icp = generate_single_icp(
+                icp_id,
+                industry,
+                seed,
+                contacts_required=contacts_required,
+            )
             icps.append(icp)
             icp_counter += 1
 
@@ -1705,7 +1884,9 @@ def get_set_id_for_date(dt: datetime) -> int:
 
 
 async def generate_and_activate_icp_set(
-    for_date: Optional[datetime] = None
+    for_date: Optional[datetime] = None,
+    *,
+    contacts_required: bool = False,
 ) -> Optional[int]:
     """
     Generate and activate a new ICP set using OpenRouter LLM.
@@ -1757,7 +1938,11 @@ async def generate_and_activate_icp_set(
     target_count = len(INDUSTRY_DISTRIBUTION)
     logger.info(f"Generating ICPs with OpenRouter LLM (target {target_count} ICPs, one per industry)...")
     try:
-        result = await generate_icps_with_openrouter(set_id, total_icps=target_count)
+        result = await generate_icps_with_openrouter(
+            set_id,
+            total_icps=target_count,
+            contacts_required=contacts_required,
+        )
         if not result:
             logger.error("❌ OpenRouter returned None - will retry on next check/restart")
             return None
@@ -1889,7 +2074,9 @@ async def icp_rotation_task():
             stale_id = active_set.get('set_id') if active_set else None
             logger.info(f"ICP rotation: Need set {today_set_id} (current active: {stale_id}), generating...")
             
-            set_id = await generate_and_activate_icp_set()
+            set_id = await generate_and_activate_icp_set(
+                contacts_required=contacts_generation_enabled()
+            )
             
             if set_id:
                 logger.info(f"ICP rotation: Successfully activated set {set_id}")
@@ -1955,4 +2142,6 @@ async def ensure_icp_set_exists():
     else:
         logger.info("No active ICP set found, generating one for today...")
     
-    return await generate_and_activate_icp_set()
+    return await generate_and_activate_icp_set(
+        contacts_required=contacts_generation_enabled()
+    )

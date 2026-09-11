@@ -1443,13 +1443,14 @@ class AssignmentExecutor:
                 input_document = scoring.build_scoring_input(
                     scored_run_id=str(lease["scored_run_id"]), icp=icp, companies=list((lease.get("scored_output") or {}).get("companies") or []),
                     policy=lease["scorer_policy"], evaluation_date=evaluation_date,
+                    contact_source_evidence=lease.get("contact_source_evidence"),
                 )
                 extra_environment = {shim.TRUSTED_SCORER_ENV: "1"}
             else:
                 input_document = {
                     "schema_version": "leadpoet.lab_arena.icp_input.v1",
                     "icp": (
-                        integrity.agent_visible_icp(icp)
+                        integrity.agent_visible_icp(icp, contacts_required=lease.get("contact_policy") == "contacts_v1")
                         if lease.get("integrity_policy") == "arena_integrity_v1" else dict(icp)
                     ),
                     "evaluation_date": evaluation_date,
@@ -1566,6 +1567,7 @@ class AssignmentExecutor:
                     try:
                         output_document = output_document_from_bytes(
                             result.output_bytes,
+                            expected_schema_version=(contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION if lease.get("contact_policy") == "contacts_v1" else contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION),
                             require_intent_dates=(
                                 lease.get("integrity_policy") != integrity.POLICY
                             ),

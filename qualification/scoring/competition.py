@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from importlib import import_module
+import hashlib
+import json
 import logging
 import math
 import os
@@ -233,9 +235,15 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
 
 def _normalized_company(
     company: Mapping[str, Any], *, integrity_policy: bool = False,
+    contacts_required: bool = False,
 ) -> dict[str, Any]:
     try:
-        row = CompetitionCompany.model_validate(company).model_dump(mode="json")
+        # V2 carries a contact claim which the independent contact gate owns.
+        # The legacy company judge remains contact-blind and extra-forbidding.
+        company_input = dict(company)
+        if contacts_required:
+            company_input.pop("contact", None)
+        row = CompetitionCompany.model_validate(company_input).model_dump(mode="json")
     except Exception as exc:
         raise CompetitionScorerInputError(
             "company does not satisfy the competition output schema"
@@ -274,7 +282,11 @@ def _normalized_company(
 
 
 def effective_competition_input(
-    companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any],
+    companies: Sequence[Mapping[str, Any]],
+    icp: Mapping[str, Any],
+    *,
+    contacts_required: bool = False,
+    contact_source_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project the same normalized first-N inputs consumed by the adapter.
 
@@ -292,7 +304,11 @@ def effective_competition_input(
         if bucket not in buckets:
             rows.append({"bucket_skipped": True})
             continue
-        normalized = _normalized_company(company, integrity_policy=True)
+        normalized = _normalized_company(
+            company,
+            integrity_policy=True,
+            contacts_required=contacts_required,
+        )
         try:
             effective = CompanyOutput(**normalized).model_dump(mode="json")
         except ValidationError:
@@ -304,8 +320,118 @@ def effective_competition_input(
         # These fields are validated above but never read during its judging.
         for ignored in ("state", "description", "required_attribute"):
             effective.pop(ignored, None)
+        if contacts_required:
+            effective.update(
+                _effective_contact_input(company, contact_source_evidence)
+            )
         rows.append(effective)
-    return {"icp": _normalized_icp(icp), "companies": rows}
+    effective_icp = _normalized_icp(icp)
+    if contacts_required:
+        geography = icp.get("contact_geography")
+        effective_icp.update({
+            "target_roles": _normalized_string_list(icp.get("target_roles")),
+            "target_seniority": str(icp.get("target_seniority") or "").strip(),
+            "contact_geography": _normalized_contact_geography(geography),
+        })
+    return {"icp": effective_icp, "companies": rows}
+
+
+def _normalized_string_list(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
+def _normalized_contact_geography(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, Mapping):
+        return {"countries": [], "regions": [], "cities": []}
+    from qualification.contact_models import normalize_country_code
+
+    countries: list[str] = []
+    for item in _normalized_string_list(value.get("countries")):
+        try:
+            normalized = normalize_country_code(item)
+        except ValueError:
+            normalized = item.casefold()
+        if normalized not in countries:
+            countries.append(normalized)
+    return {
+        "countries": countries,
+        "regions": [item.casefold() for item in _normalized_string_list(value.get("regions"))],
+        "cities": [item.casefold() for item in _normalized_string_list(value.get("cities"))],
+    }
+
+
+def _semantic_hash(value: Any) -> str:
+    serialized = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _without_cache_metadata(value: Any, depth: int = 0) -> Any:
+    if depth > 8:
+        return None
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_cache_metadata(item, depth + 1)
+            for key, item in value.items()
+            if str(key) not in {"broker_call_id", "call_identity", "observed_at"}
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_without_cache_metadata(item, depth + 1) for item in value]
+    return value
+
+
+def _effective_contact_input(
+    company: Mapping[str, Any],
+    source_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    from qualification.contact_models import validate_contact_claim
+
+    raw_contact = company.get("contact")
+    try:
+        contact = validate_contact_claim(raw_contact)
+    except (TypeError, ValueError):
+        return {
+            "contact_invalid_hash": _semantic_hash(
+                _without_cache_metadata(raw_contact)
+            )
+        }
+    source = (
+        source_evidence.get(_contact_source_key(company))
+        if isinstance(source_evidence, Mapping)
+        else None
+    )
+    from qualification.scoring.contact_verification import (
+        contact_source_semantics,
+    )
+
+    source_semantics = contact_source_semantics(source)
+    attribution = contact.get("email_source") or {}
+    effective_source = {
+        "provider": attribution.get("provider"),
+        "tool": attribution.get("tool"),
+    }
+    if attribution.get("record_id"):
+        effective_source["record_id"] = attribution["record_id"]
+    return {
+        "contact": {
+            "full_name": contact["full_name"],
+            "role": contact["role"],
+            "linkedin_url": contact["linkedin_url"],
+            "location": contact["location"],
+            "email": contact["email"],
+            "email_source": effective_source,
+        },
+        "contact_source_evidence_hash": _semantic_hash(source_semantics),
+    }
+
+
+def _contact_source_key(company: Mapping[str, Any]) -> str:
+    contact = company.get("contact")
+    source = contact.get("email_source") if isinstance(contact, Mapping) else None
+    if not isinstance(source, Mapping):
+        return ""
+    return str(source.get("broker_call_id") or source.get("record_id") or "")
 
 
 def _evidence_source(url: str, *, company_website: str) -> str:
@@ -342,11 +468,127 @@ def _ensure_provider_environment() -> None:
             setattr(module, "OPENROUTER_API_KEY", key)
 
 
+def _not_evaluated_contact(company: Mapping[str, Any]) -> dict[str, Any]:
+    from qualification.scoring.contact_verification import contact_identity_key
+
+    reason = "company_not_qualified"
+    return {
+        "contact_qualified": False,
+        "contact_identity_key": contact_identity_key(company.get("contact")),
+        "email_status": "unknown",
+        "contact_verification": {
+            "decision": "not_evaluated",
+            "reason": reason,
+            "subchecks": {},
+            "evidence_hashes": {},
+            "evidence_timestamps": {},
+        },
+        "verifier_gate_receipts": [
+            {"gate": "contact", "decision": "not_evaluated", "reason": reason}
+        ],
+    }
+
+
+def _merge_contact_breakdown(
+    breakdown: dict[str, Any], contact_result: Mapping[str, Any]
+) -> None:
+    existing_receipts = breakdown.get("verifier_gate_receipts")
+    receipts = (
+        list(existing_receipts)
+        if isinstance(existing_receipts, Sequence)
+        and not isinstance(existing_receipts, (str, bytes, bytearray))
+        else []
+    )
+    contact_receipts = contact_result.get("verifier_gate_receipts")
+    if isinstance(contact_receipts, Sequence) and not isinstance(
+        contact_receipts, (str, bytes, bytearray)
+    ):
+        receipts.extend(contact_receipts)
+    for key in (
+        "contact_qualified",
+        "contact_identity_key",
+        "email_status",
+        "contact_verification",
+    ):
+        breakdown[key] = contact_result[key]
+    breakdown["verifier_gate_receipts"] = receipts
+
+
+def _verified_company_for_contact(
+    company: Mapping[str, Any], verified_receipt: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Bind contact employment to the identity proven by the company gate."""
+    if not isinstance(verified_receipt, Mapping):
+        return dict(company)
+    observed_domain = str(verified_receipt.get("observed_domain") or "").strip()
+    observed_slug = str(
+        verified_receipt.get("observed_linkedin_slug") or ""
+    ).strip()
+    return {
+        "company_name": str(
+            verified_receipt.get("observed_name")
+            or company.get("company_name")
+            or ""
+        ),
+        "company_website": (
+            f"https://{observed_domain}" if observed_domain else ""
+        ),
+        "company_linkedin": (
+            f"https://www.linkedin.com/company/{observed_slug}/"
+            if observed_slug
+            else ""
+        ),
+        "contact": company.get("contact"),
+    }
+
+
+async def _classify_contact_role(
+    actual_role: str, target_roles: list[str], _target_seniority: str
+) -> bool:
+    """Use the existing pinned role judge only for deterministic gray zones."""
+    role_module = import_module("qualification.scoring.role_batch_check")
+    key = (
+        os.environ.get("OPENROUTER_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("QUALIFICATION_OPENROUTER_API_KEY")
+    )
+    if not key:
+        raise RuntimeError("contact role judge key unavailable")
+    async with role_module.httpx.AsyncClient() as client:
+        parsed = await role_module._judge_chunk(
+            client,
+            key,
+            target_roles,
+            [{"id": "contact", "role": actual_role}],
+        )
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 1
+        or not isinstance(parsed[0], Mapping)
+        or parsed[0].get("id") != "contact"
+        or type(parsed[0].get("match")) is not bool
+    ):
+        raise RuntimeError("contact role judge response unavailable")
+    return parsed[0]["match"]
+
+
 class CompetitionCompanyScorer:
     """Use the production company judge for baseline and miner outputs."""
 
-    def __init__(self, integrity_policy: bool = False) -> None:
-        self.integrity_policy = bool(integrity_policy)
+    def __init__(
+        self,
+        integrity_policy: bool = False,
+        *,
+        contacts_required: bool = False,
+        contact_source_evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.contacts_required = bool(contacts_required)
+        self.integrity_policy = bool(integrity_policy or self.contacts_required)
+        self.contact_source_evidence = (
+            dict(contact_source_evidence)
+            if isinstance(contact_source_evidence, Mapping)
+            else {}
+        )
 
     async def __call__(
         self,
@@ -384,7 +626,12 @@ class CompetitionCompanyScorer:
             ) or normalize_observed_employee_count_bucket(observed, default=None)
             if not bucket or bucket not in allowed_buckets:
                 continue
-            normalized_company = _normalized_company(company, integrity_policy=self.integrity_policy)
+            normalized_company = _normalized_company(
+                company,
+                integrity_policy=self.integrity_policy,
+                contacts_required=self.contacts_required,
+            )
+            contact_company = dict(company)
             submitted_identity = canonical_company_identity(normalized_company)
             submitted_alias_keys = company_identity_alias_keys(submitted_identity)
             if (
@@ -408,6 +655,10 @@ class CompetitionCompanyScorer:
                     "company_qualified": False,
                     "duplicate_company": True,
                 })
+                if self.contacts_required:
+                    _merge_contact_breakdown(
+                        duplicate, _not_evaluated_contact(company)
+                    )
                 breakdowns.append(duplicate)
                 continue
             try:
@@ -422,6 +673,10 @@ class CompetitionCompanyScorer:
                         "company_qualified": False,
                         "duplicate_company": False,
                     })
+                if self.contacts_required:
+                    _merge_contact_breakdown(
+                        incompatible, _not_evaluated_contact(company)
+                    )
                 breakdowns.append(incompatible)
                 continue
             result = await score_company(
@@ -442,6 +697,9 @@ class CompetitionCompanyScorer:
                 receipts = breakdown.get("verifier_gate_receipts")
                 fit_verified = company_fit_verified(receipts)
                 observed_receipt = verified_identity_receipt(receipts)
+                contact_company = _verified_company_for_contact(
+                    company, observed_receipt
+                )
                 verified_identity = canonical_company_identity(
                     normalized_company,
                     verified_identity_receipt=observed_receipt,
@@ -493,6 +751,29 @@ class CompetitionCompanyScorer:
                 if fit_verified and not duplicate_company:
                     for alias in identity_alias_keys:
                         verified_identity_key_by_alias[alias] = identity_key
+            if self.contacts_required:
+                if breakdown.get("company_qualified") is True:
+                    from qualification.scoring.contact_verification import (
+                        verify_contact,
+                    )
+
+                    contact_result = await verify_contact(
+                        contact_company,
+                        icp,
+                        source_evidence=self.contact_source_evidence.get(
+                            _contact_source_key(company)
+                        ),
+                        classify_role=_classify_contact_role,
+                    )
+                else:
+                    contact_result = _not_evaluated_contact(company)
+                _merge_contact_breakdown(breakdown, contact_result)
+                breakdown["company_qualified"] = bool(
+                    breakdown.get("company_qualified")
+                    and contact_result.get("contact_qualified") is True
+                )
+                if not breakdown["company_qualified"]:
+                    breakdown["final_score"] = 0.0
             breakdowns.append(breakdown)
         return breakdowns
 

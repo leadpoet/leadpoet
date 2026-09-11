@@ -86,7 +86,10 @@ applies to both.
    Keep the provider credential broker and the baseline's transport.
 3. Enable `LAB_ARENA_CONTACTS_GENERATION_ENABLED=true` for future ICP generation.
    Review the generated buyer roles before activation. A contact round rejects
-   a bank without contact policy and nonempty target roles.
+   a bank without contact policy and nonempty target roles. Generated prompts
+   keep company criteria in their original sentence and append the contact
+   requirements. Generated seniority is omitted when it conflicts with one of
+   the listed job titles.
 4. Set `LAB_ARENA_CONTACTS_FROM` to a timezone-qualified timestamp with existing
    `LAB_ARENA_INTEGRITY_FROM` configured. Only newly created rounds whose
    **submission-open time** is at or after the contact timestamp opt in. This

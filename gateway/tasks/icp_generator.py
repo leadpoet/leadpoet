@@ -788,11 +788,22 @@ def canonicalize_generated_icp(
             normalized,
             industry=industry,
         )
+        if target_seniority:
+            # The scorer applies this gate before its role judge.  Generated
+            # titles are the precise buyer requirement, so discard an
+            # optional aggregate tier when it contradicts any title.
+            from qualification.scoring.contact_verification import (
+                _target_seniority_matches,
+            )
+
+            if not all(
+                _target_seniority_matches(role, target_seniority)
+                for role in target_roles
+            ):
+                target_seniority = ""
         prompt = prompt.rstrip()
-        prompt += (
-            f" Target contacts: {', '.join(target_roles)} "
-            f"({target_seniority})."
-        )
+        prompt += f" Target contacts: {', '.join(target_roles)}"
+        prompt += f" ({target_seniority})." if target_seniority else "."
         contact_fields = {
             "contact_policy": "contacts_v1",
             "target_roles": target_roles,
@@ -1057,20 +1068,13 @@ FINAL CHECK before output (for every ICP):
         .replace("{stage_distribution}", stage_distribution)
     )
     if contacts_required:
-        system_prompt = system_prompt.replace(
-            'Never use job titles, seniority levels, "decision-makers", "executives", or any contact-level descriptor. Company-only.',
-            "Keep the company criteria company-level. Add the required contact criteria described below.",
-        ).replace(
-            "9. No job titles, no seniority, no contact-level descriptors in the prompts?",
-            "9. Do the prompt and structured contact fields name the same roles and seniority?",
-        )
         system_prompt += """
 
 CONTACT REQUIREMENTS
-Each ICP must also define the people to find at every qualifying company.
+Each ICP must also return these structured fields for the people to find at every qualifying company.
 - `target_roles`: 1-3 current job titles that plausibly own or buy the stated product/service.
-- `target_seniority`: one of `C-Level`, `VP`, `VP+`, `Head`, `Director`, `Director+`, or `Manager`, consistent with every target title.
-- The natural-language `prompt` must name the same roles and seniority.
+- `target_seniority`: optional. When present, use one of `C-Level`, `VP`, `VP+`, `Head`, `Director`, `Director+`, or `Manager`, and make it consistent with every target title.
+- Keep the natural-language `prompt` company-only. Do not put job titles, seniority, or other contact criteria in it. The service adds the canonical contact sentence after generation.
 - `contact_geography`: an object with `countries`, `regions`, and `cities` lists. This is a person-level location filter independent of company HQ. Use ISO-2 country codes. Leave all three lists empty when the buyer has no person-location constraint; never copy company geography into it by default.
 """
 

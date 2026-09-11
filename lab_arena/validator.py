@@ -578,6 +578,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--netuid", type=int)
     parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"), help="Chain identity (finney or test); use --subtensor.chain_endpoint for a local node")
     parser.add_argument("--subtensor.chain_endpoint", dest="chain_endpoint", default=os.environ.get("LAB_ARENA_CHAIN_ENDPOINT", ""), help="Explicit ws:// or wss:// RPC URL; defaults to the selected network's public endpoint")
+    parser.add_argument("--arena-archive-endpoint", dest="archive_endpoint", default=os.environ.get("LAB_ARENA_ARCHIVE_ENDPOINT", ""), help="Explicit archive WebSocket or HTTP RPC origin; defaults to the official Finney archive or the selected test endpoint")
     parser.add_argument("--wallet.name", dest="wallet_name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))
     parser.add_argument("--wallet.hotkey", dest="hotkey_name", default=os.environ.get("LAB_ARENA_HOTKEY", "default"))
     parser.add_argument("--wallet.path", dest="wallet_path", default=os.environ.get("LAB_ARENA_WALLET_PATH", "~/.bittensor/wallets"))
@@ -743,6 +744,10 @@ def main(argv=None) -> int:
         )
     network = chain_module.normalize_network_name(args.subtensor_network)
     profile = load_public_chain_signing_profile(network)
+    args.archive_endpoint = args.archive_endpoint.strip()
+    if args.archive_endpoint:
+        # Reject an unsafe archive before wallet access or any network call.
+        _http_rpc_endpoint(args.archive_endpoint)
     config = chain_module.ArenaChainConfig(
         endpoint=args.chain_endpoint.strip() or profile["chain_endpoint"],
         netuid=int(args.netuid), network_name=network,
@@ -781,6 +786,7 @@ def main(argv=None) -> int:
         signer = build_local_weight_signer(
             keypair=keypair, chain_config=config, signing_key_document=signing_key,
             expected_signing_key_hash=key_hash, cutover=cutover, burn_hotkey=burn_hotkey,
+            archive_endpoint=args.archive_endpoint or None,
         )
         snapshot = chain_module.finalized_epoch_snapshot(chain)
         snapshot.settlement_epoch_id(cutover)  # Proves configured genesis and subnet.

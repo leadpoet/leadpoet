@@ -488,18 +488,19 @@ def test_dashboard_projects_costs_only_from_published_final_ranking():
     assert '"eligibility_reason": "provider_cost_uncertain"' in uncertain_serialized
 
 
-def test_new_round_defaults_freeze_fifty_dollars_and_half_dollar_per_company():
+def test_new_round_defaults_freeze_eighty_dollars_and_eighty_cents_per_company():
     defaults = RoundDefaults()
-    assert defaults.execution_cap_microusd == 50_000_000
-    assert defaults.cost_per_company_microusd == 500_000
+    assert defaults.execution_cap_microusd == 80_000_000
+    assert defaults.cost_per_company_microusd == 800_000
+    assert defaults.scoring_cap_microusd == 50_000_000
 
 
 def test_commit_preflight_adopts_only_legacy_live_round_budget():
     legacy_live = ArenaService._configuration_for_commit(
         {"mode": "live", "execution_cap_microusd": 5_000_000}
     )
-    assert legacy_live["execution_cap_microusd"] == 50_000_000
-    assert legacy_live["cost_per_company_microusd"] == 500_000
+    assert legacy_live["execution_cap_microusd"] == 80_000_000
+    assert legacy_live["cost_per_company_microusd"] == 800_000
 
     typed_live = ArenaService._configuration_for_commit(
         {

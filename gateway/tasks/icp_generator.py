@@ -74,6 +74,7 @@ def _rebenchmark_now() -> datetime:
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "perplexity/sonar-pro"  # Real-time web search → realism-grounded ICPs
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MAX_COMPLETION_TOKENS = 8000
 
 # =============================================================================
 # Configuration
@@ -715,6 +716,18 @@ async def generate_icps_with_openrouter(
     from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
 
     all_industries = list(INDUSTRY_DISTRIBUTION.keys())
+    if total_icps < 1 or total_icps > len(all_industries):
+        logger.error(
+            "openrouter_icp_count_invalid requested=%d maximum=%d",
+            total_icps,
+            len(all_industries),
+        )
+        return None
+    selected_industries = (
+        all_industries
+        if total_icps == len(all_industries)
+        else random.SystemRandom().sample(all_industries, total_icps)
+    )
 
     # Build comprehensive industry->sub_industry mapping from taxonomy
     taxonomy_sub_industries = {}
@@ -730,7 +743,7 @@ async def generate_icps_with_openrouter(
     system_prompt = """You are generating B2B sales-targeting ICPs (Ideal Customer Profiles) for a benchmark. You have real-time web access — USE IT.
 
 YOUR JOB
-Generate exactly 20 ICPs, one per industry from the distribution list. Each ICP must describe a real, currently-existing target market that a salesperson could actually go prospect.
+Generate exactly {total_icps} ICPs, one per industry from the distribution list. Each ICP must describe a real, currently-existing target market that a salesperson could actually go prospect.
 
 THE ONE RULE THAT MATTERS MOST — REALISM
 Before outputting any ICP, mentally verify: "Can I name at least ONE real, currently-operating company that satisfies ALL the criteria of this ICP — with verifiable recent activity matching the intent signal?"
@@ -747,7 +760,7 @@ DO NOT generate ICPs where:
 - The product/service is so specific that the buyer's universe collapses (use broad categories, not single named tools)
 
 PROMPT VOICE
-Each ICP's `prompt` field should sound like a different real salesperson typed it. Mix tones across the 20 prompts:
+Each ICP's `prompt` field should sound like a different real salesperson typed it. Mix tones across the {total_icps} prompts:
 - Direct first-person ("I need", "I'm looking for")
 - Casual ("yo can you pull", "hey, gonna need")
 - Shorthand / telegraphic
@@ -759,7 +772,7 @@ Never use job titles, seniority levels, "decision-makers", "executives", or any 
 CONSTRAINT LISTS (use ONLY these values)
 
 ALLOWED INDUSTRIES (exactly one ICP per industry, in this order):
-Software, Information Technology, Artificial Intelligence, Hardware, Data and Analytics, Privacy and Security, Health Care, Biotechnology, Financial Services, Lending and Investments, Payments, Manufacturing, Commerce and Shopping, Professional Services, Advertising, Sales and Marketing, Real Estate, Energy, Education, Transportation
+{selected_industries}
 
 INTENT SIGNAL — WRITE IT LIKE A REAL SALES-INTELLIGENCE BRIEF (not a generic label):
 Pick 1-2 intents per ICP. Do NOT output a bare category like "Launched a new product".
@@ -794,13 +807,7 @@ ALLOWED COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Pub
 STAGE DISTRIBUTION — SPREAD EVENLY ACROSS STAGES:
 The benchmark needs to test miner performance at ALL stages, not just late-stage companies. Skewing toward Series C+/Public (because those have the most PR coverage) makes the benchmark too easy and fails to test the harder verification cases.
 
-Target distribution across the 20 ICPs (approximate, ±2 per bucket is fine):
-- Seed: 2-3 ICPs
-- Series A: 4-5 ICPs
-- Series B: 4-5 ICPs
-- Series C+: 3-4 ICPs
-- Private Equity: 1-2 ICPs
-- Public: 2-3 ICPs
+{stage_distribution}
 
 Do NOT cluster on later stages just because they're easier to verify. The realism rule still applies (every ICP must have a real `verified_example_company`), but Seed and Series A startups exist with verifiable funding announcements — find them.
 
@@ -873,19 +880,35 @@ FINAL CHECK before output (for every ICP):
 4. Are the `product_service` and `required_attribute` specific, descriptive value propositions (like a real sales brief) rather than bare categories or the "offers or provides X" template?
 5. Is each `intent_signal` a specific fulfillment-style sentence naming the behavior and the kind of evidence, rather than a bare label?
 6. Is the geography broad enough that real candidates exist?
-7. Are there exactly 20 ICPs, one per industry in the listed order?
+7. Are there exactly {total_icps} ICPs, one per industry in the listed order?
 8. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
 9. No job titles, no seniority, no contact-level descriptors in the prompts?"""
 
     international_target = international_icp_target(total_icps)
+    stage_distribution = (
+        """Target distribution across the 20 ICPs (approximate, ±2 per bucket is fine):
+- Seed: 2-3 ICPs
+- Series A: 4-5 ICPs
+- Series B: 4-5 ICPs
+- Series C+: 3-4 ICPs
+- Private Equity: 1-2 ICPs
+- Public: 2-3 ICPs"""
+        if total_icps == len(all_industries)
+        else (
+            f"Spread the {total_icps} ICPs as evenly as possible across the allowed stages. "
+            "Include early, middle, and later stages, and do not repeat a stage until needed."
+        )
+    )
     system_prompt = (
         system_prompt
         .replace("{international_target}", str(international_target))
         .replace("{total_icps}", str(total_icps))
         .replace("{domestic_count}", str(total_icps - international_target))
+        .replace("{selected_industries}", ", ".join(selected_industries))
+        .replace("{stage_distribution}", stage_distribution)
     )
 
-    user_prompt = f"""Generate 20 ICPs for set_id={set_id}. Follow every instruction in the system message exactly. Output JSON only, no commentary."""
+    user_prompt = f"""Generate {total_icps} ICPs for set_id={set_id}. Follow every instruction in the system message exactly. Output JSON only, no commentary."""
     if generation_context:
         user_prompt += "\n\n" + generation_context
 
@@ -910,18 +933,25 @@ FINAL CHECK before output (for every ICP):
                     # Sonar drifts from JSON format at higher temperatures;
                     # 0.7 keeps it grounded while still varying voice across the 20.
                     "temperature": 0.7,
-                    "max_tokens": 16000,
+                    "max_tokens": OPENROUTER_MAX_COMPLETION_TOKENS,
                     # Perplexity Sonar does NOT accept `response_format: json_object`;
                     # the prompt explicitly demands JSON-only output instead.
                 }
             )
         
         if response.status_code != 200:
-            logger.error(f"OpenRouter API error: {response.status_code} - {response.text}")
+            logger.error("openrouter_icp_http_error status=%d", response.status_code)
             return None
         
         result = response.json()
-        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        choice = result.get("choices", [{}])[0]
+        finish_reason = choice.get("finish_reason")
+        safe_finish_reason = (
+            finish_reason
+            if finish_reason in {"stop", "length", "content_filter", "error"}
+            else "unknown"
+        )
+        content = choice.get("message", {}).get("content", "")
         
         if not content:
             logger.error("OpenRouter returned empty content")
@@ -960,23 +990,28 @@ FINAL CHECK before output (for every ICP):
                 icps = parsed
             
             if not isinstance(icps, list):
-                logger.error(f"Expected list of ICPs, got {type(icps)}")
+                logger.error("openrouter_icp_payload_invalid payload_type=%s", type(icps).__name__)
                 return None
             
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse OpenRouter JSON response: {e}")
-            logger.error(f"Content preview: {content[:500]}...")
+            logger.error(
+                "openrouter_icp_json_invalid line=%d column=%d position=%d finish_reason=%s",
+                e.lineno,
+                e.colno,
+                e.pos,
+                safe_finish_reason,
+            )
             return None
         
         logger.info(f"OpenRouter returned {len(icps)} ICPs")
         
         # Validate and normalize each ICP
         validated_icps = []
-        actual_distribution = {ind: 0 for ind in INDUSTRY_DISTRIBUTION.keys()}
+        actual_distribution = {ind: 0 for ind in selected_industries}
         
         for i, icp in enumerate(icps):
             if not isinstance(icp, dict):
-                logger.warning(f"ICP {i} is not a dict, skipping")
+                logger.warning("openrouter_icp_item_invalid index=%d reason=not_object", i)
                 continue
             
             # Ensure required fields exist
@@ -985,19 +1020,26 @@ FINAL CHECK before output (for every ICP):
             industry = icp.get("industry", "")
             
             if not prompt or not industry:
-                logger.warning(f"ICP {icp_id} missing prompt or industry, skipping")
+                logger.warning("openrouter_icp_item_invalid index=%d reason=missing_required_field", i)
                 continue
             
             # Normalize industry name (case-insensitive match)
             industry_normalized = None
-            for valid_ind in INDUSTRY_DISTRIBUTION.keys():
+            for valid_ind in selected_industries:
                 if industry.lower() == valid_ind.lower():
                     industry_normalized = valid_ind
                     break
             
             if not industry_normalized:
-                logger.warning(f"ICP {icp_id} has invalid industry '{industry}', assigning to Software")
-                industry_normalized = "Software"
+                if total_icps == len(all_industries):
+                    logger.warning(
+                        "openrouter_icp_item_repaired index=%d reason=unexpected_industry",
+                        i,
+                    )
+                    industry_normalized = "Software"
+                else:
+                    logger.warning("openrouter_icp_item_invalid index=%d reason=unexpected_industry", i)
+                    continue
             
             # Count distribution
             actual_distribution[industry_normalized] += 1
@@ -1007,7 +1049,11 @@ FINAL CHECK before output (for every ICP):
                 intent_signals = _normalize_intent_signals(icp.get("intent_signal"))
             if not intent_signals:
                 intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
-                logger.warning(f"ICP {icp_id} had empty intent_signals from LLM, assigned fallback: {intent_signals}")
+                logger.warning(
+                    "openrouter_icp_item_repaired index=%d reason=missing_intent_signal fallback_count=%d",
+                    i,
+                    len(intent_signals),
+                )
 
             # Default to whole-US (broadest supply) when the LLM omits geography.
             # State-level defaults (e.g. "United States, California") narrow the
@@ -1033,8 +1079,8 @@ FINAL CHECK before output (for every ICP):
                 country = international_match.split(",")[0].strip()
             else:
                 logger.warning(
-                    f"ICP {icp_id} has unsupported geography {geography!r}, "
-                    f"overriding to 'United States' (whole-country, broad supply)"
+                    "openrouter_icp_item_repaired index=%d reason=unsupported_geography",
+                    i,
                 )
                 geography = "United States"
                 country = "United States"
@@ -1052,9 +1098,8 @@ FINAL CHECK before output (for every ICP):
             verified_example = (icp.get("verified_example_company") or "").strip()
             if not verified_example:
                 logger.warning(
-                    f"ICP {icp_id} has empty verified_example_company — Sonar "
-                    f"may not have grounded the supply check for this combo "
-                    f"(industry={industry_normalized})"
+                    "openrouter_icp_item_incomplete index=%d reason=missing_verified_example_company",
+                    i,
                 )
 
             sub_industry = icp.get("sub_industry", SUB_INDUSTRIES.get(industry_normalized, ["General"])[0])
@@ -1089,13 +1134,32 @@ FINAL CHECK before output (for every ICP):
 
         # Set is exactly the configured industry count; allow some slack but anything significantly
         # short of expected count is a bad generation and we fall back.
-        min_acceptable = max(int(total_icps * 0.9), total_icps - 2)
+        min_acceptable = (
+            total_icps
+            if total_icps < len(all_industries)
+            else max(int(total_icps * 0.9), total_icps - 2)
+        )
         if len(validated_icps) < min_acceptable:
             logger.error(f"Only {len(validated_icps)} valid ICPs (expected ~{total_icps}), falling back to template")
             return None
+        if total_icps < len(all_industries) and (
+            len(validated_icps) != total_icps
+            or any(count != 1 for count in actual_distribution.values())
+        ):
+            logger.error(
+                "openrouter_icp_small_draw_invalid generated=%d requested=%d distinct_industries=%d",
+                len(validated_icps),
+                total_icps,
+                sum(count == 1 for count in actual_distribution.values()),
+            )
+            return None
         
         # If the distribution is slightly imperfect, that's OK - the LLM output is approximate
-        logger.info(f"Validated {len(validated_icps)} ICPs with distribution: {actual_distribution}")
+        logger.info(
+            "Validated %d ICPs across %d requested industries",
+            len(validated_icps),
+            len(actual_distribution),
+        )
 
         # International quota (25% of the set, English-speaking markets). The
         # generation prompt demands the exact count; a short set still ships
@@ -1123,9 +1187,7 @@ FINAL CHECK before output (for every ICP):
         logger.error("OpenRouter request timed out (180s)")
         return None
     except Exception as e:
-        logger.error(f"OpenRouter ICP generation failed: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error("openrouter_icp_generation_failed error_type=%s", type(e).__name__)
         return None
 
 

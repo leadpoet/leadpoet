@@ -86,7 +86,7 @@ def fresh_confirmation_icps(*, round_id: str, evaluation_date: str, main_icps: S
     )
     def generate():
         return asyncio.run(asyncio.wait_for(generate_icps_with_openrouter(
-            int(evaluation_date.replace("-", "")), total_icps=20,
+            int(evaluation_date.replace("-", "")), total_icps=contracts.CONFIRMATION_ICP_COUNT,
             generation_context=context,
             api_key=os.environ.get("LAB_ARENA_OPENROUTER_API_KEY", "") if api_key is None else api_key,
         ), timeout=600))

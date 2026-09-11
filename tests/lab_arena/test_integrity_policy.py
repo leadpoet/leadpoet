@@ -1,4 +1,5 @@
 """Policy boundaries and anti-inflation properties independent of providers."""
+import asyncio
 from copy import deepcopy
 import json
 
@@ -94,14 +95,13 @@ def test_generation_draw_has_separate_identity_without_transmitting_main_bank(mo
     for _ in range(2):
         result = confirmation.fresh_confirmation_icps(round_id="arena-2026-09-12", evaluation_date="2026-09-12", main_icps=daily_icps())
         assert len(result) == 5
-    assert requests[0][:2] == (20260912, 20)
+    assert requests[0][:2] == (20260912, 5)
     assert requests[0][2] != requests[1][2]
     assert "verified_example_company" not in requests[0][2]
     assert daily_icps()[0]["prompt"] not in requests[0][2]
 
 
 def test_confirmation_generator_uses_explicit_key_without_legacy_alias(monkeypatch):
-    import asyncio
     from gateway.tasks import icp_generator
 
     monkeypatch.setattr(icp_generator, "OPENROUTER_API_KEY", "")
@@ -128,6 +128,174 @@ def test_confirmation_generator_uses_explicit_key_without_legacy_alias(monkeypat
         20260911, api_key="",
     )) is None
     assert len(calls) == 1
+
+
+def test_confirmation_generator_honors_small_complete_draw(monkeypatch):
+    from gateway.tasks import icp_generator
+
+    selected = list(icp_generator.INDUSTRY_DISTRIBUTION)[:5]
+    rows = []
+    for index, industry in enumerate(selected):
+        row = deepcopy(daily_icps()[index])
+        row.update({
+            "icp_id": f"icp_20260911_{index + 1:03d}",
+            "industry": industry,
+            "sub_industry": icp_generator.SUB_INDUSTRIES[industry][0],
+            "prompt": f"Find a distinct {industry} target with recent momentum",
+            "product_service": f"A private confirmation product for {industry} buyers",
+            "required_attribute": f"Provides a private confirmation service for {industry} buyers",
+            "verified_example_company": f"Example Company {index + 1}",
+        })
+        if index == len(selected) - 1:
+            row.update({"geography": "Canada", "country": "Canada"})
+        rows.append(row)
+
+    class FixedRandom:
+        def sample(self, population, count):
+            return list(population)[:count]
+
+    requests = []
+    response_rows = list(rows)
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"content": json.dumps({"icps": response_rows})},
+                }]
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, *, headers, json):
+            requests.append(json)
+            return Response()
+
+    monkeypatch.setattr(icp_generator.random, "SystemRandom", FixedRandom)
+    monkeypatch.setattr(icp_generator.httpx, "AsyncClient", lambda **kwargs: Client())
+    generated = asyncio.run(icp_generator.generate_icps_with_openrouter(
+        20260911,
+        total_icps=5,
+        api_key="organizer-test-key",
+    ))
+
+    assert generated is not None
+    assert len(generated[0]) == 5
+    assert set(generated[1]) == set(selected)
+    bank = confirmation.build_bank("arena-2026-09-11", generated[0], daily_icps())
+    assert len(bank["icps"]) == contracts.CONFIRMATION_ICP_COUNT
+    request = requests[0]
+    assert request["max_tokens"] == icp_generator.OPENROUTER_MAX_COMPLETION_TOKENS == 8000
+    system_prompt = request["messages"][0]["content"]
+    user_prompt = request["messages"][1]["content"]
+    assert "Generate exactly 5 ICPs" in system_prompt
+    assert "Are there exactly 5 ICPs" in system_prompt
+    allowed_industries = system_prompt.split(
+        "ALLOWED INDUSTRIES (exactly one ICP per industry, in this order):\n", 1
+    )[1].split("\n", 1)[0]
+    assert allowed_industries == ", ".join(selected)
+    assert "Generate 5 ICPs" in user_prompt
+    assert "Generate 20 ICPs" not in user_prompt
+
+    response_rows.pop()
+    assert asyncio.run(icp_generator.generate_icps_with_openrouter(
+        20260911,
+        total_icps=5,
+        api_key="organizer-test-key",
+    )) is None
+
+    response_rows[:] = deepcopy(rows)
+    response_rows[-1]["industry"] = selected[0]
+    assert asyncio.run(icp_generator.generate_icps_with_openrouter(
+        20260911,
+        total_icps=5,
+        api_key="organizer-test-key",
+    )) is None
+
+
+def test_openrouter_truncated_json_log_does_not_disclose_content(monkeypatch, caplog):
+    from gateway.tasks import icp_generator
+
+    private_fragment = "PRIVATE_GENERATED_ICP_FRAGMENT"
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": '{"icps":[{"prompt":"' + private_fragment},
+                }]
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, *, headers, json):
+            return Response()
+
+    monkeypatch.setattr(icp_generator.httpx, "AsyncClient", lambda **kwargs: Client())
+    with caplog.at_level("ERROR", logger=icp_generator.__name__):
+        result = asyncio.run(icp_generator.generate_icps_with_openrouter(
+            20260911,
+            total_icps=5,
+            api_key="organizer-test-key",
+        ))
+    assert result is None
+    assert private_fragment not in caplog.text
+    assert "openrouter_icp_json_invalid" in caplog.text
+    assert "finish_reason=length" in caplog.text
+
+
+def test_openrouter_http_error_log_does_not_disclose_provider_body(monkeypatch, caplog):
+    from gateway.tasks import icp_generator
+
+    private_body = "PRIVATE_PROVIDER_RESPONSE"
+
+    class Response:
+        status_code = 429
+        text = private_body
+
+    requests = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, *, headers, json):
+            requests.append(json)
+            return Response()
+
+    monkeypatch.setattr(icp_generator.httpx, "AsyncClient", lambda **kwargs: Client())
+    with caplog.at_level("ERROR", logger=icp_generator.__name__):
+        result = asyncio.run(icp_generator.generate_icps_with_openrouter(
+            20260911,
+            total_icps=20,
+            api_key="organizer-test-key",
+        ))
+    assert result is None
+    assert private_body not in caplog.text
+    assert "openrouter_icp_http_error status=429" in caplog.text
+    system_prompt = requests[0]["messages"][0]["content"]
+    assert "Generate exactly 20 ICPs" in system_prompt
+    assert ", ".join(icp_generator.INDUSTRY_DISTRIBUTION) in system_prompt
+    assert "Seed: 2-3 ICPs" in system_prompt
 
 
 def test_integrity_retry_preserves_terminal_scores_and_original_sparse_positions():

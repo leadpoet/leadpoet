@@ -924,6 +924,8 @@ class Broker:
                 and reserved.get("prior_miner_credential_refusal") is True
             ):
                 return _error_result("miner_credentials_unavailable", summary)
+            if reserved.get("reason") == "provider_cost_uncertain":
+                return _error_result("provider_unavailable", summary)
             return _error_result("budget_refused", summary)
         if status == "settled":
             # Repeated request for a settled identity: the stored response, no second dispatch.

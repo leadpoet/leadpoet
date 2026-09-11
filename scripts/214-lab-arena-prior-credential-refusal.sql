@@ -1,7 +1,7 @@
--- Preserve a proven miner credential refusal when its unknown provider charge
--- consumes the budget available to an independent retry. The uncertain charge
--- remains locked at its full reservation; this adds classification evidence
--- only to the later refusal response.
+-- Distinguish a real budget cap from a retry blocked by an unknown provider
+-- charge. A proven miner credential refusal has precedence. Every uncertain
+-- charge remains locked at its full reservation; this changes classification
+-- evidence only.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -17,6 +17,8 @@ $old$;
   v_declaration_new TEXT := $new$
   v_reason TEXT := NULL;
   v_prior_miner_credential_refusal BOOLEAN := FALSE;
+  v_has_uncertain_provider_cost BOOLEAN := FALSE;
+  v_settled_spend BIGINT := 0;
   v_expires TIMESTAMPTZ;
 $new$;
   v_refusal_old TEXT := $old$
@@ -46,6 +48,38 @@ $old$;
           AND head.entry_doc #>> '{call,provider_status}'
             IN ('401', '402', '403')
       ) INTO v_prior_miner_credential_refusal;
+    END IF;
+    IF v_reason = 'money_cap'
+       AND NOT v_prior_miner_credential_refusal THEN
+      SELECT
+        COUNT(*) FILTER (
+          WHERE head.entry_kind = 'uncertain'
+        ) > 0,
+        COALESCE(SUM(head.amount_microusd) FILTER (
+          WHERE head.entry_kind = 'settlement'
+        ), 0)::BIGINT
+      INTO v_has_uncertain_provider_cost, v_settled_spend
+      FROM (
+        SELECT DISTINCT ON (ledger.call_identity)
+          ledger.entry_kind, ledger.amount_microusd
+        FROM public.lab_arena_ledger AS ledger
+        JOIN public.lab_arena_runs AS prior_run
+          ON prior_run.run_id = ledger.run_id
+        WHERE ledger.submission_id = v_run.submission_id
+          AND prior_run.kind = v_run.kind
+          AND ledger.call_identity IS NOT NULL
+        ORDER BY ledger.call_identity, ledger.entry_id DESC
+      ) AS head;
+      IF v_has_uncertain_provider_cost
+         AND (
+           (v_dynamic AND v_settled_spend < v_money_cap)
+           OR (
+             NOT v_dynamic
+             AND v_settled_spend <= v_money_cap - p_amount_microusd
+           )
+         ) THEN
+        v_reason := 'provider_cost_uncertain';
+      END IF;
     END IF;
     INSERT INTO public.lab_arena_ledger (
 $new$;

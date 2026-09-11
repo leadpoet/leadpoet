@@ -74,6 +74,46 @@ class IntegrityHarness(fixtures.Harness):
         raise AssertionError((target, self.status()))
 
 
+def test_unknown_provider_charge_cannot_turn_an_outage_into_miner_ineligibility(database, tmp_path, monkeypatch):
+    psycopg2, dsn = database
+    harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
+        challengers=["Outage"], runners=["alpha"])
+    def judge(companies, icp, reference):
+        indexes, _ = verify.bucket_skip(icp, companies)
+        return [{"final_score": 40.0, "company_index": index,
+            "company_identity_key": canonical_company_identity(companies[index]).key,
+            "company_qualified": True, "duplicate_company": False,
+            "verifier_gate_receipts": [{"gate": "company_fit", "decision": "match"}],
+            "intent_signals_detail": [], "failure_reason": ""} for index in indexes]
+    monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
+    round_id = "arena-2026-11-01-outage"
+    harness.clock.now = datetime.now(timezone.utc)
+    harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
+    harness.round_id = round_id
+    submission = harness.submit("Outage", round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    harness.advance_until("stage1_scoring")
+    credentials = harness.service.config.credential_manager
+    original_key = credentials.runtime_key
+    monkeypatch.setattr(credentials, "runtime_key", lambda row, provider:
+        "miner-outage" if row["submission_id"] == submission else original_key(row, provider))
+    original_send = fixtures.FakeProviderTransport.send
+
+    def unavailable(self, **kwargs):
+        if any("miner-outage" in str(value) for value in kwargs["headers"].values()):
+            return fixtures.br.ProviderResponse(503, {"content-type": "application/json"}, b'{"error":"temporarily unavailable"}')
+        return original_send(self, **kwargs)
+
+    monkeypatch.setattr(fixtures.FakeProviderTransport, "send", unavailable)
+    harness.run_stage_with_runners(1)
+    runs = [run for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
+        if run["submission_id"] == submission]
+    assert runs and {run["terminal_cause"] for run in runs} == {"judge_error"}
+    result = harness.service.advance_round(round_id)
+    assert result["status"] == "cancelled"
+    assert harness.service.store.get_round(round_id)["cancel_reason"] == "scoring_incomplete"
+
+
 @pytest.mark.parametrize("case,main_score,confirmation_score,expected", [
     ("regression", 80.0, 39.0, "no_king"),
     ("confirmed", 80.0, 60.0, "crowned"),
@@ -104,7 +144,7 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
     harness.round_id = round_id
     assert config["integrity_policy"] == integrity.POLICY
     challenger = harness.submit("Challenger", round_id)
-    not_selected = harness.submit("NotSelected", round_id)
+    not_selected = harness.submit("NotSelected", round_id) if case == "confirmed" else None
     failed = harness.submit("Broken", round_id)
     harness.broken.add(failed)
     credential_failed = harness.submit("CredentialFail", round_id) if case == "belowmargin" else None
@@ -132,11 +172,12 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
     assert published["confirmation_bank_hash"] == bank_hash
     assert len(harness.service.store.list_runs(round_id, stage=3, kind="execute")) == (10 if confirmation_required else 0)
     ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
-    assert ranking[not_selected]["main_score"] == 40.5
-    assert ranking[not_selected]["confirmation_selected"] is False
     visible = {item["submission_id"]: item for item in public_dashboard.submissions_snapshot(harness.service, round_id)["submissions"]}
-    assert visible[not_selected]["main_score"] == 40.5
-    assert visible[not_selected]["status"] == "scored"
+    if not_selected:
+        assert ranking[not_selected]["main_score"] == 40.5
+        assert ranking[not_selected]["confirmation_selected"] is False
+        assert visible[not_selected]["main_score"] == 40.5
+        assert visible[not_selected]["status"] == "scored"
     assert visible[failed]["status"] == "scoring_failed"
     assert ranking[challenger]["main_score"] == main_score
     assert ranking[challenger]["final_score"] == (confirmation_score if confirmation_required else main_score)

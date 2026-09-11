@@ -9,6 +9,7 @@ import pytest
 from gateway.qualification.models import ICPPrompt
 from gateway.tasks import icp_generator
 from lab_arena import confirmation, contact_policy, integrity
+from qualification.scoring.contact_verification import _deterministic_role_match
 
 
 def _icp(role: str = "VP Engineering") -> dict:
@@ -182,6 +183,108 @@ def test_generated_contact_icp_is_service_valid_and_storage_keeps_marker(
         )
     )
     assert captured["icps"][0]["contact_policy"] == "contacts_v1"
+
+
+@pytest.mark.parametrize(
+    ("roles", "seniority", "expected_seniority"),
+    [
+        (["Head of Revenue Operations"], "VP+", ""),
+        (["Director of Engineering"], "VP+", ""),
+        (["Revenue Operations Manager"], "Director+", ""),
+        (["Revenue Operations Lead"], "Director+", ""),
+        (["Chief Revenue Officer", "VP Sales"], "VP+", "VP+"),
+        (
+            ["Head of Engineering", "Director of Engineering"],
+            "Director+",
+            "Director+",
+        ),
+        (["Customer Success Manager"], "Manager", "Manager"),
+    ],
+)
+def test_generated_contact_seniority_never_rejects_an_explicit_role(
+    roles: list[str],
+    seniority: str,
+    expected_seniority: str,
+) -> None:
+    prompt = "Find software companies whose buying process documents VP+ approval."
+    source = _icp()
+    source.update(
+        {
+            "prompt": prompt,
+            "target_roles": roles,
+            "target_seniority": seniority,
+        }
+    )
+
+    generated = icp_generator.canonicalize_generated_icp(
+        source,
+        industry="Software",
+        sub_industry="SaaS",
+        contacts_required=True,
+    )
+
+    assert generated["target_roles"] == roles
+    assert generated["target_seniority"] == expected_seniority
+    assert generated["prompt"].startswith(prompt)
+    assert "()" not in generated["prompt"]
+    assert all(
+        _deterministic_role_match(role, roles, generated["target_seniority"])
+        is True
+        for role in roles
+    )
+
+
+def test_legacy_canonicalization_does_not_repair_contact_fields() -> None:
+    source = _icp("Head of Revenue Operations")
+    source["target_seniority"] = "VP+"
+
+    generated = icp_generator.canonicalize_generated_icp(
+        source,
+        industry="Software",
+        sub_industry="SaaS",
+    )
+
+    assert generated["target_roles"] == ["Head of Revenue Operations"]
+    assert generated["target_seniority"] == "VP+"
+    assert generated["prompt"] == source["prompt"]
+
+
+def test_contact_generation_prompt_keeps_natural_prompt_company_only(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class Response:
+        status_code = 503
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, **kwargs):
+            captured.update(kwargs["json"])
+            return Response()
+
+    monkeypatch.setattr(icp_generator.httpx, "AsyncClient", Client)
+
+    assert asyncio.run(
+        icp_generator.generate_icps_with_openrouter(
+            set_id=20260912,
+            total_icps=1,
+            api_key="test-only",
+            contacts_required=True,
+        )
+    ) is None
+    system_prompt = captured["messages"][0]["content"]
+    assert "Never use job titles, seniority levels" in system_prompt
+    assert "Keep the natural-language `prompt` company-only" in system_prompt
+    assert "The natural-language `prompt` must name the same roles" not in system_prompt
 
 
 @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])

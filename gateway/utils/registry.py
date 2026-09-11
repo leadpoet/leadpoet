@@ -52,16 +52,17 @@ def _classify_hotkey_role(active: bool, validator_permit: bool, stake: float) ->
         validator_permit,
         stake,
         network_name=current_network,
+        require_stake=False,
     )
 
 
 def _validator_hotkeys(metagraph) -> list:
-    """Classify a complete metagraph with the same policy as single lookups."""
+    """Return registered, permitted validator identities."""
 
     from gateway.config import BITTENSOR_NETWORK as current_network
 
     return validator_hotkeys_from_metagraph(
-        metagraph, network_name=current_network
+        metagraph, network_name=current_network, require_stake=False
     )
 
 
@@ -336,7 +337,7 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
     Returns:
         (is_registered, role) where:
         - is_registered: True if hotkey exists in metagraph
-        - role: "validator" under the shared network policy, "miner" otherwise
+        - role: "validator" for a registered, permitted hotkey, "miner" otherwise
     """
     try:
         # Get metagraph using async version (cached, no new instance)
@@ -345,7 +346,7 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         from gateway.config import BITTENSOR_NETWORK as current_network
 
         registered, role = classify_hotkey_from_metagraph(
-            hotkey, metagraph, network_name=current_network
+            hotkey, metagraph, network_name=current_network, require_stake=False
         )
         if not registered:
             print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")
@@ -392,7 +393,7 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         from gateway.config import BITTENSOR_NETWORK as current_network
 
         registered, role = classify_hotkey_from_metagraph(
-            hotkey, metagraph, network_name=current_network
+            hotkey, metagraph, network_name=current_network, require_stake=False
         )
         if not registered:
             print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")

@@ -126,16 +126,10 @@ def create_app(service: ArenaService) -> FastAPI:
     async def signing_key() -> Any:
         return await run_in_threadpool(service.signing_key_document)
 
-    @app.get("/arena/v1/reward-basis")
-    async def reward_basis(epoch: int) -> Any:
-        basis = await run_in_threadpool(service.public_reward_basis, int(epoch))
-        if basis is None:
-            raise HTTPException(status_code=404, detail="no governing round")
-        return basis
-
-    @app.get("/arena/v1/weight-state")
-    async def accepted_weight_state(epoch: int) -> Any:
-        return await run_in_threadpool(service.public_weight_state, int(epoch))
+    @app.post("/arena/v1/weight-state")
+    async def accepted_weight_state(request: Request) -> JSONResponse:
+        envelope = await _read_json(request)
+        return await no_store_public_call(service.handle_weight_state, envelope)
 
     @app.post("/arena/v1/chain-outcomes")
     async def record_chain_outcome(request: Request) -> Any:

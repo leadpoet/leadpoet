@@ -180,7 +180,13 @@ Arena is the only subnet incentive mechanism. Research Lab reimbursements,
 legacy champion obligations, SOURCE_ADD, and Fulfillment emission allocations
 are retired. Fulfillment still accepts, scores, and delivers client leads.
 
-Every normal validator scores submitted models with brokered miner credentials,
+Registered validators with a permit and at least 75,000 effective subnet stake
+can receive new Arena scoring jobs. Permitted validators below that threshold
+can still retrieve signed gateway weights and run the independent weight loop.
+Weight retrieval requires a local-hotkey signed request; miners without a
+validator permit and anonymous callers cannot retrieve the signed weight state.
+
+Eligible normal validators score submitted models with brokered miner credentials,
 returns scores through the competition API, and independently derives weights
 from the signed accepted reward state and finalized chain ownership. Each
 validator signs with its own local Bittensor hotkey, preserving the canonical

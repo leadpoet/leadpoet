@@ -182,7 +182,7 @@ async def get_validator_set(
         )
         
         validators = validator_hotkeys_from_metagraph(
-            metagraph, network_name=BITTENSOR_NETWORK
+            metagraph, network_name=BITTENSOR_NETWORK, require_stake=False
         )
         
         print(f"📊 Validator set for epoch {epoch_id}:")

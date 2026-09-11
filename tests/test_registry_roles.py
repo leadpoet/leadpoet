@@ -8,6 +8,7 @@ from gateway.utils.hotkey_roles import (
     ValidatorIneligible,
     classify_hotkey_from_metagraph,
     classify_hotkey_role,
+    permitted_validator_uid,
     validator_hotkeys_from_metagraph,
     validator_uid,
 )
@@ -23,12 +24,12 @@ def _metagraph():
     )
 
 
-def test_shared_gateway_role_classifier_applies_mainnet_stake_policy():
+def test_shared_gateway_role_classifier_uses_permit_without_stake():
     metagraph = _metagraph()
 
     assert classify_hotkey_from_metagraph(
         "below", metagraph, network_name="finney"
-    ) == (True, "miner")
+    ) == (True, "validator")
     assert classify_hotkey_from_metagraph(
         "boundary", metagraph, network_name="finney"
     ) == (True, "validator")
@@ -40,6 +41,9 @@ def test_shared_gateway_role_classifier_applies_mainnet_stake_policy():
     ) == (False, None)
     assert validator_hotkeys_from_metagraph(
         metagraph, network_name="finney"
+    ) == ["below", "boundary", "above"]
+    assert validator_hotkeys_from_metagraph(
+        metagraph, network_name="finney", require_stake=True
     ) == ["boundary", "above"]
 
 
@@ -61,7 +65,13 @@ def test_mainnet_stake_boundary_is_inclusive_and_activity_independent(stake, eli
     )
 
     assert (
-        classify_hotkey_role(None, True, stake, network_name="finney")[0]
+        classify_hotkey_role(
+            None,
+            True,
+            stake,
+            network_name="finney",
+            require_stake=True,
+        )[0]
         == ("validator" if eligible else "miner")
     )
     if eligible:
@@ -104,6 +114,18 @@ def test_shared_gateway_role_classifier_accepts_inactive_testnet_permit():
     assert validator_hotkeys_from_metagraph(
         metagraph, network_name="test"
     ) == ["active", "permitted"]
+    assert validator_hotkeys_from_metagraph(
+        metagraph, network_name="test", require_stake=True
+    ) == ["active", "permitted"]
+
+
+def test_scalar_mainnet_role_defaults_to_permit_only():
+    assert classify_hotkey_role(
+        None, True, None, network_name="finney"
+    ) == ("validator", "permit=True")
+    assert classify_hotkey_role(
+        None, False, None, network_name="finney"
+    ) == ("miner", "permit=False")
 
 
 def test_shared_policy_accepts_bittensor_105_numpy_field_types():
@@ -116,13 +138,17 @@ def test_shared_policy_accepts_bittensor_105_numpy_field_types():
         validator_permit=np.array([False, True, False], dtype=bool),
         S=np.array([0.018, 75_000, 1_000_000], dtype=np.float32),
     )
-    assert validator_hotkeys_from_metagraph(metagraph, network_name="test") == [
+    assert validator_hotkeys_from_metagraph(
+        metagraph, network_name="test", require_stake=True
+    ) == [
         "active", "permitted",
     ]
     assert validator_uid(metagraph, "active", netuid=401, network_name="test") == 0
     assert classify_hotkey_role(np.int64(1), np.bool_(False), np.float32(0.018),
                                network_name="test")[0] == "validator"
-    assert validator_hotkeys_from_metagraph(metagraph, network_name="finney") == ["permitted"]
+    assert validator_hotkeys_from_metagraph(
+        metagraph, network_name="finney", require_stake=True
+    ) == ["permitted"]
 
 
 @pytest.mark.parametrize("active", [-1, 2, 0.0, "1", "false", None])
@@ -169,6 +195,23 @@ def test_identity_only_uid_keeps_permit_and_testnet_rules_without_mainnet_stake(
         network_name="test",
         require_stake=False,
     ) == 0
+    with pytest.raises(ValidatorIneligible, match="runner_validator_required"):
+        permitted_validator_uid(testnet, "active", netuid=401)
+
+
+def test_permitted_validator_uid_is_strict_and_does_not_read_stake_or_activity():
+    metagraph = SimpleNamespace(
+        netuid=401,
+        hotkeys=("active", "permitted"),
+        validator_permit=(False, True),
+        active=None,
+        S=None,
+    )
+    assert permitted_validator_uid(metagraph, "permitted", netuid=401) == 1
+    with pytest.raises(ValidatorIneligible, match="runner_validator_required"):
+        permitted_validator_uid(metagraph, "active", netuid=401)
+    with pytest.raises(ValidatorIneligible, match="runner_hotkey_unregistered"):
+        permitted_validator_uid(metagraph, "absent", netuid=401)
 
 
 @pytest.mark.parametrize("field", ["validator_permit", "S"])
@@ -178,7 +221,7 @@ def test_mainnet_classifier_rejects_missing_required_field(field):
 
     with pytest.raises((TypeError, ValueError)):
         classify_hotkey_from_metagraph(
-            "boundary", metagraph, network_name="finney"
+            "boundary", metagraph, network_name="finney", require_stake=True
         )
 
 
@@ -232,7 +275,7 @@ def test_validator_uid_reports_stable_ineligibility_codes():
 @pytest.mark.parametrize(
     "network, expected",
     [
-        ("finney", ["boundary", "above"]),
+        ("finney", ["below", "boundary", "above"]),
         ("test", ["below", "boundary", "above", "no-permit"]),
     ],
 )

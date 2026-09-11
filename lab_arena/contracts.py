@@ -98,12 +98,14 @@ SCOPE_CLAIM = "lab_arena.claim.v1"
 SCOPE_COMPLETE = "lab_arena.complete.v1"
 SCOPE_SUBMISSION_PRESIGN = "lab_arena.submission.presign.v1"
 SCOPE_SUBMISSION_FINALIZE = "lab_arena.submission.finalize.v1"
+SCOPE_WEIGHT_STATE = "lab_arena.weight_state.v1"
 REQUEST_SCOPES = frozenset(
     {
         SCOPE_CLAIM,
         SCOPE_COMPLETE,
         SCOPE_SUBMISSION_PRESIGN,
         SCOPE_SUBMISSION_FINALIZE,
+        SCOPE_WEIGHT_STATE,
     }
 )
 

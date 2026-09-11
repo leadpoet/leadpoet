@@ -62,6 +62,33 @@ _DEEPLINE_FIXED_CREDITS = {
     "predictleads_company_news_events": Decimal("0.56"),
 }
 
+_OPENROUTER_ERROR_TOP_LEVEL_FIELDS = frozenset(
+    {"error", "openrouter_metadata", "user_id"}
+)
+_OPENROUTER_AUXILIARY_REQUEST_FIELDS = frozenset(
+    {
+        "audio",
+        "files",
+        "image",
+        "images",
+        "modalities",
+        "plugins",
+        "prediction",
+        "web_search_options",
+    }
+)
+_OPENROUTER_INSURED_PLAIN_MODELS = frozenset(
+    {
+        # This allowlist limits only the zero-cost insurance fallback.  It
+        # does not constrain Arena routing or normal native billing.
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-5",
+        "google/gemini-2.5-flash",
+        "google/gemini-2.5-flash-lite",
+        "openai/gpt-4o-mini",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ProviderCost:
@@ -333,6 +360,124 @@ def openrouter_cost(response_json: Any) -> Optional[ProviderCost]:
     )
 
 
+def openrouter_generation_cost(
+    response_json: Any, *, generation_id: str
+) -> Optional[ProviderCost]:
+    """Read one exact OpenRouter generation charge for the requested id."""
+
+    if not isinstance(response_json, Mapping) or set(response_json) != {"data"}:
+        return None
+    data = response_json.get("data")
+    if (
+        not isinstance(data, Mapping)
+        or data.get("id") != generation_id
+    ):
+        return None
+    present = [data[name] for name in ("total_cost", "usage") if name in data]
+    if not present:
+        return None
+    costs = [_decimal(value) for value in present]
+    if any(cost is None for cost in costs) or len(set(costs)) != 1:
+        return None
+    usd = costs[0]
+    assert usd is not None
+    return ProviderCost(
+        microusd=_microusd_ceiling(usd),
+        units=usd,
+        unit_name="usd",
+        price_basis="openrouter_generation_cost",
+    )
+
+
+def openrouter_insured_error_cost(
+    parameters: Mapping[str, Any],
+    pricing: Mapping[str, Any],
+    response_status: Any,
+    response_json: Any,
+) -> Optional[ProviderCost]:
+    """Prove one plain OpenRouter 502 has no separately billable work.
+
+    OpenRouter's Zero Completion Insurance covers model inference on an error,
+    but not BYOK fees or auxiliary services.  The metadata opt-in and closed
+    request checked here rule those exceptions out.  The allowlist limits this
+    fallback to known plain models; optional image or web-search catalog prices
+    do not prove those features ran.  See:
+    https://openrouter.ai/docs/guides/features/zero-completion-insurance and
+    https://openrouter.ai/docs/guides/features/router-metadata.
+    """
+
+    if (
+        isinstance(response_status, bool)
+        or not isinstance(response_status, int)
+        or response_status != 502
+        or not isinstance(response_json, Mapping)
+        or not {"error", "openrouter_metadata"}.issubset(response_json)
+        or not set(response_json).issubset(_OPENROUTER_ERROR_TOP_LEVEL_FIELDS)
+        or any(field in parameters for field in _OPENROUTER_AUXILIARY_REQUEST_FIELDS)
+        or not isinstance(pricing, Mapping)
+    ):
+        return None
+    request_price = _decimal(pricing.get("request"))
+    if request_price is None or request_price != 0:
+        return None
+    model = parameters.get("model")
+    if (
+        not isinstance(model, str)
+        or model not in _OPENROUTER_INSURED_PLAIN_MODELS
+        or model.endswith(":online")
+        or model.startswith("perplexity/sonar")
+    ):
+        return None
+    messages = parameters.get("messages")
+    if not isinstance(messages, list) or not messages or any(
+        not isinstance(message, Mapping)
+        or ("content" in message and not isinstance(message["content"], str))
+        for message in messages
+    ):
+        return None
+    error = response_json.get("error")
+    if (
+        not isinstance(error, Mapping)
+        or error.get("code") != 502
+        or not isinstance(error.get("message"), str)
+        or not error["message"].strip()
+        or not set(error).issubset({"code", "message", "metadata"})
+    ):
+        return None
+    metadata = response_json.get("openrouter_metadata")
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("requested") != model
+        or metadata.get("is_byok") is not False
+        or isinstance(metadata.get("attempt"), bool)
+        or not isinstance(metadata.get("attempt"), int)
+        or not 0 <= metadata["attempt"] <= 128
+    ):
+        return None
+    pipeline = metadata.get("pipeline", [])
+    if not isinstance(pipeline, list) or pipeline:
+        return None
+    attempts = metadata.get("attempts", [])
+    if (
+        not isinstance(attempts, list)
+        or len(attempts) > 128
+        or any(
+            not isinstance(attempt, Mapping)
+            or isinstance(attempt.get("status"), bool)
+            or not isinstance(attempt.get("status"), int)
+            or not 400 <= attempt["status"] <= 599
+            for attempt in attempts
+        )
+    ):
+        return None
+    return ProviderCost(
+        microusd=0,
+        units=Decimal("0"),
+        unit_name="usd",
+        price_basis="openrouter_zero_completion_insurance_error_20260911",
+    )
+
+
 __all__ = [
     "DEEPLINE_USD_PER_CREDIT",
     "ProviderCost",
@@ -342,5 +487,7 @@ __all__ = [
     "deepline_free_completed_cost",
     "deepline_reservation_cost",
     "openrouter_cost",
+    "openrouter_generation_cost",
+    "openrouter_insured_error_cost",
     "scrapingdog_cost",
 ]

@@ -67,6 +67,9 @@ OPENROUTER_MAX_CONTENT_CHARS = 32_000
 OPENROUTER_STRICT_PROVIDER_POLICY: Mapping[str, Any] = MappingProxyType(
     {"data_collection": "deny", "allow_fallbacks": False, "zdr": True}
 )
+OPENROUTER_OUTBOUND_HEADERS: Mapping[str, str] = MappingProxyType(
+    {"X-OpenRouter-Metadata": "enabled"}
+)
 
 # Structural limits for operation parameters (see module docstring). They are
 # deliberately looser than every field schema so the schema produces the
@@ -1044,6 +1047,7 @@ _OPERATION_LIST = (
         response_sanitizer="json",
         funding_source="host",
         credential=_OPENROUTER_CREDENTIAL,
+        outbound_headers=OPENROUTER_OUTBOUND_HEADERS,
     ),
 )
 
@@ -1726,6 +1730,7 @@ __all__ = [
     "FieldSpec",
     "OPENROUTER_MAX_OUTPUT_TOKENS",
     "OPENROUTER_STRICT_PROVIDER_POLICY",
+    "OPENROUTER_OUTBOUND_HEADERS",
     "OPERATIONS",
     "OPERATION_LIMITS",
     "DEEPLINE_TOOLS",

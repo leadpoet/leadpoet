@@ -25,7 +25,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote_to_bytes
+from urllib.parse import quote, unquote_to_bytes
 
 import httpx
 
@@ -34,6 +34,7 @@ from lab_arena.contracts import ArenaContractError
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
 )
@@ -81,6 +82,13 @@ _DEEPLINE_JOB_STATUSES = frozenset(
 _DEEPLINE_BILLING_MAX_ATTEMPTS = 24
 _DEEPLINE_BILLING_MAX_SECONDS = 30.0
 _DEEPLINE_BILLING_POLL_SECONDS = 2.0
+_OPENROUTER_BILLING_MAX_ATTEMPTS = 6
+_OPENROUTER_BILLING_MAX_SECONDS = 30.0
+_OPENROUTER_BILLING_POLL_SECONDS = 2.0
+_OPENROUTER_GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+# Documented post-mortem billing identity:
+# https://openrouter.ai/docs/guides/features/router-metadata#error-responses
+_OPENROUTER_GENERATION_HEADER = "x-generation-id"
 
 
 def _safe_exception_class(exc: BaseException) -> str:
@@ -550,6 +558,95 @@ def _deepline_billing_readback(
     return None
 
 
+def _openrouter_generation_identity(
+    document: Any, headers: Mapping[str, Any]
+) -> Tuple[bool, Optional[str]]:
+    """Return whether a generation id was present and one valid exact value."""
+
+    values = [
+        value
+        for name, value in headers.items()
+        if isinstance(name, str) and name.lower() == _OPENROUTER_GENERATION_HEADER
+    ]
+    present = bool(values)
+    if isinstance(document, Mapping) and "id" in document:
+        present = True
+        values.append(document["id"])
+    if not present:
+        return False, None
+    if any(
+        not isinstance(value, str)
+        or _OPENROUTER_GENERATION_ID_RE.fullmatch(value.strip()) is None
+        for value in values
+    ):
+        return True, None
+    normalized = {value.strip() for value in values}
+    if len(normalized) != 1:
+        return True, None
+    return True, normalized.pop()
+
+
+def _openrouter_generation_readback(
+    *,
+    transport: ProviderTransport,
+    secret: str,
+    generation_id: str,
+    request_deadline: float,
+) -> Optional[provider_costs.ProviderCost]:
+    """Poll one exact OpenRouter generation without retrying the paid request."""
+
+    readback_deadline = min(
+        request_deadline, time.monotonic() + _OPENROUTER_BILLING_MAX_SECONDS
+    )
+    headers = {
+        "accept": "application/json",
+        "authorization": "Bearer " + secret,
+        "user-agent": "leadpoet-lab-arena-broker/1",
+    }
+    url = OPENROUTER_GENERATION_URL + quote(generation_id, safe="")
+    for attempt in range(_OPENROUTER_BILLING_MAX_ATTEMPTS):
+        now = time.monotonic()
+        if now >= readback_deadline:
+            break
+        if attempt:
+            delay = min(
+                _OPENROUTER_BILLING_POLL_SECONDS,
+                max(0.0, readback_deadline - now),
+            )
+            if delay <= 0:
+                break
+            time.sleep(delay)
+            now = time.monotonic()
+            if now >= readback_deadline:
+                break
+        try:
+            response = transport.send(
+                method="GET",
+                url=url,
+                headers=headers,
+                body=b"",
+                timeout_seconds=max(0.001, readback_deadline - now),
+            )
+        except ProviderTransportError:
+            continue
+        if _response_contains_credential(response, secret):
+            return None
+        if response.status in (401, 403):
+            return None
+        if response.status != 200:
+            continue
+        try:
+            document = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+        cost = provider_costs.openrouter_generation_cost(
+            document, generation_id=generation_id
+        )
+        if cost is not None:
+            return cost
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Broker
 # ---------------------------------------------------------------------------
@@ -987,6 +1084,11 @@ class Broker:
         deepline_native_cost: Optional[provider_costs.ProviderCost] = None
         deepline_request_id: Optional[str] = None
         deepline_operation: Optional[str] = None
+        openrouter_native_cost: Optional[provider_costs.ProviderCost] = None
+        openrouter_readback_cost: Optional[provider_costs.ProviderCost] = None
+        openrouter_insured_cost: Optional[provider_costs.ProviderCost] = None
+        openrouter_generation_present = False
+        openrouter_generation_id: Optional[str] = None
         try:
             url, headers = inject_credential(outbound, secret)
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
@@ -1000,7 +1102,46 @@ class Broker:
                         {"content-type": "application/json"},
                         b'{"error":{"code":"provider_unavailable"}}',
                     )
-                if effective_operation.provider == "deepline":
+                if effective_operation.provider == "openrouter":
+                    try:
+                        raw_document = json.loads(response.body.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError):
+                        raw_document = None
+                    openrouter_native_cost = provider_costs.openrouter_cost(
+                        raw_document
+                    )
+                    (
+                        openrouter_generation_present,
+                        openrouter_generation_id,
+                    ) = _openrouter_generation_identity(
+                        raw_document, response.headers
+                    )
+                    if (
+                        openrouter_native_cost is None
+                        and openrouter_generation_id is not None
+                    ):
+                        openrouter_readback_cost = _openrouter_generation_readback(
+                            transport=self._transport,
+                            secret=secret,
+                            generation_id=openrouter_generation_id,
+                            request_deadline=request_deadline,
+                        )
+                    if (
+                        openrouter_native_cost is None
+                        and openrouter_readback_cost is None
+                        and not openrouter_generation_present
+                    ):
+                        openrouter_insured_cost = (
+                            provider_costs.openrouter_insured_error_cost(
+                                effective_normalized,
+                                self._price_table["models"][
+                                    effective_normalized["model"]
+                                ],
+                                response.status,
+                                raw_document,
+                            )
+                        )
+                elif effective_operation.provider == "deepline":
                     try:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
@@ -1058,14 +1199,12 @@ class Broker:
         raw_actual: Optional[int] = None
         raw_cost: Optional[provider_costs.ProviderCost] = None
         if effective_operation.provider == "openrouter":
-            try:
-                raw_document = json.loads(response.body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                raw_document = None
-            raw_actual = actual_openrouter_cost_microusd(
-                self._price_table, normalized["model"], raw_document
+            raw_cost = (
+                openrouter_native_cost
+                or openrouter_readback_cost
+                or openrouter_insured_cost
             )
-            raw_cost = provider_costs.openrouter_cost(raw_document)
+            raw_actual = None if raw_cost is None else raw_cost.microusd
         elif effective_operation.provider == "deepline":
             # Native billing is scoped to this completed request. Billing
             # history can aggregate multiple requests into one charge group,
@@ -1105,6 +1244,9 @@ class Broker:
                     raw_cost is deepline_native_cost
                     or raw_cost is deepline_readback_cost
                 )
+                else openrouter_generation_id
+                if effective_operation.provider == "openrouter"
+                and raw_cost is openrouter_readback_cost
                 else None
             ),
         )

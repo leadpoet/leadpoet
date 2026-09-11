@@ -15,6 +15,16 @@ from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
 from lab_arena.store import ArenaStoreError, hash_lease_token
 
 
+def _runner_snapshot(runner, *, registered=True, permit=True, stake=75_000.0):
+    return SimpleNamespace(
+        netuid=71, block_number=100, block_hash="0x" + "a" * 64,
+        hotkeys=(runner,) if registered else (),
+        coldkeys=("owner",) if registered else (),
+        validator_permit=(permit,) if registered else (),
+        stake=(stake,) if registered else (), active=(False,) if registered else (),
+    )
+
+
 def _schedule():
     return {
         "submission_open": "2026-09-02T00:00:00Z",
@@ -35,7 +45,7 @@ def test_startup_requires_the_next_day_bank_date_column():
         @staticmethod
         def select(table, *, limit, columns):
             assert table == "lab_arena_rounds"
-            assert limit == 1 and columns == "icp_set_date,benchmark_reveal_at,benchmark_commitment_doc,benchmark_committed_at"
+            assert limit == 1 and columns == "icp_set_date"
             raise ArenaStoreError("column icp_set_date does not exist")
 
     service = object.__new__(ArenaService)
@@ -519,6 +529,70 @@ def test_completion_requires_lease_owner_and_accepts_authorized_owner():
         wrong_owner.handle_complete({})
 
     assert _completion_service().handle_complete({}) == {"status": "failed"}
+
+
+@pytest.mark.parametrize(
+    ("configuration", "accepted"),
+    [({}, False), ({"integrity_policy": "arena_integrity_v1"}, True)],
+)
+def test_service_acceptance_scopes_missing_signal_dates_to_integrity(
+    configuration, accepted
+):
+    lease_token = "lease-token"
+    result = {
+        "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 1.0,
+            "max_rss_bytes": 1,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "provider_call_count": 0,
+        },
+        "started_at": "2026-09-02T00:00:00Z",
+        "finished_at": "2026-09-02T00:00:01Z",
+        "terminal_status": "accepted",
+    }
+    output = _stored_public_output("Undated Company")
+    output["companies"][0]["intent_signals"][0]["date"] = None
+    stored = []
+    service = object.__new__(ArenaService)
+    service._request_round = lambda *_args, **_kwargs: (
+        {
+            "hotkey": "runner",
+            "body": {
+                "run_id": "run-1",
+                "lease_token": lease_token,
+                "result": result,
+                "output": output,
+            },
+        },
+        {"round_id": "arena-a", "configuration_doc": configuration},
+    )
+    service._config = SimpleNamespace(
+        validator_authorizer=lambda _hotkey: (True, "validator")
+    )
+    service._store = SimpleNamespace(
+        get_run=lambda _run_id: {
+            "run_id": "run-1",
+            "round_id": "arena-a",
+            "runner_hotkey": "runner",
+            "kind": "execute",
+            "lease_token_hash": hash_lease_token(lease_token),
+        },
+        complete_attempt=lambda **_kwargs: {"status": "accepted"},
+    )
+    service._objects = SimpleNamespace(
+        put=lambda reference, payload: stored.append((reference, payload))
+    )
+
+    if accepted:
+        assert service.handle_complete({}) == {"status": "accepted"}
+        assert len(stored) == 1
+    else:
+        with pytest.raises(ServiceError, match="output_invalid"):
+            service.handle_complete({})
+        assert stored == []
 
 
 def test_final_admission_must_finish_before_the_round_freezes():
@@ -1334,38 +1408,6 @@ def test_public_results_take_valid_identity_from_the_round_publication():
     }
 
 
-def _with_completed_public_baseline(service):
-    """Exercise evidence handling after the real 7/3 split is available."""
-    original_round = service._round
-    original_list_runs = service._store.list_runs
-    baseline_id = "baseline-public-evidence"
-
-    def round_with_baseline(round_id):
-        row = original_round(round_id)
-        return {
-            **row,
-            "participants": [
-                *(row.get("participants") or []),
-                {"submission_id": baseline_id, "is_king": True},
-            ],
-        }
-
-    def list_runs(round_id, **filters):
-        if filters == {"submission_id": baseline_id, "kind": "execute"}:
-            return [
-                {
-                    "submission_id": baseline_id, "kind": "execute",
-                    "icp_position": position, "attempt": 1,
-                    "per_icp_score": float(position), "terminal_cause": "accepted",
-                }
-                for position in range(contracts.BENCHMARK_ICP_COUNT)
-            ]
-        return original_list_runs(round_id, **filters)
-
-    service._round = round_with_baseline
-    service._store.list_runs = list_runs
-
-
 def _stored_public_output(name):
     return validate_output_document({
         "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
@@ -1394,350 +1436,6 @@ def _stored_public_output(name):
             }
         ],
     })
-
-
-def test_cancelled_results_return_scoped_outputs_scores_and_redacted_judge_evidence():
-    hotkey = "5" + "D" * 47
-    round_id = "arena-2026-09-07"
-    execute = {
-        "run_id": "execute-target-0",
-        "submission_id": "sub-target",
-        "kind": "execute",
-        "stage": 1,
-        "icp_position": 0,
-        "status": "accepted",
-        "terminal_cause": "accepted",
-        "output_ref": "arena/target-output.json",
-        "per_icp_score": 72.5,
-        "result_doc": {"terminal_status": "accepted"},
-    }
-    score = {
-        "run_id": "score-target-0",
-        "scored_run_id": execute["run_id"],
-        "submission_id": "sub-target",
-        "kind": "score",
-        "stage": 1,
-        "icp_position": 0,
-        "attempt": 1,
-        "status": "accepted",
-        "terminal_cause": "accepted",
-        "output_ref": "arena/target-score.json",
-    }
-    round_row = {
-        "round_id": round_id,
-        "status": "cancelled",
-        "cancel_reason": "scoring_incomplete",
-        "participants": [
-            {
-                "submission_id": "sub-target",
-                "miner_hotkey": hotkey,
-                "is_king": False,
-                "source_ref": "private-target-source",
-            },
-            {
-                "submission_id": "sub-other",
-                "miner_hotkey": "5" + "E" * 47,
-                "is_king": False,
-                "source_ref": "private-other-source",
-            },
-        ],
-        "publication_doc": None,
-    }
-
-    class Store:
-        @staticmethod
-        def list_runs(requested_round, **filters):
-            assert requested_round == round_id
-            assert filters["submission_id"] == "sub-target"
-            return [execute] if filters["kind"] == "execute" else [score]
-
-    judge_document = scoring.build_scoring_output(
-        execute["run_id"],
-        [
-            {
-                "final_score": 72.5,
-                "failure_reason": "",
-                "proof_quote": "private judge payload",
-                "intent_signals_detail": [],
-                "verifier_gate_receipts": [],
-            }
-        ],
-    )
-    service = object.__new__(ArenaService)
-    service._round = lambda _round_id: round_row
-    service._store = Store()
-    output_document = _stored_public_output("Visible Company")
-    service._objects = SimpleNamespace(
-        get=lambda ref: json.dumps(output_document).encode(),
-        get_bounded=lambda ref, limit: json.dumps(
-            output_document if ref == execute["output_ref"] else judge_document
-        ).encode(),
-    )
-
-    _with_completed_public_baseline(service)
-
-    with pytest.raises(ServiceError) as caught:
-        service.public_results(round_id, "sub-target")
-    assert caught.value.status == 403 and caught.value.code == "results_not_public"
-    return
-
-    assert result["round_status"] == "cancelled"
-    assert result["cancel_reason"] == "scoring_incomplete"
-    assert result["incomplete"] is True
-    assert result["outputs"] == {
-        execute["run_id"]: output_document
-    }
-    assert result["scores"]["stage_1"] == [
-        {
-            "run_id": execute["run_id"],
-            "icp_position": 0,
-            "per_icp_score": 72.5,
-        }
-    ]
-    assert result["submission_scores"] == {"stage_1": None, "final": None}
-    assert result["execution_jobs"] == [
-        {
-            "run_id": execute["run_id"],
-            "stage": 1,
-            "icp_position": 0,
-            "status": "accepted",
-            "terminal_cause": "accepted",
-            "output_status": "available",
-        }
-    ]
-    assert result["judge_jobs"] == [
-        {
-            "run_id": score["run_id"],
-            "scored_run_id": execute["run_id"],
-            "stage": 1,
-            "icp_position": 0,
-            "status": "accepted",
-            "terminal_cause": "accepted",
-            "evidence_status": "available",
-        }
-    ]
-    assert result["judge_evidence"][0]["per_icp_score"] == 72.5
-    assert result["judge_evidence"][0]["breakdowns"] == [
-        {
-            "final_score": 72.5,
-            "failure_reason": "",
-            "intent_signals_detail": [],
-            "verifier_gate_receipts": [],
-        }
-    ]
-    serialized = json.dumps(result, sort_keys=True)
-    for private_value in (
-        "private-target-source",
-        "private-other-source",
-        "private judge payload",
-        "sub-other",
-    ):
-        assert private_value not in serialized
-    for unpublished_field in ("final_ranking", "king_decision", "reward_basis"):
-        assert unpublished_field not in result
-
-
-@pytest.mark.parametrize("cause", ["judge_timeout", "lease_expired", "stage_closed"])
-def test_cancelled_results_keep_partial_jobs_incomplete_and_report_safe_judge_failure(cause):
-    round_id = "arena-2026-09-07-partial"
-    execute_runs = [
-        {
-            "run_id": "execute-complete",
-            "submission_id": "sub-partial",
-            "kind": "execute",
-            "stage": 1,
-            "icp_position": 0,
-            "status": "accepted",
-            "output_ref": "arena/complete.json",
-            "per_icp_score": None,
-            "result_doc": {"terminal_status": "accepted"},
-        },
-        {
-            "run_id": "execute-pending",
-            "submission_id": "sub-partial",
-            "kind": "execute",
-            "stage": 1,
-            "icp_position": 1,
-            "status": "pending",
-            "output_ref": None,
-            "per_icp_score": None,
-            "result_doc": None,
-        },
-    ]
-    failed_score = {
-        "run_id": "score-failed",
-        "scored_run_id": "execute-complete",
-        "submission_id": "sub-partial",
-        "kind": "score",
-        "stage": 1,
-        "icp_position": 0,
-        "attempt": 2,
-        "status": "failed",
-        "terminal_cause": cause,
-        "output_ref": None,
-        "result_doc": {"unsafe_detail": "must stay private"},
-    }
-
-    class Store:
-        @staticmethod
-        def list_runs(_round_id, **filters):
-            return execute_runs if filters["kind"] == "execute" else [failed_score]
-
-    service = object.__new__(ArenaService)
-    service._round = lambda _round_id: {
-        "round_id": round_id,
-        "status": "cancelled",
-        "cancel_reason": "scoring_incomplete",
-        "publication_doc": {
-            "stage1_ranking": [{"submission_id": "sub-partial", "stage1_score": 80}],
-            "final_ranking": [{"submission_id": "sub-partial", "final_score": 90}],
-        },
-        "participants": [
-            {
-                "submission_id": "sub-partial",
-                "miner_hotkey": "5" + "F" * 47,
-                "is_king": False,
-            }
-        ],
-    }
-    service._store = Store()
-    output_document = _stored_public_output("Partial")
-    service._objects = SimpleNamespace(
-        get=lambda _ref: json.dumps(output_document).encode(),
-        get_bounded=lambda ref, _limit: json.dumps(output_document).encode(),
-    )
-
-    _with_completed_public_baseline(service)
-
-    with pytest.raises(ServiceError) as caught:
-        service.public_results(round_id, "sub-partial")
-    assert caught.value.status == 403 and caught.value.code == "results_not_public"
-    return
-
-    assert result["incomplete"] is True
-    assert list(result["outputs"]) == ["execute-complete"]
-    assert [job["output_status"] for job in result["execution_jobs"]] == [
-        "available",
-        "unavailable",
-    ]
-    assert result["scores"] == {"stage_1": [], "stage_2": []}
-    assert result["submission_scores"] == {"stage_1": None, "final": None}
-    assert result["judge_evidence"] == []
-    assert result["judge_jobs"] == [
-        {
-            "run_id": "score-failed",
-            "scored_run_id": "execute-complete",
-            "stage": 1,
-            "icp_position": 0,
-            "status": "failed",
-            "terminal_cause": cause,
-            "evidence_status": "unavailable",
-        }
-    ]
-    assert "unsafe_detail" not in json.dumps(result)
-
-
-def test_cancelled_results_preserve_good_evidence_when_other_artifacts_fail():
-    round_id = "arena-2026-09-07-mixed-evidence"
-    execute_runs = [
-        {
-            "run_id": "execute-%s" % label,
-            "submission_id": "sub-mixed",
-            "kind": "execute",
-            "stage": 1,
-            "icp_position": position,
-            "status": "accepted",
-            "output_ref": "arena/output-%s.json" % label,
-            "per_icp_score": None,
-            "result_doc": {"terminal_status": "accepted"},
-        }
-        for position, label in enumerate(("good", "missing", "invalid"))
-    ]
-    score_runs = [
-        {
-            "run_id": "score-%s" % label,
-            "scored_run_id": "execute-%s" % label,
-            "submission_id": "sub-mixed",
-            "kind": "score",
-            "stage": 1,
-            "icp_position": position,
-            "attempt": 1,
-            "status": "accepted",
-            "terminal_cause": "accepted",
-            "output_ref": "arena/score-%s.json" % label,
-        }
-        for position, label in enumerate(("good", "missing", "invalid"))
-    ]
-
-    class Store:
-        @staticmethod
-        def list_runs(_round_id, **filters):
-            return execute_runs if filters["kind"] == "execute" else score_runs
-
-    good = scoring.build_scoring_output(
-        "execute-good", [{"final_score": 50.0, "proof_quote": "private"}]
-    )
-
-    def get_bounded(ref, _limit):
-        if "/output-" in ref:
-            if ref.endswith("output-invalid.json"):
-                return b'{"secret": "raw execute secret"}'
-            return json.dumps(
-                {
-                    "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
-                    "companies": [],
-                }
-            ).encode()
-        if ref.endswith("score-good.json"):
-            return json.dumps(good).encode()
-        if ref.endswith("score-missing.json"):
-            raise OSError("private bucket diagnostic")
-        return b"not-json"
-
-    service = object.__new__(ArenaService)
-    service._round = lambda _round_id: {
-        "round_id": round_id,
-        "status": "cancelled",
-        "cancel_reason": "scoring_incomplete",
-        "participants": [
-            {
-                "submission_id": "sub-mixed",
-                "miner_hotkey": "5" + "I" * 47,
-                "is_king": False,
-            }
-        ],
-    }
-    service._store = Store()
-    service._objects = SimpleNamespace(
-        get=lambda _ref: b'{"companies": []}',
-        get_bounded=get_bounded,
-    )
-
-    _with_completed_public_baseline(service)
-
-    with pytest.raises(ServiceError) as caught:
-        service.public_results(round_id, "sub-mixed")
-    assert caught.value.status == 403 and caught.value.code == "results_not_public"
-    return
-
-    assert [job["evidence_status"] for job in result["judge_jobs"]] == [
-        "available",
-        "unavailable",
-        "invalid",
-    ]
-    assert [item["scored_run_id"] for item in result["judge_evidence"]] == [
-        "execute-good"
-    ]
-    assert [job["output_status"] for job in result["execution_jobs"]] == [
-        "available",
-        "available",
-        "invalid",
-    ]
-    assert set(result["outputs"]) == {"execute-good", "execute-missing"}
-    serialized = json.dumps(result, sort_keys=True)
-    assert "private bucket diagnostic" not in serialized
-    assert "proof_quote" not in serialized
-    assert "raw execute secret" not in serialized
 
 
 def test_cancelled_results_refuse_an_unrelated_submission_before_run_lookup():
@@ -1770,8 +1468,8 @@ def test_cancelled_results_refuse_an_unrelated_submission_before_run_lookup():
     assert caught.value.status == 403 and caught.value.code == "results_not_public"
 
 
-@pytest.mark.parametrize("status", ["open", "stage1", "stage2_judged", "scored", "cancelled"])
-def test_public_results_keep_nonterminal_rounds_private(status):
+@pytest.mark.parametrize("status", [state for state in contracts.ROUND_STATUSES if state != "published"])
+def test_public_results_keep_unpublished_rounds_private(status):
     service = object.__new__(ArenaService)
     service._round = lambda _round_id: {
         "round_id": "arena-2026-09-08",
@@ -1786,7 +1484,13 @@ def test_public_results_keep_nonterminal_rounds_private(status):
     }
     service._store = SimpleNamespace(
         list_runs=lambda *_args, **_kwargs: pytest.fail(
-            "live round must be rejected before run lookup"
+            "unpublished round must be rejected before run lookup"
+        )
+    )
+
+    service._objects = SimpleNamespace(
+        get_bounded=lambda *_args, **_kwargs: pytest.fail(
+            "unpublished round must be rejected before reading outputs"
         )
     )
 
@@ -1978,7 +1682,7 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     service._store = Store()
     service._objects = Objects()
     service._config = SimpleNamespace(
-        chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: []),
+        chain=SimpleNamespace(metagraph=lambda *, finalized: _runner_snapshot(runner)),
         validator_authorizer=lambda _hotkey: (True, "validator"),
         defaults=SimpleNamespace(
             scorer_image_digest="sha256:" + "b" * 64,
@@ -2007,15 +1711,18 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
 def _runner_claim_service(*, registered, role, configured=False):
     runner = "5" * 48
     chain = SimpleNamespace(
-        hotkeys_owned_by_same_coldkey=lambda _hotkey: [],
+        metagraph=lambda *, finalized: _runner_snapshot(
+            runner, registered=registered, permit=role == "validator"
+        ),
     )
     service = object.__new__(ArenaService)
     service._store = SimpleNamespace(
-        claim_assignment=lambda **_kwargs: {"status": "empty"}
+        claim_assignment=lambda **_kwargs: {"status": "empty"},
+        recover_claim_response=lambda **_kwargs: None,
     )
     service._config = SimpleNamespace(
         chain=chain,
-        validator_authorizer=lambda _hotkey: (registered, role),
+        validator_authorizer=lambda _hotkey: (True, "validator"),
     )
     service._request_round = lambda *_args, **_kwargs: (
         {
@@ -2045,7 +1752,7 @@ def _runner_claim_service(*, registered, role, configured=False):
         (True, "miner", "runner_validator_required"),
     ],
 )
-def test_claim_rejects_hotkeys_without_gateway_validator_authority(
+def test_claim_rejects_hotkeys_without_onchain_validator_permit(
     registered, role, expected_code
 ):
     service = _runner_claim_service(registered=registered, role=role)
@@ -2056,7 +1763,7 @@ def test_claim_rejects_hotkeys_without_gateway_validator_authority(
     assert rejected.value.code == expected_code
 
 
-def test_claim_accepts_gateway_validator_absent_from_runner_configuration():
+def test_claim_accepts_eligible_validator_absent_from_runner_configuration():
     service = _runner_claim_service(
         registered=True, role="validator", configured=False
     )
@@ -2072,9 +1779,10 @@ def test_standalone_service_default_authority_uses_its_finalized_metagraph(
     snapshot = SimpleNamespace(
         netuid=71,
         hotkeys=(runner,),
-        active=(True,),
+        coldkeys=("owner",),
+        active=(False,),
         validator_permit=(True,),
-        stake=(1.0,),
+        stake=(75_000.0,),
     )
     chain = SimpleNamespace(
         metagraph=lambda *, finalized: (
@@ -2106,8 +1814,8 @@ def test_standalone_service_default_authority_uses_its_finalized_metagraph(
     [
         (("other",), (True,), (True,), (1.0,), "runner_hotkey_unregistered"),
         (("5" * 48,), (True,), (False,), (1.0,), "runner_validator_required"),
-        (("5" * 48,), None, (True,), (1.0,), "runner_validator_authority_unavailable"),
-        (("5" * 48,), (True,), (True,), None, "runner_validator_authority_unavailable"),
+        (("5" * 48,), (True,), None, (1.0,), "runner_validator_authority_unavailable"),
+        (("5" * 48,), (True,), ("true",), (1.0,), "runner_validator_authority_unavailable"),
     ],
 )
 def test_standalone_service_default_authority_fails_closed(
@@ -2198,7 +1906,7 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image(c
     service = object.__new__(ArenaService)
     service._store = Store()
     service._config = SimpleNamespace(
-        chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: []),
+        chain=SimpleNamespace(metagraph=lambda *, finalized: _runner_snapshot(runner)),
         validator_authorizer=lambda _hotkey: (True, "validator"),
     )
     service._request_round = lambda *_args, **_kwargs: (

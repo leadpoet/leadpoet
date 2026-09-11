@@ -46,9 +46,15 @@ VALIDATOR_SCORING_AUTHORITY_SQL = (
 RETIRED_INCENTIVE_BRIDGE_SQL = (
     SCRIPTS / "203-retire-legacy-incentive-weight-bridge.sql"
 ).read_text(encoding="utf-8")
-BENCHMARK_DISCLOSURE_SQL = (
-    SCRIPTS / "210-lab-arena-benchmark-commit-reveal.sql"
+OWNER_ADMISSION_SQL = (SCRIPTS / "211-lab-arena-owner-admission.sql").read_text(
+    encoding="utf-8"
+)
+JUDGMENT_CACHE_SQL = (
+    SCRIPTS / "212-lab-arena-accepted-judgment-cache.sql"
 ).read_text(encoding="utf-8")
+SCORE_INTEGRITY_SQL = (SCRIPTS / "213-lab-arena-score-integrity.sql").read_text(
+    encoding="utf-8"
+)
 HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
 HISTORICAL_UPLOAD_SHA256 = (
     "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
@@ -116,22 +122,7 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
-    assert numbered[209] == ["209-lab-arena-uncertain-cost-eligibility.sql"]
-    assert numbered[210] == ["210-lab-arena-benchmark-commit-reveal.sql"]
     assert all(len(paths) == 1 for paths in numbered.values()), numbered
-
-
-def test_benchmark_disclosure_migration_is_additive_and_scoped():
-    assert "ADD COLUMN IF NOT EXISTS benchmark_reveal_at TIMESTAMPTZ" in BENCHMARK_DISCLOSURE_SQL
-    assert "ADD COLUMN IF NOT EXISTS benchmark_commitment_doc JSONB" in BENCHMARK_DISCLOSURE_SQL
-    assert "ADD COLUMN IF NOT EXISTS benchmark_committed_at TIMESTAMPTZ" in BENCHMARK_DISCLOSURE_SQL
-    assert "CREATE OR REPLACE FUNCTION public.lab_arena_commit_round_v3(" in BENCHMARK_DISCLOSURE_SQL
-    assert "CREATE TRIGGER lab_arena_benchmark_commitment_guard" in BENCHMARK_DISCLOSURE_SQL
-    assert "'version', 210" in BENCHMARK_DISCLOSURE_SQL
-    assert "CREATE OR REPLACE FUNCTION public.lab_arena_schema_version_v1()" not in BENCHMARK_DISCLOSURE_SQL
-    assert "DROP TABLE" not in BENCHMARK_DISCLOSURE_SQL
-    assert "provider_cost_uncertain" in BENCHMARK_DISCLOSURE_SQL
-    assert "cost_per_company_microusd', 500000" in BENCHMARK_DISCLOSURE_SQL
 
 
 def test_validator_scoring_authority_migration_delegates_only_role_to_gateway():
@@ -336,14 +327,28 @@ def test_every_service_function_is_definer_owned_and_granted_only_to_service():
 def test_state_vocabularies_match_contracts():
     from lab_arena import contracts
 
+    # 179/180 are the original schema, while the current stage-3 vocabulary
+    # and repaired RPC contracts are installed by 211-213. Keep this check
+    # text-only and scoped to the Arena migrations under test.
+    vocabulary_sql = "\n".join(
+        (
+            SQL,
+            DAILY_SQL,
+            CREDENTIAL_SQL,
+            OWNER_ADMISSION_SQL,
+            JUDGMENT_CACHE_SQL,
+            SCORE_INTEGRITY_SQL,
+        )
+    )
+
     for status in contracts.ROUND_STATUSES:
-        assert f"'{status}'" in SQL
+        assert f"'{status}'" in vocabulary_sql
     for outcome in contracts.KING_OUTCOMES:
-        assert f"'{outcome}'" in SQL
+        assert f"'{outcome}'" in vocabulary_sql
     for cause in contracts.TERMINAL_CAUSES:
-        assert f"'{cause}'" in SQL + CREDENTIAL_SQL
+        assert f"'{cause}'" in vocabulary_sql
     for kind in contracts.LEDGER_ENTRY_KINDS:
-        assert f"'{kind}'" in SQL
+        assert f"'{kind}'" in vocabulary_sql
 
 
 def test_unique_indexes_enforce_plan_invariants():

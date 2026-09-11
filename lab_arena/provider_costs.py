@@ -39,6 +39,14 @@ _DEEPLINE_COMPLETED_NO_BILL_BASIS = {
     "free_simple_company_search": "deepline_free_simple_company_search_completed_zero",
     "hunter_discover": "deepline_hunter_discover_completed_zero",
 }
+# The authenticated live contract for hunter_discover was checked on
+# 2026-09-11: billingMode=no_bill, billingSource=free, and a fixed per-call
+# price of zero credits/USD.  A structured provider error therefore also has
+# an exact zero Deepline charge when no billing object contradicts the
+# published contract.
+_DEEPLINE_ERROR_NO_BILL_BASIS = {
+    "hunter_discover": "deepline_hunter_discover_error_zero",
+}
 # Deepline's tool descriptions, checked 2026-09-10. These are reservations,
 # never final charges. Tools with dynamic prices reserve the remaining budget
 # in the database instead of treating an unknown price as zero.
@@ -53,6 +61,35 @@ _DEEPLINE_FIXED_CREDITS = {
     "predictleads_company_job_openings": Decimal("0.56"),
     "predictleads_company_news_events": Decimal("0.56"),
 }
+
+_OPENROUTER_ERROR_TOP_LEVEL_FIELDS = frozenset(
+    {"error", "openrouter_metadata", "user_id"}
+)
+_OPENROUTER_AUXILIARY_REQUEST_FIELDS = frozenset(
+    {
+        "audio",
+        "files",
+        "image",
+        "images",
+        "modalities",
+        "plugins",
+        "prediction",
+        "web_search_options",
+    }
+)
+_OPENROUTER_INSURED_PLAIN_MODELS = frozenset(
+    {
+        # This allowlist limits only the zero-cost insurance fallback.  It
+        # does not constrain Arena routing or normal native billing.
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-5",
+        "google/gemini-2.5-flash",
+        "google/gemini-2.5-flash-lite",
+        "openai/gpt-4o-mini",
+        "openai/gpt-5.5",
+        "openai/gpt-5.6-sol",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -133,8 +170,8 @@ def deepline_billing_history_cost(
 
     ``pending`` means the requested job is absent. ``nonterminal`` means its
     charge is present but not final. ``invalid`` means the history shape or
-    exact job match cannot be trusted. Only one ``posted`` or ``free`` entry
-    can produce a cost.
+    exact job match cannot be trusted. One ``posted`` or ``free`` entry can
+    produce a cost; a strictly zero ``failed`` error entry proves no charge.
     """
 
     if not isinstance(response_json, Mapping):
@@ -207,13 +244,28 @@ def deepline_billing_history_cost(
     charge_state = entry.get("charge_state")
     if not isinstance(charge_state, str):
         return "invalid", None, False, None
-    if charge_state not in ("posted", "free"):
-        return "nonterminal", None, False, None
     credits_value = entry.get("credits")
     if isinstance(credits_value, bool) or not isinstance(
         credits_value, (int, float, Decimal)
     ):
         return "invalid", None, False, None
+    if charge_state == "failed":
+        delta = _decimal(entry.get("delta"))
+        if entry.get("status") != "error" or credits_value != 0 or delta != 0:
+            return "invalid", None, False, None
+        return (
+            "matched",
+            ProviderCost(
+                microusd=0,
+                units=Decimal("0"),
+                unit_name="credits",
+                price_basis="deepline_billing_history_failed_zero",
+            ),
+            False,
+            None,
+        )
+    if charge_state not in ("posted", "free"):
+        return "nonterminal", None, False, None
     credits = _decimal(credits_value)
     if credits is None or (charge_state == "free" and credits != 0):
         return "invalid", None, False, None
@@ -233,10 +285,13 @@ def deepline_billing_history_cost(
 def deepline_free_completed_cost(
     parameters: Mapping[str, Any], response_status: Any, response_json: Any
 ) -> Optional[ProviderCost]:
-    """Prove a verified Deepline no-bill operation completed at zero cost.
+    """Prove a verified Deepline no-bill operation used zero credits.
 
     A present billing object remains authoritative, including when malformed:
     callers must not replace invalid provider accounting with this fixed zero.
+    Only Hunter's authenticated per-call ``no_bill`` contract also proves a
+    structured HTTP error costs zero.  Other tools still require a valid
+    completed response or exact provider billing.
     """
 
     tool = parameters.get("tool")
@@ -248,10 +303,18 @@ def deepline_free_completed_cost(
     if (
         basis is None
         or isinstance(response_status, bool)
-        or response_status != 200
+        or not isinstance(response_status, int)
         or not isinstance(response_json, Mapping)
         or "billing" in response_json
-        or response_json.get("status") != "completed"
+    ):
+        return None
+    if response_status != 200:
+        error_basis = _DEEPLINE_ERROR_NO_BILL_BASIS.get(tool)
+        if error_basis is None or not 400 <= response_status < 600:
+            return None
+        basis = error_basis
+    elif (
+        response_json.get("status") != "completed"
         or not isinstance(response_json.get("job_id"), str)
         or not response_json["job_id"].strip()
         or len(response_json["job_id"]) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
@@ -299,6 +362,124 @@ def openrouter_cost(response_json: Any) -> Optional[ProviderCost]:
     )
 
 
+def openrouter_generation_cost(
+    response_json: Any, *, generation_id: str
+) -> Optional[ProviderCost]:
+    """Read one exact OpenRouter generation charge for the requested id."""
+
+    if not isinstance(response_json, Mapping) or set(response_json) != {"data"}:
+        return None
+    data = response_json.get("data")
+    if (
+        not isinstance(data, Mapping)
+        or data.get("id") != generation_id
+    ):
+        return None
+    present = [data[name] for name in ("total_cost", "usage") if name in data]
+    if not present:
+        return None
+    costs = [_decimal(value) for value in present]
+    if any(cost is None for cost in costs) or len(set(costs)) != 1:
+        return None
+    usd = costs[0]
+    assert usd is not None
+    return ProviderCost(
+        microusd=_microusd_ceiling(usd),
+        units=usd,
+        unit_name="usd",
+        price_basis="openrouter_generation_cost",
+    )
+
+
+def openrouter_insured_error_cost(
+    parameters: Mapping[str, Any],
+    pricing: Mapping[str, Any],
+    response_status: Any,
+    response_json: Any,
+) -> Optional[ProviderCost]:
+    """Prove one plain OpenRouter 502 has no separately billable work.
+
+    OpenRouter's Zero Completion Insurance covers model inference on an error,
+    but not BYOK fees or auxiliary services.  The metadata opt-in and closed
+    request checked here rule those exceptions out.  The allowlist limits this
+    fallback to known plain models; optional image or web-search catalog prices
+    do not prove those features ran.  See:
+    https://openrouter.ai/docs/guides/features/zero-completion-insurance and
+    https://openrouter.ai/docs/guides/features/router-metadata.
+    """
+
+    if (
+        isinstance(response_status, bool)
+        or not isinstance(response_status, int)
+        or response_status != 502
+        or not isinstance(response_json, Mapping)
+        or not {"error", "openrouter_metadata"}.issubset(response_json)
+        or not set(response_json).issubset(_OPENROUTER_ERROR_TOP_LEVEL_FIELDS)
+        or any(field in parameters for field in _OPENROUTER_AUXILIARY_REQUEST_FIELDS)
+        or not isinstance(pricing, Mapping)
+    ):
+        return None
+    request_price = _decimal(pricing.get("request"))
+    if request_price is None or request_price != 0:
+        return None
+    model = parameters.get("model")
+    if (
+        not isinstance(model, str)
+        or model not in _OPENROUTER_INSURED_PLAIN_MODELS
+        or model.endswith(":online")
+        or model.startswith("perplexity/sonar")
+    ):
+        return None
+    messages = parameters.get("messages")
+    if not isinstance(messages, list) or not messages or any(
+        not isinstance(message, Mapping)
+        or ("content" in message and not isinstance(message["content"], str))
+        for message in messages
+    ):
+        return None
+    error = response_json.get("error")
+    if (
+        not isinstance(error, Mapping)
+        or error.get("code") != 502
+        or not isinstance(error.get("message"), str)
+        or not error["message"].strip()
+        or not set(error).issubset({"code", "message", "metadata"})
+    ):
+        return None
+    metadata = response_json.get("openrouter_metadata")
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("requested") != model
+        or metadata.get("is_byok") is not False
+        or isinstance(metadata.get("attempt"), bool)
+        or not isinstance(metadata.get("attempt"), int)
+        or not 0 <= metadata["attempt"] <= 128
+    ):
+        return None
+    pipeline = metadata.get("pipeline", [])
+    if not isinstance(pipeline, list) or pipeline:
+        return None
+    attempts = metadata.get("attempts", [])
+    if (
+        not isinstance(attempts, list)
+        or len(attempts) > 128
+        or any(
+            not isinstance(attempt, Mapping)
+            or isinstance(attempt.get("status"), bool)
+            or not isinstance(attempt.get("status"), int)
+            or not 400 <= attempt["status"] <= 599
+            for attempt in attempts
+        )
+    ):
+        return None
+    return ProviderCost(
+        microusd=0,
+        units=Decimal("0"),
+        unit_name="usd",
+        price_basis="openrouter_zero_completion_insurance_error_20260911",
+    )
+
+
 __all__ = [
     "DEEPLINE_USD_PER_CREDIT",
     "ProviderCost",
@@ -308,5 +489,7 @@ __all__ = [
     "deepline_free_completed_cost",
     "deepline_reservation_cost",
     "openrouter_cost",
+    "openrouter_generation_cost",
+    "openrouter_insured_error_cost",
     "scrapingdog_cost",
 ]

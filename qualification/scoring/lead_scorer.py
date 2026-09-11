@@ -73,7 +73,11 @@ from qualification.scoring.verification_helpers import (
     check_source_url_mismatch,
     openrouter_chat,
 )
-from qualification.scoring.intent_signal_gate import check_evidence_freshness, judge_intent_signal
+from qualification.scoring.intent_signal_gate import (
+    _claim_max_age_days,
+    check_evidence_freshness,
+    judge_intent_signal,
+)
 from qualification.scoring.company_verification import (
     _registrable_domain,
     verify_company_exists,
@@ -90,6 +94,13 @@ from qualification.scoring.company_fit_decision import (
     evaluate_company_identity,
     reconcile_company_fit_decisions,
     strict_company_fit_boolean,
+)
+from qualification.scoring.arena_integrity import (
+    bounded_criterion_evidence,
+    fit_evidence_url_hints,
+    MAX_FIT_EVIDENCE_URL_HINTS,
+    source_dates_from_verdict,
+    source_grounded_date_verdict,
 )
 from qualification.scoring.competition import (
     intent_unavailability_requires_retry,
@@ -127,7 +138,6 @@ MAX_COMPANY_ICP_FIT_SCORE = 40
 MAX_COMPANY_INTENT_SIGNAL_SCORE = 60
 MAX_COMPANY_TOTAL_SCORE = MAX_COMPANY_ICP_FIT_SCORE + MAX_COMPANY_INTENT_SIGNAL_SCORE  # = 100
 MAX_COMPETITION_INTENT_SCORE = 100
-MAX_FIT_EVIDENCE_URL_HINTS = 3
 COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT = {
     1: 60.0,
     2: 80.0,
@@ -961,24 +971,7 @@ def _valid_web_evidence_url(value: Any) -> str:
 def _fit_evidence_url_hints(company: CompanyOutput) -> list[str]:
     """Return bounded, prompt-safe public URLs as untrusted lookup hints."""
 
-    hints: list[str] = []
-    for index, value in enumerate(company.fit_evidence_urls):
-        if not isinstance(value, str) or len(value) > 2048:
-            continue
-        try:
-            public_url = public_http_url(value)
-            safe_url = canonical_candidate_prompt_url(
-                public_url,
-                f"fit_evidence_urls[{index}]",
-            )
-        except (TypeError, ValueError):
-            continue
-        if safe_url in hints:
-            continue
-        hints.append(safe_url)
-        if len(hints) == MAX_FIT_EVIDENCE_URL_HINTS:
-            break
-    return hints
+    return fit_evidence_url_hints(company.fit_evidence_urls)
 
 
 def _verified_homepage_identity_anchor(
@@ -2621,6 +2614,7 @@ async def score_company_competition_intent(
     seen_companies: Set[str],
     force_fail_reason: Optional[str] = None,
     is_reference_model: bool = False,
+    integrity_policy: bool = False,
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
@@ -2659,8 +2653,12 @@ async def score_company_competition_intent(
             _max_confidence,
             all_signals_unverified,
             signal_results,
-        ) = await score_company_competition_intent_signal(company, icp)
-        if _intent_verifier_unavailable(signal_results):
+        ) = await score_company_competition_intent_signal(
+            company, icp, integrity_policy=integrity_policy
+        )
+        if _intent_verifier_unavailable(
+            signal_results, integrity_policy=integrity_policy
+        ):
             return _zero_company_breakdown(
                 "Intent verification unavailable: verifier provider error",
                 intent_signals_detail=signal_results,
@@ -2672,7 +2670,12 @@ async def score_company_competition_intent(
             # replacement evidence sources for the same claim and re-verify
             # them through this same scorer — repair supplies candidates,
             # never verdicts.
-            repaired = await _attempt_competition_evidence_repair(company, icp)
+            repaired = await _attempt_competition_evidence_repair(
+                company,
+                icp,
+                integrity_policy=integrity_policy,
+                original_signal_results=signal_results,
+            )
             if repaired is not None:
                 (
                     intent_raw,
@@ -2682,7 +2685,9 @@ async def score_company_competition_intent(
                     all_signals_unverified,
                     signal_results,
                 ) = repaired
-                if _intent_verifier_unavailable(signal_results):
+                if _intent_verifier_unavailable(
+                    signal_results, integrity_policy=integrity_policy
+                ):
                     return _zero_company_breakdown(
                         "Intent verification unavailable: verifier provider error",
                         intent_signals_detail=signal_results,
@@ -2725,7 +2730,11 @@ async def score_company_competition_intent(
 
 
 async def _attempt_competition_evidence_repair(
-    company: CompanyOutput, icp: ICPPrompt
+    company: CompanyOutput,
+    icp: ICPPrompt,
+    *,
+    integrity_policy: bool = False,
+    original_signal_results: Optional[List[dict]] = None,
 ) -> Optional[Tuple[float, float, float, int, bool, List[dict]]]:
     """Try to rescue an all-zero intent verdict with repaired evidence URLs.
 
@@ -2733,6 +2742,10 @@ async def _attempt_competition_evidence_repair(
     the original zero stands. Never raises; bounded to one repair run and at
     most two re-verified sources per company.
     """
+    if integrity_policy:
+        # A rejected integrity bundle is terminal. Optional post-verdict
+        # repair cannot turn it into another draw of the same criterion.
+        return None
     try:
         from qualification.scoring import deepline_evidence_repair as _repair
 
@@ -2741,7 +2754,16 @@ async def _attempt_competition_evidence_repair(
         signals = list(company.intent_signals or [])
         if not signals:
             return None
-        primary = signals[0]
+        primary = next(
+            (
+                signal
+                for signal in signals
+                if getattr(signal, "matched_icp_signal", -1) == 0
+            ),
+            None,
+        )
+        if primary is None:
+            return None
         criterion = ""
         icp_signals = getattr(icp, "intent_signals", None) or []
         if icp_signals:
@@ -2773,7 +2795,9 @@ async def _attempt_competition_evidence_repair(
         if not replacement_signals:
             return None
         candidate = company.model_copy(update={"intent_signals": replacement_signals})
-        result = await score_company_competition_intent_signal(candidate, icp)
+        result = await score_company_competition_intent_signal(
+            candidate, icp, integrity_policy=integrity_policy
+        )
         if result[4]:  # still all fabricated — repair found nothing verifiable
             return None
         logger.info(
@@ -3230,6 +3254,7 @@ async def score_company_competition_intent_signal(
     api_key: str = "",
     trust_signal_date: bool = True,
     no_time_decay: bool = True,
+    integrity_policy: bool = False,
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
@@ -3257,9 +3282,22 @@ async def score_company_competition_intent_signal(
             return str(icp_evidence_types[idx] or "UNSPECIFIED").upper()
         return "UNSPECIFIED"
 
-    for signal in company.intent_signals:
+    if integrity_policy:
+        from gateway.qualification.models import IntentSignal
+
+        evidence_groups = [
+            [IntentSignal(**row) for row in group]
+            for group in bounded_criterion_evidence([
+                signal.model_dump(mode="json") for signal in company.intent_signals
+            ])
+        ]
+    else:
+        evidence_groups = [[signal] for signal in company.intent_signals]
+
+    for evidence_group in evidence_groups:
+        signal = evidence_group[0]
         domain = _extract_domain(signal.url)
-        if domain in seen_domains:
+        if not integrity_policy and domain in seen_domains:
             logger.warning(
                 f"  Duplicate domain {domain!r} on competition company "
                 f"{company.company_name!r} — signal scores 0 (URL dedup)"
@@ -3279,7 +3317,8 @@ async def score_company_competition_intent_signal(
                 },
             })
             continue
-        seen_domains.add(domain)
+        if not integrity_policy:
+            seen_domains.add(domain)
 
         matched_idx = getattr(signal, "matched_icp_signal", -1)
         target_signal = (
@@ -3287,19 +3326,40 @@ async def score_company_competition_intent_signal(
             if isinstance(matched_idx, int) and 0 <= matched_idx < len(icp_signals)
             else ""
         )
-        freshness_reason = check_evidence_freshness(
-            claim_text=str(target_signal or signal.description or ""),
-            signal_date=signal.date,
-            buyer_cap_days=getattr(icp, "intent_max_age_days", None),
+        freshness_reason = (
+            None
+            if integrity_policy
+            else check_evidence_freshness(
+                claim_text=str(target_signal or signal.description or ""),
+                signal_date=signal.date,
+                buyer_cap_days=getattr(icp, "intent_max_age_days", None),
+            )
         )
 
         # P12: keep the verifier's structured per-signal verdict alongside the
         # scalar score so the training corpus sees HOW each claim was decided.
         signal_verdicts: List[dict] = []
+        signal_icp = icp
+        if integrity_policy:
+            signal_max_age_days = list(
+                getattr(icp, "intent_signal_max_age_days", None) or []
+            )
+            if (
+                isinstance(matched_idx, int)
+                and 0 <= matched_idx < len(signal_max_age_days)
+                and isinstance(signal_max_age_days[matched_idx], int)
+                and not isinstance(signal_max_age_days[matched_idx], bool)
+                and signal_max_age_days[matched_idx] > 0
+            ):
+                signal_icp = icp.model_copy(
+                    update={
+                        "intent_max_age_days": signal_max_age_days[matched_idx]
+                    }
+                )
         score, confidence, date_status, content_found_date, _matched_idx = (
             await _score_single_intent_signal(
                 signal,
-                icp,
+                signal_icp,
                 icp_criteria,
                 company.company_name,
                 company.company_website,
@@ -3315,7 +3375,9 @@ async def score_company_competition_intent_signal(
                 # genericity pre-gate so the three-stage LLM verifier is the sole
                 # intent judge. Fulfillment keeps the cheap deterministic gate.
                 llm_only_intent_gate=True,
+                integrity_policy=integrity_policy,
                 verdict_out=signal_verdicts,
+                **({"evidence_signals": evidence_group} if integrity_policy else {}),
             )
         )
         if no_time_decay:
@@ -3354,22 +3416,62 @@ async def score_company_competition_intent_signal(
                 "freshness_explanation": freshness_reason,
                 "client_ready": False,
             }
+        integrity_date_status = (
+            date_status
+            if date_status in {"in_window", "out_of_window", "uncertain"}
+            else "not_evaluated"
+        )
         signal_results.append({
             "raw": score,
             "after_decay": after_decay,
             "decay": decay,
             "confidence": confidence,
             "date_status": date_status,
+            **(
+                {"date_verdict": integrity_date_status}
+                if integrity_policy else {}
+            ),
+            **(
+                {"claim_support_verdict": judge_verdict.get(
+                    "claim_support_verdict",
+                    "supported" if score > 0 else "unverified",
+                )}
+                if integrity_policy else {}
+            ),
             "matched_icp_signal": resolved_idx,
             "evidence_type": _evidence_type_for(resolved_idx),
+            **({"evidence_urls": [item.url for item in evidence_group]}
+               if integrity_policy else {}),
             **({"judge_verdict": judge_verdict} if judge_verdict else {}),
         })
 
     if not signal_results:
         return 0.0, 0.0, 0.0, 0, True, []
 
-    raw_scores = [r["raw"] for r in signal_results]
-    decayed_scores = [r["after_decay"] for r in signal_results]
+    if integrity_policy:
+        strongest_by_criterion: dict[int, dict] = {}
+        for result in signal_results:
+            result["counted_in_aggregate"] = False
+            try:
+                criterion_index = int(result.get("matched_icp_signal", -1))
+            except (TypeError, ValueError):
+                continue
+            if criterion_index < 0 or float(result.get("after_decay") or 0.0) <= 0:
+                continue
+            previous = strongest_by_criterion.get(criterion_index)
+            if previous is None or float(result.get("after_decay") or 0.0) > float(
+                previous.get("after_decay") or 0.0
+            ):
+                strongest_by_criterion[criterion_index] = result
+        for result in strongest_by_criterion.values():
+            result["counted_in_aggregate"] = True
+        raw_scores = [row["raw"] for row in strongest_by_criterion.values()]
+        decayed_scores = [
+            row["after_decay"] for row in strongest_by_criterion.values()
+        ]
+    else:
+        raw_scores = [r["raw"] for r in signal_results]
+        decayed_scores = [r["after_decay"] for r in signal_results]
     decays = [r["decay"] for r in signal_results if r["decay"] > 0]
     confidences = [r["confidence"] for r in signal_results]
     raw_total = aggregate_competition_intent_scores(raw_scores)
@@ -3487,10 +3589,14 @@ def _competition_intent_failure_reason(signal_results: List[dict]) -> str:
     )
 
 
-def _intent_verifier_unavailable(signal_results: List[dict]) -> bool:
+def _intent_verifier_unavailable(
+    signal_results: List[dict], *, integrity_policy: bool = False
+) -> bool:
     """Whether unavailable evidence leaves no verified primary score."""
 
-    return intent_unavailability_requires_retry(signal_results)
+    return intent_unavailability_requires_retry(
+        signal_results, integrity_policy=integrity_policy
+    )
 
 
 def required_intent_satisfied(signal_results: List[dict]) -> bool:
@@ -3806,7 +3912,9 @@ async def _score_single_intent_signal(
     stage1_soft_reject: bool = False,
     llm_only_intent_gate: bool = False,
     enforce_source_integrity: bool = False,
+    integrity_policy: bool = False,
     verdict_out: Optional[List[dict]] = None,
+    evidence_signals: Optional[Sequence["IntentSignal"]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -3852,6 +3960,8 @@ async def _score_single_intent_signal(
         }
         return {
             "evidence_url": signal.url,
+            **({"evidence_urls": [item.url for item in evidence_signals]}
+               if evidence_signals else {}),
             "evidence_source": (
                 signal.source.value
                 if hasattr(signal.source, "value")
@@ -3960,7 +4070,7 @@ async def _score_single_intent_signal(
         else:
             _record_verdict("rejected_pregate", rejection_reason="other_source_short_description")
             return 0.0, 10, "fabricated", None, -1
-    future_err = check_future_date(signal.date)
+    future_err = None if integrity_policy else check_future_date(signal.date)
     if future_err:
         logger.warning(f"Intent signal rejected: future date — {future_err}")
         if stage1_soft_reject:
@@ -4051,6 +4161,13 @@ async def _score_single_intent_signal(
         if isinstance(target_signal_raw, dict)
         else str(target_signal_raw)
     )
+    buyer_max_age_days = max(
+        1, int(getattr(icp, "intent_max_age_days", None) or 365)
+    )
+    if integrity_policy:
+        textual_max_age_days = _claim_max_age_days(target_signal_text)
+        if textual_max_age_days is not None:
+            buyer_max_age_days = min(buyer_max_age_days, textual_max_age_days)
     # Keep the strict intent verifier focused on the requested event class.
     # Product/service fit is scored separately by ICP fit; appending it here
     # makes valid event evidence look like it failed the target signal.
@@ -4097,9 +4214,18 @@ async def _score_single_intent_signal(
                 miner_signal_date=(str(signal.date) if signal.date else None),
                 evidence_type=target_evidence_type,
                 declared_source=(
-                    source_lower if enforce_source_integrity else None
+                    source_lower
+                    if enforce_source_integrity or integrity_policy
+                    else None
                 ),
                 stage1_soft_reject=stage1_soft_reject,
+                integrity_policy=integrity_policy,
+                buyer_max_age_days=buyer_max_age_days,
+                **({"evidence_bundle": [
+                    {"url": item.url, "description": item.description,
+                     "date": item.date, "snippet": item.snippet}
+                    for item in evidence_signals
+                ]} if integrity_policy and evidence_signals else {}),
             )
     except Exception as three_stage_error:
         logger.error(
@@ -4175,7 +4301,19 @@ async def _score_single_intent_signal(
         and stage3_item.get("same_entity_check") == "pass"
         and bool(supporting_quotes)
         and not unsupported_parts
-        and set(risk_notes) == {"date_mismatch"}
+        and "date_mismatch" in set(risk_notes)
+        and all(
+            note == "date_mismatch"
+            or (
+                integrity_policy
+                and isinstance(note, str)
+                and note.startswith((
+                    "source_event_date:",
+                    "source_publication_date:",
+                ))
+            )
+            for note in risk_notes
+        )
     )
     if not three_stage_result.get("client_ready") and not trusted_date_only_rejection:
         provider_unavailable = (
@@ -4204,6 +4342,7 @@ async def _score_single_intent_signal(
             stage3_status=s3_status,
             scrape_result_count=scrape_summary.get("result_count"),
             client_ready=False,
+            claim_support_verdict=s3_status,
             verification_trace=_verification_trace(three_stage_result),
         )
         return 0.0, confidence, "verified", content_found_date, -1
@@ -4214,6 +4353,17 @@ async def _score_single_intent_signal(
             "deterministic freshness gate  source=%s",
             signal.url[:60],
         )
+        if integrity_policy:
+            # The source-grounded judge established claim support and rejected
+            # only because the miner's date differed. Preserve that claim
+            # verdict while the independent date gate below evaluates age.
+            stage3_item["signal_status"] = "supported"
+            pipeline_decision = "approve"
+            three_stage_result["decision"] = "approve"
+            three_stage_result["client_ready"] = True
+            if isinstance(three_stage_result.get("stage3"), dict):
+                three_stage_result["stage3"]["status"] = "supported"
+                three_stage_result["stage3"]["decision"] = "approve"
 
     if deferred_pregate_reason:
         _record_verdict(
@@ -4230,6 +4380,39 @@ async def _score_single_intent_signal(
     miner_date_match = (
         (three_stage_result.get("stage3") or {}).get("claim_matches_miner_date")
     )
+    integrity_date_verdict = None
+    if integrity_policy:
+        from qualification.scoring.evaluation_clock import evaluation_date
+
+        source_event_date, source_publication_dates = source_dates_from_verdict(
+            stage3_item,
+            three_stage_result.get("source_publication_dates") or [],
+        )
+        integrity_date_verdict = source_grounded_date_verdict(
+            event_date=source_event_date,
+            publication_dates=source_publication_dates,
+            buyer_cap_days=buyer_max_age_days,
+            evaluated_on=evaluation_date(),
+        )
+        date_status = integrity_date_verdict.verdict
+        content_found_date = integrity_date_verdict.authoritative_date
+        if integrity_date_verdict.verdict == "out_of_window":
+            _record_verdict(
+                "rejected_freshness",
+                rejection_reason="source_grounded_event_out_of_window",
+                pipeline_decision=pipeline_decision,
+                stage1_status=s1_status,
+                stage3_status=s3_status,
+                miner_date_match=miner_date_match,
+                date_verdict=integrity_date_verdict.verdict,
+                authoritative_date=integrity_date_verdict.authoritative_date,
+                authoritative_date_basis=integrity_date_verdict.basis,
+                age_days=integrity_date_verdict.age_days,
+                claim_support_verdict=stage3_item.get("signal_status"),
+                client_ready=False,
+                verification_trace=_verification_trace(three_stage_result),
+            )
+            return 0.0, confidence, "out_of_window", content_found_date, -1
     if miner_date_match == "contradicted" and not trust_signal_date:
         logger.info(
             "Intent signal three-stage REJECT  reason=miner_date_contradicted  "
@@ -4254,6 +4437,39 @@ async def _score_single_intent_signal(
             signal.url[:60],
         )
 
+    if (
+        integrity_policy
+        and three_stage_result.get("job_publisher_relationship") == "unverified"
+    ):
+        # A URL path can suggest a job page, but only a verified publisher
+        # relationship earns the job premium. Valid unknown publishers retain
+        # ordinary web-evidence credit instead of becoming a hard rejection.
+        source_multiplier = SOURCE_TYPE_MULTIPLIERS["news"]
+
+    if integrity_policy and evidence_signals and len(evidence_signals) > 1:
+        # Premiums belong to the sources actually used for the combined
+        # verdict. An unrelated job URL cannot lend its premium to news.
+        from qualification.scoring.intent_verification_three_stage import _extract_linkedin_job_id
+
+        cited = set(stage3_item.get("evidence_urls_used") or [])
+        verified_jobs = set(three_stage_result.get("verified_job_source_urls") or [])
+        multipliers = []
+        for item in evidence_signals:
+            if item.url not in cited:
+                continue
+            source = item.source.value if hasattr(item.source, "value") else str(item.source)
+            multiplier = SOURCE_TYPE_MULTIPLIERS.get(source, 0.5)
+            if (source == "job_board" or _extract_linkedin_job_id(item.url)) and item.url not in verified_jobs:
+                multiplier = SOURCE_TYPE_MULTIPLIERS["news"]
+            multipliers.append(multiplier)
+        if not multipliers:
+            _record_verdict(
+                "rejected_three_stage", rejection_reason="combined_evidence_source_unbound",
+                client_ready=False, verification_trace=_verification_trace(three_stage_result),
+            )
+            return 0.0, 0, "uncertain", None, -1
+        source_multiplier = max(multipliers)
+
     logger.info(
         "Intent signal three-stage ACCEPT  decision=%s  "
         "s1_status=%s  s3_status=%s  miner_date_match=%s  scrape_results=%s  "
@@ -4269,6 +4485,20 @@ async def _score_single_intent_signal(
         stage1_status=s1_status,
         stage3_status=s3_status,
         miner_date_match=miner_date_match,
+        date_verdict=(
+            integrity_date_verdict.verdict if integrity_date_verdict else None
+        ),
+        authoritative_date=(
+            integrity_date_verdict.authoritative_date
+            if integrity_date_verdict else None
+        ),
+        authoritative_date_basis=(
+            integrity_date_verdict.basis if integrity_date_verdict else None
+        ),
+        job_publisher_relationship=three_stage_result.get(
+            "job_publisher_relationship"
+        ),
+        claim_support_verdict=stage3_item.get("signal_status"),
         scrape_result_count=scrape_summary.get("result_count"),
         source_multiplier=source_multiplier,
         client_ready=True,
@@ -4277,7 +4507,7 @@ async def _score_single_intent_signal(
     return (
         60.0 * source_multiplier,
         max(confidence, 90),
-        "verified",
+        (date_status if integrity_policy else "verified"),
         content_found_date,
         miner_asserted_idx,
     )

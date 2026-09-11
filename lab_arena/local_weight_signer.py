@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit, urlunsplit
@@ -24,6 +25,7 @@ from Leadpoet.utils.subnet_epoch import (
 )
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_MAX_RPC_RESPONSE_BYTES,
+    CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     ChainSourceV2Error,
     json_rpc_request,
     parse_json_rpc_response,
@@ -46,6 +48,7 @@ _PUBLIC_PROFILES = {
     "finney": _PROFILE_ROOT / "chain_signing_profile_v2.json",
     "test": _PROFILE_ROOT / "chain_signing_profile_test_v2.json",
 }
+_TRANSIENT_RPC_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 
 
 class LocalWeightSignerError(RuntimeError):
@@ -83,6 +86,9 @@ class HttpsJsonRpcTransport:
         timeout_seconds: int,
         opener: Callable[..., Any] = urllib.request.urlopen,
         max_response_bytes: int = CHAIN_MAX_RPC_RESPONSE_BYTES,
+        clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if isinstance(timeout_seconds, bool) or not 1 <= int(timeout_seconds) <= 600:
             raise LocalWeightSignerError("chain RPC timeout is invalid")
@@ -92,8 +98,37 @@ class HttpsJsonRpcTransport:
         self.timeout_seconds = int(timeout_seconds)
         self.max_response_bytes = int(max_response_bytes)
         self._opener = opener
+        self._clock = clock
+        self._wall_clock = wall_clock
+        self._sleep = sleep
         self._closed = False
         self._lock = threading.Lock()
+
+    def _require_open(self) -> None:
+        with self._lock:
+            if self._closed:
+                raise ValidatorChainSourceV2Error("host chain RPC transport is closed")
+
+    def _retry_after_seconds(self, headers: Any) -> Optional[float]:
+        raw = headers.get("Retry-After") if headers is not None else None
+        value = str(raw or "").strip()
+        if not value:
+            return None
+        if value.isdecimal():
+            if len(value) > 3:
+                return float("inf")
+            try:
+                seconds = int(value)
+            except (OverflowError, ValueError):
+                return float("inf")
+            return float(seconds) if seconds <= self.timeout_seconds else float("inf")
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                return None
+            return max(0.0, retry_at.timestamp() - float(self._wall_clock()))
+        except (OverflowError, TypeError, ValueError):
+            return None
 
     def call(
         self,
@@ -103,9 +138,6 @@ class HttpsJsonRpcTransport:
         request_id: int,
         **_context: Any,
     ) -> Any:
-        with self._lock:
-            if self._closed:
-                raise ValidatorChainSourceV2Error("host chain RPC transport is closed")
         try:
             body = json_rpc_request(method, params, int(request_id))
             request = urllib.request.Request(
@@ -114,17 +146,70 @@ class HttpsJsonRpcTransport:
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 method="POST",
             )
-            with self._opener(request, timeout=self.timeout_seconds) as response:
-                status = response.getcode()
-                if status != 200:
-                    raise ValidatorChainSourceV2Error("host chain RPC returned an HTTP error")
-                declared = response.headers.get("Content-Length")
-                if declared is not None and int(declared) > self.max_response_bytes:
-                    raise ValidatorChainSourceV2Error("host chain RPC response exceeds limit")
-                response_body = response.read(self.max_response_bytes + 1)
-            if len(response_body) > self.max_response_bytes:
-                raise ValidatorChainSourceV2Error("host chain RPC response exceeds limit")
-            return parse_json_rpc_response(response_body, int(request_id))
+            deadline = float(self._clock()) + self.timeout_seconds
+            last_error = None
+            for attempt_number in range(len(CHAIN_RPC_RETRY_BACKOFF_SECONDS) + 1):
+                self._require_open()
+                remaining = deadline - float(self._clock())
+                if remaining <= 0:
+                    raise ValidatorChainSourceV2Error(
+                        "host chain RPC retry deadline exhausted"
+                    ) from last_error
+                request_timeout = min(float(self.timeout_seconds), remaining)
+                retry_after = None
+                try:
+                    with self._opener(request, timeout=request_timeout) as response:
+                        status = int(response.getcode())
+                        if status != 200:
+                            if status not in _TRANSIENT_RPC_HTTP_STATUSES:
+                                raise ValidatorChainSourceV2Error(
+                                    "host chain RPC returned an HTTP error"
+                                )
+                            retry_after = self._retry_after_seconds(response.headers)
+                            last_error = ValidatorChainSourceV2Error(
+                                "host chain RPC returned a transient HTTP error"
+                            )
+                        else:
+                            declared = response.headers.get("Content-Length")
+                            if declared is not None and int(declared) > self.max_response_bytes:
+                                raise ValidatorChainSourceV2Error(
+                                    "host chain RPC response exceeds limit"
+                                )
+                            response_body = response.read(self.max_response_bytes + 1)
+                    if status == 200:
+                        if len(response_body) > self.max_response_bytes:
+                            raise ValidatorChainSourceV2Error(
+                                "host chain RPC response exceeds limit"
+                            )
+                        return parse_json_rpc_response(response_body, int(request_id))
+                except urllib.error.HTTPError as exc:
+                    try:
+                        if int(exc.code) not in _TRANSIENT_RPC_HTTP_STATUSES:
+                            raise ValidatorChainSourceV2Error(
+                                "host chain RPC returned an HTTP error"
+                            ) from exc
+                        retry_after = self._retry_after_seconds(exc.headers)
+                        last_error = exc
+                    finally:
+                        try:
+                            exc.close()
+                        except Exception as close_exc:
+                            raise ValidatorChainSourceV2Error(
+                                "host chain RPC HTTP response cleanup failed"
+                            ) from close_exc
+                if attempt_number == len(CHAIN_RPC_RETRY_BACKOFF_SECONDS):
+                    raise ValidatorChainSourceV2Error(
+                        "host chain RPC exhausted transient HTTP retries"
+                    ) from last_error
+                delay = max(
+                    float(CHAIN_RPC_RETRY_BACKOFF_SECONDS[attempt_number]),
+                    float(retry_after or 0.0),
+                )
+                if delay >= deadline - float(self._clock()):
+                    raise ValidatorChainSourceV2Error(
+                        "host chain RPC retry deadline exhausted"
+                    ) from last_error
+                self._sleep(delay)
         except ValidatorChainSourceV2Error:
             raise
         except (ChainSourceV2Error, urllib.error.URLError, OSError, ValueError) as exc:

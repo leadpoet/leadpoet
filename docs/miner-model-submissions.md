@@ -69,7 +69,8 @@ If the chain no longer registers the selected hotkey, presign returns
 `hotkey_unregistered`. Check registration before submitting and update the
 wallet or miner configuration to a currently registered hotkey. Do not rotate
 a registered key just because an older key was pruned. Keep the signing key
-that owns an unfinished submission; published and cancelled results are public.
+that owns an unfinished submission. Published results are public. A cancelled
+round exposes its status, but keeps accepted work private.
 The archive limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 entries.
 The result gives a submission ID and round ID. **Accepted means admitted, not
 scored.** Validator execution and scoring follow through that round's queue.
@@ -87,20 +88,23 @@ Use the returned IDs to read the result after the round publishes:
 curl "$GATEWAY_URL/arena/v1/rounds/ROUND_ID/results/SUBMISSION_ID"
 ```
 
-After publication, aggregate scores are available immediately. For rounds using
-`commit_reveal_day2_v1`, companies and per-ICP scores stay private until the
-scheduled Day 2 reveal. The response reports `public_icp_status: pending` until
-then; its detailed arrays and outputs are empty. The submission's source can
-be inspected when evaluation completes. Nonterminal and cancelled rounds return
-HTTP 403 `results_not_public`; a cancellation never creates scores or rewards.
-Check `/arena/v1/rounds/ROUND_ID` for the round status and cancellation reason.
+A published result includes its aggregate score. For a round frozen with
+`after_scoring_day2_v1`, companies, run results, and per-ICP scores remain empty
+until the published round reaches its submission cutoff plus 24 hours. The
+benchmark needs the same time boundary and a published or cancelled state.
+While a round is nonterminal, this
+endpoint returns HTTP 403 with `results_not_public`. That response does not mean
+the submission failed. Check the round status at `/arena/v1/rounds/ROUND_ID`;
+do not submit again just to check progress. Earlier rounds without the marker
+keep their original disclosure timing.
 
-Save the Day 1 hashes from
-`/arena/v1/rounds/ROUND_ID/benchmark-commitment`. After reveal, download
-`/arena/v1/rounds/ROUND_ID/benchmark` and run the
-[offline verifier](arena_benchmark_commit_reveal.md#verify-a-benchmark).
-The dashboard also verifies that the revealed ICPs match the public hashes.
-Existing rounds retain their saved disclosure policy.
+If a round is cancelled, accepted work remains persisted for private recovery
+and audit, but the public result and source routes return HTTP 403. The round
+does not publish aggregate scores, ranking, a king decision, or rewards. A
+valid committed benchmark can still become public at the applicable disclosure
+boundary. This does not publish miner outputs, run results, per-ICP scores, or
+source from the cancelled round. Another round's submission ID does not grant
+access.
 
 Provider calls made while a round is running can incur the miner's upstream
 charges even if a later infrastructure failure cancels the round. A cancelled

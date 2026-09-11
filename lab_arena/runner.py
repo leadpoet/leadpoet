@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from lab_arena import integrity
 from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
@@ -1408,18 +1409,6 @@ class AssignmentExecutor:
     def execute(self, lease: Mapping[str, Any], lease_token: str, icp: Mapping[str, Any]) -> Dict[str, Any]:
         """Run one leased ICP end to end and return the completion envelope."""
 
-        if "benchmark_disclosure_policy" in lease or "benchmark_proof" in lease:
-            from lab_arena import benchmark_commitment as bc
-            try:
-                if lease.get("benchmark_disclosure_policy") != bc.POLICY:
-                    raise bc.BenchmarkCommitmentError("benchmark_policy_invalid")
-                bc.verify_assignment(
-                    lease.get("benchmark_proof"), round_id=str(lease.get("round_id") or ""),
-                    position=lease.get("icp_position"),
-                    evaluation_date=str(lease.get("evaluation_date") or ""), icp=icp,
-                )
-            except bc.BenchmarkCommitmentError as exc:
-                raise RunnerError("benchmark_commitment_invalid") from exc
         config = self._config
         state = RunState(lease=dict(lease), lease_token=lease_token)
         run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=str(config.work_dir)))
@@ -1457,7 +1446,10 @@ class AssignmentExecutor:
             else:
                 input_document = {
                     "schema_version": "leadpoet.lab_arena.icp_input.v1",
-                    "icp": dict(icp),
+                    "icp": (
+                        integrity.agent_visible_icp(icp)
+                        if lease.get("integrity_policy") == "arena_integrity_v1" else dict(icp)
+                    ),
                     "evaluation_date": evaluation_date,
                     "company_limit": int(icp.get("max_companies") or 5),
                     "provider_operations": sorted(operations.OPERATIONS),
@@ -1570,7 +1562,12 @@ class AssignmentExecutor:
                             terminal = "accepted"
                 else:
                     try:
-                        output_document = output_document_from_bytes(result.output_bytes)
+                        output_document = output_document_from_bytes(
+                            result.output_bytes,
+                            require_intent_dates=(
+                                lease.get("integrity_policy") != integrity.POLICY
+                            ),
+                        )
                     except OutputInvalid as exc:
                         terminal = "invalid_output"
                     else:
@@ -1583,6 +1580,11 @@ class AssignmentExecutor:
                 and call.get("error_code") == "miner_credentials_unavailable"
                 for call in state.calls
             )
+            miner_scoring_funding_failed = scoring_run and any(
+                call.get("funding_source") == "miner_key"
+                and call.get("error_code") in ("budget_refused", "budget_exhausted")
+                for call in state.calls
+            )
             provider_infrastructure_failed = any(
                 call.get("error_code") in ("broker_unavailable", "provider_unavailable")
                 or (
@@ -1591,7 +1593,9 @@ class AssignmentExecutor:
                 )
                 for call in state.calls
             )
-            if miner_credentials_failed and terminal != "accepted":
+            if (
+                miner_credentials_failed or miner_scoring_funding_failed
+            ) and terminal != "accepted":
                 terminal = "credential_error"
                 output_document = None
             if provider_infrastructure_failed and terminal != "accepted":
@@ -1670,7 +1674,7 @@ def _check_runtime_image(image_reference: str, image_digest: str) -> None:
 
 # The round statuses in which assignments can be leased: both execution and
 # scoring windows in the two-stage competition.
-WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring")
+WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring", "stage3", "stage3_scoring")
 
 
 class Runner:

@@ -138,46 +138,6 @@ and requires the runtime miner-submission flag to remain false. Arena uses its
 separate fenced admission guard, lease drain, and destructive authorization.
 Its ownership and generation checks must pass before the gateway stops.
 
-## First Day 2 Benchmark Disclosure Release
-
-Migration 210 creates a compatibility floor because a pre-feature gateway can
-apply the legacy Day 1 reader to a new-policy round. Install the exact candidate's
-restart controller before applying that migration, then apply migration 210,
-then run the canonical paired restart for the same candidate. The candidate
-checkout must be clean and exactly equal to `origin/main` when installing the
-controller:
-
-```bash
-set -euo pipefail
-: "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
-cd /home/ec2-user/leadpoet_repo
-test "$(git rev-parse HEAD)" = "$EXPECTED_ATTESTED_SHA"
-test "$(git rev-parse origin/main)" = "$EXPECTED_ATTESTED_SHA"
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-python3 scripts/install_gateway_controller_transition_v1.py \
-  --repo "$PWD" \
-  --commit "$EXPECTED_ATTESTED_SHA"
-```
-
-Before migration 210 exists, that controller accepts the exact PostgREST
-missing-function response and keeps the legacy release set selectable. After
-the scoped `lab_arena_service` capability returns the exact version 210
-document, the controller rejects every forward, fallback, or explicit rollback
-target that lacks the matching AST-bound compatibility declaration. Other HTTP
-failures and malformed or different capability documents fail before a
-deployment plan is written and before the running gateway is stopped.
-If the capability is reported missing, the controller also checks for any
-persisted round configuration carrying the policy key. That read selects only
-the round ID; a marker or an unavailable/malformed response fails closed, so a
-missing RPC cannot hide rows that require the newer reader.
-
-Apply exact migration 210 only after verifying the installed controller points
-to the candidate above. Then run the canonical paired command in this runbook.
-A rollback must select a release that retains the version 210 reader and disables
-new policy only for future rounds. Keep the additive columns and existing
-new-policy rows. Never roll back to a pre-feature reader once the capability is
-installed.
-
 All proof descriptors and controller snapshots are closed after handoff or
 failure. A failed maintenance restart leaves global miner submissions disabled.
 Retry the same exact paired command after resolving the reported cause.

@@ -23,6 +23,7 @@ from uuid import UUID
 
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK, BITTENSOR_NETUID
 from gateway.db.client import create_http1_sync_client
+from gateway.utils.hotkey_roles import validator_hotkeys_from_metagraph
 import bittensor as bt
 
 # Supabase client — HTTP/1-pinned (default HTTP/2 HPACK encoder is not thread-safe)
@@ -168,7 +169,7 @@ async def get_validator_set(
         ['5GNJqR7T...', '5FHneW46...', '5EPCUjPx...']
     
     Notes:
-        - Validator = active=True AND validator_permit=True
+        - Validator eligibility uses the shared network policy.
         - Uses cached metagraph (epoch-based)
         - Returns empty list if metagraph unavailable
     """
@@ -180,24 +181,13 @@ async def get_validator_set(
             cache_epoch_id=metagraph_cache_epoch_id,
         )
         
-        # Filter validators (active + validator_permit OR stake > 500K + permit)
-        STAKE_THRESHOLD = 500000  # 500K TAO minimum
-        
-        validators = []
-        for i, hotkey in enumerate(metagraph.hotkeys):
-            # Validators must have:
-            # 1. BOTH active=True AND validator_permit=True (normal path), OR
-            # 2. Stake > 500K TAO AND validator_permit=True (temporary stake-based override)
-            active = metagraph.active[i]
-            validator_permit = metagraph.validator_permit[i]
-            stake = metagraph.S[i]
-            
-            if (active and validator_permit) or (stake > STAKE_THRESHOLD and validator_permit):
-                validators.append(hotkey)
+        validators = validator_hotkeys_from_metagraph(
+            metagraph, network_name=BITTENSOR_NETWORK, require_stake=False
+        )
         
         print(f"📊 Validator set for epoch {epoch_id}:")
         print(f"   Total registered: {len(metagraph.hotkeys)}")
-        print(f"   Validators (active+permit OR stake>500K+permit): {len(validators)}")
+        print(f"   Validators (shared {BITTENSOR_NETWORK} policy): {len(validators)}")
         print(f"   Miners: {len(metagraph.hotkeys) - len(validators)}")
         
         return validators

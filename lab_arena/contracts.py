@@ -25,6 +25,9 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 STAGE_1_ICP_COUNT = 10
 STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
+CONFIRMATION_ICP_COUNT = 5
+CONFIRMATION_FINALIST_COUNT = 3
+MAX_EVALUATION_ICP_COUNT = BENCHMARK_ICP_COUNT + CONFIRMATION_ICP_COUNT
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
 DEFAULT_MAX_CHALLENGERS = 16  # requested intake; daily rounds cap this to schedule/runner capacity
@@ -69,7 +72,9 @@ def stage_positions(stage: int) -> Tuple[int, ...]:
         return tuple(range(STAGE_1_ICP_COUNT))
     if stage == 2:
         return tuple(range(STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT))
-    raise ArenaContractError("stage must be 1 or 2")
+    if stage == 3:
+        return tuple(range(BENCHMARK_ICP_COUNT, MAX_EVALUATION_ICP_COUNT))
+    raise ArenaContractError("stage must be 1, 2 or 3")
 
 # Signed request timestamp window (section 9.1).
 REQUEST_TIMESTAMP_WINDOW_SECONDS = 300
@@ -98,12 +103,14 @@ SCOPE_CLAIM = "lab_arena.claim.v1"
 SCOPE_COMPLETE = "lab_arena.complete.v1"
 SCOPE_SUBMISSION_PRESIGN = "lab_arena.submission.presign.v1"
 SCOPE_SUBMISSION_FINALIZE = "lab_arena.submission.finalize.v1"
+SCOPE_WEIGHT_STATE = "lab_arena.weight_state.v1"
 REQUEST_SCOPES = frozenset(
     {
         SCOPE_CLAIM,
         SCOPE_COMPLETE,
         SCOPE_SUBMISSION_PRESIGN,
         SCOPE_SUBMISSION_FINALIZE,
+        SCOPE_WEIGHT_STATE,
     }
 )
 
@@ -129,6 +136,11 @@ ROUND_STATUSES = (
     "stage2_scoring",
     "stage2_judged",
     "scored",
+    "stage3",
+    "stage3_closed",
+    "stage3_scoring",
+    "stage3_judged",
+    "confirmed",
     "published",
     "cancelled",
 )
@@ -144,7 +156,12 @@ ROUND_TRANSITIONS = {
     "stage2_closed": ("stage2_scoring", "cancelled"),
     "stage2_scoring": ("stage2_judged", "cancelled"),
     "stage2_judged": ("scored", "cancelled"),
-    "scored": ("published", "cancelled"),
+    "scored": ("stage3", "confirmed", "published", "cancelled"),
+    "stage3": ("stage3_closed", "cancelled"),
+    "stage3_closed": ("stage3_scoring", "cancelled"),
+    "stage3_scoring": ("stage3_judged", "cancelled"),
+    "stage3_judged": ("confirmed", "cancelled"),
+    "confirmed": ("published", "cancelled"),
     "published": (),
     "cancelled": (),
 }
@@ -650,6 +667,9 @@ STAGE_SCHEDULE_FIELDS = (
     F("stage_2_start", "iso8601"),
     F("stage_2_close", "iso8601"),
     F("final_scoring_close", "iso8601"),
+    F("stage_3_start", "iso8601", required=False),
+    F("stage_3_close", "iso8601", required=False),
+    F("stage_3_scoring_close", "iso8601", required=False),
     F("publication_deadline", "iso8601"),
 )
 
@@ -670,7 +690,14 @@ ROUND_CONFIGURATION_FIELDS = (
     F("network_name", "str", required=False, minimum=1, maximum=64),
     F("netuid", "int", required=False, minimum=1),
     F("rewards_enabled", "bool"),
-    F("benchmark_disclosure_policy", "str", required=False, choices=("commit_reveal_day2_v1",)),
+    F("integrity_policy", "str", required=False, choices=("arena_integrity_v1",)),
+    # Optional only for rounds created before delayed benchmark disclosure.
+    F(
+        "benchmark_disclosure_policy",
+        "str",
+        required=False,
+        choices=("after_scoring_day2_v1",),
+    ),
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
     F("stage_1_icp_count", "int", minimum=1),
     F("stage_2_icp_count", "int", minimum=1),
@@ -709,10 +736,25 @@ ROUND_CONFIGURATION_FIELDS = (
 
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
-    if "benchmark_disclosure_policy" in config and config["benchmark_disclosure_policy"] is None:
-        raise ArenaContractError("benchmark disclosure policy cannot be null")
+    from lab_arena import integrity
+    is_integrity = integrity.enabled(config)
+    confirmation_keys = {"stage_3_start", "stage_3_close", "stage_3_scoring_close"}
+    if is_integrity:
+        if any(not config["schedule"].get(key) for key in confirmation_keys):
+            raise ArenaContractError("integrity policy requires confirmation schedule")
+        if config["scorer_policy"].get("scoring_adapter_version") != integrity.SCORING_ADAPTER:
+            raise ArenaContractError("integrity policy requires matching scorer adapter")
+    elif confirmation_keys.intersection(config["schedule"]):
+        raise ArenaContractError("confirmation schedule requires integrity policy")
+    elif config["scorer_policy"].get("scoring_adapter_version") == integrity.SCORING_ADAPTER:
+        raise ArenaContractError("integrity scorer adapter requires matching round policy")
     if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
         raise ArenaContractError("round cost-per-company cap cannot be null")
+    if (
+        "benchmark_disclosure_policy" in config
+        and config["benchmark_disclosure_policy"] is None
+    ):
+        raise ArenaContractError("round benchmark disclosure policy cannot be null")
     if ("network_name" in config) != ("netuid" in config):
         raise ArenaContractError("round network_name and netuid must be supplied together")
     if "network_name" not in config:
@@ -755,7 +797,7 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     if set(config["runner_hotkeys"]) & set(config["banned_hotkeys"]):
         raise ArenaContractError("a banned hotkey cannot run Arena work")
     schedule = config["schedule"]
-    ordered = [schedule[spec.name] for spec in STAGE_SCHEDULE_FIELDS]
+    ordered = [schedule[spec.name] for spec in STAGE_SCHEDULE_FIELDS if spec.name in schedule]
     if ordered != sorted(ordered) or len(set(ordered)) != len(ordered):
         raise ArenaContractError("stage schedule must be strictly increasing")
     return config
@@ -916,7 +958,7 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
 # One work item per accepted run. Plain row identifiers link it to the output.
 SCORING_WORK_ITEM_FIELDS = (
     F("scored_run_id", "str", minimum=1, maximum=128),
-    F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
+    F("icp_position", "int", minimum=0, maximum=MAX_EVALUATION_ICP_COUNT - 1),
     F("submission_id", "str", minimum=1, maximum=64),
     F("output_ref", "str", minimum=1, maximum=512),
 )
@@ -924,11 +966,11 @@ SCORING_WORK_ITEM_FIELDS = (
 SCORING_PLAN_FIELDS = (
     F("schema_version", "str", choices=(SCORING_PLAN_SCHEMA_VERSION,)),
     F("round_id", "str", minimum=6, maximum=64),
-    F("stage", "int", minimum=1, maximum=2),
+    F("stage", "int", minimum=1, maximum=3),
     F("work_items", "list[object]", fields=SCORING_WORK_ITEM_FIELDS, minimum=0, maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
     F("zero_rows", "list[object]", fields=(
         F("submission_id", "str", minimum=1, maximum=64),
-        F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
+        F("icp_position", "int", minimum=0, maximum=MAX_EVALUATION_ICP_COUNT - 1),
         F("cause", "str", choices=TERMINAL_CAUSES),
     ), minimum=0, maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
 )

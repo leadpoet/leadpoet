@@ -135,6 +135,7 @@ class FakeTransport:
 
     def send(self, *, method, url, headers, body, timeout_seconds):
         self.sent.append({"method": method, "url": url, "headers": dict(headers), "body": body, "timeout": timeout_seconds})
+        response_headers = {}
         if self.fail:
             raise br.ProviderTransportError("ReadTimeout")
         if (
@@ -145,7 +146,12 @@ class FakeTransport:
             status, payload = 200, self.synthetic_deepline_history
             self.synthetic_deepline_history = None
         else:
-            status, payload = self.responses.pop(0) if self.responses else (200, {"data": []})
+            selected = self.responses.pop(0) if self.responses else (200, {"data": []})
+            if len(selected) == 3:
+                status, payload, response_headers = selected
+            else:
+                status, payload = selected
+                response_headers = {}
         if (
             "code.deepline.com" in url
             and url != br.DEEPLINE_BILLING_HISTORY_URL
@@ -178,7 +184,16 @@ class FakeTransport:
                     }
                 }
         raw = json.dumps(payload).encode("utf-8") if not isinstance(payload, bytes) else payload
-        return br.ProviderResponse(status, {"content-type": "application/json", "x-ratelimit-remaining": "3", "set-cookie": "s=1"}, raw)
+        return br.ProviderResponse(
+            status,
+            {
+                "content-type": "application/json",
+                "x-ratelimit-remaining": "3",
+                "set-cookie": "s=1",
+                **response_headers,
+            },
+            raw,
+        )
 
 
 def make_broker(store=None, transport=None, **kwargs):
@@ -389,7 +404,9 @@ def test_openrouter_reserves_maximum_cost_and_settles_reported_actual():
     expected_actual = br.actual_openrouter_cost_microusd(price_table(), "openai/gpt-4o-mini", {"usage": usage})
     assert result.call["reserved_microusd"] == expected_max and result.call["actual_microusd"] == expected_actual < expected_max
     sent = transport.sent[0]
+    assert len(transport.sent) == 1
     assert sent["headers"]["authorization"] == "Bearer " + KEY
+    assert sent["headers"]["x-openrouter-metadata"] == "enabled"
     body = json.loads(sent["body"])
     assert body["provider"] == {"allow_fallbacks": False, "data_collection": "deny", "zdr": True} and body["stream"] is False
     assert store.openrouter_capacity == 10_000_000 - expected_actual
@@ -511,6 +528,248 @@ def test_openrouter_error_with_known_usage_settles_the_exact_charge():
     assert store.calls[result.call["call_identity"]]["actual"] == 10
 
 
+def test_openrouter_plain_non_byok_502_uses_insured_zero_and_keeps_provider_error():
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": "openai/gpt-4o-mini",
+            "is_byok": False,
+            "attempt": 1,
+            "attempts": [{"provider": "OpenAI", "status": 502}],
+        },
+        "user_id": "harmless-documented-field",
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(502, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["provider_cost"] == {
+        "basis": "openrouter_zero_completion_insurance_error_20260911",
+        "units": "0",
+        "unit_name": "usd",
+        "operation": "openrouter.chat",
+    }
+    assert transport.sent[0]["headers"]["x-openrouter-metadata"] == "enabled"
+
+
+@pytest.mark.parametrize("model", ("openai/gpt-5.6-sol", "openai/gpt-5.5"))
+@pytest.mark.parametrize("unproven", (None, "request_fee", "byok", "pipeline", "missing_metadata"))
+def test_pydantic_model_error_insurance_keeps_cost_uncertain_without_full_proof(model, unproven):
+    # The submitted harness uses GPT-5.6 Sol, not the small model in CHAT.
+    table = price_table()
+    table["models"][model] = dict(
+        table["models"]["openai/gpt-4o-mini"],
+        prompt="0.000002",
+        completion="0.00001",
+        web_search="0.01",
+        request="0.01" if unproven == "request_fee" else "0",
+    )
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": model,
+            "is_byok": unproven == "byok",
+            "attempt": 1,
+            "attempts": [{"provider": "OpenAI", "status": 502}],
+        },
+    }
+    if unproven == "pipeline":
+        payload["openrouter_metadata"]["pipeline"] = [{"type": "web-search"}]
+    if unproven == "missing_metadata":
+        del payload["openrouter_metadata"]
+    store = FakeLedgerStore()
+    transport = FakeTransport([(502, payload)])
+    broker = br.Broker(
+        store=store,
+        key_for=lambda provider: HOST_KEYS[provider],
+        price_table=table,
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=dict(CHAT, model=model, reasoning={"enabled": True}),
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert transport.sent[0]["headers"]["x-openrouter-metadata"] == "enabled"
+    assert len(transport.sent) == 1  # Never repeat the paid inference request.
+    if unproven is None:
+        assert result.call["actual_microusd"] == 0
+        assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
+        assert store.log == ["reserve", "dispatch", "settle"]
+    else:
+        assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+        assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+def test_openrouter_insurance_accepts_valid_function_tool_history_without_assistant_content():
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": "openai/gpt-4o-mini",
+            "is_byok": False,
+            "attempt": 1,
+            "attempts": [{"provider": "OpenAI", "status": 502}],
+        },
+    }
+    parameters = dict(
+        CHAT,
+        messages=[
+            {"role": "user", "content": "Find the company"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup_company",
+                            "arguments": '{"domain":"example.com"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": '{"company":"Example"}',
+            },
+        ],
+    )
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(502, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=parameters,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+def test_openrouter_502_with_nonzero_separate_request_price_stays_uncertain():
+    model = "anthropic/claude-3.5-haiku"
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": model,
+            "is_byok": False,
+            "attempt": 1,
+            "attempts": [{"provider": "Anthropic", "status": 502}],
+        },
+    }
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(502, payload)])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=dict(CHAT, model=model),
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+def test_openrouter_missing_native_cost_reads_exact_generation_once():
+    generation_id = "gen-test-123"
+    error = {"error": {"code": 502, "message": "Provider returned an error"}}
+    generation = {
+        "data": {
+            "id": generation_id,
+            "total_cost": "0.001234",
+            "usage": "0.001234",
+        }
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [
+                (502, error, {"X-Generation-Id": generation_id}),
+                (200, generation),
+            ]
+        )
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502 and result.call["actual_microusd"] == 1234
+    assert result.call["cost_basis"] == "openrouter_generation_cost"
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert transport.sent[1]["url"] == br.OPENROUTER_GENERATION_URL + generation_id
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["provider_cost"]["request_id"] == generation_id
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [
+            (
+                502,
+                {"error": {"code": 502, "message": "Provider returned an error"}, "id": "gen-body"},
+                {"X-Generation-Id": "gen-header"},
+            )
+        ],
+        [
+            (
+                502,
+                {"error": {"code": 502, "message": "Provider returned an error"}},
+                {"X-Generation-Id": "gen-readback-fails"},
+            ),
+            (401, {"error": {"code": 401, "message": "not authorized"}}),
+        ],
+    ],
+    ids=("conflicting_ids", "readback_failure"),
+)
+def test_openrouter_generation_conflict_or_failed_readback_stays_uncertain(responses):
+    broker, store, _transport = make_broker(transport=FakeTransport(responses))
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
 def test_openrouter_http_200_error_finished_choice_is_normalized():
     payload = {
         "choices": [{
@@ -610,13 +869,87 @@ def test_any_priced_model_is_allowed_and_an_unpriced_model_is_refused():
 
 
 def test_budget_refusal_is_generic_and_recorded_under_the_identity():
-    broker, store, transport = make_broker(store=FakeLedgerStore(per_icp_quota=0))
+    broker, store, transport = make_broker(
+        store=FakeLedgerStore(per_icp_quota=0),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
     refused = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert refused.status == 402 and json.loads(refused.body) == {"error": {"code": "budget_refused"}}
     assert refused.call["outcome"] == "refused" and refused.call["reason"] == "per_icp_quota"
     assert transport.sent == []
     again = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert again.status == 402 and store.log == ["reserve", "reserve"]
+
+
+def test_budget_refusal_preserves_only_database_proven_miner_credential_error():
+    store = FakeLedgerStore(per_icp_quota=0)
+    original_reserve = store.reserve_call
+
+    def reserve_with_proof(**kwargs):
+        result = original_reserve(**kwargs)
+        result["prior_miner_credential_refusal"] = True
+        return result
+
+    store.reserve_call = reserve_with_proof
+    broker, _store, transport = make_broker(
+        store=store,
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    refused = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert refused.status == 402
+    assert json.loads(refused.body) == {
+        "error": {"code": "miner_credentials_unavailable"}
+    }
+    assert refused.call["reason"] == "per_icp_quota"
+    assert transport.sent == []
+
+
+@pytest.mark.parametrize(
+    ("credential_proven", "expected_code"),
+    [
+        (False, "provider_unavailable"),
+        (True, "miner_credentials_unavailable"),
+    ],
+)
+def test_uncertain_provider_cost_refusal_is_infrastructure_unless_credentials_proven(
+    credential_proven,
+    expected_code,
+):
+    store = FakeLedgerStore(per_icp_quota=0)
+    original_reserve = store.reserve_call
+
+    def reserve_with_uncertain_cost(**kwargs):
+        result = original_reserve(**kwargs)
+        result["reason"] = "provider_cost_uncertain"
+        result["prior_miner_credential_refusal"] = credential_proven
+        return result
+
+    store.reserve_call = reserve_with_uncertain_cost
+    broker, _store, transport = make_broker(
+        store=store,
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    refused = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert json.loads(refused.body) == {"error": {"code": expected_code}}
+    assert refused.call["reason"] == "provider_cost_uncertain"
+    assert transport.sent == []
 
 
 def test_transport_failure_after_send_marks_uncertain_and_keeps_full_reservation():
@@ -652,6 +985,224 @@ def test_successful_deepline_reply_without_billing_is_uncertain():
         "usage_present": False,
         "billing_present": False,
     }
+
+
+def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
+    envelope = {
+        "request_id": "iad1::bad-input",
+        "requestId": "iad1::bad-input",
+        "error": {"code": "UPSTREAM_BAD_INPUT"},
+    }
+    history = deepline_history({
+        "request_id": "iad1::bad-input", "operation": "exa_search",
+        "provider": "exa", "charge_state": "failed", "status": "error",
+        "credits": 0, "delta": 0,
+    })
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(422, envelope), (200, history)])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 422 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize("provider_status", [422, 502, 503])
+def test_deepline_error_native_billing_settles_known_positive_charge(
+    provider_status,
+):
+    envelope = {
+        "request_id": "iad1::paid-error",
+        "error": {"code": "UPSTREAM_BAD_INPUT"},
+        "billing": {"credits_charged": 0.2},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(provider_status, envelope)])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == (provider_status if provider_status == 422 else 502)
+    assert result.call["actual_microusd"] == 20_000
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "credits", "charge_state", "expected_microusd"),
+    [(502, 0, "failed", 0), (503, 0.3, "posted", 30_000)],
+)
+def test_deepline_5xx_recovers_exact_charge_from_billing_history(
+    provider_status, credits, charge_state, expected_microusd
+):
+    request_id = "iad1::server-error"
+    envelope = {"requestId": request_id, "error": {"code": "upstream_error"}}
+    history_entry = deepline_history_entry(
+        request_id, "exa_search", credits, charge_state=charge_state
+    )
+    if charge_state == "failed":
+        history_entry.update({"status": "error", "delta": 0})
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [(provider_status, envelope), (200, deepline_history(history_entry))]
+        )
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "settled"
+    assert result.call["provider_status"] == provider_status
+    assert result.call["actual_microusd"] == expected_microusd
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"error": {"code": "upstream_error"}},
+        {"request_id": "a", "requestId": "b", "error": {}},
+        {"request_id": "expected", "error": {}},
+    ],
+)
+def test_deepline_5xx_without_exact_final_charge_remains_uncertain(envelope):
+    wrong_history = deepline_history(
+        deepline_history_entry("different", "exa_search", 0.2)
+    )
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(502, envelope), (200, wrong_history)])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+def test_deepline_hunter_no_bill_502_without_job_id_settles_zero_and_returns_provider_error():
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [(502, {"error": {"code": "upstream_error"}, "detail": {"rows": 1}})]
+        )
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "hunter_discover", "payload": {"domain": "example.com"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_hunter_discover_error_zero"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert [sent["method"] for sent in transport.sent] == ["POST"]
+
+
+def test_deepline_hunter_no_bill_401_settles_zero_and_stays_credential_error():
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(401, {"error": {"code": "auth"}})]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "hunter_discover", "payload": {"domain": "example.com"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 402
+    assert json.loads(result.body) == {
+        "error": {"code": "miner_credentials_unavailable"}
+    }
+    assert result.call["error_code"] == "miner_credentials_unavailable"
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "body"),
+    [
+        ("hunter_discover", {"error": {}, "billing": None}),
+        ("exa_search", {"error": {"code": "upstream_error"}}),
+    ],
+)
+def test_deepline_hunter_malformed_billing_and_nonfree_502_stay_uncertain(tool, body):
+    broker, store, _transport = make_broker(transport=FakeTransport([(502, body)]))
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": tool, "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+@pytest.mark.parametrize("provider_status", [401, 402, 403])
+def test_deepline_credential_error_without_charge_stays_uncertain_and_typed(
+    provider_status,
+):
+    envelope = {"request_id": "iad1::bad-key", "error": {"code": "auth"}}
+    broker, store, _transport = make_broker(
+        transport=FakeTransport(
+            [(provider_status, envelope), (200, deepline_history())]
+        ),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 402
+    assert json.loads(result.body) == {
+        "error": {"code": "miner_credentials_unavailable"}
+    }
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"request_id": "a", "requestId": "b", "error": {}},
+        {"job_id": "a", "request_id": "b", "error": {}},
+        {"request_id": "a", "error": {}},
+    ],
+)
+def test_deepline_error_without_exact_final_charge_remains_uncertain(envelope):
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(422, envelope), (200, deepline_history())])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
 @pytest.mark.parametrize("status", [{"message": "not a status"}, ["completed"], "secret-shaped-unrecognized-status"])
@@ -1679,12 +2230,9 @@ def test_host_account_or_provider_failure_is_infrastructure_for_scoring_and_exec
     broker, store, transport = make_broker(transport=FakeTransport([(status, {"error": {"message": "invalid api key"}})]))
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["error_code"] == "provider_unavailable" and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    if status in (401, 402, 403, 429):
-        assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == 0
-        assert store.openrouter_capacity == 10_000_000
-    else:
-        assert result.call["outcome"] == "uncertain"
-        assert store.openrouter_capacity == 0
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert store.openrouter_capacity == 0
 
 
 def test_true_caller_400_remains_visible_to_the_bundle():

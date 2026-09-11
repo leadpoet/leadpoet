@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -240,6 +241,32 @@ def _validate_scorer_image(image: str) -> str:
     return image
 
 
+def _validate_benchmark_disclosure_from(value: str) -> str:
+    """Validate the optional timezone-aware benchmark disclosure timestamp."""
+    if not isinstance(value, str):
+        raise ConfigurationError(
+            "benchmark disclosure timestamp must be an ISO timestamp"
+        )
+    if value == "":
+        return value
+    if any(ch in value for ch in "\r\n\x00"):
+        raise ConfigurationError(
+            "benchmark disclosure timestamp contains a forbidden character"
+        )
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "benchmark disclosure timestamp must be a valid ISO timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ConfigurationError(
+            "benchmark disclosure timestamp must include a timezone"
+        )
+    return normalized
+
+
 def gateway_updates(values: Mapping[str, str], args: argparse.Namespace, service_key: str) -> dict[str, str]:
     _validate_service_key(service_key)
     return {
@@ -307,6 +334,7 @@ def _validate_service_key(service_key: str) -> None:
 
 _REMOTE = r'''
 import json, re, shlex, subprocess, sys, uuid
+from datetime import datetime
 
 def fail(code):
     print(json.dumps({"ok": False, "code": code}, separators=(",", ":")))
@@ -375,6 +403,26 @@ updates = dict(request["updates"])
 if request["role"] == "scorer_image_only":
     if set(updates) != {"LAB_ARENA_SCORER_IMAGE"} or request.get("aliases") or request.get("service_key"):
         fail("scorer_image_scope_invalid")
+if request["role"] == "benchmark_disclosure_only":
+    if (
+        set(updates) != {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"}
+        or request.get("aliases")
+        or request.get("service_key")
+    ):
+        fail("benchmark_disclosure_scope_invalid")
+    value = updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"]
+    if not isinstance(value, str) or any(ch in value for ch in "\r\n\x00"):
+        fail("benchmark_disclosure_timestamp_invalid")
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    if value:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            fail("benchmark_disclosure_timestamp_invalid")
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            fail("benchmark_disclosure_timestamp_invalid")
+    updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"] = value
 if request["role"] in ("gateway", "miner_credentials"):
     for source, target in request["aliases"].items():
         raw_value = str(values.get(source) or "").strip()
@@ -594,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
     scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
+    scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
@@ -621,9 +670,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("--apply requires %s=1" % AUTH_ENV)
     if not 0 <= args.daily_cutoff_utc <= 23:
         raise ConfigurationError("--daily-cutoff-utc must be between 0 and 23")
+    if args.benchmark_disclosure_from is not None:
+        _validate_benchmark_disclosure_from(args.benchmark_disclosure_from)
     if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
-    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None or args.scorer_image_only or args.validator_credential_kms_guard
+    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None or args.scorer_image_only or args.validator_credential_kms_guard or args.benchmark_disclosure_from is not None
     if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
         raise ConfigurationError("validator IAM guard requires the exact production account")
     if args.miner_credential_kms_key_id is not None and not args.miner_credentials_only:
@@ -664,6 +715,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
                 "apply": args.apply, "role": "scorer_image_only", "aliases": {},
                 "updates": {"LAB_ARENA_SCORER_IMAGE": args.scorer_image},
+            }
+            result = _ssh(args.gateway_host, args.ssh_key, request)
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
+        if args.benchmark_disclosure_from is not None:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "benchmark_disclosure_only", "aliases": {},
+                "updates": {
+                    "LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": _validate_benchmark_disclosure_from(
+                        args.benchmark_disclosure_from
+                    )
+                },
             }
             result = _ssh(args.gateway_host, args.ssh_key, request)
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))

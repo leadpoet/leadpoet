@@ -198,12 +198,6 @@ def test_testnet_benchmark_is_private_and_never_reaches_sidecar(monkeypatch):
     assert blocked.status_code == 403
     assert blocked.json() == {"detail": "testnet benchmark is private"}
     assert client.get(
-        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/benchmark-commitment"
-    ).status_code == 403
-    assert client.get(
-        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/%2562enchmark-commitment"
-    ).status_code == 403
-    assert client.get(
         "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/benchmark/"
     ).status_code == 404
     assert client.get(

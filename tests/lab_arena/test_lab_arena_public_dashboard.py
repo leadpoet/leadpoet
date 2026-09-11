@@ -186,7 +186,6 @@ def test_competition_snapshot_is_scoped_and_separates_open_running_and_completed
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
-        now=lambda: datetime(2026, 9, 10, tzinfo=timezone.utc),
     )
 
     result = public_dashboard.competition_snapshot(service)
@@ -231,7 +230,6 @@ def test_competition_snapshot_fetches_the_latest_published_outside_recent_window
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
-        now=lambda: datetime(2026, 9, 10, tzinfo=timezone.utc),
     )
 
     result = public_dashboard.competition_snapshot(service)

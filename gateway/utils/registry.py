@@ -14,9 +14,9 @@ import time
 import threading
 
 from gateway.utils.hotkey_roles import (
-    STAKE_THRESHOLD,
     classify_hotkey_from_metagraph,
     classify_hotkey_role,
+    validator_hotkeys_from_metagraph,
 )
 
 # Import configuration
@@ -52,6 +52,17 @@ def _classify_hotkey_role(active: bool, validator_permit: bool, stake: float) ->
         validator_permit,
         stake,
         network_name=current_network,
+        require_stake=False,
+    )
+
+
+def _validator_hotkeys(metagraph) -> list:
+    """Return registered, permitted validator identities."""
+
+    from gateway.config import BITTENSOR_NETWORK as current_network
+
+    return validator_hotkeys_from_metagraph(
+        metagraph, network_name=current_network, require_stake=False
     )
 
 
@@ -326,7 +337,7 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
     Returns:
         (is_registered, role) where:
         - is_registered: True if hotkey exists in metagraph
-        - role: "validator" if active=True AND permit=True, "miner" otherwise
+        - role: "validator" for a registered, permitted hotkey, "miner" otherwise
     """
     try:
         # Get metagraph using async version (cached, no new instance)
@@ -335,7 +346,7 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         from gateway.config import BITTENSOR_NETWORK as current_network
 
         registered, role = classify_hotkey_from_metagraph(
-            hotkey, metagraph, network_name=current_network
+            hotkey, metagraph, network_name=current_network, require_stake=False
         )
         if not registered:
             print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")
@@ -344,23 +355,12 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         # Get UID for this hotkey
         uid = metagraph.hotkeys.index(hotkey)
         
-        # Get neuron attributes
-        stake = metagraph.S[uid]
-        active = bool(metagraph.active[uid])
-        validator_permit = bool(metagraph.validator_permit[uid])
-        
         print(f"🔍 Registry check for {hotkey[:20]}...")
         print(f"   UID: {uid}")
-        print(f"   Stake: {stake:.6f} τ")
-        print(f"   Active: {active}")
-        print(f"   Validator Permit: {validator_permit}")
-        
-        _role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
-        assert role == _role
         if role == "validator":
-            print(f"   ✅ Role: VALIDATOR ({reason})")
+            print("   ✅ Role: VALIDATOR (shared network policy)")
         else:
-            print(f"   ✅ Role: MINER ({reason})")
+            print("   ✅ Role: MINER (shared network policy)")
         
         return True, role
     
@@ -393,7 +393,7 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         from gateway.config import BITTENSOR_NETWORK as current_network
 
         registered, role = classify_hotkey_from_metagraph(
-            hotkey, metagraph, network_name=current_network
+            hotkey, metagraph, network_name=current_network, require_stake=False
         )
         if not registered:
             print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")
@@ -402,24 +402,12 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         # Get UID for this hotkey
         uid = metagraph.hotkeys.index(hotkey)
         
-        # Get neuron attributes
-        stake = metagraph.S[uid]
-        # Cast numpy bools to Python bools for consistent display
-        active = bool(metagraph.active[uid])
-        validator_permit = bool(metagraph.validator_permit[uid])
-        
         print(f"🔍 Registry check for {hotkey[:20]}...")
         print(f"   UID: {uid}")
-        print(f"   Stake: {stake:.6f} τ")
-        print(f"   Active: {active}")
-        print(f"   Validator Permit: {validator_permit}")
-        
-        _role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
-        assert role == _role
         if role == "validator":
-            print(f"   ✅ Role: VALIDATOR ({reason})")
+            print("   ✅ Role: VALIDATOR (shared network policy)")
         else:
-            print(f"   ✅ Role: MINER ({reason})")
+            print("   ✅ Role: MINER (shared network policy)")
         
         return True, role
     
@@ -435,22 +423,12 @@ async def get_validator_count_async() -> int:
     Use this from async contexts. For sync, use get_validator_count() wrapper.
     
     Returns:
-        Number of validators (neurons with active=True AND validator_permit=True,
-        OR stake > 500K TAO AND validator_permit=True)
+        Number of validators under the shared network policy.
     """
     try:
         metagraph = await get_metagraph_async()
         
-        STAKE_THRESHOLD = 500000  # 500K TAO minimum
-        
-        # Count neurons that are validators (normal OR stake-based)
-        validator_count = sum(
-            1 for i in range(len(metagraph.hotkeys))
-            if (metagraph.active[i] and metagraph.validator_permit[i]) or 
-               (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i])
-        )
-        
-        return validator_count
+        return len(_validator_hotkeys(metagraph))
     
     except Exception as e:
         print(f"❌ Error getting validator count: {e}")
@@ -464,8 +442,7 @@ def get_validator_count() -> int:
     DEPRECATED: Use get_validator_count_async() from async contexts.
     
     Returns:
-        Number of validators (neurons with active=True AND validator_permit=True,
-        OR stake > 500K TAO AND validator_permit=True)
+        Number of validators under the shared network policy.
     
     Example:
         >>> count = get_validator_count()
@@ -474,16 +451,7 @@ def get_validator_count() -> int:
     try:
         metagraph = get_metagraph()
         
-        STAKE_THRESHOLD = 500000  # 500K TAO minimum
-        
-        # Count neurons that are validators (normal OR stake-based)
-        validator_count = sum(
-            1 for i in range(len(metagraph.hotkeys))
-            if (metagraph.active[i] and metagraph.validator_permit[i]) or 
-               (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i])
-        )
-        
-        return validator_count
+        return len(_validator_hotkeys(metagraph))
     
     except Exception as e:
         print(f"❌ Error getting validator count: {e}")
@@ -502,16 +470,7 @@ async def get_miner_count_async() -> int:
     try:
         metagraph = await get_metagraph_async()
         
-        STAKE_THRESHOLD = 500000  # 500K TAO minimum
-        
-        # Count neurons that are NOT validators (inverse of validator logic)
-        miner_count = sum(
-            1 for i in range(len(metagraph.hotkeys))
-            if not ((metagraph.active[i] and metagraph.validator_permit[i]) or 
-                   (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i]))
-        )
-        
-        return miner_count
+        return len(metagraph.hotkeys) - len(_validator_hotkeys(metagraph))
     
     except Exception as e:
         print(f"❌ Error getting miner count: {e}")
@@ -534,16 +493,7 @@ def get_miner_count() -> int:
     try:
         metagraph = get_metagraph()
         
-        STAKE_THRESHOLD = 500000  # 500K TAO minimum
-        
-        # Count neurons that are NOT validators (inverse of validator logic)
-        miner_count = sum(
-            1 for i in range(len(metagraph.hotkeys))
-            if not ((metagraph.active[i] and metagraph.validator_permit[i]) or 
-                   (metagraph.S[i] > STAKE_THRESHOLD and metagraph.validator_permit[i]))
-        )
-        
-        return miner_count
+        return len(metagraph.hotkeys) - len(_validator_hotkeys(metagraph))
     
     except Exception as e:
         print(f"❌ Error getting miner count: {e}")

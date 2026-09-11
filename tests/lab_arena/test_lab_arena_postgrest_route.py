@@ -27,7 +27,7 @@ import pytest
 
 from lab_arena import contracts
 from lab_arena.store import ArenaRoleError, ArenaStore, ArenaStoreError, PostgrestTransport
-from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS
+from tests.lab_arena.lab_arena_pg_harness import POSTGREST_MIGRATIONS
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
@@ -120,7 +120,7 @@ def stack():
                   FROM PUBLIC, anon, authenticated;
                 """
             )
-            for migration in DEFAULT_MIGRATIONS:
+            for migration in POSTGREST_MIGRATIONS:
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute("SELECT granted.rolname FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'authenticator' ORDER BY 1")
             memberships = [row[0] for row in cursor.fetchall()]

@@ -1,14 +1,60 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from lab_arena import contracts
 from lab_arena.validator import (
+    ArenaPublicApi,
     ArenaValidatorError,
     ArenaWeightOrchestrator,
     ArenaWeightPaths,
     _read_hashed_json,
 )
+
+
+def test_weight_api_posts_signed_scope_bound_request(monkeypatch):
+    observed = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit):
+            return b'{"lookup_ok":true,"state":null}'
+
+    def urlopen(request, timeout):
+        observed["request"] = request
+        observed["timeout"] = timeout
+        return Response()
+
+    keypair = SimpleNamespace(
+        ss58_address="5" + "V" * 47,
+        sign=lambda message: b"s" * 64,
+    )
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    api = ArenaPublicApi(
+        "https://arena.example", keypair=keypair,
+        network="finney", netuid=71, timeout_seconds=12,
+        now=lambda: 1_800_000_000,
+    )
+    assert api.accepted_weight_state(32001) is None
+    request = observed["request"]
+    assert request.full_url == "https://arena.example/arena/v1/weight-state"
+    assert request.method == "POST" and observed["timeout"] == 12
+    envelope = json.loads(request.data)
+    assert envelope["scope"] == contracts.SCOPE_WEIGHT_STATE
+    assert envelope["round_id"] == "weight-state"
+    assert envelope["hotkey"] == keypair.ss58_address
+    assert envelope["timestamp"] == 1_800_000_000
+    assert envelope["body"] == {
+        "epoch": 32001, "network": "finney", "netuid": 71,
+    }
+    assert envelope["signature"] == "0x" + (b"s" * 64).hex()
 
 
 class _Era:
@@ -225,6 +271,43 @@ def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     orchestrator.poll_prior_outcomes(9)
     assert orchestrator.run_once(9) == "broadcast"
     assert broadcasts == ["0xdeadbeef"]
+
+
+def test_prior_poll_skips_archived_attempts_but_warns_on_malformed_names(
+    tmp_path, capsys
+):
+    def journal(epoch):
+        value = {"epoch": epoch, "record": "canonical"}
+        value["record_hash"] = contracts.document_hash(value)
+        return value
+
+    # A valid archive name is produced by ArenaWeightPaths.archived_attempt;
+    # its contents must not be re-polled as an active journal.
+    (tmp_path / "epoch-8-attempt-1-signed.json").write_text(
+        "not-json\n", encoding="utf-8"
+    )
+    (tmp_path / "epoch-8-signed.json").write_text(
+        json.dumps(journal(8)) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "epoch-8-attempt-invalid-signed.json").write_text(
+        "not-json\n", encoding="utf-8"
+    )
+    (tmp_path / "epoch-not-an-epoch-signed.json").write_text(
+        "not-json\n", encoding="utf-8"
+    )
+
+    orchestrator = _orchestrator(tmp_path, _Signer(_protected(), []), [])
+    recovered = []
+    confirmed = []
+    orchestrator._recover_protected_state = lambda signed: recovered.append(signed)
+    orchestrator._confirm = lambda signed: confirmed.append(signed)
+
+    orchestrator.poll_prior_outcomes(9)
+
+    assert [value["epoch"] for value in recovered] == [8]
+    assert [value["epoch"] for value in confirmed] == [8]
+    stderr = capsys.readouterr().err
+    assert stderr.count("Arena validator ignored an invalid journal filename") == 2
 
 
 def test_expired_mortal_attempt_retries_fresh_era_within_same_epoch(tmp_path):

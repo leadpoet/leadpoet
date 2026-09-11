@@ -40,8 +40,7 @@ _COST_COUNTER_KEYS = (
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at,icp_set_date,evaluation_date,benchmark_ref,"
-    "benchmark_reveal_at,benchmark_commitment_doc,benchmark_committed_at"
+    "baseline_promoted_at,icp_set_date,evaluation_date"
 )
 
 
@@ -153,6 +152,8 @@ def _cost_projection(ranking: Mapping[str, Any]) -> dict:
         "eligibility_cap_microusd",
     )
     projected_summary = {key: _safe_integer(summary.get(key)) for key in scalar_keys}
+    if "qualified_company_count" in summary:
+        projected_summary["qualified_company_count"] = _safe_integer(summary["qualified_company_count"])
     execution = _cost_bucket(summary.get("execution"))
     judge = _cost_bucket(summary.get("judge"))
     if any(item is None for item in projected_summary.values()) or execution is None or judge is None:
@@ -226,7 +227,7 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
     return baseline, champion
 
 
-def round_summary(row: Mapping[str, Any], now: datetime | None = None) -> dict:
+def round_summary(row: Mapping[str, Any]) -> dict:
     network_name, netuid, mode = _configuration_scope(row)
     configuration = row.get("configuration_doc")
     configuration = configuration if isinstance(configuration, Mapping) else {}
@@ -258,7 +259,6 @@ def round_summary(row: Mapping[str, Any], now: datetime | None = None) -> dict:
         "baseline": baseline,
         "champion": champion,
         "promotion_status": promotion_status,
-        **icp_disclosure.public_metadata(row, now),
     }
 
 
@@ -276,7 +276,7 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             limit=bounded_limit,
             columns=_ROUND_COLUMNS,
         )
-    summaries = [round_summary(row, service.now()) for row in rows]
+    summaries = [round_summary(row) for row in rows]
     open_round = next((row for row in summaries if row["status"] == "open"), None)
     latest_round = next(
         (row for row in summaries if row["status"] != "open"),
@@ -294,7 +294,7 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             limit=1,
             columns=_ROUND_COLUMNS,
         )
-        latest_completed = round_summary(published[0], service.now()) if published else None
+        latest_completed = round_summary(published[0]) if published else None
     return {
         "mode": service._config.mode,
         "network_name": network_name,
@@ -403,6 +403,9 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
         )
         final = final_scores.get(submission_id) or {}
         final_score = _score(final.get("final_score"))
+        lifecycle_score = final_score
+        if lifecycle_score is None and final.get("confirmation_selected") is False:
+            lifecycle_score = _score(final.get("main_score"))
         projected = {
                 "submission_id": submission_id,
                 "miner_hotkey": str(submission.get("miner_hotkey") or ""),
@@ -411,7 +414,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                     raw_status=raw_status,
                     round_status=round_status,
                     is_champion=is_champion,
-                    final_score=final_score,
+                    final_score=lifecycle_score,
                 ),
                 "submitted_at": _submitted_at(submission),
                 "stage1_score": stage1_scores.get(submission_id),
@@ -423,6 +426,9 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
             }
         if round_status == "published":
             projected.update(_cost_projection(final))
+            if "main_score" in final:
+                projected["main_score"] = _score(final.get("main_score"))
+                projected["confirmation_selected"] = final.get("confirmation_selected") is True
         submissions.append(projected)
     return {"round_id": round_id, "submissions": submissions}
 

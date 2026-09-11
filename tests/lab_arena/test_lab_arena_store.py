@@ -174,77 +174,69 @@ def test_simple_stage_and_completion_rpc_shapes():
     ]
 
 
-def test_benchmark_disclosure_capability_and_commit_v3_rpc_shapes():
-    class BenchmarkTransport(ShapeTransport):
-        def rpc(self, function, params):
-            self.calls.append((function, params))
-            if function == "lab_arena_benchmark_disclosure_schema_v1":
-                return {
-                    "schema_version":
-                        "leadpoet.lab_arena.benchmark_disclosure.v1",
-                    "version": 210,
-                    "policy": "commit_reveal_day2_v1",
-                }
-            return {"status": "ok"}
-
-    transport = BenchmarkTransport()
-    store = ArenaStore(transport)
-    assert store.benchmark_disclosure_schema()["version"] == 210
-    commitment = {
-        "manifest": {"schema_version": "fixture"},
-        "manifest_hash": "sha256:" + "a" * 64,
-        "canonical_manifest": '{"schema_version":"fixture"}',
+def test_recover_claim_response_uses_only_the_exact_bounded_read():
+    calls = []
+    response = {
+        "status": "leased",
+        "request_id": "request-1",
+        "run_id": "run-1",
     }
-    store.commit_round_v3(
-        "arena-2026-09-12",
-        participants=[{"submission_id": "s1", "miner_hotkey": "h"}],
-        benchmark_ref="arena/arena-2026-09-12/benchmarks/%s.json" % ("b" * 64),
-        evaluation_date="2026-09-12",
-        icp_set_date="2026-09-11",
-        scorer_image_digest="sha256:" + "c" * 64,
-        scorer_image_reference="registry.example/scorer@sha256:" + "c" * 64,
-        benchmark_commitment_doc=commitment,
+
+    class Transport:
+        @staticmethod
+        def select(table, **kwargs):
+            calls.append((table, kwargs))
+            return [{"claim_response": response}]
+
+    recovered = ArenaStore(Transport()).recover_claim_response(
+        round_id="arena-2026-09-10",
+        runner_hotkey="runner",
+        request_id="request-1",
+        request_hash="sha256:" + "1" * 64,
     )
-    assert transport.calls == [
-        ("lab_arena_benchmark_disclosure_schema_v1", {}),
+
+    assert recovered == response
+    assert recovered is not response
+    assert calls == [
         (
-            "lab_arena_commit_round_v3",
+            "lab_arena_runs",
             {
-                "p_round_id": "arena-2026-09-12",
-                "p_participants": [
-                    {"submission_id": "s1", "miner_hotkey": "h"}
-                ],
-                "p_benchmark_ref":
-                    "arena/arena-2026-09-12/benchmarks/%s.json" % ("b" * 64),
-                "p_evaluation_date": "2026-09-12",
-                "p_icp_set_date": "2026-09-11",
-                "p_scorer_image_digest": "sha256:" + "c" * 64,
-                "p_scorer_image_reference":
-                    "registry.example/scorer@sha256:" + "c" * 64,
-                "p_benchmark_commitment_doc": commitment,
+                "filters": {
+                    "round_id": "arena-2026-09-10",
+                    "runner_hotkey": "runner",
+                    "claim_request_id": "request-1",
+                    "claim_request_hash": "sha256:" + "1" * 64,
+                },
+                "limit": 1,
+                "columns": "claim_response",
             },
-        ),
+        )
     ]
 
 
 @pytest.mark.parametrize(
-    "result",
+    "rows",
     [
-        {"schema_version": "wrong", "version": 210,
-         "policy": "commit_reveal_day2_v1"},
-        {"schema_version": "leadpoet.lab_arena.benchmark_disclosure.v1",
-         "version": 209, "policy": "commit_reveal_day2_v1"},
-        {"schema_version": "leadpoet.lab_arena.benchmark_disclosure.v1",
-         "version": 210, "policy": "unknown"},
+        [],
+        [None],
+        [{}],
+        [{"claim_response": None}],
+        [{"claim_response": "leased"}],
+        [{"claim_response": {"status": "pending"}}],
     ],
 )
-def test_benchmark_disclosure_capability_fails_closed(result):
-    class CapabilityTransport(ShapeTransport):
-        def rpc(self, function, params):
-            return result
+def test_recover_claim_response_rejects_empty_or_malformed_rows(rows):
+    class Transport:
+        @staticmethod
+        def select(_table, **_kwargs):
+            return rows
 
-    with pytest.raises(ArenaStoreError, match="benchmark disclosure schema mismatch"):
-        ArenaStore(CapabilityTransport()).benchmark_disclosure_schema()
+    assert ArenaStore(Transport()).recover_claim_response(
+        round_id="arena-2026-09-10",
+        runner_hotkey="runner",
+        request_id="request-1",
+        request_hash="sha256:" + "1" * 64,
+    ) is None
 
 
 def test_store_boundary_contains_only_current_arena_durable_state():
@@ -255,6 +247,7 @@ def test_store_boundary_contains_only_current_arena_durable_state():
         "lab_arena_ledger",
         "lab_arena_accepted_weight_states",
         "lab_arena_chain_outcomes",
+        "lab_arena_judgment_cache",
     )
     for removed in (
         "lab_arena_append_generation_attempt",

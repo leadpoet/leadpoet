@@ -24,13 +24,19 @@ python3.11 -m pytest -q \
   tests/test_arena_validator_launcher.py \
   tests/test_arena_validator_restart.py \
   tests/test_arena_reveal_chain_source.py \
+  tests/test_arena_weight_access_routes.py \
   tests/test_registry_roles.py \
+  tests/test_validate_miner_testnet.py \
   tests/lab_arena/test_lab_arena_chain.py \
+  tests/lab_arena/test_validator_eligibility.py \
+  tests/lab_arena/test_validator_stake_flow.py \
+  tests/lab_arena/test_lab_arena_store.py \
   tests/lab_arena/test_scorer_image_access.py \
   tests/lab_arena/test_leased_images.py \
   tests/lab_arena/test_scorer_delivery_roundtrip.py \
   tests/lab_arena/test_lab_arena_service_rules.py \
   tests/lab_arena/test_arena_weight_state.py \
+  tests/lab_arena/test_lab_arena_api.py \
   tests/lab_arena/test_lab_arena_normal_weight_flow.py
 ```
 
@@ -54,8 +60,20 @@ The gate must prove:
   commitment or a missing pending commitment alone does not prove success.
 - Delayed outcome reports and older epoch recovery do not change rewards or
   prevent the current epoch from progressing.
-- Scoring setup/cycle failures and an empty queue do not stop weights. Claims
-  and results require the gateway's registered-validator role, not runner lists.
+- Scoring setup/cycle failures and claim denials do not stop weights. New
+  mainnet execute/score claims use the shared gateway scoring rule: registration, a
+  validator permit, and effective stake >=75,000, regardless of activity or
+  runner lists. Testnet retains its active-or-permitted policy without the
+  mainnet minimum. Existing leases do not gain a stake minimum at completion.
+  Capacity counts eligible planned runners with the same shared rule.
+- Weight-state and signed reward-basis retrieval require fresh, scope-bound
+  local-hotkey authentication plus finalized subnet registration and a validator
+  permit on every network. No scoring minimum applies to weight retrieval.
+  Unauthenticated, forged, wrong-scope, stale, unregistered, and non-permitted
+  requests are denied before state lookup/publication. Public round responses
+  must not expose the signed reward basis as an alternate route. Mainnet roles
+  remain validator for permitted hotkeys below the scoring minimum.
+  The retired Fulfillment reward-basis route and its unsigned client are absent.
 
 For database changes, apply the exact migration to disposable PostgreSQL.
 Exercise upgrades with representative old objects and dependency constraints,

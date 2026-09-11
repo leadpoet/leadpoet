@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -16,16 +17,19 @@ import tempfile
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Protocol, Sequence
 
+from lab_arena import contracts
 from lab_arena.contracts import document_hash
 
 MAX_ARENA_WEIGHT_ATTEMPTS = 3
+_ARENA_ARCHIVED_ATTEMPT_RE = re.compile(
+    r"epoch-[0-9]+-attempt-[0-9]+-signed\.json\Z"
+)
 
 
 class ArenaValidatorError(RuntimeError):
@@ -86,11 +90,18 @@ def _read_hashed_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 class ArenaPublicApi:
-    def __init__(self, base_url: str, *, timeout_seconds: int = 30) -> None:
+    def __init__(
+        self, base_url: str, *, keypair: Any, network: str, netuid: int,
+        timeout_seconds: int = 30, now: Any = time.time,
+    ) -> None:
         self.base_url = str(base_url).rstrip("/")
         if not self.base_url.startswith(("https://", "http://")):
             raise ArenaValidatorError("Arena API URL must be explicit HTTP(S)")
         self.timeout_seconds = int(timeout_seconds)
+        self.keypair = keypair
+        self.network = str(network)
+        self.netuid = int(netuid)
+        self.now = now
 
     def _get(self, path: str) -> Dict[str, Any]:
         request = urllib.request.Request(self.base_url + path, method="GET")
@@ -113,7 +124,43 @@ class ArenaPublicApi:
         return self._get("/arena/v1/signing-key")
 
     def accepted_weight_state(self, epoch: int) -> Optional[Dict[str, Any]]:
-        value = self._get("/arena/v1/weight-state?" + urllib.parse.urlencode({"epoch": int(epoch)}))
+        requested_epoch = int(epoch)
+        envelope = contracts.build_signed_request(
+            scope=contracts.SCOPE_WEIGHT_STATE,
+            round_id="weight-state",
+            hotkey=self.keypair.ss58_address,
+            body={
+                "epoch": requested_epoch,
+                "network": self.network,
+                "netuid": self.netuid,
+            },
+            timestamp=int(self.now()),
+            sign_message=lambda message: self.keypair.sign(
+                message.encode("utf-8")
+            ).hex(),
+        )
+        encoded = json.dumps(
+            envelope, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.base_url + "/arena/v1/weight-state", data=encoded,
+            method="POST", headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds
+            ) as response:
+                body = response.read(2 * 1024 * 1024 + 1)
+        except (OSError, urllib.error.HTTPError) as exc:
+            raise ArenaValidatorError("Arena accepted-state read failed") from exc
+        if len(body) > 2 * 1024 * 1024:
+            raise ArenaValidatorError("Arena accepted-state response is too large")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ArenaValidatorError("Arena accepted-state response is invalid") from exc
+        if not isinstance(value, dict):
+            raise ArenaValidatorError("Arena accepted-state response must be an object")
         if value.get("lookup_ok") is not True or set(value) != {"lookup_ok", "state"}:
             raise ArenaValidatorError("Arena accepted-state response is invalid")
         state = value["state"]
@@ -465,6 +512,8 @@ class ArenaWeightOrchestrator:
 
         candidates = []
         for path in self.paths.root.glob("epoch-*-signed.json"):
+            if _ARENA_ARCHIVED_ATTEMPT_RE.fullmatch(path.name):
+                continue
             try:
                 epoch = int(path.name.removeprefix("epoch-").removesuffix("-signed.json"))
             except ValueError:
@@ -640,7 +689,10 @@ def main(argv=None) -> int:
     chain = chain_module.ArenaChain(config, chain_module.connect_substrate(config))
     signer = None
     try:
-        public_api = ArenaPublicApi(args.api_base_url)
+        public_api = ArenaPublicApi(
+            args.api_base_url, keypair=keypair,
+            network=config.network_name, netuid=config.netuid,
+        )
         signing_key = public_api.signing_key()
         signing_key_from_document(signing_key, key_hash)
         cutover = chain_module.load_arena_cutover()

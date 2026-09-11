@@ -8,6 +8,8 @@ from lab_arena.provider_costs import (
     deepline_free_completed_cost,
     deepline_reservation_cost,
     openrouter_cost,
+    openrouter_generation_cost,
+    openrouter_insured_error_cost,
     scrapingdog_cost,
 )
 
@@ -20,6 +22,43 @@ def test_deepline_history_exact_terminal_match_ignores_absent_pagination_fields(
     )
     assert state == "matched" and cost is not None and cost.microusd == 14_000
     assert has_more is False and next_offset is None
+
+
+def test_deepline_history_accepts_strict_failed_error_zero_charge():
+    state, cost, has_more, next_offset = deepline_billing_history_cost(
+        {"recent": {"entries": [{
+            "request_id": "job-error", "operation": "exa_search",
+            "provider": "exa", "charge_state": "failed", "status": "error",
+            "credits": 0, "delta": 0,
+        }]}},
+        request_id="job-error", operation="exa_search",
+    )
+    assert state == "matched" and cost is not None and cost.microusd == 0
+    assert cost.price_basis == "deepline_billing_history_failed_zero"
+    assert has_more is False and next_offset is None
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"credits": 0.1},
+        {"delta": 0.1},
+        {"delta": -0.1},
+        {"status": "completed"},
+        {"delta": None},
+    ],
+)
+def test_deepline_history_rejects_nonzero_or_malformed_failed_charge(patch):
+    entry = {
+        "request_id": "job-error", "operation": "exa_search",
+        "provider": "exa", "charge_state": "failed", "status": "error",
+        "credits": 0, "delta": 0,
+    }
+    entry.update(patch)
+    assert deepline_billing_history_cost(
+        {"recent": {"entries": [entry]}},
+        request_id="job-error", operation="exa_search",
+    ) == ("invalid", None, False, None)
 
 
 def test_deepline_history_matches_exact_charge_group_alias():
@@ -174,10 +213,36 @@ def test_deepline_verified_no_bill_completed_tools_settle_zero(tool, basis):
     assert cost.microusd == 0 and cost.price_basis == basis
 
 
+def test_deepline_hunter_no_bill_structured_error_settles_zero_without_job_id():
+    cost = deepline_free_completed_cost(
+        {"tool": "hunter_discover"},
+        502,
+        {"error": {"code": "upstream_error"}},
+    )
+    assert cost is not None
+    assert cost.microusd == 0
+    assert cost.price_basis == "deepline_hunter_discover_error_zero"
+
+
+@pytest.mark.parametrize(
+    ("tool", "response"),
+    [
+        ("exa_search", {"error": {"code": "upstream_error"}}),
+        ("hunter_discover", {"error": {"code": "upstream_error"}, "billing": None}),
+        (
+            "hunter_discover",
+            {"error": {"code": "upstream_error"}, "billing": {"credits": "invalid"}},
+        ),
+    ],
+)
+def test_deepline_error_zero_proof_rejects_nonfree_or_present_billing(tool, response):
+    assert deepline_free_completed_cost({"tool": tool}, 502, response) is None
+
+
 @pytest.mark.parametrize(
     "response_status,response",
     [
-        (500, {"job_id": "wrapper-job", "status": "completed", "result": []}),
+        (399, {"job_id": "wrapper-job", "status": "completed", "result": []}),
         (200, {"status": "completed", "result": []}),
         (200, {"job_id": "wrapper-job", "status": "failed", "result": []}),
         (200, {"job_id": "wrapper-job", "status": "completed"}),
@@ -311,3 +376,147 @@ def test_openrouter_rejects_invalid_usage_cost(value):
 @pytest.mark.parametrize("response", [None, {}, {"usage": None}, {"cost": 1}, {"usage": {}}])
 def test_openrouter_requires_top_level_usage_cost(response):
     assert openrouter_cost(response) is None
+
+
+def test_openrouter_generation_cost_requires_one_matching_exact_charge():
+    cost = openrouter_generation_cost(
+        {"data": {"id": "gen-1", "total_cost": "0.0012", "usage": 0.0012}},
+        generation_id="gen-1",
+    )
+    assert cost is not None and cost.microusd == 1200
+    assert cost.price_basis == "openrouter_generation_cost"
+    for response in (
+        {"data": {"id": "other", "total_cost": "0.0012"}},
+        {"data": {"id": "gen-1"}},
+        {"data": {"id": "gen-1", "total_cost": "invalid"}},
+        {"data": {"id": "gen-1", "total_cost": "0.0012", "usage": "0.0013"}},
+        {"data": {"id": "gen-1", "total_cost": True}},
+        {"data": {"id": "gen-1", "total_cost": "0.0012"}, "error": {"code": 502}},
+    ):
+        assert openrouter_generation_cost(response, generation_id="gen-1") is None
+
+
+def _insured_openrouter_error(**metadata_patch):
+    metadata = {
+        "requested": "openai/gpt-4o-mini",
+        "is_byok": False,
+        "attempt": 1,
+        "attempts": [{"provider": "OpenAI", "status": 502}],
+    }
+    metadata.update(metadata_patch)
+    return {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": metadata,
+        "user_id": "documented-harmless-field",
+    }
+
+
+def _plain_openrouter_pricing(**patch):
+    pricing = {"request": "0", "image": "0", "web_search": "0"}
+    pricing.update(patch)
+    return pricing
+
+
+def test_openrouter_insured_error_proves_only_plain_non_byok_502_zero():
+    parameters = {
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    cost = openrouter_insured_error_cost(
+        parameters, _plain_openrouter_pricing(), 502, _insured_openrouter_error()
+    )
+    assert cost is not None and cost.microusd == 0
+    assert cost.price_basis == "openrouter_zero_completion_insurance_error_20260911"
+    reasoning_parameters = {
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+        "reasoning": {"enabled": True},
+        "include_reasoning": True,
+    }
+    reasoning_cost = openrouter_insured_error_cost(
+        reasoning_parameters,
+        _plain_openrouter_pricing(),
+        502,
+        _insured_openrouter_error(),
+    )
+    assert reasoning_cost is not None and reasoning_cost.microusd == 0
+
+
+@pytest.mark.parametrize(
+    ("parameters", "status", "response"),
+    [
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 500, _insured_openrouter_error()),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502.0, _insured_openrouter_error()),
+        ({"model": "openai/gpt-4o-mini:online", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(requested="openai/gpt-4o-mini:online")),
+        ({"model": "perplexity/sonar-pro", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(requested="perplexity/sonar-pro")),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}], "plugins": []}, 502, _insured_openrouter_error()),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": ["multimodal"]}]}, 502, _insured_openrouter_error()),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(is_byok=True)),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(pipeline=[{"type": "plugin", "name": "web-search"}])),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(attempts=[{"status": 200}])),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(attempts=[{"status": -1}])),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(attempts=[{"status": 0}])),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(attempts=[{"status": 699}])),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, {**_insured_openrouter_error(), "usage": None}),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, {**_insured_openrouter_error(), "id": "gen-1"}),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, {**_insured_openrouter_error(), "choices": []}),
+        ({"model": "openai/gpt-4o-mini", "messages": [{"content": "x"}]}, 502, {**_insured_openrouter_error(), "error": {"code": 503, "message": "wrong"}}),
+        ({"model": "unknown/plain-model", "messages": [{"content": "x"}]}, 502, _insured_openrouter_error(requested="unknown/plain-model")),
+    ],
+)
+def test_openrouter_insured_error_rejects_unproven_or_auxiliary_costs(
+    parameters, status, response
+):
+    assert openrouter_insured_error_cost(
+        parameters, _plain_openrouter_pricing(), status, response
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "pricing",
+    [
+        {"image": "0", "web_search": "0"},
+        _plain_openrouter_pricing(request="0.01"),
+        _plain_openrouter_pricing(request="NaN"),
+        _plain_openrouter_pricing(request=True),
+    ],
+)
+def test_openrouter_insured_error_requires_zero_valid_request_price(pricing):
+    parameters = {
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    assert openrouter_insured_error_cost(
+        parameters, pricing, 502, _insured_openrouter_error()
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "model",
+    (
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-5",
+        "openai/gpt-5.5",
+        "openai/gpt-5.6-sol",
+    ),
+)
+def test_openrouter_insured_error_allows_optional_model_prices_when_unused(model):
+    parameters = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    pricing = _plain_openrouter_pricing(image="0.000001", web_search="0.01")
+    response = _insured_openrouter_error(requested=model)
+
+    cost = openrouter_insured_error_cost(parameters, pricing, 502, response)
+
+    assert cost is not None and cost.microusd == 0
+    assert openrouter_insured_error_cost(
+        parameters,
+        pricing,
+        502,
+        _insured_openrouter_error(
+            requested=model,
+            pipeline=[{"type": "plugin", "name": "web-search"}],
+        ),
+    ) is None

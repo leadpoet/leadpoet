@@ -28,7 +28,7 @@ from bittensor_wallet import Keypair
 
 from lab_arena import broker as br
 from lab_arena import contracts, operations, runner as rn, runtime, shim, source_bundle
-from lab_arena.output import output_document_from_bytes
+from lab_arena.output import OutputInvalid, output_document_from_bytes
 
 RUNNER = Keypair.create_from_uri("//Runner")
 MINER = Keypair.create_from_uri("//Miner").ss58_address
@@ -224,6 +224,31 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     assert not spec.agent_entrypoint_path.exists()
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
+
+
+@pytest.mark.parametrize(
+    ("integrity_policy", "expected_status"),
+    [(None, "invalid_output"), ("arena_integrity_v1", "accepted")],
+)
+def test_missing_signal_date_is_scoped_to_integrity_rounds(
+    tmp_path, integrity_policy, expected_status
+):
+    run_lease = lease()
+    if integrity_policy:
+        run_lease["integrity_policy"] = integrity_policy
+    company = valid_company(1)
+    company["intent_signals"][0]["date"] = None
+    api = FakeApi([run_lease])
+    sandbox = BridgingRuntime(output={"companies": [company]}, calls=0)
+    (tmp_path / "work").mkdir()
+
+    rn.Runner(make_config(tmp_path, api, sandbox)).run_once()
+
+    completion = api.completions[0]["body"]
+    assert completion["result"]["terminal_status"] == expected_status
+    assert (completion["output"] is not None) is (
+        expected_status == "accepted"
+    )
 
 
 def test_execute_stages_restrictive_trusted_entrypoint_without_mutating_source(tmp_path):
@@ -888,6 +913,18 @@ def test_parallelism_env_and_http_boundary():
         rn.HttpArenaApiClient("http://localhost.evil.example")
     document = output_document_from_bytes(json.dumps([valid_company(1)]).encode())
     assert document["schema_version"] == contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION and len(document["companies"]) == 1
+
+
+def test_output_date_requirement_is_optional_and_explicit():
+    company = valid_company(1)
+    company["intent_signals"][0]["date"] = None
+    payload = json.dumps([company]).encode()
+
+    assert output_document_from_bytes(payload)["companies"][0][
+        "intent_signals"
+    ][0]["date"] is None
+    with pytest.raises(OutputInvalid, match="intent signal date is required"):
+        output_document_from_bytes(payload, require_intent_dates=True)
 
 
 def test_provider_http_timeout_covers_the_requested_provider_window():
@@ -1630,7 +1667,9 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
 
 
 @pytest.mark.parametrize("scoring_run", [False, True])
-def test_miner_key_failure_does_not_become_an_infrastructure_failure(tmp_path, scoring_run):
+def test_miner_key_failure_does_not_become_an_infrastructure_failure(
+    tmp_path, scoring_run
+):
     from lab_arena import scoring
 
     class MinerKeyApi(RefusingApi):
@@ -1647,6 +1686,51 @@ def test_miner_key_failure_does_not_become_an_infrastructure_failure(tmp_path, s
     result = contracts.validate_run_result(api.completions[0]["body"]["result"])
     assert result["terminal_status"] == "credential_error"
     assert api.completions[0]["body"].get("output") in (None, {})
+
+
+@pytest.mark.parametrize("code", ["budget_refused", "budget_exhausted"])
+def test_miner_scoring_funding_failure_is_challenger_specific(tmp_path, code):
+    from lab_arena import scoring
+
+    class MinerKeyApi(RefusingApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            document["call"].update(funding_source="miner_key")
+            return document
+
+    failure = scoring.build_scoring_failure("r1", "judge_error", detail="provider error")
+    api = MinerKeyApi([scoring_lease()], code=code)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=failure)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "credential_error"
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
+def test_miner_scoring_funding_refusal_does_not_replace_valid_output(tmp_path):
+    from lab_arena import scoring
+
+    class MinerKeyApi(RefusingApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            document["call"].update(funding_source="miner_key")
+            return document
+
+    output = scoring.build_scoring_output(
+        "r1",
+        [
+            {"final_score": 71.0, "failure_reason": ""},
+            {"final_score": 44.5, "failure_reason": ""},
+        ],
+    )
+    api = MinerKeyApi([scoring_lease()], code="budget_refused")
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=output)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    completion = api.completions[0]["body"]
+    assert contracts.validate_run_result(completion["result"])["terminal_status"] == "accepted"
+    assert completion["output"] == output
 
 
 class FlakyCompletionApi(FakeApi):

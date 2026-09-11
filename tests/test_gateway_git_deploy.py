@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import io
 import json
 import subprocess
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -78,83 +75,6 @@ def _paths(tmp_path: Path) -> tuple[Path, Path, Path]:
         tmp_path / "deployments" / "gateway-current.json",
         tmp_path / "deployments" / "gateway-last-good.json",
     )
-
-
-def _arena_environment() -> dict[str, str]:
-    return {
-        "LAB_ARENA_SUPABASE_URL": "https://arena.example",
-        "LAB_ARENA_SERVICE_KEY": "sb_secret_arena",
-    }
-
-
-class _SchemaResponse:
-    def __init__(self, value, status: int = 200):
-        self.body = json.dumps(value).encode("utf-8")
-        self.status = status
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
-
-    def getcode(self):
-        return self.status
-
-    def read(self, size=-1):
-        return self.body if size < 0 else self.body[:size]
-
-
-def _legacy_schema_opener(request, timeout):
-    del timeout
-    if "/rpc/" in request.full_url:
-        raise HTTPError(
-            request.full_url,
-            404,
-            "missing",
-            {},
-            io.BytesIO(json.dumps({"code": "PGRST202"}).encode("utf-8")),
-        )
-    return _SchemaResponse([])
-
-
-def _missing_capability_with_policy_row_opener(request, timeout):
-    del timeout
-    if "/rpc/" in request.full_url:
-        raise HTTPError(
-            request.full_url,
-            404,
-            "missing",
-            {},
-            io.BytesIO(json.dumps({"code": "PGRST202"}).encode("utf-8")),
-        )
-    query = parse_qs(urlsplit(request.full_url).query)
-    assert query == {
-        "select": ["round_id"],
-        "configuration_doc->benchmark_disclosure_policy": ["not.is.null"],
-        "limit": ["1"],
-    }
-    return _SchemaResponse([{"round_id": "arena-2026-09-11"}])
-
-
-def _installed_schema_opener(request, timeout):
-    del request, timeout
-    return _SchemaResponse(
-        gateway_git_deploy.BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY[1]
-    )
-
-
-def _install_benchmark_disclosure_declaration(repo: Path) -> str:
-    path = repo / "gateway" / "tee" / "supabase_schema_preflight_v2.py"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY = %r\n"
-        % (gateway_git_deploy.BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY,),
-        encoding="utf-8",
-    )
-    _git(repo, "add", str(path.relative_to(repo)))
-    _git(repo, "commit", "-m", "declare benchmark disclosure compatibility")
-    return _git(repo, "rev-parse", "HEAD")
 
 
 def test_fetch_branch_retries_transient_transport_failure(monkeypatch) -> None:
@@ -261,8 +181,6 @@ def _prepare(
     branch: str = "main",
     deploy_commit: str = "",
     repo_url: str | None = None,
-    environment: dict[str, str] | None = None,
-    compatibility_opener=_legacy_schema_opener,
 ) -> dict:
     plan, manifest, last_good = _paths(tmp_path)
     return gateway_git_deploy.prepare_deployment(
@@ -272,9 +190,7 @@ def _prepare(
         plan_file=plan,
         manifest_file=manifest,
         last_good_file=last_good,
-        environment=environment or _arena_environment(),
         deploy_commit=deploy_commit,
-        compatibility_opener=compatibility_opener,
     )
 
 
@@ -781,270 +697,6 @@ def test_reachable_full_sha_can_be_used_for_controlled_rollback(
     assert _git(git_fixture.checkout, "branch", "--show-current") == ""
 
 
-def test_benchmark_disclosure_floor_allows_safe_installation_order_and_compatible_rollback(
-    git_fixture: GitFixture,
-    tmp_path: Path,
-) -> None:
-    compatible = _install_benchmark_disclosure_declaration(git_fixture.source)
-    _git(git_fixture.source, "push", "origin", "main")
-
-    before_migration = _prepare(
-        git_fixture,
-        tmp_path / "before-migration",
-        compatibility_opener=_legacy_schema_opener,
-    )
-    assert before_migration["target_sha"] == compatible
-    assert before_migration["benchmark_disclosure_compatibility"] == "legacy_schema"
-
-    after_migration = _prepare(
-        git_fixture,
-        tmp_path / "after-migration",
-        compatibility_opener=_installed_schema_opener,
-    )
-    assert after_migration["target_sha"] == compatible
-    assert (
-        after_migration["benchmark_disclosure_compatibility"]
-        == "required_and_supported"
-    )
-
-    newer = _commit(git_fixture.source, "compatible-newer")
-    _git(git_fixture.source, "push", "origin", "main")
-    selected = _prepare(
-        git_fixture,
-        tmp_path / "compatible-rollback",
-        deploy_commit=compatible,
-        compatibility_opener=_installed_schema_opener,
-    )
-    assert selected["target_sha"] == compatible
-    assert newer != compatible
-
-
-def test_installed_benchmark_disclosure_floor_rejects_old_rollback_before_plan_write(
-    git_fixture: GitFixture,
-    tmp_path: Path,
-) -> None:
-    compatible = _install_benchmark_disclosure_declaration(git_fixture.source)
-    _git(git_fixture.source, "push", "origin", "main")
-    plan, manifest, _last_good = _paths(tmp_path)
-
-    with pytest.raises(
-        gateway_git_deploy.GatewayGitDeployError,
-        match="predates the installed benchmark disclosure reader floor",
-    ):
-        _prepare(
-            git_fixture,
-            tmp_path,
-            deploy_commit=git_fixture.initial_sha,
-            compatibility_opener=_installed_schema_opener,
-        )
-
-    assert compatible != git_fixture.initial_sha
-    assert _git(git_fixture.checkout, "rev-parse", "HEAD") == git_fixture.initial_sha
-    assert not plan.exists()
-    assert not manifest.exists()
-
-
-def test_installed_benchmark_disclosure_floor_rejects_incompatible_forward_candidate_cleanly(
-    git_fixture: GitFixture,
-    tmp_path: Path,
-) -> None:
-    incompatible = _commit(git_fixture.source, "incompatible-forward")
-    _git(git_fixture.source, "push", "origin", "main")
-    plan, manifest, _last_good = _paths(tmp_path)
-
-    with pytest.raises(
-        gateway_git_deploy.GatewayGitDeployError,
-        match="predates the installed benchmark disclosure reader floor",
-    ):
-        _prepare(
-            git_fixture,
-            tmp_path,
-            compatibility_opener=_installed_schema_opener,
-        )
-
-    assert incompatible != git_fixture.initial_sha
-    assert _git(git_fixture.checkout, "rev-parse", "HEAD") == git_fixture.initial_sha
-    assert not plan.exists()
-    assert not manifest.exists()
-
-
-def test_benchmark_disclosure_floor_uses_only_scoped_arena_authority() -> None:
-    observed = {}
-
-    def opener(request, timeout):
-        observed["url"] = request.full_url
-        observed["headers"] = {
-            name.lower(): value for name, value in request.header_items()
-        }
-        observed["timeout"] = timeout
-        return _SchemaResponse(
-            gateway_git_deploy.BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY[1]
-        )
-
-    assert gateway_git_deploy._probe_benchmark_disclosure_capability(
-        {
-            **_arena_environment(),
-            "SUPABASE_URL": "https://public.example",
-            "SUPABASE_SERVICE_ROLE_KEY": "must-not-be-used",
-        },
-        opener=opener,
-    )
-    assert observed["url"].startswith("https://arena.example/rest/v1/rpc/")
-    assert observed["headers"]["apikey"] == "sb_secret_arena"
-    assert "authorization" not in observed["headers"]
-    assert "must-not-be-used" not in json.dumps(observed)
-
-    fallback_requests = []
-
-    def missing_then_rows(request, timeout):
-        del timeout
-        fallback_requests.append(
-            (
-                request.full_url,
-                {name.lower(): value for name, value in request.header_items()},
-            )
-        )
-        if "/rpc/" in request.full_url:
-            raise HTTPError(
-                request.full_url,
-                404,
-                "missing",
-                {},
-                io.BytesIO(json.dumps({"code": "PGRST202"}).encode("utf-8")),
-            )
-        return _SchemaResponse([])
-
-    assert not gateway_git_deploy._probe_benchmark_disclosure_capability(
-        {
-            **_arena_environment(),
-            "SUPABASE_URL": "https://public.example",
-            "SUPABASE_SERVICE_ROLE_KEY": "must-not-be-used",
-        },
-        opener=missing_then_rows,
-    )
-    assert len(fallback_requests) == 2
-    assert all(url.startswith("https://arena.example/rest/v1/") for url, _ in fallback_requests)
-    assert all(headers["apikey"] == "sb_secret_arena" for _, headers in fallback_requests)
-    assert "must-not-be-used" not in json.dumps(fallback_requests)
-
-
-def test_benchmark_disclosure_floor_accepts_only_exact_missing_rpc_response() -> None:
-    assert not gateway_git_deploy._probe_benchmark_disclosure_capability(
-        _arena_environment(), opener=_legacy_schema_opener
-    )
-
-    def wrong_missing(request, timeout):
-        del timeout
-        raise HTTPError(
-            request.full_url,
-            404,
-            "missing",
-            {},
-            io.BytesIO(json.dumps({"code": "PGRST301"}).encode("utf-8")),
-        )
-
-    with pytest.raises(
-        gateway_git_deploy.GatewayGitDeployError,
-        match="compatibility probe failed",
-    ):
-        gateway_git_deploy._probe_benchmark_disclosure_capability(
-            _arena_environment(), opener=wrong_missing
-        )
-
-    def wrong_capability(request, timeout):
-        del request, timeout
-        return _SchemaResponse(
-            {
-                **gateway_git_deploy.BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY[1],
-                "version": 0,
-            }
-        )
-
-    with pytest.raises(
-        gateway_git_deploy.GatewayGitDeployError,
-        match="schema capability differs",
-    ):
-        gateway_git_deploy._probe_benchmark_disclosure_capability(
-            _arena_environment(), opener=wrong_capability
-        )
-
-
-def test_missing_capability_cannot_hide_existing_benchmark_disclosure_rounds() -> None:
-    with pytest.raises(
-        gateway_git_deploy.GatewayGitDeployError,
-        match="rows exist without the required schema capability",
-    ):
-        gateway_git_deploy._probe_benchmark_disclosure_capability(
-            _arena_environment(), opener=_missing_capability_with_policy_row_opener
-        )
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        {},
-        [{"round_id": "one"}, {"round_id": "two"}],
-        [{"round_id": "one", "configuration_doc": {}}],
-    ],
-)
-def test_missing_capability_requires_exact_bounded_round_probe_shape(value) -> None:
-    def malformed_rows(request, timeout):
-        del timeout
-        if "/rpc/" in request.full_url:
-            raise HTTPError(
-                request.full_url,
-                404,
-                "missing",
-                {},
-                io.BytesIO(json.dumps({"code": "PGRST202"}).encode("utf-8")),
-            )
-        return _SchemaResponse(value)
-
-    with pytest.raises(
-        gateway_git_deploy.GatewayGitDeployError,
-        match="round probe response is invalid",
-    ):
-        gateway_git_deploy._probe_benchmark_disclosure_capability(
-            _arena_environment(), opener=malformed_rows
-        )
-
-
-def test_missing_capability_round_probe_failure_is_before_candidate_mutation(
-    git_fixture: GitFixture,
-    tmp_path: Path,
-) -> None:
-    incompatible = _commit(git_fixture.source, "incompatible-forward")
-    _git(git_fixture.source, "push", "origin", "main")
-    plan, manifest, _last_good = _paths(tmp_path)
-
-    def unavailable_rounds(request, timeout):
-        del timeout
-        if "/rpc/" in request.full_url:
-            raise HTTPError(
-                request.full_url,
-                404,
-                "missing",
-                {},
-                io.BytesIO(json.dumps({"code": "PGRST202"}).encode("utf-8")),
-            )
-        raise HTTPError(request.full_url, 503, "unavailable", {}, None)
-
-    with pytest.raises(
-        gateway_git_deploy.GatewayGitDeployError,
-        match="round probe failed",
-    ):
-        _prepare(
-            git_fixture,
-            tmp_path,
-            compatibility_opener=unavailable_rounds,
-        )
-
-    assert incompatible != git_fixture.initial_sha
-    assert _git(git_fixture.checkout, "rev-parse", "HEAD") == git_fixture.initial_sha
-    assert not plan.exists()
-    assert not manifest.exists()
-
-
 def test_rollback_pin_must_be_full_and_reachable(
     git_fixture: GitFixture,
     tmp_path: Path,
@@ -1106,7 +758,6 @@ def test_prepare_cli_reads_repo_and_branch_from_hydrated_env_file(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(gateway_git_deploy, "urlopen", _legacy_schema_opener)
     _git(git_fixture.source, "checkout", "-b", "gateway-release")
     target = _commit(git_fixture.source, "release", filename="release.txt")
     _git(git_fixture.source, "push", "-u", "origin", "gateway-release")
@@ -1116,8 +767,6 @@ def test_prepare_cli_reads_repo_and_branch_from_hydrated_env_file(
             f"GITHUB_REPO_URL={git_fixture.remote}\n"
             "GITHUB_BRANCH=gateway-release\n"
             f"GATEWAY_DEPLOY_COMMIT={git_fixture.initial_sha}\n"
-            "LAB_ARENA_SUPABASE_URL=https://arena.example\n"
-            "LAB_ARENA_SERVICE_KEY=sb_secret_arena\n"
         ),
         encoding="utf-8",
     )
@@ -1150,11 +799,6 @@ def test_prepare_cli_honors_one_invocation_rollback_pin(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        gateway_git_deploy,
-        "_verify_benchmark_disclosure_release_compatibility",
-        lambda **_kwargs: "legacy_schema",
-    )
     _commit(git_fixture.source, "newer")
     _git(git_fixture.source, "push", "origin", "main")
     monkeypatch.setenv("GATEWAY_DEPLOY_COMMIT", git_fixture.initial_sha)

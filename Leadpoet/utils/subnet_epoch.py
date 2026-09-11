@@ -33,10 +33,18 @@ VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v4"
 CUTOVER_JSON_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON"
 CUTOVER_PATH_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"
 # The activated SN71 settlement mapping is public, immutable chain data.
-# The repo ships it so auditors that only pull the repository can construct
-# the official epoch authority without operator-side provisioning.
-DEFAULT_SN71_CUTOVER_MANIFEST_PATH = (
+# Source checkouts and installed wheels ship the same file so validators can
+# construct the official epoch authority without operator-side provisioning.
+_PACKAGED_SN71_CUTOVER_MANIFEST_PATH = (
     Path(__file__).resolve().parents[2]
+    / "leadpoet_canonical"
+    / "config"
+    / "stateful-epoch-cutover-sn71.json"
+)
+DEFAULT_SN71_CUTOVER_MANIFEST_PATH = (
+    _PACKAGED_SN71_CUTOVER_MANIFEST_PATH
+    if _PACKAGED_SN71_CUTOVER_MANIFEST_PATH.is_file()
+    else Path(__file__).resolve().parents[2]
     / "config"
     / "stateful-epoch-cutover-sn71.json"
 )

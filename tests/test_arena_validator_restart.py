@@ -1,7 +1,6 @@
 from pathlib import Path
 import shlex
 import subprocess
-import sys
 
 import pytest
 
@@ -341,72 +340,3 @@ cat "$ROLLBACK/candidate.unit"
     assert "ExecStartPre=/opt/venv/bin/python3 scripts/run_arena_validator.py --check-only" in unit
     assert "ExecStart=/opt/venv/bin/python3 scripts/run_arena_validator.py" in unit
     assert "Environment=/etc/leadpoet/arena-validator.env" in unit
-
-
-def _proc_entry(proc: Path, pid: int, cwd: Path, command: Path, *, ppid=1, pgid=None):
-    entry = proc / str(pid)
-    entry.mkdir()
-    (entry / "cwd").symlink_to(cwd, target_is_directory=True)
-    (entry / "cmdline").write_bytes(b"python3\0" + str(command).encode() + b"\0")
-    fields = ["0"] * 22
-    fields[3] = str(ppid)
-    fields[4] = str(pgid if pgid is not None else pid)
-    fields[21] = str(1000 + pid)
-    (entry / "stat").write_text(" ".join(fields))
-
-
-def test_process_identity_cli_handles_n_minus_one_and_second_restart(tmp_path):
-    source = tmp_path / "installed"
-    release = tmp_path / "release"
-    current = tmp_path / "current"
-    proc = tmp_path / "proc"
-    for root in (source, release, proc):
-        (root / "scripts").mkdir(parents=True, exist_ok=True)
-    current.symlink_to(release, target_is_directory=True)
-    module = "validator_tee.host.arena_restart_identity"
-
-    _proc_entry(proc, 101, source, source / "scripts/run_arena_validator.py")
-    first = subprocess.run(
-        [sys.executable, "-m", module, str(source), str(current), "0", "--proc-root", str(proc)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    assert first.stdout.strip() == "101 1101"
-
-    for child in proc.iterdir():
-        import shutil
-
-        shutil.rmtree(child)
-    _proc_entry(proc, 202, release, release / "scripts/run_arena_validator.py")
-    second = subprocess.run(
-        [sys.executable, "-m", module, str(source), str(current), "202", "--proc-root", str(proc)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    assert second.stdout.strip() == "202 1202"
-
-
-def test_process_identity_ignores_only_each_captured_container_tree(tmp_path):
-    from validator_tee.host.arena_restart_identity import find_validator_process
-
-    source = tmp_path / "source"
-    current = tmp_path / "current"
-    proc = tmp_path / "proc"
-    for root in (source, current, proc):
-        (root / "scripts").mkdir(parents=True)
-    _proc_entry(proc, 101, source, source / "scripts/run_arena_validator.py")
-    _proc_entry(proc, 201, source, source / "neurons/validator.py")
-    _proc_entry(proc, 202, source, source / "neurons/validator.py")
-    assert find_validator_process(source, current, 0, proc, ignored_tree_roots=(201, 202)) == (
-        101,
-        "1101",
-    )
-    foreign = tmp_path / "foreign"
-    (foreign / "neurons").mkdir(parents=True)
-    _proc_entry(proc, 301, foreign, foreign / "neurons/validator.py")
-    with pytest.raises(RuntimeError, match="ownership is ambiguous"):
-        find_validator_process(source, current, 0, proc, ignored_tree_roots=(201, 202))

@@ -7,27 +7,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 CODE_REVIEW_MIGRATION = "scripts/207-lab-arena-code-review.sql"
-BENCHMARK_DISCLOSURE_MIGRATION = "scripts/210-lab-arena-benchmark-commit-reveal.sql"
-BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY = (
-    "lab_arena_benchmark_disclosure_schema_v1",
-    {
-        "schema_version": "leadpoet.lab_arena.benchmark_disclosure.v1",
-        "version": 210,
-        "policy": "commit_reveal_day2_v1",
-    },
-)
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (CODE_REVIEW_MIGRATION, "lab_arena_submissions", ("submission_id", "code_review_status", "code_review_doc")),
-    (
-        BENCHMARK_DISCLOSURE_MIGRATION,
-        "lab_arena_rounds",
-        (
-            "round_id",
-            "benchmark_reveal_at",
-            "benchmark_commitment_doc",
-            "benchmark_committed_at",
-        ),
-    ),
     ("scripts/125-research-lab-artifact-key-lineage.sql", "research_lab_provider_evidence_cache_v2", ("artifact_master_key_ref_hash",)),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutovers_v1", ("mapping_hash", "network_genesis_hash", "netuid", "first_subnet_epoch_index", "first_settlement_epoch_id")),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_state_v1", ("lifecycle_state", "mapping_hash", "network_genesis_hash", "netuid", "updated_at")),
@@ -39,7 +20,6 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (CODE_REVIEW_MIGRATION, "lab_arena_code_review_schema_v1"),
     (CODE_REVIEW_MIGRATION, "lab_arena_begin_submission_review"),
     (CODE_REVIEW_MIGRATION, "lab_arena_finish_submission_review"),
-    (BENCHMARK_DISCLOSURE_MIGRATION, BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY[0]),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "put_research_lab_provider_evidence_cache_v2"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "research_lab_provider_persistence_batch_contract_v1"),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
@@ -60,18 +40,9 @@ SCHEMA_CAPABILITIES = (
     ("lab_arena_schema_version_v1", {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197}),
     ("lab_arena_weight_state_schema_v1", {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}),
     ("lab_arena_incentive_retirement_schema_v1", {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203}),
-    BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY,
 )
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
-PRIVATE_ARENA_MIGRATIONS = frozenset(
-    {CODE_REVIEW_MIGRATION, BENCHMARK_DISCLOSURE_MIGRATION}
-)
-PRIVATE_ARENA_CAPABILITIES = frozenset(
-    {
-        "lab_arena_code_review_schema_v1",
-        BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY[0],
-    }
-)
+PRIVATE_ARENA_CAPABILITIES = frozenset({"lab_arena_code_review_schema_v1"})
 
 class SupabaseSchemaPreflightV2Error(RuntimeError):
     """The selected release cannot use the live PostgREST schema."""
@@ -126,8 +97,8 @@ def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *,
         }
     migrations = set()
     for migration, table, columns in REQUIRED_SUPABASE_V2_SCHEMA:
-        probe_url = arena_supabase_url if migration in PRIVATE_ARENA_MIGRATIONS else supabase_url
-        probe_headers = arena_headers if migration in PRIVATE_ARENA_MIGRATIONS else headers
+        probe_url = arena_supabase_url if migration == CODE_REVIEW_MIGRATION else supabase_url
+        probe_headers = arena_headers if migration == CODE_REVIEW_MIGRATION else headers
         request = Request(f"{probe_url}/rest/v1/{table}?{urlencode({'select': ','.join(columns), 'limit': '0'})}", headers=probe_headers)
         try:
             with opener(request, timeout=timeout_seconds) as response:
@@ -167,7 +138,7 @@ def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *,
     for migration, function_name in required_rpcs:
         authority = (
             "lab_arena_service"
-            if migration in PRIVATE_ARENA_MIGRATIONS else "service_role"
+            if migration == CODE_REVIEW_MIGRATION else "service_role"
         )
         paths = schema_paths[authority]
         if f"/rpc/{function_name}" not in paths:

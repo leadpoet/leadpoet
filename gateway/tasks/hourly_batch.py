@@ -79,6 +79,17 @@ def build_arweave_checkpoint_log_event(
     }
 
 
+def serialize_and_compress_events(events) -> tuple:
+    """Serialise and gzip a checkpoint's events.
+
+    Pure CPU, no awaits: callers run it in a worker thread so a checkpoint
+    build cannot block requests being served on the event loop.  Returns
+    (uncompressed_bytes, compressed_bytes) so callers can report the ratio.
+    """
+    events_bytes = json.dumps(events, default=str).encode("utf-8")
+    return events_bytes, gzip.compress(events_bytes, compresslevel=9)
+
+
 async def hourly_batch_task(
     *,
     run_immediately: bool = False,
@@ -248,10 +259,15 @@ async def hourly_batch_task(
             print(f"   Time range: {header['time_range']['start']} → {header['time_range']['end']}")
             
             # Step 3: Compress events
+            #
+            # Serialising and gzip -9'ing a whole checkpoint is seconds of
+            # straight CPU on a full buffer, and this task shares the event
+            # loop with every request the gateway is serving.  Run it in a
+            # worker thread so the checkpoint never stalls live traffic.
             print(f"\n📦 Compressing events...")
-            events_json = json.dumps(events, default=str)  # Handle datetime objects
-            events_bytes = events_json.encode('utf-8')
-            compressed_events = gzip.compress(events_bytes, compresslevel=9)
+            events_bytes, compressed_events = await asyncio.to_thread(
+                serialize_and_compress_events, events
+            )
             
             compression_ratio = len(compressed_events) / len(events_bytes)
             print(f"✅ Compression complete:")
@@ -303,11 +319,15 @@ async def hourly_batch_task(
             
             # Step 5: Require confirmed immutable readback of the exact bytes.
             print(f"\n🔍 Verifying confirmed Arweave readback...")
-            expected_payload = checkpoint_payload_bytes(
-                header=header,
-                signature=signature,
-                events=compressed_events,
-                tree_levels=tree_levels,
+            # Canonicalising the payload base64s the compressed events and
+            # re-serialises the tree, so it is off the loop for the same reason.
+            expected_payload = await asyncio.to_thread(
+                lambda: checkpoint_payload_bytes(
+                    header=header,
+                    signature=signature,
+                    events=compressed_events,
+                    tree_levels=tree_levels,
+                )
             )
             confirmed = await wait_for_confirmation(
                 tx_id,

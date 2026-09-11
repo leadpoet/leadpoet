@@ -273,6 +273,43 @@ def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     assert broadcasts == ["0xdeadbeef"]
 
 
+def test_prior_poll_skips_archived_attempts_but_warns_on_malformed_names(
+    tmp_path, capsys
+):
+    def journal(epoch):
+        value = {"epoch": epoch, "record": "canonical"}
+        value["record_hash"] = contracts.document_hash(value)
+        return value
+
+    # A valid archive name is produced by ArenaWeightPaths.archived_attempt;
+    # its contents must not be re-polled as an active journal.
+    (tmp_path / "epoch-8-attempt-1-signed.json").write_text(
+        "not-json\n", encoding="utf-8"
+    )
+    (tmp_path / "epoch-8-signed.json").write_text(
+        json.dumps(journal(8)) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "epoch-8-attempt-invalid-signed.json").write_text(
+        "not-json\n", encoding="utf-8"
+    )
+    (tmp_path / "epoch-not-an-epoch-signed.json").write_text(
+        "not-json\n", encoding="utf-8"
+    )
+
+    orchestrator = _orchestrator(tmp_path, _Signer(_protected(), []), [])
+    recovered = []
+    confirmed = []
+    orchestrator._recover_protected_state = lambda signed: recovered.append(signed)
+    orchestrator._confirm = lambda signed: confirmed.append(signed)
+
+    orchestrator.poll_prior_outcomes(9)
+
+    assert [value["epoch"] for value in recovered] == [8]
+    assert [value["epoch"] for value in confirmed] == [8]
+    stderr = capsys.readouterr().err
+    assert stderr.count("Arena validator ignored an invalid journal filename") == 2
+
+
 def test_expired_mortal_attempt_retries_fresh_era_within_same_epoch(tmp_path):
     first = _protected()
     second = dict(first)

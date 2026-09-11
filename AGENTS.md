@@ -1,5 +1,22 @@
 # Agent Instructions
 
+## Scoped production authorization: 12-hour Arena launch watch
+
+On 2026-09-11 the user explicitly authorized continuous production monitoring
+from 06:36:43 UTC through 18:36:43 UTC with the overnight recovery skills.
+This covers necessary protected access, read-only production inspection,
+narrow tested permanent fixes, committed migrations and scoped recovery
+operations, pushes and safe merges, and canonical gateway/normal-validator
+restarts. Preserve submitted models, encrypted credential references, round
+assignments, intermediate results and accepted work; resume the same submission
+where safe. Preserve next-day ICP evaluation and disclosure, scoring, budgets,
+promotion, rewards, and finalized weight security. Keep monitoring after every
+fix or success until the deadline or STOP. Do not restore Research Lab,
+SOURCE_ADD, legacy auditor, or Nitro requirements in the normal Arena path.
+Preserve unrelated concurrent work. This authority is scoped to this watch and
+expires when it ends.
+
+
 ## Scoped production authorization: PR190 scoring review and validation
 
 On 2026-09-10 the user explicitly authorized PR190 review and end-to-end

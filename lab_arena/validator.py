@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -26,6 +27,9 @@ from lab_arena import contracts
 from lab_arena.contracts import document_hash
 
 MAX_ARENA_WEIGHT_ATTEMPTS = 3
+_ARENA_ARCHIVED_ATTEMPT_RE = re.compile(
+    r"epoch-[0-9]+-attempt-[0-9]+-signed\.json\Z"
+)
 
 
 class ArenaValidatorError(RuntimeError):
@@ -508,6 +512,8 @@ class ArenaWeightOrchestrator:
 
         candidates = []
         for path in self.paths.root.glob("epoch-*-signed.json"):
+            if _ARENA_ARCHIVED_ATTEMPT_RE.fullmatch(path.name):
+                continue
             try:
                 epoch = int(path.name.removeprefix("epoch-").removesuffix("-signed.json"))
             except ValueError:

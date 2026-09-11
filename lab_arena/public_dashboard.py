@@ -23,6 +23,7 @@ _COST_REASONS = frozenset(
         "historical_round",
         "stored_output_invalid",
         "provider_calls_inflight",
+        "provider_cost_uncertain",
         "execution_cap_exceeded",
         "cost_per_company_exceeded",
     }

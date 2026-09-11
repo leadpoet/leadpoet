@@ -1958,6 +1958,12 @@ class ArenaService:
                 "eligible": False,
                 "eligibility_reason": "provider_calls_inflight",
             }
+        if execution["uncertain_calls"] or judge["uncertain_calls"]:
+            return {
+                "cost_summary": summary,
+                "eligible": False,
+                "eligibility_reason": "provider_cost_uncertain",
+            }
         if execution["conservative_microusd"] > execution_cap:
             reason = "execution_cap_exceeded"
         elif execution["conservative_microusd"] > per_company_cap * returned:

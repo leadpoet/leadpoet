@@ -234,7 +234,7 @@ def test_invalid_stored_output_fails_only_cost_eligibility():
     }
 
 
-def test_inflight_calls_fail_closed_while_uncertain_cost_is_conservative():
+def test_inflight_and_uncertain_calls_fail_closed():
     service, row, submission_id, runs = _cost_service(amount=0)
     service._store.submission_costs = lambda requested: _costs(
         requested,
@@ -253,9 +253,54 @@ def test_inflight_calls_fail_closed_while_uncertain_cost_is_conservative():
     assert uncertain["cost_summary"]["execution"]["settled_microusd"] == 0
     assert uncertain["cost_summary"]["execution"]["conservative_microusd"] == 10_000_001
     assert uncertain["eligible"] is False
+    assert uncertain["eligibility_reason"] == "provider_cost_uncertain"
 
 
-def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores():
+def test_full_cap_uncertain_liability_is_not_eligible_for_one_hundred_outputs():
+    service, row, submission_id, runs = _cost_service(
+        amount=0, companies_per_icp=5
+    )
+    uncertain = _provider_row(0, uncertain_calls=1)
+    uncertain["reserved_or_uncertain_microusd"] = 50_000_000
+    service._store.submission_costs = lambda requested: _costs(
+        requested, uncertain
+    )
+
+    result = service._submission_cost_eligibility(row, submission_id, runs)
+
+    assert result["cost_summary"]["returned_company_count"] == 100
+    assert result["cost_summary"]["execution"]["conservative_microusd"] == 50_000_000
+    assert result["eligible"] is False
+    assert result["eligibility_reason"] == "provider_cost_uncertain"
+
+
+def test_uncertain_judge_cost_also_fails_cost_eligibility():
+    service, row, submission_id, runs = _cost_service(
+        amount=10_000_000, companies_per_icp=1
+    )
+    service._store.submission_costs = lambda requested: _costs(
+        requested,
+        _provider_row(10_000_000),
+        _provider_row(0, kind="score", uncertain_calls=1),
+    )
+
+    result = service._submission_cost_eligibility(row, submission_id, runs)
+
+    assert result["eligible"] is False
+    assert result["eligibility_reason"] == "provider_cost_uncertain"
+    assert result["cost_summary"]["judge"]["uncertain_calls"] == 1
+
+
+@pytest.mark.parametrize(
+    ("high_amount", "high_uncertain", "high_reason"),
+    [
+        (10_000_001, False, "cost_per_company_exceeded"),
+        (10_000_000, True, "provider_cost_uncertain"),
+    ],
+)
+def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores(
+    high_amount, high_uncertain, high_reason
+):
     participants = [
         {"submission_id": "baseline", "miner_hotkey": BASELINE_HOTKEY, "is_king": True},
         {"submission_id": "high", "miner_hotkey": HIGH_HOTKEY, "is_king": False},
@@ -268,7 +313,7 @@ def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores()
         )
         for run in runs
     }
-    amounts = {"baseline": 50_000_000, "high": 10_000_001, "low": 10_000_000}
+    amounts = {"baseline": 50_000_000, "high": high_amount, "low": 10_000_000}
     writes = []
 
     class Store:
@@ -278,7 +323,11 @@ def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores()
 
         @staticmethod
         def submission_costs(submission_id):
-            return _costs(submission_id, _provider_row(amounts[submission_id]))
+            row = _provider_row(
+                amounts[submission_id],
+                uncertain_calls=1 if submission_id == "high" and high_uncertain else 0,
+            )
+            return _costs(submission_id, row)
 
         @staticmethod
         def transition_round(_round_id, old, new, patch):
@@ -313,6 +362,7 @@ def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores()
     ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
     assert ranking["high"]["final_score"] == 90.0
     assert ranking["high"]["eligible"] is False
+    assert ranking["high"]["eligibility_reason"] == high_reason
     assert ranking["low"]["eligible"] is True
     assert ranking["baseline"]["final_score"] == 50.0
     assert ranking["baseline"]["eligible"] is False
@@ -427,6 +477,15 @@ def test_dashboard_projects_costs_only_from_published_final_ranking():
     serialized = json.dumps(published, sort_keys=True)
     assert '"eligible": true' in serialized
     assert "private_cost_detail" not in serialized
+
+    final["eligible"] = False
+    final["eligibility_reason"] = "provider_cost_uncertain"
+    uncertain_published = public_dashboard.round_summary(
+        {**base, "status": "published"}
+    )
+    uncertain_serialized = json.dumps(uncertain_published, sort_keys=True)
+    assert '"eligible": false' in uncertain_serialized
+    assert '"eligibility_reason": "provider_cost_uncertain"' in uncertain_serialized
 
 
 def test_new_round_defaults_freeze_fifty_dollars_and_half_dollar_per_company():

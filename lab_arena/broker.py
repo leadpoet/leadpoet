@@ -78,8 +78,8 @@ _SAFE_EXCEPTION_CLASSES = frozenset(
 _DEEPLINE_JOB_STATUSES = frozenset(
     {"cancelled", "completed", "failed", "in_progress", "pending", "queued", "running"}
 )
-_DEEPLINE_BILLING_MAX_ATTEMPTS = 4
-_DEEPLINE_BILLING_MAX_SECONDS = 5.0
+_DEEPLINE_BILLING_MAX_ATTEMPTS = 24
+_DEEPLINE_BILLING_MAX_SECONDS = 30.0
 _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 
 
@@ -300,7 +300,11 @@ def deepline_cost_microusd(body: bytes) -> Optional[int]:
 
 
 def _missing_provider_cost_call_doc(
-    response: ProviderResponse, document: Any
+    response: ProviderResponse,
+    document: Any,
+    *,
+    deepline_request_id: Optional[str] = None,
+    deepline_operation: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return bounded structural diagnostics without provider content."""
 
@@ -321,6 +325,13 @@ def _missing_provider_cost_call_doc(
     top_status = document.get("status") if is_mapping else None
     if isinstance(top_status, str) and top_status in _DEEPLINE_JOB_STATUSES:
         diagnostics["top_level_job_status"] = top_status
+    if deepline_request_id is not None and deepline_operation is not None:
+        diagnostics.update(
+            {
+                "deepline_job_id": deepline_request_id,
+                "deepline_operation": deepline_operation,
+            }
+        )
     return diagnostics
 
 
@@ -484,13 +495,11 @@ def _deepline_billing_readback(
     }
     history_url = DEEPLINE_BILLING_HISTORY_URL
     current_offset = 0
+    next_deeper_offset: Optional[int] = None
     for request_number in range(_DEEPLINE_BILLING_MAX_ATTEMPTS):
-        # A newly completed job may not yet appear on the newest page. Keep
-        # the existing three-page scan, then refresh the newest page instead
-        # of spending every read on older history. The time bound is unchanged.
-        if request_number == _DEEPLINE_BILLING_MAX_ATTEMPTS - 1:
-            history_url = DEEPLINE_BILLING_HISTORY_URL
-            current_offset = 0
+        # Alternate a paced newest-page refresh with one progressively older
+        # page. This catches delayed posting without losing bounded coverage
+        # when account-wide traffic pushes a new charge beyond the first page.
         now = time.monotonic()
         if now >= readback_deadline:
             break
@@ -530,12 +539,16 @@ def _deepline_billing_readback(
             return None
         if state == "matched":
             return cost
-        if state == "pending" and has_more:
+        if state == "pending" and has_more and current_offset == 0:
             if next_offset is None:
                 return None
-            current_offset = next_offset
-            history_url = DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=" + str(next_offset)
+            current_offset = next_deeper_offset or next_offset
+            history_url = DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=" + str(current_offset)
             continue
+        if state == "pending" and has_more and current_offset > 0:
+            next_deeper_offset = next_offset
+        elif state == "pending":
+            next_deeper_offset = None
         history_url = DEEPLINE_BILLING_HISTORY_URL
         current_offset = 0
     return None
@@ -962,6 +975,7 @@ class Broker:
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
         deepline_request_id: Optional[str] = None
+        deepline_operation: Optional[str] = None
         try:
             url, headers = inject_credential(outbound, secret)
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
@@ -1076,7 +1090,12 @@ class Broker:
                     run_id=context.run_id,
                     lease_token_hash=context.lease_token_hash,
                     call_identity=call_identity,
-                    call_doc=_missing_provider_cost_call_doc(response, raw_document),
+                    call_doc=_missing_provider_cost_call_doc(
+                        response,
+                        raw_document,
+                        deepline_request_id=deepline_request_id,
+                        deepline_operation=deepline_operation,
+                    ),
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount, "provider_status": int(response.status)})

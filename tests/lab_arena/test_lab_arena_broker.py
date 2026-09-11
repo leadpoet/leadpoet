@@ -773,6 +773,8 @@ def test_real_deepline_free_company_search_malformed_billing_does_not_fall_back(
         "usage_present": False,
         "billing_present": True,
         "top_level_job_status": "completed",
+        "deepline_job_id": "iad1::free-company-search",
+        "deepline_operation": "free_simple_company_search",
     }
 
 
@@ -851,7 +853,7 @@ def test_deepline_missing_native_billing_recovers_full_positive_history_charge()
     assert result.call["actual_microusd"] == 14_000
     assert result.call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
     assert store.calls[result.call["call_identity"]]["actual"] == 14_000
-    assert 0 < transport.sent[1]["timeout"] <= 5.0
+    assert 0 < transport.sent[1]["timeout"] <= 30.0
 
 
 def test_deepline_billing_history_follows_forward_offset_without_poll_delay(monkeypatch):
@@ -903,28 +905,43 @@ def test_deepline_billing_history_follows_forward_offset_without_poll_delay(monk
     assert store.calls[result.call["call_identity"]]["actual"] == 14_000
 
 
-def test_deepline_billing_history_polls_again_after_current_page_miss(monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(br.time, "sleep", sleeps.append)
+def test_deepline_billing_history_keeps_polling_after_old_four_read_window(monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
     job_id = "iad1::lagged-history"
     envelope = {
         "job_id": job_id,
         "result": {"data": {"results": []}},
         "status": "completed",
     }
+
+    class DelayedFullHistory(FakeTransport):
+        def send(self, **kwargs):
+            if kwargs["url"].startswith(br.DEEPLINE_BILLING_HISTORY_URL):
+                self.sent.append({
+                    "method": kwargs["method"], "url": kwargs["url"],
+                    "headers": dict(kwargs["headers"]), "body": kwargs["body"],
+                    "timeout": kwargs["timeout_seconds"],
+                })
+                if kwargs["url"] == br.DEEPLINE_BILLING_HISTORY_URL and elapsed[0] >= 6.0:
+                    history = deepline_history(
+                        deepline_history_entry(job_id, "exa_search", 0.03),
+                        has_more=True, next_offset=50,
+                    )
+                else:
+                    offset = int(kwargs["url"].rsplit("=", 1)[-1]) if "recent_offset=" in kwargs["url"] else 0
+                    history = deepline_history(
+                        deepline_history_entry("older", "exa_search", 0.01),
+                        has_more=True, next_offset=offset + 50,
+                    )
+                return br.ProviderResponse(200, {}, json.dumps(history).encode())
+            return super().send(**kwargs)
+
     broker, store, transport = make_broker(
-        transport=FakeTransport(
-            [
-                (200, json.dumps(envelope).encode()),
-                (200, deepline_history()),
-                (
-                    200,
-                    deepline_history(
-                        deepline_history_entry(job_id, "exa_search", 0.03)
-                    ),
-                ),
-            ]
-        )
+        transport=DelayedFullHistory([(200, json.dumps(envelope).encode())])
     )
     result = broker.execute(
         CONTEXT,
@@ -934,11 +951,10 @@ def test_deepline_billing_history_polls_again_after_current_page_miss(monkeypatc
         timeout_ms=30_000,
     )
     assert result.status == 200 and result.call["actual_microusd"] == 3_000
-    assert sleeps == [2.0]
-    assert [sent["url"] for sent in transport.sent[1:]] == [
-        br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL,
-    ]
+    assert elapsed[0] == 6.0
+    assert [sent["url"] for sent in transport.sent[1:]].count(
+        br.DEEPLINE_BILLING_HISTORY_URL
+    ) == 4
     assert store.calls[result.call["call_identity"]]["actual"] == 3_000
 
 
@@ -963,17 +979,17 @@ def test_deepline_billing_history_stops_on_equal_nonadvancing_offset():
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
-def test_deepline_billing_history_refreshes_recent_after_paginated_misses(monkeypatch):
+def test_deepline_billing_history_scans_deeper_than_old_offset_limit(monkeypatch):
     sleeps = []
     monkeypatch.setattr(br.time, "sleep", sleeps.append)
     job_id = "iad1::new-charge-arrived"
     envelope = {"job_id": job_id, "result": {"data": []}, "status": "completed"}
     older_pages = [
-        (200, deepline_history(
-            deepline_history_entry("older-%d" % index, "exa_search", 0.01),
-            has_more=True, next_offset=(index + 1) * 50,
-        ))
-        for index in range(3)
+        (200, deepline_history(has_more=True, next_offset=50)),
+        (200, deepline_history(has_more=True, next_offset=100)),
+        (200, deepline_history(has_more=True, next_offset=50)),
+        (200, deepline_history(has_more=True, next_offset=150)),
+        (200, deepline_history(has_more=True, next_offset=50)),
     ]
     broker, store, transport = make_broker(transport=FakeTransport([
         (200, json.dumps(envelope).encode()),
@@ -994,10 +1010,12 @@ def test_deepline_billing_history_refreshes_recent_after_paginated_misses(monkey
     assert [request["url"] for request in transport.sent[1:]] == [
         br.DEEPLINE_BILLING_HISTORY_URL,
         br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
+        br.DEEPLINE_BILLING_HISTORY_URL,
         br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=100",
         br.DEEPLINE_BILLING_HISTORY_URL,
+        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=150",
     ]
-    assert sleeps == [2.0]
+    assert sleeps == [2.0, 2.0]
 
 
 def test_deepline_nonterminal_older_match_resets_offset_before_newest_refresh(monkeypatch):
@@ -1023,9 +1041,9 @@ def test_deepline_nonterminal_older_match_resets_offset_before_newest_refresh(mo
         br.DEEPLINE_BILLING_HISTORY_URL,
         br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
         br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL,
+        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
     ]
-    assert sleeps == [2.0, 2.0]
+    assert sleeps == [2.0]
     assert store.log == ["reserve", "dispatch", "settle"]
 
 
@@ -1064,8 +1082,8 @@ def test_deepline_billing_history_accepts_exact_match_without_exhausting_pages()
     assert store.calls[result.call["call_identity"]]["actual"] == 14_000
 
 
-@pytest.mark.parametrize("request_seconds, expected_reads", [(2.0, 2), (20.0, 3)])
-def test_deepline_final_history_refresh_keeps_original_time_bound(monkeypatch, request_seconds, expected_reads):
+@pytest.mark.parametrize("request_seconds", [2.0, 20.0, 45.0])
+def test_deepline_final_history_refresh_keeps_original_time_bound(monkeypatch, request_seconds):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
     monkeypatch.setattr(br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds))
@@ -1090,9 +1108,9 @@ def test_deepline_final_history_refresh_keeps_original_time_bound(monkeypatch, r
         operation="exa_search", request_deadline=request_seconds,
     )
     assert cost is None
-    assert elapsed[0] == min(request_seconds, 5.0)
-    assert len(transport.timeouts) == expected_reads
-    assert all(0 < value <= 5.0 for value in transport.timeouts)
+    assert elapsed[0] == min(request_seconds, 30.0)
+    assert 1 <= len(transport.timeouts) <= br._DEEPLINE_BILLING_MAX_ATTEMPTS
+    assert all(0 < value <= min(request_seconds, 30.0) for value in transport.timeouts)
 
 
 @pytest.mark.parametrize(
@@ -1164,7 +1182,7 @@ def test_deepline_invalid_or_conflicting_history_fails_closed(entries):
     assert sentinel.encode() not in result.body
 
 
-def test_deepline_pending_history_polls_four_times_then_fails_closed(monkeypatch):
+def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monkeypatch):
     monkeypatch.setattr(br.time, "sleep", lambda seconds: None)
     job_id = "iad1::pending-history"
     envelope = {
@@ -1180,7 +1198,7 @@ def test_deepline_pending_history_polls_four_times_then_fails_closed(monkeypatch
     )
     broker, store, transport = make_broker(
         transport=FakeTransport(
-            [(200, envelope)] + [(200, pending)] * 4
+            [(200, envelope)] + [(200, pending)] * br._DEEPLINE_BILLING_MAX_ATTEMPTS
         )
     )
     result = broker.execute(
@@ -1191,7 +1209,7 @@ def test_deepline_pending_history_polls_four_times_then_fails_closed(monkeypatch
         timeout_ms=30_000,
     )
     assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert len(transport.sent) == 5
+    assert len(transport.sent) == 1 + br._DEEPLINE_BILLING_MAX_ATTEMPTS
     assert all(
         sent["url"] == br.DEEPLINE_BILLING_HISTORY_URL
         for sent in transport.sent[1:]
@@ -1235,8 +1253,34 @@ def test_deepline_billing_history_transport_timeout_polls_then_fails_closed(monk
         timeout_ms=30_000,
     )
     assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert len(transport.sent) == 5
-    assert store.calls[result.call["call_identity"]]["uncertain_doc"]["reason"] == "missing_provider_cost"
+    assert len(transport.sent) == 1 + br._DEEPLINE_BILLING_MAX_ATTEMPTS
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert diagnostic["reason"] == "missing_provider_cost"
+    assert diagnostic["deepline_job_id"] == job_id
+    assert diagnostic["deepline_operation"] == "exa_search"
+
+
+def test_deepline_credential_in_job_id_is_not_persisted():
+    envelope = {
+        "job_id": "iad1::" + DL_KEY,
+        "result": {"data": {"results": []}},
+        "status": "completed",
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, envelope)])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=30_000,
+    )
+    persisted = store.calls[result.call["call_identity"]]
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert "deepline_job_id" not in persisted["uncertain_doc"]
+    assert DL_KEY not in json.dumps(persisted)
+    assert len(transport.sent) == 1
 
 
 def test_deepline_billing_history_credential_echo_is_never_exposed_or_persisted():

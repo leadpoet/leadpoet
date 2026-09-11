@@ -58,6 +58,7 @@ MIGRATIONS = tuple(
     "scripts/206-lab-arena-combined-provider-budget.sql",
     "scripts/207-lab-arena-code-review.sql",
     "scripts/208-lab-arena-validator-scoring-authority.sql",
+    "scripts/209-lab-arena-uncertain-cost-eligibility.sql",
 )
 EXPECTED_SCHEMA_VERSION = 197
 TESTNET_NETUID = 401

@@ -1220,7 +1220,7 @@ def test_cost_guard_uses_highest_eligible_challenger_and_keeps_baseline_threshol
     baseline, high, low = parts
     spends = {
         baseline["submission_id"]: 600_000,
-        high["submission_id"]: 600_000,
+        high["submission_id"]: 500_000,
         low["submission_id"]: 400_000,
     }
     with superuser.cursor() as cursor:
@@ -1235,9 +1235,10 @@ def test_cost_guard_uses_highest_eligible_challenger_and_keeps_baseline_threshol
                 "INSERT INTO public.lab_arena_ledger "
                 "(entry_kind, miner_hotkey, round_id, submission_id, run_id, stage, "
                 "call_identity, provider, operation_id, funding_source, amount_microusd, entry_doc) "
-                "VALUES ('settlement', %s, %s, %s, %s, %s, %s, 'deepline', "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, 'deepline', "
                 "'deepline.execute', 'miner_key', %s, '{}'::jsonb)",
                 (
+                    "uncertain" if submission_id == high["submission_id"] else "settlement",
                     miner_hotkey, stored_round, submission_id, run_id, stage,
                     sha("cost-guard-" + submission_id), amount,
                 ),
@@ -1274,10 +1275,12 @@ def test_cost_guard_uses_highest_eligible_challenger_and_keeps_baseline_threshol
     def ranking(participant, score):
         submission_id = participant["submission_id"]
         amount = spends[submission_id]
+        uncertain = submission_id == high["submission_id"]
         score_inflight = 1 if submission_id == baseline["submission_id"] else 0
-        eligible = amount <= 500_000 and score_inflight == 0
+        eligible = amount <= 500_000 and score_inflight == 0 and not uncertain
         reason = (
             "provider_calls_inflight" if score_inflight
+            else "provider_cost_uncertain" if uncertain
             else ("eligible" if eligible else "cost_per_company_exceeded")
         )
         return {
@@ -1293,8 +1296,8 @@ def test_cost_guard_uses_highest_eligible_challenger_and_keeps_baseline_threshol
                 "cost_per_company_cap_microusd": 500_000,
                 "eligibility_cap_microusd": 500_000,
                 "execution": {
-                    "settled_microusd": amount,
-                    "reserved_or_uncertain_microusd": 0,
+                    "settled_microusd": 0 if uncertain else amount,
+                    "reserved_or_uncertain_microusd": amount if uncertain else 0,
                     "conservative_microusd": amount,
                     "inflight_calls": 0,
                 },
@@ -1338,6 +1341,18 @@ def test_cost_guard_uses_highest_eligible_challenger_and_keeps_baseline_threshol
         }
 
     # The raw top score is cost-ineligible and cannot be crowned.
+    rows[0]["eligible"] = True
+    rows[0]["eligibility_reason"] = "eligible"
+    with superuser.cursor() as cursor:
+        with pytest.raises(Exception, match="publication_cost_report_mismatch"):
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET status = 'published', "
+                "publication_doc = %s::jsonb, published_at = %s, "
+                "king_outcome = 'crowned', king_hotkey = %s WHERE round_id = %s",
+                (json.dumps(publication(high)), "2026-09-10T00:00:00Z", high["miner_hotkey"], round_id),
+            )
+    rows[0]["eligible"] = False
+    rows[0]["eligibility_reason"] = "provider_cost_uncertain"
     with superuser.cursor() as cursor:
         with pytest.raises(Exception, match="publication_winner_invalid"):
             cursor.execute(

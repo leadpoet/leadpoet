@@ -166,7 +166,9 @@ Set these values on the Arena service host:
 - `LAB_ARENA_SCORER_IMAGE`: a public tag or digest; startup resolves it to a
   digest for trusted scoring
 - `LAB_ARENA_RUNNER_HOTKEYS`: planned runner capacity. New rounds count only
-  registered permitted validators with at least 75,000 effective stake weight.
+  validators eligible under the shared gateway rule: on mainnet, registered
+  permitted validators with at least 75,000 effective stake weight. Testnet
+  retains its active-or-permitted rule without the mainnet stake minimum.
   This is not an access allowlist: any registered permitted validator meeting
   the minimum can claim, including inactive validators. No qualifying planned
   capacity means no new round; existing rounds and weight-state retrieval

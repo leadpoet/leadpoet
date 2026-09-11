@@ -25,8 +25,8 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
-from lab_arena.validator_eligibility import (
-    ValidatorIneligible, benchmark_validator_uid, validator_uid,
+from gateway.utils.hotkey_roles import (
+    ValidatorIneligible, validator_uid,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ CANCEL_REASONS = {
 }
 
 
-def _arena_validator_authorizer(
+def _gateway_validator_authorizer(
     hotkey: str, *, network_name: str, netuid: int, metagraph: Any
 ) -> Tuple[bool, Optional[str]]:
     """Check existing-work identity without rechecking benchmark stake."""
@@ -67,7 +67,8 @@ def _arena_validator_authorizer(
     try:
         validator_uid(
             metagraph, hotkey, netuid=netuid,
-            allow_active_testnet=chain_module.normalize_network_name(network_name) == "test",
+            network_name=chain_module.normalize_network_name(network_name),
+            require_stake=False,
         )
     except ValidatorIneligible as exc:
         return (False, None) if str(exc) == "runner_hotkey_unregistered" else (True, "miner")
@@ -2303,7 +2304,7 @@ class ArenaService:
         authorizer = getattr(self._config, "validator_authorizer", None)
         if authorizer is None:
             network_name, netuid = self._chain_scope()
-            authorizer = lambda candidate: _arena_validator_authorizer(
+            authorizer = lambda candidate: _gateway_validator_authorizer(
                 candidate,
                 network_name=network_name,
                 netuid=netuid,
@@ -2326,7 +2327,18 @@ class ArenaService:
 
     def _benchmark_validator_uid(self, snapshot: Any, hotkey: str) -> int:
         try:
-            return benchmark_validator_uid(snapshot, hotkey, netuid=self._chain_scope()[1])
+            network_name, netuid = self._chain_scope()
+            uid = validator_uid(
+                snapshot, hotkey, netuid=netuid,
+                network_name=chain_module.normalize_network_name(network_name),
+            )
+            # Bind miner self-dealing exclusions to the same authorized snapshot.
+            owners = tuple(snapshot.coldkeys)
+            if len(owners) != len(snapshot.hotkeys) or any(
+                not isinstance(owner, str) or not owner for owner in owners
+            ):
+                raise ValueError("metagraph coldkeys are invalid")
+            return uid
         except ValidatorIneligible as exc:
             raise ServiceError(str(exc), 403) from exc
         except Exception as exc:
@@ -2343,14 +2355,30 @@ class ArenaService:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
         snapshot = self._benchmark_snapshot()
-        uid = self._benchmark_validator_uid(snapshot, validated["hotkey"])
-        excluded = chain_module.hotkeys_owned_by_coldkey(snapshot, snapshot.coldkeys[uid])
+        response = None
+        try:
+            uid = self._benchmark_validator_uid(snapshot, validated["hotkey"])
+        except ServiceError as exc:
+            if exc.code != "runner_stake_below_minimum":
+                raise
+            # A lost response must not strand a lease issued before stake fell.
+            # This exact signed-request lookup cannot allocate or extend work.
+            response = self._store.recover_claim_response(
+                round_id=round_id, runner_hotkey=validated["hotkey"],
+                request_id=validated["request_id"],
+                request_hash=contracts.request_bytes_hash(validated),
+            )
+            if response is None:
+                raise
+        else:
+            excluded = chain_module.hotkeys_owned_by_coldkey(snapshot, snapshot.coldkeys[uid])
         token = self._lease_token(validated)
-        response = self._store.claim_assignment(
-            round_id=round_id, runner_hotkey=validated["hotkey"], declared_parallelism=declared, slot_ceiling=int(configuration["runner_slot_ceiling"]),
-            excluded_miner_hotkeys=excluded, request_id=validated["request_id"], request_hash=contracts.request_bytes_hash(validated), lease_token_hash=hash_lease_token(token),
-            lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
-        )
+        if response is None:
+            response = self._store.claim_assignment(
+                round_id=round_id, runner_hotkey=validated["hotkey"], declared_parallelism=declared, slot_ceiling=int(configuration["runner_slot_ceiling"]),
+                excluded_miner_hotkeys=excluded, request_id=validated["request_id"], request_hash=contracts.request_bytes_hash(validated), lease_token_hash=hash_lease_token(token),
+                lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
+            )
         if response.get("status") != "leased":
             return response
         self._require_code_review(str(response["submission_id"]), round_row)

@@ -54,9 +54,35 @@ def test_unlisted_validator_lease_survives_stake_drop_and_weights_continue(conne
             leased = harness.service.store.get_run(lease["run_id"])
             assert leased["runner_hotkey"] == beta
             harness.chain.stakes[beta] = 74_999
-            rejected = http.post("/arena/v1/runs/claim", json=envelope)
+            # Recover a saved lease even if its original HTTP response was lost.
+            # Recovery must never call the allocating RPC or extend the lease.
+            original_claim = harness.service.store.claim_assignment
+            def unexpected_allocation(**kwargs):
+                pytest.fail("stake-denied recovery must not allocate work")
+            harness.service.store.claim_assignment = unexpected_allocation
+            try:
+                assert api.claim(envelope) == lease
+            finally:
+                harness.service.store.claim_assignment = original_claim
+            new_envelope = contracts.build_signed_request(
+                scope=contracts.SCOPE_CLAIM, round_id=harness.round_id,
+                hotkey=beta, body={"declared_parallelism": 1},
+                timestamp=int(harness.clock().timestamp()),
+                sign_message=lambda message: key.sign(message.encode()).hex(),
+            )
+            rejected = http.post("/arena/v1/runs/claim", json=new_envelope)
             assert rejected.status_code == 403
             assert rejected.json()["code"] == "runner_stake_below_minimum"
+            changed_request = contracts.build_signed_request(
+                scope=contracts.SCOPE_CLAIM, round_id=harness.round_id,
+                hotkey=beta, body={"declared_parallelism": 2},
+                timestamp=int(harness.clock().timestamp()),
+                request_id=envelope["request_id"],
+                sign_message=lambda message: key.sign(message.encode()).hex(),
+            )
+            changed = http.post("/arena/v1/runs/claim", json=changed_request)
+            assert changed.status_code == 403
+            assert changed.json()["code"] == "runner_stake_below_minimum"
             assert harness.service.store.get_run(lease["run_id"]) == leased
 
             # A cache miss can still fetch the issued lease's pinned scorer.

@@ -2023,7 +2023,8 @@ def _runner_claim_service(*, registered, role, configured=False):
     )
     service = object.__new__(ArenaService)
     service._store = SimpleNamespace(
-        claim_assignment=lambda **_kwargs: {"status": "empty"}
+        claim_assignment=lambda **_kwargs: {"status": "empty"},
+        recover_claim_response=lambda **_kwargs: None,
     )
     service._config = SimpleNamespace(
         chain=chain,

@@ -7,11 +7,15 @@ needed to run this process.
 
 ## Scoring and authorization
 
-Arena assigns new execution and scoring jobs only to registered hotkeys with
+On mainnet, the shared gateway validator rule assigns validator status only to
+registered hotkeys with
 an on-chain validator permit and **at least 75,000 effective subnet stake
 weight**. Exactly 75,000 qualifies. Inactive permitted validators qualify too.
+Arena uses this same rule for new execution/scoring jobs and planned capacity.
 Every qualifying validator can claim automatically; round runner lists do not
-grant or deny access. The same minimum applies on test networks.
+grant or deny access. Test networks retain the existing gateway rule: active
+or permitted, without the mainnet stake minimum. There is no second Arena
+validator-eligibility policy.
 
 Arena reads chain `total_stake` (Bittensor `Metagraph.S`) from its finalized
 snapshot, with the existing 60-second cache. Stake changes take effect after
@@ -20,12 +24,14 @@ Registration, stake, and same-coldkey miner exclusions use one snapshot.
 Lease ownership, signatures, stage rules, code review, and miner self-dealing
 checks remain in place.
 
-The minimum applies when issuing a lease. A stake decrease alone does not
+The Arena minimum applies when issuing a lease. A stake decrease alone does not
 reject an already-issued job's source/image access, provider calls, or result.
 Existing identity and lease protections still apply. Below-threshold claims
-return `403 runner_stake_below_minimum`; the runner idles and keeps weights
+for new work return `403 runner_stake_below_minimum`; the runner idles and keeps weights
 running. No benchmark work or minimum benchmark stake is required to retrieve
 the signed weight state, derive weights, or run the weight submission loop.
+An exact signed-request retry can recover its already-issued lease after a
+stake-only drop, without allocating or extending work.
 
 `LAB_ARENA_RUNNER_HOTKEYS` is a conservative capacity plan, not an allowlist.
 New rounds count only eligible planned runners, without assuming all qualifying

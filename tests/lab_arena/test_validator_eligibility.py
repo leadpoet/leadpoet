@@ -6,8 +6,8 @@ import pytest
 
 from lab_arena import chain, driver
 from lab_arena.service import ServiceError
-from lab_arena.validator_eligibility import (
-    MIN_BENCHMARK_STAKE_WEIGHT, ValidatorIneligible, benchmark_validator_uid, validator_uid,
+from gateway.utils.hotkey_roles import (
+    MIN_VALIDATOR_STAKE_WEIGHT, ValidatorIneligible, classify_hotkey_from_metagraph, validator_uid,
 )
 from tests.lab_arena.test_lab_arena_service_rules import _runner_claim_service, _runner_snapshot
 
@@ -17,21 +17,19 @@ HOTKEY = "5" * 48
 
 @pytest.mark.parametrize("offset,eligible", [(-1, False), (0, True), (1, True)])
 def test_decoded_chain_stake_boundary_without_rounding(offset, eligible):
-    stake = chain._runtime_stake_tao(MIN_BENCHMARK_STAKE_WEIGHT * 10**9 + offset)
+    stake = chain._runtime_stake_tao(MIN_VALIDATOR_STAKE_WEIGHT * 10**9 + offset)
     snapshot = _runner_snapshot(HOTKEY, stake=stake)
     if eligible:
-        assert benchmark_validator_uid(snapshot, HOTKEY, netuid=71) == 0
+        assert validator_uid(snapshot, HOTKEY, netuid=71, network_name="finney") == 0
     else:
         with pytest.raises(ValidatorIneligible, match="runner_stake_below_minimum"):
-            benchmark_validator_uid(snapshot, HOTKEY, netuid=71)
+            validator_uid(snapshot, HOTKEY, netuid=71, network_name="finney")
 
 
-@pytest.mark.parametrize("network,netuid", [("finney", 71), ("test", 401)])
-def test_service_threshold_has_no_network_exemption_or_activity_requirement(network, netuid):
+def test_mainnet_service_threshold_has_no_activity_bypass():
     service = _runner_claim_service(registered=True, role="validator")
-    service._config.network_name, service._config.netuid = network, netuid
+    service._config.network_name, service._config.netuid = "finney", 71
     snapshot = _runner_snapshot(HOTKEY, stake=74_999)
-    snapshot.netuid = netuid
     service._config.chain.metagraph = lambda *, finalized: snapshot
     with pytest.raises(ServiceError, match="runner_stake_below_minimum") as error:
         service.handle_claim({})
@@ -42,6 +40,41 @@ def test_service_threshold_has_no_network_exemption_or_activity_requirement(netw
     snapshot.stake = (74_999,)
     with pytest.raises(ServiceError, match="runner_stake_below_minimum"):
         service.handle_claim({})
+
+
+@pytest.mark.parametrize("active,permit", [(True, False), (False, True)])
+def test_testnet_claims_keep_shared_gateway_policy(active, permit):
+    service = _runner_claim_service(registered=True, role="validator")
+    service._config.network_name, service._config.netuid = "test", 401
+    snapshot = _runner_snapshot(HOTKEY, stake=0.018, permit=permit)
+    snapshot.netuid, snapshot.active = 401, (active,)
+    service._config.chain.metagraph = lambda *, finalized: snapshot
+    assert service.handle_claim({}) == {"status": "empty"}
+
+
+@pytest.mark.parametrize("network,netuid", [("finney", 71), ("test", 401)])
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("permit", [False, True])
+@pytest.mark.parametrize("stake", [0.018, 74_999.999999999, 75_000, 75_000.000000001, 500_001])
+def test_claim_capacity_and_gateway_share_one_validator_rule(network, netuid, active, permit, stake):
+    service = _runner_claim_service(registered=True, role="validator")
+    service._config.network_name, service._config.netuid = network, netuid
+    snapshot = _runner_snapshot(HOTKEY, stake=stake, permit=permit)
+    snapshot.netuid, snapshot.active = netuid, (active,)
+    service._config.chain.metagraph = lambda *, finalized: snapshot
+    service._config.defaults = SimpleNamespace(runner_hotkeys=(HOTKEY,))
+    service._config.banned_hotkeys_source = lambda: []
+    registered, role = classify_hotkey_from_metagraph(HOTKEY, snapshot, network_name=network)
+    assert registered
+    if role == "validator":
+        assert service.handle_claim({}) == {"status": "empty"}
+        assert service.runner_settings() == ([HOTKEY], [])
+    else:
+        with pytest.raises(ServiceError) as error:
+            service.handle_claim({})
+        assert error.value.status == 403
+        with pytest.raises(ServiceError, match="daily_runner_capacity_insufficient"):
+            service.runner_settings()
 
 
 @pytest.mark.parametrize("patch", [
@@ -70,6 +103,7 @@ def test_claim_uses_one_snapshot_for_permission_stake_and_coldkey_exclusions():
     snapshot.coldkeys = ("owner", "owner", "other")
     snapshot.stake = (75_000, 0, 0)
     snapshot.validator_permit = (True, False, False)
+    snapshot.active = (False, True, True)
     reads, claims = [], []
     service._config.chain.metagraph = lambda *, finalized: reads.append(finalized) or snapshot
     service._config.chain.hotkeys_owned_by_same_coldkey = lambda _: pytest.fail("second snapshot")
@@ -89,12 +123,11 @@ def test_chain_unavailability_refuses_claim_and_does_not_call_store():
         service.handle_claim({})
 
 
-def test_permit_required_even_for_high_stake_and_testnet_active_neurons():
+def test_mainnet_permit_required_even_for_high_stake_and_activity():
     snapshot = _runner_snapshot(HOTKEY, permit=False, stake=1_000_000)
     snapshot.active = (True,)
-    assert validator_uid(snapshot, HOTKEY, netuid=71, allow_active_testnet=True) == 0
     with pytest.raises(ValidatorIneligible, match="runner_validator_required"):
-        benchmark_validator_uid(snapshot, HOTKEY, netuid=71)
+        validator_uid(snapshot, HOTKEY, netuid=71, network_name="finney")
 
 
 def test_existing_work_identity_does_not_require_stake_or_activity():
@@ -116,6 +149,7 @@ def _capacity_service():
     snapshot.coldkeys = ("owner", "low-owner", "miner-owner", "unplanned-owner")
     snapshot.stake = (75_000, 74_999, 1_000_000, 100_000)
     snapshot.validator_permit = (True, True, False, True)
+    snapshot.active = (False, True, True, False)
     service._config.chain.metagraph = lambda *, finalized: snapshot
     service._config.defaults = SimpleNamespace(runner_hotkeys=(HOTKEY, HOTKEY, "low", "miner", "absent"))
     service._config.banned_hotkeys_source = lambda: []

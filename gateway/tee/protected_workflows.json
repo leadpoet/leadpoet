@@ -1887,7 +1887,7 @@
       "symbol": "ScoringExecutorV2._execute_provider_preflight"
     },
     {
-      "ast_sha256": "sha256:0332d31be0b081d07d2dd659dc8b9543d7f3a8d8de585b086741e8487d280e78",
+      "ast_sha256": "sha256:1cef096546acb077325d949b70b6f82a33f34b32507f4c7aa7c8a2c33bf68ebd",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:61cbadeed492ed4fe895261bf8539aacfb5508b520d78baf3e09ac3e4aaf5d70",
-  "protected_source_commit": "9832858547981a3fe79605e2f78aab80130bae4e",
+  "manifest_hash": "sha256:47c76a84bd2dc5ed02f5b3d91d6c2c17301720569c3e9ebb759dadc1c8aa2dce",
+  "protected_source_commit": "b137b0c335201eea2c999be25fd0e4c767e690ea",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

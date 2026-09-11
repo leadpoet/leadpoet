@@ -123,6 +123,10 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     ) * participant_count
     assert all(run["status"] == "accepted" and run["per_icp_score"] is not None for run in execution_runs)
     # Lease expiry runs on every driver tick; the round exercised it with nothing to expire.
+    # The service-only read RPC returns real participation, not a domain error.
+    runner_hotkey = harness.runner_keys[0]
+    assert service.store.has_recent_participation("finney", 71, runner_hotkey)
+    assert not service.store.has_recent_participation("test", 71, runner_hotkey)
     reached = set(harness.calls)
     assert {"lab_arena_create_round", "lab_arena_transition_round", "lab_arena_update_submission", "lab_arena_open_stage", "lab_arena_close_scoring", "lab_arena_claim_assignment", "lab_arena_reserve_call", "lab_arena_mark_dispatched", "lab_arena_settle_call", "lab_arena_close_stage", "lab_arena_record_run_scores", "lab_arena_whoami"} <= reached, sorted(reached)
     assert "lab_arena_register_submission" in reached or "lab_arena_register_submission_v2" in reached

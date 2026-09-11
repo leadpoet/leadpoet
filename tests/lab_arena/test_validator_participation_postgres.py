@@ -155,7 +155,7 @@ def test_acceptance_scope_replay_expiry_and_immutable_evidence(store, admin):
 
 
 def test_failure_and_expired_lease_do_not_earn_participation(store, admin):
-    round_id = "arena-2026-09-11-part-failed"
+    round_id = "arena-2026-09-11-partfailed"
     runners, _ = open_round(store, round_id, prefix="part-failed", participants=1)
     runner = runners[0]
     leased, token, _, _ = claim(store, round_id, runner)

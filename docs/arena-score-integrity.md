@@ -9,6 +9,10 @@ historical rounds retain their existing scorer and publication rules.
 - Score the original first-N company slice, capped at five. A verified company
   gets one scoring slot. Normalize legal suffixes and registrable domains, then
   use independently observed identity aliases to resolve different names.
+  The same independently verified LinkedIn company identity also deduplicates
+  across corporate domains. Distinct verified subsidiaries retain separate slots;
+  a shared parent domain or a submitted parent LinkedIn link is not sufficient
+  to merge them.
   Submitted LinkedIn fields cannot create or split a verified identity. Shared
   domains alone do not merge unrelated businesses. Duplicate rows receive zero;
   they do not reject the entire output or trigger replacement from later rows.
@@ -17,8 +21,12 @@ historical rounds retain their existing scorer and publication rules.
   A source event date outranks publication metadata. Missing or uncertain dates
   remain eligible for ordinary claim verification. Harmless date mismatches do
   not reject supported evidence. The existing indexing tolerance remains.
-- Take the strongest accepted contribution for each verified requested signal.
-  Multiple articles about one signal do not earn breadth credit. Different
+- For each requested signal, retain the first three distinct canonical source
+  URLs and evaluate their evidence together in one source-grounded judgment.
+  Repeated URLs and evidence beyond that limit are ignored before judging.
+  The advisory first pass cannot approve the criterion, and the optional
+  corroboration and post-verdict evidence-repair re-judging paths are disabled for integrity rounds. Multiple
+  articles about one signal do not earn repeated chances or breadth credit. Different
   genuine requested signals may use the same publisher. The required primary
   signal must still pass.
 - Give the job-source premium only when job content and its employer/publisher
@@ -56,9 +64,11 @@ source replacement retain the original ownership record. This limits entries
 per chain owner; it does not prove that separate coldkeys belong to different
 people.
 
-Judgment sharing uses the exact effective scoring input, including array order,
-the round, chain scope, pinned image, evaluation date, and policy. It excludes
-only execution-run identity. Accepted evidence and its original validator
+Judgment sharing uses the adapter's normalized effective input, including company
+positions and retained evidence order, the round, chain scope, pinned image,
+evaluation date, and policy. Run identity, unused `why_now` text, validated but
+unused company prose/state, unused fit lookup URLs, duplicate/capped evidence,
+and unscored output padding cannot create a fresh cache entry. Accepted evidence and its original validator
 provenance are hash-bound and stored atomically. Failed judgments are not
 cached. Every recipient retains its own execution output and sourcing cost.
 Validator ownership conflicts must still be excluded when reusing evidence.
@@ -85,6 +95,15 @@ stay fixed; final cost eligibility includes confirmation spend and qualified
 slots. When no challenger qualifies, skip execution and publish no new king.
 Infrastructure gaps cannot be converted into favorable zeros. The database
 guards the cohort, recorded scores, costs, and publication transition.
+
+A selected challenger whose terminal confirmation judgment records a credential
+or budget failure is disqualified with a null confirmation score and the reason
+`confirmation_account_failure`. It remains visible in the original cohort and
+ranking. Other original finalists can finish and win. Its main qualification
+slots and all actual execution/judge costs remain reported. Missing judgments,
+shared infrastructure failures, and baseline failures do not permit this exception.
+Both the service and database derive the exception from the frozen scoring plan
+and durable attempts, so it survives restarts without replacing candidates.
 
 Publish main and confirmation scores separately. Reveal the salted confirmation
 document and its results after publication so observers can check the original

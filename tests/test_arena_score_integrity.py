@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import date
+
+import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.competition_models import CompetitionCompany
@@ -187,14 +190,14 @@ def test_verified_linkedin_corroborates_distinct_legal_name_aliases() -> None:
             "observed_linkedin_slug": "ibm",
         },
     )
-    assert short.key == legal.key == "domain:ibm.com|linkedin:ibm"
+    assert short.key == legal.key == "linkedin:ibm"
     assert set(company_identity_alias_keys(short)) == {
         "domain:ibm.com|name:ibm",
-        "domain:ibm.com|linkedin:ibm",
+        "linkedin:ibm",
     }
     assert set(company_identity_alias_keys(legal)) == {
         "domain:ibm.com|name:international business machines",
-        "domain:ibm.com|linkedin:ibm",
+        "linkedin:ibm",
     }
 
 
@@ -230,6 +233,80 @@ def test_adapter_zeros_only_after_first_verified_identity(monkeypatch) -> None:
     assert rows[2]["company_qualified"] is True
 
 
+def test_verified_entity_deduplicates_across_domains_and_keeps_subsidiaries(monkeypatch):
+    observations = {
+        "Acme": ("Acme", "acme.com", "acme"),
+        "Acme Global": ("Acme Global", "acme.io", "acme"),
+        "Acme Labs": ("Acme Labs", "acme.com", "acme-labs"),
+        "Acme Medical": ("Acme Medical", "acme.com", "acme-medical"),
+        "Unrelated": ("Unrelated", "unrelated.com", ""),
+    }
+    async def score_company(**kwargs):
+        return _positive_breakdown(*observations[kwargs["company"].company_name])
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", score_company)
+    companies = [
+        _public_company(name, domain=observed[1], linkedin="https://linkedin.com/company/acme")
+        for name, observed in observations.items()
+    ]
+    rows = asyncio.run(CompetitionCompanyScorer(integrity_policy=True).score_with_breakdowns(companies, _icp(), False))
+    assert [row["duplicate_company"] for row in rows] == [False, True, False, False, False]
+    assert [row["final_score"] for row in rows] == [60, 0, 60, 60, 60]
+    assert rows[0]["company_identity_key"] == rows[1]["company_identity_key"] == "linkedin:acme"
+    assert len({row["company_identity_key"] for row in rows if row["company_qualified"]}) == 4
+
+
+@pytest.mark.parametrize("distinct_urls", [False, True])
+def test_repeated_primary_evidence_gets_one_decision_not_a_judging_lottery(monkeypatch, distinct_urls):
+    calls = []
+    async def judge(signal, *args, evidence_signals, **kwargs):
+        calls.append(evidence_signals)
+        # The old code would reach the fifth, lucky acceptance.
+        return (54.0 if len(calls) == 5 else 0.0), 90, "uncertain", None, 0
+    monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", judge)
+    evidence = {"source": "news", "description": "Acme launched a product",
+                "url": "https://acme.com/launch", "date": None,
+                "snippet": "Product launch", "matched_icp_signal": 0}
+    signals = [dict(evidence, url=evidence["url"] + (str(i) if distinct_urls else "")) for i in range(5)]
+    result = asyncio.run(lead_scorer.score_company_competition_intent_signal(_company_model(signals), _icp_model(), integrity_policy=True))
+    assert len(calls) == 1
+    assert len(calls[0]) == (3 if distinct_urls else 1)
+    assert result[1] == 0
+    assert not lead_scorer.required_intent_satisfied(result[-1])
+
+
+def test_combined_verifier_fetches_all_sources_and_issues_one_final_judgment(monkeypatch):
+    import httpx
+    from qualification.scoring import intent_verification_three_stage as verifier
+    from tests.test_site_verifier_three_stage_source_grounding import supported
+
+    urls = ["https://acme.com/news/a", "https://news.example.com/acme"]
+    calls, fetches = [], []
+    async def fetch(values):
+        fetches.append(values)
+        return {"results": [{"url": url, "text": "Acme launched a new product.",
+                             "source_publication_date": day} for url, day in zip(urls, ["2026-08-01", "2026-09-01"])], "statuses": []}
+    async def judge(client, model, prompt):
+        calls.append(prompt)
+        return supported(urls[0])
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)
+    monkeypatch.setattr(verifier, "_call_openrouter", judge)
+    monkeypatch.setenv("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", "1")
+    async def run():
+        async with httpx.AsyncClient() as client:
+            return await verifier.verify_three_stage(client, company_name="Acme",
+                company_website="https://acme.com", company_linkedin="", source_url=urls[0],
+                miner_claim="Acme launched a product", target_signal_text="Product launch",
+                integrity_policy=True, stage1_soft_reject=True,
+                evidence_bundle=[{"url": url, "description": "Acme launched a product", "date": None, "snippet": "Product launch"} for url in urls])
+    result = asyncio.run(run())
+    assert result["client_ready"] is True
+    assert fetches == [urls]
+    assert len(calls) == 2  # One advisory pass, one source-grounded terminal pass.
+    assert "COMBINED CRITERION EVIDENCE" in calls[1]
+    assert all(url in calls[1] for url in urls)
+    assert result["source_publication_dates"] == ["2026-08-01"]
+
+
 def test_adapter_merges_only_verifier_corroborated_name_aliases(monkeypatch) -> None:
     async def score_company(**kwargs):
         return _positive_breakdown(
@@ -253,7 +330,7 @@ def test_adapter_merges_only_verifier_corroborated_name_aliases(monkeypatch) -> 
     )
     assert [row["duplicate_company"] for row in rows] == [False, True]
     assert rows[0]["company_identity_key"] == rows[1]["company_identity_key"]
-    assert "domain:ibm.com|linkedin:ibm" in rows[0][
+    assert "linkedin:ibm" in rows[0][
         "company_identity_alias_keys"
     ]
 
@@ -336,8 +413,10 @@ def _icp_model() -> ICPPrompt:
     )
 
 
-def test_integrity_aggregates_strongest_once_per_requested_signal(monkeypatch) -> None:
+def test_integrity_judges_combined_evidence_once_per_requested_signal(monkeypatch) -> None:
+    calls = []
     async def score_one(signal, *args, verdict_out=None, **kwargs):
+        calls.append([item.url for item in kwargs["evidence_signals"]])
         score = 60.0 if "primary strong" in signal.description else 54.0
         if verdict_out is not None:
             verdict_out.append({"decision": "verified", "pipeline_decision": "approve"})
@@ -354,7 +433,8 @@ def test_integrity_aggregates_strongest_once_per_requested_signal(monkeypatch) -
     ))
     assert result[0] == 80.0
     details = result[-1]
-    assert [row["counted_in_aggregate"] for row in details] == [True, False, True]
+    assert calls == [["https://acme.com/a", "https://acme.com/b"], ["https://acme.com/c"]]
+    assert [row["counted_in_aggregate"] for row in details] == [True, True]
     assert all(row["raw"] > 0 for row in details)
 
 
@@ -769,7 +849,7 @@ def test_confirmed_staleness_is_not_sent_to_evidence_repair(monkeypatch) -> None
     assert calls["n"] == 0
 
 
-def test_stale_bonus_does_not_block_primary_evidence_repair(monkeypatch) -> None:
+def test_integrity_never_rerolls_terminal_criteria_through_optional_repair(monkeypatch) -> None:
     from qualification.scoring import deepline_evidence_repair as repair
 
     calls = {"n": 0}
@@ -798,7 +878,7 @@ def test_stale_bonus_does_not_block_primary_evidence_repair(monkeypatch) -> None
         }],
     ))
     assert result is None
-    assert calls["n"] == 1
+    assert calls["n"] == 0
 
 
 def test_arena_date_prompt_is_policy_scoped() -> None:
@@ -821,3 +901,124 @@ def test_arena_date_prompt_is_policy_scoped() -> None:
     assert "ARENA INTEGRITY DATE POLICY" not in legacy
     assert "ARENA INTEGRITY DATE POLICY" in integrity
     assert "Buyer freshness window: 90 days" in integrity
+
+
+@pytest.mark.parametrize("source,url,verified,cited,expected", [
+    ("job_board", "https://unknown.example/jobs/123", False, "job", 54.0),
+    ("job_board", "https://unknown.example/jobs/123", True, "job", 60.0),
+    ("job_board", "https://unknown.example/jobs/123", True, "news", 54.0),
+    ("linkedin", "https://linkedin.com/jobs/view/123", False, "job", 54.0),
+    ("linkedin", "https://linkedin.com/jobs/view/123", True, "job", 60.0),
+    ("linkedin", "https://linkedin.com/posts/acme", False, "job", 60.0),
+    ("job_board", "https://unknown.example/jobs/123", True, "neither", 0.0),
+])
+def test_combined_evidence_premium_uses_only_cited_verified_job_sources(
+    monkeypatch, source, url, verified, cited, expected
+):
+    from qualification.scoring import intent_verification_three_stage as verifier
+    news = "https://news.example/acme"
+    async def judge(*args, **kwargs):
+        return {
+            "client_ready": True, "decision": "approve", "rejection_reason": "",
+            "stage1": {"status": "supported"},
+            "stage3": {"status": "supported", "decision": "approve", "claim_matches_miner_date": "no_date_in_content"},
+            "scrape": {"result_count": 2, "statuses": []}, "company_check": True,
+            "job_publisher_relationship": "verified" if verified else "unverified",
+            "verified_job_source_urls": [url] if verified else [],
+            "source_publication_dates": [],
+            "verdict": {"signal_evaluations": [{
+                "signal_status": "supported", "verification_mode": "source_grounded",
+                "same_entity_check": "pass", "confidence": "high", "risk_notes": [],
+                "evidence_urls_used": [url if cited == "job" else news] if cited != "neither" else [],
+            }]},
+        }
+    monkeypatch.setattr(verifier, "verify_three_stage", judge)
+    signals = _company_model([
+        {"source": source, "description": "Acme is hiring engineers", "url": url,
+         "date": None, "snippet": "Apply for the engineer role", "matched_icp_signal": 1},
+        {"source": "news", "description": "Acme is hiring engineers", "url": news,
+         "date": None, "snippet": "Hiring engineers", "matched_icp_signal": 1},
+    ]).intent_signals
+    result = asyncio.run(lead_scorer._score_single_intent_signal(
+        signals[0], _icp_model(), None, "Acme", "https://acme.com",
+        stage1_soft_reject=True, llm_only_intent_gate=True,
+        integrity_policy=True, evidence_signals=signals,
+    ))
+    assert result[0] == expected
+
+
+def test_incomplete_bundle_does_not_judge_only_the_available_source(monkeypatch):
+    from qualification.scoring import intent_verification_three_stage as verifier
+    from tests.test_site_verifier_three_stage_source_grounding import supported
+    from unittest.mock import AsyncMock
+    urls = ["https://acme.com/news/a", "https://news.example/acme"]
+    judge = AsyncMock(return_value=supported(urls[0]))
+    monkeypatch.setattr(verifier, "_call_openrouter", judge)
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", AsyncMock(return_value={
+        "results": [{"url": urls[0], "text": "Acme launched a product."}],
+        "statuses": [{"url": urls[1], "stage": "timeout", "source": "none"}],
+    }))
+    result = asyncio.run(verifier.verify_three_stage(
+        None, company_name="Acme", company_website="https://acme.com", company_linkedin="",
+        source_url=urls[0], miner_claim="Acme launched a product", target_signal_text="Product launch",
+        integrity_policy=True, stage1_soft_reject=True,
+        evidence_bundle=[{"url": url, "description": "Acme launched a product", "date": None,
+                          "snippet": "Product launch"} for url in urls],
+    ))
+    assert result["decision"] == "unavailable"
+    assert result["rejection_reason"] == "evidence_fetch_failed"
+    assert result["scrape"]["result_count"] == 1
+    assert judge.await_count == 1  # Only the advisory pass; no partial terminal verdict.
+
+
+@pytest.mark.parametrize("all_absent", [False, True])
+def test_combined_evidence_preserves_confirmed_absence_semantics(monkeypatch, all_absent):
+    from qualification.scoring import intent_verification_three_stage as verifier
+    from tests.test_site_verifier_three_stage_source_grounding import supported
+    from unittest.mock import AsyncMock
+    urls = ["https://acme.com/news/a", "https://news.example/acme"]
+    judge = AsyncMock(return_value=supported(urls[0]))
+    monkeypatch.setattr(verifier, "_call_openrouter", judge)
+    absent = urls if all_absent else urls[1:]
+    statuses = [{
+        "url": url, "source": "none", "sd_stage": "genuine_404", "sd_error": "http_404",
+        "exa_stage": "exa_target_not_found", "exa_error": "target_not_found",
+        "exa_target_absence": {"id_matches_requested_url": True, "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND", "error_http_status": 404, "confirmed_attempts": 2},
+    } for url in absent]
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", AsyncMock(return_value={
+        "results": [] if all_absent else [{"url": urls[0], "text": "Acme launched a product."}],
+        "statuses": statuses,
+    }))
+    result = asyncio.run(verifier.verify_three_stage(
+        None, company_name="Acme", company_website="https://acme.com", company_linkedin="",
+        source_url=urls[0], miner_claim="Acme launched a product", target_signal_text="Product launch",
+        integrity_policy=True, stage1_soft_reject=True,
+        evidence_bundle=[{"url": url, "description": "Acme launched a product", "date": None,
+                          "snippet": "Product launch"} for url in urls],
+    ))
+    assert result["decision"] == ("reject" if all_absent else "approve")
+    assert result["rejection_reason"] == ("evidence_not_found" if all_absent else "")
+    assert judge.await_count == (1 if all_absent else 2)
+
+
+def test_integrity_rejects_multiple_verdicts_for_one_criterion(monkeypatch):
+    from qualification.scoring import intent_verification_three_stage as verifier
+    from tests.test_site_verifier_three_stage_source_grounding import supported
+    from unittest.mock import AsyncMock
+    url = "https://acme.com/news/a"
+    response = supported(url)
+    response["answer"]["signal_evaluations"] *= 2
+    monkeypatch.setattr(verifier, "_call_openrouter", AsyncMock(return_value=response))
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", AsyncMock(return_value={
+        "results": [{"url": url, "text": "Acme launched a product."}], "statuses": [],
+    }))
+    result = asyncio.run(verifier.verify_three_stage(
+        None, company_name="Acme", company_website="https://acme.com", company_linkedin="",
+        source_url=url, miner_claim="Acme launched a product", target_signal_text="Product launch",
+        integrity_policy=True, stage1_soft_reject=True,
+        evidence_bundle=[{"url": url, "description": "Acme launched a product", "date": None,
+                          "snippet": "Product launch"}],
+    ))
+    assert result["decision"] == "unavailable"
+    assert result["rejection_reason"] == "stage3_llm_error:invalid_criterion_verdict_count"

@@ -34,6 +34,9 @@ def test_integrity_migration_replays_and_keeps_private_function_grants(database)
             assert cursor.fetchone() == (True, False, False)
         cursor.execute("SELECT has_function_privilege('lab_arena_service', 'public.lab_arena__integrity_eligibility(text,text,integer[])', 'EXECUTE')")
         assert cursor.fetchone()[0] is False
+        for role in ("lab_arena_service", "anon", "authenticated"):
+            cursor.execute("SELECT has_function_privilege(%s, 'public.lab_arena__confirmation_account_failure(text,text)', 'EXECUTE')", (role,))
+            assert cursor.fetchone()[0] is False
 
 
 def test_legacy_rounds_still_publish_and_promote_after_integrity_migrations(database, tmp_path):

@@ -1196,6 +1196,62 @@ BEGIN
 END;
 $lab_arena_213_legacy_publication_bypass$;
 
+-- A frozen finalist may disqualify itself, but cannot veto its peers. Only
+-- complete, terminal miner-account failure evidence permits a missing score.
+CREATE OR REPLACE FUNCTION public.lab_arena__confirmation_account_failure(
+  p_round_id TEXT, p_submission_id TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $lab_arena_confirmation_account_failure$
+  WITH round_plan AS (
+    SELECT rounds.stage3_scoring_plan_doc AS plan
+    FROM public.lab_arena_rounds AS rounds
+    WHERE rounds.round_id = p_round_id
+      AND rounds.configuration_doc ->> 'integrity_policy' = 'arena_integrity_v1'
+      AND rounds.confirmation_cohort -> 'required' = 'true'::JSONB
+      AND rounds.confirmation_cohort -> 'submission_ids'
+          @> pg_catalog.jsonb_build_array(p_submission_id)
+      AND rounds.confirmation_cohort ->> 'baseline_submission_id' <> p_submission_id
+  ), items AS (
+    SELECT item
+    FROM round_plan
+    CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(plan -> 'work_items') AS item
+    WHERE item ->> 'submission_id' = p_submission_id
+  ), judgments AS (
+    SELECT item, chosen.status, chosen.terminal_cause
+    FROM items
+    LEFT JOIN LATERAL (
+      SELECT runs.status, runs.terminal_cause
+      FROM public.lab_arena_runs AS runs
+      WHERE runs.round_id = p_round_id
+        AND runs.submission_id = p_submission_id
+        AND runs.stage = 3 AND runs.kind = 'score'
+        AND runs.scored_run_id = item ->> 'scored_run_id'
+      ORDER BY (runs.status = 'accepted') DESC, runs.attempt DESC
+      LIMIT 1
+    ) AS chosen ON TRUE
+  )
+  SELECT EXISTS (
+    SELECT 1 FROM judgments
+    WHERE status = 'failed'
+      AND terminal_cause IN ('credential_error', 'budget_exhausted')
+  ) AND NOT EXISTS (
+    SELECT 1 FROM judgments
+    WHERE status IS DISTINCT FROM 'accepted'
+      AND (status IS DISTINCT FROM 'failed'
+        OR terminal_cause IS NULL
+        OR terminal_cause NOT IN ('credential_error', 'budget_exhausted'))
+  );
+$lab_arena_confirmation_account_failure$;
+ALTER FUNCTION public.lab_arena__confirmation_account_failure(TEXT, TEXT)
+  OWNER TO lab_arena_owner;
+REVOKE ALL ON FUNCTION public.lab_arena__confirmation_account_failure(TEXT, TEXT)
+  FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_integrity_publication_guard_v1()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1226,6 +1282,7 @@ DECLARE
   v_ranked_count INTEGER;
   v_persisted_count INTEGER;
   v_allowed_failure BOOLEAN;
+  v_withdrawn BOOLEAN;
 BEGIN
   IF NEW.configuration_doc ->> 'integrity_policy'
        IS DISTINCT FROM 'arena_integrity_v1'
@@ -1301,8 +1358,8 @@ BEGIN
   -- Final ranking is the baseline plus challengers that obtained all twenty
   -- durable main-stage scores.  A finalist may be absent only when the latest
   -- score attempt proves a miner-account failure; shared judge failures still
-  -- make publication impossible.  Every frozen confirmation member is always
-  -- required because its cohort was selected from complete main scores.
+  -- make publication impossible. Every frozen confirmation member stays in
+  -- the ranking, including disqualified members with a null final score.
   FOR v_round_participant IN
     SELECT value FROM pg_catalog.jsonb_array_elements(NEW.participants)
   LOOP
@@ -1382,6 +1439,7 @@ BEGIN
     )
   LOOP
     v_submission_id := v_ranking ->> 'submission_id';
+    v_withdrawn := FALSE;
     SELECT participant INTO v_participant
     FROM pg_catalog.jsonb_array_elements(NEW.participants) AS participant
     WHERE participant ->> 'submission_id' = v_submission_id;
@@ -1428,7 +1486,19 @@ BEGIN
         NEW.round_id, v_submission_id,
         ARRAY(SELECT pg_catalog.generate_series(20, 24))
       );
-      IF NOT COALESCE((v_final ->> 'valid')::BOOLEAN, FALSE)
+      v_withdrawn := NOT COALESCE((v_final ->> 'valid')::BOOLEAN, FALSE)
+        AND public.lab_arena__confirmation_account_failure(
+          NEW.round_id, v_submission_id
+        );
+      IF v_withdrawn THEN
+        IF v_ranking -> 'final_score' IS DISTINCT FROM 'null'::JSONB THEN
+          RAISE EXCEPTION 'lab_arena_withdrawn_confirmation_score_invalid'
+            USING ERRCODE = '22023';
+        END IF;
+        -- The whole incomplete confirmation stage is disqualified. Retain
+        -- verified main-stage slots and all actual execution/judge costs.
+        v_positions := ARRAY(SELECT pg_catalog.generate_series(0, 19));
+      ELSIF NOT COALESCE((v_final ->> 'valid')::BOOLEAN, FALSE)
          OR NOT (v_ranking ? 'final_score')
          OR (v_final -> 'score' = 'null'::JSONB
              AND v_ranking -> 'final_score' <> 'null'::JSONB)
@@ -1464,6 +1534,11 @@ BEGIN
     v_eligibility := public.lab_arena__integrity_eligibility(
       NEW.round_id, v_submission_id, v_positions
     );
+    IF v_withdrawn THEN
+      v_eligibility := v_eligibility || pg_catalog.jsonb_build_object(
+        'eligible', FALSE, 'eligibility_reason', 'confirmation_account_failure'
+      );
+    END IF;
     v_doc_eligible := (v_ranking ->> 'eligible')::BOOLEAN;
     v_doc_reason := v_ranking ->> 'eligibility_reason';
     IF v_doc_eligible IS DISTINCT FROM

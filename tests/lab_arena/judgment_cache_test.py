@@ -10,14 +10,30 @@ from lab_arena import contracts, judgment_cache, scoring
 from lab_arena.service import ArenaService
 
 
+def _icp() -> dict:
+    return {"icp_id": "i-1", "prompt": "Find buyers", "industry": "Software",
+            "employee_count": ["51-200"], "intent_signals": ["Product launch"]}
+
+
+def _company(name: str) -> dict:
+    return {
+        "company_name": name, "company_website": "https://acme.com",
+        "industry": "Software", "employee_count": "51-200", "country": "United States",
+        "fit_summary": "Software company", "fit_evidence_urls": ["https://acme.com/about"],
+        "intent_signals": [
+            {"matched_icp_signal": 0, "description": "Product launch",
+             "url": "https://acme.com/" + path, "date": None,
+             "snippet": "A new product", "why_now": "Recent launch"}
+            for path in ("first", "second")
+        ],
+    }
+
+
 def _input(scored_run_id: str = "run-a") -> dict:
     return scoring.build_scoring_input(
         scored_run_id=scored_run_id,
-        icp={"icp_id": "i-1", "prompt": "Find buyers"},
-        companies=[
-            {"company_name": "A", "claims": ["first", "second"]},
-            {"company_name": "B", "claims": ["third"]},
-        ],
+        icp=_icp(),
+        companies=[_company("A"), _company("B")],
         policy=scoring.build_scorer_policy(
             scoring_adapter_version="qualification_integrity_v2"
         ),
@@ -37,7 +53,7 @@ def _scope(document: dict) -> dict:
     )
 
 
-def test_cache_identity_excludes_only_run_identity_and_preserves_array_order():
+def test_cache_identity_normalizes_inputs_and_preserves_meaningful_order():
     first = _scope(_input("run-a"))
     assert _scope(_input("run-b"))["cache_key"] == first["cache_key"]
 
@@ -46,7 +62,7 @@ def test_cache_identity_excludes_only_run_identity_and_preserves_array_order():
     assert _scope(reordered)["cache_key"] != first["cache_key"]
 
     reordered_claims = _input("run-d")
-    reordered_claims["companies"][0]["claims"].reverse()
+    reordered_claims["companies"][0]["intent_signals"].reverse()
     assert _scope(reordered_claims)["cache_key"] != first["cache_key"]
 
     changed_policy = _input("run-e")
@@ -63,6 +79,49 @@ def test_cache_identity_refuses_silent_scoring_input_contract_drift():
     reordered_fields = {key: document for key, document in reversed(list(_input().items()))}
     with pytest.raises(judgment_cache.JudgmentCacheError, match="field order"):
         _scope(reordered_fields)
+
+
+def test_unused_prose_duplicates_and_padding_cannot_buy_new_judgments():
+    document = _input()
+    document["companies"][0]["fit_summary"] = "x" * 500
+    original = _scope(document)["cache_key"]
+    for index in range(100):
+        candidate = copy.deepcopy(document)
+        row = candidate["companies"][0]
+        row["fit_summary"] += "ignored suffix %d" % index
+        row["intent_signals"][0]["why_now"] = "unused prose %d" % index
+        row["intent_signals"].append(copy.deepcopy(row["intent_signals"][0]))
+        assert _scope(candidate)["cache_key"] == original
+
+    document["companies"] = [_company(str(index)) for index in range(5)]
+    original = _scope(document)["cache_key"]
+    document["companies"].append(_company("padding"))
+    assert _scope(document)["cache_key"] == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("url", "https://acme.com/different"), ("description", "A different event"),
+    ("date", "2026-09-01"), ("snippet", "Different evidence"),
+    ("matched_icp_signal", 1),
+])
+def test_meaningful_claim_changes_still_require_a_new_judgment(field, value):
+    document = _input()
+    original = _scope(document)["cache_key"]
+    document["companies"][0]["intent_signals"][0][field] = value
+    assert _scope(document)["cache_key"] != original
+
+
+def test_evidence_beyond_criterion_cap_is_ignored_by_cache_and_adapter():
+    from qualification.scoring.competition import _normalized_company
+
+    document = _input()
+    signals = document["companies"][0]["intent_signals"]
+    signals.append({**signals[0], "url": "https://acme.com/third"})
+    original = _scope(document)["cache_key"]
+    effective = _normalized_company(document["companies"][0], integrity_policy=True)
+    signals.extend({**signals[0], "url": "https://acme.com/noise-%d" % i} for i in range(50))
+    assert _scope(document)["cache_key"] == original
+    assert _normalized_company(document["companies"][0], integrity_policy=True) == effective
 
 
 def test_authority_partition_is_stable_and_never_reuses_the_blocked_key():
@@ -88,7 +147,7 @@ def test_open_scoring_partitions_a_cache_that_is_not_valid_for_recipient():
     policy = scoring.build_scorer_policy(
         scoring_adapter_version="qualification_integrity_v2"
     )
-    icp = {"icp_id": "i-1", "prompt": "Find buyers"}
+    icp = _icp()
     output = {
         "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
         "companies": [],
@@ -303,3 +362,38 @@ def test_service_uses_only_hash_validated_authoritative_cached_evidence(monkeypa
                 "scoring_adapter_version": "qualification_integrity_v2",
             },
         )
+
+
+@pytest.mark.parametrize("field,value", [
+    ("fit_summary", "Different validated prose"),
+    ("state", "California"),
+])
+def test_validated_but_unused_company_fields_share_a_judgment(field, value):
+    document = _input()
+    original = _scope(document)["cache_key"]
+    document["companies"][0][field] = value
+    assert _scope(document)["cache_key"] == original
+
+
+def test_fit_url_hints_beyond_actual_lookup_limit_share_a_judgment():
+    from qualification.scoring.competition import _normalized_company
+    from qualification.scoring.lead_scorer import _fit_evidence_url_hints
+    from gateway.qualification.models import CompanyOutput
+
+    document = _input()
+    row = document["companies"][0]
+    row["fit_evidence_urls"] = ["https://acme.com/fit-%d" % i for i in range(3)]
+    original = _scope(document)["cache_key"]
+    expected = row["fit_evidence_urls"][:]
+    for index in range(20):
+        row["fit_evidence_urls"] = expected + ["https://acme.com/unused-%d" % index]
+        assert _scope(document)["cache_key"] == original
+        model = CompanyOutput(**_normalized_company(row, integrity_policy=True))
+        assert _fit_evidence_url_hints(model) == expected
+
+
+@pytest.mark.parametrize("url", ["https://example.github.io/post", "https://8.8.8.8/post"])
+def test_evidence_normalization_does_not_throw_for_valid_public_hosts(url):
+    document = _input()
+    document["companies"][0]["intent_signals"][0]["url"] = url
+    assert _scope(document)["cache_key"]

@@ -72,12 +72,13 @@ DEFAULT_MIGRATIONS = (
 )
 # Keep the historical default intact: several migration tests intentionally
 # exercise intermediate schemas. PostgREST round tests need the current
-# integrity RPCs and their 211-214 prerequisites.
+# integrity and contact RPCs and their 211-215 prerequisites.
 POSTGREST_MIGRATIONS = DEFAULT_MIGRATIONS + (
     "211-lab-arena-owner-admission.sql",
     "212-lab-arena-accepted-judgment-cache.sql",
     "213-lab-arena-score-integrity.sql",
     "214-lab-arena-prior-credential-refusal.sql",
+    "215-lab-arena-contacts.sql",
 )
 
 _SHIM_SQL = """

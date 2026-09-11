@@ -63,6 +63,7 @@ MIGRATIONS = tuple(
     "scripts/212-lab-arena-accepted-judgment-cache.sql",
     "scripts/213-lab-arena-score-integrity.sql",
     "scripts/214-lab-arena-prior-credential-refusal.sql",
+    "scripts/215-lab-arena-contacts.sql",
 )
 EXPECTED_SCHEMA_VERSION = 197
 TESTNET_NETUID = 401
@@ -654,6 +655,7 @@ def _serve(args: argparse.Namespace) -> int:
             daily_cutoff_hour_utc=None,
             rewards_enabled=False,
             integrity_from=os.environ.get("LAB_ARENA_INTEGRITY_FROM") or None,
+            contacts_from=os.environ.get("LAB_ARENA_CONTACTS_FROM") or None,
             benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         )
         service = ArenaService(

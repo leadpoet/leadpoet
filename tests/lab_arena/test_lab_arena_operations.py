@@ -161,10 +161,17 @@ def test_table_is_closed_and_every_operation_uses_host_credentials():
 
 
 def test_deepline_path_field_is_closed_and_rendered_into_the_outbound_path():
+    contact_payloads = {
+        "harvestapi_get_profile": {"url": "https://www.linkedin.com/in/jane-doe/", "findEmail": "true"},
+        "zerobounce_validate": {"email": "jane@example.com"},
+        "bounceban_verify_single": {"email": "jane@example.com"},
+        "bounceban_get_single_status": {"id": "job-1"},
+    }
     for tool in ops.DEEPLINE_TOOLS:
-        outbound = ops.build_outbound_request("deepline.execute", {"tool": tool, "payload": {"query": "x"}})
+        payload = contact_payloads.get(tool, {"query": "x"})
+        outbound = ops.build_outbound_request("deepline.execute", {"tool": tool, "payload": payload})
         assert outbound.url == "https://code.deepline.com/api/v2/integrations/%s/execute" % tool
-        assert json.loads(outbound.body) == {"provider": ops.DEEPLINE_TOOL_PROVIDERS[tool], "operation": tool, "payload": {"query": "x"}}  # the path field names the tool, never a body key
+        assert json.loads(outbound.body) == {"provider": ops.DEEPLINE_TOOL_PROVIDERS[tool], "operation": tool, "payload": payload}  # the path field names the tool, never a body key
         assert dict(outbound.headers) == {"x-deepline-execute-response-intent": "raw"}
     reject("deepline.execute", {"tool": "exa_search/../admin", "payload": {}}, "invalid_field")
     reject("deepline.execute", {"tool": "unknown_tool", "payload": {}}, "invalid_field")

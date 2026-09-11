@@ -198,7 +198,7 @@ def build_scoring_plan(
 Scorer = Callable[[Sequence[Mapping[str, Any]], Mapping[str, Any], bool], Any]
 
 
-def lab_scorer(policy: Mapping[str, Any]) -> Scorer:
+def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[Mapping[str, Any]] = None) -> Scorer:
     """The Lab scorer on its host path, constructed after the policy is applied.
 
     ``is_reference_model`` is always False: the king is a competitor, not the
@@ -210,21 +210,25 @@ def lab_scorer(policy: Mapping[str, Any]) -> Scorer:
     validated = contracts.validate_scorer_policy(policy)
     adapter = validated["scoring_adapter_version"]
     _lab_adapter_version(adapter)
+    from lab_arena import contact_policy
     scorer = CompetitionCompanyScorer(
-        integrity_policy=adapter == "qualification_integrity_v2"
+        integrity_policy=contact_policy.integrity_adapter(adapter),
+        contacts_required=contact_policy.scorer_enabled(validated),
+        contact_source_evidence=contact_source_evidence,
     )
 
     def score(companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any], is_reference_model: bool) -> Any:
         return scorer.score_with_breakdowns(list(companies), dict(icp), bool(is_reference_model))
 
-    score.integrity_policy = adapter == "qualification_integrity_v2"
+    score.integrity_policy = contact_policy.integrity_adapter(adapter)
+    score.contacts_required = contact_policy.scorer_enabled(validated)
     return score
 
 
 def _lab_adapter_version(arena_version: str) -> str:
     from qualification.scoring.competition import SCORING_ADAPTER_VERSION
 
-    if arena_version in (SCORING_ADAPTER_VERSION_V1, "qualification_integrity_v2"):
+    if arena_version in (SCORING_ADAPTER_VERSION_V1, "qualification_integrity_v2", "qualification_contacts_v3"):
         return SCORING_ADAPTER_VERSION
     raise ScoringError("unsupported scoring adapter version")
 
@@ -415,7 +419,7 @@ def build_stage_scores(
     for submission_id, values in by_submission.items():
         scores[submission_id] = verify.stage_score(values, denominator)
     return {
-        **({"integrity_policy": "arena_integrity_v1"} if validated_policy["scoring_adapter_version"] == "qualification_integrity_v2" else {}),
+        **({"integrity_policy": "arena_integrity_v1"} if validated_policy["scoring_adapter_version"] in ("qualification_integrity_v2", "qualification_contacts_v3") else {}),
         "stage": stage,
         "rows": rows,
         "submission_scores": scores,
@@ -449,7 +453,10 @@ def run_scores_for_store(stage_scores: Mapping[str, Any], runs: Sequence[Mapping
         breakdowns = row.get("breakdowns") or []
         if any("company_qualified" in item for item in breakdowns):
             record["qualification_doc"] = {"companies": [
-                {key: item[key] for key in ("company_index", "company_identity_key", "company_qualified", "duplicate_company")}
+                {
+                    **{key: item[key] for key in ("company_index", "company_identity_key", "company_qualified", "duplicate_company")},
+                    **({"contact_qualified": item["contact_qualified"]} if "contact_qualified" in item else {}),
+                }
                 for item in breakdowns
             ]}
         elif stage_scores.get("integrity_policy") == "arena_integrity_v1":
@@ -475,7 +482,7 @@ def _require_run_id(value: Any) -> str:
     return value
 
 
-def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], evaluation_date: str) -> Dict[str, Any]:
+def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], evaluation_date: str, contact_source_evidence: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The judge sandbox's input: one ICP, one output, and the scorer policy."""
 
     return {
@@ -485,6 +492,8 @@ def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies
         "companies": [dict(company) for company in companies],
         "scorer_policy": contracts.validate_scorer_policy(policy),
         "evaluation_date": str(evaluation_date),
+        **({"contact_source_evidence": dict(contact_source_evidence or {})}
+           if policy.get("scoring_adapter_version") == "qualification_contacts_v3" else {}),
     }
 
 
@@ -551,7 +560,7 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
     return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": scored_run_id, "breakdowns": breakdowns}
 
 
-def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0, integrity_policy: bool = False) -> List[Dict[str, Any]]:
+def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0, integrity_policy: bool = False, contacts_required: bool = False) -> List[Dict[str, Any]]:
     """A breakdown list is acceptable for a work item only when it covers exactly the scored companies."""
 
     scored, _skipped = verify.bucket_skip(icp, companies)
@@ -576,6 +585,12 @@ def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp
                 raise ScoringError("duplicate company cannot receive credit")
             if qualified and (seen.intersection(aliases) or float(row[BREAKDOWN_SCORE_FIELD]) <= 0):
                 raise ScoringError("qualified companies must be positive and unique")
+            if contacts_required:
+                from lab_arena.contact_policy import validate_contact_breakdown
+                try:
+                    validate_contact_breakdown(row)
+                except contracts.ArenaContractError as exc:
+                    raise ScoringError(str(exc)) from exc
             if qualified:
                 seen.update(aliases)
     return [dict(item) for item in breakdowns]

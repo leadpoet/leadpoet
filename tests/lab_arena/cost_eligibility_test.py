@@ -566,6 +566,7 @@ def _startup_service(cost_rpc_result):
     )
     service._objects = Objects()
     service._config = SimpleNamespace(
+        defaults=SimpleNamespace(contacts_from=None),
         daily_icp_source=lambda **_kwargs: {"status": "unavailable"}
     )
     service._scorer_policy = {"scoring_adapter_version": "test"}

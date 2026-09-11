@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: PR192 contact review
+
+On 2026-09-11 the user explicitly authorized review, narrow fixes, update and
+merge of PR192, and complete live contact competition validation with the
+overnight skills. This includes protected credentials and Supabase access,
+exact committed migrations, backend and baseline changes, pushes and merges,
+canonical gateway/normal-validator restarts, and realistic miner submissions.
+Preserve existing round contracts, company and intent scoring, sandbox and
+credential isolation, costs, retries, accepted results, promotion, rewards,
+weights, and concurrent task work. Do not restore retired Research Lab layers.
+This scope expires when PR192 and its affected live flows are verified.
+
 ## Scoped production authorization: validator startup configuration
 
 On 2026-09-11 the user explicitly authorized investigation, the narrow safe

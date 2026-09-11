@@ -245,6 +245,10 @@ def scored_row(
     rows = _require_list(breakdowns, "breakdowns")
     if len(rows) != len(scored):
         raise ArenaContractError("expected %d breakdowns for %d scored companies" % (len(scored), len(rows)))
+    from lab_arena import contact_policy
+    if contact_policy.scorer_enabled(validated_policy):
+        for item in rows:
+            contact_policy.validate_contact_breakdown(item)
     redacted = [redact_breakdown(item) for item in rows]
     result = per_icp_score(icp, redacted, validated_policy)
     return {
@@ -446,6 +450,7 @@ def result_is_valid(rows_by_position: Mapping[int, Mapping[str, Any]], positions
 # helpers in ``qualification/scoring/competition.py`` is kept.
 BREAKDOWN_FIELDS = (
     "company_index", "company_identity_key", "company_identity_alias_keys", "company_qualified", "duplicate_company",
+    "contact_qualified", "contact_identity_key", "email_status",
     "icp_fit",
     "decision_maker",
     "intent_signal_raw",
@@ -542,6 +547,10 @@ def redact_breakdown(breakdown: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(breakdown, Mapping):
         raise ArenaContractError("breakdown must be an object")
     out = _keep_scalars(breakdown, BREAKDOWN_FIELDS)
+    contact = breakdown.get("contact_verification")
+    if isinstance(contact, Mapping):
+        from lab_arena.contact_policy import redact_contact_verification
+        out["contact_verification"] = redact_contact_verification(contact)
     details = breakdown.get("intent_signals_detail")
     if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
         out["intent_signals_detail"] = [redact_signal_detail(item) for item in details]

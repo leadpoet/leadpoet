@@ -106,6 +106,31 @@ def test_shared_gateway_role_classifier_accepts_inactive_testnet_permit():
     ) == ["active", "permitted"]
 
 
+def test_shared_policy_accepts_bittensor_105_numpy_field_types():
+    import numpy as np
+
+    metagraph = SimpleNamespace(
+        netuid=np.int64(401),
+        hotkeys=("active", "permitted", "miner"),
+        active=np.array([1, 0, 0], dtype=np.int64),
+        validator_permit=np.array([False, True, False], dtype=bool),
+        S=np.array([0.018, 75_000, 1_000_000], dtype=np.float32),
+    )
+    assert validator_hotkeys_from_metagraph(metagraph, network_name="test") == [
+        "active", "permitted",
+    ]
+    assert validator_uid(metagraph, "active", netuid=401, network_name="test") == 0
+    assert classify_hotkey_role(np.int64(1), np.bool_(False), np.float32(0.018),
+                               network_name="test")[0] == "validator"
+    assert validator_hotkeys_from_metagraph(metagraph, network_name="finney") == ["permitted"]
+
+
+@pytest.mark.parametrize("active", [-1, 2, 0.0, "1", "false", None])
+def test_testnet_activity_rejects_non_boolean_sdk_values(active):
+    with pytest.raises(ValueError, match="active"):
+        classify_hotkey_role(active, True, 0, network_name="test")
+
+
 def test_identity_only_uid_keeps_permit_and_testnet_rules_without_mainnet_stake():
     mainnet = SimpleNamespace(
         netuid=71,

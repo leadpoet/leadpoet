@@ -59,6 +59,9 @@ def _stake_vector(metagraph: Any, size: int) -> Tuple[Any, ...]:
 
 
 def _require_bool(value: Any, field: str) -> bool:
+    # Bittensor 10.5 uses an int64 vector for activity, but bool for permits.
+    if field == "active" and type(value) is int and value in (0, 1):
+        return bool(value)
     if type(value) is not bool:
         raise ValueError("metagraph %s is not boolean" % field)
     return value

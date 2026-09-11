@@ -1035,6 +1035,34 @@ class ArenaStore:
             "claim_assignment",
         )
 
+    def recover_claim_response(
+        self,
+        *,
+        round_id: str,
+        runner_hotkey: str,
+        request_id: str,
+        request_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Read an exact prior lease response without allocating new work."""
+
+        rows = self._transport.select(
+            "lab_arena_runs",
+            filters={
+                "round_id": round_id,
+                "runner_hotkey": runner_hotkey,
+                "claim_request_id": request_id,
+                "claim_request_hash": request_hash,
+            },
+            limit=1,
+            columns="claim_response",
+        )
+        if not rows or not isinstance(rows[0], Mapping):
+            return None
+        response = rows[0].get("claim_response")
+        if not isinstance(response, Mapping) or response.get("status") != "leased":
+            return None
+        return dict(response)
+
     def reserve_call(self, *, run_id: str, lease_token_hash: str, call_identity: str, operation_id: str, provider: str, funding_source: str, amount_microusd: int, call_doc: Mapping[str, Any], lease_ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
         return _require_mapping(
             self._transport.rpc(

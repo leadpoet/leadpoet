@@ -25,7 +25,11 @@ python3.11 -m pytest -q \
   tests/test_arena_validator_restart.py \
   tests/test_arena_reveal_chain_source.py \
   tests/test_registry_roles.py \
+  tests/test_validate_miner_testnet.py \
   tests/lab_arena/test_lab_arena_chain.py \
+  tests/lab_arena/test_validator_eligibility.py \
+  tests/lab_arena/test_validator_stake_flow.py \
+  tests/lab_arena/test_lab_arena_store.py \
   tests/lab_arena/test_scorer_image_access.py \
   tests/lab_arena/test_leased_images.py \
   tests/lab_arena/test_scorer_delivery_roundtrip.py \
@@ -54,8 +58,12 @@ The gate must prove:
   commitment or a missing pending commitment alone does not prove success.
 - Delayed outcome reports and older epoch recovery do not change rewards or
   prevent the current epoch from progressing.
-- Scoring setup/cycle failures and an empty queue do not stop weights. Claims
-  and results require the gateway's registered-validator role, not runner lists.
+- Scoring setup/cycle failures and claim denials do not stop weights. New
+  mainnet execute/score claims use the shared gateway rule: registration, a
+  validator permit, and effective stake >=75,000, regardless of activity or
+  runner lists. Testnet retains its active-or-permitted policy without the
+  mainnet minimum. Existing leases do not gain a stake minimum at completion.
+  Capacity counts eligible planned runners with the same shared rule.
 
 For database changes, apply the exact migration to disposable PostgreSQL.
 Exercise upgrades with representative old objects and dependency constraints,

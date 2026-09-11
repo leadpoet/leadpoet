@@ -190,7 +190,10 @@ class BittensorDrandBackend:
             try:
                 from bittensor_drand import get_encrypted_commit_v2
             except ImportError as exc:
-                raise LocalWeightSignerError("bittensor-drand is not installed") from exc
+                raise LocalWeightSignerError(
+                    "bittensor-drand 2.x stateful API required; "
+                    "install repository requirements"
+                ) from exc
             generate_commit = get_encrypted_commit_v2
         self._generate_commit = generate_commit
 

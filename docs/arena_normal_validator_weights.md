@@ -51,7 +51,10 @@ to authorize these weights.
 
 ## Run a validator
 
-Install the repository's existing Python dependencies. Use Linux x86_64 and
+Install the repository's existing Python dependencies in a Python 3.11 virtual
+environment. The pinned Bittensor 10.5 runtime supplies drand 2.x; the old
+Bittensor 9/drand 1 host environment cannot submit stateful commitments.
+Use Linux x86_64 and
 the existing runsc setup to score models. For Finney SN71, set the trusted
 public configuration:
 
@@ -113,6 +116,12 @@ directories, and runs local-wallet readiness before draining the active
 service. It then switches the service and retains the old release and private
 configuration for rollback. It does not export an enclave key or create a new
 hotkey. Use an existing owner-held wallet for the transition.
+
+The primary controller defaults to
+`/home/ec2-user/arena-validator-venv311/bin/python3`. Install the committed
+`requirements.txt` in that dedicated environment before restarting, or set
+`VALIDATOR_PYTHON_BIN` to an already prepared compatible environment. Keep the
+old environment intact so rollback can still start the previous service.
 
 The sample systemd service supervises the same normal validator. SIGTERM stops
 new claims and drains current work. The old enclave need not be terminated to

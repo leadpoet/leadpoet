@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 
 import pytest
 
@@ -121,6 +123,20 @@ def test_python_drand_backend_passes_stateful_sdk_arguments_exactly():
     assert observed == [
         [1, 4], [5, 6], 7, 8, 9, 10, 11, 12, 13, 14, 15.0, b"h" * 32
     ]
+
+
+def test_python_drand_backend_rejects_an_installed_package_without_v2_api(
+    monkeypatch,
+):
+    monkeypatch.setitem(sys.modules, "bittensor_drand", types.ModuleType("bittensor_drand"))
+    with pytest.raises(
+        LocalWeightSignerError,
+        match=(
+            "bittensor-drand 2.x stateful API required; "
+            "install repository requirements"
+        ),
+    ):
+        BittensorDrandBackend()
 
 
 def test_builder_uses_public_profile_local_wallet_and_compatible_client_methods():

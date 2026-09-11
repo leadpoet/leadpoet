@@ -25,6 +25,7 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Sequence
 
 from lab_arena import contracts
 from lab_arena.contracts import document_hash
+from lab_arena.runtime_host import RuntimeHostError, runtime_host_diagnostic
 
 MAX_ARENA_WEIGHT_ATTEMPTS = 3
 FINNEY_SN71_API_BASE_URL = "https://gateway.subnet71.com"
@@ -552,7 +553,7 @@ class ArenaWeightOrchestrator:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one normal Leadpoet Arena validator", add_help=True)
-    parser.add_argument("--netuid", type=int, default=int(os.environ.get("LAB_ARENA_NETUID", "71")))
+    parser.add_argument("--netuid", type=int)
     parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"), help="Chain identity (finney or test); use --subtensor.chain_endpoint for a local node")
     parser.add_argument("--subtensor.chain_endpoint", dest="chain_endpoint", default=os.environ.get("LAB_ARENA_CHAIN_ENDPOINT", ""), help="Explicit ws:// or wss:// RPC URL; defaults to the selected network's public endpoint")
     parser.add_argument("--wallet.name", dest="wallet_name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))
@@ -561,9 +562,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--arena-api-base-url", dest="api_base_url", default=os.environ.get("LAB_ARENA_API_BASE_URL", ""))
     parser.add_argument("--arena-work-dir", dest="work_dir", default=os.environ.get("LAB_ARENA_RUNNER_WORK_DIR", "/var/lib/lab-arena/runner"))
     parser.add_argument("--arena-runsc-path", dest="runsc_path", default=os.environ.get("LAB_ARENA_RUNSC_PATH", "/usr/local/bin/runsc"))
-    parser.add_argument("--arena-poll-seconds", dest="poll_seconds", type=int, default=int(os.environ.get("LAB_ARENA_VALIDATOR_POLL_SECONDS", "30")))
-    parser.add_argument("--check-only", action="store_true")
-    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--arena-poll-seconds", dest="poll_seconds", type=int)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check-only", action="store_true", help="Check wallet, gateway key and chain readiness; scoring is not checked")
+    mode.add_argument("--check-scoring-only", action="store_true", help="Check local scoring host setup without wallets, chain access or claims; no sandbox is executed")
+    mode.add_argument("--once", action="store_true")
     return parser
 
 
@@ -630,16 +633,27 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
     weights = threading.Thread(target=weight_loop, name="arena-weight-loop", daemon=False)
     weights.start()
     runner = None
+    scoring_failed = False
     try:
         while not stop.is_set():
             try:
                 if runner is None:
                     runner = runner_factory()
                 taken = runner.run_once(stop_event=stop)
+                if scoring_failed:
+                    print("Arena validator scoring loop resumed; sandbox completion is reported separately",
+                          flush=True)
+                    scoring_failed = False
             except Exception as exc:
-                # No exception text: provider errors can contain credential-bearing URLs.
-                print("Arena validator scoring cycle failed: type=%s; weights continue"
-                      % type(exc).__name__, file=sys.stderr, flush=True)
+                scoring_failed = True
+                if isinstance(exc, RuntimeHostError):
+                    print("Arena validator scoring unavailable: phase=%s %s; weights continue"
+                          % ("setup" if runner is None else "cycle", runtime_host_diagnostic(exc)),
+                          file=sys.stderr, flush=True)
+                else:
+                    # Arbitrary provider errors can contain credential-bearing URLs.
+                    print("Arena validator scoring cycle failed: type=%s; weights continue"
+                          % type(exc).__name__, file=sys.stderr, flush=True)
                 if runner is not None:
                     try:
                         runner.close()
@@ -667,7 +681,33 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
 
 
 def main(argv=None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.check_scoring_only:
+        from lab_arena.runtime_host import prepare_scoring_host, scoring_host_details
+
+        try:
+            prepare_scoring_host(Path(args.runsc_path), Path(args.work_dir))
+        except RuntimeHostError as exc:
+            print("Arena scoring host checks failed: %s" % runtime_host_diagnostic(exc),
+                  file=sys.stderr, flush=True)
+            return 1
+        print("Arena scoring host checks passed: %s; sandbox_execution=not_checked"
+              % scoring_host_details(runsc_path=args.runsc_path, work_dir=args.work_dir), flush=True)
+        return 0
+
+    # Scoring-only checks do not depend on chain or loop configuration.
+    for field, variable, fallback in (
+        ("netuid", "LAB_ARENA_NETUID", "71"),
+        ("poll_seconds", "LAB_ARENA_VALIDATOR_POLL_SECONDS", "30"),
+    ):
+        if getattr(args, field) is None:
+            try:
+                value = int(os.environ.get(variable, fallback))
+            except ValueError:
+                parser.error("%s must be an integer" % variable)
+            setattr(args, field, value)
+
     from lab_arena import chain as chain_module
     from lab_arena.local_weight_signer import (
         _http_rpc_endpoint, build_local_weight_signer, load_public_chain_signing_profile,

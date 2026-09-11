@@ -21,6 +21,7 @@ python3.11 -m pytest -q \
   tests/test_arena_validator.py \
   tests/test_local_weight_signer.py \
   tests/test_arena_validator_local_runtime.py \
+  tests/test_arena_scoring_readiness.py \
   tests/test_arena_validator_launcher.py \
   tests/test_arena_validator_restart.py \
   tests/test_arena_reveal_chain_source.py \
@@ -89,6 +90,11 @@ source. A manifest generated from an uncommitted working tree is not sufficient.
 Code push and deployment are separate actions. Follow the authorized deployment
 scope. Before replacing a working process, run the normal validator's
 `--check-only` command and preserve its state directory.
+For a scoring-runtime repair, also run `--check-scoring-only` and the real
+installed-runtime probe described in `docs/arena_normal_validator_weights.md`.
+Keep scoring checks separate from the mandatory service startup check: a
+scoring failure must not stop weights. A successful host check or probe does
+not prove that a real Arena completion was accepted.
 
 The normal validator requires no enclave image or KMS recipient policy. Apply
 migration 208 before deploying the new scoring authorization. Keep the existing

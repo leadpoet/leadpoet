@@ -373,12 +373,13 @@ def test_model_failures_map_to_terminal_causes_with_no_output_hash(tmp_path, kin
     assert api.completions[0]["body"]["output"] is None
 
 
-def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path):
+def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path, capsys):
     class HostFailureRuntime:
         @staticmethod
         def run_icp(_spec, **_kwargs):
             raise runtime.RuntimeHostError(
-                "runsc exited before sandbox creation completed"
+                "untrusted subprocess detail: secret-token",
+                reason="sandbox_launch_failed", runsc_path=Path("/usr/local/bin/runsc"),
             )
 
     api = FakeApi([lease()])
@@ -389,6 +390,10 @@ def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path):
     assert runner_.abandoned == 1
     assert api.completions == []
     assert runner_.completed[0]["error"] == "RuntimeHostError"
+    diagnostic = capsys.readouterr().err
+    assert "reason=sandbox_launch_failed" in diagnostic
+    assert "secret-token" not in diagnostic
+    assert "secret-token" not in runner_.completed[0]["detail"]
 
 
 def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_error(tmp_path):

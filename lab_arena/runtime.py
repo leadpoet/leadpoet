@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import re
 import resource
 import shutil
@@ -45,6 +44,10 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from lab_arena import contracts
 from lab_arena.operations import SCRAPINGDOG_RUNTIME_HANDLE
+from lab_arena.runtime_host import (
+    ArenaRuntimeError, RuntimeHostError, require_linux_x86_64,
+    require_rootful_runtime, require_runsc_executable,
+)
 
 SANDBOX_MODEL_DIR = "/model"
 SANDBOX_AGENT_DIR = "/agent"
@@ -104,14 +107,6 @@ _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 ProcessRunner = Callable[..., Any]
 
 
-class ArenaRuntimeError(RuntimeError):
-    """Base runtime failure; always fail the ICP attempt closed."""
-
-
-class RuntimeHostError(ArenaRuntimeError):
-    """The host cannot run the Arena runtime."""
-
-
 class SandboxSpecError(ArenaRuntimeError):
     """A sandbox specification is invalid."""
 
@@ -122,27 +117,6 @@ class SandboxOutputError(ArenaRuntimeError):
 
 class SandboxCleanupError(ArenaRuntimeError):
     """Sandbox, mount, or bundle cleanup did not complete."""
-
-
-# ---------------------------------------------------------------------------
-# Runtime host
-# ---------------------------------------------------------------------------
-
-
-def require_runsc_executable(path: Path) -> Path:
-    """Require a regular executable runsc file without pinning its identity."""
-
-    binary = Path(path)
-    if not binary.is_file() or not os.access(binary, os.X_OK):
-        raise RuntimeHostError("runsc executable is unavailable")
-    return binary
-
-
-def require_linux_x86_64() -> None:
-    system = platform.system()
-    machine = platform.machine().lower()
-    if system != "Linux" or machine not in ("x86_64", "amd64"):
-        raise RuntimeHostError("Arena runtime requires Linux x86_64 (host is %s %s)" % (system, machine))
 
 
 # ---------------------------------------------------------------------------
@@ -826,11 +800,11 @@ def run_sandbox(
             pid_file_mode = os.lstat(pid_file).st_mode
         except OSError as exc:
             raise RuntimeHostError(
-                "runsc exited before sandbox creation completed"
+                reason="sandbox_launch_failed", runsc_path=config.runsc_path,
             ) from exc
         if not stat.S_ISREG(pid_file_mode):
             raise RuntimeHostError(
-                "runsc exited before sandbox creation completed"
+                reason="sandbox_launch_failed", runsc_path=config.runsc_path,
             )
         cpu_after, max_rss = rusage()
         output_bytes: Optional[bytes] = None
@@ -893,7 +867,7 @@ def run_sandbox(
 
 
 class RunscRuntime:
-    """Host-checked runtime: constructing it proves Linux x86_64 and the binary."""
+    """Host checks cover Linux x86_64, root and the selected executable."""
 
     def __init__(
         self,
@@ -906,6 +880,7 @@ class RunscRuntime:
         require_linux_x86_64()
         self.config = config
         require_runsc_executable(config.runsc_path)
+        require_rootful_runtime()
         self._process_runner = process_runner
         self._clock = clock
         self._sleep = sleep

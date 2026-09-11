@@ -214,3 +214,50 @@ def test_local_hotkey_rejects_symlink(tmp_path):
 
     with pytest.raises(validator.ArenaValidatorError, match="private regular file"):
         validator.load_local_hotkey(args)
+
+
+def test_host_failure_recovers_without_stopping_weights_or_logging_secrets(capsys):
+    from lab_arena.runtime_host import RuntimeHostError
+
+    stop = _ImmediateStop()
+    orchestrator = _WeightRecorder()
+    factories = []
+
+    class Runner:
+        def run_once(self, *, stop_event):
+            assert orchestrator.second_run.wait(1)
+            stop_event.set()
+            return 0
+
+        def close(self):
+            return None
+
+    def factory():
+        factories.append(1)
+        if len(factories) == 1:
+            raise RuntimeHostError("https://provider.invalid?key=secret-token",
+                                   reason="runsc_missing", runsc_path=Path("/usr/local/bin/runsc"))
+        return Runner()
+
+    validator.run_validator_loops(orchestrator=orchestrator, runner_factory=factory,
+                                  epoch_supplier=lambda: 1, stop=stop, once=False)
+    output = capsys.readouterr()
+    assert "phase=setup reason=runsc_missing" in output.err
+    assert "/usr/local/bin/runsc" in output.err and "weights continue" in output.err
+    assert "secret-token" not in output.err + output.out
+    assert "scoring loop resumed" in output.out
+    assert "sandbox completion is reported separately" in output.out
+    assert orchestrator.runs >= 2
+
+
+def test_generic_scoring_error_still_hides_provider_details(capsys):
+    def factory():
+        raise RuntimeError("https://provider.invalid?key=secret-token")
+
+    orchestrator = _WeightRecorder()
+    validator.run_validator_loops(orchestrator=orchestrator, runner_factory=factory,
+                                  epoch_supplier=lambda: 1, stop=_ImmediateStop(), once=True)
+    output = capsys.readouterr()
+    assert "type=RuntimeError; weights continue" in output.err
+    assert "secret-token" not in output.err
+    assert orchestrator.runs >= 1

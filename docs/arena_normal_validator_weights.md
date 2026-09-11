@@ -63,6 +63,10 @@ credentials are separate and remain in the gateway broker.
 Weights start independently, before scoring setup. An empty queue, missing
 runsc, scoring setup error, or scoring-loop error causes scoring to wait/retry,
 not the weight loop to stop. Scoring works again when its dependency recovers.
+Known host failures include a safe reason and the configured local path in
+logs. Provider exception text and runtime subprocess output are not logged.
+`scoring loop resumed` means polling recovered; an accepted completion is still
+needed to prove that actual Arena work succeeded.
 
 ## Weight submission
 
@@ -130,6 +134,18 @@ service, which runs this same entry point as root, or run the command below
 from a root shell with the validator's wallet path set explicitly. An ordinary
 unprivileged shell can submit weights but cannot launch this sandbox as
 configured. This is an existing sandbox requirement, not a signing mode.
+Root inside a restricted container may still lack the required mount and
+namespace capabilities; use the installed-runtime probe below to verify them.
+
+Install the complete matching gVisor package or release bundle. Current releases
+can require the companion `gvisor-bin/` directory beside `runsc`; copying only
+the executable may leave an incomplete installation. Follow the
+[official gVisor installation instructions](https://gvisor.dev/docs/user_guide/install/).
+Select its actual absolute path with `LAB_ARENA_RUNSC_PATH` in the service's
+configuration, or with `--arena-runsc-path`. The command-line flag takes
+precedence, then the environment, then `/usr/local/bin/runsc`. The validator
+does not search `PATH` or download a replacement binary. For an installation
+at `/usr/bin/runsc`, explicitly configure that path instead.
 
 For Finney SN71, the validator includes the public RPC endpoint, gateway URL,
 and trusted gateway signing-key hash. No API keys or public-configuration
@@ -181,12 +197,84 @@ Test networks require their matching epoch mapping and an explicit
 
 Append `--check-only` to verify local signing access, the gateway key pin,
 and finalized chain identity without broadcasting or claiming work.
+This check does not verify scoring. Keep it as the mandatory service startup
+check so a missing scoring dependency cannot stop weight submission.
 `--once` runs one scoring poll and one weight cycle; it is not a substitute
 for a continuously supervised process or finalized reveal verification.
 
 Run only one process per hotkey. Keep the same weight state directory across
 updates and retries. Never put provider keys or wallet seed values in service
 configuration, logs, or Git.
+
+## Diagnose scoring setup
+
+Run `--check-scoring-only` with the same interpreter, runtime path, work path,
+and account as the validator. It checks Linux x86_64, the selected executable,
+rootful service identity, a five-second `runsc --version` invocation, and runner
+directory access, including `sandboxes`, `runs`, `images`, `sources`, and the
+fixed `/tmp` socket root. It creates missing named runner directories with private
+permissions and removes only its own temporary write probes. Existing runner
+root permissions, wallets, journals, and cached files are preserved. Existing
+`sandboxes` and `runs` directories retain the normal private-mode requirement.
+Configured work-directory symlinks, including parent components, are rejected
+without following or replacing them. The fixed OS `/tmp` alias is resolved and
+probed without changing shared-directory permissions.
+
+For a service installation, from the release checkout:
+
+```bash
+sudo /absolute/path/to/.venv-arena/bin/python \
+  scripts/run_arena_validator.py \
+  --environment-file /absolute/path/to/arena-validator-service.env \
+  --check-scoring-only
+```
+
+Use your installed interpreter and service environment file. The command reads
+no wallet, contacts no gateway or chain, claims no work, and broadcasts nothing.
+It exits nonzero with a reason on failure. Success explicitly reports
+`sandbox_execution=not_checked`; it does not prove mounts, sandbox execution,
+gateway authorization, or accepted scoring. This mode is mutually exclusive
+with `--check-only` and `--once`.
+
+| Reason | Required action |
+| --- | --- |
+| `runsc_path_invalid` | Set the absolute path to the installed executable. |
+| `runsc_missing` | Install runsc or correct the configured path. |
+| `runsc_not_executable` | Check the file type, execute permissions, parent access, and noexec mounts. |
+| `runsc_unusable` | Check executable architecture and the complete matching installation. |
+| `runsc_probe_timeout` | Investigate why the installed runtime's version check hangs. |
+| `runsc_probe_cleanup_failed` | Inspect the host for a stuck version-check process; forced cleanup could not be confirmed. |
+| `unsupported_host` | Use Linux x86_64 for this Arena integration. |
+| `root_required` | Use the configured rootful service with the existing wallet path. |
+| `unsafe_work_directory` | Inspect the reported path; preserve its contents and correct the configuration. |
+| `work_directory_unwritable` | Check ownership, permissions, read-only mounts, and available storage. |
+| `sandbox_launch_failed` | Run the installed-runtime probe and investigate sandbox capabilities. |
+
+After host checks pass, exercise the actual installation with the existing
+probe from the same release and with equivalent service privileges:
+
+```bash
+sudo /absolute/path/to/.venv-arena/bin/python \
+  scripts/_lab_arena_runsc_probe_ci.py \
+  --runsc-path /usr/local/bin/runsc
+```
+
+Substitute the exact runtime path used by the validator. Always pass
+`--runsc-path` when diagnosing an installed service: omitting it downloads a
+separate runtime for CI and can conceal a broken service installation.
+`--dry-run` validates only the probe plan. A real pass ends with
+`LAB_ARENA_RUNSC_PROBE_SUCCESS` and covers execution, worker sockets, read-only
+filesystem behavior, timeout, output limits, the agent entrypoint, and cleanup.
+For networking it checks the `--network=none` command and a failed outbound
+connection smoke test. An unreachable destination can also make that connection
+fail, so this test alone does not independently prove network isolation.
+The probe uses local provider fixtures and no production leases or credentials.
+
+Then verify a real eligible Arena job reaches an accepted completion, and
+independently verify finalized weight reveal for that validator. An empty queue
+or a live process proves neither. `included_pending_reveal` means the commitment
+is included while reveal confirmation remains pending. Preserve all weight
+journals through repairs and restarts. Check every affected validator separately.
 
 ## Deployment
 

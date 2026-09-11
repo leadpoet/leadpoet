@@ -166,7 +166,16 @@ Set these values on the Arena service host:
 - the three host provider keys listed above
 - `LAB_ARENA_SCORER_IMAGE`: a public tag or digest; startup resolves it to a
   digest for trusted scoring
-- `LAB_ARENA_RUNNER_HOTKEYS`: the runner hotkeys allowed to claim work
+- `LAB_ARENA_RUNNER_HOTKEYS`: planned runner capacity. New rounds count only
+  validators eligible under the shared gateway rule: on mainnet, registered
+  permitted validators with at least 75,000 effective stake weight. Testnet
+  retains its active-or-permitted rule without the mainnet stake minimum.
+  This is not an access allowlist: any registered permitted validator meeting
+  the minimum can claim, including inactive validators. No qualifying planned
+  capacity means no new round; existing rounds and weight-state retrieval
+  continue. The finalized chain cache refreshes approximately every 60 seconds.
+  A stake-only drop stops new claims after refresh and lets existing leases
+  finish under their existing rules. Weight retrieval has no benchmark minimum.
 - `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns each daily
   public baseline entry
 - `LAB_ARENA_BASELINE_SOURCE_URL`: optional in live mode. The only live daily

@@ -183,23 +183,56 @@ def test_prepare_request_rejects_when_output_cannot_list_every_file():
 
 
 @pytest.mark.parametrize(
-    "mutate",
+    ("mutate", "reason"),
     (
-        lambda response: response.update({"choices": []}),
-        lambda response: response.update({"model": "anthropic/other-model"}),
-        lambda response: response["choices"][0].update({"finish_reason": "length"}),
-        lambda response: response["choices"][0]["message"].update({"refusal": "cannot review"}),
-        lambda response: response["choices"][0]["message"].update({"tool_calls": [{"id": "one"}]}),
-        lambda response: response["choices"][0]["message"].update({"content": "not json"}),
-        lambda response: response["choices"][0]["message"].update({"content": '{"verdict":"pass","verdict":"reject"}'}),
+        (lambda response: response.update({"choices": []}), "choice"),
+        (
+            lambda response: response.update({"model": "anthropic/other-model"}),
+            "model_mismatch",
+        ),
+        (
+            lambda response: response["choices"][0].update(
+                {"finish_reason": "length"}
+            ),
+            "not_finished",
+        ),
+        (
+            lambda response: response["choices"][0]["message"].update(
+                {"refusal": "cannot review"}
+            ),
+            "refusal_or_tools",
+        ),
+        (
+            lambda response: response["choices"][0]["message"].update(
+                {"tool_calls": [{"id": "one"}]}
+            ),
+            "refusal_or_tools",
+        ),
+        (
+            lambda response: response["choices"][0]["message"].update(
+                {"content": "not json"}
+            ),
+            "content_json",
+        ),
+        (
+            lambda response: response["choices"][0]["message"].update(
+                {"content": '{"verdict":"pass","verdict":"reject"}'}
+            ),
+            "content_json",
+        ),
     ),
 )
-def test_parse_response_rejects_incomplete_or_malformed_openrouter_output(mutate):
+def test_parse_response_rejects_incomplete_or_malformed_openrouter_output(
+    mutate, reason
+):
     prepared = code_review.prepare_request(_archive(_pydantic_style_source()))
     response = _openrouter_response(prepared)
     mutate(response)
-    with pytest.raises(code_review.CodeReviewError, match="review_response_invalid"):
+    with pytest.raises(
+        code_review.CodeReviewError, match="review_response_invalid"
+    ) as failure:
         code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == reason
 
 
 def test_parse_response_rejects_incomplete_file_coverage():
@@ -208,8 +241,26 @@ def test_parse_response_rejects_incomplete_file_coverage():
     content = json.loads(response["choices"][0]["message"]["content"])
     content["reviewed_files"].pop()
     response["choices"][0]["message"]["content"] = json.dumps(content)
-    with pytest.raises(code_review.CodeReviewError, match="review_response_invalid"):
+    with pytest.raises(
+        code_review.CodeReviewError, match="review_response_invalid"
+    ) as failure:
         code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == "coverage"
+
+
+def test_parse_response_diagnoses_reordered_complete_coverage_without_accepting_it():
+    prepared = code_review.prepare_request(_archive(_pydantic_style_source()))
+    response = _openrouter_response(prepared)
+    content = json.loads(response["choices"][0]["message"]["content"])
+    content["reviewed_files"].reverse()
+    response["choices"][0]["message"]["content"] = json.dumps(content)
+
+    with pytest.raises(
+        code_review.CodeReviewError, match="review_response_invalid"
+    ) as failure:
+        code_review.parse_response(response, prepared)
+
+    assert failure.value.response_reason == "coverage_order"
 
 
 def test_parse_response_rejects_finding_without_exact_source_evidence():
@@ -220,11 +271,14 @@ def test_parse_response_rejects_finding_without_exact_source_evidence():
         "evidence": "words absent from the source",
         "explanation": "Unsupported output.",
     }
-    with pytest.raises(code_review.CodeReviewError, match="review_response_invalid"):
+    with pytest.raises(
+        code_review.CodeReviewError, match="review_response_invalid"
+    ) as failure:
         code_review.parse_response(
             _openrouter_response(prepared, verdict="reject", findings=[finding]),
             prepared,
         )
+    assert failure.value.response_reason == "finding_evidence_mismatch"
 
 
 def test_summary_is_optional_but_every_file_must_still_be_reviewed():
@@ -263,8 +317,11 @@ def test_parse_response_accepts_complete_verbose_findings_for_compact_persistenc
 )
 def test_parse_response_rejects_verdict_finding_disagreement(verdict, findings):
     prepared = code_review.prepare_request(_archive(_pydantic_style_source()))
-    with pytest.raises(code_review.CodeReviewError, match="review_response_invalid"):
+    with pytest.raises(
+        code_review.CodeReviewError, match="review_response_invalid"
+    ) as failure:
         code_review.parse_response(
             _openrouter_response(prepared, verdict=verdict, findings=findings),
             prepared,
         )
+    assert failure.value.response_reason == "verdict_findings"

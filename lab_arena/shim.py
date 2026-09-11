@@ -275,10 +275,17 @@ def _dispatch_with_response_url(
     """Send one frame and retain a validated trusted page response URL."""
 
     encoded = build_operation_frame(operation_id, parameters, timeout_ms)
+    bounded_timeout_ms = min(
+        timeout_ms, operations.OPERATIONS[operation_id].timeout_seconds * 1000
+    )
     path = worker_socket_path()
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        connection.settimeout(timeout_ms / 1000.0 + SOCKET_GRACE_SECONDS)
+        connection.settimeout(
+            operations.BUDGET_ADMISSION_MAX_SECONDS
+            + bounded_timeout_ms / 1000.0
+            + SOCKET_GRACE_SECONDS
+        )
         try:
             connection.connect(path)
             connection.sendall(len(encoded).to_bytes(4, "big") + encoded)

@@ -32,6 +32,13 @@ _DEEPLINE_CREDIT_FIELDS = (
     "credits_used",
     "credits",
 )
+_DEEPLINE_MAX_CHARGE_GROUP_IDS = 128
+_DEEPLINE_MAX_REQUEST_ID_LENGTH = 512
+# Deepline's live tool descriptions reported billingMode=no_bill on 2026-09-10.
+_DEEPLINE_COMPLETED_NO_BILL_BASIS = {
+    "free_simple_company_search": "deepline_free_simple_company_search_completed_zero",
+    "hunter_discover": "deepline_hunter_discover_completed_zero",
+}
 # Deepline's tool descriptions, checked 2026-09-10. These are reservations,
 # never final charges. Tools with dynamic prices reserve the remaining budget
 # in the database instead of treating an unknown price as zero.
@@ -140,7 +147,39 @@ def deepline_billing_history_cost(
         not isinstance(entry, Mapping) for entry in entries
     ):
         return "invalid", None, False, None
-    matches = [entry for entry in entries if entry.get("request_id") == request_id]
+    matches = []
+    for entry in entries:
+        charge_group_ids = None
+        metadata = entry.get("metadata")
+        if isinstance(metadata, Mapping) and "chargeGroupIds" in metadata:
+            charge_group_ids = metadata["chargeGroupIds"]
+            if (
+                not isinstance(charge_group_ids, list)
+                or len(charge_group_ids) > _DEEPLINE_MAX_CHARGE_GROUP_IDS
+                or any(
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or len(value) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
+                    for value in charge_group_ids
+                )
+                or len(set(charge_group_ids)) != len(charge_group_ids)
+            ):
+                return "invalid", None, False, None
+        direct_match = entry.get("request_id") == request_id
+        group_match = charge_group_ids is not None and request_id in charge_group_ids
+        if direct_match or group_match:
+            # A multi-ID charge group is an aggregate across independent
+            # Runtime requests. Its credits cannot be assigned to one call.
+            if charge_group_ids is not None and charge_group_ids != [request_id]:
+                return "invalid", None, False, None
+            entry_request_id = entry.get("request_id")
+            if (
+                not isinstance(entry_request_id, str)
+                or not entry_request_id.strip()
+                or len(entry_request_id) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
+            ):
+                return "invalid", None, False, None
+            matches.append(entry)
     if not matches:
         has_more = recent.get("has_more")
         if not isinstance(has_more, bool):
@@ -194,14 +233,20 @@ def deepline_billing_history_cost(
 def deepline_free_completed_cost(
     parameters: Mapping[str, Any], response_status: Any, response_json: Any
 ) -> Optional[ProviderCost]:
-    """Prove the one Deepline operation whose completed call costs zero.
+    """Prove a verified Deepline no-bill operation completed at zero cost.
 
     A present billing object remains authoritative, including when malformed:
     callers must not replace invalid provider accounting with this fixed zero.
     """
 
+    tool = parameters.get("tool")
+    basis = (
+        _DEEPLINE_COMPLETED_NO_BILL_BASIS.get(tool)
+        if isinstance(tool, str)
+        else None
+    )
     if (
-        parameters.get("tool") != "free_simple_company_search"
+        basis is None
         or isinstance(response_status, bool)
         or response_status != 200
         or not isinstance(response_json, Mapping)
@@ -209,6 +254,7 @@ def deepline_free_completed_cost(
         or response_json.get("status") != "completed"
         or not isinstance(response_json.get("job_id"), str)
         or not response_json["job_id"].strip()
+        or len(response_json["job_id"]) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
         or not isinstance(response_json.get("result"), (Mapping, list))
     ):
         return None
@@ -216,7 +262,7 @@ def deepline_free_completed_cost(
         microusd=0,
         units=Decimal("0"),
         unit_name="credits",
-        price_basis="deepline_free_simple_company_search_completed_zero",
+        price_basis=basis,
     )
 
 

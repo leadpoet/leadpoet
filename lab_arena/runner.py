@@ -64,7 +64,14 @@ COMPLETION_SIGNATURE_REFRESH_AGE_SECONDS = (
     contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS - int(API_TIMEOUT_SECONDS)
 )
 PROVIDER_API_TIMEOUT_GRACE_SECONDS = 15.0
-MAX_PROVIDER_API_TIMEOUT_SECONDS = 135.0
+MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS = max(
+    float(operation.timeout_seconds) for operation in operations.OPERATIONS.values()
+)
+MAX_PROVIDER_API_TIMEOUT_SECONDS = (
+    operations.BUDGET_ADMISSION_MAX_SECONDS
+    + MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
+    + PROVIDER_API_TIMEOUT_GRACE_SECONDS
+)
 DEFAULT_IMAGE_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_IMAGE_CACHE_MAX_ENTRIES = 32
 DEFAULT_SOURCE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
@@ -288,12 +295,28 @@ class HttpArenaApiClient:
     def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]:
         requested_timeout = frame.get("timeout_ms")
         timeout_seconds = API_TIMEOUT_SECONDS
-        if isinstance(requested_timeout, int) and not isinstance(requested_timeout, bool):
+        operation_id = frame.get("operation_id")
+        operation = (
+            operations.OPERATIONS.get(operation_id)
+            if isinstance(operation_id, str)
+            else None
+        )
+        if (
+            operation is not None
+            and isinstance(requested_timeout, int)
+            and not isinstance(requested_timeout, bool)
+        ):
+            operation_timeout = min(
+                requested_timeout / 1000.0,
+                float(operation.timeout_seconds),
+            )
             timeout_seconds = max(
                 API_TIMEOUT_SECONDS,
                 min(
                     MAX_PROVIDER_API_TIMEOUT_SECONDS,
-                    requested_timeout / 1000.0 + PROVIDER_API_TIMEOUT_GRACE_SECONDS,
+                    operations.BUDGET_ADMISSION_MAX_SECONDS
+                    + operation_timeout
+                    + PROVIDER_API_TIMEOUT_GRACE_SECONDS,
                 ),
             )
         return self._post(
@@ -1161,7 +1184,8 @@ class WorkerSocketServer:
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
             return HTTP_ERROR_STATUS.get(code, 400), {}, _http_error_body(code)
-        error, document = self._dispatch(operation_id, parameters, shim.DEFAULT_TIMEOUT_MS)
+        operation_timeout_ms = operations.OPERATIONS[operation_id].timeout_seconds * 1000
+        error, document = self._dispatch(operation_id, parameters, operation_timeout_ms)
         if error:
             return HTTP_ERROR_STATUS.get(error, 400), {}, _http_error_body(error)
         response_headers = {

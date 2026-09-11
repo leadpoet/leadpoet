@@ -73,7 +73,7 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     terminal = ledger.calls[result.call["call_identity"]]["terminal"]
     assert set(terminal) == {"status", "headers", "body_b64", "provider_cost"}
     assert terminal["provider_cost"] == {
-        "basis": "deepline_billing_history_credits_x_0.10_usd",
+        "basis": "deepline_billing_credits_charged_x_0.10_usd",
         "units": "0.02",
         "unit_name": "credits",
         "operation": "firecrawl_scrape",
@@ -92,8 +92,7 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     )
     assert replay.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
     assert replay.call["idempotent"] is True
-    assert [call["method"] for call in transport.sent] == ["POST", "GET"]
-    assert transport.sent[1]["url"] == br.DEEPLINE_BILLING_HISTORY_URL
+    assert [call["method"] for call in transport.sent] == ["POST"]
 
 
 @pytest.mark.parametrize("percent_encoded", [False, True])
@@ -183,8 +182,7 @@ def test_cached_final_url_fails_closed_when_invalid_or_secret_bearing(corruption
     assert json.loads(replay.body) == {"error": {"code": "broker_unavailable"}}
     assert operations.TRUSTED_RESPONSE_URL_HEADER not in replay.headers
     assert secret not in repr(replay.to_document())
-    assert [call["method"] for call in transport.sent] == ["POST", "GET"]
-    assert transport.sent[1]["url"] == br.DEEPLINE_BILLING_HISTORY_URL
+    assert [call["method"] for call in transport.sent] == ["POST"]
 
 
 def test_miner_execution_does_not_fall_back_to_a_host_scrapingdog_key():

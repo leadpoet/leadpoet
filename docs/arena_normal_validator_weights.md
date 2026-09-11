@@ -107,6 +107,23 @@ to authorize these weights.
 Install the repository's existing Python dependencies in a Python 3.11 virtual
 environment. The pinned Bittensor 10.5 runtime supplies drand 2.x; the old
 Bittensor 9/drand 1 host environment cannot submit stateful commitments.
+Create a new environment instead of upgrading the old auditor environment in
+place. That can leave incompatible legacy SCALE packages installed. Keep the
+existing wallet and validator state paths when changing environments.
+
+From the updated repository checkout:
+
+```bash
+python3.11 -m venv .venv-arena
+. .venv-arena/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+`setup.py` uses this same dependency list. A built package also includes the
+local signer's Python modules, public chain profiles, and SN71 epoch mapping.
+It does not require Nitro or enclave tooling.
+
 Use Linux x86_64 and the existing runsc setup to score models. The current
 sandbox uses rootful namespaces. For full scoring, use the supplied systemd
 service, which runs this same entry point as root, or run the command below

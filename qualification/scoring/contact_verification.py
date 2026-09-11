@@ -333,6 +333,7 @@ def _profile_candidates(value: Any, depth: int = 0) -> list[Mapping[str, Any]]:
         "firstName",
         "lastName",
         "currentPosition",
+        "currentPositions",
         "experience",
     }
     found = [value] if profile_keys.intersection(value) else []
@@ -400,15 +401,16 @@ def _is_current_experience(item: Mapping[str, Any]) -> bool:
 
 def _current_positions(profile: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     positions: list[Mapping[str, Any]] = []
-    current = profile.get("currentPosition", profile.get("current_position"))
-    if isinstance(current, Mapping) and _is_current_experience(current):
-        positions.append(current)
-    elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
-        positions.extend(
-            item
-            for item in current[:10]
-            if isinstance(item, Mapping) and _is_current_experience(item)
-        )
+    for key in ("currentPosition", "currentPositions", "current_position"):
+        current = profile.get(key)
+        if isinstance(current, Mapping) and _is_current_experience(current):
+            positions.append(current)
+        elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+            positions.extend(
+                item
+                for item in current[:10]
+                if isinstance(item, Mapping) and _is_current_experience(item)
+            )
     experience = profile.get("experience") or profile.get("experiences") or []
     if isinstance(experience, Sequence) and not isinstance(experience, (str, bytes, bytearray)):
         positions.extend(

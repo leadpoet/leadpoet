@@ -98,7 +98,8 @@ def test_hook_rescues_all_fabricated(monkeypatch):
                  "excerpt": "TestCo raised a round",
                  "published_date": "2026-07-02"}]
 
-    async def fake_rescore(candidate, icp_arg):
+    async def fake_rescore(candidate, icp_arg, *, integrity_policy=False):
+        assert integrity_policy is False
         assert candidate.intent_signals[0].url == "https://testco.com/blog/round"
         return (60.0, 55.0, 0.9, 8, False, [{"raw": 60.0}])
 
@@ -136,7 +137,10 @@ def test_hook_fails_open_when_repair_empty_or_unverified(monkeypatch):
     async def repair_ok(**kwargs):
         return [{"url": "https://testco.com/x"}]
 
-    async def rescore_still_fabricated(candidate, icp_arg):
+    async def rescore_still_fabricated(
+        candidate, icp_arg, *, integrity_policy=False
+    ):
+        assert integrity_policy is False
         return (0.0, 0.0, 0.0, 0, True, [])
 
     monkeypatch.setattr(repair_module, "repair_sources", repair_ok)

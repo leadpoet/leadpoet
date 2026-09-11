@@ -610,13 +610,87 @@ def test_any_priced_model_is_allowed_and_an_unpriced_model_is_refused():
 
 
 def test_budget_refusal_is_generic_and_recorded_under_the_identity():
-    broker, store, transport = make_broker(store=FakeLedgerStore(per_icp_quota=0))
+    broker, store, transport = make_broker(
+        store=FakeLedgerStore(per_icp_quota=0),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
     refused = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert refused.status == 402 and json.loads(refused.body) == {"error": {"code": "budget_refused"}}
     assert refused.call["outcome"] == "refused" and refused.call["reason"] == "per_icp_quota"
     assert transport.sent == []
     again = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert again.status == 402 and store.log == ["reserve", "reserve"]
+
+
+def test_budget_refusal_preserves_only_database_proven_miner_credential_error():
+    store = FakeLedgerStore(per_icp_quota=0)
+    original_reserve = store.reserve_call
+
+    def reserve_with_proof(**kwargs):
+        result = original_reserve(**kwargs)
+        result["prior_miner_credential_refusal"] = True
+        return result
+
+    store.reserve_call = reserve_with_proof
+    broker, _store, transport = make_broker(
+        store=store,
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    refused = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert refused.status == 402
+    assert json.loads(refused.body) == {
+        "error": {"code": "miner_credentials_unavailable"}
+    }
+    assert refused.call["reason"] == "per_icp_quota"
+    assert transport.sent == []
+
+
+@pytest.mark.parametrize(
+    ("credential_proven", "expected_code"),
+    [
+        (False, "provider_unavailable"),
+        (True, "miner_credentials_unavailable"),
+    ],
+)
+def test_uncertain_provider_cost_refusal_is_infrastructure_unless_credentials_proven(
+    credential_proven,
+    expected_code,
+):
+    store = FakeLedgerStore(per_icp_quota=0)
+    original_reserve = store.reserve_call
+
+    def reserve_with_uncertain_cost(**kwargs):
+        result = original_reserve(**kwargs)
+        result["reason"] = "provider_cost_uncertain"
+        result["prior_miner_credential_refusal"] = credential_proven
+        return result
+
+    store.reserve_call = reserve_with_uncertain_cost
+    broker, _store, transport = make_broker(
+        store=store,
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    refused = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert json.loads(refused.body) == {"error": {"code": expected_code}}
+    assert refused.call["reason"] == "provider_cost_uncertain"
+    assert transport.sent == []
 
 
 def test_transport_failure_after_send_marks_uncertain_and_keeps_full_reservation():

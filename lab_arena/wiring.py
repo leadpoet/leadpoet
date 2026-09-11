@@ -424,6 +424,7 @@ def build_service_from_environment(mode: str):
         scorer_image_reference=str(scorer.reference),
         pool_percent=_pool_percent_from_environment(),
         rewards_enabled=rewards_enabled,
+        integrity_from=os.environ.get("LAB_ARENA_INTEGRITY_FROM") or None,
     )
 
     # The catalog is organizer-held runtime state. It is not published in a

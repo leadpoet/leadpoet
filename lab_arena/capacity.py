@@ -47,4 +47,14 @@ def daily_challenger_capacity(configuration: Mapping[str, Any]) -> int:
                 raise ValueError("daily competition requires a positive run limit")
             waves = max(0, int(seconds(start, end) // wave_seconds))
             limits.append((waves * slots) // (attempts * count) - 1)
+    if configuration.get("integrity_policy") == "arena_integrity_v1":
+        # A fixed cohort of three challengers plus the baseline must fit even
+        # when every assignment takes its full retry budget.
+        for start, end, duration in (
+            ("stage_3_start", "stage_3_close", "icp_wall_clock_seconds"),
+            ("stage_3_close", "stage_3_scoring_close", "scoring_wall_clock_seconds"),
+        ):
+            waves = max(0, int(seconds(start, end) // (int(configuration[duration]) + ATTEMPT_OVERHEAD_SECONDS)))
+            if waves * slots < attempts * 5 * 4:
+                return 0
     return max(0, min(limits))

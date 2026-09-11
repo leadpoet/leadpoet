@@ -41,6 +41,7 @@ def employee_count_buckets_for_icp(*args, **kwargs):
 from lab_arena.contracts import (
     ArenaContractError,
     BENCHMARK_ICP_COUNT,
+    CONFIRMATION_ICP_COUNT,
     FINALIST_COUNT,
     KING_OUTCOMES,
     STAGE_1_ICP_COUNT,
@@ -50,7 +51,7 @@ from lab_arena.contracts import (
 )
 
 FINAL_DENOMINATOR = BENCHMARK_ICP_COUNT
-STAGE_DENOMINATORS = (STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT - STAGE_1_ICP_COUNT, FINAL_DENOMINATOR)
+STAGE_DENOMINATORS = (STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT - STAGE_1_ICP_COUNT, FINAL_DENOMINATOR, CONFIRMATION_ICP_COUNT)
 MAX_COMPANIES_PER_ICP = 5
 ACCEPTED_CAUSE = "accepted"
 ZERO_ROW_CAUSES = tuple(cause for cause in TERMINAL_CAUSES if cause != ACCEPTED_CAUSE)
@@ -261,8 +262,9 @@ def scored_row(
 
 
 def _require_position(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < BENCHMARK_ICP_COUNT:
-        raise ArenaContractError("icp_position must be within 0..%d" % (BENCHMARK_ICP_COUNT - 1))
+    from lab_arena.contracts import MAX_EVALUATION_ICP_COUNT
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < MAX_EVALUATION_ICP_COUNT:
+        raise ArenaContractError("icp_position must be within 0..%d" % (MAX_EVALUATION_ICP_COUNT - 1))
     return value
 
 
@@ -443,6 +445,7 @@ def result_is_valid(rows_by_position: Mapping[int, Mapping[str, Any]], positions
 # ``count_penalizable_false_positives`` and the ``scorer_breakdown_has_*``
 # helpers in ``qualification/scoring/competition.py`` is kept.
 BREAKDOWN_FIELDS = (
+    "company_index", "company_identity_key", "company_identity_alias_keys", "company_qualified", "duplicate_company",
     "icp_fit",
     "decision_maker",
     "intent_signal_raw",
@@ -459,6 +462,7 @@ SIGNAL_DETAIL_FIELDS = (
     "decay",
     "confidence",
     "date_status",
+    "verified_source", "date_verdict", "claim_support_verdict", "counted_in_aggregate",
     "matched_icp_signal",
     "evidence_type",
 )

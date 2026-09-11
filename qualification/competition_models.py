@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
-from datetime import date
+from datetime import date as Date
 from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -60,7 +60,7 @@ class CompetitionIntentSignal(BaseModel):
 
     matched_icp_signal: int = Field(ge=0)
     description: str = Field(min_length=1)
-    date: date
+    date: Optional[Date] = None
     why_now: str = Field(min_length=1)
     url: str
     snippet: str = Field(min_length=1)

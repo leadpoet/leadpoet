@@ -16,6 +16,14 @@ from qualification.employee_buckets import (
     normalize_employee_count_bucket,
     normalize_observed_employee_count_bucket,
 )
+from qualification.scoring.arena_integrity import (
+    bounded_criterion_evidence,
+    canonical_company_identity,
+    company_fit_verified,
+    company_identity_alias_keys,
+    fit_evidence_url_hints,
+    verified_identity_receipt,
+)
 
 
 SCORING_ADAPTER_VERSION = "qualification-company-scorer:v1"
@@ -96,6 +104,19 @@ def _category(value: Any) -> str | None:
     return text or None
 
 
+def _max_age_days(value: Any) -> int | None:
+    if not isinstance(value, Mapping):
+        return None
+    raw = value.get("max_age_days")
+    if raw is None:
+        raw = value.get("intent_max_age_days")
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return days if days > 0 else None
+
+
 def employee_count_buckets_for_icp(icp: Mapping[str, Any]) -> list[str]:
     """Return the exact employee buckets declared by one ICP."""
 
@@ -133,9 +154,11 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
 
     signals: list[str] = []
     evidence_types: list[str | None] = []
+    signal_max_age_days: list[int] = []
     primary_category = str(icp.get("intent_category") or "").strip().upper() or None
-    bonus_categories = {
-        _text(item): _category(item)
+    primary_max_age_days = max(1, int(icp.get("intent_max_age_days") or 365))
+    bonus_metadata = {
+        _text(item): (_category(item), _max_age_days(item))
         for item in (icp.get("bonus_intents") or [])
         if isinstance(item, Mapping) and _text(item)
     }
@@ -147,16 +170,27 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
         if not signal or signal in signals:
             continue
         signals.append(signal)
+        bonus_category, bonus_max_age_days = bonus_metadata.get(
+            signal, (None, None)
+        )
         evidence_types.append(
             _category(item)
-            or bonus_categories.get(signal)
+            or bonus_category
             or (primary_category if index == 0 else None)
+        )
+        signal_max_age_days.append(
+            _max_age_days(item)
+            or bonus_max_age_days
+            or primary_max_age_days
         )
     for item in icp.get("bonus_intents") or []:
         signal = _text(item)
         if signal and signal not in signals:
             signals.append(signal)
             evidence_types.append(_category(item))
+            signal_max_age_days.append(
+                _max_age_days(item) or primary_max_age_days
+            )
     if not signals:
         raise CompetitionScorerInputError("ICP has no intent signal")
 
@@ -192,11 +226,14 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
         "excluded_companies": [str(value) for value in excluded],
         "intent_signals": signals,
         "intent_signal_evidence_types": evidence_types,
-        "intent_max_age_days": max(1, int(icp.get("intent_max_age_days") or 365)),
+        "intent_signal_max_age_days": signal_max_age_days,
+        "intent_max_age_days": primary_max_age_days,
     }
 
 
-def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
+def _normalized_company(
+    company: Mapping[str, Any], *, integrity_policy: bool = False,
+) -> dict[str, Any]:
     try:
         row = CompetitionCompany.model_validate(company).model_dump(mode="json")
     except Exception as exc:
@@ -216,6 +253,8 @@ def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
         }
         for signal in row["intent_signals"]
     ]
+    if integrity_policy:
+        signals = [signal for group in bounded_criterion_evidence(signals) for signal in group]
     return {
         "company_name": row["company_name"],
         "company_website": row["company_website"],
@@ -227,10 +266,46 @@ def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
         "country": row["country"],
         "state": row["state"],
         "description": row["fit_summary"][:500],
-        "fit_evidence_urls": row["fit_evidence_urls"],
+        "fit_evidence_urls": (fit_evidence_url_hints(row["fit_evidence_urls"])
+                              if integrity_policy else row["fit_evidence_urls"]),
         "intent_signals": signals,
         "required_attribute": row.get("required_attribute"),
     }
+
+
+def effective_competition_input(
+    companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the same normalized first-N inputs consumed by the adapter.
+
+    Company positions and order remain significant. Bucket-skipped companies
+    have no judge input; output padding, unused prose and repeated/capped
+    evidence cannot buy a fresh judgment.
+    """
+    buckets = employee_count_buckets_for_icp(icp)
+    from gateway.qualification.models import CompanyOutput
+
+    rows = []
+    for company in list(companies)[:_company_goal(icp)]:
+        observed = company.get("employee_count")
+        bucket = normalize_employee_count_bucket(observed, default=None) or normalize_observed_employee_count_bucket(observed, default=None)
+        if bucket not in buckets:
+            rows.append({"bucket_skipped": True})
+            continue
+        normalized = _normalized_company(company, integrity_policy=True)
+        try:
+            effective = CompanyOutput(**normalized).model_dump(mode="json")
+        except ValidationError:
+            # Preserve validation inputs for incompatible rows; none reach
+            # the networked judge, and identity still affects their receipts.
+            rows.append(normalized)
+            continue
+        # The binary Arena fit verifier independently resolves these facts.
+        # These fields are validated above but never read during its judging.
+        for ignored in ("state", "description", "required_attribute"):
+            effective.pop(ignored, None)
+        rows.append(effective)
+    return {"icp": _normalized_icp(icp), "companies": rows}
 
 
 def _evidence_source(url: str, *, company_website: str) -> str:
@@ -270,6 +345,9 @@ def _ensure_provider_environment() -> None:
 class CompetitionCompanyScorer:
     """Use the production company judge for baseline and miner outputs."""
 
+    def __init__(self, integrity_policy: bool = False) -> None:
+        self.integrity_policy = bool(integrity_policy)
+
     async def __call__(
         self,
         companies: Sequence[Mapping[str, Any]],
@@ -295,38 +373,132 @@ class CompetitionCompanyScorer:
         score_company = scorer_module.score_company_competition_intent
 
         seen_companies: set[str] = set()
+        verified_identity_key_by_alias: dict[str, str] = {}
         breakdowns: list[dict[str, Any]] = []
-        for company in list(companies)[: _company_goal(icp)]:
+        for company_index, company in enumerate(
+            list(companies)[: _company_goal(icp)]
+        ):
             observed = (company or {}).get("employee_count")
             bucket = normalize_employee_count_bucket(
                 observed, default=None
             ) or normalize_observed_employee_count_bucket(observed, default=None)
             if not bucket or bucket not in allowed_buckets:
                 continue
-            normalized_company = _normalized_company(company)
+            normalized_company = _normalized_company(company, integrity_policy=self.integrity_policy)
+            submitted_identity = canonical_company_identity(normalized_company)
+            submitted_alias_keys = company_identity_alias_keys(submitted_identity)
+            if (
+                self.integrity_policy
+                and any(
+                    alias in verified_identity_key_by_alias
+                    for alias in submitted_alias_keys
+                )
+            ):
+                identity_key = next(
+                    verified_identity_key_by_alias[alias]
+                    for alias in submitted_alias_keys
+                    if alias in verified_identity_key_by_alias
+                )
+                duplicate = _model_contract_incompatible_breakdown()
+                duplicate.update({
+                    "failure_reason": "Duplicate company identity",
+                    "company_index": company_index,
+                    "company_identity_key": identity_key,
+                    "company_identity_alias_keys": list(submitted_alias_keys),
+                    "company_qualified": False,
+                    "duplicate_company": True,
+                })
+                breakdowns.append(duplicate)
+                continue
             try:
                 company_model = company_type(**normalized_company)
             except ValidationError:
-                breakdowns.append(_model_contract_incompatible_breakdown())
+                incompatible = _model_contract_incompatible_breakdown()
+                if self.integrity_policy:
+                    incompatible.update({
+                        "company_index": company_index,
+                        "company_identity_key": submitted_identity.key,
+                        "company_identity_alias_keys": list(submitted_alias_keys),
+                        "company_qualified": False,
+                        "duplicate_company": False,
+                    })
+                breakdowns.append(incompatible)
                 continue
             result = await score_company(
                 company=company_model,
                 icp=icp_model,
                 run_cost_usd=0.0,
                 run_time_seconds=0.0,
-                seen_companies=seen_companies,
+                seen_companies=(seen_companies if not self.integrity_policy else set()),
                 is_reference_model=bool(is_reference_model),
+                integrity_policy=self.integrity_policy,
             )
-            breakdowns.append(
+            breakdown = (
                 result.model_dump(mode="json")
                 if hasattr(result, "model_dump")
                 else dict(result)
             )
+            if self.integrity_policy:
+                receipts = breakdown.get("verifier_gate_receipts")
+                fit_verified = company_fit_verified(receipts)
+                observed_receipt = verified_identity_receipt(receipts)
+                verified_identity = canonical_company_identity(
+                    normalized_company,
+                    verified_identity_receipt=observed_receipt,
+                )
+                current_identity_key = (
+                    verified_identity.key if observed_receipt else submitted_identity.key
+                )
+                identity_alias_keys = tuple(dict.fromkeys(
+                    (*submitted_alias_keys, *company_identity_alias_keys(verified_identity))
+                ))
+                prior_identity_key = next(
+                    (
+                        verified_identity_key_by_alias[alias]
+                        for alias in identity_alias_keys
+                        if alias in verified_identity_key_by_alias
+                    ),
+                    None,
+                )
+                duplicate_company = bool(
+                    fit_verified and prior_identity_key is not None
+                )
+                identity_key = prior_identity_key or current_identity_key
+                if duplicate_company:
+                    for field, value in (
+                        ("icp_fit", 0.0),
+                        ("decision_maker", 0.0),
+                        ("intent_signal_raw", 0.0),
+                        ("time_decay_multiplier", 1.0),
+                        ("intent_signal_final", 0.0),
+                        ("cost_penalty", 0.0),
+                        ("time_penalty", 0.0),
+                        ("final_score", 0.0),
+                    ):
+                        breakdown[field] = value
+                    breakdown["failure_reason"] = "Duplicate company identity"
+                primary_verified = has_verified_primary_intent(
+                    breakdown.get("intent_signals_detail") or []
+                )
+                company_qualified = bool(
+                    fit_verified and primary_verified and not duplicate_company
+                )
+                breakdown.update({
+                    "company_index": company_index,
+                    "company_identity_key": identity_key,
+                    "company_identity_alias_keys": list(identity_alias_keys),
+                    "company_qualified": company_qualified,
+                    "duplicate_company": duplicate_company,
+                })
+                if fit_verified and not duplicate_company:
+                    for alias in identity_alias_keys:
+                        verified_identity_key_by_alias[alias] = identity_key
+            breakdowns.append(breakdown)
         return breakdowns
 
 
 def scorer_breakdown_has_retryable_infrastructure_failure(
-    breakdown: Mapping[str, Any],
+    breakdown: Mapping[str, Any], *, integrity_policy: bool = False
 ) -> bool:
     if not isinstance(breakdown, Mapping):
         return False
@@ -342,7 +514,9 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 return True
     details = breakdown.get("intent_signals_detail")
     if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
-        if intent_unavailability_requires_retry(details):
+        if intent_unavailability_requires_retry(
+            details, integrity_policy=integrity_policy
+        ):
             return True
     reason = str(breakdown.get("failure_reason") or "").strip().lower()
     return bool(reason) and any(
@@ -426,11 +600,14 @@ def has_verified_primary_intent(details: Sequence[Any]) -> bool:
     return False
 
 
-def intent_unavailability_requires_retry(details: Sequence[Any]) -> bool:
-    """Retry unavailable intent evidence unless a primary verdict scored."""
+def intent_unavailability_requires_retry(
+    details: Sequence[Any], *, integrity_policy: bool = False
+) -> bool:
+    """Retry any unavailable integrity signal; legacy needs no verified primary."""
 
-    return any(_intent_detail_is_unavailable(detail) for detail in details) and not (
-        has_verified_primary_intent(details)
+    unavailable = any(_intent_detail_is_unavailable(detail) for detail in details)
+    return unavailable and (
+        integrity_policy or not has_verified_primary_intent(details)
     )
 
 

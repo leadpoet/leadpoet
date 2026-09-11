@@ -138,8 +138,11 @@ async def _request_sidecar(
 # as the span name, so an unlabelled catch-all makes a runner claiming work and a
 # miner submitting an agent indistinguishable in telemetry — which is exactly the
 # ambiguity that left the 2026-09-05 12:56-13:00 UTC submission refusals
-# unattributable. The templates are low-cardinality and carry no client-controlled
-# segment, so the telemetry boundary validator's route rules are unaffected.
+# unattributable. Since the legacy gateway weight API was retired the weight
+# publication path runs through this proxy too, so `/v1/weight-state` and
+# `/v1/chain-outcomes` are the only remaining telemetry handle on it. The
+# templates are low-cardinality and carry no client-controlled segment, so the
+# telemetry boundary validator's route rules are unaffected.
 #
 # A path NOT listed here still matches the catch-all below and behaves exactly as
 # it does today, so the sidecar can grow endpoints without this list blocking
@@ -149,17 +152,22 @@ async def _request_sidecar(
 # POST-only endpoint is still its 405, not the gateway's.
 _CONTRACT_ROUTES: tuple[str, ...] = (
     "/v1/current",
+    "/v1/competition",
     "/v1/signing-key",
-    "/v1/reward-basis",
+    "/v1/weight-state",
+    "/v1/chain-outcomes",
     "/v1/rounds/{round_id}",
     "/v1/rounds/{round_id}/benchmark",
+    "/v1/rounds/{round_id}/submissions",
     "/v1/rounds/{round_id}/results/{submission_id}",
     "/v1/submissions/presign",
     "/v1/submissions/{submission_id}",
+    "/v1/submissions/{submission_id}/code",
     "/v1/submissions/{submission_id}/finalize",
     "/v1/runs/claim",
     "/v1/runs/{run_id}/provider",
     "/v1/runs/{run_id}/source",
+    "/v1/runs/{run_id}/image-access",
     "/v1/runs/{run_id}/complete",
 )
 _CONTRACT_ROUTE_METHODS = ["GET", "POST"]

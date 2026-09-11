@@ -354,11 +354,17 @@ def test_contract_endpoints_are_labelled_by_operation(monkeypatch):
     client.post("/arena/v1/submissions/sub-abc/finalize", content=b"{}")
     client.post("/arena/v1/runs/claim", content=b"{}")
     client.get("/arena/v1/rounds/arena-2026-09-05/results/sub-abc")
+    # The weight publication path reaches the sidecar through this proxy now
+    # that the gateway's own weight API is gone, so it needs its own labels.
+    client.post("/arena/v1/weight-state", content=b"{}")
+    client.post("/arena/v1/chain-outcomes", content=b"{}")
 
     assert seen == [
         "/arena/v1/submissions/{submission_id}/finalize",
         "/arena/v1/runs/claim",
         "/arena/v1/rounds/{round_id}/results/{submission_id}",
+        "/arena/v1/weight-state",
+        "/arena/v1/chain-outcomes",
     ]
     # The concrete ids stay out of the template and the sidecar still receives
     # exactly the path it receives today.
@@ -366,6 +372,8 @@ def test_contract_endpoints_are_labelled_by_operation(monkeypatch):
         ("POST", "v1/submissions/sub-abc/finalize"),
         ("POST", "v1/runs/claim"),
         ("GET", "v1/rounds/arena-2026-09-05/results/sub-abc"),
+        ("POST", "v1/weight-state"),
+        ("POST", "v1/chain-outcomes"),
     ]
 
 

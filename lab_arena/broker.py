@@ -974,6 +974,7 @@ class Broker:
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
+        deepline_native_cost: Optional[provider_costs.ProviderCost] = None
         deepline_request_id: Optional[str] = None
         deepline_operation: Optional[str] = None
         try:
@@ -1000,7 +1001,14 @@ class Broker:
                     request_id = _deepline_job_request_id(raw_document)
                     deepline_request_id = request_id
                     if (
-                        deepline_known_free_cost is None
+                        response.status == 200
+                        and request_id is not None
+                        and raw_document.get("status") == "completed"
+                    ):
+                        deepline_native_cost = provider_costs.deepline_cost(raw_document)
+                    if (
+                        deepline_native_cost is None
+                        and deepline_known_free_cost is None
                         and 200 <= response.status < 300
                         and request_id is not None
                     ):
@@ -1043,10 +1051,15 @@ class Broker:
             )
             raw_cost = provider_costs.openrouter_cost(raw_document)
         elif effective_operation.provider == "deepline":
-            # A terminal per-job history entry is authoritative. Native
-            # response billing has been observed to understate the posted
-            # charge, so paid calls never fall back to it.
-            raw_cost = deepline_known_free_cost or deepline_readback_cost
+            # Native billing is scoped to this completed request. Billing
+            # history can aggregate multiple requests into one charge group,
+            # so it is only a fallback when the history parser proves that the
+            # entry is unshared.
+            raw_cost = (
+                deepline_native_cost
+                or deepline_known_free_cost
+                or deepline_readback_cost
+            )
             raw_actual = None if raw_cost is None else raw_cost.microusd
         elif effective_operation.provider == "scrapingdog" and 200 <= response.status < 300:
             raw_cost = provider_costs.scrapingdog_cost(
@@ -1072,7 +1085,10 @@ class Broker:
             request_id=(
                 deepline_request_id
                 if effective_operation.provider == "deepline"
-                and raw_cost is deepline_readback_cost
+                and (
+                    raw_cost is deepline_native_cost
+                    or raw_cost is deepline_readback_cost
+                )
                 else None
             ),
         )

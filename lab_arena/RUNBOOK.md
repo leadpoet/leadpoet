@@ -254,22 +254,28 @@ mismatch. Therefore, schema 190 and the matching candidate runtime form one
 cutover dependency. Do not use an older Arena service as a claim-capable
 rollback after this migration.
 
-The canonical restart pauses new claims after its existing release,
+The canonical gateway restart pauses new claims after its release,
 attestation, and maintenance preflight. It then waits for every captured lease
-to have an accepted receipt or an authentic terminal failure receipt with
+to have a persisted accepted result or authenticated terminal failure with
 closed accounting. A lease expiry, worker loss, changed lease generation, or
-missing receipt stops the restart before shutdown and restores the prior
+missing result stops the restart before shutdown and restores the prior
 operator pause state. Reported failures keep the normal retry assignment; the
 restart does not convert them to accepted work.
 
-A failed restart keeps the guard after a destructive phase. A normal canonical
-retry by the same retained invocation repeats the complete gateway and
-validator path. If the exact candidate advances, the same owner can change the
+A failed gateway restart keeps the guard after a destructive phase. A canonical
+retry by the same retained invocation resumes the gateway restart. If the
+candidate advances, the same owner can change the
 guard target with a generation-checked operation after the new candidate has
 passed the normal preflight. The captured leases, operator pause, and
-destructive phase stay unchanged. The controller releases claims only after
-the joined gateway and validator readiness manifest passes. There is no
-separate completion or release-only path.
+destructive phase stay unchanged. The gateway releases its claim guard after
+its runtime and Arena service pass readiness checks.
+
+The paired normal-validator restart checks the local wallet, gateway signing-key
+pin, and finalized chain identity before stopping the old service. It drains
+scoring work and preserves signed weight bytes and recovery state. Verify that
+both hosts run the intended release, then check automatic weight submission and
+finalized commitment/reveal readback. See
+[Normal Arena validators](../docs/arena_normal_validator_weights.md).
 
 The service creates a daily round at 00:00 UTC by default. Set
 `LAB_ARENA_DAILY_CUTOFF_UTC` to select another hour, or create one manually:
@@ -371,17 +377,15 @@ does not affect production. The next daily round loads the promoted `lab` code;
 the organizer still owns the baseline entry, while the winning miner remains
 the reward payee.
 
-## Rewards and independent disable controls
+## Rewards and competition controls
 
-The Arena result is beside the retained reward settlement path. With Arena
-rewards off, no Arena champion allocation is added.
-
-If Arena rewards are enabled, the Arena and the reward-basis gateway must use
-the same Supabase database. The published Arena basis must be visible to the
-gateway/coordinator. Configure the Arena signing public-key hash and the Arena
-reward enable flag on both the gateway/coordinator and validator as required by
-the existing reward adapter. A missing, invalid, or unreachable governing
-basis fails closed; it is not treated as an empty winner.
+The live Arena service persists the published reward basis and accepted weight
+state in Supabase. A registered, permitted validator requests that state with
+its local hotkey signature. It verifies the gateway signing-key pin, accepted
+state, reward basis, and finalized UID ownership before deriving and submitting
+weights. The benchmark stake minimum applies to new scoring work, not weight
+retrieval. A missing, invalid, conflicting, or unreachable accepted state stops
+that weight submission.
 
 Competition publication is separate from reward activation. Publication
 writes the participants, rankings, winner decision, and publication time
@@ -395,10 +399,14 @@ rounds are not retroactively promoted or rescored. The default champion pool is
 An activated database record is not proof that chain weights were submitted;
 verify canonical publication, validator submission, finalization, and readback.
 
-To disable only the competition, set `LAB_ARENA_MODE=off` and stop the Arena
-service and runners. To disable only Arena rewards, turn off the Arena reward
-flag on the gateway/coordinator and validator. Neither action requires removal
-of retained reward history.
+Keep the live Arena service available for weight-state requests while pausing
+new competition work. Set `LAB_ARENA_DAILY_CUTOFF_UTC=disabled` to stop automatic
+creation of new rounds; existing rounds continue. Set
+`LAB_ARENA_REWARDS_ENABLED=false` to create future rounds with rewards disabled.
+This setting is frozen into each round and does not change existing rounds or
+their governing reward history. Validators continue their independent weight
+loop. Setting `LAB_ARENA_MODE=off` or stopping the Arena service also removes
+weight-state availability and is a service shutdown, not a scoring-only pause.
 
 ## Focused checks
 

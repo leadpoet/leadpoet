@@ -25,7 +25,9 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
-from gateway.utils.hotkey_roles import classify_hotkey_from_metagraph
+from gateway.utils.hotkey_roles import (
+    ValidatorIneligible, validator_uid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +62,17 @@ CANCEL_REASONS = {
 def _gateway_validator_authorizer(
     hotkey: str, *, network_name: str, netuid: int, metagraph: Any
 ) -> Tuple[bool, Optional[str]]:
-    """Apply the gateway's role policy to Arena's finalized metagraph."""
+    """Check existing-work identity without rechecking benchmark stake."""
 
-    if int(getattr(metagraph, "netuid")) != int(netuid):
-        raise RuntimeError("Arena metagraph chain scope does not match service")
-    return classify_hotkey_from_metagraph(
-        hotkey,
-        metagraph,
-        network_name=chain_module.normalize_network_name(network_name),
-    )
+    try:
+        validator_uid(
+            metagraph, hotkey, netuid=netuid,
+            network_name=chain_module.normalize_network_name(network_name),
+            require_stake=False,
+        )
+    except ValidatorIneligible as exc:
+        return (False, None) if str(exc) == "runner_hotkey_unregistered" else (True, "miner")
+    return True, "validator"
 
 
 class ServiceError(RuntimeError):
@@ -332,8 +336,8 @@ class ServiceConfig:
     # Supplies plain accepted economic inputs. It must not return receipts,
     # ancestry, release identity, or a preconstructed weight vector.
     accepted_burn_hotkey: str = ""
-    # Production uses the gateway's canonical subnet role lookup. Tests may
-    # inject a deterministic lookup without constructing a live metagraph.
+    # Identity-only test seam for existing leases. New claims and capacity
+    # always require the finalized permit/stake snapshot, never this override.
     validator_authorizer: Optional[
         Callable[[str], Tuple[bool, Optional[str]]]
     ] = None
@@ -621,9 +625,21 @@ class ArenaService:
         for hotkey in runners:
             if hotkey in banned:
                 raise ServiceError("runner_banned", 500)
+        snapshot = self._benchmark_snapshot()
+        eligible = []
+        for hotkey in runners:
+            try:
+                self._benchmark_validator_uid(snapshot, hotkey)
+            except ServiceError as exc:
+                if exc.status != 403:
+                    raise
+            else:
+                eligible.append(hotkey)
+        if not eligible:
+            raise ServiceError("daily_runner_capacity_insufficient", 503)
         # This planned runner set sizes the announced daily capacity and stays
         # in the document for schema compatibility. It never grants authority.
-        return runners, banned
+        return eligible, banned
 
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
@@ -2283,7 +2299,7 @@ class ArenaService:
         return contracts.document_hash({"lease": validated["request_id"], "signature": validated["signature"]})[7:]
 
     def _require_validator_authority(self, hotkey: str) -> None:
-        """Require the gateway's canonical registered-validator role."""
+        """Require validator identity for existing work, without a stake gate."""
 
         authorizer = getattr(self._config, "validator_authorizer", None)
         if authorizer is None:
@@ -2303,6 +2319,31 @@ class ArenaService:
         if role != "validator":
             raise ServiceError("runner_validator_required", 403)
 
+    def _benchmark_snapshot(self) -> chain_module.MetagraphSnapshot:
+        try:
+            return self._config.chain.metagraph(finalized=True)
+        except Exception as exc:
+            raise ServiceError("runner_benchmark_eligibility_unavailable", 503) from exc
+
+    def _benchmark_validator_uid(self, snapshot: Any, hotkey: str) -> int:
+        try:
+            network_name, netuid = self._chain_scope()
+            uid = validator_uid(
+                snapshot, hotkey, netuid=netuid,
+                network_name=chain_module.normalize_network_name(network_name),
+            )
+            # Bind miner self-dealing exclusions to the same authorized snapshot.
+            owners = tuple(snapshot.coldkeys)
+            if len(owners) != len(snapshot.hotkeys) or any(
+                not isinstance(owner, str) or not owner for owner in owners
+            ):
+                raise ValueError("metagraph coldkeys are invalid")
+            return uid
+        except ValidatorIneligible as exc:
+            raise ServiceError(str(exc), 403) from exc
+        except Exception as exc:
+            raise ServiceError("runner_benchmark_eligibility_unavailable", 503) from exc
+
     def handle_claim(self, envelope: Any) -> Dict[str, Any]:
         validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_CLAIM, hot=True)
         round_id = round_row["round_id"]
@@ -2313,14 +2354,31 @@ class ArenaService:
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
-        self._require_validator_authority(validated["hotkey"])
-        excluded = list(self._config.chain.hotkeys_owned_by_same_coldkey(validated["hotkey"]))
+        snapshot = self._benchmark_snapshot()
+        response = None
+        try:
+            uid = self._benchmark_validator_uid(snapshot, validated["hotkey"])
+        except ServiceError as exc:
+            if exc.code != "runner_stake_below_minimum":
+                raise
+            # A lost response must not strand a lease issued before stake fell.
+            # This exact signed-request lookup cannot allocate or extend work.
+            response = self._store.recover_claim_response(
+                round_id=round_id, runner_hotkey=validated["hotkey"],
+                request_id=validated["request_id"],
+                request_hash=contracts.request_bytes_hash(validated),
+            )
+            if response is None:
+                raise
+        else:
+            excluded = chain_module.hotkeys_owned_by_coldkey(snapshot, snapshot.coldkeys[uid])
         token = self._lease_token(validated)
-        response = self._store.claim_assignment(
-            round_id=round_id, runner_hotkey=validated["hotkey"], declared_parallelism=declared, slot_ceiling=int(configuration["runner_slot_ceiling"]),
-            excluded_miner_hotkeys=excluded, request_id=validated["request_id"], request_hash=contracts.request_bytes_hash(validated), lease_token_hash=hash_lease_token(token),
-            lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
-        )
+        if response is None:
+            response = self._store.claim_assignment(
+                round_id=round_id, runner_hotkey=validated["hotkey"], declared_parallelism=declared, slot_ceiling=int(configuration["runner_slot_ceiling"]),
+                excluded_miner_hotkeys=excluded, request_id=validated["request_id"], request_hash=contracts.request_bytes_hash(validated), lease_token_hash=hash_lease_token(token),
+                lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
+            )
         if response.get("status") != "leased":
             return response
         self._require_code_review(str(response["submission_id"]), round_row)

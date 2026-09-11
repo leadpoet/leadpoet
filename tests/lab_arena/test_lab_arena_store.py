@@ -174,6 +174,71 @@ def test_simple_stage_and_completion_rpc_shapes():
     ]
 
 
+def test_recover_claim_response_uses_only_the_exact_bounded_read():
+    calls = []
+    response = {
+        "status": "leased",
+        "request_id": "request-1",
+        "run_id": "run-1",
+    }
+
+    class Transport:
+        @staticmethod
+        def select(table, **kwargs):
+            calls.append((table, kwargs))
+            return [{"claim_response": response}]
+
+    recovered = ArenaStore(Transport()).recover_claim_response(
+        round_id="arena-2026-09-10",
+        runner_hotkey="runner",
+        request_id="request-1",
+        request_hash="sha256:" + "1" * 64,
+    )
+
+    assert recovered == response
+    assert recovered is not response
+    assert calls == [
+        (
+            "lab_arena_runs",
+            {
+                "filters": {
+                    "round_id": "arena-2026-09-10",
+                    "runner_hotkey": "runner",
+                    "claim_request_id": "request-1",
+                    "claim_request_hash": "sha256:" + "1" * 64,
+                },
+                "limit": 1,
+                "columns": "claim_response",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],
+        [None],
+        [{}],
+        [{"claim_response": None}],
+        [{"claim_response": "leased"}],
+        [{"claim_response": {"status": "pending"}}],
+    ],
+)
+def test_recover_claim_response_rejects_empty_or_malformed_rows(rows):
+    class Transport:
+        @staticmethod
+        def select(_table, **_kwargs):
+            return rows
+
+    assert ArenaStore(Transport()).recover_claim_response(
+        round_id="arena-2026-09-10",
+        runner_hotkey="runner",
+        request_id="request-1",
+        request_hash="sha256:" + "1" * 64,
+    ) is None
+
+
 def test_store_boundary_contains_only_current_arena_durable_state():
     assert TABLES == (
         "lab_arena_rounds",

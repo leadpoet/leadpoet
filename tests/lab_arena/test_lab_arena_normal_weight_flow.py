@@ -10,8 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 from bittensor_wallet import Keypair
+from fastapi.testclient import TestClient
 
 from lab_arena import signing
+from lab_arena.api import create_app
+from lab_arena.service import ServiceError
 from lab_arena.local_weight_signer import LocalArenaWeightSigner
 from lab_arena.store import ArenaStoreError
 from lab_arena.promotion import GitPromoter
@@ -389,6 +392,10 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
     assert weight_schema == {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}
     harness = Harness(connect, tmp_path, challengers=["NormalWinner"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(harness.service.config.defaults, rewards_enabled=True)
+    # Beta is a valid but unplanned worker: runner configuration cannot gate it.
+    harness.service.config.defaults.runner_hotkeys = (harness.runner_keys[0],)
+    harness.chain.stakes[harness.runner_keys[1]] = 75_000
+    harness.chain.active[harness.runner_keys[1]] = False
     participants = _start_round(harness, day=round_day, epoch=round_epoch)
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.advance_until("published", runners=2)
@@ -417,9 +424,18 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
     harness.clock.now = datetime.now(timezone.utc)
 
     profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
-    outcomes = []
+    outcomes, vectors = [], []
     for index in range(2):
         key = Keypair.create_from_uri("//ArenaNormalValidator%d" % index)
+        harness.chain.runners.append(key.ss58_address)
+        harness.chain.stakes[key.ss58_address] = 1 if index == 0 else 75_000
+        harness.service._require_validator_authority(key.ss58_address)
+        if index == 0:
+            with pytest.raises(ServiceError, match="runner_stake_below_minimum"):
+                harness.service._benchmark_validator_uid(harness.chain.metagraph(), key.ss58_address)
+        with TestClient(create_app(harness.service)) as public:
+            response = public.get("/arena/v1/weight-state", params={"epoch": reward_epoch})
+            assert response.status_code == 200 and response.json()["state"] == state
         hotkeys = [burn]
         if state["reward_basis"]["king_hotkey"]:
             hotkeys.append(state["reward_basis"]["king_hotkey"])
@@ -448,6 +464,7 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
         outcome_path = paths.outcome(reward_epoch)
         signed_bytes = signed_path.read_bytes()
         signed = json.loads(signed_bytes)
+        vectors.append((signed["sparse_uids"], signed["sparse_weights_u16"]))
         source.expected_weights = list(zip(signed["sparse_uids"], signed["sparse_weights_u16"]))
         # A new in-process signer has no memory of the first attempt.  It must
         # authenticate and restore the exact bytes from the durable journal.
@@ -475,6 +492,7 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
         outcomes.append(outcome_path.read_bytes())
     assert len(harness.service.public_chain_outcomes(reward_epoch)["outcomes"]) == 2
     assert outcomes[0] != outcomes[1]
+    assert vectors[0] == vectors[1]
     first_report = harness.service.public_chain_outcomes(reward_epoch)["outcomes"][0]
     assert first_report["finalized_block_hash"] == "4" * 64
     assert first_report["extrinsic_hash"].startswith("0x")

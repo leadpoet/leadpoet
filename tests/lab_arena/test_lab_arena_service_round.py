@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 import pytest
 from bittensor_wallet import Keypair
 
+from lab_arena import chain as chain_module
 from lab_arena import broker as br, code_review, contracts, driver as arena_driver, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
 
@@ -104,12 +105,30 @@ class FakeChain:
         self.epoch = epoch
         self.block = 8_700_000
         self.owned: Dict[str, List[str]] = {}
+        self.netuid = 71
+        self.stakes: Dict[str, float] = {}
+        self.permits: Dict[str, bool] = {}
+        self.active: Dict[str, bool] = {}
 
     def finalized_head(self):
         return FakeHead(self.block)
 
     def metagraph(self, finalized=True):
-        return None
+        assert finalized is True
+        hotkeys = list(dict.fromkeys(self.runners + [
+            hotkey for owned in self.owned.values() for hotkey in owned
+        ]))
+        owners = {hotkey: keypair("owner-" + hotkey).ss58_address for hotkey in hotkeys}
+        for runner, owned in self.owned.items():
+            for hotkey in owned:
+                owners[hotkey] = owners[runner]
+        return chain_module.MetagraphSnapshot(
+            netuid=self.netuid, block_number=self.block, block_hash=self.finalized_head().hash,
+            hotkeys=tuple(hotkeys), coldkeys=tuple(owners[hotkey] for hotkey in hotkeys),
+            validator_permit=tuple(self.permits.get(hotkey, hotkey in self.runners) for hotkey in hotkeys),
+            stake=tuple(self.stakes.get(hotkey, 100_000.0) for hotkey in hotkeys),
+            active=tuple(self.active.get(hotkey, True) for hotkey in hotkeys),
+        )
 
     def current_settlement_epoch(self) -> int:
         return self.epoch
@@ -555,10 +574,6 @@ class Harness:
                 credential_for=payer.code_review_key,
                 price_table=price_table(),
                 transport=self.review_transport,
-            ),
-            validator_authorizer=lambda hotkey: (
-                hotkey in harness.runner_keys,
-                "validator" if hotkey in harness.runner_keys else None,
             ),
         )
         return svc.ArenaService(config)

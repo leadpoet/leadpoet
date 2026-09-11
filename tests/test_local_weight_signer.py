@@ -506,7 +506,7 @@ def test_custom_chain_transport_readiness_rejects_wrong_chain_identity(runtime, 
         client.close()
 
 
-def test_builder_rejects_an_unpinned_finney_archive():
+def test_builder_allows_an_explicit_safe_finney_archive():
     from bittensor_wallet import Keypair
 
     signing_key, signing_key_hash = _arena_key()
@@ -516,7 +516,35 @@ def test_builder_rejects_an_unpinned_finney_archive():
         network_name="finney",
         request_timeout_seconds=4,
     )
-    with pytest.raises(LocalWeightSignerError, match="archive chain RPC endpoint"):
+    client = build_local_weight_signer(
+        Keypair.create_from_seed("0x" + ("03" * 32)),
+        config,
+        signing_key,
+        signing_key_hash,
+        load_arena_cutover({}),
+        burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        archive_endpoint="wss://archive.operator.example:443",
+        live_transport=_Transport(),
+        drand_backend=object(),
+    )
+    assert (
+        client._chain_source._host_archive_transport.endpoint
+        == "https://archive.operator.example:443/"
+    )
+    client.close()
+
+
+def test_builder_validates_explicit_archive_with_injected_transport():
+    from bittensor_wallet import Keypair
+
+    signing_key, signing_key_hash = _arena_key()
+    config = ArenaChainConfig(
+        endpoint="wss://entrypoint-finney.opentensor.ai:443",
+        netuid=71,
+        network_name="finney",
+        request_timeout_seconds=4,
+    )
+    with pytest.raises(LocalWeightSignerError, match="credential-free origin"):
         build_local_weight_signer(
             Keypair.create_from_seed("0x" + ("03" * 32)),
             config,
@@ -524,5 +552,42 @@ def test_builder_rejects_an_unpinned_finney_archive():
             signing_key_hash,
             load_arena_cutover({}),
             burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
-            archive_endpoint="wss://untrusted.example:443",
+            archive_endpoint="wss://user:secret@archive.operator.example:443",
+            live_transport=_Transport(),
+            archive_transport=_Transport(),
+            drand_backend=object(),
         )
+
+
+@pytest.mark.parametrize(
+    "network, expected_archive",
+    [
+        ("finney", "https://archive.chain.opentensor.ai:443/"),
+        ("test", "https://test.finney.opentensor.ai:443/"),
+    ],
+)
+def test_builder_uses_the_network_archive_default(network, expected_archive):
+    from bittensor_wallet import Keypair
+
+    signing_key, signing_key_hash = _arena_key()
+    profile = load_public_chain_signing_profile(network)
+    cutover = load_arena_cutover({}).to_dict()
+    cutover["network_genesis_hash"] = "0x" + profile["genesis_hash"]
+    cutover.pop("mapping_hash")
+    client = build_local_weight_signer(
+        Keypair.create_from_seed("0x" + ("05" * 32)),
+        ArenaChainConfig(
+            endpoint=profile["chain_endpoint"],
+            netuid=71,
+            network_name=network,
+            request_timeout_seconds=4,
+        ),
+        signing_key,
+        signing_key_hash,
+        cutover,
+        burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        live_transport=_Transport(),
+        drand_backend=object(),
+    )
+    assert client._chain_source._host_archive_transport.endpoint == expected_archive
+    client.close()

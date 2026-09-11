@@ -485,6 +485,12 @@ def build_local_weight_signer(
     # The profile authenticates chain and signing policy; the selected live
     # RPC is only a transport. Validate it even when a transport is injected.
     _http_rpc_endpoint(endpoint)
+    selected_archive_endpoint = archive_endpoint or (
+        OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT if network == "finney" else endpoint
+    )
+    # An operator-selected archive is also only a transport. Its origin must
+    # remain safe even when tests or callers inject the transport itself.
+    _http_rpc_endpoint(selected_archive_endpoint)
 
     if isinstance(cutover, SubnetEpochCutover):
         normalized_cutover = cutover.to_dict()
@@ -521,16 +527,8 @@ def build_local_weight_signer(
     if archive_transport is not None:
         archive = archive_transport
     else:
-        expected_archive = (
-            OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT if network == "finney" else endpoint
-        )
-        selected_archive = archive_endpoint or expected_archive
-        if _http_rpc_endpoint(selected_archive) != _http_rpc_endpoint(expected_archive):
-            raise LocalWeightSignerError(
-                "archive chain RPC endpoint differs from public network policy"
-            )
         archive = HttpsJsonRpcTransport(
-            selected_archive, timeout_seconds=int(timeout)
+            selected_archive_endpoint, timeout_seconds=int(timeout)
         )
     source = HostValidatorChainSource(
         live_transport=live,

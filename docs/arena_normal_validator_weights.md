@@ -173,7 +173,19 @@ For a local **Finney node**, keep the network identity and add the RPC endpoint:
 The endpoint must serve both WebSocket and HTTP JSON-RPC at the same origin.
 Use `wss://` for a remote node; plaintext `ws://` is permitted only on loopback.
 The node must follow the selected network and support the finalized reads used
-by the validator. Finney archive proofs still use the pinned public archive.
+by the validator. Finney archive proofs use the official public archive by
+default. To use an operator-owned archive, set `LAB_ARENA_ARCHIVE_ENDPOINT` or
+pass `--arena-archive-endpoint`; the command-line flag takes precedence. Test
+networks use the selected live endpoint as the archive default.
+
+Archive endpoints must be credential-free WebSocket or HTTP origins. The signer
+converts `wss://` to `https://` and `ws://` to `http://` for JSON-RPC, so the
+same endpoint must accept HTTP POST requests. Remote endpoints require TLS with
+normal certificate verification. There is no insecure TLS bypass. Plaintext is
+allowed only on a loopback address. Select an archive that you operate and
+trust because its raw RPC replies remain a trust input. The existing genesis,
+cutover, exact-block, runtime-profile, and signing checks reject inconsistent
+chain data; they do not authenticate an arbitrary archive operator.
 Do not put an RPC URL in `--subtensor.network`, and do not set the endpoint to
 the bare word `finney`. A TLS connection reset means the RPC connection failed;
 check the node, TLS proxy, and network path without disabling certificate checks.
@@ -187,6 +199,30 @@ trust a custom gateway. Use the trusted pin supplied by the subnet operator if
 it changes. Do not blindly accept a key fetched from a gateway.
 The hotkey must already exist as a private regular wallet file (mode 0600).
 The validator does not create or replace wallets.
+
+`scripts/run_arena_validator.py --environment-file ...` loads
+`LAB_ARENA_ARCHIVE_ENDPOINT` from its protected environment file. The direct
+`neurons/validator.py` entry point reads the current process environment but
+does not load a `.env` file by itself.
+
+For example, add the selected origin to the existing private service file:
+
+```dotenv
+# /absolute/path/to/arena-validator-service.env (mode 0600)
+LAB_ARENA_ARCHIVE_ENDPOINT=wss://archive.operator.example:443
+```
+
+Then run the existing launcher and verify readiness before normal service use:
+
+```bash
+sudo /absolute/path/to/.venv-arena/bin/python \
+  scripts/run_arena_validator.py \
+  --environment-file /absolute/path/to/arena-validator-service.env \
+  --check-only
+```
+
+For the direct `neurons/validator.py` command, pass
+`--arena-archive-endpoint wss://archive.operator.example:443` instead.
 
 For a service, the equivalent wallet settings are `LAB_ARENA_WALLET_NAME`,
 `LAB_ARENA_HOTKEY`, and `LAB_ARENA_WALLET_PATH`.

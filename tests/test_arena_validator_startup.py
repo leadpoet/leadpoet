@@ -142,6 +142,7 @@ def _clear_startup_environment(monkeypatch):
         "LAB_ARENA_NETUID",
         "LAB_ARENA_VALIDATOR_POLL_SECONDS",
         "LAB_ARENA_CHAIN_ENDPOINT",
+        "LAB_ARENA_ARCHIVE_ENDPOINT",
         "LAB_ARENA_API_BASE_URL",
         "LAB_ARENA_SIGNING_KEY_HASH",
         "LAB_ARENA_BURN_HOTKEY",
@@ -175,6 +176,7 @@ def test_advertised_finney71_check_only_uses_public_defaults_and_stops_at_readin
     assert api.base_url == validator.FINNEY_SN71_API_BASE_URL
     assert api.network == "finney" and api.netuid == 71
     assert startup_harness.captured["signer_args"][-1]["chain_config"].endpoint == chain.config.endpoint
+    assert startup_harness.captured["signer_args"][-1]["archive_endpoint"] is None
     assert startup_harness.captured["signers"][-1].readiness_epochs == [123]
     assert startup_harness.captured["default_signing_key_hash"] == validator.FINNEY_SN71_SIGNING_KEY_HASH
     assert signer == []
@@ -216,6 +218,59 @@ def test_environment_endpoint_is_used_when_flag_is_absent(monkeypatch, startup_h
     assert chain.config.endpoint == "wss://env.example:443"
     signer_config = startup_harness.captured["signer_args"][-1]["chain_config"]
     assert signer_config.endpoint == "wss://env.example:443"
+
+
+def test_archive_endpoint_flag_wins_over_environment(monkeypatch, startup_harness):
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("LAB_ARENA_ARCHIVE_ENDPOINT", "wss://archive-env.example:443")
+
+    assert validator.main([
+        "--check-only",
+        "--arena-archive-endpoint",
+        "wss://archive-flag.example:443",
+    ]) == 0
+
+    assert (
+        startup_harness.captured["signer_args"][-1]["archive_endpoint"]
+        == "wss://archive-flag.example:443"
+    )
+
+
+def test_archive_endpoint_environment_is_used_when_flag_is_absent(
+    monkeypatch, startup_harness
+):
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("LAB_ARENA_ARCHIVE_ENDPOINT", "wss://archive-env.example:443")
+
+    assert validator.main(["--check-only"]) == 0
+
+    assert (
+        startup_harness.captured["signer_args"][-1]["archive_endpoint"]
+        == "wss://archive-env.example:443"
+    )
+
+
+def test_protected_environment_launcher_configures_archive_endpoint(
+    monkeypatch, startup_harness, tmp_path
+):
+    from scripts import run_arena_validator
+
+    _clear_startup_environment(monkeypatch)
+    environment = tmp_path / "arena-validator.env"
+    environment.write_text(
+        "LAB_ARENA_ARCHIVE_ENDPOINT=wss://archive-env.example:443\n",
+        encoding="utf-8",
+    )
+    environment.chmod(0o600)
+
+    assert run_arena_validator.main([
+        "--environment-file", str(environment), "--check-only",
+    ]) == 0
+
+    assert (
+        startup_harness.captured["signer_args"][-1]["archive_endpoint"]
+        == "wss://archive-env.example:443"
+    )
 
 
 @pytest.mark.parametrize("variable", ["LAB_ARENA_NETUID", "LAB_ARENA_VALIDATOR_POLL_SECONDS"])
@@ -323,6 +378,27 @@ def test_unsafe_explicit_endpoint_is_rejected_before_chain_connect(
             "--subtensor.chain_endpoint",
             "ws://203.0.113.10:9944",
         ])
+    assert startup_harness.captured["connect_configs"] == []
+
+
+@pytest.mark.parametrize(
+    "endpoint, message",
+    [
+        ("ws://203.0.113.10:9944", "plaintext chain RPC"),
+        ("wss://user:secret@archive.example:443", "credential-free origin"),
+        ("wss://archive.example:443/rpc", "credential-free origin"),
+    ],
+)
+def test_unsafe_archive_endpoint_is_rejected_before_wallet_or_network_io(
+    monkeypatch, startup_harness, endpoint, message
+):
+    _clear_startup_environment(monkeypatch)
+
+    with pytest.raises(LocalWeightSignerError, match=message):
+        validator.main([
+            "--check-only", "--arena-archive-endpoint", endpoint,
+        ])
+    assert startup_harness.captured["wallet_args"] == []
     assert startup_harness.captured["connect_configs"] == []
 
 

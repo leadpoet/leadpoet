@@ -7,12 +7,31 @@ needed to run this process.
 
 ## Scoring and authorization
 
-The gateway's existing subnet role rule decides whether a signed hotkey is a
-registered validator. Arena applies that shared rule to its finalized chain
-snapshot; it does not depend on another gateway process's initialized client.
-That check authorizes both claims and scoring results.
-Round runner lists do not grant or deny access. Lease ownership, signatures,
-stage rules, code review, and miner self-dealing checks remain in place.
+Arena assigns new execution and scoring jobs only to registered hotkeys with
+an on-chain validator permit and **at least 75,000 effective subnet stake
+weight**. Exactly 75,000 qualifies. Inactive permitted validators qualify too.
+Every qualifying validator can claim automatically; round runner lists do not
+grant or deny access. The same minimum applies on test networks.
+
+Arena reads chain `total_stake` (Bittensor `Metagraph.S`) from its finalized
+snapshot, with the existing 60-second cache. Stake changes take effect after
+finality and cache refresh. Missing or invalid chain data stops new claims.
+Registration, stake, and same-coldkey miner exclusions use one snapshot.
+Lease ownership, signatures, stage rules, code review, and miner self-dealing
+checks remain in place.
+
+The minimum applies when issuing a lease. A stake decrease alone does not
+reject an already-issued job's source/image access, provider calls, or result.
+Existing identity and lease protections still apply. Below-threshold claims
+return `403 runner_stake_below_minimum`; the runner idles and keeps weights
+running. No benchmark work or minimum benchmark stake is required to retrieve
+the signed weight state, derive weights, or run the weight submission loop.
+
+`LAB_ARENA_RUNNER_HOTKEYS` is a conservative capacity plan, not an allowlist.
+New rounds count only eligible planned runners, without assuming all qualifying
+on-chain validators are online. Zero eligible planned capacity stops creation
+of a new round, but not processing existing rounds or publishing weight state.
+Existing round configurations and admitted submissions are not rewritten.
 
 The validator pulls assigned miner source, runs the existing Arena ICP and
 scoring path, and reports results with its local hotkey. Miner provider
@@ -116,6 +135,13 @@ runner-list gate. SQL claims remain restricted to the gateway service role.
 Migrations through 207 remain prerequisites. This is not a change to scores,
 promotion, rewards, or provider accounting.
 
+The 75,000 stake gate needs no additional migration or validator upgrade.
+Before enabling it, verify qualifying planned capacity for every open round.
+Use the canonical gateway restart and retain existing runs and validator
+journals. Rolling back to a release without this gate reopens low-stake claims;
+use the existing operator claim pause if the minimum must remain enforced
+while repairing a rollback. Weight-state retrieval remains available.
+
 Use the canonical gateway restart. For the validator, prepare a mode-0600
 environment file with the public configuration and local wallet path, then run
 the exact pushed main controller:
@@ -151,7 +177,8 @@ run the local path; the controller does not manage unrelated enclave services.
 Run the focused gate in `docs/v2_deployment_verification_checklist.md`.
 It covers local-wallet signing, safe restart/retry, finalized reveals, idle
 weight submission, scoring with brokered miner credentials, and registered
-validator authorization without runner lists.
+validator authorization without runner lists, the exact stake boundary,
+completion after a stake-only decrease, and below-threshold weight submission.
 
 Report controlled tests, deployment readiness, and live finalized outcomes
 separately. Do not claim Yuma or Rizzo is working solely because the primary is

@@ -15,6 +15,16 @@ from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
 from lab_arena.store import ArenaStoreError, hash_lease_token
 
 
+def _runner_snapshot(runner, *, registered=True, permit=True, stake=75_000.0):
+    return SimpleNamespace(
+        netuid=71, block_number=100, block_hash="0x" + "a" * 64,
+        hotkeys=(runner,) if registered else (),
+        coldkeys=("owner",) if registered else (),
+        validator_permit=(permit,) if registered else (),
+        stake=(stake,) if registered else (), active=(False,) if registered else (),
+    )
+
+
 def _schedule():
     return {
         "submission_open": "2026-09-02T00:00:00Z",
@@ -1978,7 +1988,7 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     service._store = Store()
     service._objects = Objects()
     service._config = SimpleNamespace(
-        chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: []),
+        chain=SimpleNamespace(metagraph=lambda *, finalized: _runner_snapshot(runner)),
         validator_authorizer=lambda _hotkey: (True, "validator"),
         defaults=SimpleNamespace(
             scorer_image_digest="sha256:" + "b" * 64,
@@ -2007,7 +2017,9 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
 def _runner_claim_service(*, registered, role, configured=False):
     runner = "5" * 48
     chain = SimpleNamespace(
-        hotkeys_owned_by_same_coldkey=lambda _hotkey: [],
+        metagraph=lambda *, finalized: _runner_snapshot(
+            runner, registered=registered, permit=role == "validator"
+        ),
     )
     service = object.__new__(ArenaService)
     service._store = SimpleNamespace(
@@ -2015,7 +2027,7 @@ def _runner_claim_service(*, registered, role, configured=False):
     )
     service._config = SimpleNamespace(
         chain=chain,
-        validator_authorizer=lambda _hotkey: (registered, role),
+        validator_authorizer=lambda _hotkey: (True, "validator"),
     )
     service._request_round = lambda *_args, **_kwargs: (
         {
@@ -2045,7 +2057,7 @@ def _runner_claim_service(*, registered, role, configured=False):
         (True, "miner", "runner_validator_required"),
     ],
 )
-def test_claim_rejects_hotkeys_without_gateway_validator_authority(
+def test_claim_rejects_hotkeys_without_onchain_validator_permit(
     registered, role, expected_code
 ):
     service = _runner_claim_service(registered=registered, role=role)
@@ -2056,7 +2068,7 @@ def test_claim_rejects_hotkeys_without_gateway_validator_authority(
     assert rejected.value.code == expected_code
 
 
-def test_claim_accepts_gateway_validator_absent_from_runner_configuration():
+def test_claim_accepts_eligible_validator_absent_from_runner_configuration():
     service = _runner_claim_service(
         registered=True, role="validator", configured=False
     )
@@ -2072,9 +2084,10 @@ def test_standalone_service_default_authority_uses_its_finalized_metagraph(
     snapshot = SimpleNamespace(
         netuid=71,
         hotkeys=(runner,),
-        active=(True,),
+        coldkeys=("owner",),
+        active=(False,),
         validator_permit=(True,),
-        stake=(1.0,),
+        stake=(75_000.0,),
     )
     chain = SimpleNamespace(
         metagraph=lambda *, finalized: (
@@ -2106,8 +2119,8 @@ def test_standalone_service_default_authority_uses_its_finalized_metagraph(
     [
         (("other",), (True,), (True,), (1.0,), "runner_hotkey_unregistered"),
         (("5" * 48,), (True,), (False,), (1.0,), "runner_validator_required"),
-        (("5" * 48,), None, (True,), (1.0,), "runner_validator_authority_unavailable"),
-        (("5" * 48,), (True,), (True,), None, "runner_validator_authority_unavailable"),
+        (("5" * 48,), (True,), None, (1.0,), "runner_validator_authority_unavailable"),
+        (("5" * 48,), (True,), ("true",), (1.0,), "runner_validator_authority_unavailable"),
     ],
 )
 def test_standalone_service_default_authority_fails_closed(
@@ -2198,7 +2211,7 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image(c
     service = object.__new__(ArenaService)
     service._store = Store()
     service._config = SimpleNamespace(
-        chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: []),
+        chain=SimpleNamespace(metagraph=lambda *, finalized: _runner_snapshot(runner)),
         validator_authorizer=lambda _hotkey: (True, "validator"),
     )
     service._request_round = lambda *_args, **_kwargs: (

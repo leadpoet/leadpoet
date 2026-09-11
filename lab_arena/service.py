@@ -3449,18 +3449,7 @@ class ArenaService:
         if round_status != "published":
             raise ServiceError("results_not_public", 403)
         publication = row.get("publication_doc") or {}
-        participants = (
-            publication.get("participants") or []
-            if round_status == "published"
-            else [
-                {
-                    "submission_id": item.get("submission_id"),
-                    "miner_hotkey": item.get("miner_hotkey"),
-                    "is_baseline": bool(item.get("is_king")),
-                }
-                for item in (row.get("participants") or [])
-            ]
-        )
+        participants = publication.get("participants") or []
         participant = next(
             (
                 item
@@ -3473,54 +3462,20 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
-        if round_status == "published" and integrity.enabled(row.get("configuration_doc") or {}):
+        if integrity.enabled(row.get("configuration_doc") or {}):
             public_positions.update(contracts.stage_positions(3))
         runs = [
             run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")
             if run.get("icp_position") in public_positions
         ]
         outputs = {}
-        execution_jobs = []
         for run in runs:
-            job = None
-            if round_status == "cancelled":
-                cause = str(run.get("terminal_cause") or "")
-                status = str(run.get("status") or "")
-                job = {
-                    "run_id": run["run_id"],
-                    "stage": int(run["stage"]),
-                    "icp_position": int(run["icp_position"]),
-                    "status": status if status in contracts.ATTEMPT_STATUSES else None,
-                    "terminal_cause": (
-                        cause if cause in contracts.TERMINAL_CAUSES else None
-                    ),
-                    "output_status": "unavailable",
-                }
-                execution_jobs.append(job)
             if run.get("output_ref"):
-                if round_status == "published":
-                    try:
-                        raw = self._objects.get_bounded(str(run["output_ref"]), MAX_OUTPUT_BYTES)
-                        outputs[run["run_id"]] = validate_output_document(json.loads(raw.decode("utf-8")))
-                    except Exception as exc:
-                        raise ServiceError("public_output_unavailable", 503) from exc
-                    continue
                 try:
-                    raw = self._objects.get_bounded(
-                        str(run["output_ref"]), MAX_OUTPUT_BYTES
-                    )
-                except ArenaContractError:
-                    job["output_status"] = "invalid"
-                    continue
-                except Exception:
-                    continue
-                try:
-                    document = json.loads(raw.decode("utf-8"))
-                    outputs[run["run_id"]] = validate_output_document(document)
-                except (AttributeError, UnicodeDecodeError, ValueError, OutputInvalid):
-                    job["output_status"] = "invalid"
-                    continue
-                job["output_status"] = "available"
+                    raw = self._objects.get_bounded(str(run["output_ref"]), MAX_OUTPUT_BYTES)
+                    outputs[run["run_id"]] = validate_output_document(json.loads(raw.decode("utf-8")))
+                except Exception as exc:
+                    raise ServiceError("public_output_unavailable", 503) from exc
         scores = {
             "stage_1": [
                 {"run_id": run["run_id"], "icp_position": run["icp_position"], "per_icp_score": run["per_icp_score"]}
@@ -3546,8 +3501,7 @@ class ArenaService:
             try:
                 validated_results.append(contracts.validate_run_result(document))
             except ArenaContractError as exc:
-                if round_status == "published":
-                    raise ServiceError("public_result_unavailable", 503) from exc
+                raise ServiceError("public_result_unavailable", 503) from exc
         run_results = validated_results
         result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
@@ -3563,114 +3517,4 @@ class ArenaService:
                 "final": None if final_entry is None else final_entry.get("final_score"),
             },
         }
-        if round_status == "cancelled":
-            judge = self._cancelled_judge_results(
-                runs,
-                [run for run in self._store.list_runs(
-                    round_id,
-                    submission_id=submission_id,
-                    kind="score",
-                ) if run.get("icp_position") in public_positions],
-            )
-            result.update(
-                {
-                    "round_status": "cancelled",
-                    "cancel_reason": row.get("cancel_reason"),
-                    "incomplete": True,
-                    "submission_scores": {"stage_1": None, "final": None},
-                    "execution_jobs": execution_jobs,
-                    "judge_jobs": judge["jobs"],
-                    "judge_evidence": judge["evidence"],
-                }
-            )
         return result
-
-    def _cancelled_judge_results(
-        self,
-        execute_runs: Sequence[Mapping[str, Any]],
-        score_runs: Sequence[Mapping[str, Any]],
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """Return safe terminal judge facts without assembling a score."""
-
-        executions = {str(run["run_id"]): run for run in execute_runs}
-        selected: Dict[str, Mapping[str, Any]] = {}
-        for run in score_runs:
-            scored_run_id = str(run.get("scored_run_id") or "")
-            execution = executions.get(scored_run_id)
-            if (
-                run.get("status") not in ("accepted", "failed")
-                or execution is None
-                or int(run.get("stage") or 0) != int(execution.get("stage") or 0)
-                or int(run.get("icp_position") or 0)
-                != int(execution.get("icp_position") or 0)
-            ):
-                continue
-            current = selected.get(scored_run_id)
-            if current is None or (
-                run["status"] == "accepted" and current["status"] != "accepted"
-            ) or (
-                run["status"] == current["status"]
-                and int(run.get("attempt") or 0) > int(current.get("attempt") or 0)
-            ):
-                selected[scored_run_id] = run
-
-        jobs = []
-        evidence = []
-        for scored_run_id, run in sorted(
-            selected.items(),
-            key=lambda item: (
-                int(item[1].get("stage") or 0),
-                int(item[1].get("icp_position") or 0),
-                str(item[1].get("run_id") or ""),
-            ),
-        ):
-            cause = str(run.get("terminal_cause") or "")
-            job = {
-                "run_id": run["run_id"],
-                "scored_run_id": scored_run_id,
-                "stage": int(run["stage"]),
-                "icp_position": int(run["icp_position"]),
-                "status": run["status"],
-                "terminal_cause": (
-                    cause if cause in contracts.TERMINAL_CAUSES else None
-                ),
-                "evidence_status": "unavailable",
-            }
-            jobs.append(job)
-            if run["status"] != "accepted" or not run.get("output_ref"):
-                continue
-            try:
-                raw = self._objects.get_bounded(
-                    str(run["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES
-                )
-            except ArenaContractError:
-                job["evidence_status"] = "invalid"
-                continue
-            except Exception:
-                continue
-            try:
-                document = scoring.scoring_output_from_bytes(raw)
-                if (
-                    document.get("scored_run_id") != scored_run_id
-                    or "breakdowns" not in document
-                ):
-                    raise scoring.ScoringError("judge evidence does not match its run")
-                redacted = [
-                    verify.redact_breakdown(item) for item in document["breakdowns"]
-                ]
-            except (scoring.ScoringError, ArenaContractError):
-                job["evidence_status"] = "invalid"
-                continue
-            execution = executions[scored_run_id]
-            job["evidence_status"] = "available"
-            evidence.append(
-                {
-                    "run_id": run["run_id"],
-                    "scored_run_id": scored_run_id,
-                    "stage": int(run["stage"]),
-                    "icp_position": int(run["icp_position"]),
-                    "per_icp_score": execution.get("per_icp_score"),
-                    "breakdowns": redacted,
-                }
-            )
-        return {"jobs": jobs, "evidence": evidence}

@@ -31,6 +31,7 @@ from lab_arena.contracts import (
     canonical_json,
     validate_submission_costs,
 )
+from lab_arena.owner_admission import OwnerAdmission
 
 WHOAMI_SCHEMA_VERSION = "leadpoet.lab_arena.whoami.v1"
 CODE_REVIEW_SCHEMA_VERSION = "leadpoet.lab_arena.code_review.v1"
@@ -49,6 +50,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_schema_version_v1": (),
     "lab_arena_code_review_schema_v1": (),
     "lab_arena_validator_scoring_authority_schema_v1": (),
+    "lab_arena_integrity_schema_v1": (),
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_submission_costs": (("p_submission_id", "text"),),
@@ -64,9 +66,20 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
+    "lab_arena_prepare_confirmation_bank": (("p_round_id", "text"), ("p_ref", "text"), ("p_hash", "text")),
+    "lab_arena_open_confirmation": (("p_round_id", "text"), ("p_cohort", "jsonb")),
     "lab_arena_prepare_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_complete_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
+    "lab_arena_register_submission_v2": (
+        ("p_round_id", "text"),
+        ("p_submission_id", "text"),
+        ("p_miner_hotkey", "text"),
+        ("p_doc", "jsonb"),
+        ("p_owner_coldkey", "text"),
+        ("p_owner_block_number", "bigint"),
+        ("p_owner_block_hash", "text"),
+    ),
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_accept_submission_with_credentials": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_credentials", "jsonb")),
     "lab_arena_get_submission_credential": (("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_provider", "text")),
@@ -94,9 +107,19 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_settle_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_actual_microusd", "bigint"), ("p_terminal_response", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_mark_uncertain": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_complete_attempt": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_result", "jsonb"), ("p_terminal_cause", "text"), ("p_output_ref", "text")),
+    "lab_arena_complete_attempt_v2": (
+        ("p_run_id", "text"),
+        ("p_lease_token_hash", "text"),
+        ("p_result", "jsonb"),
+        ("p_terminal_cause", "text"),
+        ("p_output_ref", "text"),
+        ("p_judgment_evidence", "jsonb"),
+        ("p_judgment_evidence_hash", "text"),
+    ),
     "lab_arena_expire_leases": (("p_round_id", "text"),),
     "lab_arena_close_stage": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_open_scoring": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
+    "lab_arena_open_scoring_v2": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
     "lab_arena_close_scoring": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_cancel_round": (("p_round_id", "text"), ("p_reason", "text")),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
@@ -111,6 +134,7 @@ TABLES = (
     "lab_arena_ledger",
     "lab_arena_accepted_weight_states",
     "lab_arena_chain_outcomes",
+    "lab_arena_judgment_cache",
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
 PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
@@ -818,12 +842,31 @@ class ArenaStore:
 
     # -- submissions ------------------------------------------------------
 
-    def register_submission(self, round_id: str, submission_id: str, miner_hotkey: str, doc: Mapping[str, Any]) -> Dict[str, Any]:
+    def register_submission(
+        self,
+        round_id: str,
+        submission_id: str,
+        miner_hotkey: str,
+        doc: Mapping[str, Any],
+        *,
+        owner_admission: Optional[OwnerAdmission] = None,
+    ) -> Dict[str, Any]:
+        function = "lab_arena_register_submission"
+        params = {
+            "p_round_id": round_id,
+            "p_submission_id": submission_id,
+            "p_miner_hotkey": miner_hotkey,
+            "p_doc": dict(doc),
+        }
+        if owner_admission is not None:
+            function = "lab_arena_register_submission_v2"
+            params.update({
+                "p_owner_coldkey": owner_admission.coldkey,
+                "p_owner_block_number": owner_admission.block_number,
+                "p_owner_block_hash": owner_admission.block_hash,
+            })
         return _require_mapping(
-            self._transport.rpc(
-                "lab_arena_register_submission",
-                {"p_round_id": round_id, "p_submission_id": submission_id, "p_miner_hotkey": miner_hotkey, "p_doc": dict(doc)},
-            ),
+            self._transport.rpc(function, params),
             "register_submission",
         )
 
@@ -1079,18 +1122,23 @@ class ArenaStore:
             "mark_uncertain",
         )
 
-    def complete_attempt(self, *, run_id: str, lease_token_hash: str, result: Mapping[str, Any], terminal_cause: str, output_ref: str) -> Dict[str, Any]:
+    def complete_attempt(self, *, run_id: str, lease_token_hash: str, result: Mapping[str, Any], terminal_cause: str, output_ref: str, judgment_evidence: Optional[Mapping[str, Any]] = None, judgment_evidence_hash: str = "") -> Dict[str, Any]:
+        function = "lab_arena_complete_attempt"
+        params: Dict[str, Any] = {
+            "p_run_id": run_id,
+            "p_lease_token_hash": lease_token_hash,
+            "p_result": dict(result),
+            "p_terminal_cause": terminal_cause,
+            "p_output_ref": output_ref,
+        }
+        if judgment_evidence is not None:
+            function = "lab_arena_complete_attempt_v2"
+            params.update({
+                "p_judgment_evidence": dict(judgment_evidence),
+                "p_judgment_evidence_hash": str(judgment_evidence_hash),
+            })
         return _require_mapping(
-            self._transport.rpc(
-                "lab_arena_complete_attempt",
-                {
-                    "p_run_id": run_id,
-                    "p_lease_token_hash": lease_token_hash,
-                    "p_result": dict(result),
-                    "p_terminal_cause": terminal_cause,
-                    "p_output_ref": output_ref,
-                },
-            ),
+            self._transport.rpc(function, params),
             "complete_attempt",
         )
 
@@ -1100,13 +1148,24 @@ class ArenaStore:
     def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_stage", {"p_round_id": round_id, "p_stage": int(stage)}), "close_stage")
 
-    def open_scoring(self, round_id: str, stage: int, work_items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    def open_scoring(self, round_id: str, stage: int, work_items: Sequence[Mapping[str, Any]], *, integrity_cache: bool = False) -> Dict[str, Any]:
         """Turn the committed scoring plan into claimable scoring assignments (one per work item)."""
 
         return _require_mapping(
-            self._transport.rpc("lab_arena_open_scoring", {"p_round_id": round_id, "p_stage": int(stage), "p_work_items": [dict(item) for item in work_items]}),
+            self._transport.rpc("lab_arena_open_scoring_v2" if integrity_cache else "lab_arena_open_scoring", {"p_round_id": round_id, "p_stage": int(stage), "p_work_items": [dict(item) for item in work_items]}),
             "open_scoring",
         )
+
+    def get_judgment_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        rows = self._transport.select(
+            "lab_arena_judgment_cache",
+            filters={"cache_key": str(cache_key)},
+            limit=2,
+            columns="cache_key,scope_doc,scoring_input_hash,evidence_hash,evidence_doc,source_score_run_id,source_scored_run_id,source_runner_hotkey,created_at",
+        )
+        if len(rows) > 1:
+            raise ArenaStoreError("multiple accepted judgments exist for one cache key")
+        return rows[0] if rows else None
 
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_scoring", {"p_round_id": round_id, "p_stage": int(stage)}), "close_scoring")
@@ -1187,6 +1246,12 @@ class ArenaStore:
         if result["submission_id"] != str(submission_id):
             raise ArenaStoreError("submission_costs returned the wrong submission")
         return result
+
+    def prepare_confirmation_bank(self, round_id: str, ref: str, digest: str) -> Dict[str, Any]:
+        return self._transport.rpc("lab_arena_prepare_confirmation_bank", {"p_round_id": round_id, "p_ref": ref, "p_hash": digest})
+
+    def open_confirmation(self, round_id: str, cohort: Mapping[str, Any]) -> Dict[str, Any]:
+        return self._transport.rpc("lab_arena_open_confirmation", {"p_round_id": round_id, "p_cohort": dict(cohort)})
 
     def close(self) -> None:
         self._transport.close()

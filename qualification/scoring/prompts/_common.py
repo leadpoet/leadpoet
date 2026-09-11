@@ -328,6 +328,29 @@ MINER_DATE_CHECK_BLOCK = """Miner-date consistency check (set claim_matches_mine
 6. If miner_signal_date is null → "no_date_in_content" regardless."""
 
 
+ARENA_INTEGRITY_DATE_BLOCK = """ARENA INTEGRITY DATE POLICY (applies to this evaluation only):
+- Judge claim support and dates independently. signal_status describes only
+  whether the exact source supports the claim and target ICP signal. A harmless
+  mismatch with miner_signal_date must not change a supported signal_status.
+- claim_matches_miner_date records consistency only; it is never itself a
+  reason to reject otherwise supported evidence.
+- Identify the date of the SAME EVENT established by the exact source. When the
+  body states one unambiguous event date, add exactly
+  "source_event_date:YYYY-MM-DD" to risk_notes.
+- If no event date is stated and the exact page is clearly the original record
+  or announcement of that same event, you may use supplied page/provider
+  publication metadata as the event proxy and add exactly
+  "source_publication_date:YYYY-MM-DD" to risk_notes. Do not use publication
+  metadata for ongoing pages, secondary retrospectives, or unrelated updates.
+- An event date outranks publication or update metadata. Never use a newer
+  publication/update date to rejuvenate an older event described in the body.
+- Missing, approximate, conflicting, or uncertain dates do not disprove the
+  claim. Add no date tag in those cases.
+- For active hiring, use the buyer freshness window supplied below instead of
+  the generic six-month example above. Closed-state evidence still contradicts
+  a claim that a job is currently open."""
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Assemblers
 # ──────────────────────────────────────────────────────────────────────
@@ -386,6 +409,13 @@ def build_final_judge_prompt(
     verification = build_verification_prompt(row, extra_parts=extra_parts)
 
     def assemble(blocks: List[str]) -> str:
+        integrity_block = (
+            "\n\nBuyer freshness window: "
+            f"{max(1, int(row.get('_buyer_max_age_days') or 365))} days.\n\n"
+            + ARENA_INTEGRITY_DATE_BLOCK
+            if row.get("_integrity_policy") is True
+            else ""
+        )
         return f"""{verification}
 
 {source_name} exact supplied source extraction:
@@ -395,7 +425,7 @@ Today's date: {today_str}
 
 {FINAL_JUDGE_RULES_BLOCK}
 
-{MINER_DATE_CHECK_BLOCK}"""
+{MINER_DATE_CHECK_BLOCK}{integrity_block}"""
 
     results = list(contents.get("results") or [])
     if not results:

@@ -141,8 +141,8 @@ def build_scoring_plan(
     means the stage should have cancelled and is refused here.
     """
 
-    if stage not in (1, 2):
-        raise ArenaContractError("stage must be 1 or 2")
+    if stage not in (1, 2, 3):
+        raise ArenaContractError("stage must be 1, 2 or 3")
     positions = contracts.stage_positions(stage)
     latest: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     accepted: Dict[Tuple[str, int], Mapping[str, Any]] = {}
@@ -210,18 +210,21 @@ def lab_scorer(policy: Mapping[str, Any]) -> Scorer:
     validated = contracts.validate_scorer_policy(policy)
     adapter = validated["scoring_adapter_version"]
     _lab_adapter_version(adapter)
-    scorer = CompetitionCompanyScorer()
+    scorer = CompetitionCompanyScorer(
+        integrity_policy=adapter == "qualification_integrity_v2"
+    )
 
     def score(companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any], is_reference_model: bool) -> Any:
         return scorer.score_with_breakdowns(list(companies), dict(icp), bool(is_reference_model))
 
+    score.integrity_policy = adapter == "qualification_integrity_v2"
     return score
 
 
 def _lab_adapter_version(arena_version: str) -> str:
     from qualification.scoring.competition import SCORING_ADAPTER_VERSION
 
-    if arena_version == SCORING_ADAPTER_VERSION_V1:
+    if arena_version in (SCORING_ADAPTER_VERSION_V1, "qualification_integrity_v2"):
         return SCORING_ADAPTER_VERSION
     raise ScoringError("unsupported scoring adapter version")
 
@@ -279,7 +282,8 @@ def score_work_item(
 
     sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
     scored_indexes, _skipped = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
-    retain_terminal = _has_unique_scored_company_names(sliced, scored_indexes)
+    integrity_policy = bool(getattr(scorer, "integrity_policy", False))
+    retain_terminal = integrity_policy or _has_unique_scored_company_names(sliced, scored_indexes)
     retained: List[Optional[Dict[str, Any]]] = [None] * len(scored_indexes)
     unresolved = list(range(len(scored_indexes)))
     last_error: Optional[BaseException] = None
@@ -308,7 +312,14 @@ def score_work_item(
                 last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
                 continue
             return breakdowns
-        for position, breakdown in zip(invoked_positions, breakdowns):
+        for relative_index, (position, breakdown) in enumerate(zip(invoked_positions, breakdowns)):
+            if integrity_policy:
+                # Initial sparse indexes refer to the full first-N slice;
+                # subsequent invocations contain only unresolved companies.
+                expected_index = scored_indexes[position] if attempt == 0 else relative_index
+                if breakdown.get("company_index") != expected_index:
+                    raise ScoringError("integrity breakdown company index mismatch")
+                breakdown = {**breakdown, "company_index": scored_indexes[position]}
             if not scorer_breakdown_has_retryable_infrastructure_failure(breakdown):
                 retained[position] = breakdown
         unresolved = [
@@ -316,7 +327,35 @@ def score_work_item(
             if breakdown is None
         ]
         if not unresolved:
-            return [dict(breakdown) for breakdown in retained if breakdown is not None]
+            result = [dict(breakdown) for breakdown in retained if breakdown is not None]
+            if integrity_policy:
+                # A recovered company can resolve to an earlier, already
+                # accepted identity. Regroup in original order without
+                # invoking the judge again or replacing its first verdict.
+                from qualification.scoring.arena_integrity import company_fit_verified, mark_duplicate_companies
+                original = mark_duplicate_companies(sliced, limit=len(sliced))
+                seen = set()
+                canonical_by_alias = {}
+                verified_indexes = set()
+                for breakdown in result:
+                    identity_key = breakdown.get("company_identity_key")
+                    aliases = breakdown.get("company_identity_alias_keys") or [identity_key]
+                    index = breakdown["company_index"]
+                    fit_verified = company_fit_verified(breakdown)
+                    duplicate_of = original[index].duplicate_of_index
+                    intersecting = seen.intersection(aliases)
+                    if duplicate_of in verified_indexes or (fit_verified and intersecting):
+                        breakdown.update({BREAKDOWN_SCORE_FIELD: 0.0,
+                            "company_qualified": False, "duplicate_company": True,
+                            "failure_reason": "duplicate_company_identity"})
+                        if intersecting:
+                            breakdown["company_identity_key"] = canonical_by_alias[sorted(intersecting)[0]]
+                    if fit_verified and not breakdown.get("duplicate_company") and identity_key:
+                        seen.update(aliases)
+                        for alias in aliases:
+                            canonical_by_alias.setdefault(alias, breakdown["company_identity_key"])
+                        verified_indexes.add(index)
+            return result
         if failed:
             last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
             continue
@@ -368,6 +407,7 @@ def build_stage_scores(
     for submission_id, values in by_submission.items():
         scores[submission_id] = verify.stage_score(values, denominator)
     return {
+        **({"integrity_policy": "arena_integrity_v1"} if validated_policy["scoring_adapter_version"] == "qualification_integrity_v2" else {}),
         "stage": stage,
         "rows": rows,
         "submission_scores": scores,
@@ -397,7 +437,16 @@ def run_scores_for_store(stage_scores: Mapping[str, Any], runs: Sequence[Mapping
         row = rows.get(key)
         if row is None:
             continue
-        records.append({"run_id": run["run_id"], "per_icp_score": float(row["per_icp_score"])})
+        record = {"run_id": run["run_id"], "per_icp_score": float(row["per_icp_score"])}
+        breakdowns = row.get("breakdowns") or []
+        if any("company_qualified" in item for item in breakdowns):
+            record["qualification_doc"] = {"companies": [
+                {key: item[key] for key in ("company_index", "company_identity_key", "company_qualified", "duplicate_company")}
+                for item in breakdowns
+            ]}
+        elif stage_scores.get("integrity_policy") == "arena_integrity_v1":
+            record["qualification_doc"] = {"companies": []}
+        records.append(record)
     return records
 
 
@@ -494,7 +543,7 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
     return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": scored_run_id, "breakdowns": breakdowns}
 
 
-def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0) -> List[Dict[str, Any]]:
+def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0, integrity_policy: bool = False) -> List[Dict[str, Any]]:
     """A breakdown list is acceptable for a work item only when it covers exactly the scored companies."""
 
     scored, _skipped = verify.bucket_skip(icp, companies)
@@ -502,4 +551,23 @@ def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp
         scored = scored[:max_scored_companies]
     if len(breakdowns) != len(scored):
         raise ScoringError("breakdown count %d differs from the %d scored companies" % (len(breakdowns), len(scored)))
+    if integrity_policy:
+        seen = set()
+        for index, row in zip(scored, breakdowns):
+            key = row.get("company_identity_key")
+            qualified = row.get("company_qualified")
+            duplicate = row.get("duplicate_company")
+            aliases = row.get("company_identity_alias_keys") or [key]
+            if (type(row.get("company_index")) is not int or row["company_index"] != index
+                or not isinstance(key, str) or not key or len(key) > 1024
+                or type(qualified) is not bool or type(duplicate) is not bool):
+                raise ScoringError("invalid integrity qualification receipt")
+            if not isinstance(aliases, list) or not 1 <= len(aliases) <= 4 or any(not isinstance(alias, str) or not alias or len(alias) > 1024 for alias in aliases):
+                raise ScoringError("invalid integrity identity aliases")
+            if duplicate and (qualified or float(row[BREAKDOWN_SCORE_FIELD]) != 0):
+                raise ScoringError("duplicate company cannot receive credit")
+            if qualified and (seen.intersection(aliases) or float(row[BREAKDOWN_SCORE_FIELD]) <= 0):
+                raise ScoringError("qualified companies must be positive and unique")
+            if qualified:
+                seen.update(aliases)
     return [dict(item) for item in breakdowns]

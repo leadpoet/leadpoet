@@ -152,6 +152,8 @@ def _cost_projection(ranking: Mapping[str, Any]) -> dict:
         "eligibility_cap_microusd",
     )
     projected_summary = {key: _safe_integer(summary.get(key)) for key in scalar_keys}
+    if "qualified_company_count" in summary:
+        projected_summary["qualified_company_count"] = _safe_integer(summary["qualified_company_count"])
     execution = _cost_bucket(summary.get("execution"))
     judge = _cost_bucket(summary.get("judge"))
     if any(item is None for item in projected_summary.values()) or execution is None or judge is None:
@@ -421,6 +423,9 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
             }
         if round_status == "published":
             projected.update(_cost_projection(final))
+            if "main_score" in final:
+                projected["main_score"] = _score(final.get("main_score"))
+                projected["confirmation_selected"] = final.get("confirmation_selected") is True
         submissions.append(projected)
     return {"round_id": round_id, "submissions": submissions}
 

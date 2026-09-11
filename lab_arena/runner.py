@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from lab_arena import integrity
 from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
@@ -1445,7 +1446,10 @@ class AssignmentExecutor:
             else:
                 input_document = {
                     "schema_version": "leadpoet.lab_arena.icp_input.v1",
-                    "icp": dict(icp),
+                    "icp": (
+                        integrity.agent_visible_icp(icp)
+                        if lease.get("integrity_policy") == "arena_integrity_v1" else dict(icp)
+                    ),
                     "evaluation_date": evaluation_date,
                     "company_limit": int(icp.get("max_companies") or 5),
                     "provider_operations": sorted(operations.OPERATIONS),
@@ -1658,7 +1662,7 @@ def _check_runtime_image(image_reference: str, image_digest: str) -> None:
 
 # The round statuses in which assignments can be leased: both execution and
 # scoring windows in the two-stage competition.
-WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring")
+WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring", "stage3", "stage3_scoring")
 
 
 class Runner:

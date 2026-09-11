@@ -135,6 +135,7 @@ class FakeTransport:
 
     def send(self, *, method, url, headers, body, timeout_seconds):
         self.sent.append({"method": method, "url": url, "headers": dict(headers), "body": body, "timeout": timeout_seconds})
+        response_headers = {}
         if self.fail:
             raise br.ProviderTransportError("ReadTimeout")
         if (
@@ -145,7 +146,12 @@ class FakeTransport:
             status, payload = 200, self.synthetic_deepline_history
             self.synthetic_deepline_history = None
         else:
-            status, payload = self.responses.pop(0) if self.responses else (200, {"data": []})
+            selected = self.responses.pop(0) if self.responses else (200, {"data": []})
+            if len(selected) == 3:
+                status, payload, response_headers = selected
+            else:
+                status, payload = selected
+                response_headers = {}
         if (
             "code.deepline.com" in url
             and url != br.DEEPLINE_BILLING_HISTORY_URL
@@ -178,7 +184,16 @@ class FakeTransport:
                     }
                 }
         raw = json.dumps(payload).encode("utf-8") if not isinstance(payload, bytes) else payload
-        return br.ProviderResponse(status, {"content-type": "application/json", "x-ratelimit-remaining": "3", "set-cookie": "s=1"}, raw)
+        return br.ProviderResponse(
+            status,
+            {
+                "content-type": "application/json",
+                "x-ratelimit-remaining": "3",
+                "set-cookie": "s=1",
+                **response_headers,
+            },
+            raw,
+        )
 
 
 def make_broker(store=None, transport=None, **kwargs):
@@ -389,7 +404,9 @@ def test_openrouter_reserves_maximum_cost_and_settles_reported_actual():
     expected_actual = br.actual_openrouter_cost_microusd(price_table(), "openai/gpt-4o-mini", {"usage": usage})
     assert result.call["reserved_microusd"] == expected_max and result.call["actual_microusd"] == expected_actual < expected_max
     sent = transport.sent[0]
+    assert len(transport.sent) == 1
     assert sent["headers"]["authorization"] == "Bearer " + KEY
+    assert sent["headers"]["x-openrouter-metadata"] == "enabled"
     body = json.loads(sent["body"])
     assert body["provider"] == {"allow_fallbacks": False, "data_collection": "deny", "zdr": True} and body["stream"] is False
     assert store.openrouter_capacity == 10_000_000 - expected_actual
@@ -509,6 +526,192 @@ def test_openrouter_error_with_known_usage_settles_the_exact_charge():
     assert result.status == 400
     assert result.call["actual_microusd"] == 10
     assert store.calls[result.call["call_identity"]]["actual"] == 10
+
+
+def test_openrouter_plain_non_byok_502_uses_insured_zero_and_keeps_provider_error():
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": "openai/gpt-4o-mini",
+            "is_byok": False,
+            "attempt": 1,
+            "attempts": [{"provider": "OpenAI", "status": 502}],
+        },
+        "user_id": "harmless-documented-field",
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(502, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["provider_cost"] == {
+        "basis": "openrouter_zero_completion_insurance_error_20260911",
+        "units": "0",
+        "unit_name": "usd",
+        "operation": "openrouter.chat",
+    }
+    assert transport.sent[0]["headers"]["x-openrouter-metadata"] == "enabled"
+
+
+def test_openrouter_insurance_accepts_valid_function_tool_history_without_assistant_content():
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": "openai/gpt-4o-mini",
+            "is_byok": False,
+            "attempt": 1,
+            "attempts": [{"provider": "OpenAI", "status": 502}],
+        },
+    }
+    parameters = dict(
+        CHAT,
+        messages=[
+            {"role": "user", "content": "Find the company"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup_company",
+                            "arguments": '{"domain":"example.com"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": '{"company":"Example"}',
+            },
+        ],
+    )
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(502, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=parameters,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+def test_openrouter_502_with_nonzero_separate_request_price_stays_uncertain():
+    model = "anthropic/claude-3.5-haiku"
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": model,
+            "is_byok": False,
+            "attempt": 1,
+            "attempts": [{"provider": "Anthropic", "status": 502}],
+        },
+    }
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(502, payload)])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=dict(CHAT, model=model),
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+def test_openrouter_missing_native_cost_reads_exact_generation_once():
+    generation_id = "gen-test-123"
+    error = {"error": {"code": 502, "message": "Provider returned an error"}}
+    generation = {
+        "data": {
+            "id": generation_id,
+            "total_cost": "0.001234",
+            "usage": "0.001234",
+        }
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [
+                (502, error, {"X-Generation-Id": generation_id}),
+                (200, generation),
+            ]
+        )
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502 and result.call["actual_microusd"] == 1234
+    assert result.call["cost_basis"] == "openrouter_generation_cost"
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert transport.sent[1]["url"] == br.OPENROUTER_GENERATION_URL + generation_id
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["provider_cost"]["request_id"] == generation_id
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [
+            (
+                502,
+                {"error": {"code": 502, "message": "Provider returned an error"}, "id": "gen-body"},
+                {"X-Generation-Id": "gen-header"},
+            )
+        ],
+        [
+            (
+                502,
+                {"error": {"code": 502, "message": "Provider returned an error"}},
+                {"X-Generation-Id": "gen-readback-fails"},
+            ),
+            (401, {"error": {"code": 401, "message": "not authorized"}}),
+        ],
+    ],
+    ids=("conflicting_ids", "readback_failure"),
+)
+def test_openrouter_generation_conflict_or_failed_readback_stays_uncertain(responses):
+    broker, store, _transport = make_broker(transport=FakeTransport(responses))
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
 def test_openrouter_http_200_error_finished_choice_is_normalized():

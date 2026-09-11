@@ -971,6 +971,92 @@ def test_incomplete_bundle_does_not_judge_only_the_available_source(monkeypatch)
     assert judge.await_count == 1  # Only the advisory pass; no partial terminal verdict.
 
 
+@pytest.mark.parametrize("cite_closed", [True, False])
+def test_combined_hiring_evidence_scopes_the_closed_linkedin_guard(
+    monkeypatch, cite_closed,
+):
+    from qualification.scoring import intent_verification_three_stage as verifier
+    from tests.test_site_verifier_three_stage_source_grounding import supported
+    from unittest.mock import AsyncMock
+
+    closed = "https://www.linkedin.com/jobs/view/123"
+    filler = "https://news.example.com/acme"
+    cited = closed if cite_closed else filler
+    verdict = supported(cited)
+    verdict["answer"].update({
+        "overall_verdict": "qualified",
+        "overall_confidence": "high",
+    })
+    monkeypatch.setattr(
+        verifier,
+        "_call_openrouter",
+        AsyncMock(return_value=verdict),
+    )
+    monkeypatch.setattr(
+        verifier,
+        "_fetch_sd_then_exa",
+        AsyncMock(return_value={
+            "results": [
+                {
+                    "url": closed,
+                    "text": (
+                        "Acme Senior Engineer job. Responsibilities include "
+                        "Python. Applications are closed."
+                    ),
+                    "meta": {
+                        "kind": "linkedin_job",
+                        "is_closed": True,
+                        "jobs_status": "Applications are closed",
+                    },
+                },
+                {"url": filler, "text": "Acme company profile.", "meta": {}},
+            ],
+            "statuses": [],
+        }),
+    )
+
+    result = asyncio.run(verifier.verify_three_stage(
+        None,
+        company_name="Acme",
+        company_website="https://acme.com",
+        company_linkedin="",
+        source_url=closed,
+        miner_claim="Acme is hiring senior engineers",
+        target_signal_text="Hiring senior engineers",
+        evidence_type="HIRING",
+        declared_source="linkedin",
+        stage1_soft_reject=True,
+        integrity_policy=True,
+        buyer_max_age_days=90,
+        evidence_bundle=[
+            {
+                "url": closed,
+                "description": "Acme is hiring senior engineers",
+                "date": None,
+                "snippet": "Senior Engineer job",
+            },
+            {
+                "url": filler,
+                "description": "Acme is hiring senior engineers",
+                "date": None,
+                "snippet": "Acme company profile",
+            },
+        ],
+    ))
+
+    assert result["client_ready"] is not cite_closed
+    assert result["decision"] == ("reject" if cite_closed else "approve")
+    assert result["rejection_reason"] == (
+        "linkedin_job_closed" if cite_closed else ""
+    )
+    assert result["verdict"]["overall_verdict"] == (
+        "disqualified" if cite_closed else "qualified"
+    )
+    assert result["verdict"]["signal_evaluations"][0][
+        "signal_status"
+    ] == ("contradicted" if cite_closed else "supported")
+
+
 @pytest.mark.parametrize("all_absent", [False, True])
 def test_combined_evidence_preserves_confirmed_absence_semantics(monkeypatch, all_absent):
     from qualification.scoring import intent_verification_three_stage as verifier

@@ -3719,6 +3719,31 @@ async def verify_three_stage(
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     s3_decision = _decision(s3_verdict)
+    closed_only_hiring_evidence = False
+    if integrity_policy and is_hiring_claim and len(bundle) > 1:
+        cited_urls = {
+            _normalize_url(url)
+            for url in (s3_item.get("evidence_urls_used") or [])
+            if str(url or "").strip()
+        }
+        closed_linkedin_urls = {
+            _normalize_url(item.get("url") or "")
+            for item in (contents.get("results") or [])
+            if (item.get("meta") or {}).get("kind") == "linkedin_job"
+            and (item.get("meta") or {}).get("is_closed")
+        }
+        closed_only_hiring_evidence = bool(
+            cited_urls and cited_urls.issubset(closed_linkedin_urls)
+        )
+        if closed_only_hiring_evidence:
+            s3_item["signal_status"] = "contradicted"
+            s3_item["confidence"] = "high"
+            s3_item.setdefault("risk_notes", []).append(
+                "all_cited_hiring_postings_are_closed"
+            )
+            s3_verdict["overall_verdict"] = "disqualified"
+            s3_verdict["overall_confidence"] = "high"
+            s3_decision = "reject"
     job_publisher_relationship = (
         "verified"
         if is_job_board
@@ -3796,7 +3821,11 @@ async def verify_three_stage(
         reason = ""
     elif s3_decision == "reject":
         client_ready = False
-        reason = f"stage3_{s3_item.get('signal_status') or 'reject'}"
+        reason = (
+            "linkedin_job_closed"
+            if closed_only_hiring_evidence
+            else f"stage3_{s3_item.get('signal_status') or 'reject'}"
+        )
     else:  # review
         # An eligible medium result that failed corroboration must stay closed
         # even when the legacy review-as-accept escape hatch is enabled.

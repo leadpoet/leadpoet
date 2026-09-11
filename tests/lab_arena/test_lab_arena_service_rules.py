@@ -531,6 +531,70 @@ def test_completion_requires_lease_owner_and_accepts_authorized_owner():
     assert _completion_service().handle_complete({}) == {"status": "failed"}
 
 
+@pytest.mark.parametrize(
+    ("configuration", "accepted"),
+    [({}, False), ({"integrity_policy": "arena_integrity_v1"}, True)],
+)
+def test_service_acceptance_scopes_missing_signal_dates_to_integrity(
+    configuration, accepted
+):
+    lease_token = "lease-token"
+    result = {
+        "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 1.0,
+            "max_rss_bytes": 1,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "provider_call_count": 0,
+        },
+        "started_at": "2026-09-02T00:00:00Z",
+        "finished_at": "2026-09-02T00:00:01Z",
+        "terminal_status": "accepted",
+    }
+    output = _stored_public_output("Undated Company")
+    output["companies"][0]["intent_signals"][0]["date"] = None
+    stored = []
+    service = object.__new__(ArenaService)
+    service._request_round = lambda *_args, **_kwargs: (
+        {
+            "hotkey": "runner",
+            "body": {
+                "run_id": "run-1",
+                "lease_token": lease_token,
+                "result": result,
+                "output": output,
+            },
+        },
+        {"round_id": "arena-a", "configuration_doc": configuration},
+    )
+    service._config = SimpleNamespace(
+        validator_authorizer=lambda _hotkey: (True, "validator")
+    )
+    service._store = SimpleNamespace(
+        get_run=lambda _run_id: {
+            "run_id": "run-1",
+            "round_id": "arena-a",
+            "runner_hotkey": "runner",
+            "kind": "execute",
+            "lease_token_hash": hash_lease_token(lease_token),
+        },
+        complete_attempt=lambda **_kwargs: {"status": "accepted"},
+    )
+    service._objects = SimpleNamespace(
+        put=lambda reference, payload: stored.append((reference, payload))
+    )
+
+    if accepted:
+        assert service.handle_complete({}) == {"status": "accepted"}
+        assert len(stored) == 1
+    else:
+        with pytest.raises(ServiceError, match="output_invalid"):
+            service.handle_complete({})
+        assert stored == []
+
+
 def test_final_admission_must_finish_before_the_round_freezes():
     service = object.__new__(ArenaService)
     service._hot_round_lock = __import__("threading").Lock()

@@ -685,6 +685,7 @@ async def generate_icps_with_openrouter(
     set_id: int,
     total_icps: int = 20,
     *, generation_context: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> tuple:
     """
     Generate ICP prompts using OpenRouter LLM (o3-mini).
@@ -706,7 +707,8 @@ async def generate_icps_with_openrouter(
         Tuple of (icps_list, industry_distribution, icp_set_hash)
         or None if LLM generation fails (falls back to template-based)
     """
-    if not OPENROUTER_API_KEY:
+    api_key = OPENROUTER_API_KEY if api_key is None else api_key
+    if not api_key:
         logger.warning("OPENROUTER_API_KEY not set, falling back to template-based generation")
         return None
 
@@ -894,7 +896,7 @@ FINAL CHECK before output (for every ICP):
             response = await client.post(
                 f"{OPENROUTER_BASE_URL}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://leadpoet.ai",
                     "X-Title": "LeadPoet ICP Generator"

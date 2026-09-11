@@ -1775,15 +1775,8 @@ class ArenaService:
                         )
                     except judgment_cache.JudgmentCacheError as exc:
                         raise ServiceError("judgment_cache_invalid", 500) from exc
-                    source_runner = str(cached.get("source_runner_hotkey") or "")
-                    try:
-                        excluded = set(
-                            self._config.chain.hotkeys_owned_by_same_coldkey(source_runner)
-                        )
-                    except Exception as exc:
-                        raise ServiceError(
-                            "judgment_cache_authority_unavailable", 503
-                        ) from exc
+                    evidence = cached.get("evidence_doc") or {}
+                    excluded = set(evidence["runner_authority_exclusions"])
                     if bool(participant.get("is_king")) or str(
                         participant.get("miner_hotkey") or ""
                     ) not in excluded:
@@ -2691,6 +2684,19 @@ class ArenaService:
                 raise
         else:
             excluded = chain_module.hotkeys_owned_by_coldkey(snapshot, snapshot.coldkeys[uid])
+            if integrity.enabled(configuration):
+                runner_coldkey = snapshot.coldkeys[uid]
+                for submission in self._store.list_submissions(
+                    round_id,
+                    status="frozen",
+                    columns="miner_hotkey,owner_coldkey,is_king",
+                ):
+                    if (
+                        not bool(submission.get("is_king"))
+                        and submission.get("owner_coldkey") == runner_coldkey
+                    ):
+                        excluded.append(str(submission.get("miner_hotkey") or ""))
+                excluded = sorted(set(excluded) - {""})
         token = self._lease_token(validated)
         if response is None:
             response = self._store.claim_assignment(
@@ -2936,13 +2942,21 @@ class ArenaService:
                         source_scored_run_id=str(run["scored_run_id"]),
                         source_output_ref=output_ref,
                         source_runner_hotkey=str(validated["hotkey"]),
+                        runner_authority_exclusions=(
+                            run.get("claim_response") or {}
+                        ).get("runner_authority_exclusions"),
                     )
                 except judgment_cache.JudgmentCacheError as exc:
                     raise ServiceError("judgment_cache_invalid", 500) from exc
                 judgment_evidence_hash = contracts.document_hash(judgment_evidence)
         elif terminal_status == "accepted":
             try:
-                output = validate_output_document(body.get("output"))
+                output = validate_output_document(
+                    body.get("output"),
+                    require_intent_dates=not integrity.enabled(
+                        round_row["configuration_doc"]
+                    ),
+                )
             except OutputInvalid:
                 raise ServiceError("output_invalid", 400)
             output_ref = "arena/%s/outputs/%s.json" % (round_id, run_id)

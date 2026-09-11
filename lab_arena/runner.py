@@ -1562,7 +1562,12 @@ class AssignmentExecutor:
                             terminal = "accepted"
                 else:
                     try:
-                        output_document = output_document_from_bytes(result.output_bytes)
+                        output_document = output_document_from_bytes(
+                            result.output_bytes,
+                            require_intent_dates=(
+                                lease.get("integrity_policy") != integrity.POLICY
+                            ),
+                        )
                     except OutputInvalid as exc:
                         terminal = "invalid_output"
                     else:

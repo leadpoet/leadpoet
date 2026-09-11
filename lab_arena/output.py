@@ -35,16 +35,27 @@ def parse_output_bytes(data: bytes) -> Any:
         raise OutputInvalid("output is not valid JSON") from exc
 
 
-def validate_companies(companies: Any) -> List[Dict[str, Any]]:
+def validate_companies(
+    companies: Any, *, require_intent_dates: bool = False
+) -> List[Dict[str, Any]]:
     """Validate companies with the shared public competition model."""
 
     try:
-        return validate_public_companies(companies, max_companies=MAX_COMPANIES)
+        rows = validate_public_companies(companies, max_companies=MAX_COMPANIES)
     except (TypeError, ValueError) as exc:
         raise OutputInvalid("companies fail the public output contract") from exc
+    if require_intent_dates and any(
+        signal.get("date") is None
+        for company in rows
+        for signal in company["intent_signals"]
+    ):
+        raise OutputInvalid("intent signal date is required")
+    return rows
 
 
-def output_document_from_bytes(data: bytes) -> Dict[str, Any]:
+def output_document_from_bytes(
+    data: bytes, *, require_intent_dates: bool = False
+) -> Dict[str, Any]:
     """Parse and validate the model's ``companies.json`` into the output document.
 
     Accepted shapes: a bare list of companies, or an object whose only keys
@@ -68,11 +79,15 @@ def output_document_from_bytes(data: bytes) -> Dict[str, Any]:
         companies = parsed.get("companies")
     else:
         raise OutputInvalid("output must be a list or an object")
-    validated = validate_companies(companies)
+    validated = validate_companies(
+        companies, require_intent_dates=require_intent_dates
+    )
     return {"schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION, "companies": validated}
 
 
-def validate_output_document(document: Any) -> Dict[str, Any]:
+def validate_output_document(
+    document: Any, *, require_intent_dates: bool = False
+) -> Dict[str, Any]:
     """Validate an already-parsed output document (the service side of completion)."""
 
     if not isinstance(document, Mapping):
@@ -87,4 +102,10 @@ def validate_output_document(document: Any) -> Dict[str, Any]:
         contracts.check_strict_document(document, contracts.OUTPUT_LIMITS)
     except ArenaContractError as exc:
         raise OutputInvalid(str(exc)) from exc
-    return {"schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION, "companies": validate_companies(document.get("companies"))}
+    return {
+        "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        "companies": validate_companies(
+            document.get("companies"),
+            require_intent_dates=require_intent_dates,
+        ),
+    }

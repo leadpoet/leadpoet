@@ -115,6 +115,40 @@ def test_claim_uses_one_snapshot_for_permission_stake_and_coldkey_exclusions():
     assert claims[0]["excluded_miner_hotkeys"] == [HOTKEY, "same-owner-miner"]
 
 
+def test_integrity_claim_keeps_frozen_owner_excluded_after_hotkey_transfer():
+    service = _runner_claim_service(registered=True, role="validator")
+    snapshot = _runner_snapshot(HOTKEY)
+    snapshot.hotkeys = (HOTKEY, "transferred-miner")
+    snapshot.coldkeys = ("owner", "new-owner")
+    snapshot.stake = (75_000, 0)
+    snapshot.validator_permit = (True, False)
+    snapshot.active = (False, True)
+    service._config.chain.metagraph = lambda *, finalized: snapshot
+    original_request_round = service._request_round
+
+    def request_round(*args, **kwargs):
+        validated, round_row = original_request_round(*args, **kwargs)
+        round_row["configuration_doc"]["integrity_policy"] = "arena_integrity_v1"
+        return validated, round_row
+
+    service._request_round = request_round
+    service._store.list_submissions = lambda *_args, **_kwargs: [{
+        "miner_hotkey": "transferred-miner",
+        "owner_coldkey": "owner",
+        "is_king": False,
+    }]
+    claims = []
+    service._store.claim_assignment = (
+        lambda **kwargs: claims.append(kwargs) or {"status": "empty"}
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+    assert claims[0]["excluded_miner_hotkeys"] == [
+        HOTKEY,
+        "transferred-miner",
+    ]
+
+
 def test_chain_unavailability_refuses_claim_and_does_not_call_store():
     service = _runner_claim_service(registered=True, role="validator")
     def unavailable(**kwargs):

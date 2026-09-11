@@ -234,11 +234,11 @@ def test_serve_pins_the_runtime_service_to_the_requested_round():
 
 
 def test_testnet_database_uses_current_arena_schema_and_review_migration():
-    from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS
+    from tests.lab_arena.lab_arena_pg_harness import POSTGREST_MIGRATIONS
 
     assert SCRIPT.EXPECTED_SCHEMA_VERSION == 197
     assert SCRIPT.MIGRATIONS == tuple(
-        "scripts/" + migration for migration in DEFAULT_MIGRATIONS
+        "scripts/" + migration for migration in POSTGREST_MIGRATIONS
     )
 
 

@@ -306,7 +306,13 @@ def score_work_item(
                 "scorer returned %d breakdowns for %d scored companies"
                 % (len(breakdowns), len(invoked_positions))
             )
-        failed = [item_row for item_row in breakdowns if scorer_breakdown_has_retryable_infrastructure_failure(item_row)]
+        failed = [
+            item_row
+            for item_row in breakdowns
+            if scorer_breakdown_has_retryable_infrastructure_failure(
+                item_row, integrity_policy=integrity_policy
+            )
+        ]
         if not retain_terminal:
             if failed:
                 last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
@@ -320,7 +326,9 @@ def score_work_item(
                 if breakdown.get("company_index") != expected_index:
                     raise ScoringError("integrity breakdown company index mismatch")
                 breakdown = {**breakdown, "company_index": scored_indexes[position]}
-            if not scorer_breakdown_has_retryable_infrastructure_failure(breakdown):
+            if not scorer_breakdown_has_retryable_infrastructure_failure(
+                breakdown, integrity_policy=integrity_policy
+            ):
                 retained[position] = breakdown
         unresolved = [
             position for position, breakdown in enumerate(retained)

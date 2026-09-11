@@ -124,7 +124,10 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert all(run["status"] == "accepted" and run["per_icp_score"] is not None for run in execution_runs)
     # Lease expiry runs on every driver tick; the round exercised it with nothing to expire.
     reached = set(harness.calls)
-    assert {"lab_arena_create_round", "lab_arena_transition_round", "lab_arena_register_submission", "lab_arena_update_submission", "lab_arena_open_stage", "lab_arena_open_scoring", "lab_arena_close_scoring", "lab_arena_claim_assignment", "lab_arena_reserve_call", "lab_arena_mark_dispatched", "lab_arena_settle_call", "lab_arena_complete_attempt", "lab_arena_close_stage", "lab_arena_record_run_scores", "lab_arena_whoami"} <= reached, sorted(reached)
+    assert {"lab_arena_create_round", "lab_arena_transition_round", "lab_arena_update_submission", "lab_arena_open_stage", "lab_arena_close_scoring", "lab_arena_claim_assignment", "lab_arena_reserve_call", "lab_arena_mark_dispatched", "lab_arena_settle_call", "lab_arena_close_stage", "lab_arena_record_run_scores", "lab_arena_whoami"} <= reached, sorted(reached)
+    assert "lab_arena_register_submission" in reached or "lab_arena_register_submission_v2" in reached
+    assert "lab_arena_open_scoring" in reached or "lab_arena_open_scoring_v2" in reached
+    assert "lab_arena_complete_attempt" in reached or "lab_arena_complete_attempt_v2" in reached
     # Every function the round did not reach is routed and coerced by PostgREST; only its own domain check refuses.
     for function in sorted(set(FUNCTION_SIGNATURES) - reached):
         params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}
@@ -137,6 +140,12 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
             continue
         if function == "lab_arena_validator_scoring_authority_schema_v1":
             assert harness.transport.rpc(function, params)["version"] == 208
+            continue
+        if function == "lab_arena_code_review_schema_v1":
+            assert harness.transport.rpc(function, params)["version"] == 207
+            continue
+        if function == "lab_arena_integrity_schema_v1":
+            assert harness.transport.rpc(function, params)["version"] == 213
             continue
         with pytest.raises(ArenaStoreError) as excinfo:
             harness.transport.rpc(function, params)

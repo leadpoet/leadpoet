@@ -853,6 +853,10 @@ class ICPPrompt(BaseModel):
         default_factory=list,
         description="Per-signal evidence_type aligned to intent_signals index",
     )
+    intent_signal_max_age_days: List[Optional[int]] = Field(
+        default_factory=list,
+        description="Per-signal freshness cap aligned to intent_signals index",
+    )
 
     # Legacy fields for backward compatibility
     target_role: Optional[str] = Field(None, description="DEPRECATED: Use target_roles list")

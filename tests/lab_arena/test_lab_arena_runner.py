@@ -28,7 +28,7 @@ from bittensor_wallet import Keypair
 
 from lab_arena import broker as br
 from lab_arena import contracts, operations, runner as rn, runtime, shim, source_bundle
-from lab_arena.output import output_document_from_bytes
+from lab_arena.output import OutputInvalid, output_document_from_bytes
 
 RUNNER = Keypair.create_from_uri("//Runner")
 MINER = Keypair.create_from_uri("//Miner").ss58_address
@@ -224,6 +224,31 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     assert not spec.agent_entrypoint_path.exists()
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
+
+
+@pytest.mark.parametrize(
+    ("integrity_policy", "expected_status"),
+    [(None, "invalid_output"), ("arena_integrity_v1", "accepted")],
+)
+def test_missing_signal_date_is_scoped_to_integrity_rounds(
+    tmp_path, integrity_policy, expected_status
+):
+    run_lease = lease()
+    if integrity_policy:
+        run_lease["integrity_policy"] = integrity_policy
+    company = valid_company(1)
+    company["intent_signals"][0]["date"] = None
+    api = FakeApi([run_lease])
+    sandbox = BridgingRuntime(output={"companies": [company]}, calls=0)
+    (tmp_path / "work").mkdir()
+
+    rn.Runner(make_config(tmp_path, api, sandbox)).run_once()
+
+    completion = api.completions[0]["body"]
+    assert completion["result"]["terminal_status"] == expected_status
+    assert (completion["output"] is not None) is (
+        expected_status == "accepted"
+    )
 
 
 def test_execute_stages_restrictive_trusted_entrypoint_without_mutating_source(tmp_path):
@@ -888,6 +913,18 @@ def test_parallelism_env_and_http_boundary():
         rn.HttpArenaApiClient("http://localhost.evil.example")
     document = output_document_from_bytes(json.dumps([valid_company(1)]).encode())
     assert document["schema_version"] == contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION and len(document["companies"]) == 1
+
+
+def test_output_date_requirement_is_optional_and_explicit():
+    company = valid_company(1)
+    company["intent_signals"][0]["date"] = None
+    payload = json.dumps([company]).encode()
+
+    assert output_document_from_bytes(payload)["companies"][0][
+        "intent_signals"
+    ][0]["date"] is None
+    with pytest.raises(OutputInvalid, match="intent signal date is required"):
+        output_document_from_bytes(payload, require_intent_dates=True)
 
 
 def test_provider_http_timeout_covers_the_requested_provider_window():

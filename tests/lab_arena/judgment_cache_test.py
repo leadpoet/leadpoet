@@ -117,6 +117,7 @@ def test_open_scoring_partitions_a_cache_that_is_not_valid_for_recipient():
         source_scored_run_id="execute-source",
         source_output_ref="arena/source.json",
         source_runner_hotkey="validator-a",
+        runner_authority_exclusions=["miner-a", "validator-a"],
     )
     cached = {
         "cache_key": scope["cache_key"],
@@ -168,8 +169,8 @@ def test_open_scoring_partitions_a_cache_that_is_not_valid_for_recipient():
         get_bounded=lambda _ref, _limit: json.dumps(output).encode("utf-8")
     )
     service._config = SimpleNamespace(chain=SimpleNamespace(
-        hotkeys_owned_by_same_coldkey=lambda hotkey: (
-            ["validator-a", miner_hotkey] if hotkey == "validator-a" else [hotkey]
+        hotkeys_owned_by_same_coldkey=lambda _hotkey: pytest.fail(
+            "cache reuse consulted mutable chain ownership"
         )
     ))
     service._round = lambda _round_id: row
@@ -201,11 +202,21 @@ def test_frozen_evidence_is_hash_bound_and_cannot_name_another_execution():
         source_scored_run_id="run-a",
         source_output_ref="arena/round/scores/items/score-a.json",
         source_runner_hotkey="validator-a",
+        runner_authority_exclusions=["validator-a"],
     )
     evidence_hash = contracts.document_hash(snapshot)
     assert judgment_cache.validate_evidence_snapshot(
         snapshot, cache_key=scope["cache_key"], evidence_hash=evidence_hash
     ) == snapshot
+
+    legacy = copy.deepcopy(snapshot)
+    del legacy["runner_authority_exclusions"]
+    with pytest.raises(judgment_cache.JudgmentCacheError, match="fields"):
+        judgment_cache.validate_evidence_snapshot(
+            legacy,
+            cache_key=scope["cache_key"],
+            evidence_hash=contracts.document_hash(legacy),
+        )
 
     tampered = copy.deepcopy(snapshot)
     tampered["breakdowns"][0]["final_score"] = 1.0
@@ -222,6 +233,7 @@ def test_frozen_evidence_is_hash_bound_and_cannot_name_another_execution():
             source_scored_run_id="run-b",
             source_output_ref="arena/round/scores/items/score-a.json",
             source_runner_hotkey="validator-a",
+            runner_authority_exclusions=["validator-a"],
         )
 
 
@@ -237,6 +249,7 @@ def test_service_uses_only_hash_validated_authoritative_cached_evidence(monkeypa
         source_scored_run_id="run-a",
         source_output_ref="arena/round/scores/items/score-a.json",
         source_runner_hotkey="validator-a",
+        runner_authority_exclusions=["validator-a"],
     )
     cache_row = {
         "cache_key": scope["cache_key"],

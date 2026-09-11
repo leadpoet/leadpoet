@@ -127,11 +127,29 @@ class FakeChain:
 class FakeProviderTransport:
     def __init__(self):
         self.review_requests = []
+        self._deepline_lock = threading.Lock()
+        self._deepline_jobs = []
 
     def send(self, *, method, url, headers, body, timeout_seconds):
         if "-refused" in url or any("-refused" in str(value) for value in headers.values()):
             # The provider rejects a revoked miner key.
             return br.ProviderResponse(401, {"content-type": "application/json"}, b'{"error": "invalid key"}')
+        if method == "GET" and url.startswith(br.DEEPLINE_BILLING_HISTORY_URL):
+            assert headers["authorization"] == "Bearer " + CANARY_DEEPLINE_KEY
+            with self._deepline_lock:
+                entries = list(reversed(self._deepline_jobs[-50:]))
+            payload = json.dumps(
+                {
+                    "recent": {
+                        "entries": entries,
+                        "has_more": False,
+                        "next_cursor": None,
+                    }
+                }
+            ).encode()
+            return br.ProviderResponse(
+                200, {"content-type": "application/json"}, payload
+            )
         request = json.loads(body.decode("utf-8"))
         if request.get("model") == code_review.DEFAULT_REVIEW_MODEL:
             assert headers["Authorization"] == "Bearer " + CANARY_OPENROUTER_KEY
@@ -159,13 +177,25 @@ class FakeProviderTransport:
             return br.ProviderResponse(
                 200, {"content-type": "application/json"}, payload
             )
+        assert method == "POST"
+        assert headers["authorization"] == "Bearer " + CANARY_DEEPLINE_KEY
+        operation = request["operation"]
+        with self._deepline_lock:
+            job_id = "fake-deepline-job-%d" % (len(self._deepline_jobs) + 1)
+            self._deepline_jobs.append(
+                {
+                    "request_id": job_id,
+                    "operation": operation,
+                    "provider": "fake",
+                    "credits": 0,
+                    "charge_state": "posted",
+                }
+            )
         payload = json.dumps(
             {
+                "job_id": job_id,
                 "results": [{"url": "https://co1.example.com", "title": "Co"}],
-                # The real Deepline response carries a numeric credit charge.
-                # Explicit zero keeps this fake free without bypassing the
-                # broker's fail-closed cost accounting contract.
-                "billing": {"credits_charged": 0},
+                "status": "completed",
             }
         ).encode()
         return br.ProviderResponse(200, {"content-type": "application/json"}, payload)

@@ -96,18 +96,30 @@ def _role_at_uid(
         )
         active = decoded_active[uid]
         return classify_hotkey_role(
-            active, permit, 0, network_name=network_name
+            active,
+            permit,
+            0,
+            network_name=network_name,
+            require_stake=require_stake,
         )
 
     if not require_stake:
-        if permit:
-            return "validator", "permit=True"
-        return "miner", "permit=False"
+        return classify_hotkey_role(
+            False,
+            permit,
+            0,
+            network_name=network_name,
+            require_stake=False,
+        )
 
     stakes = _stake_vector(metagraph, hotkey_count)
     decoded_stakes = tuple(_require_stake(value) for value in stakes)
     return classify_hotkey_role(
-        False, permit, decoded_stakes[uid], network_name=network_name
+        False,
+        permit,
+        decoded_stakes[uid],
+        network_name=network_name,
+        require_stake=True,
     )
 
 
@@ -117,8 +129,9 @@ def classify_hotkey_role(
     stake: float,
     *,
     network_name: str,
+    require_stake: bool = False,
 ) -> Tuple[str, str]:
-    """Apply the shared network-specific validator policy to one neuron."""
+    """Classify one neuron under identity or scoring validator policy."""
 
     permit = _require_bool(_scalar(validator_permit), "validator_permit")
     if network_name == "test":
@@ -128,6 +141,11 @@ def classify_hotkey_role(
         if is_active:
             return "validator", "testnet, active=True"
         return "miner", "testnet, active=False, permit=False"
+
+    if not require_stake:
+        if permit:
+            return "validator", "permit=True"
+        return "miner", "permit=False"
 
     stake_weight = _require_stake(_scalar(stake))
     if permit and stake_weight >= STAKE_THRESHOLD:
@@ -144,8 +162,9 @@ def classify_hotkey_from_metagraph(
     metagraph: Any,
     *,
     network_name: str,
+    require_stake: bool = False,
 ) -> Tuple[bool, Optional[str]]:
-    """Look up and classify one hotkey with the shared validator policy."""
+    """Look up one hotkey using identity or scoring validator policy."""
 
     hotkeys = _snapshot_hotkeys(metagraph)
     if hotkey not in hotkeys:
@@ -154,7 +173,7 @@ def classify_hotkey_from_metagraph(
         metagraph,
         hotkeys.index(hotkey),
         network_name=network_name,
-        require_stake=True,
+        require_stake=require_stake,
         hotkey_count=len(hotkeys),
     )
     return True, role
@@ -168,7 +187,7 @@ def validator_uid(
     network_name: str,
     require_stake: bool = True,
 ) -> int:
-    """Return an eligible validator UID or raise a stable eligibility code."""
+    """Return a validator UID under scoring or existing lease policy."""
 
     observed_netuid = _scalar(getattr(metagraph, "netuid", None))
     if (
@@ -197,10 +216,36 @@ def validator_uid(
     raise ValidatorIneligible("runner_validator_required")
 
 
+def permitted_validator_uid(
+    metagraph: Any,
+    hotkey: str,
+    *,
+    netuid: int,
+) -> int:
+    """Return a registered, permitted validator UID without stake or activity."""
+
+    observed_netuid = _scalar(getattr(metagraph, "netuid", None))
+    if (
+        isinstance(observed_netuid, bool)
+        or not isinstance(observed_netuid, int)
+        or observed_netuid != netuid
+    ):
+        raise ValueError("metagraph subnet differs")
+    hotkeys = _snapshot_hotkeys(metagraph)
+    if hotkey not in hotkeys:
+        raise ValidatorIneligible("runner_hotkey_unregistered")
+    uid = hotkeys.index(hotkey)
+    permits = _snapshot_vector(metagraph, "validator_permit", len(hotkeys))
+    permit = _require_bool(permits[uid], "validator_permit")
+    if not permit:
+        raise ValidatorIneligible("runner_validator_required")
+    return uid
+
+
 def validator_hotkeys_from_metagraph(
-    metagraph: Any, *, network_name: str
+    metagraph: Any, *, network_name: str, require_stake: bool = False
 ) -> List[str]:
-    """Return all validator hotkeys using the same policy as single lookups."""
+    """Return validator hotkeys using identity or scoring policy."""
 
     hotkeys = _snapshot_hotkeys(metagraph)
     return [
@@ -210,7 +255,7 @@ def validator_hotkeys_from_metagraph(
             metagraph,
             uid,
             network_name=network_name,
-            require_stake=True,
+            require_stake=require_stake,
             hotkey_count=len(hotkeys),
         )[0]
         == "validator"
@@ -223,6 +268,7 @@ __all__ = [
     "ValidatorIneligible",
     "classify_hotkey_from_metagraph",
     "classify_hotkey_role",
+    "permitted_validator_uid",
     "validator_hotkeys_from_metagraph",
     "validator_uid",
 ]

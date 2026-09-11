@@ -28,7 +28,7 @@ from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_do
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 from gateway.utils.hotkey_roles import (
-    ValidatorIneligible, validator_uid,
+    ValidatorIneligible, permitted_validator_uid, validator_uid,
 )
 
 logger = logging.getLogger(__name__)
@@ -3240,6 +3240,42 @@ class ArenaService:
             raise ServiceError("accepted_weight_state_conflict", 409) from exc
         return {"state": validate_accepted_weight_state(stored["state"]), "lookup_ok": True}
 
+    def handle_weight_state(self, envelope: Any) -> Dict[str, Any]:
+        """Authorize a finalized permit holder before returning accepted state."""
+
+        validated = self.validate_request(
+            envelope, scope=contracts.SCOPE_WEIGHT_STATE, round_id=None
+        )
+        network, netuid = self._chain_scope()
+        body = validated["body"]
+        if (
+            validated["round_id"] != "weight-state"
+            or set(body) != {"epoch", "network", "netuid"}
+        ):
+            raise ServiceError("weight_state_request_invalid", 400)
+        epoch = body.get("epoch")
+        requested_netuid = body.get("netuid")
+        if (
+            isinstance(epoch, bool)
+            or not isinstance(epoch, int)
+            or epoch < 0
+            or body.get("network") != network
+            or isinstance(requested_netuid, bool)
+            or not isinstance(requested_netuid, int)
+            or requested_netuid != netuid
+        ):
+            raise ServiceError("weight_state_scope_mismatch", 400)
+        try:
+            metagraph = self._config.chain.metagraph(finalized=True)
+            permitted_validator_uid(
+                metagraph, validated["hotkey"], netuid=netuid
+            )
+        except ValidatorIneligible as exc:
+            raise ServiceError(str(exc), 403) from None
+        except Exception:
+            raise ServiceError("validator_snapshot_unavailable", 503) from None
+        return self.public_weight_state(epoch)
+
     def record_chain_outcome(self, document: Any) -> Dict[str, Any]:
         """Record an authenticated validator observation, never settlement authority."""
 
@@ -3311,7 +3347,7 @@ class ArenaService:
             "finalists": row.get("finalists") if row["status"] == "published" else None,
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
             "effective_reward_epoch": row.get("effective_reward_epoch"), "cancel_reason": row.get("cancel_reason"),
-            "final_ranking": None, "reward_basis": row.get("reward_basis_doc"),
+            "final_ranking": None,
         }
         if row["status"] == "published":
             publication = row.get("publication_doc") or {}

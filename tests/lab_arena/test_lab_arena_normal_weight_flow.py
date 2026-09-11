@@ -12,7 +12,7 @@ import pytest
 from bittensor_wallet import Keypair
 from fastapi.testclient import TestClient
 
-from lab_arena import signing
+from lab_arena import contracts, signing
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
 from lab_arena.local_weight_signer import LocalArenaWeightSigner
@@ -349,6 +349,20 @@ def _local_signer_client(*, key, source, profile, arena_signer, burn):
     )
 
 
+def _weight_request(
+    key, *, epoch, network="finney", netuid=71, timestamp=None,
+    round_id="weight-state",
+):
+    return contracts.build_signed_request(
+        scope=contracts.SCOPE_WEIGHT_STATE,
+        round_id=round_id,
+        hotkey=key.ss58_address,
+        body={"epoch": int(epoch), "network": network, "netuid": netuid},
+        timestamp=int(timestamp or datetime.now(timezone.utc).timestamp()),
+        sign_message=lambda message: key.sign(message.encode("utf-8")).hex(),
+    )
+
+
 class _HostChain:
     def __init__(self, source, validator_hotkey):
         self.source = source; self.config = SimpleNamespace(netuid=71, network_name="finney")
@@ -425,6 +439,100 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
 
     profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
     outcomes, vectors = [], []
+    miner = Keypair.create_from_uri("//ArenaWeightMiner")
+    harness.chain.runners.append(miner.ss58_address)
+    harness.chain.permits[miner.ss58_address] = False
+    outsider = Keypair.create_from_uri("//ArenaWeightOutsider")
+    permitted = Keypair.create_from_uri("//ArenaWeightPermitted")
+    harness.chain.runners.append(permitted.ss58_address)
+    harness.chain.stakes[permitted.ss58_address] = 1
+    weight_reads = []
+    original_public_weight_state = harness.service.public_weight_state
+    monkeypatch.setattr(
+        harness.service, "public_weight_state",
+        lambda epoch: weight_reads.append(epoch) or original_public_weight_state(epoch),
+    )
+    with TestClient(create_app(harness.service)) as public:
+        assert public.post("/arena/v1/weight-state", json={}).status_code == 400
+        denied_miner = public.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(miner, epoch=reward_epoch),
+        )
+        assert denied_miner.status_code == 403
+        assert denied_miner.json()["code"] == "runner_validator_required"
+        denied_outsider = public.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(outsider, epoch=reward_epoch),
+        )
+        assert denied_outsider.status_code == 403
+        assert denied_outsider.json()["code"] == "runner_hotkey_unregistered"
+        forged = _weight_request(permitted, epoch=reward_epoch)
+        forged["signature"] = "0x" + "00" * 64
+        assert public.post(
+            "/arena/v1/weight-state", json=forged
+        ).status_code == 401
+        stale = public.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(
+                miner, epoch=reward_epoch,
+                timestamp=int(harness.clock.now.timestamp()) - 301,
+            ),
+        )
+        assert stale.status_code == 400
+        wrong_action = public.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(
+                permitted, epoch=reward_epoch, round_id="not-weight-state",
+            ),
+        )
+        assert wrong_action.status_code == 400
+        wrong_scope = _weight_request(permitted, epoch=reward_epoch)
+        wrong_scope["scope"] = contracts.SCOPE_CLAIM
+        wrong_scope["signature"] = "0x" + permitted.sign(
+            contracts.signed_request_message(wrong_scope).encode("utf-8")
+        ).hex()
+        assert public.post(
+            "/arena/v1/weight-state", json=wrong_scope
+        ).status_code == 400
+        wrong_network = public.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(
+                permitted, epoch=reward_epoch, network="test",
+            ),
+        )
+        assert wrong_network.status_code == 400
+        wrong_netuid = public.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(permitted, epoch=reward_epoch, netuid=72),
+        )
+        assert wrong_netuid.status_code == 400
+        non_integer_netuid = public.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(permitted, epoch=reward_epoch, netuid=71.0),
+        )
+        assert non_integer_netuid.status_code == 400
+        with monkeypatch.context() as patcher:
+            patcher.setattr(
+                harness.chain, "metagraph",
+                lambda finalized=True: (_ for _ in ()).throw(
+                    RuntimeError("private chain diagnostic")
+                ),
+            )
+            unavailable = public.post(
+                "/arena/v1/weight-state",
+                json=_weight_request(miner, epoch=reward_epoch),
+            )
+        assert unavailable.status_code == 503
+        assert unavailable.json()["code"] == "validator_snapshot_unavailable"
+        assert "private chain diagnostic" not in unavailable.text
+        assert weight_reads == []
+        assert public.get(
+            "/arena/v1/reward-basis", params={"epoch": reward_epoch}
+        ).status_code == 404
+        public_round = public.get(
+            "/arena/v1/rounds/%s" % harness.round_id
+        ).json()
+        assert "reward_basis" not in public_round
     for index in range(2):
         key = Keypair.create_from_uri("//ArenaNormalValidator%d" % index)
         harness.chain.runners.append(key.ss58_address)
@@ -434,7 +542,13 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
             with pytest.raises(ServiceError, match="runner_stake_below_minimum"):
                 harness.service._benchmark_validator_uid(harness.chain.metagraph(), key.ss58_address)
         with TestClient(create_app(harness.service)) as public:
-            response = public.get("/arena/v1/weight-state", params={"epoch": reward_epoch})
+            assert public.get(
+                "/arena/v1/weight-state", params={"epoch": reward_epoch}
+            ).status_code == 405
+            response = public.post(
+                "/arena/v1/weight-state",
+                json=_weight_request(key, epoch=reward_epoch),
+            )
             assert response.status_code == 200 and response.json()["state"] == state
         hotkeys = [burn]
         if state["reward_basis"]["king_hotkey"]:

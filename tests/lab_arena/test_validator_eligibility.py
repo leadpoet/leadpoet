@@ -64,7 +64,9 @@ def test_claim_capacity_and_gateway_share_one_validator_rule(network, netuid, ac
     service._config.chain.metagraph = lambda *, finalized: snapshot
     service._config.defaults = SimpleNamespace(runner_hotkeys=(HOTKEY,))
     service._config.banned_hotkeys_source = lambda: []
-    registered, role = classify_hotkey_from_metagraph(HOTKEY, snapshot, network_name=network)
+    registered, role = classify_hotkey_from_metagraph(
+        HOTKEY, snapshot, network_name=network, require_stake=True
+    )
     assert registered
     if role == "validator":
         assert service.handle_claim({}) == {"status": "empty"}

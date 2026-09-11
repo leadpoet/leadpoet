@@ -48,6 +48,10 @@ class StubService:
     def public_weight_state(self, epoch):
         return {"state": {"epoch": epoch}, "lookup_ok": True}
 
+    def handle_weight_state(self, envelope):
+        self.calls["weight_state"] = envelope
+        return {"state": {"epoch": envelope["body"]["epoch"]}, "lookup_ok": True}
+
     def record_chain_outcome(self, document):
         self.calls["chain_outcome"] = document
         return {"status": "recorded"}
@@ -197,9 +201,13 @@ def test_public_routes(client):
     assert http.get("/arena/v1/competition").json()["network_name"] == "test"
     assert http.get("/arena/v1/signing-key").json()["schema_version"] == contracts.SIGNING_KEY_DOCUMENT_SCHEMA_VERSION
     assert http.get("/arena/v1/recipient").status_code == 404
-    assert http.get("/arena/v1/reward-basis", params={"epoch": 24801}).json()["effective_reward_epoch"] == 24801
-    assert http.get("/arena/v1/reward-basis", params={"epoch": 1}).status_code == 404
-    assert http.get("/arena/v1/weight-state", params={"epoch": 24801}).json()["state"]["epoch"] == 24801
+    assert http.get("/arena/v1/reward-basis", params={"epoch": 24801}).status_code == 404
+    assert http.get("/arena/v1/weight-state", params={"epoch": 24801}).status_code == 405
+    weight_request = {"body": {"epoch": 24801}}
+    weight_response = http.post("/arena/v1/weight-state", json=weight_request)
+    assert weight_response.json()["state"]["epoch"] == 24801
+    assert weight_response.headers["cache-control"] == "no-store"
+    assert _service.calls["weight_state"] == weight_request
     outcome = {"epoch": 24801}
     assert http.post("/arena/v1/chain-outcomes", json=outcome).json()["status"] == "recorded"
     assert _service.calls["chain_outcome"] == outcome

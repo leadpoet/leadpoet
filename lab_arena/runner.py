@@ -1580,6 +1580,11 @@ class AssignmentExecutor:
                 and call.get("error_code") == "miner_credentials_unavailable"
                 for call in state.calls
             )
+            miner_scoring_funding_failed = scoring_run and any(
+                call.get("funding_source") == "miner_key"
+                and call.get("error_code") in ("budget_refused", "budget_exhausted")
+                for call in state.calls
+            )
             provider_infrastructure_failed = any(
                 call.get("error_code") in ("broker_unavailable", "provider_unavailable")
                 or (
@@ -1588,7 +1593,9 @@ class AssignmentExecutor:
                 )
                 for call in state.calls
             )
-            if miner_credentials_failed and terminal != "accepted":
+            if (
+                miner_credentials_failed or miner_scoring_funding_failed
+            ) and terminal != "accepted":
                 terminal = "credential_error"
                 output_document = None
             if provider_infrastructure_failed and terminal != "accepted":

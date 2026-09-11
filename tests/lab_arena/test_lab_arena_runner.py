@@ -1667,7 +1667,9 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
 
 
 @pytest.mark.parametrize("scoring_run", [False, True])
-def test_miner_key_failure_does_not_become_an_infrastructure_failure(tmp_path, scoring_run):
+def test_miner_key_failure_does_not_become_an_infrastructure_failure(
+    tmp_path, scoring_run
+):
     from lab_arena import scoring
 
     class MinerKeyApi(RefusingApi):
@@ -1684,6 +1686,51 @@ def test_miner_key_failure_does_not_become_an_infrastructure_failure(tmp_path, s
     result = contracts.validate_run_result(api.completions[0]["body"]["result"])
     assert result["terminal_status"] == "credential_error"
     assert api.completions[0]["body"].get("output") in (None, {})
+
+
+@pytest.mark.parametrize("code", ["budget_refused", "budget_exhausted"])
+def test_miner_scoring_funding_failure_is_challenger_specific(tmp_path, code):
+    from lab_arena import scoring
+
+    class MinerKeyApi(RefusingApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            document["call"].update(funding_source="miner_key")
+            return document
+
+    failure = scoring.build_scoring_failure("r1", "judge_error", detail="provider error")
+    api = MinerKeyApi([scoring_lease()], code=code)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=failure)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "credential_error"
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
+def test_miner_scoring_funding_refusal_does_not_replace_valid_output(tmp_path):
+    from lab_arena import scoring
+
+    class MinerKeyApi(RefusingApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            document["call"].update(funding_source="miner_key")
+            return document
+
+    output = scoring.build_scoring_output(
+        "r1",
+        [
+            {"final_score": 71.0, "failure_reason": ""},
+            {"final_score": 44.5, "failure_reason": ""},
+        ],
+    )
+    api = MinerKeyApi([scoring_lease()], code="budget_refused")
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=output)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    completion = api.completions[0]["body"]
+    assert contracts.validate_run_result(completion["result"])["terminal_status"] == "accepted"
+    assert completion["output"] == output
 
 
 class FlakyCompletionApi(FakeApi):

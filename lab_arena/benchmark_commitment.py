@@ -245,6 +245,21 @@ def verify_assignment(proof: Any, *, round_id: str, position: int, evaluation_da
     _require(contracts.canonical_json(leaf["icp"]) == contracts.canonical_json(icp), "benchmark_icp_mismatch")
 
 
+def _same_json_value(left: Any, right: Any) -> bool:
+    # Browser downloads may serialize 1.0 as 1. The original canonical leaf
+    # bytes are still hashed verbatim; only the display projection compares
+    # JSON number values. Booleans must never compare equal to numbers.
+    if type(left) in (int, float) and type(right) in (int, float):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(_same_json_value(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json_value(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def verify_reveal(commitment_response: Mapping[str, Any], reveal_response: Mapping[str, Any]) -> str:
     """Verify downloaded Day 1 and Day 2 responses, including decorated ICPs."""
 
@@ -270,5 +285,5 @@ def verify_reveal(commitment_response: Mapping[str, Any], reveal_response: Mappi
         # These reserved display fields never appear in the committed input.
         # All raw input fields must match exactly.
         expected = {**raw, "icp_position": position, "baseline_score": view.get("baseline_score")}
-        _require(contracts.canonical_json(view) == contracts.canonical_json(expected), "benchmark_icp_mismatch")
+        _require(_same_json_value(view, expected), "benchmark_icp_mismatch")
     return document["manifest_hash"]

@@ -228,3 +228,14 @@ def test_cached_open_round_refreshes_proof_when_another_coordinator_commits():
     assert lease["evaluation_date"] == row["evaluation_date"]
     assert lease["benchmark_proof"]["commitment"] == artifact["commitment"]
     bc.verify_assignment(lease["benchmark_proof"], round_id=row["round_id"], position=0, evaluation_date=lease["evaluation_date"], icp=lease["icp"])
+
+
+def test_browser_download_number_formatting_preserves_proof_without_bool_coercion():
+    service, row, _, _, _ = service_fixture(now=DAY2)
+    saved = service.public_benchmark_commitment(row["round_id"])
+    reveal = service.public_benchmark(row["round_id"])
+    reveal["icps"][0]["weight"] = 1  # JSON.stringify(1.0)
+    assert bc.verify_reveal(saved, reveal) == saved["manifest_hash"]
+    reveal["icps"][0]["weight"] = True
+    with pytest.raises(bc.BenchmarkCommitmentError, match="benchmark_icp_mismatch"):
+        bc.verify_reveal(saved, reveal)

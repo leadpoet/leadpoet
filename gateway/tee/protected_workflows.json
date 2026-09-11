@@ -1887,7 +1887,42 @@
       "symbol": "ScoringExecutorV2._execute_provider_preflight"
     },
     {
-      "ast_sha256": "sha256:0332d31be0b081d07d2dd659dc8b9543d7f3a8d8de585b086741e8487d280e78",
+      "ast_sha256": "sha256:287cffe979e284b8286aab65c7cf8bbe742e0891b4966b2660a810688c785ff9",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "BENCHMARK_DISCLOSURE_MIGRATION"
+    },
+    {
+      "ast_sha256": "sha256:6ec0a560041ee6c36994817d42a3ada914272a926e4dd9893c8b540c411273ef",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY"
+    },
+    {
+      "ast_sha256": "sha256:31840b01b009173b4a7e52746205252993096390c6a7dee70b36cc6385c13969",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "PRIVATE_ARENA_CAPABILITIES"
+    },
+    {
+      "ast_sha256": "sha256:7cf24b4f34a5b4183b9cdd370ffa6d6d5eb1dff2cd9fa18923fd4cc41c69974a",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "PRIVATE_ARENA_MIGRATIONS"
+    },
+    {
+      "ast_sha256": "sha256:c6ff3e21c7d480f768f51c9fb77ed414bcd45f1f8ade3ceb9e0daa97bb6ea912",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "REQUIRED_SUPABASE_V2_RPCS"
+    },
+    {
+      "ast_sha256": "sha256:12149a24e68d497fd666a27c1dec7ef3a2cd02605bed8339da50bde169667fdb",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "REQUIRED_SUPABASE_V2_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:65f26f2d51bc9234f8dde0bc4e0c2f0cabd2440d2ce988eb58e01729c6a7040f",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SCHEMA_CAPABILITIES"
+    },
+    {
+      "ast_sha256": "sha256:1cef096546acb077325d949b70b6f82a33f34b32507f4c7aa7c8a2c33bf68ebd",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
@@ -2797,7 +2832,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:61cbadeed492ed4fe895261bf8539aacfb5508b520d78baf3e09ac3e4aaf5d70",
-  "protected_source_commit": "9832858547981a3fe79605e2f78aab80130bae4e",
+  "manifest_hash": "sha256:e039416851db79daa28d6f2e331bf1795035ad1f2f963f8f0ac8b8027774880c",
+  "protected_source_commit": "363ea6ef9daaa037ce09eb74539b4cdf05044dc3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

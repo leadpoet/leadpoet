@@ -39,6 +39,7 @@ PRICE_LIST_SCHEMA_VERSION = "leadpoet.lab_arena.provider_price_list.v1"
 # worker carries it inside the existing response-header map, and the scorer
 # shim consumes it without exposing it as a provider response header.
 TRUSTED_RESPONSE_URL_HEADER = "x-lab-arena-response-url"
+BUDGET_ADMISSION_MAX_SECONDS = 20.0
 
 # A public SDK-compatible handle, not a provider credential. The worker drops
 # this exact value before the gateway resolves the submission-owned key.
@@ -1714,6 +1715,7 @@ def sanitize_response(
 
 __all__ = [
     "ALLOWED_REQUEST_HEADERS",
+    "BUDGET_ADMISSION_MAX_SECONDS",
     "CREDENTIAL_HEADERS",
     "HOST_ACCOUNT_STATUSES",
     "CredentialPlacement",

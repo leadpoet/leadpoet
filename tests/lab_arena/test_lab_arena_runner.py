@@ -27,7 +27,7 @@ import httpx
 from bittensor_wallet import Keypair
 
 from lab_arena import broker as br
-from lab_arena import contracts, runner as rn, runtime, shim, source_bundle
+from lab_arena import contracts, operations, runner as rn, runtime, shim, source_bundle
 from lab_arena.output import output_document_from_bytes
 
 RUNNER = Keypair.create_from_uri("//Runner")
@@ -922,6 +922,32 @@ def test_provider_http_timeout_covers_the_requested_provider_window():
         },
     )
     assert client.timeouts[-1].read == rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
+    api.provider(
+        "run-1",
+        "a" * 64,
+        {
+            "operation_id": "deepline.execute",
+            "parameters": {},
+            "timeout_ms": 60_000,
+            "action_sequence": 1,
+        },
+    )
+    assert client.timeouts[-1].read == (
+        operations.BUDGET_ADMISSION_MAX_SECONDS
+        + operations.OPERATIONS["deepline.execute"].timeout_seconds
+        + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+    )
+    api.provider(
+        "run-1",
+        "a" * 64,
+        {
+            "operation_id": [],
+            "parameters": {},
+            "timeout_ms": 999_999_999,
+            "action_sequence": 2,
+        },
+    )
+    assert client.timeouts[-1].read == rn.API_TIMEOUT_SECONDS
     api.claim({"request_id": "claim-1"})
     assert client.timeouts[-1].read == rn.API_TIMEOUT_SECONDS
 
@@ -1047,6 +1073,9 @@ def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
         status, headers, body = request("GET", "api.scrapingdog.com", "/scrape?url=https%3A%2F%2Fexample.com%2F")
         assert status == 200 and json.loads(body)["results"] and headers["Connection"] == "close"
         assert api.provider_frames[-1]["operation_id"] == "scrapingdog.scrape" and state.calls
+        assert api.provider_frames[-1]["timeout_ms"] == (
+            operations.OPERATIONS["scrapingdog.scrape"].timeout_seconds * 1000
+        )
         # A credential header is refused, an unknown host has no operation, and the frame path still works.
         status, _headers, body = request("GET", "api.scrapingdog.com", "/scrape?url=https%3A%2F%2Fexample.com%2F", headers={"Authorization": "Bearer leaked"})
         assert status == 400 and json.loads(body)["error"]["code"] == "forbidden_header"
@@ -1058,10 +1087,101 @@ def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
         finally:
             os.environ.pop(shim.WORKER_SOCKET_ENV, None)
         assert frame_status == 200 and json.loads(frame_body)["results"]
+        assert api.provider_frames[-1]["timeout_ms"] == 5000
         assert len(state.calls) == 2  # only the two matched requests reached the Arena
     finally:
         server.stop()
         shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize("transport_kind", ["frame", "http"])
+@pytest.mark.parametrize("native_billing", [False, True])
+def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, transport_kind, native_billing):
+    """Exercise both real socket protocols through the API client and broker."""
+    import http.client
+    from types import SimpleNamespace
+    from tests.lab_arena.test_lab_arena_broker import (
+        CONTEXT, FakeLedgerStore, FakeTransport, deepline_history,
+        deepline_history_entry, make_broker,
+    )
+
+    elapsed = [0.0]
+    monkeypatch.setattr(br, "time", SimpleNamespace(
+        monotonic=lambda: elapsed[0],
+        sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+    ))
+    job_id = "iad1::queued-socket-roundtrip"
+
+    class TimedProvider(FakeTransport):
+        def send(self, **kwargs):
+            response = super().send(**kwargs)
+            if kwargs["method"] == "POST":
+                elapsed[0] += 20.0
+            return response
+
+    provider = TimedProvider([
+        (200, {"job_id": job_id, "status": "completed", "result": {"data": []},
+               "billing": {"credits_charged": 0.1} if native_billing else None}),
+        *[(200, deepline_history())] * 3,
+        (200, deepline_history(deepline_history_entry(job_id, "exa_search", 0.1))),
+    ])
+    broker, store, _ = make_broker(
+        store=FakeLedgerStore(openrouter_capacity=50_000_000, budget_busy_responses=65),
+        transport=provider,
+    )
+    api_timeouts = []
+
+    def gateway(request):
+        frame = json.loads(request.content)
+        api_timeouts.append(request.extensions["timeout"]["read"])
+        result = broker.execute(
+            CONTEXT, operation_id=frame["operation_id"], parameters=frame["parameters"],
+            action_sequence=frame["action_sequence"], timeout_ms=frame["timeout_ms"],
+        )
+        return httpx.Response(200, json=result.to_document())
+
+    client = httpx.Client(transport=httpx.MockTransport(gateway))
+    api = rn.HttpArenaApiClient("https://arena.example", client=client)
+    state = rn.RunState(lease=lease("r1"), lease_token="tok-r1")
+    socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
+    socket_path = socket_dir / runtime.SANDBOX_SOCKET_NAME
+    server = rn.WorkerSocketServer(socket_path, api, state)
+    server.start()
+    try:
+        if transport_kind == "frame":
+            monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+            status, _headers, body = shim.dispatch(
+                "deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}}, 60_000,
+            )
+        else:
+            connection = http.client.HTTPConnection("code.deepline.com")
+            connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.sock.connect(str(socket_path))
+            try:
+                connection.request(
+                    "POST", "/api/v2/integrations/exa_search/execute",
+                    body=json.dumps({"payload": {"query": "x"}}),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                status, body = response.status, response.read()
+            finally:
+                connection.close()
+        assert status == 200 and json.loads(body)["job_id"] == job_id
+        assert api_timeouts == [95.0]
+        assert elapsed[0] == pytest.approx(33.0 if native_billing else 39.0)
+        assert provider.sent[0]["timeout"] == pytest.approx(60.0)
+        assert sum(item["method"] == "POST" for item in provider.sent) == 1
+        assert sum(item["method"] == "GET" for item in provider.sent) == (0 if native_billing else 4)
+        assert len(store.calls) == 1
+        assert next(iter(store.calls.values()))["kind"] == "settlement"
+        assert next(iter(store.calls.values()))["actual"] == 10_000
+        assert store.openrouter_capacity == 49_990_000
+        assert state.calls[0]["outcome"] == "settled"
+    finally:
+        server.stop()
+        client.close()
+        shutil.rmtree(socket_dir)
 
 
 @pytest.mark.parametrize("transport_kind", ["frame", "http"])

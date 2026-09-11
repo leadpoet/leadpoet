@@ -5,6 +5,7 @@ import pytest
 from lab_arena.provider_costs import (
     deepline_billing_history_cost,
     deepline_cost,
+    deepline_free_completed_cost,
     deepline_reservation_cost,
     openrouter_cost,
     scrapingdog_cost,
@@ -19,6 +20,185 @@ def test_deepline_history_exact_terminal_match_ignores_absent_pagination_fields(
     )
     assert state == "matched" and cost is not None and cost.microusd == 14_000
     assert has_more is False and next_offset is None
+
+
+def test_deepline_history_matches_exact_charge_group_alias():
+    state, cost, has_more, next_offset = deepline_billing_history_cost(
+        {
+            "recent": {
+                "entries": [
+                    {
+                        "request_id": "internal-job",
+                        "operation": "exa_search",
+                        "provider": "exa",
+                        "charge_state": "posted",
+                        "credits": 0.2,
+                        "metadata": {"chargeGroupIds": ["wrapper-job"]},
+                    }
+                ]
+            }
+        },
+        request_id="wrapper-job",
+        operation="exa_search",
+    )
+    assert state == "matched" and cost is not None and cost.microusd == 20_000
+    assert has_more is False and next_offset is None
+
+
+@pytest.mark.parametrize(
+    "charge_group_ids",
+    [
+        "wrapper-job",
+        {"wrapper-job": True},
+        ["wrapper-job", "wrapper-job"],
+        ["wrapper-job", ""],
+        ["wrapper-job", True],
+        ["x" * 513, "wrapper-job"],
+        ["wrapper-job", *["group-%d" % index for index in range(128)]],
+    ],
+)
+def test_deepline_history_rejects_malformed_charge_groups(charge_group_ids):
+    assert deepline_billing_history_cost(
+        {
+            "recent": {
+                "entries": [
+                    {
+                        "request_id": "internal-job",
+                        "operation": "exa_search",
+                        "provider": "exa",
+                        "charge_state": "posted",
+                        "credits": 0.2,
+                        "metadata": {"chargeGroupIds": charge_group_ids},
+                    }
+                ],
+                "has_more": False,
+            }
+        },
+        request_id="wrapper-job",
+        operation="exa_search",
+    ) == ("invalid", None, False, None)
+
+
+def test_deepline_history_rejects_direct_and_charge_group_ambiguity():
+    entries = [
+        {
+            "request_id": "wrapper-job",
+            "operation": "exa_search",
+            "provider": "exa",
+            "charge_state": "posted",
+            "credits": 0.2,
+        },
+        {
+            "request_id": "internal-job",
+            "operation": "exa_search",
+            "provider": "exa",
+            "charge_state": "posted",
+            "credits": 0.2,
+            "metadata": {"chargeGroupIds": ["wrapper-job"]},
+        },
+    ]
+    assert deepline_billing_history_cost(
+        {"recent": {"entries": entries}},
+        request_id="wrapper-job",
+        operation="exa_search",
+    ) == ("invalid", None, False, None)
+
+
+def test_deepline_history_charge_group_keeps_operation_binding():
+    entry = {
+        "request_id": "internal-job",
+        "operation": "exa_contents",
+        "provider": "exa",
+        "charge_state": "posted",
+        "credits": 0.2,
+        "metadata": {"chargeGroupIds": ["wrapper-job"]},
+    }
+    assert deepline_billing_history_cost(
+        {"recent": {"entries": [entry]}},
+        request_id="wrapper-job",
+        operation="exa_search",
+    ) == ("invalid", None, False, None)
+
+
+def test_deepline_history_rejects_shared_charge_group_cost():
+    entry = {
+        "request_id": "internal-job",
+        "operation": "exa_search",
+        "provider": "exa",
+        "charge_state": "posted",
+        "credits": 0.2,
+        "metadata": {"chargeGroupIds": ["internal-job", "wrapper-job"]},
+    }
+    assert deepline_billing_history_cost(
+        {"recent": {"entries": [entry]}},
+        request_id="wrapper-job",
+        operation="exa_search",
+    ) == ("invalid", None, False, None)
+
+
+def test_deepline_history_direct_singleton_group_counts_once():
+    entry = {
+        "request_id": "wrapper-job",
+        "operation": "exa_search",
+        "provider": "exa",
+        "charge_state": "posted",
+        "credits": 0.2,
+        "metadata": {"chargeGroupIds": ["wrapper-job"]},
+    }
+    state, cost, has_more, next_offset = deepline_billing_history_cost(
+        {"recent": {"entries": [entry]}},
+        request_id="wrapper-job",
+        operation="exa_search",
+    )
+    assert state == "matched" and cost is not None and cost.microusd == 20_000
+    assert has_more is False and next_offset is None
+
+
+@pytest.mark.parametrize(
+    ("tool", "basis"),
+    [
+        (
+            "free_simple_company_search",
+            "deepline_free_simple_company_search_completed_zero",
+        ),
+        ("hunter_discover", "deepline_hunter_discover_completed_zero"),
+    ],
+)
+def test_deepline_verified_no_bill_completed_tools_settle_zero(tool, basis):
+    cost = deepline_free_completed_cost(
+        {"tool": tool},
+        200,
+        {"job_id": "wrapper-job", "status": "completed", "result": []},
+    )
+    assert cost is not None
+    assert cost.microusd == 0 and cost.price_basis == basis
+
+
+@pytest.mark.parametrize(
+    "response_status,response",
+    [
+        (500, {"job_id": "wrapper-job", "status": "completed", "result": []}),
+        (200, {"status": "completed", "result": []}),
+        (200, {"job_id": "wrapper-job", "status": "failed", "result": []}),
+        (200, {"job_id": "wrapper-job", "status": "completed"}),
+        (
+            200,
+            {
+                "job_id": "wrapper-job",
+                "status": "completed",
+                "result": [],
+                "billing": None,
+            },
+        ),
+    ],
+)
+def test_deepline_hunter_zero_proof_fails_closed(response_status, response):
+    assert (
+        deepline_free_completed_cost(
+            {"tool": "hunter_discover"}, response_status, response
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("next_offset", [None, True, False, 0, -1, 50.0, "50", 1_000_001])

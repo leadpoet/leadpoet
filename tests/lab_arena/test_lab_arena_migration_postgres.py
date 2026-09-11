@@ -162,6 +162,42 @@ def encrypted_runtime_credentials(submission_id: str) -> Dict[str, str]:
     }
 
 
+def pass_code_review(store: ArenaStore, submission_id: str, miner: str) -> None:
+    """Record the real pre-scoring review state required by the current schema."""
+
+    token = new_lease_token()
+    claimed = store.begin_submission_review(
+        submission_id,
+        miner,
+        token,
+        1_000,
+        "anthropic/claude-sonnet-5",
+        1,
+        4096,
+    )
+    assert claimed["status"] == "claimed", claimed
+    finished = store.finish_submission_review(
+        submission_id,
+        miner,
+        token,
+        "passed",
+        {
+            "passed": True,
+            "verdict": "pass",
+            "model": "anthropic/claude-sonnet-5",
+            "summary": "Reviewed the complete fixture source.",
+            "reviewed_files": ["harness.py"],
+            "reviewed_file_count": 1,
+            "reviewed_file_bytes": 4096,
+            "file_count": 1,
+            "source_bytes": 4096,
+            "findings": [],
+        },
+        750,
+    )
+    assert finished["status"] == "passed", finished
+
+
 def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix: str, king_index=None) -> List[Dict[str, Any]]:
     participants = []
     for index in range(count):
@@ -181,6 +217,7 @@ def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix:
             encrypted_runtime_credentials(submission_id),
         )
         assert result["status"] == "ok", result
+        pass_code_review(store, submission_id, miner)
         result = store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": king_index == index})
         assert result["status"] == "ok"
         participants.append({"submission_id": submission_id, "miner_hotkey": miner, "is_king": king_index == index})
@@ -762,6 +799,7 @@ def test_commit_waits_for_inflight_acceptance_and_retries_without_orphan(
         accepting.close()
 
     assert store.get_round(round_id)["status"] == "open"
+    pass_code_review(store, miner_submission, miner_hotkey)
     assert store.update_submission(
         round_id, miner_submission, "accepted", "frozen", {}
     )["status"] == "ok"

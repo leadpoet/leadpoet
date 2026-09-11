@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: full-code Arena review
+
+The user explicitly authorized this task on 2026-09-10 to implement and deploy
+a full-code pre-scoring LLM review of miner submissions with the submitting
+miner's OpenRouter key. This includes protected credential retrieval, narrow
+committed changes and migrations, pushes to main, canonical gateway and normal
+validator restarts, and real miner submission/review/scoring tests. Preserve
+sandbox isolation, scheduling, scoring, promotion, credentials, and concurrent
+work. Do not restore retired Research Lab or auditor machinery. This scope
+expires when this task and its end-to-end validation are complete.
+
 ## Scoped production authorization: combined provider competition budget
 
 On 2026-09-10 the user explicitly authorized `$overnight-rebenchmark-validation` for combined OpenRouter, Scrapingdog, and Deepline accounting and budget enforcement. This scope permits protected credential retrieval, narrow code and committed migrations, pushes, canonical gateway/validator restarts, and fresh real miner submissions through scoring and live budget-boundary tests. Preserve disclosure, credential isolation, scoring semantics, promotion, reward security, and concurrent work. Reuse only minimal accounting logic; do not add retired model-verification machinery. No auditor or SOURCE_ADD requirement applies. This scope expires when this task and its live validation complete.

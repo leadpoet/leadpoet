@@ -129,6 +129,22 @@ def main(argv=None) -> int:
 
     stop = threading.Event()
 
+    def review_submissions() -> None:
+        while not stop.is_set():
+            try:
+                service.review_pending_submissions()
+            except Exception as exc:
+                # Never emit source, model responses, or credential errors.
+                print("code review worker unavailable", type(exc).__name__, file=sys.stderr)
+            stop.wait(5)
+
+    review_thread = None
+    if not args.no_driver:
+        review_thread = threading.Thread(
+            target=review_submissions, name="lab-arena-code-review", daemon=True
+        )
+        review_thread.start()
+
     def driver() -> None:
         while not stop.wait(max(5, int(args.tick_seconds))):
             outcome = drive_once(service)
@@ -157,6 +173,8 @@ def main(argv=None) -> int:
         stop.set()
         if driver_thread is not None:
             driver_thread.join(timeout=5)
+        if review_thread is not None:
+            review_thread.join(timeout=5)
     return 0
 
 

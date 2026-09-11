@@ -24,7 +24,8 @@ from typing import Any, Dict, List
 import pytest
 from bittensor_wallet import Keypair
 
-from lab_arena import broker as br, contracts, driver as arena_driver, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
+from lab_arena import broker as br, code_review, contracts, driver as arena_driver, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
+from lab_arena.code_review_runtime import SubmissionCodeReviewer
 
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
@@ -124,10 +125,40 @@ class FakeChain:
 
 
 class FakeProviderTransport:
+    def __init__(self):
+        self.review_requests = []
+
     def send(self, *, method, url, headers, body, timeout_seconds):
         if "-refused" in url or any("-refused" in str(value) for value in headers.values()):
             # The provider rejects a revoked miner key.
             return br.ProviderResponse(401, {"content-type": "application/json"}, b'{"error": "invalid key"}')
+        request = json.loads(body.decode("utf-8"))
+        if request.get("model") == code_review.DEFAULT_REVIEW_MODEL:
+            assert headers["Authorization"] == "Bearer " + CANARY_OPENROUTER_KEY
+            submitted = json.loads(request["messages"][1]["content"])
+            reviewed_files = [
+                item["path"] for item in submitted["submission_files"]
+            ]
+            self.review_requests.append(request)
+            payload = json.dumps({
+                "model": code_review.DEFAULT_REVIEW_MODEL,
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps({
+                            "verdict": "pass",
+                            "summary": "Every supplied source file was reviewed.",
+                            "reviewed_files": reviewed_files,
+                            "findings": [],
+                        }),
+                    },
+                }],
+                "usage": {"cost": "0"},
+            }).encode()
+            return br.ProviderResponse(
+                200, {"content-type": "application/json"}, payload
+            )
         payload = json.dumps(
             {
                 "results": [{"url": "https://co1.example.com", "title": "Co"}],
@@ -158,7 +189,11 @@ class FakeCredentialManager:
         return CANARY_KEYS[provider]
 
 
-PRICED_MODELS = ("openai/gpt-4o-mini", *sorted(set(scoring.DEFAULT_JUDGE_MODELS.values())))
+PRICED_MODELS = (
+    "openai/gpt-4o-mini",
+    code_review.DEFAULT_REVIEW_MODEL,
+    *sorted(set(scoring.DEFAULT_JUDGE_MODELS.values())),
+)
 
 
 def price_table(models=PRICED_MODELS):
@@ -446,13 +481,15 @@ class Harness:
     def build_service(self) -> svc.ArenaService:
         store = self.make_store()
         harness = self
+        credential_manager = FakeCredentialManager()
+        payer = submission_runtime.SubmissionProviderKeys(
+            store=store,
+            credentials=credential_manager,
+            organizer_keys=CANARY_KEYS,
+        )
+        self.review_transport = FakeProviderTransport()
 
         def broker_factory(service, round_row):
-            payer = submission_runtime.SubmissionProviderKeys(
-                store=store,
-                credentials=service.config.credential_manager,
-                organizer_keys=CANARY_KEYS,
-            )
             return br.Broker(
                 store=store,
                 key_for=lambda provider: CANARY_KEYS[provider],
@@ -481,7 +518,14 @@ class Harness:
             ),
             clock=self.clock,
             baseline_source_fetcher=lambda _url, _limit: self.baseline_source,
-            credential_manager=FakeCredentialManager(),
+            credential_manager=credential_manager,
+            code_reviewer=SubmissionCodeReviewer(
+                store=store,
+                objects=self.objects,
+                credential_for=payer.code_review_key,
+                price_table=price_table(),
+                transport=self.review_transport,
+            ),
         )
         return svc.ArenaService(config)
 
@@ -532,8 +576,13 @@ class Harness:
         )
         result = self.service.handle_submission_finalize(target["submission_id"], finalize)
         assert result["status"] == "accepted", result
+        assert self.service.review_pending_submissions() == {"reviewed": 1}
         row = self.service.store.get_submission(target["submission_id"])
-        assert row["status"] == "accepted" and row["source_ref"] == target["source_ref"], row
+        assert (
+            row["status"] == "accepted"
+            and row["source_ref"] == target["source_ref"]
+            and row["code_review_status"] == "passed"
+        ), row
         return target["submission_id"]
 
     def runner(self, index: int, parallel: int = 4) -> rn.Runner:
@@ -609,6 +658,10 @@ def test_benchmark_commit_refreshes_a_delayed_open_round_scorer_before_jobs(conn
     submission_id = harness.submit("Refresh", "arena-2026-09-25-refresh")
     accepted = harness.service.store.get_submission(submission_id)
     accepted_source = harness.objects.get(accepted["source_ref"])
+    prepared_review = code_review.prepare_request(accepted_source)
+    assert harness.review_transport.review_requests == [
+        prepared_review.parameters
+    ]
     assert harness.service.store.list_runs("arena-2026-09-25-refresh") == []
     new_digest = "sha256:" + "6" * 64
     new_reference = "arena.example/lab-arena/judge@" + new_digest

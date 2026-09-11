@@ -33,6 +33,7 @@ from lab_arena.contracts import (
 )
 
 WHOAMI_SCHEMA_VERSION = "leadpoet.lab_arena.whoami.v1"
+CODE_REVIEW_SCHEMA_VERSION = "leadpoet.lab_arena.code_review.v1"
 SERVICE_ROLE_NAME = "lab_arena_service"
 
 # Parameter order and PostgreSQL casts for every service-callable function.
@@ -43,6 +44,7 @@ SCORE_BATCH_SIZE = 500
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_whoami": (),
     "lab_arena_schema_version_v1": (),
+    "lab_arena_code_review_schema_v1": (),
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_submission_costs": (("p_submission_id", "text"),),
@@ -64,6 +66,23 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_accept_submission_with_credentials": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_credentials", "jsonb")),
     "lab_arena_get_submission_credential": (("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_provider", "text")),
+    "lab_arena_begin_submission_review": (
+        ("p_submission_id", "text"),
+        ("p_miner_hotkey", "text"),
+        ("p_claim_token_hash", "text"),
+        ("p_reservation_microusd", "bigint"),
+        ("p_review_model", "text"),
+        ("p_file_count", "integer"),
+        ("p_source_bytes", "bigint"),
+    ),
+    "lab_arena_finish_submission_review": (
+        ("p_submission_id", "text"),
+        ("p_miner_hotkey", "text"),
+        ("p_claim_token_hash", "text"),
+        ("p_status", "text"),
+        ("p_review_doc", "jsonb"),
+        ("p_actual_microusd", "bigint"),
+    ),
     "lab_arena_open_stage": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_participants", "jsonb"), ("p_icp_positions", "integer[]")),
     "lab_arena_claim_assignment": (("p_round_id", "text"), ("p_runner_hotkey", "text"), ("p_declared_parallelism", "integer"), ("p_slot_ceiling", "integer"), ("p_excluded_miner_hotkeys", "text[]"), ("p_request_id", "text"), ("p_request_hash", "text"), ("p_lease_token_hash", "text"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
@@ -541,6 +560,23 @@ class ArenaStore:
             "current_daily_icp_set",
         )
 
+    def code_review_schema(self) -> Dict[str, Any]:
+        """Require the independently deployable pre-scoring review capability."""
+
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_code_review_schema_v1", {}),
+            "code_review_schema",
+        )
+        if (
+            result.get("schema_version") != CODE_REVIEW_SCHEMA_VERSION
+            or result.get("version") != 207
+            or result.get("claim_ttl_seconds") != 600
+            or result.get("retry_backoff_seconds") != 60
+            or result.get("max_attempts") != 3
+        ):
+            raise ArenaStoreError("code review schema mismatch")
+        return result
+
     # -- accepted weight state ------------------------------------------
 
     def get_weight_state(self, network: str, netuid: int, epoch: int) -> Optional[Dict[str, Any]]:
@@ -814,6 +850,58 @@ class ArenaStore:
         )
         return result if result.get("status") == "available" else None
 
+    def begin_submission_review(
+        self,
+        submission_id: str,
+        miner_hotkey: str,
+        claim_token: str,
+        reservation_microusd: int,
+        review_model: str,
+        file_count: int,
+        source_bytes: int,
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_begin_submission_review",
+                {
+                    "p_submission_id": str(submission_id),
+                    "p_miner_hotkey": str(miner_hotkey),
+                    "p_claim_token_hash": hash_lease_token(claim_token),
+                    "p_reservation_microusd": int(reservation_microusd),
+                    "p_review_model": str(review_model),
+                    "p_file_count": int(file_count),
+                    "p_source_bytes": int(source_bytes),
+                },
+            ),
+            "begin_submission_review",
+        )
+
+    def finish_submission_review(
+        self,
+        submission_id: str,
+        miner_hotkey: str,
+        claim_token: str,
+        status: str,
+        review_doc: Mapping[str, Any],
+        actual_microusd: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_finish_submission_review",
+                {
+                    "p_submission_id": str(submission_id),
+                    "p_miner_hotkey": str(miner_hotkey),
+                    "p_claim_token_hash": hash_lease_token(claim_token),
+                    "p_status": str(status),
+                    "p_review_doc": dict(review_doc),
+                    "p_actual_microusd": (
+                        None if actual_microusd is None else int(actual_microusd)
+                    ),
+                },
+            ),
+            "finish_submission_review",
+        )
+
     def get_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_submissions", filters={"submission_id": submission_id}, limit=1)
         return rows[0] if rows else None
@@ -1022,7 +1110,7 @@ class ArenaStore:
             filters["kind"] = kind
         return self._transport.select("lab_arena_runs", filters=filters, order="run_id")
 
-    def list_ledger(self, *, run_id: Optional[str] = None, call_identity: Optional[str] = None, miner_hotkey: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_ledger(self, *, run_id: Optional[str] = None, call_identity: Optional[str] = None, miner_hotkey: Optional[str] = None, submission_id: Optional[str] = None) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {}
         if run_id:
             filters["run_id"] = run_id
@@ -1030,6 +1118,8 @@ class ArenaStore:
             filters["call_identity"] = call_identity
         if miner_hotkey:
             filters["miner_hotkey"] = miner_hotkey
+        if submission_id:
+            filters["submission_id"] = submission_id
         return self._transport.select("lab_arena_ledger", filters=filters or None, order="entry_id")
 
     def submission_costs(self, submission_id: str) -> Dict[str, Any]:

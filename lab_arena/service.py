@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 import secrets
 import threading
 import time
@@ -310,6 +311,7 @@ class ServiceConfig:
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
+    code_reviewer: Optional[Any] = None
     # Only the host publishes accepted source. Miner code never gets GitHub access.
     baseline_promoter_factory: Optional[Callable[[], Any]] = None
     # Supplies plain accepted economic inputs. It must not return receipts,
@@ -480,6 +482,10 @@ class ArenaService:
                 )
             except ArenaStoreError as exc:
                 raise ServiceError("table_unavailable:%s" % table, 500) from exc
+        try:
+            self._store.code_review_schema()
+        except ArenaStoreError as exc:
+            raise ServiceError("code_review_schema_unavailable", 500) from exc
         # Every service function must exist and be granted: a missing round is the
         # expected structured failure; a permission or undefined-function error is not.
         for function, params in (
@@ -849,7 +855,56 @@ class ArenaService:
             "submission_id": submission_id,
             "status": row["status"],
             "rejection_rule": row.get("rejection_rule"),
+            "code_review": self._public_code_review(row),
         }
+
+    @staticmethod
+    def _public_code_review(row: Mapping[str, Any]) -> Dict[str, Any]:
+        document = row.get("code_review_doc") or {}
+        return {
+            "status": row.get("code_review_status") or "pending",
+            "model": document.get("model"),
+            "file_count": document.get("file_count"),
+            "source_bytes": document.get("source_bytes"),
+            "cost_microusd": document.get("cost_microusd"),
+            "review_cost_microusd": document.get("review_cost_microusd"),
+            "cost_status": document.get("cost_status"),
+            "error_code": document.get("error_code"),
+            "categories": document.get("categories") or [],
+        }
+
+    @staticmethod
+    def _is_daily_baseline(row: Mapping[str, Any], round_row: Mapping[str, Any]) -> bool:
+        return bool(
+            row.get("is_king")
+            and row.get("submission_id") == "baseline-" + str(round_row["round_id"]).removeprefix("arena-")
+            and row.get("miner_hotkey") == (round_row.get("configuration_doc") or {}).get("baseline_hotkey")
+        )
+
+    def _require_code_review(self, submission_id: str, round_row: Mapping[str, Any]) -> None:
+        row = self._store.get_submission(submission_id)
+        if row is None:
+            raise ServiceError("submission_missing", 404)
+        if not self._is_daily_baseline(row, round_row) and row.get("code_review_status") != "passed":
+            raise ServiceError("code_review_required", 409)
+
+    def review_pending_submissions(self) -> Dict[str, Any]:
+        """Called by a separate worker, never in the competition scheduler."""
+        reviewer = self._config.code_reviewer
+        if reviewer is None:
+            raise ServiceError("code_review_unavailable", 503)
+        candidates = []
+        for active in self.active_rounds():
+            round_row = self._round(active["round_id"])
+            for status in ("accepted", "frozen"):
+                for row in self._store.list_submissions(round_row["round_id"], status=status):
+                    if self._is_daily_baseline(row, round_row) or row.get("code_review_status") in ("passed", "rejected"):
+                        continue
+                    candidates.append(row)
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="arena-code-review") as pool:
+            results = list(pool.map(reviewer.review, candidates))
+        reviewed = sum(result.get("status") in ("passed", "rejected", "error", "ok") for result in results)
+        return {"reviewed": reviewed}
 
     def _require_submission_window(self, round_row: Mapping[str, Any]) -> None:
         if round_row["status"] != "open":
@@ -1233,6 +1288,16 @@ class ArenaService:
         participants: List[Dict[str, Any]] = []
         frozen = self._store.list_submissions(round_id, status="frozen")
         accepted = self._store.list_submissions(round_id, status="accepted")
+        unresolved = [
+            row for row in accepted
+            if not self._is_daily_baseline(row, round_row)
+            and row.get("code_review_status") not in ("passed", "rejected")
+            and (row.get("code_review_status") == "reviewing" or int(row.get("code_review_attempts") or 0) < 3)
+        ]
+        if unresolved:
+            deadline = (round_row["configuration_doc"].get("schedule") or {}).get("benchmark_deadline")
+            if not deadline or self.now() < _parse_iso(deadline):
+                raise ServiceError("code_review_pending", 409)
         frozen_kings = [row for row in frozen if row.get("is_king")]
         if len(frozen_kings) > 1:
             raise ServiceError("baseline_submission_invalid", 500)
@@ -1263,6 +1328,10 @@ class ArenaService:
         frozen_count = sum(1 for row in frozen if not row.get("is_king"))
         for row in accepted:
             is_king = row["submission_id"] == baseline_id
+            if not is_king and row.get("code_review_status") != "passed":
+                rule = "code_review_rejected" if row.get("code_review_status") == "rejected" else "code_review_incomplete"
+                self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": rule})
+                continue
             if not is_king and frozen_count >= cap:
                 self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "capacity.round_full"})
                 continue
@@ -1349,7 +1418,7 @@ class ArenaService:
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
-            if exc.code in ("baseline_source_not_ready", "baseline_promotion_pending"):
+            if exc.code in ("baseline_source_not_ready", "baseline_promotion_pending", "code_review_pending"):
                 return {"status": "retry", "reason": exc.code, "set_id": set_id}
             raise
         evaluation_date = _parse_iso(
@@ -1461,6 +1530,8 @@ class ArenaService:
         if round_row["status"] != "stage%d_closed" % stage:
             return {"status": "stale", "round_status": round_row["status"]}
         plan = self._load_scoring_plan(round_row, stage)
+        for submission_id in {item["submission_id"] for item in plan["work_items"]}:
+            self._require_code_review(submission_id, round_row)
         accepted = {}
         for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
             accepted[str(run["run_id"])] = run
@@ -2212,6 +2283,7 @@ class ArenaService:
         )
         if response.get("status") != "leased":
             return response
+        self._require_code_review(str(response["submission_id"]), round_row)
         icps = self.benchmark_icps(round_id)
         position = int(response["icp_position"])
         if not 0 <= position < len(icps):

@@ -36,6 +36,9 @@ class FakeService:
     def startup_checks(self):
         return {"database_identity": {"current_user": "test"}}
 
+    def review_pending_submissions(self):
+        return {"reviewed": 0}
+
     def activate_pending_rewards(self):
         if self._reward_error is not None:
             raise self._reward_error
@@ -126,9 +129,19 @@ def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatc
             pass
 
     monkeypatch.setattr(script.threading, "Event", FiniteEvent)
+    workers = []
+    class FakeThread:
+        def __init__(self, **kwargs):
+            workers.append(kwargs)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(script.threading, "Thread", FakeThread)
 
     assert script.main(["--driver-only", "--tick-seconds", "5"]) == 0
     assert ticks == [service, service]
+    assert [worker["name"] for worker in workers] == ["lab-arena-code-review"]
 
 
 def test_check_only_performs_startup_checks_without_writes(script, monkeypatch):

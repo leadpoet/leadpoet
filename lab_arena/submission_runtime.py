@@ -42,15 +42,29 @@ class SubmissionProviderKeys:
             if not secret:
                 raise BrokerError("broker_unavailable")
             return secret
+        return self._miner_key(row, provider)
+
+    def code_review_key(self, submission: Mapping[str, Any]) -> str:
+        """Review only with the accepted source owner's stored OpenRouter key."""
+        row = self._store.get_submission(str(submission["submission_id"]))
+        if (
+            row is None or row.get("status") not in ("accepted", "frozen")
+            or row.get("miner_hotkey") != submission.get("miner_hotkey")
+            or self._is_baseline(row)
+        ):
+            raise BrokerError("miner_credentials_unavailable")
+        return self._miner_key(row, "openrouter")
+
+    def _miner_key(self, row: Mapping[str, Any], provider: str) -> str:
         if provider not in ("openrouter", "deepline", "scrapingdog"):
             raise BrokerError("miner_provider_not_configured")
         if self._credentials is None:
             raise BrokerError("miner_credentials_unavailable")
-        encrypted = self._store.get_submission_credential(context.submission_id, context.miner_hotkey, provider)
+        encrypted = self._store.get_submission_credential(row["submission_id"], row["miner_hotkey"], provider)
         if (
             not encrypted
-            or encrypted.get("submission_id") != context.submission_id
-            or encrypted.get("miner_hotkey") != context.miner_hotkey
+            or encrypted.get("submission_id") != row["submission_id"]
+            or encrypted.get("miner_hotkey") != row["miner_hotkey"]
             or encrypted.get("provider") != provider
         ):
             raise BrokerError("miner_credentials_unavailable")

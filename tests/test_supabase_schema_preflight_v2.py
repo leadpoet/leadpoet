@@ -41,6 +41,7 @@ def _opener(*, missing=None, bad_capability=None, retired_storage_absent=False):
     if missing:
         paths.pop(f"/rpc/{missing}", None)
     capabilities = {
+        "lab_arena_code_review_schema_v1": {"schema_version": "leadpoet.lab_arena.code_review.v1", "version": 207},
         "lab_arena_schema_version_v1": {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197},
         "lab_arena_weight_state_schema_v1": {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202},
         "lab_arena_incentive_retirement_schema_v1": {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203},

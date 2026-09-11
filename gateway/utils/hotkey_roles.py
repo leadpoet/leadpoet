@@ -242,6 +242,15 @@ def permitted_validator_uid(
     return uid
 
 
+def validator_stake_weight(metagraph: Any, uid: int) -> float:
+    """Read effective stake from the same validated snapshot as the permit."""
+
+    hotkeys = _snapshot_hotkeys(metagraph)
+    if type(uid) is not int or not 0 <= uid < len(hotkeys):
+        raise ValueError("metagraph validator UID is invalid")
+    return _require_stake(_stake_vector(metagraph, len(hotkeys))[uid])
+
+
 def validator_hotkeys_from_metagraph(
     metagraph: Any, *, network_name: str, require_stake: bool = False
 ) -> List[str]:

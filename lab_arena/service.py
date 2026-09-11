@@ -28,7 +28,8 @@ from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_do
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 from gateway.utils.hotkey_roles import (
-    ValidatorIneligible, permitted_validator_uid, validator_uid,
+    MIN_VALIDATOR_STAKE_WEIGHT, ValidatorIneligible, permitted_validator_uid,
+    validator_stake_weight, validator_uid,
 )
 
 logger = logging.getLogger(__name__)
@@ -3327,13 +3328,23 @@ class ArenaService:
             raise ServiceError("weight_state_scope_mismatch", 400)
         try:
             metagraph = self._config.chain.metagraph(finalized=True)
-            permitted_validator_uid(
+            uid = permitted_validator_uid(
                 metagraph, validated["hotkey"], netuid=netuid
             )
+            stake = validator_stake_weight(metagraph, uid)
         except ValidatorIneligible as exc:
             raise ServiceError(str(exc), 403) from None
         except Exception:
             raise ServiceError("validator_snapshot_unavailable", 503) from None
+        if stake > MIN_VALIDATOR_STAKE_WEIGHT:
+            try:
+                participated = self.store.has_recent_participation(
+                    network, netuid, validated["hotkey"]
+                )
+            except Exception:
+                raise ServiceError("validator_participation_unavailable", 503) from None
+            if not participated:
+                raise ServiceError("validator_participation_required", 403)
         return self.public_weight_state(epoch)
 
     def record_chain_outcome(self, document: Any) -> Dict[str, Any]:

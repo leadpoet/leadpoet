@@ -38,6 +38,7 @@ def database():
     migrations = DEFAULT_MIGRATIONS
     if MIGRATION not in migrations:
         migrations = (*migrations, MIGRATION)
+    migrations = (*migrations, "20260911173147_lab_arena_validator_participation.sql")
     yield from database_with_lab_arena_migration(migrations)
 
 
@@ -158,6 +159,8 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
         judgment_evidence_hash=contracts.document_hash(evidence),
     )
     assert accepted["status"] == "accepted"
+    accepted_at = store.get_run(leased["run_id"])["participation_accepted_at"]
+    assert accepted_at is not None
     repeated = store.complete_attempt(
         run_id=leased["run_id"],
         lease_token_hash=hash_lease_token(token),
@@ -168,11 +171,18 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
         judgment_evidence_hash=contracts.document_hash(evidence),
     )
     assert repeated["status"] == "accepted" and repeated["idempotent"] is True
+    assert store.get_run(leased["run_id"])["participation_accepted_at"] == accepted_at
     same_key = source_run["judgment_cache_key"]
     same_runs = [
         run for run in store.list_runs(round_id, stage=1, kind="score")
         if run.get("judgment_cache_key") == same_key
     ]
+    assert all(
+        (run["participation_accepted_at"] == accepted_at)
+        if run["run_id"] == leased["run_id"]
+        else run["participation_accepted_at"] is None
+        for run in same_runs
+    )
     assert len(same_runs) == 2
     assert {run["status"] for run in same_runs} == {"accepted"}
     assert {run["judgment_cache_source_run_id"] for run in same_runs} == {
@@ -192,6 +202,7 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
         terminal_cause="judge_error",
         output_ref="",
     )["status"] == "failed"
+    assert store.get_run(failed_lease["run_id"])["participation_accepted_at"] is None
     assert store.get_judgment_cache(failed_source["judgment_cache_key"]) is None
     retry = next(
         run for run in store.list_runs(round_id, stage=1, kind="score")

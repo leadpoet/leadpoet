@@ -450,3 +450,87 @@ def test_rate_limit_read_failure_fails_before_signing(tmp_path):
         orchestrator.run_once(9)
     assert signer.prepares == 0
     assert not orchestrator.paths.signed(9).exists()
+
+
+def test_participation_denial_blocks_new_signing_then_recovers(tmp_path):
+    from lab_arena.validator import ArenaParticipationRequired
+
+    broadcasts = []
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    accepted = orchestrator._verified_state
+    def deny(*_):
+        raise ArenaParticipationRequired("validator_participation_required")
+    orchestrator._verified_state = deny
+    assert orchestrator.run_once(9) == "blocked_on_participation"
+    assert signer.prepares == 0 and broadcasts == []
+    assert not (tmp_path / "epoch-9-signed.json").exists()
+    orchestrator._verified_state = accepted
+    assert orchestrator.run_once(9) == "broadcast"
+    assert signer.prepares == 1
+
+
+@pytest.mark.parametrize("outcome,expected", [
+    ({"status": "pending", "finalized": False}, "rebroadcast"),
+    ({"status": "included_pending_reveal", "finalized": False,
+      "inclusion_block": 1055, "extrinsic_hash": "0x" + "7" * 64}, "included_pending_reveal"),
+])
+def test_participation_denial_preserves_signed_recovery(tmp_path, outcome, expected):
+    signer = _Signer(_protected(), [outcome])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    assert orchestrator.run_once(9) == "broadcast"
+    journal = (tmp_path / "epoch-9-signed.json").read_bytes()
+    def forbidden(*_):
+        pytest.fail("signed recovery must not fetch new weight state")
+    orchestrator._verified_state = forbidden
+    orchestrator.api.signing_key = forbidden
+    assert orchestrator.run_once(9) == expected
+    assert signer.prepares == 1 and signer.recoveries == 1
+    assert (tmp_path / "epoch-9-signed.json").read_bytes() == journal
+
+
+def test_participation_denial_blocks_expired_attempt_replacement(tmp_path):
+    from lab_arena.validator import ArenaParticipationRequired
+
+    signer = _Signer(_protected(), [{
+        "status": "not_included_expired", "finalized": False,
+        "finalized_head": {"block": 1060}, "finalized_nonce": 7,
+    }])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    assert orchestrator.run_once(9) == "broadcast"
+    journal = (tmp_path / "epoch-9-signed.json").read_bytes()
+    def deny(*_):
+        raise ArenaParticipationRequired("validator_participation_required")
+    orchestrator._verified_state = deny
+    assert orchestrator.run_once(9) == "blocked_on_participation"
+    assert signer.prepares == 1
+    assert (tmp_path / "epoch-9-signed.json").read_bytes() == journal
+    assert not (tmp_path / "epoch-9-attempt-1-signed.json").exists()
+
+
+@pytest.mark.parametrize("status,body,participation", [
+    (403, b'{"status":"rejected","code":"validator_participation_required"}', True),
+    (503, b'{"status":"rejected","code":"validator_participation_required"}', False),
+    (403, b'{"status":"rejected","code":"other"}', False),
+    (403, b'not-json-private', False),
+    (403, b'{"status":"rejected","code":"validator_participation_required","extra":1}', False),
+    (403, b' ' * 4097 + b'private', False),
+])
+def test_weight_api_only_recognizes_bounded_participation_denial(monkeypatch, status, body, participation):
+    import io
+    from urllib.error import HTTPError
+    from lab_arena.validator import ArenaParticipationRequired
+
+    stream = io.BytesIO(body)
+    error = HTTPError("https://arena.example", status, "error", {}, stream)
+    def urlopen(*_args, **_kwargs):
+        raise error
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    api = ArenaPublicApi("https://arena.example", keypair=SimpleNamespace(
+        ss58_address="5" + "V" * 47, sign=lambda _: b"s" * 64,
+    ), network="finney", netuid=71)
+    with pytest.raises(ArenaValidatorError) as caught:
+        api.accepted_weight_state(123)
+    assert isinstance(caught.value, ArenaParticipationRequired) is participation
+    assert "private" not in str(caught.value)
+    assert stream.closed

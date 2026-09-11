@@ -182,7 +182,11 @@ are retired. Fulfillment still accepts, scores, and delivers client leads.
 
 Registered validators with a permit and at least 75,000 effective subnet stake
 can receive new Arena scoring jobs. Permitted validators below that threshold
-can still retrieve signed gateway weights and run the independent weight loop.
+can still retrieve signed gateway weights. Above 75,000 effective stake, the
+validator must have an original accepted execute or score job within the last
+24 hours to retrieve weight state. Exactly 75,000 remains exempt from this
+participation gate. Failed jobs, claims, diagnostic checks, and cached scoring
+results do not count. There is no exemption when the queue is empty.
 Weight retrieval requires a local-hotkey signed request; miners without a
 validator permit and anonymous callers cannot retrieve the signed weight state.
 
@@ -190,8 +194,9 @@ Eligible normal validators score submitted models with brokered miner credential
 returns scores through the competition API, and independently derives weights
 from the signed accepted reward state and finalized chain ownership. Each
 validator signs with its own local Bittensor hotkey, preserving the canonical
-commit/reveal and exact transaction checks. Weight submission runs independently
-of scoring. Chain outcomes are recorded separately. No Nitro enclave or KMS
+commit/reveal and exact transaction checks. Scoring and weights use separate
+loops; participation denial pauses new weight preparation while jobs continue.
+Already-signed transaction recovery and pending reveals continue. Chain outcomes are recorded separately. No Nitro enclave or KMS
 provisioning is required for validators, and there is no audit-validator role.
 
 Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)

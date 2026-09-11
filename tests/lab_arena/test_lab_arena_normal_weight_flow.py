@@ -95,6 +95,7 @@ def integrated_database():
             LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
         )
     )
+    staged_migrations += ("20260911173147_lab_arena_validator_participation.sql",)
     database = database_with_lab_arena_migration(staged_migrations)
     psycopg2, dsn = next(database)
     connection = psycopg2.connect(**dsn)
@@ -404,12 +405,20 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
         core_schema, weight_schema = cursor.fetchone()
     assert core_schema == {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197}
     assert weight_schema == {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}
-    harness = Harness(connect, tmp_path, challengers=["NormalWinner"], runners=["alpha", "beta"])
+    harness = Harness(connect, tmp_path, challengers=["NormalWinner"], runners=["alpha-%s" % round_day, "beta-%s" % round_day])
     harness.service.config.defaults = replace(harness.service.config.defaults, rewards_enabled=True)
     # Beta is a valid but unplanned worker: runner configuration cannot gate it.
     harness.service.config.defaults.runner_hotkeys = (harness.runner_keys[0],)
     harness.chain.stakes[harness.runner_keys[1]] = 75_000
     harness.chain.active[harness.runner_keys[1]] = False
+    working_key = Keypair.create_from_uri("//svc-runner-alpha-%s" % round_day)
+    assert working_key.ss58_address == harness.runner_keys[0]
+    harness.clock.now = datetime.now(timezone.utc)
+    with TestClient(create_app(harness.service)) as http:
+        denied = http.post("/arena/v1/weight-state", json=_weight_request(working_key, epoch=reward_epoch))
+        assert denied.status_code == 403
+        assert denied.json()["code"] == "validator_participation_required"
+        assert denied.headers["cache-control"] == "no-store"
     participants = _start_round(harness, day=round_day, epoch=round_epoch)
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.advance_until("published", runners=2)
@@ -436,6 +445,13 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
             {**state, "state_hash": "sha256:" + "0" * 64},
         )
     harness.clock.now = datetime.now(timezone.utc)
+
+    # The same high-stake validator now receives the real signed state after
+    # running accepted jobs through the normal execution/scoring flow.
+    with TestClient(create_app(harness.service)) as http:
+        allowed = http.post("/arena/v1/weight-state", json=_weight_request(working_key, epoch=reward_epoch))
+        assert allowed.status_code == 200 and allowed.json()["state"] == state
+        assert allowed.headers["cache-control"] == "no-store"
 
     profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
     outcomes, vectors = [], []

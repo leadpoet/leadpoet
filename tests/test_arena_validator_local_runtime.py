@@ -243,7 +243,7 @@ def test_host_failure_recovers_without_stopping_weights_or_logging_secrets(capsy
                                   epoch_supplier=lambda: 1, stop=stop, once=False)
     output = capsys.readouterr()
     assert "phase=setup reason=runsc_missing" in output.err
-    assert "/usr/local/bin/runsc" in output.err and "weights continue" in output.err
+    assert "/usr/local/bin/runsc" in output.err and "weight loop continues" in output.err
     assert "secret-token" not in output.err + output.out
     assert "scoring loop resumed" in output.out
     assert "sandbox completion is reported separately" in output.out
@@ -258,6 +258,6 @@ def test_generic_scoring_error_still_hides_provider_details(capsys):
     validator.run_validator_loops(orchestrator=orchestrator, runner_factory=factory,
                                   epoch_supplier=lambda: 1, stop=_ImmediateStop(), once=True)
     output = capsys.readouterr()
-    assert "type=RuntimeError; weights continue" in output.err
+    assert "type=RuntimeError; weight loop continues" in output.err
     assert "secret-token" not in output.err
     assert orchestrator.runs >= 1

@@ -69,9 +69,14 @@ to authorize these weights.
 Install the repository's existing Python dependencies in a Python 3.11 virtual
 environment. The pinned Bittensor 10.5 runtime supplies drand 2.x; the old
 Bittensor 9/drand 1 host environment cannot submit stateful commitments.
-Use Linux x86_64 and
-the existing runsc setup to score models. For Finney SN71, set the trusted
-public configuration:
+Use Linux x86_64 and the existing runsc setup to score models. The current
+sandbox uses rootful namespaces. For full scoring, use the supplied systemd
+service, which runs this same entry point as root, or run the command below
+from a root shell with the validator's wallet path set explicitly. An ordinary
+unprivileged shell can submit weights but cannot launch this sandbox as
+configured. This is an existing sandbox requirement, not a signing mode.
+
+For Finney SN71, set the trusted public configuration:
 
 ```bash
 export LAB_ARENA_API_BASE_URL=https://gateway.subnet71.com
@@ -84,7 +89,7 @@ export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
 python neurons/validator.py \
   --netuid 71 --subtensor.network finney \
   --wallet.name YOUR_WALLET --wallet.hotkey YOUR_HOTKEY \
-  --wallet.path "$HOME/.bittensor/wallets"
+  --wallet.path /absolute/path/to/YOUR_WALLETS_DIRECTORY
 ```
 
 Use the current trusted signing-key pin supplied by the subnet operator if it

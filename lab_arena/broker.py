@@ -80,10 +80,8 @@ _DEEPLINE_JOB_STATUSES = frozenset(
     {"cancelled", "completed", "failed", "in_progress", "pending", "queued", "running"}
 )
 _DEEPLINE_BILLING_MAX_ATTEMPTS = 24
-_DEEPLINE_BILLING_MAX_SECONDS = 30.0
 _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
-_OPENROUTER_BILLING_MAX_SECONDS = 30.0
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 # Documented post-mortem billing identity:
@@ -502,12 +500,13 @@ def _deepline_billing_readback(
     secret: str,
     request_id: str,
     operation: str,
-    request_deadline: float,
+    reconciliation_deadline: float,
 ) -> Optional[provider_costs.ProviderCost]:
     """Poll bounded billing history and return only one exact terminal charge."""
 
     readback_deadline = min(
-        request_deadline, time.monotonic() + _DEEPLINE_BILLING_MAX_SECONDS
+        reconciliation_deadline,
+        time.monotonic() + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
     )
     headers = {
         "accept": "application/json",
@@ -608,12 +607,13 @@ def _openrouter_generation_readback(
     transport: ProviderTransport,
     secret: str,
     generation_id: str,
-    request_deadline: float,
+    reconciliation_deadline: float,
 ) -> Optional[provider_costs.ProviderCost]:
     """Poll one exact OpenRouter generation without retrying the paid request."""
 
     readback_deadline = min(
-        request_deadline, time.monotonic() + _OPENROUTER_BILLING_MAX_SECONDS
+        reconciliation_deadline,
+        time.monotonic() + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
     )
     headers = {
         "accept": "application/json",
@@ -1082,9 +1082,10 @@ class Broker:
         if reserve_remaining_budget:
             summary["reservation_basis"] = "remaining_budget_dynamic_deepline"
 
-        # Budget admission has its own bounded wait. Once admitted, the
-        # provider execution and any authoritative billing readback receive
-        # the full caller-requested window, capped by the operation table.
+        # Budget admission has its own bounded wait. Once admitted, the paid
+        # provider request receives the full caller-requested window, capped by
+        # the operation table. Exact billing reconciliation gets its own fixed
+        # post-response allowance and never resends the paid request.
         request_deadline = time.monotonic() + operation_timeout_seconds
         dispatched = self._store.mark_dispatched(run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity)
         if dispatched.get("status") == "stale":
@@ -1142,7 +1143,10 @@ class Broker:
                             transport=self._transport,
                             secret=secret,
                             generation_id=openrouter_generation_id,
-                            request_deadline=request_deadline,
+                            reconciliation_deadline=(
+                                time.monotonic()
+                                + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+                            ),
                         )
                     if (
                         openrouter_native_cost is None
@@ -1198,7 +1202,10 @@ class Broker:
                             secret=secret,
                             request_id=request_id,
                             operation=deepline_operation,
-                            request_deadline=request_deadline,
+                            reconciliation_deadline=(
+                                time.monotonic()
+                                + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+                            ),
                         )
             except ProviderTransportError:
                 # Outcome unknown after send: consume the full reservation.

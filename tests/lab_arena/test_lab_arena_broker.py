@@ -1485,7 +1485,9 @@ def test_real_deepline_paid_fixed_tool_recovers_zero_from_billing_history():
     assert result.call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
     assert store.calls[result.call["call_identity"]]["actual"] == 0
     assert len(transport.sent) == 2
-    assert 0 < transport.sent[1]["timeout"] <= 1.0
+    assert 0 < transport.sent[1]["timeout"] <= (
+        operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+    )
 
 
 def test_deepline_missing_native_billing_recovers_full_positive_history_charge():
@@ -1878,7 +1880,7 @@ def test_deepline_billing_history_accepts_exact_match_without_exhausting_pages()
 
 
 @pytest.mark.parametrize("request_seconds", [2.0, 20.0, 45.0])
-def test_deepline_final_history_refresh_keeps_original_time_bound(monkeypatch, request_seconds):
+def test_deepline_history_refresh_keeps_reconciliation_time_bound(monkeypatch, request_seconds):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
     monkeypatch.setattr(br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds))
@@ -1900,12 +1902,172 @@ def test_deepline_final_history_refresh_keeps_original_time_bound(monkeypatch, r
     transport = SlowHistory()
     cost = br._deepline_billing_readback(
         transport=transport, secret="test-key", request_id="new-job",
-        operation="exa_search", request_deadline=request_seconds,
+        operation="exa_search", reconciliation_deadline=request_seconds,
     )
     assert cost is None
     assert elapsed[0] == min(request_seconds, 30.0)
     assert 1 <= len(transport.timeouts) <= br._DEEPLINE_BILLING_MAX_ATTEMPTS
     assert all(0 < value <= min(request_seconds, 30.0) for value in transport.timeouts)
+
+
+def test_deepline_reconciles_after_paid_request_uses_full_provider_window(monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
+    job_id = "iad1::full-window-exa-contents"
+
+    class FullWindowProvider(FakeTransport):
+        def send(self, **kwargs):
+            response = super().send(**kwargs)
+            if kwargs["method"] == "POST":
+                elapsed[0] += kwargs["timeout_seconds"]
+            return response
+
+    envelope = {
+        "job_id": job_id,
+        "status": "completed",
+        "result": {"data": {"requestId": "exa-request", "results": []}},
+        "billing": None,
+    }
+    exact_free_history = deepline_history(
+        deepline_history_entry(
+            job_id, "exa_contents", 0, charge_state="free", provider="exa"
+        )
+    )
+    broker, store, transport = make_broker(
+        transport=FullWindowProvider(
+            [(200, envelope), (200, exact_free_history)]
+        )
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="exa.contents",
+        parameters={
+            "ids": ["https://example.com/news"],
+            "text": {"maxCharacters": 12000},
+            "maxAgeHours": 0,
+        },
+        action_sequence=0,
+        timeout_ms=30_000,
+    )
+
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert transport.sent[0]["timeout"] == pytest.approx(30.0)
+    assert transport.sent[1]["timeout"] == pytest.approx(
+        operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+    )
+    assert elapsed[0] == pytest.approx(30.0)
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+def test_deepline_unresolved_reconciliation_stays_uncertain_after_bounded_extra_window(
+    monkeypatch,
+):
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
+    job_id = "iad1::full-window-history-missing"
+
+    class FullWindowProvider(FakeTransport):
+        def send(self, **kwargs):
+            response = super().send(**kwargs)
+            if kwargs["method"] == "POST":
+                elapsed[0] += kwargs["timeout_seconds"]
+            return response
+
+    envelope = {
+        "job_id": job_id,
+        "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": None,
+    }
+    broker, store, transport = make_broker(
+        transport=FullWindowProvider(
+            [(200, envelope)]
+            + [(200, deepline_history())] * br._DEEPLINE_BILLING_MAX_ATTEMPTS
+        )
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=30_000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert elapsed[0] == pytest.approx(
+        30.0 + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+    )
+    assert [sent["method"] for sent in transport.sent].count("POST") == 1
+    assert [sent["method"] for sent in transport.sent].count("GET") > 1
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+def test_openrouter_reconciles_after_paid_request_uses_full_provider_window(monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
+    generation_id = "gen-full-window"
+
+    class FullWindowProvider(FakeTransport):
+        def send(self, **kwargs):
+            response = super().send(**kwargs)
+            if kwargs["method"] == "POST":
+                elapsed[0] += kwargs["timeout_seconds"]
+            return response
+
+    broker, store, transport = make_broker(
+        transport=FullWindowProvider(
+            [
+                (
+                    502,
+                    {"error": {"code": 502, "message": "upstream failure"}},
+                    {"X-Generation-Id": generation_id},
+                ),
+                (
+                    200,
+                    {
+                        "data": {
+                            "id": generation_id,
+                            "total_cost": "0.001234",
+                            "usage": "0.001234",
+                        }
+                    },
+                ),
+            ]
+        )
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30_000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 1234
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert transport.sent[0]["timeout"] == pytest.approx(30.0)
+    assert transport.sent[1]["timeout"] == pytest.approx(
+        operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+    )
+    assert elapsed[0] == pytest.approx(30.0)
+    assert store.log == ["reserve", "dispatch", "settle"]
 
 
 @pytest.mark.parametrize(

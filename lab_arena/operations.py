@@ -40,6 +40,11 @@ PRICE_LIST_SCHEMA_VERSION = "leadpoet.lab_arena.provider_price_list.v1"
 # shim consumes it without exposing it as a provider response header.
 TRUSTED_RESPONSE_URL_HEADER = "x-lab-arena-response-url"
 BUDGET_ADMISSION_MAX_SECONDS = 20.0
+# A paid OpenRouter or Deepline request can consume its full network timeout
+# before returning an identity without final billing. Keep a separate bounded
+# window for exact post-response billing reconciliation; never resend the paid
+# request during this allowance.
+PROVIDER_BILLING_RECONCILIATION_SECONDS = 30.0
 
 # A public SDK-compatible handle, not a provider credential. The worker drops
 # this exact value before the gateway resolves the submission-owned key.
@@ -1720,6 +1725,7 @@ def sanitize_response(
 __all__ = [
     "ALLOWED_REQUEST_HEADERS",
     "BUDGET_ADMISSION_MAX_SECONDS",
+    "PROVIDER_BILLING_RECONCILIATION_SECONDS",
     "CREDENTIAL_HEADERS",
     "HOST_ACCOUNT_STATUSES",
     "CredentialPlacement",

@@ -972,6 +972,39 @@ def test_provider_http_timeout_covers_the_requested_provider_window():
     assert client.timeouts[-1].read == (
         operations.BUDGET_ADMISSION_MAX_SECONDS
         + operations.OPERATIONS["deepline.execute"].timeout_seconds
+        + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+    )
+    api.provider(
+        "run-1",
+        "a" * 64,
+        {
+            "operation_id": "exa.contents",
+            "parameters": {},
+            "timeout_ms": 60_000,
+            "action_sequence": 2,
+        },
+    )
+    assert client.timeouts[-1].read == (
+        operations.BUDGET_ADMISSION_MAX_SECONDS
+        + operations.OPERATIONS["exa.contents"].timeout_seconds
+        + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+    )
+    api.provider(
+        "run-1",
+        "a" * 64,
+        {
+            "operation_id": "scrapingdog.scrape",
+            "parameters": {},
+            "timeout_ms": 60_000,
+            "action_sequence": 3,
+        },
+    )
+    assert client.timeouts[-1].read == (
+        operations.BUDGET_ADMISSION_MAX_SECONDS
+        + operations.OPERATIONS["scrapingdog.scrape"].timeout_seconds
+        + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
         + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
     )
     api.provider(
@@ -981,7 +1014,7 @@ def test_provider_http_timeout_covers_the_requested_provider_window():
             "operation_id": [],
             "parameters": {},
             "timeout_ms": 999_999_999,
-            "action_sequence": 2,
+            "action_sequence": 4,
         },
     )
     assert client.timeouts[-1].read == rn.API_TIMEOUT_SECONDS
@@ -1205,7 +1238,12 @@ def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, tra
             finally:
                 connection.close()
         assert status == 200 and json.loads(body)["job_id"] == job_id
-        assert api_timeouts == [95.0]
+        assert api_timeouts == [
+            operations.BUDGET_ADMISSION_MAX_SECONDS
+            + operations.OPERATIONS["deepline.execute"].timeout_seconds
+            + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+            + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+        ]
         assert elapsed[0] == pytest.approx(33.0 if native_billing else 39.0)
         assert provider.sent[0]["timeout"] == pytest.approx(60.0)
         assert sum(item["method"] == "POST" for item in provider.sent) == 1

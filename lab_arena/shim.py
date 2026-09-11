@@ -284,6 +284,9 @@ def _dispatch_with_response_url(
         connection.settimeout(
             operations.BUDGET_ADMISSION_MAX_SECONDS
             + bounded_timeout_ms / 1000.0
+            # The shim does not have the run context needed to know whether a
+            # legacy scoring request will route to Deepline in the broker.
+            + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
             + SOCKET_GRACE_SECONDS
         )
         try:

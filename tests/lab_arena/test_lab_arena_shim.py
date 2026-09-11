@@ -52,8 +52,25 @@ ORIGINALS = {
 }
 
 
+@pytest.mark.parametrize(
+    ("operation_id", "parameters"),
+    (
+        ("deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}}),
+        (
+            "exa.contents",
+            {"ids": ["https://example.com"], "text": {"maxCharacters": 12000}},
+        ),
+        (
+            "openrouter.chat",
+            {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "x"}]},
+        ),
+        ("scrapingdog.scrape", {"url": "https://example.com"}),
+    ),
+)
 @pytest.mark.parametrize("requested_timeout_ms", (60_000, 9_999_999))
-def test_typed_socket_timeout_covers_admission_operation_and_grace(monkeypatch, requested_timeout_ms):
+def test_typed_socket_timeout_covers_provider_and_billing_windows(
+    monkeypatch, requested_timeout_ms, operation_id, parameters
+):
     reply = shim.encode_worker_response(200, {}, b"{}")
 
     class RecordingSocket:
@@ -84,14 +101,16 @@ def test_typed_socket_timeout_covers_admission_operation_and_grace(monkeypatch, 
     monkeypatch.setenv(shim.WORKER_SOCKET_ENV, "/tmp/fake-arena-worker.sock")
     monkeypatch.setattr(shim.socket, "socket", lambda *_args: connection)
     status, _headers, body = shim.dispatch(
-        "deepline.execute",
-        {"tool": "exa_search", "payload": {"query": "x"}},
+        operation_id,
+        parameters,
         requested_timeout_ms,
     )
+    operation = operations.OPERATIONS[operation_id]
     assert status == 200 and body == b"{}"
     assert connection.timeout == (
         operations.BUDGET_ADMISSION_MAX_SECONDS
-        + 60.0
+        + min(requested_timeout_ms / 1000.0, float(operation.timeout_seconds))
+        + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
         + shim.SOCKET_GRACE_SECONDS
     )
 

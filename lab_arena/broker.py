@@ -458,21 +458,17 @@ class HttpxProviderTransport:
 
 
 def _deepline_job_request_id(document: Any) -> Optional[str]:
-    """Return a usable job id only from Deepline's bounded job envelope."""
+    """Return one bounded Deepline request id, rejecting conflicting aliases."""
 
     if not isinstance(document, Mapping):
         return None
-    request_id = document.get("job_id")
-    status = document.get("status")
-    if (
-        not isinstance(request_id, str)
-        or not request_id.strip()
-        or len(request_id) > 512
-        or not isinstance(status, str)
-        or status not in _DEEPLINE_JOB_STATUSES
-    ):
+    present = [document[name] for name in ("job_id", "request_id", "requestId") if name in document]
+    if not present or any(
+        not isinstance(value, str) or not value.strip() or len(value) > 512
+        for value in present
+    ) or len(set(present)) != 1:
         return None
-    return request_id
+    return present[0]
 
 
 def _deepline_billing_readback(
@@ -1007,16 +1003,21 @@ class Broker:
                     )
                     request_id = _deepline_job_request_id(raw_document)
                     deepline_request_id = request_id
-                    if (
-                        response.status == 200
-                        and request_id is not None
-                        and raw_document.get("status") == "completed"
+                    if request_id is not None and (
+                        (
+                            response.status == 200
+                            and raw_document.get("status") == "completed"
+                        )
+                        or not 200 <= response.status < 300
                     ):
                         deepline_native_cost = provider_costs.deepline_cost(raw_document)
                     if (
                         deepline_native_cost is None
                         and deepline_known_free_cost is None
-                        and 200 <= response.status < 300
+                        and (
+                            200 <= response.status < 300
+                            or response.status in (400, 401, 402, 403, 404, 422, 429)
+                        )
                         and request_id is not None
                     ):
                         deepline_operation = effective_normalized.get("tool") or {
@@ -1104,11 +1105,15 @@ class Broker:
         try:
             if effective_operation.provider == "openrouter":
                 response = _openrouter_effective_response(response)
-            if (
-                response.status not in (400, 401, 402, 403, 404, 422, 429)
-                and effective_operation.provider in ("openrouter", "deepline")
+            missing_deepline_cost = (
+                effective_operation.provider == "deepline" and raw_actual is None
+            )
+            missing_openrouter_cost = (
+                effective_operation.provider == "openrouter"
+                and response.status not in (400, 401, 402, 403, 404, 422, 429)
                 and raw_actual is None
-            ):
+            )
+            if missing_deepline_cost or missing_openrouter_cost:
                 result = self._store.mark_uncertain(
                     run_id=context.run_id,
                     lease_token_hash=context.lease_token_hash,
@@ -1122,6 +1127,12 @@ class Broker:
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount, "provider_status": int(response.status)})
+                if (
+                    missing_deepline_cost
+                    and funding_source == "miner_key"
+                    and response.status in (401, 402, 403)
+                ):
+                    return _error_result("miner_credentials_unavailable", summary)
                 return _error_result("provider_unavailable", summary)
             if funding_source == "miner_key" and response.status in (401, 402, 403):
                 failure_stage = "response_sanitization"

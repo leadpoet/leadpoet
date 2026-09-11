@@ -126,6 +126,31 @@ def _zero(status: str) -> dict:
     return {"status": "completed", "result": {"data": {"status": status}}}
 
 
+def test_non_latin_names_remain_distinct_during_identity_verification() -> None:
+    source = _source(_profile(firstName="张", lastName="三"))
+    valid = _run(
+        company=_company(contact=_contact(full_name="张 三")),
+        source=source,
+        execute=ScriptedExecute({"zerobounce_validate": [_zero("valid")]}),
+    )
+    assert valid["contact_qualified"] is True
+    mismatch = _run(
+        company=_company(contact=_contact(full_name="李 四")),
+        source=source,
+        execute=ScriptedExecute({}),
+    )
+    assert mismatch["contact_verification"]["reason"] == "contact_person_mismatch"
+
+
+def test_punctuation_only_names_cannot_verify_an_identity() -> None:
+    result = _run(
+        company=_company(contact=_contact(full_name="...")),
+        source=_source(_profile(firstName="...", lastName="")),
+        execute=ScriptedExecute({}),
+    )
+    assert result["contact_verification"]["reason"] == "contact_person_mismatch"
+
+
 def test_default_execute_request_matches_the_closed_arena_operation(monkeypatch) -> None:
     from lab_arena import operations
 

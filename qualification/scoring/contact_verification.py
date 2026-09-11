@@ -113,8 +113,8 @@ def _text(value: Any) -> str:
 
 def _norm(value: Any) -> str:
     raw = unicodedata.normalize("NFKD", _text(value))
-    ascii_value = "".join(char for char in raw if not unicodedata.combining(char))
-    return re.sub(r"[^a-z0-9]+", " ", ascii_value.casefold()).strip()
+    letters = "".join(char for char in raw if not unicodedata.combining(char))
+    return re.sub(r"[\W_]+", " ", letters.casefold()).strip()
 
 
 def _norm_country(value: Any) -> str:
@@ -1090,7 +1090,8 @@ async def verify_contact(
             evidence_timestamps=evidence_timestamps,
         )
 
-    if _norm(_profile_name(profile)) != _norm(contact.get("full_name")):
+    observed_name = _norm(_profile_name(profile))
+    if not observed_name or observed_name != _norm(contact.get("full_name")):
         subchecks["identity"] = {"status": "fail", "reason": "contact_person_mismatch"}
         return _result(contact, "mismatch", "contact_person_mismatch", subchecks=subchecks, evidence_hashes=evidence_hashes, evidence_timestamps=evidence_timestamps)
     subchecks["identity"] = {"status": "pass", "reason": "contact_identity_verified"}

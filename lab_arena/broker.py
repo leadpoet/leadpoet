@@ -1024,6 +1024,7 @@ class Broker:
                         and (
                             200 <= response.status < 300
                             or response.status in (400, 401, 402, 403, 404, 422, 429)
+                            or 500 <= response.status < 600
                         )
                         and request_id is not None
                     ):

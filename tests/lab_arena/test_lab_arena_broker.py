@@ -1523,7 +1523,7 @@ def test_dynamic_deepline_admission_wait_does_not_consume_operation_window(monke
     broker, store, transport = make_broker(
         store=store,
         transport=SlowExecutionThenLaggedHistory([
-            (200, {"job_id": job_id, "status": "completed", "result": {"data": []}}),
+            (200, {"job_id": job_id, "status": "completed", "result": {"data": []}, "billing": None}),
             (200, deepline_history()),
             (200, deepline_history()),
             (200, deepline_history()),

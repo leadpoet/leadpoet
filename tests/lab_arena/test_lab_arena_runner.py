@@ -1095,7 +1095,8 @@ def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
 
 
 @pytest.mark.parametrize("transport_kind", ["frame", "http"])
-def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, transport_kind):
+@pytest.mark.parametrize("native_billing", [False, True])
+def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, transport_kind, native_billing):
     """Exercise both real socket protocols through the API client and broker."""
     import http.client
     from types import SimpleNamespace
@@ -1119,7 +1120,8 @@ def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, tra
             return response
 
     provider = TimedProvider([
-        (200, {"job_id": job_id, "status": "completed", "result": {"data": []}}),
+        (200, {"job_id": job_id, "status": "completed", "result": {"data": []},
+               "billing": {"credits_charged": 0.1} if native_billing else None}),
         *[(200, deepline_history())] * 3,
         (200, deepline_history(deepline_history_entry(job_id, "exa_search", 0.1))),
     ])
@@ -1167,9 +1169,10 @@ def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, tra
                 connection.close()
         assert status == 200 and json.loads(body)["job_id"] == job_id
         assert api_timeouts == [95.0]
-        assert elapsed[0] == pytest.approx(39.0)
+        assert elapsed[0] == pytest.approx(33.0 if native_billing else 39.0)
         assert provider.sent[0]["timeout"] == pytest.approx(60.0)
         assert sum(item["method"] == "POST" for item in provider.sent) == 1
+        assert sum(item["method"] == "GET" for item in provider.sent) == (0 if native_billing else 4)
         assert len(store.calls) == 1
         assert next(iter(store.calls.values()))["kind"] == "settlement"
         assert next(iter(store.calls.values()))["actual"] == 10_000

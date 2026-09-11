@@ -402,8 +402,8 @@ def test_company_verification_routed_page_fetch_uses_provider_deadline(
 
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["actual_final_url"] == source_url
-    assert [call["method"] for call in transport.sent] == ["POST", "GET"]
-    assert transport.sent[1]["url"] == br.DEEPLINE_BILLING_HISTORY_URL
+    assert [call["method"] for call in transport.sent] == ["POST"]
+    assert next(iter(_ledger.calls.values()))["actual"] == 2_000
     assert 59.0 <= transport.sent[0]["timeout"] <= 60.0
     request = json.loads(transport.sent[0]["body"])
     assert request["operation"] == "firecrawl_scrape"

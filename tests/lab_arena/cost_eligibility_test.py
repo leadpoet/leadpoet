@@ -494,6 +494,10 @@ def _startup_service(cost_rpc_result):
     service = object.__new__(ArenaService)
     service._store = SimpleNamespace(
         require_service_role=lambda: {"current_user": "lab_arena_service"},
+        code_review_schema=lambda: {
+            "schema_version": "leadpoet.lab_arena.code_review.v1",
+            "version": 207,
+        },
         _transport=transport,
     )
     service._objects = Objects()

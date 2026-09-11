@@ -73,13 +73,18 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
     assert len(completed) == 40  # four participants over the ten-ICP first stage
     runs = setup.list_runs(round_id, stage=1)
     assert all(run["status"] == "accepted" for run in runs) and len(runs) == 40
-    ledger = setup.list_ledger()
+    ledger = [
+        entry
+        for entry in setup.list_ledger()
+        if entry.get("round_id") == round_id
+        and entry.get("operation_id") == "deepline.execute"
+    ]
     heads = {}
     for entry in ledger:
-        if entry.get("round_id") == round_id and entry.get("call_identity"):
+        if entry.get("call_identity"):
             heads[entry["call_identity"]] = entry["entry_kind"]
     assert len(heads) == 120 and set(heads.values()) == {"settlement"}  # three settlements per first-stage run
-    assert {entry["funding_source"] for entry in ledger if entry.get("round_id") == round_id} == {"miner_key"}
+    assert {entry["funding_source"] for entry in ledger} == {"miner_key"}
     print("deadlock retries:", retries, details[:1])
     for store in stores + [setup]:
         store.close()

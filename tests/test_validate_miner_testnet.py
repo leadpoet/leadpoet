@@ -24,12 +24,18 @@ SPEC.loader.exec_module(SCRIPT)
 def test_testnet_server_uses_real_gateway_validator_scope():
     source = """
 import json
+from types import SimpleNamespace
 from scripts.validate_miner_testnet import _configure_testnet_registry
 _configure_testnet_registry()
 from gateway.utils import registry
 from lab_arena.service import _gateway_validator_authorizer
-registry.is_registered_hotkey = lambda hotkey: (True, 'validator')
-result = _gateway_validator_authorizer('test-validator', network_name='test', netuid=401)
+def unexpected_global_registry(_hotkey):
+    raise AssertionError('standalone Arena must use its own finalized snapshot')
+registry.is_registered_hotkey = unexpected_global_registry
+snapshot = SimpleNamespace(netuid=401, hotkeys=('test-validator',),
+                           active=(True,), validator_permit=(False,), stake=(0.0,))
+result = _gateway_validator_authorizer('test-validator', network_name='test', netuid=401,
+                                      metagraph=snapshot)
 print(json.dumps({'result':result,'network':registry.BITTENSOR_NETWORK,'netuid':registry.BITTENSOR_NETUID}))
 """
     env = dict(os.environ, BITTENSOR_NETWORK="finney", BITTENSOR_NETUID="71", PYTHONDONTWRITEBYTECODE="1")

@@ -46,6 +46,9 @@ VALIDATOR_SCORING_AUTHORITY_SQL = (
 RETIRED_INCENTIVE_BRIDGE_SQL = (
     SCRIPTS / "203-retire-legacy-incentive-weight-bridge.sql"
 ).read_text(encoding="utf-8")
+BENCHMARK_DISCLOSURE_SQL = (
+    SCRIPTS / "210-lab-arena-benchmark-commit-reveal.sql"
+).read_text(encoding="utf-8")
 HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
 HISTORICAL_UPLOAD_SHA256 = (
     "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
@@ -113,7 +116,22 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
+    assert numbered[209] == ["209-lab-arena-uncertain-cost-eligibility.sql"]
+    assert numbered[210] == ["210-lab-arena-benchmark-commit-reveal.sql"]
     assert all(len(paths) == 1 for paths in numbered.values()), numbered
+
+
+def test_benchmark_disclosure_migration_is_additive_and_scoped():
+    assert "ADD COLUMN IF NOT EXISTS benchmark_reveal_at TIMESTAMPTZ" in BENCHMARK_DISCLOSURE_SQL
+    assert "ADD COLUMN IF NOT EXISTS benchmark_commitment_doc JSONB" in BENCHMARK_DISCLOSURE_SQL
+    assert "ADD COLUMN IF NOT EXISTS benchmark_committed_at TIMESTAMPTZ" in BENCHMARK_DISCLOSURE_SQL
+    assert "CREATE OR REPLACE FUNCTION public.lab_arena_commit_round_v3(" in BENCHMARK_DISCLOSURE_SQL
+    assert "CREATE TRIGGER lab_arena_benchmark_commitment_guard" in BENCHMARK_DISCLOSURE_SQL
+    assert "'version', 210" in BENCHMARK_DISCLOSURE_SQL
+    assert "CREATE OR REPLACE FUNCTION public.lab_arena_schema_version_v1()" not in BENCHMARK_DISCLOSURE_SQL
+    assert "DROP TABLE" not in BENCHMARK_DISCLOSURE_SQL
+    assert "provider_cost_uncertain" in BENCHMARK_DISCLOSURE_SQL
+    assert "cost_per_company_microusd', 500000" in BENCHMARK_DISCLOSURE_SQL
 
 
 def test_validator_scoring_authority_migration_delegates_only_role_to_gateway():

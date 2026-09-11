@@ -1,15 +1,23 @@
 """Arena installation under the non-superuser role used by hosted Supabase."""
 
-from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS
-from tests.postgres_migration_harness import SCRIPTS, _database_with_migrations
+from tests.lab_arena.lab_arena_pg_harness import (
+    DEFAULT_MIGRATIONS,
+    database_with_lab_arena_migration,
+)
+from tests.postgres_migration_harness import SCRIPTS
 
 
 def test_hosted_owner_transfers_and_idempotent_upgrade():
     # Earlier tests installed as a superuser, which bypasses schema ownership
     # checks. This role has migration authority but no superuser privilege.
+    # PostgreSQL 17 scopes CREATEROLE operations by ADMIN OPTION. Supabase's
+    # managed roles already exist, so model that hosted reapply shape directly.
     setup = """
-    CREATE ROLE hosted_migrator LOGIN CREATEROLE INHERIT;
+    CREATE ROLE hosted_migrator LOGIN CREATEDB CREATEROLE INHERIT;
     GRANT anon, authenticated, service_role TO hosted_migrator WITH ADMIN OPTION;
+    CREATE ROLE lab_arena_owner NOLOGIN;
+    CREATE ROLE lab_arena_service NOLOGIN;
+    GRANT lab_arena_owner, lab_arena_service TO hosted_migrator WITH ADMIN OPTION;
     ALTER SCHEMA public OWNER TO hosted_migrator;
     GRANT USAGE ON SCHEMA extensions TO hosted_migrator WITH GRANT OPTION;
     SET ROLE hosted_migrator;
@@ -21,7 +29,7 @@ def test_hosted_owner_transfers_and_idempotent_upgrade():
     ALTER TABLE public.qualification_private_icp_sets ENABLE ROW LEVEL SECURITY;
     RESET ROLE;
     """
-    database = _database_with_migrations((), setup_sql=setup)
+    database = database_with_lab_arena_migration((), setup_sql=setup)
     try:
         psycopg2, dsn = next(database)
         with psycopg2.connect(**dsn) as connection:
@@ -33,7 +41,12 @@ def test_hosted_owner_transfers_and_idempotent_upgrade():
                 # migration, not obsolete definitions that would drop columns.
                 for migrations in (DEFAULT_MIGRATIONS, DEFAULT_MIGRATIONS[-1:]):
                     for migration in migrations:
-                        cursor.execute((SCRIPTS / migration).read_text())
+                        try:
+                            cursor.execute((SCRIPTS / migration).read_text())
+                        except Exception as exc:
+                            raise AssertionError(
+                                "hosted migration failed: %s" % migration
+                            ) from exc
                         cursor.execute(
                             "SELECT has_schema_privilege('lab_arena_owner', 'public', 'CREATE'), "
                             "has_schema_privilege('lab_arena_service', 'public', 'CREATE')"

@@ -1,19 +1,20 @@
 # Open Source Agent Competition operator guide
 
-The Arena is a simple agent-bundle competition with a UTC daily cycle:
+The Arena supports a versioned three-day cycle for newly opted-in rounds:
 
-1. Day 0: generate twenty ICPs, keep them private, and accept model submissions.
-2. Day 1: close Day 0 submissions and reveal all twenty of Day 0's ICPs.
-   Evaluate the frozen baseline and every accepted model on that same set.
-3. Publish the source, final score, and all twenty per-ICP scores as soon as
-   evaluation is complete. There is no additional 24-hour source delay.
+1. Day 0: keep twenty ICPs private and accept model submissions.
+2. Day 1: close submissions, publish salted hashes, and evaluate the frozen
+   baseline and accepted models. Only assigned validators receive their inputs.
+3. Publish aggregate scores and source when evaluation completes. Promotion and
+   normal rewards retain their existing timing.
+4. Day 2: reveal the exact ICPs and verification preimages at cutoff plus 24
+   hours, provided the round has ended. Published rounds also release detailed
+   outputs and per-ICP scores. Active overruns remain private.
 
-Day 1 also starts a new hidden set and submission window for Day 2. The existing
-two ten-ICP batches are execution details; new rounds do not eliminate models
-between them. The round ID names the evaluation day. `icp_set_date` names the
-previous submission day's bank, which remains fixed during restart and retry.
-Historical rounds retain their actual bank date; they are not relabelled as a
-previous-day evaluation.
+Activation is opt-in for newly created rounds; older rounds preserve their
+stored behavior. The round ID names the evaluation day, and `icp_set_date` names
+the previous submission day's bank. The same bank survives restart and retry.
+See [rollout, recovery and verification](../docs/arena_benchmark_commit_reveal.md).
 
 The midnight submission cutoff starts the readiness-driven execution and
 scoring batches. Completed work moves to the next batch without fixed 00:30 or

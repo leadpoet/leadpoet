@@ -44,7 +44,7 @@ def _is_public_benchmark_path(arena_path: str) -> bool:
         len(parts) == 4
         and parts[:2] == ["v1", "rounds"]
         and parts[2] not in {"", ".", ".."}
-        and parts[3] == "benchmark"
+        and parts[3] in ("benchmark", "benchmark-commitment")
     )
 
 

@@ -21,7 +21,7 @@ Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. Th
 
 ## Daily schedule
 
-Day 0: submit models while that day's 20 ICPs stay hidden. At about **00:00 UTC on Day 1**, those ICPs become public and evaluation starts for the baseline and prior-day models. All 20 are processed without fixed pauses between batches. Code, final and per-ICP scores publish when evaluation finishes. Day 1's new ICP set stays hidden until Day 2.
+New rounds can use a three-day cycle: **Day 0** model submissions; **Day 1** scoring with public salted benchmark hashes; **Day 2** reveal of the exact twenty ICPs. Assigned validators receive their ICP and agent code during Day 1. Aggregate scores and source publish when evaluation completes; detailed outputs and per-ICP scores wait for reveal. Reveal requires both the scheduled time and a terminal round. Existing rounds retain their stored disclosure policy. See [commitment verification and activation](docs/arena_benchmark_commit_reveal.md).
 
 ## Install and register
 

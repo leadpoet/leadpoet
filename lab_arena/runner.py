@@ -1384,6 +1384,18 @@ class AssignmentExecutor:
     def execute(self, lease: Mapping[str, Any], lease_token: str, icp: Mapping[str, Any]) -> Dict[str, Any]:
         """Run one leased ICP end to end and return the completion envelope."""
 
+        if "benchmark_disclosure_policy" in lease or "benchmark_proof" in lease:
+            from lab_arena import benchmark_commitment as bc
+            try:
+                if lease.get("benchmark_disclosure_policy") != bc.POLICY:
+                    raise bc.BenchmarkCommitmentError("benchmark_policy_invalid")
+                bc.verify_assignment(
+                    lease.get("benchmark_proof"), round_id=str(lease.get("round_id") or ""),
+                    position=lease.get("icp_position"),
+                    evaluation_date=str(lease.get("evaluation_date") or ""), icp=icp,
+                )
+            except bc.BenchmarkCommitmentError as exc:
+                raise RunnerError("benchmark_commitment_invalid") from exc
         config = self._config
         state = RunState(lease=dict(lease), lease_token=lease_token)
         run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=str(config.work_dir)))

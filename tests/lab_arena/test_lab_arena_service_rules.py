@@ -35,7 +35,7 @@ def test_startup_requires_the_next_day_bank_date_column():
         @staticmethod
         def select(table, *, limit, columns):
             assert table == "lab_arena_rounds"
-            assert limit == 1 and columns == "icp_set_date"
+            assert limit == 1 and columns == "icp_set_date,benchmark_reveal_at,benchmark_commitment_doc,benchmark_committed_at"
             raise ArenaStoreError("column icp_set_date does not exist")
 
     service = object.__new__(ArenaService)

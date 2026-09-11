@@ -40,7 +40,8 @@ _COST_COUNTER_KEYS = (
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at,icp_set_date,evaluation_date"
+    "baseline_promoted_at,icp_set_date,evaluation_date,benchmark_ref,"
+    "benchmark_reveal_at,benchmark_commitment_doc,benchmark_committed_at"
 )
 
 
@@ -225,7 +226,7 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
     return baseline, champion
 
 
-def round_summary(row: Mapping[str, Any]) -> dict:
+def round_summary(row: Mapping[str, Any], now: datetime | None = None) -> dict:
     network_name, netuid, mode = _configuration_scope(row)
     configuration = row.get("configuration_doc")
     configuration = configuration if isinstance(configuration, Mapping) else {}
@@ -257,6 +258,7 @@ def round_summary(row: Mapping[str, Any]) -> dict:
         "baseline": baseline,
         "champion": champion,
         "promotion_status": promotion_status,
+        **icp_disclosure.public_metadata(row, now),
     }
 
 
@@ -274,7 +276,7 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             limit=bounded_limit,
             columns=_ROUND_COLUMNS,
         )
-    summaries = [round_summary(row) for row in rows]
+    summaries = [round_summary(row, service.now()) for row in rows]
     open_round = next((row for row in summaries if row["status"] == "open"), None)
     latest_round = next(
         (row for row in summaries if row["status"] != "open"),
@@ -292,7 +294,7 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             limit=1,
             columns=_ROUND_COLUMNS,
         )
-        latest_completed = round_summary(published[0]) if published else None
+        latest_completed = round_summary(published[0], service.now()) if published else None
     return {
         "mode": service._config.mode,
         "network_name": network_name,

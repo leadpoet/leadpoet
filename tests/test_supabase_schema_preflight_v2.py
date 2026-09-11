@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 import pytest
 
 from gateway.tee.supabase_schema_preflight_v2 import (
+    BENCHMARK_DISCLOSURE_MIGRATION,
+    BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY,
     CODE_REVIEW_MIGRATION,
     REQUIRED_SUPABASE_V2_RPCS,
     REQUIRED_SUPABASE_V2_SCHEMA,
@@ -37,12 +39,12 @@ def _opener(
     service_role_paths = {
         f"/rpc/{name}": {}
         for migration, name in REQUIRED_SUPABASE_V2_RPCS
-        if migration != CODE_REVIEW_MIGRATION
+        if migration not in {CODE_REVIEW_MIGRATION, BENCHMARK_DISCLOSURE_MIGRATION}
     }
     arena_paths = {
         f"/rpc/{name}": {}
         for migration, name in REQUIRED_SUPABASE_V2_RPCS
-        if migration == CODE_REVIEW_MIGRATION
+        if migration in {CODE_REVIEW_MIGRATION, BENCHMARK_DISCLOSURE_MIGRATION}
     }
     retired_tables = {
         "validator_sourcing_epoch_inputs_v2",
@@ -74,6 +76,7 @@ def _opener(
         "lab_arena_schema_version_v1": {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197},
         "lab_arena_weight_state_schema_v1": {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202},
         "lab_arena_incentive_retirement_schema_v1": {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203},
+        BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY[0]: BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY[1],
     }
     def open_(request, timeout):
         path = urlparse(request.full_url).path
@@ -82,17 +85,21 @@ def _opener(
         }
         arena_authority = request_headers.get("apikey") == "sb_secret_arena"
         arena_url = urlparse(request.full_url).netloc == "arena.example"
-        private_review = (
+        private_arena = (
             path.endswith("/lab_arena_submissions")
+            or path.endswith("/lab_arena_rounds")
             or path.endswith("/rpc/lab_arena_code_review_schema_v1")
+            or path.endswith(
+                "/rpc/lab_arena_benchmark_disclosure_schema_v1"
+            )
         )
-        if enforce_role_separation and private_review and not arena_authority:
+        if enforce_role_separation and private_arena and not arena_authority:
             raise HTTPError(request.full_url, 403, "private", {}, None)
         if enforce_url_separation and arena_authority != arena_url:
             raise HTTPError(request.full_url, 404, "wrong project", {}, None)
         if retired_storage_absent and path.rsplit("/", 1)[-1] in retired_tables:
             raise HTTPError(request.full_url, 404, "retired storage absent", {}, None)
-        if missing and missing in path:
+        if missing and missing in request.full_url:
             raise HTTPError(request.full_url, 404, "missing", {}, None)
         if path == "/rest/v1/":
             paths = arena_paths if arena_authority else service_role_paths
@@ -140,6 +147,41 @@ def test_code_review_preflight_uses_only_the_scoped_arena_role():
     assert "lab_arena_code_review_schema_v1" in required_rpc_names
     assert "lab_arena_begin_submission_review" in required_rpc_names
     assert "lab_arena_finish_submission_review" in required_rpc_names
+    assert "lab_arena_benchmark_disclosure_schema_v1" in required_rpc_names
+    assert result["schema_capabilities"][
+        "lab_arena_benchmark_disclosure_schema_v1"
+    ] == {
+        "schema_version": "leadpoet.lab_arena.benchmark_disclosure.v1",
+        "version": 210,
+        "policy": "commit_reveal_day2_v1",
+    }
+    assert any(
+        migration == BENCHMARK_DISCLOSURE_MIGRATION
+        and table == "lab_arena_rounds"
+        and columns
+        == (
+            "round_id",
+            "benchmark_reveal_at",
+            "benchmark_commitment_doc",
+            "benchmark_committed_at",
+        )
+        for migration, table, columns in REQUIRED_SUPABASE_V2_SCHEMA
+    )
+
+
+def test_benchmark_disclosure_preflight_contract_is_protected():
+    from gateway.tee.protected_workflows import PROTECTED_SYMBOLS
+
+    assert {
+        "BENCHMARK_DISCLOSURE_MIGRATION",
+        "BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY",
+        "REQUIRED_SUPABASE_V2_SCHEMA",
+        "REQUIRED_SUPABASE_V2_RPCS",
+        "SCHEMA_CAPABILITIES",
+        "PRIVATE_ARENA_MIGRATIONS",
+        "PRIVATE_ARENA_CAPABILITIES",
+        "verify_required_supabase_v2_schema",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/supabase_schema_preflight_v2.py"])
 
 
 def test_preflight_accepts_current_schema_without_retired_host_receipt_storage():
@@ -187,6 +229,27 @@ def test_preflight_fails_closed_for_missing_arena_table_and_wrong_retirement_cap
         verify_required_supabase_v2_schema(env, opener=_opener(missing="lab_arena_accepted_weight_states"))
     with pytest.raises(SupabaseSchemaPreflightV2Error, match="capability differs"):
         verify_required_supabase_v2_schema(env, opener=_opener(bad_capability="lab_arena_incentive_retirement_schema_v1"))
+
+
+def test_benchmark_disclosure_preflight_fails_closed_for_missing_private_schema():
+    env = _environment()
+    with pytest.raises(SupabaseSchemaPreflightV2Error, match="210-lab-arena"):
+        verify_required_supabase_v2_schema(
+            env,
+            opener=_opener(missing="benchmark_reveal_at"),
+        )
+    with pytest.raises(SupabaseSchemaPreflightV2Error, match="required RPC"):
+        verify_required_supabase_v2_schema(
+            env,
+            opener=_opener(missing="lab_arena_benchmark_disclosure_schema_v1"),
+        )
+    with pytest.raises(SupabaseSchemaPreflightV2Error, match="capability differs"):
+        verify_required_supabase_v2_schema(
+            env,
+            opener=_opener(
+                bad_capability="lab_arena_benchmark_disclosure_schema_v1"
+            ),
+        )
 
 
 def test_preflight_requires_credentials():

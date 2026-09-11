@@ -670,6 +670,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("network_name", "str", required=False, minimum=1, maximum=64),
     F("netuid", "int", required=False, minimum=1),
     F("rewards_enabled", "bool"),
+    F("benchmark_disclosure_policy", "str", required=False, choices=("commit_reveal_day2_v1",)),
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
     F("stage_1_icp_count", "int", minimum=1),
     F("stage_2_icp_count", "int", minimum=1),
@@ -708,6 +709,8 @@ ROUND_CONFIGURATION_FIELDS = (
 
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
+    if "benchmark_disclosure_policy" in config and config["benchmark_disclosure_policy"] is None:
+        raise ArenaContractError("benchmark disclosure policy cannot be null")
     if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
         raise ArenaContractError("round cost-per-company cap cannot be null")
     if ("network_name" in config) != ("netuid" in config):

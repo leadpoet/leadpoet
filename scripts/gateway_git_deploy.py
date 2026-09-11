@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -16,7 +17,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlsplit, urlunsplit
+from urllib.error import HTTPError
+from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 
 SCHEMA_VERSION = "leadpoet.gateway_git_deployment.v1"
@@ -27,6 +30,18 @@ DEFAULT_REPO_URL = "https://github.com/leadpoet/leadpoet.git"
 DEFAULT_BRANCH = "main"
 RESTART_PROTOCOL_MARKER = 'GATEWAY_GIT_DEPLOY_PROTOCOL="1"'
 GIT_FETCH_MAX_ATTEMPTS = 4
+BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY = (
+    "lab_arena_benchmark_disclosure_schema_v1",
+    {
+        "schema_version": "leadpoet.lab_arena.benchmark_disclosure.v1",
+        "version": 210,
+        "policy": "commit_reveal_day2_v1",
+    },
+)
+_BENCHMARK_DISCLOSURE_COMPATIBILITY_PATH = (
+    "gateway/tee/supabase_schema_preflight_v2.py"
+)
+_MAX_SCHEMA_RESPONSE_BYTES = 64 * 1024
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
@@ -607,6 +622,208 @@ def _validate_target_restart_protocol(repo_root: Path, target_sha: str) -> None:
     )
 
 
+def _arena_schema_authority(
+    environment: Mapping[str, str],
+) -> tuple[str, dict[str, str]]:
+    url = str(
+        environment.get("LAB_ARENA_SUPABASE_URL")
+        or environment.get("SUPABASE_URL")
+        or ""
+    ).rstrip("/")
+    service_key = str(environment.get("LAB_ARENA_SERVICE_KEY") or "").strip()
+    service_jwt = str(environment.get("LAB_ARENA_SERVICE_JWT") or "").strip()
+    anon_key = str(environment.get("LAB_ARENA_SUPABASE_ANON_KEY") or "").strip()
+    if not url or bool(service_key) == bool(service_jwt):
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure compatibility authority is unavailable"
+        )
+    if service_key:
+        if not service_key.startswith("sb_secret_"):
+            raise GatewayGitDeployError(
+                "Arena benchmark disclosure compatibility authority is invalid"
+            )
+        return url, {"Accept": "application/json", "apikey": service_key}
+    if not anon_key or service_jwt.count(".") != 2:
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure compatibility authority is invalid"
+        )
+    return url, {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {service_jwt}",
+        "apikey": anon_key,
+    }
+
+
+def _read_schema_response(response: Any) -> Any:
+    encoded = response.read(_MAX_SCHEMA_RESPONSE_BYTES + 1)
+    if len(encoded) > _MAX_SCHEMA_RESPONSE_BYTES:
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure compatibility response is oversized"
+        )
+    try:
+        return json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure compatibility response is invalid"
+        ) from exc
+
+
+def _benchmark_disclosure_rows_exist(
+    url: str,
+    headers: Mapping[str, str],
+    *,
+    opener: Any,
+    timeout_seconds: float,
+) -> bool:
+    query = urlencode(
+        {
+            "select": "round_id",
+            # JSON null must still count as an explicit, fail-closed policy marker.
+            # The JSON operator keeps it distinct from an absent key.
+            "configuration_doc->benchmark_disclosure_policy": "not.is.null",
+            "limit": "1",
+        }
+    )
+    request = Request(
+        f"{url}/rest/v1/lab_arena_rounds?{query}",
+        headers=dict(headers),
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            if not 200 <= status < 300:
+                raise GatewayGitDeployError(
+                    "Arena benchmark disclosure round probe failed"
+                )
+            value = _read_schema_response(response)
+    except GatewayGitDeployError:
+        raise
+    except Exception as exc:
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure round probe failed"
+        ) from exc
+    if not isinstance(value, list) or len(value) > 1 or any(
+        not isinstance(row, Mapping)
+        or set(row) != {"round_id"}
+        or not isinstance(row["round_id"], str)
+        or not row["round_id"]
+        for row in value
+    ):
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure round probe response is invalid"
+        )
+    return bool(value)
+
+
+def _probe_benchmark_disclosure_capability(
+    environment: Mapping[str, str],
+    *,
+    opener: Any = urlopen,
+    timeout_seconds: float = 10.0,
+) -> bool:
+    """Return false only for the exact pre-migration missing-RPC response."""
+
+    url, headers = _arena_schema_authority(environment)
+    function_name, expected = BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY
+    request = Request(
+        f"{url}/rest/v1/rpc/{function_name}",
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            if not 200 <= status < 300:
+                raise GatewayGitDeployError(
+                    "Arena benchmark disclosure compatibility probe failed"
+                )
+            value = _read_schema_response(response)
+    except HTTPError as exc:
+        try:
+            missing = _read_schema_response(exc)
+        except GatewayGitDeployError:
+            missing = None
+        if (
+            exc.code == 404
+            and isinstance(missing, Mapping)
+            and missing.get("code") == "PGRST202"
+        ):
+            if _benchmark_disclosure_rows_exist(
+                url,
+                headers,
+                opener=opener,
+                timeout_seconds=timeout_seconds,
+            ):
+                raise GatewayGitDeployError(
+                    "Arena benchmark disclosure rows exist without the required schema capability"
+                )
+            return False
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure compatibility probe failed"
+        ) from exc
+    except GatewayGitDeployError:
+        raise
+    except Exception as exc:
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure compatibility probe failed"
+        ) from exc
+    if value != expected:
+        raise GatewayGitDeployError(
+            "Arena benchmark disclosure schema capability differs"
+        )
+    return True
+
+
+def _target_benchmark_disclosure_capability(
+    repo_root: Path, target_sha: str
+) -> Any:
+    try:
+        source = _run_git_bytes(
+            repo_root,
+            "show",
+            f"{target_sha}:{_BENCHMARK_DISCLOSURE_COMPATIBILITY_PATH}",
+            timeout=30,
+        ).decode("utf-8")
+        tree = ast.parse(source, filename=_BENCHMARK_DISCLOSURE_COMPATIBILITY_PATH)
+    except (GatewayGitDeployError, UnicodeDecodeError, SyntaxError):
+        return None
+    declarations = []
+    for statement in tree.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        if any(
+            isinstance(target, ast.Name)
+            and target.id == "BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY"
+            for target in targets
+        ):
+            try:
+                declarations.append(ast.literal_eval(statement.value))
+            except (TypeError, ValueError):
+                declarations.append(None)
+    return declarations[0] if len(declarations) == 1 else None
+
+
+def _verify_benchmark_disclosure_release_compatibility(
+    *,
+    repo_root: Path,
+    target_sha: str,
+    environment: Mapping[str, str],
+    opener: Any = urlopen,
+) -> str:
+    if not _probe_benchmark_disclosure_capability(environment, opener=opener):
+        return "legacy_schema"
+    if (
+        _target_benchmark_disclosure_capability(repo_root, target_sha)
+        != BENCHMARK_DISCLOSURE_SCHEMA_CAPABILITY
+    ):
+        raise GatewayGitDeployError(
+            "selected gateway release predates the installed benchmark disclosure reader floor"
+        )
+    return "required_and_supported"
+
+
 def prepare_deployment(
     *,
     repo_root: Path,
@@ -615,7 +832,9 @@ def prepare_deployment(
     plan_file: Path,
     manifest_file: Path,
     last_good_file: Path,
+    environment: Mapping[str, str],
     deploy_commit: str = "",
+    compatibility_opener: Any = None,
 ) -> dict[str, Any]:
     """Fetch one branch and persist an immutable deployment decision."""
 
@@ -651,6 +870,14 @@ def prepare_deployment(
         if not _is_ancestor(repo_root, previous_sha, target_sha):
             raise GatewayGitDeployError("configured branch is not a fast-forward from deployed HEAD")
 
+    benchmark_disclosure_compatibility = (
+        _verify_benchmark_disclosure_release_compatibility(
+            repo_root=repo_root,
+            target_sha=target_sha,
+            environment=environment,
+            opener=compatibility_opener or urlopen,
+        )
+    )
     _validate_target_restart_protocol(repo_root, target_sha)
     tree_hash = _run_git(repo_root, "rev-parse", f"{target_sha}^{{tree}}").lower()
     document: dict[str, Any] = {
@@ -666,6 +893,7 @@ def prepare_deployment(
         "branch_head_sha": branch_head_sha,
         "target_sha": target_sha,
         "tree_hash": tree_hash,
+        "benchmark_disclosure_compatibility": benchmark_disclosure_compatibility,
         "prepared_at": _utc_now(),
         "manifest_file": str(manifest_file.expanduser().resolve()),
         "last_good_file": str(last_good_file.expanduser().resolve()),
@@ -940,6 +1168,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan_file=args.plan_file,
                 manifest_file=args.manifest_file,
                 last_good_file=args.last_good_file,
+                environment=env_values,
                 deploy_commit=_operator_only_value(
                     "GATEWAY_DEPLOY_COMMIT", args.deploy_commit, ""
                 ),

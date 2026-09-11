@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 from typing import Any, Mapping
 from urllib.parse import quote
 
-from lab_arena import icp_disclosure, source_bundle
+from lab_arena import icp_disclosure, source_bundle, benchmark_commitment as bc
 
 MAX_PREVIEW_BYTES = 2 * 1024 * 1024
 MAX_PREVIEW_FILE_BYTES = 256 * 1024
@@ -57,6 +57,14 @@ def disclosure_status(
     available_at = _timestamp(row.get("published_at")) if row.get("status") == "published" else None
     metadata = icp_disclosure.disclosure_metadata(row)
     public_at = _timestamp(metadata.get("public_at")) if metadata else None
+    try:
+        if bc.policy(row):
+            bc.committed_document(row)
+            # Source remains tied to completed Day 1 scoring, independently of
+            # the later plaintext benchmark reveal.
+            public_at = _timestamp(row["configuration_doc"]["schedule"]["submission_cutoff"])
+    except bc.BenchmarkCommitmentError:
+        public_at = None
     # Historical rounds evaluated on their bank's creation day. Their source
     # becomes eligible on the new next-day boundary, not permanently private.
     if row.get("icp_set_date") is None and available_at is not None and public_at is not None:

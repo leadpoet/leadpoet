@@ -150,6 +150,10 @@ def create_app(service: ArenaService) -> FastAPI:
     async def round_view(round_id: str) -> Any:
         return await run_in_threadpool(service.public_round, round_id)
 
+    @app.get("/arena/v1/rounds/{round_id}/benchmark-commitment")
+    async def round_benchmark_commitment(round_id: str) -> JSONResponse:
+        return await no_store_public_call(service.public_benchmark_commitment, round_id)
+
     @app.get("/arena/v1/rounds/{round_id}/benchmark")
     async def round_benchmark(round_id: str) -> JSONResponse:
         return await no_store_public_call(service.public_benchmark, round_id)

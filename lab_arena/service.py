@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
+from lab_arena import benchmark_commitment as bc, icp_disclosure
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -294,6 +295,8 @@ class RoundDefaults:
     daily_cutoff_hour_utc: Optional[int] = None
     # A new round's cutoff lies at least this far ahead so miners can submit.
     min_submission_hours: int = 6
+    # Opt in only newly created rounds at/after this aware UTC cutoff.
+    benchmark_commit_reveal_from: Optional[str] = None
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
     # Announced in every round configuration and carried by every reward basis,
     # so a change applies from the next round and never rewrites a published one.
@@ -344,6 +347,14 @@ class ServiceConfig:
     ] = None
 
     def __post_init__(self) -> None:
+        activation = self.defaults.benchmark_commit_reveal_from
+        if activation is not None:
+            try:
+                parsed = bc.instant(activation)
+                if parsed.microsecond:
+                    raise bc.BenchmarkCommitmentError("benchmark_time_invalid")
+            except bc.BenchmarkCommitmentError as exc:
+                raise ServiceError("benchmark_activation_invalid", 500) from exc
         if self.mode not in MODES:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
@@ -467,6 +478,10 @@ class ArenaService:
         """Refuse a round owned by another Arena mode or chain scope."""
 
         configuration = row.get("configuration_doc") or {}
+        try:
+            bc.policy(row)
+        except bc.BenchmarkCommitmentError as exc:
+            raise ServiceError("benchmark_policy_invalid", 503) from exc
         if configuration.get("mode") != self._config.mode:
             raise ServiceError("round_mode_mismatch", 409)
         # Rows created before schema 189 had no explicit chain pair. They are
@@ -503,7 +518,7 @@ class ArenaService:
                 self._store._transport.select(
                     table,
                     limit=1,
-                    columns="icp_set_date" if table == "lab_arena_rounds" else "*",
+                    columns="icp_set_date,benchmark_reveal_at,benchmark_commitment_doc,benchmark_committed_at" if table == "lab_arena_rounds" else "*",
                 )
             except ArenaStoreError as exc:
                 raise ServiceError("table_unavailable:%s" % table, 500) from exc
@@ -517,9 +532,24 @@ class ArenaService:
             raise ServiceError(
                 "validator_scoring_authority_schema_unavailable", 500
             ) from exc
+        try:
+            self._store.benchmark_disclosure_schema()
+        except ArenaStoreError as exc:
+            raise ServiceError("benchmark_disclosure_schema_unavailable", 500) from exc
         # Every service function must exist and be granted: a missing round is the
         # expected structured failure; a permission or undefined-function error is not.
         for function, params in (
+            (
+                "lab_arena_commit_round_v3",
+                {
+                    "p_round_id": "arena-0000-00-00", "p_participants": [],
+                    "p_benchmark_ref": "probe", "p_evaluation_date": "2000-01-02",
+                    "p_icp_set_date": "2000-01-01",
+                    "p_scorer_image_digest": "sha256:" + "0" * 64,
+                    "p_scorer_image_reference": "probe@sha256:" + "0" * 64,
+                    "p_benchmark_commitment_doc": {},
+                },
+            ),
             (
                 "lab_arena_commit_round_v2",
                 {
@@ -663,6 +693,9 @@ class ArenaService:
             "banned_hotkeys": banned_hotkeys,
             "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
         }
+        activation = defaults.benchmark_commit_reveal_from
+        if activation is not None and cutoff >= bc.instant(activation):
+            document["benchmark_disclosure_policy"] = bc.POLICY
         # Keep the announced intake within the actual all-participant workload.
         # Shadow-only short rehearsals deliberately do not reserve live budgets.
         if self._config.mode == "live":
@@ -675,7 +708,7 @@ class ArenaService:
         if result.get("status") not in ("created", "existing"):
             raise ServiceError("round_create_failed", 500)
         if result.get("status") == "existing":
-            self._round(round_id)
+            return dict(self._round(round_id)["configuration_doc"])
         return configuration
 
     def ensure_daily_round(self, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -1378,6 +1411,8 @@ class ArenaService:
     def commit_benchmark(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "open":
+            if bc.policy(round_row) and round_row.get("benchmark_commitment_doc") is not None:
+                self._benchmark_artifact(round_row)
             return {"status": "existing", "round_status": round_row["status"]}
         scorer_image = {
             "scorer_image_digest": self._config.defaults.scorer_image_digest,
@@ -1446,6 +1481,13 @@ class ArenaService:
                 "status": "cancelled",
                 "reason": CANCEL_REASONS["benchmark_invalid"],
             }
+        artifact = None
+        if bc.policy(round_row):
+            try:
+                artifact = bc.build_artifact(round_row, icps)
+            except (ArenaContractError, TypeError, ValueError, OverflowError, RecursionError):
+                self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
+                return {"status": "cancelled", "reason": CANCEL_REASONS["benchmark_invalid"]}
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
@@ -1455,17 +1497,49 @@ class ArenaService:
         evaluation_date = _parse_iso(
             schedule["submission_cutoff"]
         ).astimezone(timezone.utc).date().isoformat()
-        benchmark_ref = "arena/%s/benchmark.json" % round_id
-        self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": icps}).encode("utf-8"))
-        transition = self._store.commit_round_v2(
-            round_id,
-            participants=participants,
-            benchmark_ref=benchmark_ref,
-            evaluation_date=evaluation_date,
+        params = dict(
+            participants=participants, evaluation_date=evaluation_date,
             icp_set_date=icp_set_date,
             scorer_image_digest=scorer_image["scorer_image_digest"],
             scorer_image_reference=scorer_image["scorer_image_reference"],
         )
+        if artifact is not None:
+            payload = contracts.canonical_json(artifact).encode("utf-8")
+            digest = contracts.hash_bytes(payload).removeprefix("sha256:")
+            benchmark_ref = "arena/%s/benchmarks/%s.json" % (round_id, digest)
+            try:
+                self._objects.put(benchmark_ref, payload)
+            except Exception as exc:
+                # An acknowledged immutable object is safe to reuse even if
+                # the upload response was lost; all other errors fail closed.
+                try:
+                    observed = self._objects.get_bounded(benchmark_ref, bc.MAX_ARTIFACT_BYTES)
+                except Exception:
+                    raise ServiceError("benchmark_storage_unavailable", 503) from exc
+                if observed != payload:
+                    raise ServiceError("benchmark_storage_unavailable", 503) from exc
+            try:
+                transition = self._store.commit_round_v3(
+                    round_id, benchmark_ref=benchmark_ref,
+                    benchmark_commitment_doc=artifact["commitment"], **params,
+                )
+            except ArenaStoreError:
+                # A lost acknowledgement can follow a successful transaction.
+                # The stored winner is authoritative; never overwrite it.
+                winner = self._round(round_id)
+                if winner.get("benchmark_commitment_doc") is None:
+                    raise
+                self._benchmark_artifact(winner)
+                return {"status": "existing", "round_status": winner["status"]}
+            winner = self._round(round_id)
+            if winner.get("benchmark_commitment_doc") is not None:
+                self._benchmark_artifact(winner)
+        else:
+            benchmark_ref = "arena/%s/benchmark.json" % round_id
+            self._objects.put(benchmark_ref, contracts.canonical_json({
+                "schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": icps,
+            }).encode("utf-8"))
+            transition = self._store.commit_round_v2(round_id, benchmark_ref=benchmark_ref, **params)
         return {"status": transition.get("status"), "participants": len(participants)}
 
     @staticmethod
@@ -1483,8 +1557,25 @@ class ArenaService:
             )
         return refreshed
 
+    def _benchmark_artifact(self, row: Mapping[str, Any]) -> Tuple[dict, List[Dict[str, Any]]]:
+        try:
+            commitment = bc.committed_document(row)
+            payload = self._objects.get_bounded(str(row["benchmark_ref"]), bc.MAX_ARTIFACT_BYTES)
+            expected = "arena/%s/benchmarks/%s.json" % (
+                row["round_id"], contracts.hash_bytes(payload).removeprefix("sha256:"),
+            )
+            if row["benchmark_ref"] != expected:
+                raise bc.BenchmarkCommitmentError("benchmark_hash_invalid")
+            artifact = json.loads(payload.decode("utf-8"))
+            icps = bc.validate_artifact(artifact, commitment=commitment)
+            return artifact, icps
+        except Exception as exc:
+            raise ServiceError("benchmark_data_invalid", 503) from exc
+
     def benchmark_icps(self, round_id: str) -> List[Dict[str, Any]]:
         round_row = self._round(round_id)
+        if bc.policy(round_row):
+            return self._benchmark_artifact(round_row)[1]
         ref = round_row.get("benchmark_ref")
         if not ref:
             raise ServiceError("benchmark_not_committed", 409)
@@ -2315,6 +2406,10 @@ class ArenaService:
         configuration = round_row["configuration_doc"]
         self._require_validator_authority(validated["hotkey"])
         excluded = list(self._config.chain.hotkeys_owned_by_same_coldkey(validated["hotkey"]))
+        artifact_and_icps = (
+            self._benchmark_artifact(round_row)
+            if bc.policy(round_row) and round_row["status"] != "open" else None
+        )
         token = self._lease_token(validated)
         response = self._store.claim_assignment(
             round_id=round_id, runner_hotkey=validated["hotkey"], declared_parallelism=declared, slot_ceiling=int(configuration["runner_slot_ceiling"]),
@@ -2323,12 +2418,26 @@ class ArenaService:
         )
         if response.get("status") != "leased":
             return response
+        if bc.policy(round_row) and artifact_and_icps is None:
+            # Another coordinator may have committed while this process still
+            # held a briefly cached open row. Every new-policy lease needs the
+            # stored winner's proof and evaluation metadata.
+            round_row = self._round(round_id)
+            configuration = round_row["configuration_doc"]
+            artifact_and_icps = self._benchmark_artifact(round_row)
         self._require_code_review(str(response["submission_id"]), round_row)
-        icps = self.benchmark_icps(round_id)
+        icps = artifact_and_icps[1] if artifact_and_icps else self.benchmark_icps(round_id)
         position = int(response["icp_position"])
         if not 0 <= position < len(icps):
             raise ServiceError("benchmark_data_invalid", 500)
         lease = dict(response, icp=icps[position], lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        if artifact_and_icps:
+            artifact = artifact_and_icps[0]
+            lease["benchmark_disclosure_policy"] = bc.POLICY
+            lease["benchmark_proof"] = {
+                "commitment": artifact["commitment"],
+                "canonical_preimage": artifact["canonical_preimages"][position],
+            }
         lease.update({
             "image_digest": configuration["scorer_image_digest"],
             "image_reference": configuration["scorer_image_reference"],
@@ -2612,6 +2721,24 @@ class ArenaService:
                         "remaining_admissions": int(admission["remaining"]),
                     }
             return self._advance_round_locked(round_id)
+        except ServiceError as exc:
+            if exc.code in ("benchmark_data_invalid", "benchmark_storage_unavailable") and bc.policy(row):
+                schedule = row["configuration_doc"]["schedule"]
+                deadline_key = {
+                    "open": "benchmark_deadline", "committed": "stage_1_close",
+                    "stage1_closed": "stage_1_scoring_close",
+                    "stage1_judged": "stage_1_scoring_close",
+                    "stage1_scored": "stage_2_close",
+                    "stage2_closed": "final_scoring_close",
+                    "stage2_judged": "final_scoring_close",
+                }.get(row["status"])
+                if deadline_key:
+                    deadline = _parse_iso(schedule[deadline_key])
+                    if row["status"] in ("stage1_judged", "stage2_judged"):
+                        deadline += timedelta(hours=2)  # existing scoring retry grace
+                    if self.now() >= deadline:
+                        return self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
+            raise
         finally:
             self._invalidate_hot_round()
 
@@ -2902,11 +3029,13 @@ class ArenaService:
         if row["status"] == "published":
             publication = row.get("publication_doc") or {}
             view.update({"final_ranking": publication.get("final_ranking"), "king_decision": publication.get("king_decision")})
+        if bc.policy(row):
+            view.update(icp_disclosure.public_metadata(row, self.now()))
         return view
 
     def _public_icp_disclosure(self, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         from lab_arena.icp_disclosure import baseline_disclosure, disclosure_metadata
-        if disclosure_metadata(row) is None:
+        if disclosure_metadata(row) is None or baseline_disclosure(row, [], self.now()) is None:
             return None
         baselines = [p for p in row.get("participants") or [] if p.get("is_king") is True]
         runs = (
@@ -2920,13 +3049,26 @@ class ArenaService:
         )
         return baseline_disclosure(row, runs, self.now())
 
+    def public_benchmark_commitment(self, round_id: str) -> Dict[str, Any]:
+        row = self._round(round_id)
+        if not bc.policy(row):
+            raise ServiceError("benchmark_commitment_unavailable", 404)
+        if row.get("benchmark_commitment_doc") is None:
+            raise ServiceError("benchmark_not_committed", 409)
+        try:
+            document = bc.committed_document(row)
+        except bc.BenchmarkCommitmentError as exc:
+            raise ServiceError("benchmark_data_invalid", 503) from exc
+        return {"round_id": round_id, **document, "committed_at": row["benchmark_committed_at"]}
+
     def public_benchmark(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
         disclosure = self._public_icp_disclosure(row)
         if disclosure is None:
             raise ServiceError("benchmark_not_public", 403)
-        icps = self.benchmark_icps(round_id)
-        return {
+        artifact_and_icps = self._benchmark_artifact(row) if bc.policy(row) else None
+        icps = artifact_and_icps[1] if artifact_and_icps else self.benchmark_icps(round_id)
+        response = {
             "round_id": round_id,
             "icps": [
                 {**icps[position], "icp_position": position,
@@ -2939,6 +3081,14 @@ class ArenaService:
             "private_icp_count": 0,
             "disclosure_policy": disclosure["disclosure_policy"],
         }
+        if artifact_and_icps:
+            artifact = artifact_and_icps[0]
+            response["commitment"] = self.public_benchmark_commitment(round_id)
+            response["verification"] = {
+                "manifest_hash": artifact["commitment"]["manifest_hash"],
+                "canonical_preimages": artifact["canonical_preimages"],
+            }
+        return response
 
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
         if not submission_id or not isinstance(submission_id, str):
@@ -2971,6 +3121,8 @@ class ArenaService:
         if participant is None:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
+        if disclosure and bc.policy(row):
+            self._benchmark_artifact(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
         runs = [
             run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")

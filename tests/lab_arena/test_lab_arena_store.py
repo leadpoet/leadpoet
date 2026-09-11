@@ -174,6 +174,79 @@ def test_simple_stage_and_completion_rpc_shapes():
     ]
 
 
+def test_benchmark_disclosure_capability_and_commit_v3_rpc_shapes():
+    class BenchmarkTransport(ShapeTransport):
+        def rpc(self, function, params):
+            self.calls.append((function, params))
+            if function == "lab_arena_benchmark_disclosure_schema_v1":
+                return {
+                    "schema_version":
+                        "leadpoet.lab_arena.benchmark_disclosure.v1",
+                    "version": 210,
+                    "policy": "commit_reveal_day2_v1",
+                }
+            return {"status": "ok"}
+
+    transport = BenchmarkTransport()
+    store = ArenaStore(transport)
+    assert store.benchmark_disclosure_schema()["version"] == 210
+    commitment = {
+        "manifest": {"schema_version": "fixture"},
+        "manifest_hash": "sha256:" + "a" * 64,
+        "canonical_manifest": '{"schema_version":"fixture"}',
+    }
+    store.commit_round_v3(
+        "arena-2026-09-12",
+        participants=[{"submission_id": "s1", "miner_hotkey": "h"}],
+        benchmark_ref="arena/arena-2026-09-12/benchmarks/%s.json" % ("b" * 64),
+        evaluation_date="2026-09-12",
+        icp_set_date="2026-09-11",
+        scorer_image_digest="sha256:" + "c" * 64,
+        scorer_image_reference="registry.example/scorer@sha256:" + "c" * 64,
+        benchmark_commitment_doc=commitment,
+    )
+    assert transport.calls == [
+        ("lab_arena_benchmark_disclosure_schema_v1", {}),
+        (
+            "lab_arena_commit_round_v3",
+            {
+                "p_round_id": "arena-2026-09-12",
+                "p_participants": [
+                    {"submission_id": "s1", "miner_hotkey": "h"}
+                ],
+                "p_benchmark_ref":
+                    "arena/arena-2026-09-12/benchmarks/%s.json" % ("b" * 64),
+                "p_evaluation_date": "2026-09-12",
+                "p_icp_set_date": "2026-09-11",
+                "p_scorer_image_digest": "sha256:" + "c" * 64,
+                "p_scorer_image_reference":
+                    "registry.example/scorer@sha256:" + "c" * 64,
+                "p_benchmark_commitment_doc": commitment,
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"schema_version": "wrong", "version": 210,
+         "policy": "commit_reveal_day2_v1"},
+        {"schema_version": "leadpoet.lab_arena.benchmark_disclosure.v1",
+         "version": 209, "policy": "commit_reveal_day2_v1"},
+        {"schema_version": "leadpoet.lab_arena.benchmark_disclosure.v1",
+         "version": 210, "policy": "unknown"},
+    ],
+)
+def test_benchmark_disclosure_capability_fails_closed(result):
+    class CapabilityTransport(ShapeTransport):
+        def rpc(self, function, params):
+            return result
+
+    with pytest.raises(ArenaStoreError, match="benchmark disclosure schema mismatch"):
+        ArenaStore(CapabilityTransport()).benchmark_disclosure_schema()
+
+
 def test_store_boundary_contains_only_current_arena_durable_state():
     assert TABLES == (
         "lab_arena_rounds",

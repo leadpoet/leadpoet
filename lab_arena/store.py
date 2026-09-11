@@ -37,6 +37,9 @@ CODE_REVIEW_SCHEMA_VERSION = "leadpoet.lab_arena.code_review.v1"
 VALIDATOR_SCORING_AUTHORITY_SCHEMA_VERSION = (
     "leadpoet.lab_arena.validator_scoring_authority.v1"
 )
+BENCHMARK_DISCLOSURE_SCHEMA_VERSION = (
+    "leadpoet.lab_arena.benchmark_disclosure.v1"
+)
 SERVICE_ROLE_NAME = "lab_arena_service"
 
 # Parameter order and PostgreSQL casts for every service-callable function.
@@ -49,6 +52,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_schema_version_v1": (),
     "lab_arena_code_review_schema_v1": (),
     "lab_arena_validator_scoring_authority_schema_v1": (),
+    "lab_arena_benchmark_disclosure_schema_v1": (),
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_submission_costs": (("p_submission_id", "text"),),
@@ -60,6 +64,16 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_icp_set_date", "date"),
         ("p_scorer_image_digest", "text"),
         ("p_scorer_image_reference", "text"),
+    ),
+    "lab_arena_commit_round_v3": (
+        ("p_round_id", "text"),
+        ("p_participants", "jsonb"),
+        ("p_benchmark_ref", "text"),
+        ("p_evaluation_date", "text"),
+        ("p_icp_set_date", "date"),
+        ("p_scorer_image_digest", "text"),
+        ("p_scorer_image_reference", "text"),
+        ("p_benchmark_commitment_doc", "jsonb"),
     ),
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
@@ -599,6 +613,23 @@ class ArenaStore:
             raise ArenaStoreError("validator scoring authority schema mismatch")
         return result
 
+    def benchmark_disclosure_schema(self) -> Dict[str, Any]:
+        """Require the independently deployable Day 2 disclosure capability."""
+
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_benchmark_disclosure_schema_v1", {}
+            ),
+            "benchmark_disclosure_schema",
+        )
+        if (
+            result.get("schema_version") != BENCHMARK_DISCLOSURE_SCHEMA_VERSION
+            or result.get("version") != 210
+            or result.get("policy") != "commit_reveal_day2_v1"
+        ):
+            raise ArenaStoreError("benchmark disclosure schema mismatch")
+        return result
+
     # -- accepted weight state ------------------------------------------
 
     def get_weight_state(self, network: str, netuid: int, epoch: int) -> Optional[Dict[str, Any]]:
@@ -696,6 +727,39 @@ class ArenaStore:
                 },
             ),
             "commit_round_v2",
+        )
+
+    def commit_round_v3(
+        self,
+        round_id: str,
+        *,
+        participants: Sequence[Mapping[str, Any]],
+        benchmark_ref: str,
+        evaluation_date: str,
+        icp_set_date: str,
+        scorer_image_digest: str,
+        scorer_image_reference: str,
+        benchmark_commitment_doc: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Atomically select a private benchmark and its Day 1 commitment."""
+
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_commit_round_v3",
+                {
+                    "p_round_id": round_id,
+                    "p_participants": [dict(item) for item in participants],
+                    "p_benchmark_ref": benchmark_ref,
+                    "p_evaluation_date": evaluation_date,
+                    "p_icp_set_date": icp_set_date,
+                    "p_scorer_image_digest": scorer_image_digest,
+                    "p_scorer_image_reference": scorer_image_reference,
+                    "p_benchmark_commitment_doc": dict(
+                        benchmark_commitment_doc
+                    ),
+                },
+            ),
+            "commit_round_v3",
         )
 
     def activate_reward(self, round_id: str, reward_basis: Mapping[str, Any], signing_key_doc: Mapping[str, Any]) -> Dict[str, Any]:

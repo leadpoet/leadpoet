@@ -44,6 +44,7 @@ LAB_ARENA_COMBINED_PROVIDER_BUDGET_MIGRATION = "206-lab-arena-combined-provider-
 LAB_ARENA_CODE_REVIEW_MIGRATION = "207-lab-arena-code-review.sql"
 LAB_ARENA_VALIDATOR_SCORING_AUTHORITY_MIGRATION = "208-lab-arena-validator-scoring-authority.sql"
 LAB_ARENA_UNCERTAIN_COST_ELIGIBILITY_MIGRATION = "209-lab-arena-uncertain-cost-eligibility.sql"
+LAB_ARENA_BENCHMARK_DISCLOSURE_MIGRATION = "210-lab-arena-benchmark-commit-reveal.sql"
 DEFAULT_MIGRATIONS = (
     LAB_ARENA_MIGRATION,
     LAB_ARENA_DAILY_COMPETITION_MIGRATION,
@@ -69,6 +70,7 @@ DEFAULT_MIGRATIONS = (
     LAB_ARENA_CODE_REVIEW_MIGRATION,
     LAB_ARENA_VALIDATOR_SCORING_AUTHORITY_MIGRATION,
     LAB_ARENA_UNCERTAIN_COST_ELIGIBILITY_MIGRATION,
+    LAB_ARENA_BENCHMARK_DISCLOSURE_MIGRATION,
 )
 
 _SHIM_SQL = """
@@ -115,7 +117,7 @@ def _server_bindir() -> Path | None:
     return None
 
 
-def _local_database(migrations):
+def _local_database(migrations, *, setup_sql: str):
     psycopg2 = pytest.importorskip("psycopg2")
     bindir = _server_bindir()
     if bindir is None:
@@ -148,7 +150,8 @@ def _local_database(migrations):
         connection.autocommit = True
         with connection.cursor() as cursor:
             cursor.execute(_SHIM_SQL)
-            cursor.execute(_DAILY_SOURCE_SHIM_SQL)
+            if setup_sql:
+                cursor.execute(setup_sql)
             for migration in migrations:
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
         connection.close()
@@ -163,12 +166,16 @@ def _local_database(migrations):
         shutil.rmtree(sockdir, ignore_errors=True)
 
 
-def database_with_lab_arena_migration(migrations=DEFAULT_MIGRATIONS):
+def database_with_lab_arena_migration(
+    migrations=DEFAULT_MIGRATIONS,
+    *,
+    setup_sql: str = _DAILY_SOURCE_SHIM_SQL,
+):
     """Yield ``(psycopg2, dsn)`` for a disposable database with the migration applied."""
 
     use_local = os.environ.get("LAB_ARENA_PG_LOCAL") == "1" or shutil.which("docker") is None
     if use_local:
-        yield from _local_database(migrations)
+        yield from _local_database(migrations, setup_sql=setup_sql)
         return
     # The Docker harness polls pg_isready with short fixed timeouts; on a loaded
     # host that first poll can time out before the container answers. Retry the
@@ -177,7 +184,7 @@ def database_with_lab_arena_migration(migrations=DEFAULT_MIGRATIONS):
     last_error: BaseException | None = None
     for _attempt in range(3):
         generator = _database_with_migrations(
-            migrations, setup_sql=_DAILY_SOURCE_SHIM_SQL
+            migrations, setup_sql=setup_sql
         )
         try:
             value = next(generator)

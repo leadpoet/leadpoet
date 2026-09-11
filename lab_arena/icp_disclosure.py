@@ -6,7 +6,7 @@ import math
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from lab_arena import contracts
+from lab_arena import contracts, benchmark_commitment as bc
 
 
 DISCLOSURE_POLICY = "all_20_next_day"
@@ -44,6 +44,14 @@ def disclosure_metadata(round_row: Mapping[str, Any]) -> dict | None:
     day avoids interpreting their old cutoff as an early publication time.
     """
 
+    try:
+        if bc.policy(round_row):
+            metadata = bc.round_metadata(round_row)
+            return {key: metadata[key] for key in (
+                "icp_set_date", "evaluation_date", "public_at", "disclosure_policy",
+            )} | {"planned": round_row.get("status") == "open"}
+    except bc.BenchmarkCommitmentError:
+        return None
     schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
     submission_open = _instant(schedule.get("submission_open"))
     cutoff = _instant(schedule.get("submission_cutoff"))
@@ -156,6 +164,13 @@ def baseline_disclosure(
         or round_row.get("status") == "open"
     ):
         return None
+    if metadata["disclosure_policy"] == bc.POLICY:
+        if round_row.get("status") not in ("published", "cancelled"):
+            return None
+        try:
+            bc.committed_document(round_row)
+        except bc.BenchmarkCommitmentError:
+            return None
     return {
         **metadata,
         "baseline_submission_id": next(
@@ -173,4 +188,28 @@ def baseline_disclosure(
             if round_row.get("status") == "published"
             else {}
         ),
+    }
+
+
+def public_metadata(round_row: Mapping[str, Any], now: datetime | None = None) -> dict:
+    """Public hash-only state. Never fetches or exposes private preimages."""
+    # Unknown policies must never fall back to legacy disclosure.
+    selected = bc.policy(round_row)
+    if selected is None:
+        return {}
+    metadata = bc.round_metadata(round_row)
+    current = now or datetime.now(timezone.utc)
+    state = "pending_commitment"
+    commitment_hash = committed_at = None
+    if round_row.get("benchmark_commitment_doc") is not None:
+        document = bc.committed_document(round_row)
+        commitment_hash = document["manifest_hash"]
+        committed_at = round_row["benchmark_committed_at"]
+        state = "committed"
+        if current >= bc.instant(metadata["public_at"]):
+            state = "reveal_available" if round_row.get("status") in ("published", "cancelled") else "reveal_delayed"
+    return {
+        **{key: metadata[key] for key in ("icp_set_date", "evaluation_date", "public_at", "disclosure_policy")},
+        "benchmark_state": state, "benchmark_commitment_hash": commitment_hash,
+        "benchmark_committed_at": committed_at,
     }

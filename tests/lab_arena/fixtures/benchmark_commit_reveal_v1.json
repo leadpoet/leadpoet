@@ -1,0 +1,395 @@
+{
+  "commitment": {
+    "round_id": "arena-2026-09-10",
+    "manifest": {
+      "schema_version": "leadpoet.lab_arena.benchmark_commitment.v1",
+      "network_name": "finney",
+      "netuid": 71,
+      "round_id": "arena-2026-09-10",
+      "icp_set_date": "2026-09-09",
+      "evaluation_date": "2026-09-10",
+      "public_at": "2026-09-11T06:00:00Z",
+      "disclosure_policy": "commit_reveal_day2_v1",
+      "icp_count": 20,
+      "entries": [
+        {
+          "icp_position": 0,
+          "icp_hash": "sha256:190c78f78b8e83b76a2b2ffbe367e4d65f5e57912339283cca1baba057803c29"
+        },
+        {
+          "icp_position": 1,
+          "icp_hash": "sha256:01b61a8c75fd114fd07b5d2d464c71816f42c97a5239623c3f9da7a48efb72c2"
+        },
+        {
+          "icp_position": 2,
+          "icp_hash": "sha256:faed722d3cac83cf321faa7547ca83a223741497b0069dcc0824a8b770d8d9e9"
+        },
+        {
+          "icp_position": 3,
+          "icp_hash": "sha256:0d3f9a93d49879ac1eb56a981bfdefa8f96eaea34c08bd129cb48fc7e73b334d"
+        },
+        {
+          "icp_position": 4,
+          "icp_hash": "sha256:a8c1c2e96362325af4069aa14edcb2f898a121b26cdd3c3ddab092893101d59f"
+        },
+        {
+          "icp_position": 5,
+          "icp_hash": "sha256:138d3bc603c322122b05d624fdedcd37c6d910b47fc0ecae38ea63847c36797b"
+        },
+        {
+          "icp_position": 6,
+          "icp_hash": "sha256:1d3572ffe5446468e4760b9a53aeb480ae36781a8e3acc13cf0c1c5b9f672fc7"
+        },
+        {
+          "icp_position": 7,
+          "icp_hash": "sha256:dd5ec3154135cf7f6d7b21af419749e82bfcabfc30f4f8fcfd419f3ef82c9708"
+        },
+        {
+          "icp_position": 8,
+          "icp_hash": "sha256:081c224f60b85be2469aca824601dfd4cc1ef5f73a2cf7158e02c05e979cf24f"
+        },
+        {
+          "icp_position": 9,
+          "icp_hash": "sha256:43e9084c0e2374490183d9ef8cd232d7e779c78c70901ccc4c5c2b32e5d9638d"
+        },
+        {
+          "icp_position": 10,
+          "icp_hash": "sha256:90162b0cb738a05bdf74a4c5e802b1a82da0211b9fc576fbaa33f78b0d36a568"
+        },
+        {
+          "icp_position": 11,
+          "icp_hash": "sha256:f256fcb8699962b1f2b07a0a4355c922eed2b3759217f09fd22baa4a60ac4946"
+        },
+        {
+          "icp_position": 12,
+          "icp_hash": "sha256:c4e67fb8f9c75bb8b0fd07d41b72c92616456c492b1372f0efcef4ee581fe207"
+        },
+        {
+          "icp_position": 13,
+          "icp_hash": "sha256:7fb35b1a55c2fdd9e66cd16a1b0d55faa92160d4ff4bfabb32b8f87e32108b9b"
+        },
+        {
+          "icp_position": 14,
+          "icp_hash": "sha256:4a442b62699e7064704bd45090a72d7b6bad9041f42b67febb806741fc2869f5"
+        },
+        {
+          "icp_position": 15,
+          "icp_hash": "sha256:ab8b9d0a5e1ee2cba3c63ac3f8ed1ac05d75d794f228a2d1b8010270c9300f00"
+        },
+        {
+          "icp_position": 16,
+          "icp_hash": "sha256:bd5072ec6caee6a561b2dfa18d7af77d4b901fd7e7c70df7062e9549bdd371f6"
+        },
+        {
+          "icp_position": 17,
+          "icp_hash": "sha256:aee35ca51e0a69286ab75d17b52b19c117a065f3826723bd05d792ae5f8906bf"
+        },
+        {
+          "icp_position": 18,
+          "icp_hash": "sha256:0bb4c067ffd986d9b3d8cb9bbd6c1d061d7712f59a6fc2b4c78d10fcb3f3fb9e"
+        },
+        {
+          "icp_position": 19,
+          "icp_hash": "sha256:e3faddb59c1147258d135493cc1bfbcf38bdfa8c6aadf8d56f8a2a912f861f1f"
+        }
+      ]
+    },
+    "manifest_hash": "sha256:f3f41eba8a7fe9cd66cb6c152029548228ceecaf0d6ddae68ccb6d6418ee27e4",
+    "canonical_manifest": "{\"disclosure_policy\":\"commit_reveal_day2_v1\",\"entries\":[{\"icp_hash\":\"sha256:190c78f78b8e83b76a2b2ffbe367e4d65f5e57912339283cca1baba057803c29\",\"icp_position\":0},{\"icp_hash\":\"sha256:01b61a8c75fd114fd07b5d2d464c71816f42c97a5239623c3f9da7a48efb72c2\",\"icp_position\":1},{\"icp_hash\":\"sha256:faed722d3cac83cf321faa7547ca83a223741497b0069dcc0824a8b770d8d9e9\",\"icp_position\":2},{\"icp_hash\":\"sha256:0d3f9a93d49879ac1eb56a981bfdefa8f96eaea34c08bd129cb48fc7e73b334d\",\"icp_position\":3},{\"icp_hash\":\"sha256:a8c1c2e96362325af4069aa14edcb2f898a121b26cdd3c3ddab092893101d59f\",\"icp_position\":4},{\"icp_hash\":\"sha256:138d3bc603c322122b05d624fdedcd37c6d910b47fc0ecae38ea63847c36797b\",\"icp_position\":5},{\"icp_hash\":\"sha256:1d3572ffe5446468e4760b9a53aeb480ae36781a8e3acc13cf0c1c5b9f672fc7\",\"icp_position\":6},{\"icp_hash\":\"sha256:dd5ec3154135cf7f6d7b21af419749e82bfcabfc30f4f8fcfd419f3ef82c9708\",\"icp_position\":7},{\"icp_hash\":\"sha256:081c224f60b85be2469aca824601dfd4cc1ef5f73a2cf7158e02c05e979cf24f\",\"icp_position\":8},{\"icp_hash\":\"sha256:43e9084c0e2374490183d9ef8cd232d7e779c78c70901ccc4c5c2b32e5d9638d\",\"icp_position\":9},{\"icp_hash\":\"sha256:90162b0cb738a05bdf74a4c5e802b1a82da0211b9fc576fbaa33f78b0d36a568\",\"icp_position\":10},{\"icp_hash\":\"sha256:f256fcb8699962b1f2b07a0a4355c922eed2b3759217f09fd22baa4a60ac4946\",\"icp_position\":11},{\"icp_hash\":\"sha256:c4e67fb8f9c75bb8b0fd07d41b72c92616456c492b1372f0efcef4ee581fe207\",\"icp_position\":12},{\"icp_hash\":\"sha256:7fb35b1a55c2fdd9e66cd16a1b0d55faa92160d4ff4bfabb32b8f87e32108b9b\",\"icp_position\":13},{\"icp_hash\":\"sha256:4a442b62699e7064704bd45090a72d7b6bad9041f42b67febb806741fc2869f5\",\"icp_position\":14},{\"icp_hash\":\"sha256:ab8b9d0a5e1ee2cba3c63ac3f8ed1ac05d75d794f228a2d1b8010270c9300f00\",\"icp_position\":15},{\"icp_hash\":\"sha256:bd5072ec6caee6a561b2dfa18d7af77d4b901fd7e7c70df7062e9549bdd371f6\",\"icp_position\":16},{\"icp_hash\":\"sha256:aee35ca51e0a69286ab75d17b52b19c117a065f3826723bd05d792ae5f8906bf\",\"icp_position\":17},{\"icp_hash\":\"sha256:0bb4c067ffd986d9b3d8cb9bbd6c1d061d7712f59a6fc2b4c78d10fcb3f3fb9e\",\"icp_position\":18},{\"icp_hash\":\"sha256:e3faddb59c1147258d135493cc1bfbcf38bdfa8c6aadf8d56f8a2a912f861f1f\",\"icp_position\":19}],\"evaluation_date\":\"2026-09-10\",\"icp_count\":20,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"public_at\":\"2026-09-11T06:00:00Z\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_commitment.v1\"}",
+    "committed_at": "2026-09-10T06:00:00Z"
+  },
+  "reveal": {
+    "round_id": "arena-2026-09-10",
+    "icps": [
+      {
+        "icp_id": "icp-0",
+        "prompt": "private ICP 0: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 0,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-1",
+        "prompt": "private ICP 1: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 1,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-2",
+        "prompt": "private ICP 2: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 2,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-3",
+        "prompt": "private ICP 3: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 3,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-4",
+        "prompt": "private ICP 4: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 4,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-5",
+        "prompt": "private ICP 5: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 5,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-6",
+        "prompt": "private ICP 6: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 6,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-7",
+        "prompt": "private ICP 7: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 7,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-8",
+        "prompt": "private ICP 8: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 8,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-9",
+        "prompt": "private ICP 9: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 9,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-10",
+        "prompt": "private ICP 10: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 10,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-11",
+        "prompt": "private ICP 11: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 11,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-12",
+        "prompt": "private ICP 12: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 12,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-13",
+        "prompt": "private ICP 13: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 13,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-14",
+        "prompt": "private ICP 14: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 14,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-15",
+        "prompt": "private ICP 15: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 15,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-16",
+        "prompt": "private ICP 16: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 16,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-17",
+        "prompt": "private ICP 17: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 17,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-18",
+        "prompt": "private ICP 18: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 18,
+        "baseline_score": null
+      },
+      {
+        "icp_id": "icp-19",
+        "prompt": "private ICP 19: café 日本",
+        "tiny": 1e-07,
+        "weight": 1.0,
+        "icp_position": 19,
+        "baseline_score": null
+      }
+    ],
+    "icp_set_date": "2026-09-09",
+    "public_at": "2026-09-11T06:00:00Z",
+    "public_icp_count": 20,
+    "private_icp_count": 0,
+    "disclosure_policy": "commit_reveal_day2_v1",
+    "commitment": {
+      "round_id": "arena-2026-09-10",
+      "manifest": {
+        "schema_version": "leadpoet.lab_arena.benchmark_commitment.v1",
+        "network_name": "finney",
+        "netuid": 71,
+        "round_id": "arena-2026-09-10",
+        "icp_set_date": "2026-09-09",
+        "evaluation_date": "2026-09-10",
+        "public_at": "2026-09-11T06:00:00Z",
+        "disclosure_policy": "commit_reveal_day2_v1",
+        "icp_count": 20,
+        "entries": [
+          {
+            "icp_position": 0,
+            "icp_hash": "sha256:190c78f78b8e83b76a2b2ffbe367e4d65f5e57912339283cca1baba057803c29"
+          },
+          {
+            "icp_position": 1,
+            "icp_hash": "sha256:01b61a8c75fd114fd07b5d2d464c71816f42c97a5239623c3f9da7a48efb72c2"
+          },
+          {
+            "icp_position": 2,
+            "icp_hash": "sha256:faed722d3cac83cf321faa7547ca83a223741497b0069dcc0824a8b770d8d9e9"
+          },
+          {
+            "icp_position": 3,
+            "icp_hash": "sha256:0d3f9a93d49879ac1eb56a981bfdefa8f96eaea34c08bd129cb48fc7e73b334d"
+          },
+          {
+            "icp_position": 4,
+            "icp_hash": "sha256:a8c1c2e96362325af4069aa14edcb2f898a121b26cdd3c3ddab092893101d59f"
+          },
+          {
+            "icp_position": 5,
+            "icp_hash": "sha256:138d3bc603c322122b05d624fdedcd37c6d910b47fc0ecae38ea63847c36797b"
+          },
+          {
+            "icp_position": 6,
+            "icp_hash": "sha256:1d3572ffe5446468e4760b9a53aeb480ae36781a8e3acc13cf0c1c5b9f672fc7"
+          },
+          {
+            "icp_position": 7,
+            "icp_hash": "sha256:dd5ec3154135cf7f6d7b21af419749e82bfcabfc30f4f8fcfd419f3ef82c9708"
+          },
+          {
+            "icp_position": 8,
+            "icp_hash": "sha256:081c224f60b85be2469aca824601dfd4cc1ef5f73a2cf7158e02c05e979cf24f"
+          },
+          {
+            "icp_position": 9,
+            "icp_hash": "sha256:43e9084c0e2374490183d9ef8cd232d7e779c78c70901ccc4c5c2b32e5d9638d"
+          },
+          {
+            "icp_position": 10,
+            "icp_hash": "sha256:90162b0cb738a05bdf74a4c5e802b1a82da0211b9fc576fbaa33f78b0d36a568"
+          },
+          {
+            "icp_position": 11,
+            "icp_hash": "sha256:f256fcb8699962b1f2b07a0a4355c922eed2b3759217f09fd22baa4a60ac4946"
+          },
+          {
+            "icp_position": 12,
+            "icp_hash": "sha256:c4e67fb8f9c75bb8b0fd07d41b72c92616456c492b1372f0efcef4ee581fe207"
+          },
+          {
+            "icp_position": 13,
+            "icp_hash": "sha256:7fb35b1a55c2fdd9e66cd16a1b0d55faa92160d4ff4bfabb32b8f87e32108b9b"
+          },
+          {
+            "icp_position": 14,
+            "icp_hash": "sha256:4a442b62699e7064704bd45090a72d7b6bad9041f42b67febb806741fc2869f5"
+          },
+          {
+            "icp_position": 15,
+            "icp_hash": "sha256:ab8b9d0a5e1ee2cba3c63ac3f8ed1ac05d75d794f228a2d1b8010270c9300f00"
+          },
+          {
+            "icp_position": 16,
+            "icp_hash": "sha256:bd5072ec6caee6a561b2dfa18d7af77d4b901fd7e7c70df7062e9549bdd371f6"
+          },
+          {
+            "icp_position": 17,
+            "icp_hash": "sha256:aee35ca51e0a69286ab75d17b52b19c117a065f3826723bd05d792ae5f8906bf"
+          },
+          {
+            "icp_position": 18,
+            "icp_hash": "sha256:0bb4c067ffd986d9b3d8cb9bbd6c1d061d7712f59a6fc2b4c78d10fcb3f3fb9e"
+          },
+          {
+            "icp_position": 19,
+            "icp_hash": "sha256:e3faddb59c1147258d135493cc1bfbcf38bdfa8c6aadf8d56f8a2a912f861f1f"
+          }
+        ]
+      },
+      "manifest_hash": "sha256:f3f41eba8a7fe9cd66cb6c152029548228ceecaf0d6ddae68ccb6d6418ee27e4",
+      "canonical_manifest": "{\"disclosure_policy\":\"commit_reveal_day2_v1\",\"entries\":[{\"icp_hash\":\"sha256:190c78f78b8e83b76a2b2ffbe367e4d65f5e57912339283cca1baba057803c29\",\"icp_position\":0},{\"icp_hash\":\"sha256:01b61a8c75fd114fd07b5d2d464c71816f42c97a5239623c3f9da7a48efb72c2\",\"icp_position\":1},{\"icp_hash\":\"sha256:faed722d3cac83cf321faa7547ca83a223741497b0069dcc0824a8b770d8d9e9\",\"icp_position\":2},{\"icp_hash\":\"sha256:0d3f9a93d49879ac1eb56a981bfdefa8f96eaea34c08bd129cb48fc7e73b334d\",\"icp_position\":3},{\"icp_hash\":\"sha256:a8c1c2e96362325af4069aa14edcb2f898a121b26cdd3c3ddab092893101d59f\",\"icp_position\":4},{\"icp_hash\":\"sha256:138d3bc603c322122b05d624fdedcd37c6d910b47fc0ecae38ea63847c36797b\",\"icp_position\":5},{\"icp_hash\":\"sha256:1d3572ffe5446468e4760b9a53aeb480ae36781a8e3acc13cf0c1c5b9f672fc7\",\"icp_position\":6},{\"icp_hash\":\"sha256:dd5ec3154135cf7f6d7b21af419749e82bfcabfc30f4f8fcfd419f3ef82c9708\",\"icp_position\":7},{\"icp_hash\":\"sha256:081c224f60b85be2469aca824601dfd4cc1ef5f73a2cf7158e02c05e979cf24f\",\"icp_position\":8},{\"icp_hash\":\"sha256:43e9084c0e2374490183d9ef8cd232d7e779c78c70901ccc4c5c2b32e5d9638d\",\"icp_position\":9},{\"icp_hash\":\"sha256:90162b0cb738a05bdf74a4c5e802b1a82da0211b9fc576fbaa33f78b0d36a568\",\"icp_position\":10},{\"icp_hash\":\"sha256:f256fcb8699962b1f2b07a0a4355c922eed2b3759217f09fd22baa4a60ac4946\",\"icp_position\":11},{\"icp_hash\":\"sha256:c4e67fb8f9c75bb8b0fd07d41b72c92616456c492b1372f0efcef4ee581fe207\",\"icp_position\":12},{\"icp_hash\":\"sha256:7fb35b1a55c2fdd9e66cd16a1b0d55faa92160d4ff4bfabb32b8f87e32108b9b\",\"icp_position\":13},{\"icp_hash\":\"sha256:4a442b62699e7064704bd45090a72d7b6bad9041f42b67febb806741fc2869f5\",\"icp_position\":14},{\"icp_hash\":\"sha256:ab8b9d0a5e1ee2cba3c63ac3f8ed1ac05d75d794f228a2d1b8010270c9300f00\",\"icp_position\":15},{\"icp_hash\":\"sha256:bd5072ec6caee6a561b2dfa18d7af77d4b901fd7e7c70df7062e9549bdd371f6\",\"icp_position\":16},{\"icp_hash\":\"sha256:aee35ca51e0a69286ab75d17b52b19c117a065f3826723bd05d792ae5f8906bf\",\"icp_position\":17},{\"icp_hash\":\"sha256:0bb4c067ffd986d9b3d8cb9bbd6c1d061d7712f59a6fc2b4c78d10fcb3f3fb9e\",\"icp_position\":18},{\"icp_hash\":\"sha256:e3faddb59c1147258d135493cc1bfbcf38bdfa8c6aadf8d56f8a2a912f861f1f\",\"icp_position\":19}],\"evaluation_date\":\"2026-09-10\",\"icp_count\":20,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"public_at\":\"2026-09-11T06:00:00Z\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_commitment.v1\"}",
+      "committed_at": "2026-09-10T06:00:00Z"
+    },
+    "verification": {
+      "manifest_hash": "sha256:f3f41eba8a7fe9cd66cb6c152029548228ceecaf0d6ddae68ccb6d6418ee27e4",
+      "canonical_preimages": [
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-0\",\"prompt\":\"private ICP 0: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":0,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"840258abca1ac257ec2cf8b0e62e2cd2a99b6af90a92a705edb589ee20673e51\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-1\",\"prompt\":\"private ICP 1: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":1,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"992125301380bb0de877a7d17eadbd7014322570694009f0459c6e7ad6d9eab9\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-2\",\"prompt\":\"private ICP 2: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":2,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"7425a0f9660c200f6815450034510c698da9a1927e04877cdbe5cd1f510dc5c0\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-3\",\"prompt\":\"private ICP 3: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":3,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"dd11081c9dfed6966cc2b72dbe559904eb495ed866626df40035e2abba27fab8\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-4\",\"prompt\":\"private ICP 4: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":4,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"bc281ff726c97be9690b8bc2ccd9c025387c526262478afc06b29ca2e3db5f5a\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-5\",\"prompt\":\"private ICP 5: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":5,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"ba2bc4607ce1bbaa1c67af3f54c08417b96afd256709f16372fc7dc0e5716eed\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-6\",\"prompt\":\"private ICP 6: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":6,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"141abe7f130f93071ef01acc810f8bb9bc6c8e4684364b0a29aad6c46a86c714\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-7\",\"prompt\":\"private ICP 7: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":7,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"311e0835ad6a1a23fc391ce36ea9c9d69845c28643b03aa62c9a7eeb26f78abe\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-8\",\"prompt\":\"private ICP 8: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":8,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"3f91bac118830176f6f33277cbbaf366a8c6c8fb6a8761e8065b2821453ca596\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-9\",\"prompt\":\"private ICP 9: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":9,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"8e47aabb068ab47c4898e27e52f92a6bcad5d72e90f86f20ba5586b3a16af771\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-10\",\"prompt\":\"private ICP 10: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":10,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"f1e096003761cd1041f6bb25858728b6a1ede0d92dfea2ad295c5748b9def910\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-11\",\"prompt\":\"private ICP 11: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":11,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"b6f4500b401ff6951481fa8c773461cb058fe85b25e18d0c2d2459426328e4c7\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-12\",\"prompt\":\"private ICP 12: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":12,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"5f065c2ded15700295cf39625072ec8454b7fc9ecb4d6902ab0bc346662aabd3\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-13\",\"prompt\":\"private ICP 13: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":13,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"2eb2c6a964ddd8e5a97bc901ece2ff10bef80af6f0a8950e05caa2dba33be6c3\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-14\",\"prompt\":\"private ICP 14: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":14,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"561e87e89e55a99d13142bf44914c29b8f18778c3bcd5cead04aa6c31ed6423a\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-15\",\"prompt\":\"private ICP 15: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":15,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"7e5b44d3de812ed3346f8fff326a6afce2baa2882327cd4f077c64dc853dbc31\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-16\",\"prompt\":\"private ICP 16: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":16,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"d27da602d8cec0038c826fae1a09214a0ef9020eb0eb8fdec7355628b7fb8e3c\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-17\",\"prompt\":\"private ICP 17: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":17,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"c04ad88ea6e8852ac1ef78274a2833e207372cb2fc58b8b414e5d9b3ee6a08fa\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-18\",\"prompt\":\"private ICP 18: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":18,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"3bab2a06521cd21a4f6294c2d9f22171dc18a2fb9fabf02b243766b98abc341c\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}",
+        "{\"evaluation_date\":\"2026-09-10\",\"icp\":{\"icp_id\":\"icp-19\",\"prompt\":\"private ICP 19: café 日本\",\"tiny\":1e-07,\"weight\":1.0},\"icp_position\":19,\"icp_set_date\":\"2026-09-09\",\"netuid\":71,\"network_name\":\"finney\",\"nonce\":\"8172659c33cac5e068258c5bb23c4e294b860719df5af2520d6f4b863b9542f5\",\"round_id\":\"arena-2026-09-10\",\"schema_version\":\"leadpoet.lab_arena.benchmark_leaf.v1\"}"
+      ]
+    }
+  }
+}

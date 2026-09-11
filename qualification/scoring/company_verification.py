@@ -455,6 +455,7 @@ def _verified_organization_legal_name_aliases(
     observed_domain: str,
     observed_name: str,
     observed_linkedin: str,
+    company_quality: bool = False,
 ) -> list[str]:
     """Return legal names explicitly bound to the verified homepage entity."""
 
@@ -493,6 +494,7 @@ def _verified_organization_legal_name_aliases(
             observed_website=organization_url,
             observed_linkedin=observed_linkedin,
             evidence_source="company_homepage",
+            company_quality=company_quality,
         )
         if brand_receipt["decision"] != "match":
             continue
@@ -532,6 +534,7 @@ async def verify_company_exists(
     *,
     company_linkedin: str = "",
     require_https_transport: bool = False,
+    company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
@@ -551,6 +554,7 @@ async def verify_company_exists(
         observed_website="",
         observed_linkedin="",
         evidence_source="company_homepage",
+        company_quality=company_quality,
     )
     if submitted_identity["decision"] == "mismatch":
         return _identity_result(
@@ -688,6 +692,7 @@ async def verify_company_exists(
             observed_website=observed_url,
             observed_linkedin=observed_linkedin,
             evidence_source="company_homepage",
+            company_quality=company_quality,
         )
         for observed_name in observed_names
         for observed_linkedin in observed_linkedins
@@ -707,6 +712,7 @@ async def verify_company_exists(
             observed_domain=matched["observed_domain"],
             observed_name=matched["observed_name"],
             observed_linkedin=matched_linkedin,
+            company_quality=company_quality,
         )
         if legal_name_aliases:
             matched_receipt["verified_legal_name_aliases"] = legal_name_aliases

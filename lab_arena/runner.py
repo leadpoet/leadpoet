@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from lab_arena import integrity
+from lab_arena import integrity, contact_policy, quality_policy
 from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
@@ -1445,6 +1445,7 @@ class AssignmentExecutor:
                     scored_run_id=str(lease["scored_run_id"]), icp=icp, companies=list((lease.get("scored_output") or {}).get("companies") or []),
                     policy=lease["scorer_policy"], evaluation_date=evaluation_date,
                     contact_source_evidence=lease.get("contact_source_evidence"),
+                    company_judgment_cache=lease.get("company_judgment_cache"),
                 )
                 extra_environment = {shim.TRUSTED_SCORER_ENV: "1"}
             else:
@@ -1459,6 +1460,19 @@ class AssignmentExecutor:
                     "provider_operations": sorted(operations.OPERATIONS),
                 }
                 extra_environment = {}
+                if quality_policy.enabled(lease):
+                    input_document["company_quality_policy"] = quality_policy.POLICY
+                    input_document["output_schema_version"] = contact_policy.output_schema(lease)
+                    input_document["company_requirements"] = {
+                        "company_linkedin": "matching LinkedIn company page required",
+                        "state": "headquarters state required for United States companies; full name or abbreviation, including DC",
+                    }
+                    # The public harness receives only document['icp']; carry
+                    # the announced requirements through that actual boundary.
+                    input_document["icp"].update({
+                        "company_quality_policy": quality_policy.POLICY,
+                        "company_requirements": dict(input_document["company_requirements"]),
+                    })
                 if lease.get("scrapingdog_configured") is True:
                     extra_environment["SCRAPINGDOG_API_KEY"] = operations.SCRAPINGDOG_RUNTIME_HANDLE
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
@@ -1568,7 +1582,7 @@ class AssignmentExecutor:
                     try:
                         output_document = output_document_from_bytes(
                             result.output_bytes,
-                            expected_schema_version=(contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION if lease.get("contact_policy") == "contacts_v1" else contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION),
+                            expected_schema_version=contact_policy.output_schema(lease),
                             require_intent_dates=(
                                 lease.get("integrity_policy") != integrity.POLICY
                             ),

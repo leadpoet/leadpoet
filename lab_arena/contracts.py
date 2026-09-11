@@ -693,6 +693,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("rewards_enabled", "bool"),
     F("integrity_policy", "str", required=False, choices=("arena_integrity_v1",)),
     F("contact_policy", "str", required=False, choices=("contacts_v1",)),
+    F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
     # Optional only for rounds created before delayed benchmark disclosure.
     F(
         "benchmark_disclosure_policy",
@@ -738,9 +739,14 @@ ROUND_CONFIGURATION_FIELDS = (
 
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
-    from lab_arena import contact_policy, integrity
+    from lab_arena import contact_policy, integrity, quality_policy
     is_integrity = integrity.enabled(config)
     has_contacts = contact_policy.enabled(config)
+    has_quality = quality_policy.enabled(config)
+    if has_quality and not is_integrity:
+        raise ArenaContractError("company quality policy requires integrity policy")
+    if has_quality != quality_policy.scorer_enabled(config["scorer_policy"]):
+        raise ArenaContractError("company quality policy requires matching scorer policy")
     if has_contacts and not is_integrity:
         raise ArenaContractError("contact policy requires integrity policy")
     expected_adapter = contact_policy.SCORING_ADAPTER if has_contacts else integrity.SCORING_ADAPTER
@@ -940,6 +946,7 @@ def validate_submission_finalize_body(body: Any) -> Dict[str, Any]:
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
     F("scoring_adapter_version", "str", minimum=1, maximum=64),
+    F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
     F("fp_penalty_points", "float", minimum=0, maximum=10),
     F("fp_unverified_primary_penalty_points", "float", minimum=0, maximum=10),
     F("fp_penalty_icp_floor", "float", minimum=-100, maximum=0),
@@ -955,6 +962,10 @@ SCORER_POLICY_FIELDS = (
 
 def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     policy = validate_document(document, SCORER_POLICY_FIELDS)
+    if policy.get("company_quality_policy") and policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
+        raise ArenaContractError("company quality requires integrity scoring")
+    if policy.get("company_quality_policy") and policy["max_scored_companies"] != 0:
+        raise ArenaContractError("company quality requires scoring all assigned company slots")
     for key, value in policy["env_bindings"].items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise ArenaContractError("env_bindings must map strings to strings")

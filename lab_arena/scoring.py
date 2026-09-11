@@ -69,6 +69,7 @@ def build_scorer_policy(
     judge_models: Mapping[str, str] = DEFAULT_JUDGE_MODELS,
     provider_profile: str = "lab_arena",
     scoring_adapter_version: str = SCORING_ADAPTER_VERSION_V1,
+    company_quality: bool = False,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
@@ -76,6 +77,7 @@ def build_scorer_policy(
     return contracts.validate_scorer_policy({
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
+        **({"company_quality_policy": "company_quality_v1"} if company_quality else {}),
         "fp_penalty_points": float(bindings["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"]),
         "fp_unverified_primary_penalty_points": float(bindings["RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY"]),
         "fp_penalty_icp_floor": 0.0,
@@ -210,11 +212,12 @@ def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[M
     validated = contracts.validate_scorer_policy(policy)
     adapter = validated["scoring_adapter_version"]
     _lab_adapter_version(adapter)
-    from lab_arena import contact_policy
+    from lab_arena import contact_policy, quality_policy
     scorer = CompetitionCompanyScorer(
         integrity_policy=contact_policy.integrity_adapter(adapter),
         contacts_required=contact_policy.scorer_enabled(validated),
         contact_source_evidence=contact_source_evidence,
+        company_quality=quality_policy.scorer_enabled(validated),
     )
 
     def score(companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any], is_reference_model: bool) -> Any:
@@ -222,6 +225,7 @@ def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[M
 
     score.integrity_policy = contact_policy.integrity_adapter(adapter)
     score.contacts_required = contact_policy.scorer_enabled(validated)
+    score.company_quality = quality_policy.scorer_enabled(validated)
     return score
 
 
@@ -374,6 +378,53 @@ def score_work_item(
     raise ScoringError("run %s could not be scored: %s: %s" % (item.get("scored_run_id"), type(last_error).__name__ if last_error else "unknown", str(last_error or "")[:240]))
 
 
+def score_quality_work_item(
+    item: Mapping[str, Any], *, icp: Mapping[str, Any],
+    companies: Sequence[Mapping[str, Any]], scorer: Scorer,
+    cache_context: Mapping[str, Any], max_scored_companies: int = 0,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Judge only missing company inputs, then apply this list's duplicate rules."""
+    from lab_arena import company_judgments
+    from qualification.scoring.competition import (
+        apply_company_judgment_context, bucket_skipped_judgment, raw_company_judgment,
+    )
+
+    if not getattr(scorer, "company_quality", False):
+        raise ScoringError("company quality scorer is required")
+    lease = company_judgments.validate_lease_context(cache_context)
+    sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
+    refs = sorted(lease["hits"] + lease["misses"], key=lambda ref: ref["company_index"])
+    if len(refs) != len(sliced):
+        raise ScoringError("company cache lease does not cover this output")
+    raw_by_key = {
+        hit["cache_key"]: hit["evidence_doc"]["raw_judgment"]
+        for hit in lease["hits"]
+    }
+    new_judgments = []
+    for miss in sorted(lease["misses"], key=lambda ref: ref["company_index"]):
+        key = miss["cache_key"]
+        if key in raw_by_key:
+            continue
+        company = sliced[miss["company_index"]]
+        rows = score_work_item(item, icp=icp, companies=[company], scorer=scorer)
+        raw = raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment()
+        raw_by_key[key] = raw
+        new_judgments.append({**miss, "raw_judgment": raw})
+    new_judgments = company_judgments.validate_new_company_judgments(new_judgments, lease_context=lease)
+    full = apply_company_judgment_context(
+        sliced, [raw_by_key[ref["cache_key"]] for ref in refs],
+        contacts_required=bool(getattr(scorer, "contacts_required", False)),
+    )
+    scored, _skipped = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
+    full = [row for row in full if row["company_index"] in scored]
+    validate_breakdowns_for_item(
+        full, icp=icp, companies=sliced, max_scored_companies=max_scored_companies,
+        integrity_policy=True, company_quality=True,
+        contacts_required=bool(getattr(scorer, "contacts_required", False)),
+    )
+    return full, new_judgments
+
+
 # ---------------------------------------------------------------------------
 # Bundles
 # ---------------------------------------------------------------------------
@@ -417,7 +468,8 @@ def build_stage_scores(
     scores: Dict[str, float] = {}
     denominator = len(expected_positions)
     for submission_id, values in by_submission.items():
-        scores[submission_id] = verify.stage_score(values, denominator)
+        from lab_arena import quality_policy
+        scores[submission_id] = verify.stage_score(values, denominator, company_quality=quality_policy.scorer_enabled(validated_policy))
     return {
         **({"integrity_policy": "arena_integrity_v1"} if validated_policy["scoring_adapter_version"] in ("qualification_integrity_v2", "qualification_contacts_v3") else {}),
         "stage": stage,
@@ -482,10 +534,10 @@ def _require_run_id(value: Any) -> str:
     return value
 
 
-def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], evaluation_date: str, contact_source_evidence: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], evaluation_date: str, contact_source_evidence: Optional[Mapping[str, Any]] = None, company_judgment_cache: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The judge sandbox's input: one ICP, one output, and the scorer policy."""
 
-    return {
+    document = {
         "schema_version": SCORING_INPUT_SCHEMA_VERSION,
         "scored_run_id": _require_run_id(scored_run_id),
         "icp": dict(icp),
@@ -495,10 +547,19 @@ def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies
         **({"contact_source_evidence": dict(contact_source_evidence or {})}
            if policy.get("scoring_adapter_version") == "qualification_contacts_v3" else {}),
     }
+    if company_judgment_cache is not None:
+        from lab_arena import company_judgments, quality_policy
+        if not quality_policy.scorer_enabled(policy):
+            raise ScoringError("company judgments require company quality policy")
+        document["company_judgment_cache"] = company_judgments.validate_lease_context(company_judgment_cache)
+    return document
 
 
-def build_scoring_output(scored_run_id: str, breakdowns: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": _require_run_id(scored_run_id), "breakdowns": [dict(item) for item in breakdowns]}
+def build_scoring_output(scored_run_id: str, breakdowns: Sequence[Mapping[str, Any]], *, company_judgments: Optional[Sequence[Mapping[str, Any]]] = None) -> Dict[str, Any]:
+    result = {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": _require_run_id(scored_run_id), "breakdowns": [dict(item) for item in breakdowns]}
+    if company_judgments is not None:
+        result["company_judgments"] = [dict(item) for item in company_judgments]
+    return result
 
 
 MAX_FAILURE_DETAIL_CHARS = 300
@@ -547,7 +608,7 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
         if detail:
             failure_document["detail"] = detail
         return failure_document
-    if keys != {"schema_version", "scored_run_id", "breakdowns"} or not isinstance(document["breakdowns"], list):
+    if keys - {"company_judgments"} != {"schema_version", "scored_run_id", "breakdowns"} or not isinstance(document["breakdowns"], list):
         raise ScoringError("scoring output document is invalid")
     breakdowns = []
     for item in document["breakdowns"]:
@@ -557,10 +618,20 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
         if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0.0 <= float(score) <= 100.0:
             raise ScoringError("scoring breakdown carries no valid final score")
         breakdowns.append(dict(item))
-    return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": scored_run_id, "breakdowns": breakdowns}
+    result = {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": scored_run_id, "breakdowns": breakdowns}
+    if "company_judgments" in document:
+        from lab_arena.company_judgments import raw_judgment_is_cacheable
+        judgments = document["company_judgments"]
+        if not isinstance(judgments, list) or len(judgments) > 5:
+            raise ScoringError("company judgments must be a bounded list")
+        for row in judgments:
+            if not isinstance(row, Mapping) or set(row) != {"company_index", "cache_key", "company_input_hash", "authority_slot", "raw_judgment"} or not raw_judgment_is_cacheable(row["raw_judgment"]):
+                raise ScoringError("company judgment is invalid")
+        result["company_judgments"] = [dict(row) for row in judgments]
+    return result
 
 
-def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0, integrity_policy: bool = False, contacts_required: bool = False) -> List[Dict[str, Any]]:
+def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0, integrity_policy: bool = False, contacts_required: bool = False, company_quality: bool = False) -> List[Dict[str, Any]]:
     """A breakdown list is acceptable for a work item only when it covers exactly the scored companies."""
 
     scored, _skipped = verify.bucket_skip(icp, companies)
@@ -593,4 +664,14 @@ def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp
                     raise ScoringError(str(exc)) from exc
             if qualified:
                 seen.update(aliases)
+        if company_quality:
+            from qualification.scoring.competition import apply_company_judgment_context, raw_company_judgment, bucket_skipped_judgment
+            # Recompute identity and qualification from evidence, not the
+            # validator's list-level flags. Positive malformed claims fail.
+            by_index = {row["company_index"]: raw_company_judgment(row) for row in breakdowns}
+            intrinsic = [by_index.get(index, bucket_skipped_judgment()) for index in range(len(companies))]
+            expected = apply_company_judgment_context(companies, intrinsic, contacts_required=contacts_required)
+            fields = ("company_index", "company_identity_key", "company_identity_alias_keys", "company_qualified", "duplicate_company", BREAKDOWN_SCORE_FIELD)
+            if any(any(row.get(field) != derived.get(field) for field in fields) for row, derived in zip(breakdowns, expected)):
+                raise ScoringError("company quality qualification differs from evidence")
     return [dict(item) for item in breakdowns]

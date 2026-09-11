@@ -41,15 +41,44 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
         environ=os.environ,
         credentials=dict(PLACEHOLDER_CREDENTIALS),
     )
-    from lab_arena import contact_policy
+    from lab_arena import contact_policy, quality_policy
     scorer = scoring.lab_scorer(policy, **({"contact_source_evidence": document.get("contact_source_evidence")} if contact_policy.scorer_enabled(policy) else {}))
     item = {"scored_run_id": scored_run_id}
     try:
         with use_evaluation_date(str(document.get("evaluation_date") or "")):
-            breakdowns = scoring.score_work_item(item, icp=icp, companies=companies, scorer=scorer, max_scored_companies=int(policy["max_scored_companies"]))
+            if quality_policy.scorer_enabled(policy):
+                cache_context = document.get("company_judgment_cache")
+                if not isinstance(cache_context, dict):
+                    raise scoring.ScoringError(
+                        "company quality cache lease is required"
+                    )
+                breakdowns, new_judgments = scoring.score_quality_work_item(
+                    item,
+                    icp=icp,
+                    companies=companies,
+                    scorer=scorer,
+                    cache_context=cache_context,
+                    max_scored_companies=int(policy["max_scored_companies"]),
+                )
+            else:
+                breakdowns = scoring.score_work_item(
+                    item,
+                    icp=icp,
+                    companies=companies,
+                    scorer=scorer,
+                    max_scored_companies=int(policy["max_scored_companies"]),
+                )
     except (scoring.ScoringError, ValueError) as exc:
         return scoring.build_scoring_failure(scored_run_id, "judge_error", detail=str(exc))
-    return scoring.build_scoring_output(scored_run_id, breakdowns)
+    return scoring.build_scoring_output(
+        scored_run_id,
+        breakdowns,
+        **(
+            {"company_judgments": new_judgments}
+            if quality_policy.scorer_enabled(policy)
+            else {}
+        ),
+    )
 
 
 def main(argv: Any = None) -> int:

@@ -38,6 +38,7 @@ CODE_REVIEW_SCHEMA_VERSION = "leadpoet.lab_arena.code_review.v1"
 VALIDATOR_SCORING_AUTHORITY_SCHEMA_VERSION = (
     "leadpoet.lab_arena.validator_scoring_authority.v1"
 )
+COMPANY_QUALITY_SCHEMA_VERSION = "leadpoet.lab_arena.company_quality_schema.v1"
 SERVICE_ROLE_NAME = "lab_arena_service"
 
 # Parameter order and PostgreSQL casts for every service-callable function.
@@ -52,6 +53,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_validator_scoring_authority_schema_v1": (),
     "lab_arena_integrity_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
+    "lab_arena_company_quality_schema_v1": (),
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_submission_costs": (("p_submission_id", "text"),),
@@ -117,10 +119,21 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_judgment_evidence", "jsonb"),
         ("p_judgment_evidence_hash", "text"),
     ),
+    "lab_arena_complete_attempt_v3": (
+        ("p_run_id", "text"),
+        ("p_lease_token_hash", "text"),
+        ("p_result", "jsonb"),
+        ("p_terminal_cause", "text"),
+        ("p_output_ref", "text"),
+        ("p_output_hash", "text"),
+        ("p_company_judgment_evidence", "jsonb"),
+        ("p_completion_request_hash", "text"),
+    ),
     "lab_arena_expire_leases": (("p_round_id", "text"),),
     "lab_arena_close_stage": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_open_scoring": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
     "lab_arena_open_scoring_v2": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
+    "lab_arena_open_scoring_v3": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
     "lab_arena_close_scoring": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_cancel_round": (("p_round_id", "text"), ("p_reason", "text")),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
@@ -136,6 +149,7 @@ TABLES = (
     "lab_arena_accepted_weight_states",
     "lab_arena_chain_outcomes",
     "lab_arena_judgment_cache",
+    "lab_arena_company_judgments",
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
 PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
@@ -622,6 +636,20 @@ class ArenaStore:
             or result.get("authority") != "gateway_subnet_validator_role"
         ):
             raise ArenaStoreError("validator scoring authority schema mismatch")
+        return result
+
+    def company_quality_schema(self) -> Dict[str, Any]:
+        """Require the per-company accepted-judgment capability."""
+
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_company_quality_schema_v1", {}),
+            "company_quality_schema",
+        )
+        if (
+            result.get("schema_version") != COMPANY_QUALITY_SCHEMA_VERSION
+            or result.get("version") != 1
+        ):
+            raise ArenaStoreError("company quality schema mismatch")
         return result
 
     # -- accepted weight state ------------------------------------------
@@ -1123,7 +1151,20 @@ class ArenaStore:
             "mark_uncertain",
         )
 
-    def complete_attempt(self, *, run_id: str, lease_token_hash: str, result: Mapping[str, Any], terminal_cause: str, output_ref: str, judgment_evidence: Optional[Mapping[str, Any]] = None, judgment_evidence_hash: str = "") -> Dict[str, Any]:
+    def complete_attempt(
+        self,
+        *,
+        run_id: str,
+        lease_token_hash: str,
+        result: Mapping[str, Any],
+        terminal_cause: str,
+        output_ref: str,
+        judgment_evidence: Optional[Mapping[str, Any]] = None,
+        judgment_evidence_hash: str = "",
+        company_judgment_evidence: Optional[Sequence[Mapping[str, Any]]] = None,
+        output_hash: str = "",
+        completion_request_hash: str = "",
+    ) -> Dict[str, Any]:
         function = "lab_arena_complete_attempt"
         params: Dict[str, Any] = {
             "p_run_id": run_id,
@@ -1132,7 +1173,18 @@ class ArenaStore:
             "p_terminal_cause": terminal_cause,
             "p_output_ref": output_ref,
         }
-        if judgment_evidence is not None:
+        if judgment_evidence is not None and company_judgment_evidence is not None:
+            raise ArenaStoreError("whole-item and company judgment evidence conflict")
+        if company_judgment_evidence is not None:
+            function = "lab_arena_complete_attempt_v3"
+            params.update({
+                "p_output_hash": str(output_hash),
+                "p_company_judgment_evidence": [
+                    dict(item) for item in company_judgment_evidence
+                ],
+                "p_completion_request_hash": str(completion_request_hash),
+            })
+        elif judgment_evidence is not None:
             function = "lab_arena_complete_attempt_v2"
             params.update({
                 "p_judgment_evidence": dict(judgment_evidence),
@@ -1149,11 +1201,29 @@ class ArenaStore:
     def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_stage", {"p_round_id": round_id, "p_stage": int(stage)}), "close_stage")
 
-    def open_scoring(self, round_id: str, stage: int, work_items: Sequence[Mapping[str, Any]], *, integrity_cache: bool = False) -> Dict[str, Any]:
+    def open_scoring(
+        self,
+        round_id: str,
+        stage: int,
+        work_items: Sequence[Mapping[str, Any]],
+        *,
+        integrity_cache: bool = False,
+        company_quality_cache: bool = False,
+    ) -> Dict[str, Any]:
         """Turn the committed scoring plan into claimable scoring assignments (one per work item)."""
 
+        if integrity_cache and company_quality_cache:
+            raise ArenaStoreError("scoring cache modes conflict")
+        function = (
+            "lab_arena_open_scoring_v3"
+            if company_quality_cache
+            else "lab_arena_open_scoring_v2"
+            if integrity_cache
+            else "lab_arena_open_scoring"
+        )
+
         return _require_mapping(
-            self._transport.rpc("lab_arena_open_scoring_v2" if integrity_cache else "lab_arena_open_scoring", {"p_round_id": round_id, "p_stage": int(stage), "p_work_items": [dict(item) for item in work_items]}),
+            self._transport.rpc(function, {"p_round_id": round_id, "p_stage": int(stage), "p_work_items": [dict(item) for item in work_items]}),
             "open_scoring",
         )
 
@@ -1166,6 +1236,45 @@ class ArenaStore:
         )
         if len(rows) > 1:
             raise ArenaStoreError("multiple accepted judgments exist for one cache key")
+        return rows[0] if rows else None
+
+    def get_company_judgments(self, cache_key: str) -> List[Dict[str, Any]]:
+        """Read immutable authority variants for one gateway-built company key."""
+
+        return self._transport.select(
+            "lab_arena_company_judgments",
+            filters={"cache_key": str(cache_key)},
+            order="authority_slot",
+            limit=100,
+            columns=(
+                "cache_key,authority_slot,scope_doc,company_input_hash,"
+                "evidence_hash,evidence_doc,source_score_run_id,"
+                "source_scored_run_id,source_runner_hotkey,created_at"
+            ),
+        )
+
+    def get_company_judgment(
+        self, cache_key: str, authority_slot: int
+    ) -> Optional[Dict[str, Any]]:
+        """Read one exact immutable company judgment authority variant."""
+
+        rows = self._transport.select(
+            "lab_arena_company_judgments",
+            filters={
+                "cache_key": str(cache_key),
+                "authority_slot": int(authority_slot),
+            },
+            limit=2,
+            columns=(
+                "cache_key,authority_slot,scope_doc,company_input_hash,"
+                "evidence_hash,evidence_doc,source_score_run_id,"
+                "source_scored_run_id,source_runner_hotkey,created_at"
+            ),
+        )
+        if len(rows) > 1:
+            raise ArenaStoreError(
+                "multiple company judgments exist for one authority slot"
+            )
         return rows[0] if rows else None
 
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:

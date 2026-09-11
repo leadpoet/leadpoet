@@ -61,6 +61,10 @@ from gateway.qualification.models import (
     candidate_company_prompt_identity,
 )
 from qualification.competition_models import public_http_url
+from qualification.company_quality import (
+    canonical_us_state as canonical_quality_us_state,
+    is_united_states,
+)
 from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
 from qualification.scoring.pre_checks import (
     check_country_match,
@@ -101,6 +105,7 @@ from qualification.scoring.arena_integrity import (
     MAX_FIT_EVIDENCE_URL_HINTS,
     source_dates_from_verdict,
     source_grounded_date_verdict,
+    verified_identity_receipt,
 )
 from qualification.scoring.competition import (
     intent_unavailability_requires_retry,
@@ -816,13 +821,17 @@ def _industry_evidence_decision(
     return COMPANY_FIT_UNAVAILABLE
 
 
-def _canonical_us_state(value: Any) -> str:
+def _canonical_us_state(
+    value: Any, *, case_insensitive_abbreviation: bool = False
+) -> str:
     if not isinstance(value, str):
         return ""
     text = value.strip()
     if not text:
         return ""
-    if len(text) == 2 and text.isupper():
+    if case_insensitive_abbreviation:
+        return canonical_quality_us_state(text)
+    elif len(text) == 2 and text.isupper():
         return str(US_STATES.get(text) or "")
     return str(US_STATES.get(text.casefold()) or "")
 
@@ -867,7 +876,13 @@ def _requested_us_states(value: Any) -> frozenset[str]:
     return named if named and not non_state_tokens else frozenset()
 
 
-def _decision_from_observed_geography(verdict: dict, icp: ICPPrompt) -> str:
+def _decision_from_observed_geography(
+    verdict: dict,
+    icp: ICPPrompt,
+    *,
+    company: Optional[CompanyOutput] = None,
+    company_quality: bool = False,
+) -> str:
     observed_value = verdict.get("observed_hq_country")
     if not isinstance(observed_value, str):
         return COMPANY_FIT_UNAVAILABLE
@@ -883,12 +898,42 @@ def _decision_from_observed_geography(verdict: dict, icp: ICPPrompt) -> str:
     ))
     if not observed or not requested_values:
         return COMPANY_FIT_UNAVAILABLE
+    if company_quality and company is not None:
+        submitted_country = str(company.country or "").strip()
+        if not submitted_country:
+            return COMPANY_FIT_UNAVAILABLE
+        # ``check_country_match`` accepts broad ICP geography expressions and
+        # defers unknown prose.  A submitted fact must match in both
+        # directions so values such as ``North America`` or ``Mars`` cannot
+        # stand in for an independently observed country.
+        if (
+            not check_country_match(observed, submitted_country).passed
+            or not check_country_match(submitted_country, observed).passed
+        ):
+            return COMPANY_FIT_MISMATCH
+        observed_is_us = is_united_states(observed)
+        if observed_is_us:
+            submitted_state = _canonical_us_state(
+                company.state,
+                case_insensitive_abbreviation=True,
+            )
+            observed_state = _canonical_us_state(
+                verdict.get("observed_hq_state"),
+                case_insensitive_abbreviation=True,
+            )
+            if not submitted_state or not observed_state:
+                return COMPANY_FIT_UNAVAILABLE
+            if submitted_state != observed_state:
+                return COMPANY_FIT_MISMATCH
     requested_states = frozenset().union(
         *(_requested_us_states(value) for value in requested_values)
     )
     state_matches = True
     if requested_states:
-        observed_state = _canonical_us_state(verdict.get("observed_hq_state"))
+        observed_state = _canonical_us_state(
+            verdict.get("observed_hq_state"),
+            case_insensitive_abbreviation=company_quality,
+        )
         if not observed_state:
             return COMPANY_FIT_UNAVAILABLE
         state_matches = observed_state in requested_states
@@ -1073,6 +1118,7 @@ def _web_identity_receipt(
     verdict: Mapping[str, Any],
     *,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    company_quality: bool = False,
 ) -> dict[str, Any]:
     """Bind the independently observed web identity to the submitted company."""
 
@@ -1100,6 +1146,7 @@ def _web_identity_receipt(
         observed_website=observed_values["website"],
         observed_linkedin=observed_values["linkedin"],
         evidence_source="company_web_reverification",
+        company_quality=company_quality,
     )
     verified_anchor_receipt: Mapping[str, str] = {}
     if isinstance(verified_homepage_identity, Mapping):
@@ -1129,11 +1176,92 @@ def _web_identity_receipt(
                     f"{anchor_linkedin_slug}"
                 ),
                 evidence_source="company_homepage",
+                company_quality=company_quality,
             )
     if (
-        receipt.get("decision") == COMPANY_FIT_MISMATCH
-        and receipt.get("reason_code") == "identity_mismatch"
+        company_quality
         and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+        and isinstance(verified_homepage_identity, Mapping)
+        and not str(observed_values["linkedin"] or "").strip()
+    ):
+        anchor_slug = str(
+            verified_homepage_identity.get("linkedin_company_slug") or ""
+        ).strip()
+        preserved = evaluate_company_identity(
+            submitted_name=company.company_name,
+            submitted_website=company.company_website,
+            submitted_linkedin=company.company_linkedin,
+            observed_name=observed_values["name"],
+            observed_website=observed_values["website"],
+            observed_linkedin=(
+                f"https://www.linkedin.com/company/{anchor_slug}"
+            ),
+            evidence_source="company_web_reverification",
+            company_quality=True,
+        )
+        if preserved.get("decision") != COMPANY_FIT_MATCH:
+            raw_aliases = verified_homepage_identity.get(
+                "verified_legal_name_aliases"
+            )
+            aliases = raw_aliases if isinstance(raw_aliases, list) else []
+            observed_name = " ".join(str(observed_values["name"] or "").split())
+            if (
+                receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+                and receipt.get("observed_domain")
+                == verified_homepage_identity.get("registrable_dns_domain")
+                and receipt.get("submitted_domain")
+                == verified_homepage_identity.get("registrable_dns_domain")
+                and any(
+                    isinstance(alias, str)
+                    and " ".join(alias.split()).casefold()
+                    == observed_name.casefold()
+                    for alias in aliases[:3]
+                )
+            ):
+                preserved = dict(receipt)
+                preserved.update(
+                    decision=COMPANY_FIT_MATCH,
+                    reason_code="verifier_accepted",
+                    observed_linkedin_slug=anchor_slug,
+                )
+        if preserved.get("decision") == COMPANY_FIT_MATCH:
+            preserved.update(
+                linkedin_evidence_source="company_homepage",
+                web_observed_linkedin_slug="",
+            )
+            raw_aliases = verified_homepage_identity.get(
+                "verified_legal_name_aliases"
+            )
+            if isinstance(raw_aliases, list) and raw_aliases:
+                preserved["verified_legal_name_aliases"] = list(raw_aliases[:3])
+            return preserved
+    if (
+        company_quality
+        and receipt.get("decision") == COMPANY_FIT_MATCH
+        and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+        and isinstance(verified_homepage_identity, Mapping)
+        and receipt.get("observed_domain")
+        == verified_homepage_identity.get("registrable_dns_domain")
+        and receipt.get("observed_linkedin_slug")
+        == verified_homepage_identity.get("linkedin_company_slug")
+    ):
+        receipt["linkedin_evidence_source"] = "company_web_reverification"
+        raw_aliases = verified_homepage_identity.get("verified_legal_name_aliases")
+        if isinstance(raw_aliases, list) and raw_aliases:
+            receipt["verified_legal_name_aliases"] = list(raw_aliases[:3])
+        return receipt
+    if (
+        (
+            receipt.get("decision") == COMPANY_FIT_MISMATCH
+            and receipt.get("reason_code") == "identity_mismatch"
+        )
+        or (
+            company_quality
+            and receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+            and receipt.get("reason_code") == "identity_name_alias_unresolved"
+        )
+    ) and (
+        verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and isinstance(verified_homepage_identity, Mapping)
         and receipt.get("observed_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
@@ -1164,11 +1292,19 @@ def _web_identity_receipt(
                 observed_website=observed_values["website"],
                 observed_linkedin=observed_values["linkedin"],
                 evidence_source="company_web_reverification",
+                company_quality=company_quality,
             )
             if alias_receipt.get("decision") == COMPANY_FIT_MATCH:
                 receipt.update(
                     decision=COMPANY_FIT_MATCH,
                     reason_code="verifier_accepted",
+                    verified_legal_name_aliases=[
+                        value
+                        for value in aliases[:3]
+                        if isinstance(value, str)
+                        and value.strip()
+                        and len(value.strip()) <= 200
+                    ],
                 )
                 return receipt
     if (
@@ -1256,6 +1392,7 @@ def _web_identity_receipt(
         observed_website=observed_values["website"],
         observed_linkedin=observed_values["linkedin"],
         evidence_source="company_web_reverification",
+        company_quality=company_quality,
     )
 
 
@@ -1413,6 +1550,7 @@ def _reverify_decision(
     icp: Optional[ICPPrompt] = None,
     company: Optional[CompanyOutput] = None,
     verified_homepage_identity: Optional[Mapping[str, str]] = None,
+    company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
     """Classify web proof as a match, conflict, or unavailable outcome.
 
@@ -1431,6 +1569,7 @@ def _reverify_decision(
             company,
             verdict,
             verified_homepage_identity=verified_homepage_identity,
+            company_quality=company_quality,
         )
         identity_decision = str(identity_receipt.get("decision") or "")
         if identity_decision not in {
@@ -1484,7 +1623,12 @@ def _reverify_decision(
             semantic_evidence=industry_evidence,
             industry_activity_role=verdict.get("industry_activity_role"),
         ),
-        "geography": _decision_from_observed_geography(verdict, icp),
+        "geography": _decision_from_observed_geography(
+            verdict,
+            icp,
+            company=company,
+            company_quality=company_quality,
+        ),
         "stage": _decision_from_observed_stage(verdict, icp_stage),
     }
     active_dimensions = {"employee_size", "industry", "geography"}
@@ -1835,6 +1979,7 @@ async def _llm_reverify_company(
     *,
     require_company_fit_dimensions: bool = False,
     verified_homepage_identity: Optional[CompanyFitDecisionResult] = None,
+    company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
     """Web-grounded re-verification of the model-REPORTED attribute claim and
     stage label — the two dimensions where the scorer otherwise trusts model
@@ -1908,6 +2053,14 @@ async def _llm_reverify_company(
             (
                 "geography_matches: independently find the company's headquarters "
                 f"and test it against {(icp.country or icp.geography)!r}."
+                + (
+                    " Always return the observed HQ state when the observed HQ "
+                    "country is the United States. Use only current headquarters "
+                    "evidence; incorporation, job, office, branch, and customer "
+                    "locations do not establish headquarters."
+                    if company_quality
+                    else ""
+                )
             ),
         ])
     if icp_attribute:
@@ -2035,6 +2188,7 @@ async def _llm_reverify_company(
         icp=icp if require_company_fit_dimensions else None,
         company=company,
         verified_homepage_identity=verified_identity,
+        company_quality=company_quality,
     )
     incomplete = _incomplete_company_reverify_dimensions(
         result,
@@ -2129,6 +2283,7 @@ async def _llm_reverify_company(
         icp=icp if require_company_fit_dimensions else None,
         company=company,
         verified_homepage_identity=verified_identity,
+        company_quality=company_quality,
     )
     repaired_incomplete = _incomplete_company_reverify_dimensions(
         repaired_result,
@@ -2276,6 +2431,7 @@ async def _verify_company_fit(
     seen_companies: Set[str],
     *,
     require_https_transport: bool,
+    company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
     """One official public/Research Lab company-fit verifier.
 
@@ -2391,6 +2547,7 @@ async def _verify_company_fit(
             company.company_website,
             company_linkedin=company.company_linkedin,
             require_https_transport=require_https_transport,
+            company_quality=company_quality,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Company identity verification raised: %s", exc)
@@ -2428,6 +2585,7 @@ async def _verify_company_fit(
         verified_homepage_identity=(
             identity if identity.decision == COMPANY_FIT_MATCH else None
         ),
+        company_quality=company_quality,
     )
     web_details = web.details if isinstance(web.details, Mapping) else {}
     observed_raw = web_details.get("dimension_decisions") or {}
@@ -2615,6 +2773,7 @@ async def score_company_competition_intent(
     force_fail_reason: Optional[str] = None,
     is_reference_model: bool = False,
     integrity_policy: bool = False,
+    company_quality: bool = False,
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
@@ -2634,6 +2793,7 @@ async def score_company_competition_intent(
         run_time_seconds,
         seen_companies,
         require_https_transport=True,
+        company_quality=company_quality,
     )
     gate_receipts = [company_fit.receipt("company_fit")]
     if company_fit.decision != COMPANY_FIT_MATCH:
@@ -2654,7 +2814,11 @@ async def score_company_competition_intent(
             all_signals_unverified,
             signal_results,
         ) = await score_company_competition_intent_signal(
-            company, icp, integrity_policy=integrity_policy
+            company,
+            icp,
+            integrity_policy=integrity_policy,
+            company_quality=company_quality,
+            verified_company_identity=verified_identity_receipt(gate_receipts),
         )
         if _intent_verifier_unavailable(
             signal_results, integrity_policy=integrity_policy
@@ -2674,6 +2838,8 @@ async def score_company_competition_intent(
                 company,
                 icp,
                 integrity_policy=integrity_policy,
+                company_quality=company_quality,
+                verified_company_identity=verified_identity_receipt(gate_receipts),
                 original_signal_results=signal_results,
             )
             if repaired is not None:
@@ -2734,6 +2900,8 @@ async def _attempt_competition_evidence_repair(
     icp: ICPPrompt,
     *,
     integrity_policy: bool = False,
+    company_quality: bool = False,
+    verified_company_identity: Optional[Mapping[str, Any]] = None,
     original_signal_results: Optional[List[dict]] = None,
 ) -> Optional[Tuple[float, float, float, int, bool, List[dict]]]:
     """Try to rescue an all-zero intent verdict with repaired evidence URLs.
@@ -2745,6 +2913,27 @@ async def _attempt_competition_evidence_repair(
     if integrity_policy:
         # A rejected integrity bundle is terminal. Optional post-verdict
         # repair cannot turn it into another draw of the same criterion.
+        return None
+    if company_quality and any(
+        isinstance(result, Mapping)
+        and isinstance(result.get("judge_verdict"), Mapping)
+        and isinstance(
+            result["judge_verdict"].get("verification_trace"), Mapping
+        )
+        and isinstance(
+            result["judge_verdict"]["verification_trace"].get(
+                "identity_clarification"
+            ),
+            Mapping,
+        )
+        and result["judge_verdict"]["verification_trace"][
+            "identity_clarification"
+        ].get("attempted")
+        for result in (original_signal_results or [])
+    ):
+        # This evidence already received its one targeted identity
+        # clarification. Do not turn an unresolved subject into another
+        # evidence-source lottery.
         return None
     try:
         from qualification.scoring import deepline_evidence_repair as _repair
@@ -2796,7 +2985,11 @@ async def _attempt_competition_evidence_repair(
             return None
         candidate = company.model_copy(update={"intent_signals": replacement_signals})
         result = await score_company_competition_intent_signal(
-            candidate, icp, integrity_policy=integrity_policy
+            candidate,
+            icp,
+            integrity_policy=integrity_policy,
+            company_quality=company_quality,
+            verified_company_identity=verified_company_identity,
         )
         if result[4]:  # still all fabricated — repair found nothing verifiable
             return None
@@ -3255,6 +3448,8 @@ async def score_company_competition_intent_signal(
     trust_signal_date: bool = True,
     no_time_decay: bool = True,
     integrity_policy: bool = False,
+    company_quality: bool = False,
+    verified_company_identity: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
@@ -3376,6 +3571,8 @@ async def score_company_competition_intent_signal(
                 # intent judge. Fulfillment keeps the cheap deterministic gate.
                 llm_only_intent_gate=True,
                 integrity_policy=integrity_policy,
+                company_quality=company_quality,
+                verified_company_identity=verified_company_identity,
                 verdict_out=signal_verdicts,
                 **({"evidence_signals": evidence_group} if integrity_policy else {}),
             )
@@ -3913,6 +4110,8 @@ async def _score_single_intent_signal(
     llm_only_intent_gate: bool = False,
     enforce_source_integrity: bool = False,
     integrity_policy: bool = False,
+    company_quality: bool = False,
+    verified_company_identity: Optional[Mapping[str, Any]] = None,
     verdict_out: Optional[List[dict]] = None,
     evidence_signals: Optional[Sequence["IntentSignal"]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
@@ -3974,6 +4173,7 @@ async def _score_single_intent_signal(
             "stage1": result.get("stage1"),
             "stage3": result.get("stage3"),
             "corroboration": result.get("corroboration"),
+            "identity_clarification": result.get("identity_clarification"),
             "intent_verdict": intent_verdict,
             "final_disposition": result.get("decision"),
         }
@@ -4220,6 +4420,8 @@ async def _score_single_intent_signal(
                 ),
                 stage1_soft_reject=stage1_soft_reject,
                 integrity_policy=integrity_policy,
+                company_quality=company_quality,
+                verified_company_identity=verified_company_identity,
                 buyer_max_age_days=buyer_max_age_days,
                 **({"evidence_bundle": [
                     {"url": item.url, "description": item.description,

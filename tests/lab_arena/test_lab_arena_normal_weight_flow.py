@@ -12,6 +12,7 @@ import pytest
 from bittensor_wallet import Keypair
 
 from lab_arena import signing
+from lab_arena.local_weight_signer import LocalArenaWeightSigner
 from lab_arena.store import ArenaStoreError
 from lab_arena.promotion import GitPromoter
 from lab_arena.validator import ArenaWeightOrchestrator, ArenaWeightPaths
@@ -275,15 +276,16 @@ class _Era:
 
 
 class _ExternalSource:
-    def __init__(self, hotkeys, validator_public_hex, genesis):
+    def __init__(self, hotkeys, validator_public_hex, genesis, *, epoch=32001):
         self.hotkeys = list(hotkeys); self.validator_public_hex = validator_public_hex
-        self.genesis = genesis; self.included = False; self.revealed = False
+        self.genesis = genesis; self.epoch = epoch
+        self.included = False; self.revealed = False
         self.extrinsic = None; self.expected_weights = []
 
     def snapshot(self):
         return {
             "header": {"block": 104}, "finalized_block_hash": "0x" + "2" * 64,
-            "epoch_authority": {"settlement_epoch_id": 32001, "last_epoch_block": 100,
+            "epoch_authority": {"settlement_epoch_id": self.epoch, "last_epoch_block": 100,
                 "pending_epoch_at": 460, "subnet_epoch_index": 10, "tempo": 360,
                 "blocks_since_last_step": 4, "current_block": 104},
             "metagraph": {"hotkeys": self.hotkeys},
@@ -318,12 +320,30 @@ class _Drand:
     def generate_commit(self, **_): return b"c" * 32, 12
 
 
-class _SignerClient:
-    def __init__(self, signer): self.signer = signer
-    def prepare_arena_weight_extrinsic_v1(self, request): return self.signer.prepare(request)
-    def confirm_arena_weight_extrinsic_v1(self, request): return self.signer.confirm(request)
-    def sign_arena_chain_outcome_v1(self, request): return self.signer.sign_chain_outcome(request)
-    def recover_arena_weight_extrinsic_v1(self, request): return self.signer.recover(request)
+def _local_signer_client(*, key, source, profile, arena_signer, burn):
+    signer = ArenaWeightSigner(
+        validator_hotkey=key.ss58_address,
+        hotkey_public_key_hex=key.public_key.hex(),
+        chain_profile=profile,
+        chain_source=source,
+        drand_backend=_Drand(),
+        sign_sr25519=key.sign,
+        arena_public_key_der=arena_signer.public_key_der,
+        verify_sr25519=lambda signature, message: key.verify(message, signature),
+        arena_public_key_hash=arena_signer.public_key_hash,
+        network="finney",
+        netuid=71,
+        burn_hotkey=burn,
+    )
+    return LocalArenaWeightSigner(
+        signer,
+        chain_source=source,
+        extrinsic_period=int(profile["extrinsic_period"]),
+        validator_hotkey=key.ss58_address,
+        network="finney",
+        netuid=71,
+        chain_profile=profile,
+    )
 
 
 class _HostChain:
@@ -351,7 +371,15 @@ class _Api:
     def submit_chain_outcome(self, document): return self.service.record_chain_outcome(document)
 
 
-def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integrated_database, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("round_day", "round_epoch", "reward_epoch", "uses_prior_basis"),
+    ((30, 32000, 32001, False), (31, 32002, 32004, True)),
+    ids=("new-scoring-basis", "no-new-miner-or-scoring"),
+)
+def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
+    integrated_database, tmp_path, monkeypatch,
+    round_day, round_epoch, reward_epoch, uses_prior_basis,
+):
     psycopg2, dsn = integrated_database
     connect = lambda: psycopg2.connect(**dsn)
     with connect() as db, db.cursor() as cursor:
@@ -361,7 +389,7 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integra
     assert weight_schema == {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}
     harness = Harness(connect, tmp_path, challengers=["NormalWinner"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(harness.service.config.defaults, rewards_enabled=True)
-    participants = _start_round(harness, day=30, epoch=32000)
+    participants = _start_round(harness, day=round_day, epoch=round_epoch)
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.advance_until("published", runners=2)
     repository_root = tmp_path / "promotion"; repository_root.mkdir()
@@ -372,13 +400,18 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integra
 
     burn = Keypair.create_from_uri("//ArenaFlowBurn").ss58_address
     harness.service.config.accepted_burn_hotkey = burn
-    harness.chain.accepted_weight_epoch_scope = lambda: {"genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03", "epoch": 32001, "valid_from_block": 100, "valid_until_block": 459}
-    harness.chain.epoch = 32001
-    state = harness.service.public_weight_state(32001)["state"]
-    assert state == harness.service.public_weight_state(32001)["state"]
+    harness.chain.accepted_weight_epoch_scope = lambda: {"genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03", "epoch": reward_epoch, "valid_from_block": 100, "valid_until_block": 459}
+    harness.chain.epoch = reward_epoch
+    state = harness.service.public_weight_state(reward_epoch)["state"]
+    assert state == harness.service.public_weight_state(reward_epoch)["state"]
+    if uses_prior_basis:
+        # No new round, miner, or scoring run produced this state. The last
+        # activated signed basis remains the governing economic authority.
+        assert state["reward_basis"]["effective_reward_epoch"] == round_epoch + 1
+        assert harness.service.public_reward_basis(reward_epoch) == state["reward_basis"]
     with pytest.raises(ArenaStoreError, match="weight_state_conflict"):
         harness.service.store.publish_weight_state(
-            "finney", 71, 32001, "sha256:" + "0" * 64,
+            "finney", 71, reward_epoch, "sha256:" + "0" * 64,
             {**state, "state_hash": "sha256:" + "0" * 64},
         )
     harness.clock.now = datetime.now(timezone.utc)
@@ -390,46 +423,59 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integra
         hotkeys = [burn]
         if state["reward_basis"]["king_hotkey"]:
             hotkeys.append(state["reward_basis"]["king_hotkey"])
-        source = _ExternalSource(hotkeys, key.public_key.hex(), profile["genesis_hash"])
-        protected = ArenaWeightSigner(
-            validator_hotkey=key.ss58_address, hotkey_public_key_hex=key.public_key.hex(),
-            chain_profile=profile, chain_source=source, drand_backend=_Drand(),
-            sign_sr25519=key.sign, arena_public_key_der=harness.signer.public_key_der,
-            verify_sr25519=lambda signature, message, k=key: k.verify(message, signature),
-            arena_public_key_hash=harness.signer.public_key_hash, network="finney", netuid=71,
-            burn_hotkey=burn,
+        source = _ExternalSource(
+            hotkeys,
+            key.public_key.hex(),
+            profile["genesis_hash"],
+            epoch=reward_epoch,
+        )
+        signer_client = _local_signer_client(
+            key=key,
+            source=source,
+            profile=profile,
+            arena_signer=harness.signer,
+            burn=burn,
         )
         host_chain = _HostChain(source, key.ss58_address)
         paths = ArenaWeightPaths(tmp_path / ("v%d" % index))
         orchestrator = ArenaWeightOrchestrator(
-            api=_Api(harness.service), chain=host_chain, signer=_SignerClient(protected),
+            api=_Api(harness.service), chain=host_chain, signer=signer_client,
             validator_hotkey=key.ss58_address, expected_signing_key_hash=harness.signer.public_key_hash,
             paths=paths, extrinsic_period=int(profile["extrinsic_period"]),
         )
-        assert orchestrator.run_once(32001) == "broadcast"
-        signed_path = paths.signed(32001)
-        outcome_path = paths.outcome(32001)
+        assert orchestrator.run_once(reward_epoch) == "broadcast"
+        signed_path = paths.signed(reward_epoch)
+        outcome_path = paths.outcome(reward_epoch)
         signed_bytes = signed_path.read_bytes()
         signed = json.loads(signed_bytes)
         source.expected_weights = list(zip(signed["sparse_uids"], signed["sparse_weights_u16"]))
+        # A new in-process signer has no memory of the first attempt.  It must
+        # authenticate and restore the exact bytes from the durable journal.
+        restarted_signer = _local_signer_client(
+            key=key,
+            source=source,
+            profile=profile,
+            arena_signer=harness.signer,
+            burn=burn,
+        )
         restarted = ArenaWeightOrchestrator(
-            api=_Api(harness.service), chain=host_chain, signer=_SignerClient(protected),
+            api=_Api(harness.service), chain=host_chain, signer=restarted_signer,
             validator_hotkey=key.ss58_address, expected_signing_key_hash=harness.signer.public_key_hash,
             paths=paths, extrinsic_period=int(profile["extrinsic_period"]),
         )
-        assert restarted.run_once(32001) == "rebroadcast"
+        assert restarted.run_once(reward_epoch) == "rebroadcast"
         assert signed_path.read_bytes() == signed_bytes
         source.included = True
-        assert restarted.run_once(32001) == "included_pending_reveal"
+        assert restarted.run_once(reward_epoch) == "included_pending_reveal"
         assert signed_path.read_bytes() == signed_bytes
         assert not outcome_path.exists()
         assert len(host_chain.broadcasts) == 2
         source.revealed = True
-        assert restarted.run_once(32001) == "finalized"
+        assert restarted.run_once(reward_epoch) == "finalized"
         outcomes.append(outcome_path.read_bytes())
-    assert len(harness.service.public_chain_outcomes(32001)["outcomes"]) == 2
+    assert len(harness.service.public_chain_outcomes(reward_epoch)["outcomes"]) == 2
     assert outcomes[0] != outcomes[1]
-    first_report = harness.service.public_chain_outcomes(32001)["outcomes"][0]
+    first_report = harness.service.public_chain_outcomes(reward_epoch)["outcomes"][0]
     assert first_report["finalized_block_hash"] == "4" * 64
     assert first_report["extrinsic_hash"].startswith("0x")
     with connect() as db, db.cursor() as cursor:
@@ -449,4 +495,4 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(integra
             )
     assert_canary_absent(harness, connect)
     with pytest.raises(Exception, match="not_current"):
-        harness.service.public_weight_state(32002)
+        harness.service.public_weight_state(reward_epoch + 1)

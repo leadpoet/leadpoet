@@ -1,15 +1,14 @@
 # Arena reward and weight verification
 
 Use this gate for changes to scoring, accepted reward state, weight construction,
-protected signing, retries, restart recovery, or chain readback. The Arena flow
+local-wallet signing, retries, restart recovery, or chain readback. The Arena flow
 has one normal validator implementation. Retired primary/audit validator and
 Research Lab allocation rehearsals are not release requirements.
 
 ## Before push
 
 Fetch the intended base and preserve concurrent work. Test the edited checkout.
-Run syntax checks and `git diff --check`. Use Python 3.11 for host tests and
-check the measured signer sources for Python 3.7 compatibility.
+Run syntax checks and `git diff --check`. Use Python 3.11 for validator tests.
 
 The blocking local gate has a 120-second budget. It must execute the relevant
 checks successfully; a timeout or an all-skipped run is not a pass. Keep local
@@ -20,10 +19,12 @@ broadcast manual weights as a local release test.
 python3.11 -m pytest -q \
   tests/test_arena_weights.py \
   tests/test_arena_validator.py \
-  tests/test_arena_protected_hotkey.py \
-  tests/test_arena_hotkey_bootstrap.py \
+  tests/test_local_weight_signer.py \
+  tests/test_arena_validator_local_runtime.py \
   tests/test_arena_validator_launcher.py \
+  tests/test_arena_validator_restart.py \
   tests/test_arena_reveal_chain_source.py \
+  tests/lab_arena/test_lab_arena_service_rules.py \
   tests/lab_arena/test_arena_weight_state.py \
   tests/lab_arena/test_lab_arena_normal_weight_flow.py
 ```
@@ -37,7 +38,7 @@ The gate must prove:
   network, genesis, subnet, and epoch. Conflicts and missing state stop signing.
 - Independent validators derive the same Arena winner and burn weights using
   finalized UID ownership. Retired incentive tables and allocations are absent.
-- The protected signer constrains the exact transaction, nonce, runtime,
+- The local signer constrains the exact transaction, nonce, runtime,
   validity window, and rewarded UID ownership.
 - Persisted bytes are reused after restart and unknown submission results.
   A new attempt requires proof that the prior attempt expired without inclusion.
@@ -45,6 +46,8 @@ The gate must prove:
   commitment or a missing pending commitment alone does not prove success.
 - Delayed outcome reports and older epoch recovery do not change rewards or
   prevent the current epoch from progressing.
+- Scoring setup/cycle failures and an empty queue do not stop weights. Claims
+  and results require the gateway's registered-validator role, not runner lists.
 
 For database changes, apply the exact migration to disposable PostgreSQL.
 Exercise upgrades with representative old objects and dependency constraints,
@@ -61,8 +64,10 @@ Code push and deployment are separate actions. Follow the authorized deployment
 scope. Before replacing a working process, run the normal validator's
 `--check-only` command and preserve its state directory.
 
-A protected signer image change requires the measured image policy and KMS
-recipient-unsealing checks. After an authorized deployment, record actual
+The normal validator requires no enclave image or KMS recipient policy. Apply
+migration 208 before deploying the new scoring authorization. Keep the existing
+hotkey identity and state directory; do not export enclave key material. After
+an authorized deployment, record actual
 finalized chain readback for each configured normal validator. Report local
 tests, provisioning, and live chain results separately. Never claim live weight
 submission from readiness or an HTTP acknowledgement alone.

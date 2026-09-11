@@ -442,9 +442,83 @@ def test_completion_cannot_cross_the_signed_round_boundary():
         {"hotkey": "runner", "body": {"run_id": "run-1", "result": result}},
         {"round_id": "arena-a"},
     )
+    service._config = SimpleNamespace(
+        validator_authorizer=lambda _hotkey: (True, "validator")
+    )
     service._store = SimpleNamespace(get_run=lambda _run_id: {"round_id": "arena-b", "runner_hotkey": "runner"})
     with pytest.raises(ServiceError, match="run_round_mismatch"):
         service.handle_complete({})
+
+
+def _completion_service(*, registered=True, role="validator", run_runner="runner"):
+    result = {
+        "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 1.0,
+            "max_rss_bytes": 1,
+            "stdout_bytes": 1,
+            "stderr_bytes": 0,
+            "provider_call_count": 0,
+        },
+        "started_at": "2026-09-02T00:00:00Z",
+        "finished_at": "2026-09-02T00:00:01Z",
+        "terminal_status": "model_error",
+    }
+    lease_token = "lease-token"
+    run = {
+        "run_id": "run-1",
+        "round_id": "arena-a",
+        "runner_hotkey": run_runner,
+        "kind": "execute",
+        "lease_token_hash": hash_lease_token(lease_token),
+    }
+    service = object.__new__(ArenaService)
+    service._request_round = lambda *_args, **_kwargs: (
+        {
+            "hotkey": "runner",
+            "body": {
+                "run_id": "run-1",
+                "lease_token": lease_token,
+                "result": result,
+            },
+        },
+        {"round_id": "arena-a"},
+    )
+    service._config = SimpleNamespace(
+        validator_authorizer=lambda _hotkey: (registered, role)
+    )
+    service._store = SimpleNamespace(
+        get_run=lambda _run_id: run,
+        complete_attempt=lambda **_kwargs: {"status": "failed"},
+    )
+    return service
+
+
+@pytest.mark.parametrize(
+    ("registered", "role", "expected_code"),
+    [
+        (False, None, "runner_hotkey_unregistered"),
+        (True, "miner", "runner_validator_required"),
+    ],
+)
+def test_completion_requires_gateway_validator_authority(
+    registered, role, expected_code
+):
+    service = _completion_service(registered=registered, role=role)
+
+    with pytest.raises(ServiceError) as rejected:
+        service.handle_complete({})
+
+    assert rejected.value.code == expected_code
+
+
+def test_completion_requires_lease_owner_and_accepts_authorized_owner():
+    wrong_owner = _completion_service(run_runner="different-validator")
+    with pytest.raises(ServiceError, match="run_runner_mismatch"):
+        wrong_owner.handle_complete({})
+
+    assert _completion_service().handle_complete({}) == {"status": "failed"}
 
 
 def test_final_admission_must_finish_before_the_round_freezes():
@@ -1905,6 +1979,7 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     service._objects = Objects()
     service._config = SimpleNamespace(
         chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: []),
+        validator_authorizer=lambda _hotkey: (True, "validator"),
         defaults=SimpleNamespace(
             scorer_image_digest="sha256:" + "b" * 64,
             scorer_image_reference="registry.example/wrong@sha256:" + "b" * 64,
@@ -1929,23 +2004,19 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     assert (lease["image_digest"], lease["image_reference"]) == (pinned_digest, pinned_reference)
 
 
-def _runner_claim_service(*, network_name, hotkeys, validator_permit, active=None):
+def _runner_claim_service(*, registered, role, configured=False):
     runner = "5" * 48
-    snapshot_values = {"hotkeys": hotkeys}
-    if validator_permit is not None:
-        snapshot_values["validator_permit"] = validator_permit
-    if active is not None:
-        snapshot_values["active"] = active
-    snapshot = SimpleNamespace(**snapshot_values)
     chain = SimpleNamespace(
-        metagraph=lambda: snapshot,
         hotkeys_owned_by_same_coldkey=lambda _hotkey: [],
     )
     service = object.__new__(ArenaService)
     service._store = SimpleNamespace(
         claim_assignment=lambda **_kwargs: {"status": "empty"}
     )
-    service._config = SimpleNamespace(network_name=network_name, chain=chain)
+    service._config = SimpleNamespace(
+        chain=chain,
+        validator_authorizer=lambda _hotkey: (registered, role),
+    )
     service._request_round = lambda *_args, **_kwargs: (
         {
             "hotkey": runner,
@@ -1957,7 +2028,7 @@ def _runner_claim_service(*, network_name, hotkeys, validator_permit, active=Non
             "round_id": "arena-2026-09-05-testnet",
             "status": "stage1",
             "configuration_doc": {
-                "runner_hotkeys": [runner],
+                "runner_hotkeys": [runner] if configured else [],
                 "runner_slot_ceiling": 8,
                 "lease_ttl_seconds": 420,
             },
@@ -1968,23 +2039,16 @@ def _runner_claim_service(*, network_name, hotkeys, validator_permit, active=Non
 
 
 @pytest.mark.parametrize(
-    ("hotkeys", "validator_permit", "expected_code"),
+    ("registered", "role", "expected_code"),
     [
-        (["5" + "A" * 47], [True], "runner_hotkey_unregistered"),
-        (["5" * 48], [False], "runner_validator_permit_required"),
-        (["5" * 48], None, "runner_validator_permit_unavailable"),
-        (["5" * 48], [], "runner_validator_permit_unavailable"),
-        (["5" * 48], ["false"], "runner_validator_permit_unavailable"),
+        (False, None, "runner_hotkey_unregistered"),
+        (True, "miner", "runner_validator_required"),
     ],
 )
-def test_test_network_claim_requires_registered_validator_permit(
-    hotkeys, validator_permit, expected_code
+def test_claim_rejects_hotkeys_without_gateway_validator_authority(
+    registered, role, expected_code
 ):
-    service = _runner_claim_service(
-        network_name="test",
-        hotkeys=hotkeys,
-        validator_permit=validator_permit,
-    )
+    service = _runner_claim_service(registered=registered, role=role)
 
     with pytest.raises(ServiceError) as rejected:
         service.handle_claim({})
@@ -1992,25 +2056,42 @@ def test_test_network_claim_requires_registered_validator_permit(
     assert rejected.value.code == expected_code
 
 
-def test_test_network_claim_accepts_permitted_inactive_validator():
+def test_claim_accepts_gateway_validator_absent_from_runner_configuration():
     service = _runner_claim_service(
-        network_name="test",
-        hotkeys=["5" * 48],
-        validator_permit=[True],
-        active=[False],
+        registered=True, role="validator", configured=False
     )
 
     assert service.handle_claim({}) == {"status": "empty"}
 
 
-def test_finney_claim_does_not_add_the_testnet_validator_permit_gate():
-    service = _runner_claim_service(
-        network_name="finney",
-        hotkeys=["5" * 48],
-        validator_permit=[False],
+def test_validator_authority_defaults_to_gateway_registry_lookup(monkeypatch):
+    observed = []
+    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETWORK", "finney")
+    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETUID", 71)
+    monkeypatch.setattr(
+        "gateway.utils.registry.is_registered_hotkey",
+        lambda hotkey: (observed.append(hotkey) or True, "validator"),
     )
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(network_name="finney", netuid=71)
 
-    assert service.handle_claim({}) == {"status": "empty"}
+    service._require_validator_authority("validator-hotkey")
+
+    assert observed == ["validator-hotkey"]
+
+
+def test_validator_authority_rejects_gateway_registry_for_another_subnet(
+    monkeypatch,
+):
+    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETWORK", "finney")
+    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETUID", 72)
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(network_name="finney", netuid=71)
+
+    with pytest.raises(ServiceError) as rejected:
+        service._require_validator_authority("validator-hotkey")
+
+    assert rejected.value.code == "runner_validator_authority_unavailable"
 
 
 @pytest.mark.parametrize("configured,is_baseline", [(False, False), (True, False), (False, True)])
@@ -2051,7 +2132,8 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image(c
     service = object.__new__(ArenaService)
     service._store = Store()
     service._config = SimpleNamespace(
-        chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: [])
+        chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: []),
+        validator_authorizer=lambda _hotkey: (True, "validator"),
     )
     service._request_round = lambda *_args, **_kwargs: (
         {

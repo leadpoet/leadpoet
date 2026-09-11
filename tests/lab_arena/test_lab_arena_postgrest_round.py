@@ -135,6 +135,9 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
         if function == "lab_arena_weight_state_schema_v1":
             assert harness.transport.rpc(function, params)["version"] == 202
             continue
+        if function == "lab_arena_validator_scoring_authority_schema_v1":
+            assert harness.transport.rpc(function, params)["version"] == 208
+            continue
         with pytest.raises(ArenaStoreError) as excinfo:
             harness.transport.rpc(function, params)
         message = str(excinfo.value)

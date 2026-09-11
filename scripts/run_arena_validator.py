@@ -40,7 +40,7 @@ def load_environment(path: Path) -> None:
         name = name.strip()
         if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
             raise ValueError("Arena validator env file has an invalid assignment")
-        if not (name.startswith("LAB_ARENA_") or name == "ENCLAVE_CID"):
+        if not name.startswith("LAB_ARENA_"):
             raise ValueError("Arena validator env file contains an unrelated setting")
         try:
             parts = shlex.split("VALUE=" + value, comments=True, posix=True)
@@ -55,13 +55,8 @@ def load_environment(path: Path) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument("--environment-file", type=Path, required=True)
-    parser.add_argument("--enclave-cid", type=int)
     args, remaining = parser.parse_known_args(argv)
     load_environment(args.environment_file)
-    if args.enclave_cid is not None:
-        if args.enclave_cid < 4:
-            parser.error("--enclave-cid must identify a child enclave")
-        os.environ["ENCLAVE_CID"] = str(args.enclave_cid)
     from lab_arena.validator import main as validator_main
 
     return validator_main(remaining)

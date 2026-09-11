@@ -1,7 +1,7 @@
 """One normal Arena validator: score leases and publish independently derived weights.
 
-It depends only on the Arena public API, finalized chain reads, and the narrow
-protected hotkey signer.
+It depends only on the Arena public API, finalized chain reads, and the
+validator's local Bittensor hotkey. Scoring availability never gates weights.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -502,6 +503,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one normal Leadpoet Arena validator", add_help=True)
     parser.add_argument("--netuid", type=int, default=int(os.environ.get("LAB_ARENA_NETUID", "71")))
     parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"))
+    parser.add_argument("--wallet.name", dest="wallet_name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))
+    parser.add_argument("--wallet.hotkey", dest="hotkey_name", default=os.environ.get("LAB_ARENA_HOTKEY", "default"))
+    parser.add_argument("--wallet.path", dest="wallet_path", default=os.environ.get("LAB_ARENA_WALLET_PATH", "~/.bittensor/wallets"))
     parser.add_argument("--arena-api-base-url", dest="api_base_url", default=os.environ.get("LAB_ARENA_API_BASE_URL", ""))
     parser.add_argument("--arena-work-dir", dest="work_dir", default=os.environ.get("LAB_ARENA_RUNNER_WORK_DIR", "/var/lib/lab-arena/runner"))
     parser.add_argument("--arena-runsc-path", dest="runsc_path", default=os.environ.get("LAB_ARENA_RUNSC_PATH", "/usr/local/bin/runsc"))
@@ -518,166 +522,172 @@ def _required_environment(name: str) -> str:
     return value
 
 
+def load_local_hotkey(args):
+    """Load an existing private wallet; never create or change an identity."""
+    from bittensor_wallet import Wallet
+
+    for name in (args.wallet_name, args.hotkey_name):
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            raise ArenaValidatorError("wallet and hotkey names must be simple file names")
+    wallet_path = Path(args.wallet_path).expanduser()
+    hotkey_path = wallet_path / args.wallet_name / "hotkeys" / args.hotkey_name
+    try:
+        metadata = hotkey_path.lstat()
+    except OSError as exc:
+        raise ArenaValidatorError("configured local validator hotkey file is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_mode & 0o077
+        or (os.geteuid() != 0 and metadata.st_uid != os.geteuid())
+    ):
+        raise ArenaValidatorError("local validator hotkey must be an owned private regular file")
+    try:
+        wallet = Wallet(name=args.wallet_name, hotkey=args.hotkey_name, path=str(wallet_path))
+        keypair = wallet.hotkey
+        # Prove access to signing material, not just a public hotkey file.
+        challenge = b"leadpoet.arena.local-wallet-readiness.v1"
+        if not keypair.verify(challenge, keypair.sign(challenge)):
+            raise ArenaValidatorError("local validator hotkey failed its signing check")
+    except Exception:
+        raise ArenaValidatorError("local validator hotkey cannot sign; check its private wallet file") from None
+    expected = os.environ.get("LAB_ARENA_EXPECTED_HOTKEY", "").strip()
+    if expected and keypair.ss58_address != expected:
+        raise ArenaValidatorError("local wallet identity differs from LAB_ARENA_EXPECTED_HOTKEY")
+    return keypair
+
+
+def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
+                        poll_seconds=30, once=False) -> None:
+    """Start weights first; retry scoring setup and cycles without stopping them."""
+    interval = max(5, int(poll_seconds))
+    first_weight_cycle = threading.Event()
+
+    def weight_loop() -> None:
+        while not stop.is_set():
+            try:
+                epoch = int(epoch_supplier())
+                try:
+                    orchestrator.poll_prior_outcomes(epoch)
+                except Exception as exc:
+                    print("Arena validator prior polling failed: type=%s" % type(exc).__name__,
+                          file=sys.stderr, flush=True)
+                status = orchestrator.run_once(epoch)
+                print("Arena validator weight status: %s" % status, flush=True)
+            except Exception as exc:
+                print("Arena validator weight cycle failed: %s" % type(exc).__name__,
+                      file=sys.stderr, flush=True)
+            finally:
+                first_weight_cycle.set()
+            if once:
+                break
+            stop.wait(interval)
+
+    weights = threading.Thread(target=weight_loop, name="arena-weight-loop", daemon=False)
+    weights.start()
+    runner = None
+    try:
+        while not stop.is_set():
+            try:
+                if runner is None:
+                    runner = runner_factory()
+                taken = runner.run_once(stop_event=stop)
+            except Exception as exc:
+                # No exception text: provider errors can contain credential-bearing URLs.
+                print("Arena validator scoring cycle failed: type=%s; weights continue"
+                      % type(exc).__name__, file=sys.stderr, flush=True)
+                if runner is not None:
+                    try:
+                        runner.close()
+                    except Exception as close_exc:
+                        print("Arena validator scoring cleanup failed: type=%s"
+                              % type(close_exc).__name__, file=sys.stderr, flush=True)
+                    runner = None
+                taken = 0
+            if once:
+                # A fast empty scoring queue must not cancel the first weight cycle.
+                first_weight_cycle.wait()
+                break
+            if taken == 0:
+                stop.wait(interval)
+    finally:
+        stop.set()
+        if runner is not None:
+            try:
+                runner.close()
+            except Exception as exc:
+                print("Arena validator scoring cleanup failed: type=%s"
+                      % type(exc).__name__, file=sys.stderr, flush=True)
+        # Do not close the chain underneath an in-flight journal/finalization check.
+        weights.join()
+
+
 def main(argv=None) -> int:
-    parser = _parser()
-    args, unknown = parser.parse_known_args(argv)
-    if unknown:
-        parser.error("unrecognized arguments: %s" % " ".join(unknown))
-    required = (
-        args.api_base_url,
-        _required_environment("LAB_ARENA_CHAIN_ENDPOINT"),
-        _required_environment("LAB_ARENA_SIGNING_KEY_HASH"),
-    )
-    if not all(required):
-        raise ArenaValidatorError("Arena validator configuration is incomplete")
+    args = _parser().parse_args(argv)
+    endpoint = _required_environment("LAB_ARENA_CHAIN_ENDPOINT")
+    key_hash = _required_environment("LAB_ARENA_SIGNING_KEY_HASH")
+    if not args.api_base_url:
+        raise ArenaValidatorError("Arena API URL is required")
     from lab_arena import chain as chain_module
-    from validator_tee.host.arena_hotkey import build_arena_protected_keypair
-    from validator_tee.host.vsock_client import ValidatorEnclaveClient
+    from lab_arena.local_weight_signer import build_local_weight_signer
+    from leadpoet_canonical.lab_arena_rewards import signing_key_from_document
 
-    client = ValidatorEnclaveClient()
-    arena_hotkey_state = client.get_arena_hotkey_state_v1()
-    if arena_hotkey_state.get("provisioned") is not True:
-        envelope_path = os.environ.get("LAB_ARENA_HOTKEY_ENVELOPE", "").strip()
-        if not envelope_path:
-            raise ArenaValidatorError(
-                "protected Arena hotkey is not provisioned; LAB_ARENA_HOTKEY_ENVELOPE is required"
-            )
-        from validator_tee.host.arena_hotkey_bootstrap import _private_read, create_kms_client, provision
-
-        try:
-            envelope = json.loads(_private_read(Path(envelope_path)))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ArenaValidatorError("Arena hotkey envelope is invalid") from exc
-        provision(envelope, client=client, kms_client=create_kms_client(envelope.get("kms_key_id")))
-    keypair = build_arena_protected_keypair(client=client)
+    keypair = load_local_hotkey(args)
     config = chain_module.ArenaChainConfig(
-        endpoint=required[1],
-        netuid=int(args.netuid),
+        endpoint=endpoint, netuid=int(args.netuid),
         network_name=str(args.subtensor_network),
         request_timeout_seconds=int(os.environ.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")),
     )
     chain = chain_module.ArenaChain(config, chain_module.connect_substrate(config))
-    public_api = ArenaPublicApi(args.api_base_url)
-    signing_key = public_api.signing_key()
-    protected_policy = keypair.arena_state.get("policy")
-    if not isinstance(protected_policy, Mapping):
-        raise ArenaValidatorError("protected Arena signer policy is unavailable")
-    chain_profile = protected_policy.get("chain_profile")
-    policy_matches = (
-        protected_policy.get("network") == config.network_name
-        and int(protected_policy.get("netuid", -1)) == config.netuid
-        and str(protected_policy.get("arena_api_base_url") or "").rstrip("/") == args.api_base_url.rstrip("/")
-        and protected_policy.get("arena_signing_key_hash") == required[2]
-        and protected_policy.get("arena_signing_key") == signing_key
-        and isinstance(chain_profile, Mapping)
-        and str(chain_profile.get("chain_endpoint") or "").rstrip("/") == config.endpoint.rstrip("/")
-        and protected_policy.get("validator_hotkey") == keypair.ss58_address
-        and protected_policy.get("hotkey_public_key") == keypair.public_key.hex()
-    )
-    if not policy_matches:
-        raise ArenaValidatorError("protected Arena policy differs from validator configuration")
-    if args.check_only:
-        try:
-            from lab_arena.signing import load_public_key_from_document
-
-            load_public_key_from_document(signing_key)
-            if signing_key.get("public_key_hash") != required[2]:
-                raise ArenaValidatorError("Arena signing key differs from the pinned key")
-            health = client.health_check()
-            if (
-                health.get("arena_weight_signer_v1_supported") is not True
-                or health.get("arena_weight_signer_v1_configured") is not True
-                or health.get("arena_hotkey_v1_configured") is not True
-            ):
-                raise ArenaValidatorError("protected Arena weight signer is not ready")
-            head = chain.finalized_head()
-            genesis = str(chain.client.get_block_hash(block_id=0)).lower().removeprefix("0x")
-            if len(genesis) != 64 or genesis != str(chain_profile["genesis_hash"]).lower().removeprefix("0x"):
-                raise ArenaValidatorError("finalized chain genesis differs from protected policy")
-            metagraph = chain.refresh_metagraph()
-            if keypair.ss58_address not in metagraph.hotkeys:
-                raise ArenaValidatorError("validator hotkey is not in the finalized metagraph")
-            print(
-                "Arena validator readiness is valid: hotkey=%s finalized_block=%d"
-                % (keypair.ss58_address, head.number)
-            )
-            return 0
-        finally:
-            chain.close()
-
-    from lab_arena.wiring import build_runner_from_environment
-    from validator_tee.host.arena_state_relay import ArenaStateRelay
-    from validator_tee.host.chain_relay_v2 import ValidatorChainRelayV2
-
-    runner = build_runner_from_environment(args, keypair=keypair)
-    chain_relay = ValidatorChainRelayV2()
-    state_relay = ArenaStateRelay(protected_policy)
+    signer = None
     try:
-        chain_relay.start()
-        state_relay.start()
-    except Exception:
-        try:
-            state_relay.stop()
-        finally:
-            chain_relay.stop()
-            runner.close()
-            chain.close()
-        raise
-    state_dir = Path(os.environ.get("LAB_ARENA_VALIDATOR_STATE_DIR", "/var/lib/leadpoet/arena-validator"))
-    orchestrator = ArenaWeightOrchestrator(
-        api=public_api, chain=chain, signer=client,
-        validator_hotkey=keypair.ss58_address,
-        expected_signing_key_hash=required[2],
-        paths=ArenaWeightPaths(state_dir),
-        extrinsic_period=int(chain_profile["extrinsic_period"]),
-    )
-    stop = threading.Event()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(signum, lambda _signum, _frame: stop.set())
-
-    def weight_loop() -> None:
-        from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
-
-        cutover = SubnetEpochCutover.from_mapping(
-            protected_policy["epoch_authority"]["cutover_manifest"]
+        public_api = ArenaPublicApi(args.api_base_url)
+        signing_key = public_api.signing_key()
+        signing_key_from_document(signing_key, key_hash)
+        cutover = chain_module.load_arena_cutover()
+        burn_hotkey = os.environ.get("LAB_ARENA_BURN_HOTKEY", "").strip()
+        if not burn_hotkey and config.network_name == "finney":
+            burn_hotkey = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
+        if not burn_hotkey:
+            raise ArenaValidatorError("LAB_ARENA_BURN_HOTKEY is required on this network")
+        signer = build_local_weight_signer(
+            keypair=keypair, chain_config=config, signing_key_document=signing_key,
+            expected_signing_key_hash=key_hash, cutover=cutover, burn_hotkey=burn_hotkey,
         )
-        while not stop.is_set():
-            try:
-                snapshot = chain_module.finalized_epoch_snapshot(chain)
-                epoch = int(snapshot.settlement_epoch_id(cutover))
-                try:
-                    orchestrator.poll_prior_outcomes(epoch)
-                except Exception as exc:
-                    print(
-                        "Arena validator prior polling failed: type=%s"
-                        % type(exc).__name__, file=sys.stderr, flush=True,
-                    )
-                status = orchestrator.run_once(epoch)
-                print("Arena validator weight status: %s" % status, flush=True)
-            except Exception as exc:
-                print("Arena validator weight cycle failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
-            stop.wait(max(5, args.poll_seconds))
+        snapshot = chain_module.finalized_epoch_snapshot(chain)
+        snapshot.settlement_epoch_id(cutover)  # Proves configured genesis and subnet.
+        metagraph = chain.refresh_metagraph()
+        if keypair.ss58_address not in metagraph.hotkeys:
+            raise ArenaValidatorError("validator hotkey is not in the finalized metagraph")
+        if args.check_only:
+            signer.readiness(int(snapshot.settlement_epoch_id(cutover)))
+            print("Arena local-wallet validator readiness is valid: hotkey=%s"
+                  % keypair.ss58_address, flush=True)
+            return 0
 
-    weights = threading.Thread(target=weight_loop, name="arena-weight-loop", daemon=False)
-    weights.start()
-    try:
-        while not stop.is_set():
-            taken = runner.run_once(stop_event=stop)
-            if args.once:
-                stop.set()
-                break
-            if taken == 0:
-                stop.wait(max(5, args.poll_seconds))
+        from lab_arena.wiring import build_runner_from_environment
+
+        orchestrator = ArenaWeightOrchestrator(
+            api=public_api, chain=chain, signer=signer,
+            validator_hotkey=keypair.ss58_address,
+            expected_signing_key_hash=key_hash,
+            paths=ArenaWeightPaths(Path(os.environ.get(
+                "LAB_ARENA_VALIDATOR_STATE_DIR", "/var/lib/leadpoet/arena-validator"))),
+            extrinsic_period=signer.extrinsic_period,
+        )
+        stop = threading.Event()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, lambda _signum, _frame: stop.set())
+        run_validator_loops(
+            orchestrator=orchestrator,
+            runner_factory=lambda: build_runner_from_environment(args, keypair=keypair),
+            epoch_supplier=lambda: chain_module.current_settlement_epoch(chain, cutover),
+            stop=stop, poll_seconds=args.poll_seconds, once=args.once,
+        )
+        return 0
     finally:
-        stop.set()
-        runner.close()
-        weights.join(timeout=max(10, args.poll_seconds + 5))
-        try:
-            state_relay.stop()
-        finally:
-            chain_relay.stop()
-            chain.close()
-    return 0
+        if signer is not None:
+            signer.close()
+        chain.close()
 
 
 if __name__ == "__main__":

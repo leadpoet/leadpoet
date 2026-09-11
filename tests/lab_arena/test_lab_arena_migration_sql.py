@@ -40,6 +40,9 @@ REWARD_CHAIN_SCOPE_SQL = (
 WEIGHT_STATE_SQL = (
     SCRIPTS / "202-arena-accepted-weight-state.sql"
 ).read_text(encoding="utf-8")
+VALIDATOR_SCORING_AUTHORITY_SQL = (
+    SCRIPTS / "208-lab-arena-validator-scoring-authority.sql"
+).read_text(encoding="utf-8")
 RETIRED_INCENTIVE_BRIDGE_SQL = (
     SCRIPTS / "203-retire-legacy-incentive-weight-bridge.sql"
 ).read_text(encoding="utf-8")
@@ -109,7 +112,24 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[201] == ["201-lab-arena-daily-capacity.sql"]
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
+    assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
     assert all(len(paths) == 1 for paths in numbered.values()), numbered
+
+
+def test_validator_scoring_authority_migration_delegates_only_role_to_gateway():
+    assert VALIDATOR_SCORING_AUTHORITY_SQL.lstrip().startswith(
+        "-- Let the gateway's canonical subnet-role check authorize Arena workers."
+    )
+    assert "CREATE OR REPLACE FUNCTION public.lab_arena_claim_assignment(" in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "configuration_doc -> 'runner_hotkeys'" not in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "not_allowlisted" not in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "p_excluded_miner_hotkeys" in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "FOR UPDATE SKIP LOCKED" in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "lab_arena_restart_claim_control" in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "reviewed_submission.code_review_status = 'passed'" in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "REVOKE ALL ON FUNCTION %s FROM PUBLIC" in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "GRANT EXECUTE ON FUNCTION %s TO lab_arena_service" in VALIDATOR_SCORING_AUTHORITY_SQL
+    assert "'version', 208" in VALIDATOR_SCORING_AUTHORITY_SQL
 
 
 def test_reward_chain_scope_migration_scopes_every_reward_history_read():

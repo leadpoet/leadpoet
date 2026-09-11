@@ -556,6 +556,10 @@ class Harness:
                 price_table=price_table(),
                 transport=self.review_transport,
             ),
+            validator_authorizer=lambda hotkey: (
+                hotkey in harness.runner_keys,
+                "validator" if hotkey in harness.runner_keys else None,
+            ),
         )
         return svc.ArenaService(config)
 

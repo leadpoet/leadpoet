@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: normal Arena local-wallet validators
+
+On 2026-09-10 the user explicitly authorized the normal Arena local-wallet
+transition: replace the validator's Nitro signing dependency, use the gateway's
+existing subnet-validator classification for scoring access, preserve the miner
+credential broker and canonical commit/reveal checks, and keep weights running
+independently of scoring. This permits protected access to existing owner-held
+wallet files, narrow committed fixes and migrations, pushes, canonical gateway
+and validator restarts, and live idle/scoring/weight validation. Do not export
+keys from an enclave, create a replacement identity, restore auditor or retired
+Research Lab requirements, or modify unrelated competition behavior. This scope
+expires when the transition and its live validation are complete.
+
 ## Scoped production authorization: full-code Arena review
 
 The user explicitly authorized this task on 2026-09-10 to implement and deploy

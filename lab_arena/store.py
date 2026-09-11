@@ -34,6 +34,9 @@ from lab_arena.contracts import (
 
 WHOAMI_SCHEMA_VERSION = "leadpoet.lab_arena.whoami.v1"
 CODE_REVIEW_SCHEMA_VERSION = "leadpoet.lab_arena.code_review.v1"
+VALIDATOR_SCORING_AUTHORITY_SCHEMA_VERSION = (
+    "leadpoet.lab_arena.validator_scoring_authority.v1"
+)
 SERVICE_ROLE_NAME = "lab_arena_service"
 
 # Parameter order and PostgreSQL casts for every service-callable function.
@@ -45,6 +48,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_whoami": (),
     "lab_arena_schema_version_v1": (),
     "lab_arena_code_review_schema_v1": (),
+    "lab_arena_validator_scoring_authority_schema_v1": (),
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_submission_costs": (("p_submission_id", "text"),),
@@ -575,6 +579,24 @@ class ArenaStore:
             or result.get("max_attempts") != 3
         ):
             raise ArenaStoreError("code review schema mismatch")
+        return result
+
+    def validator_scoring_authority_schema(self) -> Dict[str, Any]:
+        """Require gateway-authorized validator claims and completions."""
+
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_validator_scoring_authority_schema_v1", {}
+            ),
+            "validator_scoring_authority_schema",
+        )
+        if (
+            result.get("schema_version")
+            != VALIDATOR_SCORING_AUTHORITY_SCHEMA_VERSION
+            or result.get("version") != 208
+            or result.get("authority") != "gateway_subnet_validator_role"
+        ):
+            raise ArenaStoreError("validator scoring authority schema mismatch")
         return result
 
     # -- accepted weight state ------------------------------------------

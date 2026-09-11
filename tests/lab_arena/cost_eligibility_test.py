@@ -498,6 +498,11 @@ def _startup_service(cost_rpc_result):
             "schema_version": "leadpoet.lab_arena.code_review.v1",
             "version": 207,
         },
+        validator_scoring_authority_schema=lambda: {
+            "schema_version": "leadpoet.lab_arena.validator_scoring_authority.v1",
+            "version": 208,
+            "authority": "gateway_subnet_validator_role",
+        },
         _transport=transport,
     )
     service._objects = Objects()
@@ -517,6 +522,22 @@ def test_startup_probes_cost_rpc_grant_and_missing_submission_path():
 
     assert service.startup_checks()["current_round"] is None
     assert transport.cost_probe_seen is True
+
+
+def test_startup_rejects_missing_validator_scoring_authority_schema():
+    service, _transport = _startup_service(
+        ArenaStoreError("lab_arena_submission_missing")
+    )
+
+    def unavailable():
+        raise ArenaStoreError("function is unavailable")
+
+    service._store.validator_scoring_authority_schema = unavailable
+
+    with pytest.raises(ServiceError) as caught:
+        service.startup_checks()
+
+    assert caught.value.code == "validator_scoring_authority_schema_unavailable"
 
 
 @pytest.mark.parametrize(

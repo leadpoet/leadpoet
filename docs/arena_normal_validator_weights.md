@@ -1,193 +1,130 @@
 # Normal Arena validators
 
-Arena / Open Source Agent Competition is the only emission incentive. Arena
-accepts competition scores and publishes the signed reward state. Every normal
-validator scores miner submissions through the standard lease and completion
-API, then independently derives weights from that state and finalized chain
-inputs. Miner provider credentials stay in the existing credential broker.
+The primary, Yuma, Rizzo, and other subnet validators use the same
+`neurons/validator.py` process with their own local Bittensor hotkey.
+Nitro, an enclave, KMS key unwrapping, and the retired auditor client are not
+needed to run this process.
 
-The accepted state contains the signed Arena reward basis, chain identity,
-subnet, epoch, validity window, and burn hotkey. It contains no reimbursement,
-legacy champion, SOURCE_ADD, fulfillment, or leaderboard allocations. The Arena
-reward share, decay, promotion threshold, and effective epoch rules are
-unchanged. The eligible registered Arena winner receives its share. All
-remaining weight goes to the registered burn hotkey. A missing or invalid
-accepted state stops submission; it never becomes a fabricated burn-only state.
+## Scoring and authorization
 
-## Trust and signing
+The gateway's existing subnet registry decides whether a signed hotkey is a
+registered validator. That check authorizes both claims and scoring results.
+Round runner lists do not grant or deny access. Lease ownership, signatures,
+stage rules, code review, and miner self-dealing checks remain in place.
 
-Arena is trusted to accept scores and choose the winner. Independent weight
-construction makes that accepted decision reproducible; it does not independently
-prove that Arena accepted the correct scores.
+The validator pulls assigned miner source, runs the existing Arena ICP and
+scoring path, and reports results with its local hotkey. Miner provider
+credentials remain in the gateway broker. Validators and submitted models do
+not receive the raw keys. The existing gVisor/runsc sandbox is still needed for
+scoring; removing Nitro does not remove the model sandbox.
 
-One immutable state is accepted per network, genesis, subnet, and epoch. A
-conflicting governing reward basis cannot replace it. Validators resolve hotkeys
-to UIDs from finalized chain state. The protected verifier checks the signed
-state, epoch window, UID ownership, nonce, runtime, and exact transaction. It
-then signs only the permitted mortal time-locked weight commitment.
+Weights start independently, before scoring setup. An empty queue, missing
+runsc, scoring setup error, or scoring-loop error causes scoring to wait/retry,
+not the weight loop to stop. Scoring works again when its dependency recovers.
 
-The dedicated `validator_tee/Dockerfile.arena-signer` image exposes only Arena
-RPCs. Its measured image contains the reviewed public policy, which binds the
-Arena signing key and HTTPS host, chain and subnet, epoch mapping, burn hotkey,
-transaction profile, and drand library. KMS unwraps the existing encrypted
-validator seed only to an attested recipient inside that measured image. The
-enclave verifies that the derived hotkey matches its policy. The host cannot
-read the seed or replace the policy while retaining the key.
+## Weight submission
 
-TLS to Arena and the chain terminates inside the protected signer. The host
-relays can interrupt traffic but cannot substitute an authenticated response.
-The scorer obtains narrowly scoped claim and completion signatures from the
-same protected service. It does not load a plaintext validator hotkey.
+The validator verifies the gateway signing-key pin and the signed accepted
+Arena state, including the governing reward basis, chain identity, subnet,
+epoch window, and burn hotkey. It derives the same canonical winner/burn vector
+from finalized UID ownership and signs the time-locked commitment with its own
+local hotkey. The existing runtime, nonce, mortal transaction, and exact
+transaction checks still apply.
 
-No GitHub commit identity, model manifest, receipt graph, historical ancestry,
-or audit-validator role is required by the Arena weight path. Existing generic
-qualification and artifact verification services retain their own evidence
-checks. Those services do not construct Arena weights.
+No scoring work is needed to submit weights. The gateway publishes the current
+epoch's state from the governing reward basis, even when no new model has been
+scored. A missing, invalid, conflicting, or expired accepted state stops that
+submission. It never becomes an invented burn-only state.
 
-## Persistence and recovery
+Signed bytes are persisted before broadcast. Restarts and uncertain results
+reuse those exact bytes. A fresh attempt requires proof of expiry, absence of
+inclusion, and an unchanged nonce. Earlier reveals and report retries do not
+block the current epoch. Success requires finalized commitment/reveal readback,
+`LastUpdate`, the exact revealed vector, and unchanged rewarded UID ownership.
+Commitment inclusion alone is not success.
 
-The host persists signed transaction bytes before broadcast. Retries and restart
-recovery use those exact bytes. A new attempt is permitted only after the
-protected verifier proves expiry, absence of the previous transaction, and an
-unchanged nonce. Attempts are bounded and the old journals remain available.
+The local host can now access its own hotkey. Protect that machine and wallet
+file. Gateway signatures authenticate Arena decisions; local signing does not
+independently prove that Arena accepted the correct scores. No receipt graphs,
+release identity, model ancestry, or legacy Research Lab verification is used
+to authorize these weights.
 
-Each epoch has a separate journal. An older reveal or report retry does not
-block a new epoch. Final success requires chain readback of the time-locked
-reveal, the exact weight vector, and unchanged rewarded UID ownership at that
-transition. Commitment inclusion alone is insufficient.
+## Run a validator
 
-Before requesting a new signature, the validator checks the chain's weight
-rate limit at the same finalized block used for UID ownership. Waiting for that
-limit does not consume an attempt or replace a saved transaction.
+Install the repository's existing Python dependencies. Use Linux x86_64 and
+the existing runsc setup to score models. For Finney SN71, set the trusted
+public configuration:
 
-Chain outcomes are separate signed observations. They do not modify the reward
-state or maintain a reimbursement ledger. Delayed report delivery can resume
-after a gateway outage without signing another weight transaction.
+```bash
+export LAB_ARENA_API_BASE_URL=https://gateway.subnet71.com
+export LAB_ARENA_CHAIN_ENDPOINT=wss://entrypoint-finney.opentensor.ai:443
+export LAB_ARENA_SIGNING_KEY_HASH=sha256:fb0a422d437700f468beda94b4d3e05bb22dbaa6141f0e6c5f1dac9e7257d99a
+export LAB_ARENA_VALIDATOR_STATE_DIR="$PWD/validator-state"
+export LAB_ARENA_RUNNER_WORK_DIR="$PWD/arena-runner"
+export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
 
-## Installation and restart
+python neurons/validator.py \
+  --netuid 71 --subtensor.network finney \
+  --wallet.name YOUR_WALLET --wallet.hotkey YOUR_HOTKEY \
+  --wallet.path "$HOME/.bittensor/wallets"
+```
 
-Apply additive migration `scripts/202-arena-accepted-weight-state.sql` before
-the first restart. Prepare the measured signer files and its KMS recipient
-policy, then run the exact pushed `main` validator restart while the old gateway
-is still available:
+Use the current trusted signing-key pin supplied by the subnet operator if it
+changes. Do not blindly accept a key fetched from an untrusted gateway.
+The hotkey must already exist as a private regular wallet file (mode 0600).
+The validator does not create or replace wallets.
+
+For a service, the equivalent wallet settings are `LAB_ARENA_WALLET_NAME`,
+`LAB_ARENA_HOTKEY`, and `LAB_ARENA_WALLET_PATH`.
+`LAB_ARENA_EXPECTED_HOTKEY` can additionally bind deployment to an existing
+public identity. Use an absolute wallet path in services.
+Test networks require their matching epoch mapping and an explicit
+`LAB_ARENA_BURN_HOTKEY`.
+
+Append `--check-only` to verify local signing access, the gateway key pin,
+and finalized chain identity without broadcasting or claiming work.
+`--once` runs one scoring poll and one weight cycle; it is not a substitute
+for a continuously supervised process or finalized reveal verification.
+
+Run only one process per hotkey. Keep the same weight state directory across
+updates and retries. Never put provider keys or wallet seed values in service
+configuration, logs, or Git.
+
+## Deployment
+
+Apply committed migration `208-lab-arena-validator-scoring-authority.sql`
+before restarting the gateway to this code. It removes the duplicate SQL
+runner-list gate. SQL claims remain restricted to the gateway service role.
+Migrations through 207 remain prerequisites. This is not a change to scores,
+promotion, rewards, or provider accounting.
+
+Use the canonical gateway restart. For the validator, prepare a mode-0600
+environment file with the public configuration and local wallet path, then run
+the exact pushed main controller:
 
 ```bash
 git -C /home/ec2-user/leadpoet/leadpoet fetch --no-tags origin main
-test "$(git -C /home/ec2-user/leadpoet/leadpoet rev-parse origin/main)" = "$SHA"
 git -C /home/ec2-user/leadpoet/leadpoet show "$SHA:validator_restart.sh" \
   | VALIDATOR_DEPLOY_COMMIT="$SHA" bash
 ```
 
-The controller checks the public chain and configuration before stopping the
-old weight container. On this host, one enclave fits at a time. The controller
-preserves the old image and container, boots and provisions the Arena signer,
-and restores the old signer and container if protected readiness fails. A
-routine restart reuses a matching Arena signer. The normal validator retries
-missing accepted-state responses until the gateway transition completes.
+The controller stages exact committed source, preserves the journal/work
+directories, and runs local-wallet readiness before draining the active
+service. It then switches the service and retains the old release and private
+configuration for rollback. It does not export an enclave key or create a new
+hotkey. Use an existing owner-held wallet for the transition.
 
-For a later signer image update, pass the new build's paths through
-`VALIDATOR_ARENA_SIGNER_EIF`, `VALIDATOR_ARENA_SIGNER_MANIFEST`, and
-`VALIDATOR_ARENA_SIGNER_POLICY` to that same restart command. Keep the installed
-signer files in place. The controller verifies and snapshots them, drains the
-old service, and activates the new signer. If activation fails, it restores the
-previous signer and service. It installs the new files only after readiness.
-Keep the previous image approved in KMS until live validation passes.
-
-After the validator restart succeeds, run the gateway controller transition:
-
-```bash
-git -C /home/ec2-user/leadpoet_repo fetch --no-tags origin main
-test "$(git -C /home/ec2-user/leadpoet_repo rev-parse origin/main)" = "$SHA"
-git -C /home/ec2-user/leadpoet_repo show \
-  "$SHA:scripts/transition_gateway_controller_and_restart_v1.sh" \
-  | bash -s -- --commit "$SHA"
-```
-
-The transition keeps the canonical restart lock from controller installation
-through restart. After it stops all old gateway incentive producers, it writes
-the fixed migration barrier and waits. Apply the exact migration 203 from the
-same commit. For the 2026-09-10 transition only, apply migration 204 next. It
-appends the primary normal validator to the still-open `arena-2026-09-11`
-runner list only when the complete stored configuration has the reviewed hash;
-it is a no-op on fresh databases. Apply migration 205 before releasing the
-barrier as well. The current gateway checks optional Scrapingdog credential
-availability when it creates execution leases, including for submissions that
-use only the two required providers. The completion helper checks the live 203
-capability and binds the
-completion to the candidate, SQL hash, and restart invocation before startup
-continues. Run the helper from the exact Git object and use the protected
-persistent gateway environment, which remains available after the temporary
-parent environment is scrubbed:
-
-```bash
-git -C /home/ec2-user/leadpoet_repo show "$SHA:scripts/203-retire-legacy-incentive-weight-bridge.sql" > "/tmp/203-$SHA.sql"
-git -C /home/ec2-user/leadpoet_repo show "$SHA:scripts/complete_gateway_migration_203_barrier.py" \
-  | python3 - \
-      --barrier /home/ec2-user/.config/leadpoet/migration-203-barrier.json \
-      --completion /home/ec2-user/.config/leadpoet/migration-203-complete.json \
-      --sql "/tmp/203-$SHA.sql" --commit "$SHA" \
-      --env-file /home/ec2-user/.config/leadpoet/gateway.env
-```
-
-The helper does not print credentials. Complete migrations 204 and 205 before
-running the helper because normal Arena claims can resume after it returns. Later
-restarts use the normal canonical command; migrations 203 through 205 are
-idempotent and the special barrier is not required.
-
-`neurons/validator.py` starts the normal Arena validator. The sample
-`deploy/leadpoet-arena-validator.service` supervises that same implementation.
-Set its interpreter and checkout paths for the installed environment.
-`scripts/run_arena_validator.py` reads a mode-0600 environment file as data.
-
-Required settings include:
-
-```dotenv
-LAB_ARENA_API_BASE_URL=https://your-arena-host.example
-LAB_ARENA_CHAIN_ENDPOINT=wss://your-finalized-chain-endpoint.example
-LAB_ARENA_SIGNING_KEY_HASH=sha256:<trusted-Arena-public-key-hash>
-LAB_ARENA_NETWORK=finney
-LAB_ARENA_NETUID=71
-LAB_ARENA_VALIDATOR_STATE_DIR=/var/lib/leadpoet/arena-validator
-LAB_ARENA_RUNNER_WORK_DIR=/var/lib/lab-arena/runner
-LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
-LAB_ARENA_HOTKEY_ENVELOPE=/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json
-```
-
-Use the existing sandbox settings for scoring. Do not put miner provider keys
-or the validator seed in this environment file.
-
-Keep the existing KMS-encrypted validator hotkey envelope as the durable boot
-input. Build the signer with the reviewed public policy set through
-`VALIDATOR_ARENA_SIGNER_POLICY_INPUT`. On every fresh enclave boot, the host
-sends the existing KMS ciphertext and the enclave's signed recipient document
-to KMS. KMS must permit the approved signer PCR0 and require recipient-only
-decryption. The returned recipient ciphertext is opened only inside the
-enclave and is accepted only when its hotkey matches the measured policy. This
-transition does not require the owner seed on the host or a newly sealed copy.
-
-The canonical restart runs this protected readiness check after provisioning
-the candidate signer. It can also check an already running Arena signer:
-
-```bash
-python3 scripts/run_arena_validator.py \
-  --environment-file /home/ec2-user/.config/leadpoet/arena-validator.env \
-  --check-only
-```
-
-Preserve the validator state directory across updates. SIGTERM stops new claims
-and drains current work. The validator owns chain relay port 5002 and Arena
-relay port 5003. One process must own each port. Do not run an old validator
-and the Arena validator with the same hotkey at the same time.
-
-The legacy `/weights` and `/research-lab/allocations/*` routes, old audit client,
-allocation producers, automatic validator Git rebuilds, and paired weight
-restart machinery are removed from this release. There is no retirement flag
-or fallback. A code push does not change the currently deployed old release.
+The sample systemd service supervises the same normal validator. SIGTERM stops
+new claims and drains current work. The old enclave need not be terminated to
+run the local path; the controller does not manage unrelated enclave services.
 
 ## Validation
 
-The local end-to-end gate uses disposable PostgreSQL and controlled model,
-provider, and chain boundaries. It exercises scoring, winner selection,
-accepted state, weight construction, protected submission, restart recovery,
-and chain readback. Production Nitro key unsealing and a live chain reveal
-remain deployment checks; local success does not prove either occurred.
+Run the focused gate in `docs/v2_deployment_verification_checklist.md`.
+It covers local-wallet signing, safe restart/retry, finalized reveals, idle
+weight submission, scoring with brokered miner credentials, and registered
+validator authorization without runner lists.
+
+Report controlled tests, deployment readiness, and live finalized outcomes
+separately. Do not claim Yuma or Rizzo is working solely because the primary is
+working; each operator must run the updated process with their own wallet.

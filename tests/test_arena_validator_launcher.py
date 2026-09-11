@@ -22,6 +22,7 @@ def test_environment_is_data_and_overrides_ambient_settings(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("body", [
     "LEADPOET_WEIGHT_MODE=legacy\n",
+    "ENCLAVE_CID=8\n",
     "PATH=/tmp\n",
     "LAB_ARENA_API_BASE_URL=one\nLAB_ARENA_API_BASE_URL=two\n",
     "LAB_ARENA_SECRET=private value\n",
@@ -44,12 +45,11 @@ def test_public_or_symlinked_environment_is_rejected(tmp_path):
         load_environment(link)
 
 
-def test_explicit_candidate_enclave_cid_overrides_environment(tmp_path, monkeypatch):
-    path = _env(tmp_path, "ENCLAVE_CID=8\n")
+def test_standard_wallet_flags_are_forwarded_unchanged(tmp_path, monkeypatch):
+    path = _env(tmp_path, "LAB_ARENA_API_BASE_URL=https://arena.example\n")
     observed = {}
 
     def validator_main(argv):
-        observed["cid"] = os.environ["ENCLAVE_CID"]
         observed["argv"] = argv
         return 0
 
@@ -57,13 +57,38 @@ def test_explicit_candidate_enclave_cid_overrides_environment(tmp_path, monkeypa
 
     monkeypatch.setattr(lab_arena.validator, "main", validator_main)
     assert run_arena_validator.main(
-        ["--environment-file", str(path), "--enclave-cid", "19", "--check-only"]
+        [
+            "--environment-file", str(path),
+            "--wallet-name", "arena_runner",
+            "--hotkey", "default",
+            "--wallet-path", "/var/lib/arena-wallets",
+            "--check-only",
+        ]
     ) == 0
-    assert observed == {"cid": "19", "argv": ["--check-only"]}
+    assert observed == {
+        "argv": [
+            "--wallet-name", "arena_runner",
+            "--hotkey", "default",
+            "--wallet-path", "/var/lib/arena-wallets",
+            "--check-only",
+        ]
+    }
 
 
-def test_parent_cid_is_rejected_before_validator_import(tmp_path):
-    with pytest.raises(SystemExit):
-        run_arena_validator.main(
-            ["--environment-file", str(_env(tmp_path, "# empty\n")), "--enclave-cid", "3"]
-        )
+def test_check_only_is_forwarded_without_enclave_configuration(tmp_path, monkeypatch):
+    path = _env(tmp_path, "# empty\n")
+    observed = {}
+
+    def validator_main(argv):
+        observed["argv"] = argv
+        observed["enclave"] = os.environ.get("ENCLAVE_CID")
+        return 0
+
+    import lab_arena.validator
+
+    monkeypatch.delenv("ENCLAVE_CID", raising=False)
+    monkeypatch.setattr(lab_arena.validator, "main", validator_main)
+    assert run_arena_validator.main(
+        ["--environment-file", str(path), "--check-only"]
+    ) == 0
+    assert observed == {"argv": ["--check-only"], "enclave": None}

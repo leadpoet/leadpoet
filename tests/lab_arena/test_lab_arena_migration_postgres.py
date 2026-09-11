@@ -1618,8 +1618,40 @@ def test_claim_replay_reuse_ceiling_and_self_exclusion(store, connect):
     assert excluded["status"] == "no_pending"
     only_one, *_ = claim(store, round_id, hotkey("cl-runner-0"), parallelism=8, ceiling=8, excluded=[parts[0]["miner_hotkey"]])
     assert only_one["status"] == "leased" and only_one["miner_hotkey"] == parts[1]["miner_hotkey"]
-    # Not allowlisted runner.
-    assert claim(store, round_id, hotkey("stranger"))[0]["status"] == "not_allowlisted"
+
+
+def test_claim_rpc_accepts_gateway_authorized_hotkey_absent_from_round_list(
+    store, superuser
+):
+    assert store.validator_scoring_authority_schema() == {
+        "schema_version": "leadpoet.lab_arena.validator_scoring_authority.v1",
+        "version": 208,
+        "authority": "gateway_subnet_validator_role",
+    }
+    with superuser.cursor() as cursor:
+        for role, expected in (
+            ("lab_arena_service", True),
+            ("service_role", False),
+            ("anon", False),
+            ("authenticated", False),
+        ):
+            cursor.execute(
+                "SELECT has_function_privilege(%s, "
+                "'public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)', "
+                "'EXECUTE')",
+                (role,),
+            )
+            assert cursor.fetchone() == (expected,)
+    round_id = "arena-2026-09-02-va"
+    configured, _parts = open_round(
+        store, round_id, participants=1, runners=1, prefix="va"
+    )
+    stranger = hotkey("va-stranger")
+    assert stranger not in configured
+
+    response, *_ = claim(store, round_id, stranger)
+    assert response["status"] == "leased"
+    assert response["run_id"]
 
 
 def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once(store, superuser):

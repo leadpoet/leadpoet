@@ -56,6 +56,22 @@ CANCEL_REASONS = {
 }
 
 
+def _gateway_validator_authorizer(
+    hotkey: str, *, network_name: str, netuid: int
+) -> Tuple[bool, Optional[str]]:
+    """Use the gateway registry for the exact Arena chain scope."""
+
+    from gateway.utils import registry
+
+    if (
+        chain_module.normalize_network_name(registry.BITTENSOR_NETWORK)
+        != chain_module.normalize_network_name(network_name)
+        or int(registry.BITTENSOR_NETUID) != int(netuid)
+    ):
+        raise RuntimeError("gateway registry chain scope does not match Arena")
+    return registry.is_registered_hotkey(hotkey)
+
+
 class ServiceError(RuntimeError):
     """A request or transition failed closed."""
 
@@ -317,6 +333,11 @@ class ServiceConfig:
     # Supplies plain accepted economic inputs. It must not return receipts,
     # ancestry, release identity, or a preconstructed weight vector.
     accepted_burn_hotkey: str = ""
+    # Production uses the gateway's canonical subnet role lookup. Tests may
+    # inject a deterministic lookup without constructing a live metagraph.
+    validator_authorizer: Optional[
+        Callable[[str], Tuple[bool, Optional[str]]]
+    ] = None
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -486,6 +507,12 @@ class ArenaService:
             self._store.code_review_schema()
         except ArenaStoreError as exc:
             raise ServiceError("code_review_schema_unavailable", 500) from exc
+        try:
+            self._store.validator_scoring_authority_schema()
+        except ArenaStoreError as exc:
+            raise ServiceError(
+                "validator_scoring_authority_schema_unavailable", 500
+            ) from exc
         # Every service function must exist and be granted: a missing round is the
         # expected structured failure; a permission or undefined-function error is not.
         for function, params in (
@@ -590,8 +617,8 @@ class ArenaService:
         for hotkey in runners:
             if hotkey in banned:
                 raise ServiceError("runner_banned", 500)
-        # Only the explicit Arena runner configuration grants execution and
-        # scoring authority. A chain validator permit does not grant access.
+        # This planned runner set sizes the announced daily capacity and stays
+        # in the document for schema compatibility. It never grants authority.
         return runners, banned
 
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
@@ -2245,6 +2272,24 @@ class ArenaService:
     def _lease_token(self, validated: Mapping[str, Any]) -> str:
         return contracts.document_hash({"lease": validated["request_id"], "signature": validated["signature"]})[7:]
 
+    def _require_validator_authority(self, hotkey: str) -> None:
+        """Require the gateway's canonical registered-validator role."""
+
+        authorizer = getattr(self._config, "validator_authorizer", None)
+        if authorizer is None:
+            network_name, netuid = self._chain_scope()
+            authorizer = lambda candidate: _gateway_validator_authorizer(
+                candidate, network_name=network_name, netuid=netuid
+            )
+        try:
+            registered, role = authorizer(hotkey)
+        except Exception as exc:
+            raise ServiceError("runner_validator_authority_unavailable", 503) from exc
+        if not registered:
+            raise ServiceError("runner_hotkey_unregistered", 403)
+        if role != "validator":
+            raise ServiceError("runner_validator_required", 403)
+
     def handle_claim(self, envelope: Any) -> Dict[str, Any]:
         validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_CLAIM, hot=True)
         round_id = round_row["round_id"]
@@ -2255,25 +2300,7 @@ class ArenaService:
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
-        if validated["hotkey"] not in configuration["runner_hotkeys"]:
-            raise ServiceError("runner_not_allowlisted", 403)
-        if str(getattr(self._config, "network_name", "finney")).strip().lower() == "test":
-            try:
-                snapshot = self._config.chain.metagraph()
-                uid = chain_module.uid_for_hotkey(snapshot, validated["hotkey"])
-                permits = snapshot.validator_permit
-            except Exception as exc:
-                raise ServiceError("runner_validator_permit_unavailable", 503) from exc
-            if uid is None:
-                raise ServiceError("runner_hotkey_unregistered", 403)
-            try:
-                has_validator_permit = permits[uid]
-            except (IndexError, KeyError, TypeError) as exc:
-                raise ServiceError("runner_validator_permit_unavailable", 503) from exc
-            if not isinstance(has_validator_permit, bool):
-                raise ServiceError("runner_validator_permit_unavailable", 503)
-            if not has_validator_permit:
-                raise ServiceError("runner_validator_permit_required", 403)
+        self._require_validator_authority(validated["hotkey"])
         excluded = list(self._config.chain.hotkeys_owned_by_same_coldkey(validated["hotkey"]))
         token = self._lease_token(validated)
         response = self._store.claim_assignment(
@@ -2414,6 +2441,7 @@ class ArenaService:
             run_result = contracts.validate_run_result(body.get("result"))
         except ArenaContractError as exc:
             raise ServiceError("run_result_invalid:%s" % str(exc)[:80], 400)
+        self._require_validator_authority(validated["hotkey"])
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)

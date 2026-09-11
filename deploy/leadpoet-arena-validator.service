@@ -7,10 +7,9 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/home/ec2-user/leadpoet/validator-current
-EnvironmentFile=/home/ec2-user/.config/leadpoet/arena-validator-runtime.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStartPre=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator-service.env --enclave-cid ${ENCLAVE_CID} --check-only
-ExecStart=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator-service.env --enclave-cid ${ENCLAVE_CID}
+ExecStartPre=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator-service.env --check-only
+ExecStart=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator-service.env
 Restart=on-failure
 RestartSec=15
 KillSignal=SIGTERM

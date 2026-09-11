@@ -78,7 +78,7 @@ _SAFE_EXCEPTION_CLASSES = frozenset(
 _DEEPLINE_JOB_STATUSES = frozenset(
     {"cancelled", "completed", "failed", "in_progress", "pending", "queued", "running"}
 )
-_DEEPLINE_BILLING_MAX_ATTEMPTS = 3
+_DEEPLINE_BILLING_MAX_ATTEMPTS = 4
 _DEEPLINE_BILLING_MAX_SECONDS = 5.0
 _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 
@@ -484,6 +484,11 @@ def _deepline_billing_readback(
     }
     history_url = DEEPLINE_BILLING_HISTORY_URL
     for request_number in range(_DEEPLINE_BILLING_MAX_ATTEMPTS):
+        # A newly completed job may not yet appear on the newest page. Keep
+        # the existing three-page scan, then refresh the newest page instead
+        # of spending every read on older history. The time bound is unchanged.
+        if request_number == _DEEPLINE_BILLING_MAX_ATTEMPTS - 1:
+            history_url = DEEPLINE_BILLING_HISTORY_URL
         now = time.monotonic()
         if now >= readback_deadline:
             break

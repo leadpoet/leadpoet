@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: PR194 validator participation
+
+On 2026-09-11 the user explicitly authorized review, narrow fixes, update and
+merge of PR194, and end-to-end production validation using the overnight weight
+recovery and rebenchmark validation skills. This covers protected production
+inspection, required credentials and Supabase access, exact committed migrations,
+pushes and safe merges, and canonical gateway/normal-validator restarts. Require
+validators strictly above 75,000 effective stake to earn fresh gateway weight
+access through accepted Arena work, according to the reviewed policy. Preserve
+normal jobs, scoring, stakeweight behavior, wallets, signed transaction recovery,
+finalization, submission data, credentials, round timing, and concurrent work.
+Do not restore retired Research Lab, auditor, SOURCE_ADD, or Nitro requirements.
+This authority expires when PR194 and its affected live flows are verified.
+
+
 ## Scoped production authorization: PR192 contact review
 
 On 2026-09-11 the user explicitly authorized review, narrow fixes, update and

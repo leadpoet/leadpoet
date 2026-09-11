@@ -115,7 +115,13 @@ class HttpsJsonRpcTransport:
         if not value:
             return None
         if value.isdecimal():
-            return float(int(value))
+            if len(value) > 3:
+                return float("inf")
+            try:
+                seconds = int(value)
+            except (OverflowError, ValueError):
+                return float("inf")
+            return float(seconds) if seconds <= self.timeout_seconds else float("inf")
         try:
             retry_at = parsedate_to_datetime(value)
             if retry_at.tzinfo is None:
@@ -149,9 +155,7 @@ class HttpsJsonRpcTransport:
                     raise ValidatorChainSourceV2Error(
                         "host chain RPC retry deadline exhausted"
                     ) from last_error
-                request_timeout = (
-                    self.timeout_seconds if attempt_number == 0 else remaining
-                )
+                request_timeout = min(float(self.timeout_seconds), remaining)
                 retry_after = None
                 try:
                     with self._opener(request, timeout=request_timeout) as response:
@@ -179,12 +183,20 @@ class HttpsJsonRpcTransport:
                             )
                         return parse_json_rpc_response(response_body, int(request_id))
                 except urllib.error.HTTPError as exc:
-                    if int(exc.code) not in _TRANSIENT_RPC_HTTP_STATUSES:
-                        raise ValidatorChainSourceV2Error(
-                            "host chain RPC returned an HTTP error"
-                        ) from exc
-                    retry_after = self._retry_after_seconds(exc.headers)
-                    last_error = exc
+                    try:
+                        if int(exc.code) not in _TRANSIENT_RPC_HTTP_STATUSES:
+                            raise ValidatorChainSourceV2Error(
+                                "host chain RPC returned an HTTP error"
+                            ) from exc
+                        retry_after = self._retry_after_seconds(exc.headers)
+                        last_error = exc
+                    finally:
+                        try:
+                            exc.close()
+                        except Exception as close_exc:
+                            raise ValidatorChainSourceV2Error(
+                                "host chain RPC HTTP response cleanup failed"
+                            ) from close_exc
                 if attempt_number == len(CHAIN_RPC_RETRY_BACKOFF_SECONDS):
                     raise ValidatorChainSourceV2Error(
                         "host chain RPC exhausted transient HTTP retries"

@@ -24,6 +24,7 @@ class _Response:
         self.headers = {}
         if declared is not None:
             self.headers["Content-Length"] = str(declared)
+        self.closed = False
 
     def __enter__(self):
         return self
@@ -36,6 +37,9 @@ class _Response:
 
     def read(self, limit):
         return self._body[:limit]
+
+    def close(self):
+        self.closed = True
 
 
 class _Transport:
@@ -72,7 +76,7 @@ def test_https_transport_converts_wss_and_binds_strict_json_rpc():
     assert transport.call(method="chain_getBlockHash", params=[3], request_id=7) == "0xabc"
     assert observed == {
         "url": "https://chain.example:443/",
-        "timeout": 9,
+        "timeout": pytest.approx(9),
         "request": {
             "jsonrpc": "2.0",
             "id": 7,
@@ -108,12 +112,14 @@ def test_https_transport_retries_transient_http_within_original_deadline():
         observed.append((bytes(request.data), timeout))
         now[0] += 2.0
         if len(observed) == 1:
+            response = _Response(b"")
+            error_responses.append(response)
             raise urllib.error.HTTPError(
                 request.full_url,
                 429,
                 "rate limited",
-                {"Retry-After": "3"},
-                None,
+                {"Retry-After": "Thu, 01 Jan 1970 00:01:43 GMT"},
+                response,
             )
         return _Response(
             json.dumps({"jsonrpc": "2.0", "id": 7, "result": "0xabc"}).encode()
@@ -123,17 +129,20 @@ def test_https_transport_retries_transient_http_within_original_deadline():
         sleeps.append(delay)
         now[0] += delay
 
+    error_responses = []
     transport = HttpsJsonRpcTransport(
         "https://chain.example",
         timeout_seconds=9,
         opener=open_request,
         clock=lambda: now[0],
+        wall_clock=lambda: 100.0,
         sleep=sleep,
     )
     assert transport.call(method="chain_getBlockHash", params=[3], request_id=7) == "0xabc"
     assert sleeps == [3.0]
     assert [timeout for _body, timeout in observed] == [9, 4.0]
     assert observed[0][0] == observed[1][0]
+    assert error_responses[0].closed is True
 
 
 def test_https_transport_exhausts_bounded_transient_http_retries():
@@ -177,6 +186,25 @@ def test_https_transport_does_not_retry_invalid_or_authenticated_errors():
         assert calls == [1]
 
 
+def test_https_transport_closes_a_nontransient_http_error_response():
+    response = _Response(b"")
+    calls = []
+
+    def open_request(request, *, timeout):
+        calls.append(timeout)
+        raise urllib.error.HTTPError(request.full_url, 401, "unauthorized", {}, response)
+
+    transport = HttpsJsonRpcTransport(
+        "https://chain.example",
+        timeout_seconds=9,
+        opener=open_request,
+    )
+    with pytest.raises(ValidatorChainSourceV2Error, match="HTTP error"):
+        transport.call(method="chain_getBlockHash", params=[3], request_id=7)
+    assert len(calls) == 1
+    assert response.closed is True
+
+
 def test_https_transport_does_not_cross_deadline_for_retry_after():
     calls = []
     sleeps = []
@@ -187,7 +215,7 @@ def test_https_transport_does_not_cross_deadline_for_retry_after():
             request.full_url,
             429,
             "rate limited",
-            {"Retry-After": "10"},
+            {"Retry-After": "9" * 10_000},
             None,
         )
 

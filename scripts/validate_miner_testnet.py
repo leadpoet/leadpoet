@@ -487,6 +487,34 @@ def _validate_chain_endpoint(endpoint: str) -> str:
     return endpoint
 
 
+def _selected_baseline_source_url(configured: str | None, default: str) -> str:
+    """Select an explicit shadow baseline or the production service default."""
+
+    return str(configured).strip() if configured is not None else default
+
+
+def _resume_configuration_matches(
+    configuration: Mapping[str, Any],
+    *,
+    cutoff: str,
+    runner_hotkey: str,
+    baseline_hotkey: str,
+    baseline_source_url: str,
+    scorer_image_reference: str,
+) -> bool:
+    """Require a resumed shadow test to use its exact frozen controls."""
+
+    return (
+        configuration.get("mode") == "shadow"
+        and configuration.get("rewards_enabled") is False
+        and (configuration.get("schedule") or {}).get("submission_cutoff") == cutoff
+        and configuration.get("runner_hotkeys") == [runner_hotkey]
+        and configuration.get("baseline_hotkey") == baseline_hotkey
+        and configuration.get("baseline_source_url") == baseline_source_url
+        and configuration.get("scorer_image_reference") == scorer_image_reference
+    )
+
+
 def _serve(args: argparse.Namespace) -> int:
     prefix = _validate_s3_prefix(args.s3_prefix)
     if args.bucket != DEFAULT_BUCKET:
@@ -520,7 +548,13 @@ def _serve(args: argparse.Namespace) -> int:
     from lab_arena.credentials import CredentialManager
     from lab_arena.code_review_runtime import SubmissionCodeReviewer
     from lab_arena.driver import drive_once
-    from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig
+    from lab_arena.service import (
+        DEFAULT_BASELINE_SOURCE_URL,
+        ArenaService,
+        RoundDefaults,
+        S3ObjectStore,
+        ServiceConfig,
+    )
     from lab_arena.store import ArenaStore, PsycopgTransport
     from lab_arena.submission_runtime import SubmissionProviderKeys
     from lab_arena.wiring import ChainReadsAdapter, fetch_public_source_archive, registry_client_from_environment
@@ -593,11 +627,16 @@ def _serve(args: argparse.Namespace) -> int:
                 funding_source_for=submission_keys.funding_source_for,
             )
 
+        baseline_source_url = _selected_baseline_source_url(
+            args.baseline_source_url,
+            DEFAULT_BASELINE_SOURCE_URL,
+        )
         defaults = RoundDefaults(
             execution_cap_microusd=args.execution_cap_usd,
             scoring_cap_microusd=args.scoring_cap_usd,
             runner_hotkeys=(args.runner_hotkey,),
             baseline_hotkey=args.baseline_hotkey,
+            baseline_source_url=baseline_source_url,
             stage_minutes={
                 "benchmark": args.benchmark_minutes,
                 "stage_1": args.stage_1_minutes,
@@ -656,13 +695,13 @@ def _serve(args: argparse.Namespace) -> int:
                     raise ConfigurationError("resume target is not the only round in the isolated database")
                 existing_round = existing_rounds[0]
             existing_configuration = existing_round.get("configuration_doc") or {}
-            if (
-                existing_configuration.get("mode") != "shadow"
-                or existing_configuration.get("rewards_enabled") is not False
-                or (existing_configuration.get("schedule") or {}).get("submission_cutoff") != args.cutoff
-                or existing_configuration.get("runner_hotkeys") != [args.runner_hotkey]
-                or existing_configuration.get("baseline_hotkey") != args.baseline_hotkey
-                or existing_configuration.get("scorer_image_reference") != str(scorer.reference)
+            if not _resume_configuration_matches(
+                existing_configuration,
+                cutoff=args.cutoff,
+                runner_hotkey=args.runner_hotkey,
+                baseline_hotkey=args.baseline_hotkey,
+                baseline_source_url=baseline_source_url,
+                scorer_image_reference=str(scorer.reference),
             ):
                 raise ConfigurationError("existing round configuration does not match the resume request")
         elif args.managed_postgrest:
@@ -797,6 +836,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--expected-miner-uid", type=int, default=11)
     serve.add_argument("--runner-hotkey", default=DEFAULT_RUNNER)
     serve.add_argument("--baseline-hotkey", default=DEFAULT_BASELINE)
+    serve.add_argument(
+        "--baseline-source-url",
+        help="public HTTPS source archive used only as this shadow round's baseline",
+    )
     serve.add_argument("--benchmark-minutes", type=_positive_minutes, default=2)
     serve.add_argument("--stage-1-minutes", type=_positive_minutes, default=30)
     serve.add_argument("--stage-1-scoring-minutes", type=_positive_minutes, default=60)

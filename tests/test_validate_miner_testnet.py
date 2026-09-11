@@ -124,6 +124,72 @@ def test_parser_fixes_shadow_limits_and_requires_explicit_resources():
     assert args.scoring_cap_usd == 10_000_000
     assert args.runner_hotkey == SCRIPT.DEFAULT_RUNNER
     assert args.miner_hotkey == SCRIPT.DEFAULT_MINER
+    assert args.baseline_source_url is None
+    assert (
+        SCRIPT._selected_baseline_source_url(
+            args.baseline_source_url,
+            "https://github.com/example/promoted/archive/lab.tar.gz",
+        )
+        == "https://github.com/example/promoted/archive/lab.tar.gz"
+    )
+
+
+def test_parser_accepts_an_immutable_shadow_baseline_source():
+    source_url = (
+        "https://github.com/leadpoet/pydantic-harness/archive/"
+        "74a3b5633dcaa7ba3aef3af3b8f8e4685890d5de.tar.gz"
+    )
+    args = SCRIPT.build_parser().parse_args(
+        [
+            "serve",
+            "--gateway-secret-id",
+            "gateway-secret",
+            "--chain-endpoint",
+            "wss://test.invalid",
+            "--cutoff",
+            "2026-09-05T04:20:00Z",
+            "--kms-key-id",
+            "arn:aws:kms:us-east-1:493765492819:key/00000000-0000-0000-0000-000000000000",
+            "--s3-prefix",
+            "miner-testnet-20260904",
+            "--scorer-image",
+            "registry.example/repository@sha256:" + "a" * 64,
+            "--baseline-source-url",
+            source_url,
+        ]
+    )
+    assert args.baseline_source_url == source_url
+    assert (
+        SCRIPT._selected_baseline_source_url(
+            args.baseline_source_url,
+            "https://github.com/example/promoted/archive/lab.tar.gz",
+        )
+        == source_url
+    )
+
+
+def test_resume_configuration_requires_the_exact_baseline_source():
+    source_url = "https://github.com/example/control/archive/immutable.tar.gz"
+    configuration = {
+        "mode": "shadow",
+        "rewards_enabled": False,
+        "schedule": {"submission_cutoff": "2026-09-05T04:20:00Z"},
+        "runner_hotkeys": ["runner"],
+        "baseline_hotkey": "baseline",
+        "baseline_source_url": source_url,
+        "scorer_image_reference": "registry.example/scorer@sha256:" + "a" * 64,
+    }
+    arguments = {
+        "cutoff": "2026-09-05T04:20:00Z",
+        "runner_hotkey": "runner",
+        "baseline_hotkey": "baseline",
+        "baseline_source_url": source_url,
+        "scorer_image_reference": configuration["scorer_image_reference"],
+    }
+    assert SCRIPT._resume_configuration_matches(configuration, **arguments)
+
+    changed = dict(configuration, baseline_source_url="https://example.test/other.tar.gz")
+    assert not SCRIPT._resume_configuration_matches(changed, **arguments)
 
 
 @pytest.mark.parametrize("service_key", ("", "sb_secret_example"))

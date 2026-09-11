@@ -3,11 +3,38 @@ from decimal import Decimal
 import pytest
 
 from lab_arena.provider_costs import (
+    deepline_billing_history_cost,
     deepline_cost,
     deepline_reservation_cost,
     openrouter_cost,
     scrapingdog_cost,
 )
+
+
+def test_deepline_history_exact_terminal_match_ignores_absent_pagination_fields():
+    state, cost, has_more, next_offset = deepline_billing_history_cost(
+        {"recent": {"entries": [{"request_id": "job-1", "operation": "exa_search",
+                                  "provider": "exa", "charge_state": "posted", "credits": 0.14}]}},
+        request_id="job-1", operation="exa_search",
+    )
+    assert state == "matched" and cost is not None and cost.microusd == 14_000
+    assert has_more is False and next_offset is None
+
+
+@pytest.mark.parametrize("next_offset", [None, True, False, 0, -1, 50.0, "50", 1_000_001])
+def test_deepline_history_rejects_invalid_or_nonadvancing_offset(next_offset):
+    state, cost, has_more, offset = deepline_billing_history_cost(
+        {"recent": {"entries": [], "has_more": True, "next_offset": next_offset}},
+        request_id="job-1", operation="exa_search", current_offset=0,
+    )
+    assert (state, cost, has_more, offset) == ("invalid", None, False, None)
+
+
+def test_deepline_history_returns_forward_offset_for_missing_job():
+    assert deepline_billing_history_cost(
+        {"recent": {"entries": [], "has_more": True, "next_offset": 100}},
+        request_id="job-1", operation="exa_search", current_offset=50,
+    ) == ("pending", None, True, 100)
 
 
 @pytest.mark.parametrize(

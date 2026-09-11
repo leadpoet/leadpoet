@@ -129,3 +129,29 @@ def test_integrity_receipts_reject_missing_fields_duplicate_credit_and_wrong_pos
     for bad in ({"final_score": 54}, {**valid, "company_index": 1}, {**valid, "duplicate_company": True}, {**valid, "final_score": 0}):
         with pytest.raises(scoring.ScoringError):
             scoring.validate_breakdowns_for_item([bad], icp=icp, companies=companies, integrity_policy=True)
+
+
+@pytest.mark.parametrize("returned", [1, 5])
+def test_irrelevant_padding_cannot_raise_cost_allowance(returned):
+    from tests.lab_arena.cost_eligibility_test import _cost_service
+    service, row, submission, runs = _cost_service(amount=750_000, companies_per_icp=returned, populated_positions={0})
+    row["configuration_doc"].update({"integrity_policy": integrity.POLICY,
+        "scorer_policy": scoring.build_scorer_policy(scoring_adapter_version=integrity.SCORING_ADAPTER)})
+    icps = daily_icps()
+    for icp in icps:
+        icp["employee_count"] = ["1-10"]
+    service.evaluation_icps = lambda _round_id: icps
+    service._scoring_outputs = lambda _round_id, stage: {
+        run["run_id"]: {"status": "accepted"} for run in runs if run["stage"] == stage
+    }
+    def accepted_judgment(_run, *, icp, companies, policy):
+        return [{"company_index": index, "company_identity_key": str(index),
+            "company_qualified": index == 0, "duplicate_company": False,
+            "final_score": 54 if index == 0 else 0} for index in range(len(companies))]
+    service._verified_breakdowns = accepted_judgment
+    result = service._submission_cost_eligibility(row, submission, runs)
+    assert not result["eligible"]
+    assert result["eligibility_reason"] == "cost_per_company_exceeded"
+    assert result["cost_summary"]["returned_company_count"] == returned
+    assert result["cost_summary"]["qualified_company_count"] == 1
+    assert result["cost_summary"]["eligibility_cap_microusd"] == 500_000

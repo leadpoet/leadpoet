@@ -1222,6 +1222,10 @@ DECLARE
   v_decision JSONB;
   v_winner_id TEXT;
   v_winner_score NUMERIC;
+  v_round_participant JSONB;
+  v_ranked_count INTEGER;
+  v_persisted_count INTEGER;
+  v_allowed_failure BOOLEAN;
 BEGIN
   IF NEW.configuration_doc ->> 'integrity_policy'
        IS DISTINCT FROM 'arena_integrity_v1'
@@ -1242,6 +1246,41 @@ BEGIN
   END IF;
   v_cohort := NEW.confirmation_cohort;
   v_required := COALESCE((v_cohort ->> 'required')::BOOLEAN, FALSE);
+  IF pg_catalog.jsonb_array_length(NEW.publication_doc -> 'participants')
+       <> pg_catalog.jsonb_array_length(NEW.participants)
+     OR (SELECT pg_catalog.count(DISTINCT participant ->> 'submission_id')
+         FROM pg_catalog.jsonb_array_elements(
+           NEW.publication_doc -> 'participants'
+         ) AS participant)
+       <> pg_catalog.jsonb_array_length(NEW.participants)
+     OR EXISTS (
+       SELECT 1
+       FROM pg_catalog.jsonb_array_elements(
+         NEW.publication_doc -> 'participants'
+       ) AS published
+       WHERE pg_catalog.jsonb_typeof(published) IS DISTINCT FROM 'object'
+          OR (SELECT pg_catalog.count(*)
+              FROM pg_catalog.jsonb_object_keys(published)) <> 3
+          OR NOT published ?& ARRAY[
+            'submission_id', 'miner_hotkey', 'is_baseline'
+          ]
+          OR published ? 'is_king'
+          OR pg_catalog.jsonb_typeof(published -> 'is_baseline')
+             IS DISTINCT FROM 'boolean'
+          OR NOT EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(NEW.participants) AS original
+            WHERE original ->> 'submission_id'
+                    = published ->> 'submission_id'
+              AND original ->> 'miner_hotkey'
+                    = published ->> 'miner_hotkey'
+              AND COALESCE((original ->> 'is_king')::BOOLEAN, FALSE)
+                    = (published ->> 'is_baseline')::BOOLEAN
+          )
+     ) THEN
+    RAISE EXCEPTION 'lab_arena_publication_participants_invalid'
+      USING ERRCODE = '22023';
+  END IF;
   SELECT pg_catalog.min(participant ->> 'submission_id'), pg_catalog.count(*)
   INTO v_baseline_id, v_qualified
   FROM pg_catalog.jsonb_array_elements(NEW.participants) AS participant
@@ -1249,15 +1288,93 @@ BEGIN
   IF v_qualified <> 1 OR COALESCE(v_baseline_id, '') = ''
      OR v_cohort ->> 'baseline_submission_id' IS DISTINCT FROM v_baseline_id
      OR (v_cohort -> 'submission_ids' ->> 0) IS DISTINCT FROM v_baseline_id
-     OR pg_catalog.jsonb_array_length(NEW.publication_doc -> 'final_ranking')
-        <> pg_catalog.jsonb_array_length(NEW.participants)
      OR (SELECT pg_catalog.count(DISTINCT ranking ->> 'submission_id')
          FROM pg_catalog.jsonb_array_elements(
            NEW.publication_doc -> 'final_ranking') AS ranking)
-        <> pg_catalog.jsonb_array_length(NEW.participants) THEN
+        <> pg_catalog.jsonb_array_length(
+          NEW.publication_doc -> 'final_ranking'
+        ) THEN
     RAISE EXCEPTION 'lab_arena_publication_baseline_invalid'
       USING ERRCODE = '22023';
   END IF;
+
+  -- Final ranking is the baseline plus challengers that obtained all twenty
+  -- durable main-stage scores.  A finalist may be absent only when the latest
+  -- score attempt proves a miner-account failure; shared judge failures still
+  -- make publication impossible.  Every frozen confirmation member is always
+  -- required because its cohort was selected from complete main scores.
+  FOR v_round_participant IN
+    SELECT value FROM pg_catalog.jsonb_array_elements(NEW.participants)
+  LOOP
+    v_submission_id := v_round_participant ->> 'submission_id';
+    SELECT pg_catalog.count(*) INTO v_ranked_count
+    FROM pg_catalog.jsonb_array_elements(
+      NEW.publication_doc -> 'final_ranking'
+    ) AS ranking
+    WHERE ranking ->> 'submission_id' = v_submission_id;
+    SELECT pg_catalog.count(DISTINCT runs.icp_position)
+    INTO v_persisted_count
+    FROM public.lab_arena_runs AS runs
+    WHERE runs.round_id = NEW.round_id
+      AND runs.submission_id = v_submission_id
+      AND runs.kind = 'execute'
+      AND runs.icp_position BETWEEN 0 AND 19
+      AND runs.per_icp_score IS NOT NULL;
+    v_selected := v_cohort -> 'submission_ids'
+      @> pg_catalog.jsonb_build_array(v_submission_id);
+    IF v_persisted_count = 20 OR v_selected THEN
+      IF v_ranked_count <> 1 THEN
+        RAISE EXCEPTION 'lab_arena_publication_ranking_incomplete'
+          USING ERRCODE = '22023';
+      END IF;
+      CONTINUE;
+    END IF;
+    IF v_ranked_count <> 0 THEN
+      RAISE EXCEPTION 'lab_arena_publication_ranking_invalid'
+        USING ERRCODE = '22023';
+    END IF;
+    IF COALESCE((v_round_participant ->> 'is_king')::BOOLEAN, FALSE) THEN
+      RAISE EXCEPTION 'lab_arena_publication_baseline_invalid'
+        USING ERRCODE = '22023';
+    END IF;
+    -- This branch is reached only for an omitted challenger without all twenty
+    -- main scores.  Its omission needs durable miner-account failure evidence.
+    IF v_persisted_count <> 20 AND NOT v_selected THEN
+      WITH latest AS (
+        SELECT DISTINCT ON (runs.assignment_id)
+          runs.status, runs.terminal_cause
+        FROM public.lab_arena_runs AS runs
+        WHERE runs.round_id = NEW.round_id
+          AND runs.submission_id = v_submission_id
+          AND runs.stage IN (1, 2)
+          AND runs.kind = 'score'
+        ORDER BY runs.assignment_id,
+          (runs.status = 'accepted') DESC, runs.attempt DESC
+      )
+      SELECT EXISTS (
+               SELECT 1 FROM latest
+               WHERE status <> 'accepted'
+                 AND terminal_cause IN (
+                   'credential_error', 'budget_exhausted'
+                 )
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM latest
+               WHERE status <> 'accepted'
+                 AND (
+                   terminal_cause IS NULL
+                   OR terminal_cause NOT IN (
+                     'credential_error', 'budget_exhausted'
+                   )
+                 )
+             )
+      INTO v_allowed_failure;
+      IF NOT COALESCE(v_allowed_failure, FALSE) THEN
+        RAISE EXCEPTION 'lab_arena_publication_scoring_incomplete'
+          USING ERRCODE = '22023';
+      END IF;
+    END IF;
+  END LOOP;
 
   FOR v_ranking IN
     SELECT value FROM pg_catalog.jsonb_array_elements(
@@ -1531,9 +1648,9 @@ COMMENT ON COLUMN public.lab_arena_runs.qualification_doc IS
 COMMENT ON FUNCTION public.lab_arena_integrity_schema_v1() IS
   'Private service-role feature probe confirming Arena integrity migrations 211 through 213.';
 
-NOTIFY pgrst, 'reload schema';
-REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
-COMMIT;
 REVOKE ALL ON FUNCTION public.lab_arena__integrity_eligibility(
   TEXT, TEXT, INTEGER[]
 ) FROM PUBLIC;
+NOTIFY pgrst, 'reload schema';
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
+COMMIT;

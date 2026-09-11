@@ -1,6 +1,7 @@
 """Saved-result verification of integrity rounds on disposable PostgreSQL."""
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,27 @@ MIGRATIONS = DEFAULT_MIGRATIONS + (
 @pytest.fixture()
 def database():
     yield from database_with_lab_arena_migration(MIGRATIONS)
+
+
+def test_integrity_migration_replays_and_keeps_private_function_grants(database):
+    psycopg2, dsn = database
+    migration = Path(__file__).resolve().parents[2] / "scripts" / "213-lab-arena-score-integrity.sql"
+    with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(migration.read_text())
+        cursor.execute("SELECT public.lab_arena_integrity_schema_v1()")
+        assert cursor.fetchone()[0] == {"schema_version": "leadpoet.lab_arena.integrity_schema.v1", "version": 213}
+        for function in ("public.lab_arena_prepare_confirmation_bank(text,text,text)", "public.lab_arena_open_confirmation(text,jsonb)", "public.lab_arena_integrity_schema_v1()"):
+            cursor.execute("SELECT has_function_privilege('lab_arena_service', %s, 'EXECUTE'), has_function_privilege('anon', %s, 'EXECUTE'), has_function_privilege('authenticated', %s, 'EXECUTE')", (function, function, function))
+            assert cursor.fetchone() == (True, False, False)
+        cursor.execute("SELECT has_function_privilege('lab_arena_service', 'public.lab_arena__integrity_eligibility(text,text,integer[])', 'EXECUTE')")
+        assert cursor.fetchone()[0] is False
+
+
+def test_legacy_rounds_still_publish_and_promote_after_integrity_migrations(database, tmp_path):
+    psycopg2, dsn = database
+    fixtures.test_full_round_publishes_results_and_next_day_uses_the_public_baseline(
+        lambda: psycopg2.connect(**dsn), tmp_path,
+    )
 
 
 class IntegrityHarness(fixtures.Harness):
@@ -81,7 +103,15 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
     challenger = harness.submit("Challenger", round_id)
     failed = harness.submit("Broken", round_id)
     harness.broken.add(failed)
+    credential_failed = harness.submit("CredentialFail", round_id) if case == "belowmargin" else None
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    if credential_failed:
+        harness.advance_until("stage1_scoring")
+        credentials = harness.service.config.credential_manager
+        original_key = credentials.runtime_key
+        def key_after_revocation(row, provider):
+            return "miner-refused" if row["submission_id"] == credential_failed else original_key(row, provider)
+        monkeypatch.setattr(credentials, "runtime_key", key_after_revocation)
     harness.advance_until("scored")
     before = harness.service.store.get_round(round_id)
     bank_hash = before["confirmation_bank_hash"]
@@ -103,6 +133,9 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
     assert ranking[challenger]["cost_summary"]["qualified_company_count"] == (125 if confirmation_required else 100)
     assert ranking[failed]["main_score"] is None
     assert ranking[failed]["eligible"] is False
+    if credential_failed:
+        assert credential_failed not in ranking
+        assert any(row["submission_id"] == credential_failed for row in published["publication_doc"]["participants"])
     public = harness.service.public_results(round_id, challenger)
     assert len(public["scores"]["confirmation"]) == (5 if confirmation_required else 0)
     bank = harness.service.public_benchmark(round_id)["confirmation_bank"]

@@ -1,5 +1,7 @@
 """Arena-only gateway schema preflight contract."""
 import json
+from pathlib import Path
+import re
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 
@@ -12,6 +14,15 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     SupabaseSchemaPreflightV2Error,
     verify_required_supabase_v2_schema,
 )
+
+
+def test_required_migrations_use_canonical_deployment_filenames():
+    root = Path(__file__).resolve().parents[1]
+    paths = {row[0] for row in REQUIRED_SUPABASE_V2_SCHEMA + REQUIRED_SUPABASE_V2_RPCS}
+    for relative in paths:
+        path = root / relative
+        assert path.is_file()
+        assert re.fullmatch(r"[0-9]{2,4}-[a-z0-9][a-z0-9-]*\.sql", path.name)
 
 
 def _environment():

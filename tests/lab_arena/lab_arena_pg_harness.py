@@ -79,7 +79,7 @@ POSTGREST_MIGRATIONS = DEFAULT_MIGRATIONS + (
     "213-lab-arena-score-integrity.sql",
     "214-lab-arena-prior-credential-refusal.sql",
     "215-lab-arena-contacts.sql",
-    "20260911173147_lab_arena_validator_participation.sql",
+    "216-lab-arena-validator-participation.sql",
 )
 
 _SHIM_SQL = """

@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 CODE_REVIEW_MIGRATION = "scripts/207-lab-arena-code-review.sql"
-PARTICIPATION_MIGRATION = "scripts/20260911173147_lab_arena_validator_participation.sql"
+PARTICIPATION_MIGRATION = "scripts/216-lab-arena-validator-participation.sql"
 PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),

@@ -29,9 +29,10 @@ The Arena minimum applies when issuing a lease. A stake decrease alone does not
 reject an already-issued job's source/image access, provider calls, or result.
 Existing identity and lease protections still apply. Below-threshold claims
 for new work return `403 runner_stake_below_minimum`; the runner idles and keeps weights
-running. No benchmark work or minimum benchmark stake is required to retrieve
-the signed weight state, derive weights, or run the weight submission loop.
-Subnet registration and a validator permit are still required for retrieval.
+running. At or below 75,000, no benchmark work is required to retrieve the signed
+weight state. Above 75,000, the recent accepted-work rule below applies.
+Subnet registration and a validator permit are required for retrieval at every
+stake level. Existing signed transactions recover independently of new work.
 An exact signed-request retry can recover its already-issued lease after a
 stake-only drop, without allocating or extending work.
 
@@ -390,7 +391,7 @@ working; each operator must run the updated process with their own wallet.
 
 ## Participation rollout
 
-Apply `scripts/20260911173147_lab_arena_validator_participation.sql` after the
+Apply `scripts/216-lab-arena-validator-participation.sql` after the
 existing Arena migrations through 215. It is additive and can run while the
 previous gateway version is live. Let it collect original acceptance timestamps
 for 24 hours before activating this gateway change. Do not backfill from

@@ -38,7 +38,7 @@ def database():
     migrations = DEFAULT_MIGRATIONS
     if MIGRATION not in migrations:
         migrations = (*migrations, MIGRATION)
-    migrations = (*migrations, "20260911173147_lab_arena_validator_participation.sql")
+    migrations = (*migrations, "216-lab-arena-validator-participation.sql")
     yield from database_with_lab_arena_migration(migrations)
 
 

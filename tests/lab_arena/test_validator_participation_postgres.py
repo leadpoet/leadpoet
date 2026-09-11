@@ -19,7 +19,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
 
 MIGRATION = (
     Path(__file__).resolve().parents[2]
-    / "scripts/20260911173147_lab_arena_validator_participation.sql"
+    / "scripts/216-lab-arena-validator-participation.sql"
 )
 
 
@@ -43,6 +43,50 @@ def admin(database):
     connection.autocommit = True
     yield connection
     connection.close()
+
+
+def test_n_minus_one_lease_completes_after_additive_migration():
+    migrations = tuple(
+        migration
+        for migration in POSTGREST_MIGRATIONS
+        if migration != MIGRATION.name
+    )
+    database = database_with_lab_arena_migration(migrations)
+    psycopg2, dsn = next(database)
+    transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    store = ArenaStore(transport)
+    admin = psycopg2.connect(**dsn)
+    admin.autocommit = True
+    try:
+        round_id = "arena-2026-09-11-n1"
+        runners, _ = open_round(store, round_id, prefix="nminus", participants=1)
+        runner = runners[0]
+        leased, token, _, _ = claim(store, round_id, runner)
+        run_id, lease_hash = leased["run_id"], hash_lease_token(token)
+
+        with admin.cursor() as cursor:
+            cursor.execute(MIGRATION.read_text())
+        assert (
+            complete(store, run_id, lease_hash, "accepted", output_ref="output")[
+                "status"
+            ]
+            == "accepted"
+        )
+        timestamp = store.get_run(run_id)["participation_accepted_at"]
+        assert timestamp is not None
+        assert store.has_recent_participation("finney", 71, runner)
+
+        with admin.cursor() as cursor:
+            cursor.execute(MIGRATION.read_text())
+        repeated = complete(
+            store, run_id, lease_hash, "accepted", output_ref="output"
+        )
+        assert repeated["status"] == "accepted" and repeated["idempotent"] is True
+        assert store.get_run(run_id)["participation_accepted_at"] == timestamp
+    finally:
+        admin.close()
+        transport.close()
+        database.close()
 
 
 def test_acceptance_scope_replay_expiry_and_immutable_evidence(store, admin):

@@ -35,6 +35,7 @@ from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
+from lab_arena.runtime_host import prepare_scoring_host
 
 
 _DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
@@ -483,6 +484,9 @@ def build_service_from_environment(mode: str):
 
 
 def build_runner_from_environment(args, *, keypair=None):
+    # Keep the CLI readiness check and real scoring setup on the same path.
+    # This runs only inside the retryable scoring loop, never the weight loop.
+    prepare_scoring_host(Path(args.runsc_path), Path(args.work_dir))
     from lab_arena import runner as runner_module
 
     if keypair is None:
@@ -497,11 +501,6 @@ def build_runner_from_environment(args, *, keypair=None):
     runner_root = Path(args.work_dir)
     sandbox_work = runner_root / "sandboxes"
     runs_work = runner_root / "runs"
-    for directory in (sandbox_work, runs_work):
-        directory.mkdir(parents=True, exist_ok=True)
-        if directory.is_symlink() or not directory.is_dir():
-            raise runtime.RuntimeHostError("runner work directory is unsafe")
-        directory.chmod(0o700)
     config = runtime.RuntimeConfig(runsc_path=Path(args.runsc_path), work_dir=sandbox_work)
     sandbox_runtime = runtime.RunscRuntime(config)
     identity = runner_module.RunnerIdentity(hotkey=keypair.ss58_address, sign=lambda message: keypair.sign(message.encode("utf-8")).hex())

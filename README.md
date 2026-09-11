@@ -196,6 +196,9 @@ provisioning is required for validators, and there is no audit-validator role.
 
 Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)
 for local wallet configuration, sandbox setup, restart, and verification.
+Use `--check-scoring-only` to diagnose local scoring setup without accessing
+wallets or the chain; the separate installed-runtime probe verifies sandbox
+execution. The normal `--check-only` command verifies wallet and chain readiness.
 
 
 ## License

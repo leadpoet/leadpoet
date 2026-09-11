@@ -41,10 +41,11 @@ from lab_arena import integrity
 from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
+from lab_arena.runtime_host import DEFAULT_RUNNER_SOCKET_ROOT, RuntimeHostError, runtime_host_diagnostic
 
 DEFAULT_MAX_PARALLEL_RUNS = contracts.RUNNER_SLOT_CEILING
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
-DEFAULT_SOCKET_ROOT = "/tmp"
+DEFAULT_SOCKET_ROOT = str(DEFAULT_RUNNER_SOCKET_ROOT)
 AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
 # A request on the worker socket is either a length-prefixed operation frame
@@ -1759,8 +1760,9 @@ class Runner:
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
+            detail = runtime_host_diagnostic(exc) if isinstance(exc, RuntimeHostError) else type(exc).__name__
             print(
-                "Lab Arena run abandoned: %s" % type(exc).__name__,
+                "Lab Arena run abandoned: %s" % detail,
                 file=sys.stderr,
                 flush=True,
             )
@@ -1768,7 +1770,7 @@ class Runner:
                 {
                     "run_id": lease.get("run_id"),
                     "error": type(exc).__name__,
-                    "detail": str(exc)[:200],
+                    "detail": (detail if isinstance(exc, RuntimeHostError) else str(exc))[:200],
                 }
             )
         finally:

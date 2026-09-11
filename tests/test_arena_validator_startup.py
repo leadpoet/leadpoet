@@ -140,6 +140,7 @@ def _clear_startup_environment(monkeypatch):
     for name in (
         "LAB_ARENA_NETWORK",
         "LAB_ARENA_NETUID",
+        "LAB_ARENA_VALIDATOR_POLL_SECONDS",
         "LAB_ARENA_CHAIN_ENDPOINT",
         "LAB_ARENA_API_BASE_URL",
         "LAB_ARENA_SIGNING_KEY_HASH",
@@ -153,6 +154,10 @@ def test_advertised_finney71_check_only_uses_public_defaults_and_stops_at_readin
     monkeypatch, startup_harness, capsys
 ):
     _clear_startup_environment(monkeypatch)
+    monkeypatch.setattr(
+        "lab_arena.runtime_host.prepare_scoring_host",
+        lambda *_args: pytest.fail("wallet readiness must not depend on scoring setup"),
+    )
 
     assert validator.main([
         "--netuid", "71", "--subtensor.network", "finney",
@@ -211,6 +216,36 @@ def test_environment_endpoint_is_used_when_flag_is_absent(monkeypatch, startup_h
     assert chain.config.endpoint == "wss://env.example:443"
     signer_config = startup_harness.captured["signer_args"][-1]["chain_config"]
     assert signer_config.endpoint == "wss://env.example:443"
+
+
+@pytest.mark.parametrize("variable", ["LAB_ARENA_NETUID", "LAB_ARENA_VALIDATOR_POLL_SECONDS"])
+def test_invalid_service_numeric_environment_fails_without_echoing_value(
+    monkeypatch, startup_harness, capsys, variable
+):
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv(variable, "secret-malformed-setting")
+    with pytest.raises(SystemExit) as failure:
+        validator.main(["--check-only"])
+    assert failure.value.code == 2
+    output = capsys.readouterr().err
+    assert variable + " must be an integer" in output
+    assert "secret-malformed-setting" not in output and "Traceback" not in output
+    assert startup_harness.captured["wallet_args"] == []
+
+
+@pytest.mark.parametrize("explicit_flags", [False, True])
+def test_service_numeric_settings_keep_flag_environment_precedence(
+    monkeypatch, startup_harness, explicit_flags
+):
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("LAB_ARENA_NETUID", "invalid" if explicit_flags else "71")
+    monkeypatch.setenv("LAB_ARENA_VALIDATOR_POLL_SECONDS", "invalid" if explicit_flags else "45")
+    args = ["--once"]
+    if explicit_flags:
+        args += ["--netuid", "71", "--arena-poll-seconds", "45"]
+    assert validator.main(args) == 0
+    assert startup_harness.captured["connect_configs"][-1].netuid == 71
+    assert startup_harness.captured["loops"][-1]["poll_seconds"] == 45
 
 
 def test_loopback_ws_endpoint_is_allowed(monkeypatch, startup_harness):

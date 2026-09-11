@@ -72,7 +72,8 @@ def test_https_transport_converts_wss_and_binds_strict_json_rpc():
         )
 
     transport = HttpsJsonRpcTransport(
-        "wss://chain.example:443", timeout_seconds=9, opener=open_request
+        "wss://chain.example:443", timeout_seconds=9, opener=open_request,
+        clock=lambda: 100.0,  # Request construction must not depend on scheduling latency.
     )
     assert transport.call(method="chain_getBlockHash", params=[3], request_id=7) == "0xabc"
     assert observed == {

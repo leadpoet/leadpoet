@@ -16,6 +16,12 @@ from qualification.employee_buckets import (
     normalize_employee_count_bucket,
     normalize_observed_employee_count_bucket,
 )
+from qualification.scoring.arena_integrity import (
+    canonical_company_identity,
+    company_fit_verified,
+    company_identity_alias_keys,
+    verified_identity_receipt,
+)
 
 
 SCORING_ADAPTER_VERSION = "qualification-company-scorer:v1"
@@ -270,6 +276,9 @@ def _ensure_provider_environment() -> None:
 class CompetitionCompanyScorer:
     """Use the production company judge for baseline and miner outputs."""
 
+    def __init__(self, integrity_policy: bool = False) -> None:
+        self.integrity_policy = bool(integrity_policy)
+
     async def __call__(
         self,
         companies: Sequence[Mapping[str, Any]],
@@ -295,8 +304,11 @@ class CompetitionCompanyScorer:
         score_company = scorer_module.score_company_competition_intent
 
         seen_companies: set[str] = set()
+        verified_identity_key_by_alias: dict[str, str] = {}
         breakdowns: list[dict[str, Any]] = []
-        for company in list(companies)[: _company_goal(icp)]:
+        for company_index, company in enumerate(
+            list(companies)[: _company_goal(icp)]
+        ):
             observed = (company or {}).get("employee_count")
             bucket = normalize_employee_count_bucket(
                 observed, default=None
@@ -304,24 +316,115 @@ class CompetitionCompanyScorer:
             if not bucket or bucket not in allowed_buckets:
                 continue
             normalized_company = _normalized_company(company)
+            submitted_identity = canonical_company_identity(normalized_company)
+            submitted_alias_keys = company_identity_alias_keys(submitted_identity)
+            if (
+                self.integrity_policy
+                and any(
+                    alias in verified_identity_key_by_alias
+                    for alias in submitted_alias_keys
+                )
+            ):
+                identity_key = next(
+                    verified_identity_key_by_alias[alias]
+                    for alias in submitted_alias_keys
+                    if alias in verified_identity_key_by_alias
+                )
+                duplicate = _model_contract_incompatible_breakdown()
+                duplicate.update({
+                    "failure_reason": "Duplicate company identity",
+                    "company_index": company_index,
+                    "company_identity_key": identity_key,
+                    "company_identity_alias_keys": list(submitted_alias_keys),
+                    "company_qualified": False,
+                    "duplicate_company": True,
+                })
+                breakdowns.append(duplicate)
+                continue
             try:
                 company_model = company_type(**normalized_company)
             except ValidationError:
-                breakdowns.append(_model_contract_incompatible_breakdown())
+                incompatible = _model_contract_incompatible_breakdown()
+                if self.integrity_policy:
+                    incompatible.update({
+                        "company_index": company_index,
+                        "company_identity_key": submitted_identity.key,
+                        "company_identity_alias_keys": list(submitted_alias_keys),
+                        "company_qualified": False,
+                        "duplicate_company": False,
+                    })
+                breakdowns.append(incompatible)
                 continue
             result = await score_company(
                 company=company_model,
                 icp=icp_model,
                 run_cost_usd=0.0,
                 run_time_seconds=0.0,
-                seen_companies=seen_companies,
+                seen_companies=(seen_companies if not self.integrity_policy else set()),
                 is_reference_model=bool(is_reference_model),
+                integrity_policy=self.integrity_policy,
             )
-            breakdowns.append(
+            breakdown = (
                 result.model_dump(mode="json")
                 if hasattr(result, "model_dump")
                 else dict(result)
             )
+            if self.integrity_policy:
+                receipts = breakdown.get("verifier_gate_receipts")
+                fit_verified = company_fit_verified(receipts)
+                observed_receipt = verified_identity_receipt(receipts)
+                verified_identity = canonical_company_identity(
+                    normalized_company,
+                    verified_identity_receipt=observed_receipt,
+                )
+                current_identity_key = (
+                    verified_identity.key if observed_receipt else submitted_identity.key
+                )
+                identity_alias_keys = tuple(dict.fromkeys(
+                    (*submitted_alias_keys, *company_identity_alias_keys(verified_identity))
+                ))
+                prior_identity_key = next(
+                    (
+                        verified_identity_key_by_alias[alias]
+                        for alias in identity_alias_keys
+                        if alias in verified_identity_key_by_alias
+                    ),
+                    None,
+                )
+                duplicate_company = bool(
+                    fit_verified and prior_identity_key is not None
+                )
+                identity_key = prior_identity_key or current_identity_key
+                if duplicate_company:
+                    for field, value in (
+                        ("icp_fit", 0.0),
+                        ("decision_maker", 0.0),
+                        ("intent_signal_raw", 0.0),
+                        ("time_decay_multiplier", 1.0),
+                        ("intent_signal_final", 0.0),
+                        ("cost_penalty", 0.0),
+                        ("time_penalty", 0.0),
+                        ("final_score", 0.0),
+                    ):
+                        breakdown[field] = value
+                    breakdown["failure_reason"] = "Duplicate company identity"
+                primary_verified = has_verified_primary_intent(
+                    breakdown.get("intent_signals_detail") or []
+                )
+                company_qualified = bool(
+                    fit_verified and primary_verified and not duplicate_company
+                )
+                breakdown.update({
+                    "company_index": company_index,
+                    "company_identity_key": identity_key,
+                    "company_identity_alias_keys": list(identity_alias_keys),
+                    "company_qualified": company_qualified,
+                    "duplicate_company": duplicate_company,
+                })
+                if fit_verified and not duplicate_company:
+                    for alias in identity_alias_keys:
+                        verified_identity_key_by_alias[alias] = identity_key
+            breakdowns.append(breakdown)
         return breakdowns
 
 

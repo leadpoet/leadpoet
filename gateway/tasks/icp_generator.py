@@ -683,7 +683,8 @@ def canonicalize_generated_icp(
 
 async def generate_icps_with_openrouter(
     set_id: int,
-    total_icps: int = 20
+    total_icps: int = 20,
+    *, generation_context: Optional[str] = None,
 ) -> tuple:
     """
     Generate ICP prompts using OpenRouter LLM (o3-mini).
@@ -883,6 +884,8 @@ FINAL CHECK before output (for every ICP):
     )
 
     user_prompt = f"""Generate 20 ICPs for set_id={set_id}. Follow every instruction in the system message exactly. Output JSON only, no commentary."""
+    if generation_context:
+        user_prompt += "\n\n" + generation_context
 
     try:
         logger.info(f"Calling OpenRouter {OPENROUTER_MODEL} to generate {total_icps} ICPs...")

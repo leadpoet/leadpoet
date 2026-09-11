@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
+from lab_arena import integrity, confirmation, judgment_cache
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -24,6 +25,7 @@ from leadpoet_canonical.arena_weights import (
 )
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
+from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 from gateway.utils.hotkey_roles import classify_hotkey_from_metagraph
 
@@ -293,6 +295,8 @@ class RoundDefaults:
     # None to leave round creation to the operator (``lab_arena_admin.py create``).
     daily_cutoff_hour_utc: Optional[int] = None
     # A new round's cutoff lies at least this far ahead so miners can submit.
+    integrity_from: Optional[str] = None
+    confirmation_minutes: Tuple[int, int] = (60, 110)
     min_submission_hours: int = 6
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
     # Announced in every round configuration and carried by every reward basis,
@@ -339,11 +343,19 @@ class ServiceConfig:
     ] = None
     # Returns temporary access only for the scorer image frozen into a run's
     # round. Generic public registries do not configure this ECR-only path.
+    confirmation_icp_source: Optional[Callable[..., Sequence[Mapping[str, Any]]]] = None
     scorer_image_access: Optional[
         Callable[[str, str], Mapping[str, Any]]
     ] = None
 
     def __post_init__(self) -> None:
+        if self.defaults.integrity_from is not None:
+            try:
+                activation = datetime.fromisoformat(self.defaults.integrity_from.replace("Z", "+00:00"))
+                if activation.tzinfo is None:
+                    raise ValueError("missing timezone")
+            except (ValueError, AttributeError) as exc:
+                raise ServiceError("integrity_activation_invalid", 500) from exc
         if self.mode not in MODES:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
@@ -467,6 +479,12 @@ class ArenaService:
         """Refuse a round owned by another Arena mode or chain scope."""
 
         configuration = row.get("configuration_doc") or {}
+        try:
+            policy_enabled = integrity.enabled(configuration)
+        except ValueError as exc:
+            raise ServiceError("unsupported_integrity_policy", 409) from exc
+        if policy_enabled != (configuration.get("scorer_policy", {}).get("scoring_adapter_version") == integrity.SCORING_ADAPTER):
+            raise ServiceError("integrity_scorer_policy_mismatch", 409)
         if configuration.get("mode") != self._config.mode:
             raise ServiceError("round_mode_mismatch", 409)
         # Rows created before schema 189 had no explicit chain pair. They are
@@ -575,6 +593,8 @@ class ArenaService:
         except Exception as exc:
             raise ServiceError("object_store_unavailable", 500) from exc
         current = self.current_round()
+        if getattr(getattr(self._config, "defaults", None), "integrity_from", None) or (current and integrity.enabled(current.get("configuration_doc") or {})):
+            self._require_integrity_schema()
         return {
             "database_identity": identity,
             "schema_version": int(schema_version),
@@ -583,6 +603,14 @@ class ArenaService:
         }
 
     # -- round creation (section 5.1) ----------------------------------------
+
+    def _require_integrity_schema(self) -> None:
+        try:
+            result = self._store._transport.rpc("lab_arena_integrity_schema_v1", {})
+        except ArenaStoreError as exc:
+            raise ServiceError("integrity_schema_unavailable", 503) from exc
+        if not isinstance(result, Mapping) or result.get("schema_version") != "leadpoet.lab_arena.integrity_schema.v1" or result.get("version") != 213:
+            raise ServiceError("integrity_schema_invalid", 503)
 
     def build_schedule(self, cutoff: datetime) -> Dict[str, str]:
         """Build the round's cutoff and absolute timeout budget.
@@ -663,6 +691,22 @@ class ArenaService:
             "banned_hotkeys": banned_hotkeys,
             "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
         }
+        if defaults.integrity_from is not None and cutoff >= datetime.fromisoformat(defaults.integrity_from.replace("Z", "+00:00")):
+            self._require_integrity_schema()
+            document["integrity_policy"] = integrity.POLICY
+            document["scorer_policy"] = scoring.build_scorer_policy(scoring_adapter_version=integrity.SCORING_ADAPTER)
+            execution_minutes, judging_minutes = defaults.confirmation_minutes
+            if execution_minutes <= 0 or judging_minutes <= 0:
+                raise ServiceError("confirmation_schedule_invalid", 500)
+            confirmation_start = _parse_iso(document["schedule"]["final_scoring_close"]) + timedelta(seconds=1)
+            confirmation_close = confirmation_start + timedelta(minutes=execution_minutes)
+            confirmation_scoring_close = confirmation_close + timedelta(minutes=judging_minutes)
+            document["schedule"].update({
+                "stage_3_start": _iso(confirmation_start),
+                "stage_3_close": _iso(confirmation_close),
+                "stage_3_scoring_close": _iso(confirmation_scoring_close),
+                "publication_deadline": _iso(confirmation_scoring_close + timedelta(seconds=1)),
+            })
         # Keep the announced intake within the actual all-participant workload.
         # Shadow-only short rehearsals deliberately do not reserve live budgets.
         if self._config.mode == "live":
@@ -964,7 +1008,17 @@ class ArenaService:
         )
         self._require_submission_window(round_row)
         round_id = round_row["round_id"]
-        if self._config.chain.uid_for_hotkey(validated["hotkey"]) is None:
+        configuration = round_row.get("configuration_doc") or {}
+        owner_admission = None
+        if integrity.enabled(configuration):
+            try:
+                owner_admission = resolve_finalized_owner(
+                    self._config.chain, validated["hotkey"]
+                )
+            except OwnerAdmissionError as exc:
+                status = 403 if exc.code == "hotkey_unregistered" else 503
+                raise ServiceError(exc.code, status) from exc
+        elif self._config.chain.uid_for_hotkey(validated["hotkey"]) is None:
             raise ServiceError("hotkey_unregistered", 403)
         if validated["hotkey"] == (round_row.get("configuration_doc") or {}).get(
             "baseline_hotkey"
@@ -983,13 +1037,20 @@ class ArenaService:
         if body.get("source_content_md5") is not None:
             document["source_content_md5"] = body["source_content_md5"]
         try:
-            registration = self._store.register_submission(
-                round_id,
-                submission_id,
-                validated["hotkey"],
-                document,
+            registration_args = (
+                round_id, submission_id, validated["hotkey"], document
             )
+            if owner_admission is None:
+                registration = self._store.register_submission(*registration_args)
+            else:
+                registration = self._store.register_submission(
+                    *registration_args, owner_admission=owner_admission
+                )
         except ArenaStoreError as exc:
+            if "lab_arena_owner_active_submission" in str(exc):
+                raise ServiceError("owner_active_submission_exists", 409) from exc
+            if "lab_arena_submission_owner_changed" in str(exc):
+                raise ServiceError("submission_owner_changed", 409) from exc
             if "lab_arena_submission_conflict" in str(exc):
                 raise ServiceError("submission_conflict", 409) from exc
             raise
@@ -1446,6 +1507,13 @@ class ArenaService:
                 "status": "cancelled",
                 "reason": CANCEL_REASONS["benchmark_invalid"],
             }
+        if integrity.enabled(round_row["configuration_doc"]):
+            try:
+                self._prepare_confirmation_bank(round_row, icps)
+            except (ValueError, TimeoutError, ArenaStoreError) as exc:
+                if started >= _parse_iso(schedule["benchmark_deadline"]):
+                    return self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
+                return {"status": "retry", "reason": "confirmation_bank_unavailable"}
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
@@ -1497,6 +1565,61 @@ class ArenaService:
         if len(icps) != contracts.BENCHMARK_ICP_COUNT:
             raise ServiceError("benchmark_data_invalid", 500)
         return icps
+
+    def _prepare_confirmation_bank(self, round_row: Mapping[str, Any], main_icps: Sequence[Mapping[str, Any]]) -> None:
+        round_id = str(round_row["round_id"])
+        current = self._round(round_id)
+        if current.get("confirmation_bank_hash"):
+            self.confirmation_bank(round_id)
+            return
+        provider = self._config.confirmation_icp_source or confirmation.fresh_confirmation_icps
+        evaluation_date = _parse_iso(round_row["configuration_doc"]["schedule"]["submission_cutoff"]).astimezone(timezone.utc).date().isoformat()
+        generated = provider(round_id=round_id, evaluation_date=evaluation_date, main_icps=main_icps)
+        bank = confirmation.build_bank(round_id, generated, main_icps)
+        payload = contracts.canonical_json(bank).encode("utf-8")
+        digest = contracts.hash_bytes(payload)
+        ref = "arena/%s/confirmation/%s.json" % (round_id, digest.split(":")[-1])
+        try:
+            self._objects.put(ref, payload)
+        except Exception:
+            # A lost write acknowledgement is safe only if exact bytes landed.
+            if self._objects.get_bounded(ref, MAX_OUTPUT_BYTES) != payload:
+                raise
+        try:
+            self._store.prepare_confirmation_bank(round_id, ref, digest)
+        except ArenaStoreError:
+            if not self._round(round_id).get("confirmation_bank_hash"):
+                raise
+        self.confirmation_bank(round_id)
+
+    def confirmation_bank(self, round_id: str) -> Dict[str, Any]:
+        row = self._round(round_id)
+        ref, digest = row.get("confirmation_bank_ref"), row.get("confirmation_bank_hash")
+        if not ref or not digest:
+            raise ServiceError("confirmation_bank_missing", 503)
+        try:
+            return confirmation.read_bank(self._objects.get_bounded(ref, MAX_OUTPUT_BYTES), round_id=round_id, digest=digest)
+        except (ValueError, TypeError) as exc:
+            raise ServiceError("confirmation_bank_invalid", 503) from exc
+
+    def evaluation_icps(self, round_id: str) -> List[Dict[str, Any]]:
+        row = self._round(round_id)
+        main = self.benchmark_icps(round_id)
+        return main + self.confirmation_bank(round_id)["icps"] if integrity.enabled(row["configuration_doc"]) else main
+
+    def open_confirmation(self, round_id: str) -> Dict[str, Any]:
+        row = self._round(round_id)
+        if row["status"] != "scored" or not integrity.enabled(row["configuration_doc"]):
+            return {"status": "stale", "round_status": row["status"]}
+        self.confirmation_bank(round_id)
+        entries = self._score_entries_from_runs(row, range(contracts.BENCHMARK_ICP_COUNT), "final_score")
+        runs = self._store.list_runs(round_id, kind="execute")
+        eligibility = {entry["submission_id"]: self._submission_cost_eligibility(row, entry["submission_id"], runs, positions=range(contracts.BENCHMARK_ICP_COUNT)) for entry in entries}
+        try:
+            cohort = confirmation.select_cohort(entries, eligibility)
+        except ValueError:
+            return self._store.cancel_round(round_id, CANCEL_REASONS["scoring_incomplete"])
+        return self._store.open_confirmation(round_id, cohort)
 
     # -- stages (sections 2, 9) ----------------------------------------------
 
@@ -1567,18 +1690,111 @@ class ArenaService:
         for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
             accepted[str(run["run_id"])] = run
         items: List[Dict[str, Any]] = []
+        integrity_cache = integrity.enabled(round_row.get("configuration_doc") or {})
+        icps = self.evaluation_icps(round_id) if integrity_cache else []
+        configuration = round_row.get("configuration_doc") or {}
+        policy = configuration.get("scorer_policy") or {}
         for item in plan["work_items"]:
             submission_id = item["submission_id"]
             run = accepted.get(str(item["scored_run_id"]))
             if run is None or run["submission_id"] != submission_id or int(run["icp_position"]) != int(item["icp_position"]) or run.get("output_ref") != item["output_ref"]:
                 raise ServiceError("scoring_plan_run_mismatch", 500)
-            items.append({
+            work_item = {
                 "scored_run_id": run["run_id"],
                 "submission_id": run["submission_id"],
                 "icp_position": int(run["icp_position"]),
                 "output_ref": run["output_ref"],
-            })
-        result = self._store.open_scoring(round_id, stage, items)
+            }
+            if integrity_cache:
+                output = json.loads(
+                    self._objects.get_bounded(
+                        str(run["output_ref"]), MAX_OUTPUT_BYTES
+                    ).decode("utf-8")
+                )
+                companies = validate_output_document(output)["companies"]
+                position = int(run["icp_position"])
+                scoring_input = scoring.build_scoring_input(
+                    scored_run_id=str(run["run_id"]),
+                    icp=integrity.agent_visible_icp(icps[position]),
+                    companies=companies,
+                    policy=policy,
+                    evaluation_date=str(round_row.get("evaluation_date") or ""),
+                )
+                cache_scope = judgment_cache.build_cache_scope(
+                    scoring_input=scoring_input,
+                    round_id=round_id,
+                    network_name=str(round_row.get("arena_network_name") or ""),
+                    netuid=int(round_row.get("arena_netuid") or 0),
+                    scorer_image_digest=str(configuration.get("scorer_image_digest") or ""),
+                    scorer_image_reference=str(configuration.get("scorer_image_reference") or ""),
+                    integrity_policy=str(configuration.get("integrity_policy") or ""),
+                )
+                work_item.update({
+                    "judgment_cache_key": cache_scope["cache_key"],
+                    "judgment_scope_doc": cache_scope,
+                    "judgment_input_hash": cache_scope["scoring_input_hash"],
+                })
+            items.append(work_item)
+        if integrity_cache:
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            participant_by_submission = {
+                str(participant["submission_id"]): participant
+                for participant in round_row.get("participants") or []
+            }
+            for item in items:
+                participant = participant_by_submission.get(
+                    str(item["submission_id"])
+                ) or {}
+                while True:
+                    cache_key = str(item["judgment_cache_key"])
+                    cached = self._store.get_judgment_cache(cache_key)
+                    if cached is None:
+                        grouped.setdefault(cache_key, []).append(item)
+                        break
+                    try:
+                        judgment_cache.validate_evidence_snapshot(
+                            cached.get("evidence_doc") or {},
+                            cache_key=cache_key,
+                            evidence_hash=str(cached.get("evidence_hash") or ""),
+                        )
+                    except judgment_cache.JudgmentCacheError as exc:
+                        raise ServiceError("judgment_cache_invalid", 500) from exc
+                    source_runner = str(cached.get("source_runner_hotkey") or "")
+                    try:
+                        excluded = set(
+                            self._config.chain.hotkeys_owned_by_same_coldkey(source_runner)
+                        )
+                    except Exception as exc:
+                        raise ServiceError(
+                            "judgment_cache_authority_unavailable", 503
+                        ) from exc
+                    if bool(participant.get("is_king")) or str(
+                        participant.get("miner_hotkey") or ""
+                    ) not in excluded:
+                        item["reuse_cache_key"] = cache_key
+                        break
+                    try:
+                        partitioned = judgment_cache.partition_cache_scope(
+                            item["judgment_scope_doc"],
+                            incompatible_hotkeys=list(excluded),
+                        )
+                    except judgment_cache.JudgmentCacheError as exc:
+                        raise ServiceError("judgment_cache_authority_invalid", 500) from exc
+                    item.update({
+                        "judgment_cache_key": partitioned["cache_key"],
+                        "judgment_scope_doc": partitioned,
+                    })
+            for cache_key, pending in grouped.items():
+                group_miners = sorted({
+                    str((participant_by_submission.get(str(item["submission_id"])) or {}).get("miner_hotkey") or "")
+                    for item in pending
+                } - {""})
+                for index, item in enumerate(sorted(pending, key=lambda row: str(row["scored_run_id"]))):
+                    item["judgment_group_leader"] = index == 0
+                    item["judgment_group_miner_hotkeys"] = group_miners
+        result = self._store.open_scoring(
+            round_id, stage, items, integrity_cache=integrity_cache
+        )
         return {"status": result.get("status"), "round_status": result.get("round_status"), "assignments": result.get("assignments"), "work_items": len(plan["work_items"])}
 
     def scoring_is_complete(self, round_id: str, stage: int) -> bool:
@@ -1643,6 +1859,41 @@ class ArenaService:
         return chosen
 
     def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        cache_key = str(run.get("judgment_cache_key") or "")
+        if cache_key:
+            cached = self._store.get_judgment_cache(cache_key)
+            if cached is None:
+                raise scoring.ScoringError("accepted judgment cache entry is missing")
+            try:
+                evidence = judgment_cache.validate_evidence_snapshot(
+                    cached.get("evidence_doc") or {},
+                    cache_key=cache_key,
+                    evidence_hash=str(cached.get("evidence_hash") or ""),
+                )
+            except judgment_cache.JudgmentCacheError as exc:
+                raise scoring.ScoringError("accepted judgment cache evidence is invalid") from exc
+            source = self._store.get_run(str(evidence["source_score_run_id"]))
+            if (
+                source is None
+                or source.get("kind") != "score"
+                or source.get("status") != "accepted"
+                or source.get("runner_hotkey") != evidence["source_runner_hotkey"]
+                or source.get("scored_run_id") != evidence["source_scored_run_id"]
+                or cached.get("source_score_run_id") != evidence["source_score_run_id"]
+                or cached.get("scoring_input_hash") != evidence["scoring_input_hash"]
+                or run.get("judgment_cache_source_run_id") != evidence["source_score_run_id"]
+            ):
+                raise scoring.ScoringError("accepted judgment cache authority is invalid")
+            return scoring.validate_breakdowns_for_item(
+                evidence["breakdowns"],
+                icp=icp,
+                companies=companies,
+                max_scored_companies=int(policy["max_scored_companies"]),
+                integrity_policy=(
+                    policy.get("scoring_adapter_version")
+                    == "qualification_integrity_v2"
+                ),
+            )
         try:
             document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
         except (TypeError, ValueError, UnicodeDecodeError) as exc:
@@ -1652,7 +1903,14 @@ class ArenaService:
             raise scoring.ScoringError("scoring output names the wrong execution run")
         if "breakdowns" not in output:
             raise scoring.ScoringError("accepted scoring output contains a failure")
-        return scoring.validate_breakdowns_for_item(output["breakdowns"], icp=icp, companies=companies, max_scored_companies=int(policy["max_scored_companies"]))
+        return scoring.validate_breakdowns_for_item(
+            output["breakdowns"], icp=icp, companies=companies,
+            max_scored_companies=int(policy["max_scored_companies"]),
+            integrity_policy=(
+                policy.get("scoring_adapter_version")
+                == "qualification_integrity_v2"
+            ),
+        )
 
     def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         """Assemble the stage bundle from configured-runner scoring results."""
@@ -1662,7 +1920,7 @@ class ArenaService:
             return {"status": "stale", "round_status": round_row["status"]}
         policy = contracts.validate_scorer_policy(round_row["configuration_doc"]["scorer_policy"])
         plan = self._load_scoring_plan(round_row, stage)
-        icps = self.benchmark_icps(round_id)
+        icps = self.evaluation_icps(round_id)
         outputs = self._outputs_by_run(round_id, stage)
         chosen = self._scoring_outputs(round_id, stage)
         baseline_ids = {
@@ -1775,7 +2033,7 @@ class ArenaService:
                 "ineligible_submissions": sorted(ineligible),
                 "finalists": finalists,
             }
-        transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
+        transition = self._store.transition_round(round_id, "stage3_judged" if stage == 3 else "stage2_judged", "confirmed" if stage == 3 else "scored", {})
         return {
             "status": transition.get("status"),
             "judge_executions": judge_executions,
@@ -1849,7 +2107,7 @@ class ArenaService:
 
         selected = self._selected_accepted_execution_runs(runs, submission_id)
         total = 0
-        for position in range(contracts.BENCHMARK_ICP_COUNT):
+        for position in sorted(selected):
             run = selected.get(position)
             if run is None:
                 continue
@@ -1870,6 +2128,49 @@ class ArenaService:
                 )
             # The same company in different ICPs is a different returned slot.
             total += len(domains)
+        return total
+
+    def _qualified_company_count(
+        self, round_row: Mapping[str, Any], submission_id: str,
+        runs: Sequence[Mapping[str, Any]], *, positions: Optional[Sequence[int]] = None,
+    ) -> int:
+        """Count unique qualified entities from accepted, output-bound judgments."""
+        policy = round_row["configuration_doc"]["scorer_policy"]
+        round_id = str(round_row["round_id"])
+        icps = self.evaluation_icps(round_id)
+        wanted = set(range(len(icps)) if positions is None else positions)
+        selected = self._selected_accepted_execution_runs(runs, submission_id)
+        judges = {}
+        for stage in (1, 2, 3):
+            if wanted.intersection(contracts.stage_positions(stage)):
+                judges.update(self._scoring_outputs(round_id, stage))
+        total = 0
+        for position in sorted(wanted):
+            execution = selected.get(position)
+            if execution is None:
+                continue
+            judge = judges.get(str(execution["run_id"]))
+            if judge is None or judge.get("status") != "accepted":
+                raise scoring.ScoringError("qualified count requires accepted judgment")
+            document = json.loads(self._objects.get_bounded(execution["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8"))
+            output = validate_output_document(document)
+            companies = output["companies"]
+            rows = self._verified_breakdowns(judge, icp=icps[position], companies=companies, policy=policy)
+            scored_indexes, _ = verify.bucket_skip(icps[position], verify.slice_first_n(companies, verify.icp_company_goal(icps[position])))
+            identities = set()
+            for original_index, breakdown in zip(scored_indexes, rows):
+                if breakdown.get("company_index") != original_index:
+                    raise scoring.ScoringError("integrity breakdown company index mismatch")
+                if not isinstance(breakdown.get("company_qualified"), bool) or not isinstance(breakdown.get("duplicate_company"), bool):
+                    raise scoring.ScoringError("integrity qualification receipt missing")
+                key = breakdown.get("company_identity_key")
+                if not isinstance(key, str) or not key:
+                    raise scoring.ScoringError("integrity company identity missing")
+                if breakdown["company_qualified"] and not breakdown["duplicate_company"]:
+                    if float(breakdown.get("final_score") or 0) <= 0:
+                        raise scoring.ScoringError("qualified company cannot carry zero score")
+                    identities.add(key)
+            total += len(identities)
         return total
 
     @staticmethod
@@ -1919,6 +2220,7 @@ class ArenaService:
         round_row: Mapping[str, Any],
         submission_id: str,
         runs: Sequence[Mapping[str, Any]],
+        *, positions: Optional[Sequence[int]] = None,
     ) -> Dict[str, Any]:
         """Build final cost reporting without changing the quality score."""
 
@@ -1931,7 +2233,8 @@ class ArenaService:
             }
         try:
             returned = self._returned_company_count(submission_id, runs)
-        except (ArenaContractError, OutputInvalid, TypeError, ValueError):
+            qualified = self._qualified_company_count(round_row, submission_id, runs, positions=positions) if integrity.enabled(configuration) else returned
+        except (ArenaContractError, OutputInvalid, TypeError, ValueError, scoring.ScoringError):
             return {
                 "cost_summary": None,
                 "eligible": False,
@@ -1942,7 +2245,7 @@ class ArenaService:
         judge = self._cost_kind_summary(costs, "score")
         execution_cap = int(configuration["execution_cap_microusd"])
         per_company_cap = int(configuration["cost_per_company_microusd"])
-        eligibility_cap = min(execution_cap, per_company_cap * returned)
+        eligibility_cap = min(execution_cap, per_company_cap * qualified)
         summary = {
             "returned_company_count": returned,
             "execution_cap_microusd": execution_cap,
@@ -1952,6 +2255,11 @@ class ArenaService:
             # Judge spend is reported, but it does not enter sourcing eligibility.
             "judge": judge,
         }
+        if integrity.enabled(configuration):
+            summary["qualified_company_count"] = qualified
+            selected = self._selected_accepted_execution_runs(runs, submission_id)
+            if not any(position in selected for position in (positions if positions is not None else range(contracts.MAX_EVALUATION_ICP_COUNT))):
+                return {"cost_summary": summary, "eligible": False, "eligibility_reason": "stored_output_invalid"}
         if execution["inflight_calls"] or judge["inflight_calls"]:
             return {
                 "cost_summary": summary,
@@ -1966,7 +2274,7 @@ class ArenaService:
             }
         if execution["conservative_microusd"] > execution_cap:
             reason = "execution_cap_exceeded"
-        elif execution["conservative_microusd"] > per_company_cap * returned:
+        elif execution["conservative_microusd"] > per_company_cap * qualified:
             reason = "cost_per_company_exceeded"
         else:
             reason = "eligible"
@@ -1980,7 +2288,9 @@ class ArenaService:
 
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
-        if round_row["status"] != "scored":
+        policy_enabled = integrity.enabled(round_row.get("configuration_doc") or {})
+        expected_status = "confirmed" if policy_enabled else "scored"
+        if round_row["status"] != expected_status:
             return {"status": "stale", "round_status": round_row["status"]}
         stage1_ranking = verify.stage1_ranking(
             self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
@@ -1989,6 +2299,12 @@ class ArenaService:
         final_entries = self._score_entries_from_runs(
             round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
         )
+        main_scores = {entry["submission_id"]: entry["final_score"] for entry in final_entries}
+        cohort = round_row.get("confirmation_cohort") or {}
+        if policy_enabled and cohort.get("required"):
+            confirmation_entries = {entry["submission_id"]: entry for entry in self._score_entries_from_runs(round_row, contracts.stage_positions(3), "final_score")}
+            for entry in final_entries:
+                entry["final_score"] = confirmation_entries.get(entry["submission_id"], {}).get("final_score")
         execution_runs = self._store.list_runs(round_id, kind="execute")
         eligibility = {
             str(entry["submission_id"]): self._submission_cost_eligibility(
@@ -2016,6 +2332,9 @@ class ArenaService:
         final_ranking = verify.final_ranking(final_entries)
         for row in final_ranking:
             row.update(eligibility[str(row["submission_id"])])
+            if policy_enabled:
+                row["main_score"] = main_scores.get(row["submission_id"])
+                row["confirmation_selected"] = row["submission_id"] in cohort.get("submission_ids", [])
         publication = {
             "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
             "round_id": round_id,
@@ -2027,7 +2346,7 @@ class ArenaService:
             "published_at": published_at,
         }
         contracts.check_strict_document(publication, contracts.PUBLICATION_LIMITS)
-        transition = self._store.transition_round(round_id, "scored", "published", {
+        transition = self._store.transition_round(round_id, expected_status, "published", {
             "publication_doc": publication,
             "published_at": published_at,
         })
@@ -2324,11 +2643,14 @@ class ArenaService:
         if response.get("status") != "leased":
             return response
         self._require_code_review(str(response["submission_id"]), round_row)
-        icps = self.benchmark_icps(round_id)
+        icps = self.evaluation_icps(round_id) if integrity.enabled(configuration) else self.benchmark_icps(round_id)
         position = int(response["icp_position"])
         if not 0 <= position < len(icps):
             raise ServiceError("benchmark_data_invalid", 500)
-        lease = dict(response, icp=icps[position], lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        lease_icp = integrity.agent_visible_icp(icps[position]) if integrity.enabled(configuration) else icps[position]
+        lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        if integrity.enabled(configuration):
+            lease["integrity_policy"] = integrity.POLICY
         lease.update({
             "image_digest": configuration["scorer_image_digest"],
             "image_reference": configuration["scorer_image_reference"],
@@ -2534,6 +2856,8 @@ class ArenaService:
             raise ServiceError("run_result_cause_kind_mismatch", 400)
         lease_token = self._lease_token_for_run(validated, run)
         output_ref = ""
+        judgment_evidence = None
+        judgment_evidence_hash = ""
         if terminal_status == "accepted" and kind == "score":
             try:
                 output = scoring.validate_scoring_output_document(body.get("output"))
@@ -2543,6 +2867,21 @@ class ArenaService:
                 raise ServiceError("output_invalid", 400)
             output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
             self._objects.put(output_ref, contracts.canonical_json(output).encode("utf-8"))
+            if run.get("judgment_cache_key"):
+                scope = dict(run.get("judgment_scope_doc") or {})
+                scope["cache_key"] = str(run["judgment_cache_key"])
+                try:
+                    judgment_evidence = judgment_cache.build_evidence_snapshot(
+                        output=output,
+                        cache_scope=scope,
+                        source_score_run_id=run_id,
+                        source_scored_run_id=str(run["scored_run_id"]),
+                        source_output_ref=output_ref,
+                        source_runner_hotkey=str(validated["hotkey"]),
+                    )
+                except judgment_cache.JudgmentCacheError as exc:
+                    raise ServiceError("judgment_cache_invalid", 500) from exc
+                judgment_evidence_hash = contracts.document_hash(judgment_evidence)
         elif terminal_status == "accepted":
             try:
                 output = validate_output_document(body.get("output"))
@@ -2552,7 +2891,8 @@ class ArenaService:
             self._objects.put(output_ref, contracts.canonical_json(output).encode("utf-8"))
         result = self._store.complete_attempt(
             run_id=run_id, lease_token_hash=hash_lease_token(lease_token), result=run_result, terminal_cause=terminal_status,
-            output_ref=output_ref,
+            output_ref=output_ref, judgment_evidence=judgment_evidence,
+            judgment_evidence_hash=judgment_evidence_hash,
         )
         return result
 
@@ -2634,19 +2974,19 @@ class ArenaService:
                 return self.commit_benchmark(round_id)
             if status == "committed":
                 return self.open_stage(round_id, 1)
-            if status in ("stage1", "stage2"):
-                stage = 1 if status == "stage1" else 2
+            if status in ("stage1", "stage2", "stage3"):
+                stage = int(status[-1])
                 self._store.expire_leases(round_id)
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
                     return self.close_stage(round_id, stage)
                 return {"status": "waiting", "round_status": status}
-            if status in ("stage1_closed", "stage2_closed"):
-                stage = 1 if status == "stage1_closed" else 2
+            if status in ("stage1_closed", "stage2_closed", "stage3_closed"):
+                stage = int(status[5])
                 if not round_row.get("stage%d_scoring_plan_doc" % stage):
                     return self.commit_scoring_plan(round_id, stage)
                 return self.open_scoring(round_id, stage)
-            if status in ("stage1_scoring", "stage2_scoring"):
-                stage = 1 if status == "stage1_scoring" else 2
+            if status in ("stage1_scoring", "stage2_scoring", "stage3_scoring"):
+                stage = int(status[5])
                 self._store.expire_leases(round_id)
                 scoring_runs = self._store.list_runs(
                     round_id, stage=stage, kind="score"
@@ -2657,16 +2997,16 @@ class ArenaService:
                     return self._store.cancel_round(
                         round_id, CANCEL_REASONS["scoring_incomplete"]
                     )
-                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
+                window = schedule["stage_1_scoring_close" if stage == 1 else "stage_3_scoring_close" if stage == 3 else "final_scoring_close"]
                 if now >= _parse_iso(window) or all(
                     run["status"] in ("accepted", "failed")
                     for run in scoring_runs
                 ):
                     return self.close_scoring(round_id, stage)
                 return {"status": "waiting", "round_status": status}
-            if status in ("stage1_judged", "stage2_judged"):
-                stage = 1 if status == "stage1_judged" else 2
-                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
+            if status in ("stage1_judged", "stage2_judged", "stage3_judged"):
+                stage = int(status[5])
+                window = schedule["stage_1_scoring_close" if stage == 1 else "stage_3_scoring_close" if stage == 3 else "final_scoring_close"]
                 try:
                     return self.score_stage(round_id, stage)
                 except scoring.ScoringError:
@@ -2675,7 +3015,9 @@ class ArenaService:
                     return {"status": "retry", "round_status": status}
             if status == "stage1_scored":
                 return self.open_stage(round_id, 2)
-            if status == "scored":
+            if status == "scored" and integrity.enabled(round_row["configuration_doc"]):
+                return self.open_confirmation(round_id)
+            if status in ("scored", "confirmed"):
                 try:
                     return self.publish(round_id)
                 except ServiceError as exc:
@@ -2902,6 +3244,11 @@ class ArenaService:
         if row["status"] == "published":
             publication = row.get("publication_doc") or {}
             view.update({"final_ranking": publication.get("final_ranking"), "king_decision": publication.get("king_decision")})
+        if integrity.enabled(configuration):
+            view["integrity_policy"] = integrity.POLICY
+            view["confirmation_bank_hash"] = row.get("confirmation_bank_hash")
+            if row["status"] == "published":
+                view["confirmation_submission_ids"] = (row.get("confirmation_cohort") or {}).get("submission_ids", [])
         return view
 
     def _public_icp_disclosure(self, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2926,10 +3273,10 @@ class ArenaService:
         if disclosure is None:
             raise ServiceError("benchmark_not_public", 403)
         icps = self.benchmark_icps(round_id)
-        return {
+        result = {
             "round_id": round_id,
             "icps": [
-                {**icps[position], "icp_position": position,
+                {**(integrity.agent_visible_icp(icps[position]) if integrity.enabled(row.get("configuration_doc") or {}) else icps[position]), "icp_position": position,
                  "baseline_score": disclosure["baseline_scores"].get(position)}
                 for position in disclosure["public_positions"]
             ],
@@ -2939,6 +3286,15 @@ class ArenaService:
             "private_icp_count": 0,
             "disclosure_policy": disclosure["disclosure_policy"],
         }
+        if integrity.enabled(row.get("configuration_doc") or {}):
+            result["confirmation_bank_hash"] = row.get("confirmation_bank_hash")
+            result["private_icp_count"] = contracts.CONFIRMATION_ICP_COUNT
+            if row["status"] == "published":
+                # The salted original document lets observers check the
+                # commitment without changing the main bank's reveal time.
+                result["confirmation_bank"] = self.confirmation_bank(round_id)
+                result["private_icp_count"] = 0
+        return result
 
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
         if not submission_id or not isinstance(submission_id, str):
@@ -2972,6 +3328,8 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
+        if round_status == "published" and integrity.enabled(row.get("configuration_doc") or {}):
+            public_positions.update(contracts.stage_positions(3))
         runs = [
             run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")
             if run.get("icp_position") in public_positions
@@ -3030,6 +3388,11 @@ class ArenaService:
                 if int(run.get("stage") or 0) == 2 and run.get("per_icp_score") is not None
             ],
         }
+        if integrity.enabled(row.get("configuration_doc") or {}):
+            scores["confirmation"] = [
+                {"run_id": run["run_id"], "icp_position": run["icp_position"], "per_icp_score": run["per_icp_score"]}
+                for run in runs if int(run.get("stage") or 0) == 3 and run.get("per_icp_score") is not None
+            ]
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
         run_results = [run["result_doc"] for run in runs if run.get("result_doc")]

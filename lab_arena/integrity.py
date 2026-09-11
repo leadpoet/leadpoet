@@ -1,0 +1,71 @@
+"""Versioned Arena integrity policy and safe agent-facing ICP projection."""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Mapping
+
+POLICY = "arena_integrity_v1"
+SCORING_ADAPTER = "qualification_integrity_v2"
+
+# Buyer requirements only. Generation receipts and examples never cross this
+# boundary, including in nested signal objects added by future generators.
+ICP_FIELDS = frozenset({
+    "icp_id", "prompt", "industry", "sub_industry", "employee_count",
+    "company_stage", "geography", "country", "state", "product_service",
+    "required_attribute", "excluded_companies", "intent_signals",
+    "intent_signal", "intent_category", "bonus_intents", "intent_max_age_days",
+    "max_companies", "intent_signal_evidence_types",
+})
+SIGNAL_FIELDS = frozenset({
+    "text", "intent_signal", "signal", "intent_category", "category",
+    "evidence_type", "max_age_days", "description",
+    "intent_max_age_days",
+})
+ATTRIBUTE_FIELDS = frozenset({"text", "description", "required"})
+
+
+def enabled(configuration: Mapping[str, Any]) -> bool:
+    if "integrity_policy" not in configuration:
+        return False
+    if configuration["integrity_policy"] != POLICY:
+        raise ValueError("unsupported Arena integrity policy")
+    return True
+
+
+def _project(value: Any, allowed: frozenset[str]) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _project(item, allowed)
+            for key, item in value.items() if key in allowed
+        }
+    if isinstance(value, list):
+        return [_project(item, allowed) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise ValueError("ICP values must be JSON values")
+
+
+def agent_visible_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(icp, Mapping):
+        raise ValueError("ICP must be an object")
+    result = {}
+    for key in ICP_FIELDS:
+        if key not in icp:
+            continue
+        allowed = ATTRIBUTE_FIELDS if key == "required_attribute" else SIGNAL_FIELDS
+        result[key] = _project(icp[key], allowed)
+    # Validate the actual serialized boundary; never return a view into private
+    # benchmark objects which a downstream caller could mutate.
+    return json.loads(json.dumps(result, allow_nan=False))
+
+
+def requirement_fingerprint(icp: Mapping[str, Any]) -> str:
+    """Stable semantic input fingerprint excluding only its assigned identifier."""
+    from lab_arena.contracts import document_hash
+
+    visible = agent_visible_icp(icp)
+    visible.pop("icp_id", None)
+    if visible.get("industry") and (visible.get("intent_signal") or visible.get("intent_signals")):
+        visible.pop("prompt", None)
+    return document_hash(visible)

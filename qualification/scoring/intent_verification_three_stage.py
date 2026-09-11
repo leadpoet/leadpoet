@@ -3158,6 +3158,8 @@ async def verify_three_stage(
     evidence_type: Optional[str] = None,
     declared_source: Optional[str] = None,
     stage1_soft_reject: bool = False,
+    integrity_policy: bool = False,
+    buyer_max_age_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
 
@@ -3249,6 +3251,8 @@ async def verify_three_stage(
         ),
         "_target_signal_text": target_signal_text,
         "_declared_source": (declared_source or "").strip().lower() or None,
+        "_integrity_policy": bool(integrity_policy),
+        "_buyer_max_age_days": max(1, int(buyer_max_age_days or 365)),
         # Dispatcher in _build_verification_prompt routes on this — TECHSTACK
         # adds PART E (tech-stack anti-patterns), SOCIAL_POSTING adds PART D
         # (author-role check), other values fall through to the default
@@ -3386,6 +3390,11 @@ async def verify_three_stage(
         fetched_contents, fetch_source_url
     )
     contents = _project_contents_for_prompt(fetched_contents)
+    source_publication_dates = list(dict.fromkeys(
+        str(result.get("source_publication_date") or "")
+        for result in (contents.get("results") or [])
+        if str(result.get("source_publication_date") or "")
+    ))
     if not (contents.get("results") or []):
         return {
             "client_ready": False,
@@ -3508,7 +3517,7 @@ async def verify_three_stage(
                     }],
                 },
             }
-        if meta.get("is_stale"):
+        if meta.get("is_stale") and not integrity_policy:
             return {
                 "client_ready": False,
                 "decision": "reject",
@@ -3540,6 +3549,13 @@ async def verify_three_stage(
     is_job_board = (
         row.get("_declared_source") == "job_board"
         or _is_job_board_url(fetch_source_url)
+        or (
+            integrity_policy
+            and (
+                has_linkedin_structured
+                or bool(_extract_linkedin_job_id(fetch_source_url))
+            )
+        )
     )
     if is_job_board and not has_linkedin_structured:
         combined_for_gate = "\n".join(
@@ -3627,8 +3643,14 @@ async def verify_three_stage(
                 and item.get("verification_mode") == "source_grounded"
                 and item.get("confidence") in {"medium", "high"}
                 and item.get("same_entity_check") in {"pass", "unclear", "fail"}
-                and item.get("claim_matches_miner_date")
-                in {"consistent", "no_date_in_content"}
+                and (
+                    item.get("claim_matches_miner_date")
+                    in {"consistent", "no_date_in_content"}
+                    or (
+                        integrity_policy
+                        and item.get("claim_matches_miner_date") == "contradicted"
+                    )
+                )
                 and str(item.get("claim") or "") == str(row.get("claim") or "")
                 # Model-owned verified-event summaries are normalized claims,
                 # not promised verbatim source spans.  Ground the evidence
@@ -3662,6 +3684,20 @@ async def verify_three_stage(
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     s3_decision = _decision(s3_verdict)
+    job_publisher_relationship = (
+        "verified"
+        if is_job_board
+        and _looks_like_job_body(combined_text)
+        and (
+            _on_lead_domain
+            or exact_hiring_employer_binding
+            or (
+                has_linkedin_structured
+                and s3_item.get("same_entity_check") == "pass"
+            )
+        )
+        else ("unverified" if is_job_board else "not_applicable")
+    )
     stage3_info = {
         "model": s3_envelope.get("model"),
         "status": s3_item.get("signal_status"),
@@ -3736,7 +3772,7 @@ async def verify_three_stage(
             client_ready = review_as_accept
             reason = "" if review_as_accept else "stage3_review"
 
-    return {
+    result = {
         "client_ready": client_ready,
         "decision": s3_decision,
         "rejection_reason": reason,
@@ -3748,3 +3784,9 @@ async def verify_three_stage(
         "verdict": s3_verdict,
         "corroboration": corroboration_info,
     }
+    if integrity_policy:
+        result.update({
+            "source_publication_dates": source_publication_dates,
+            "job_publisher_relationship": job_publisher_relationship,
+        })
+    return result

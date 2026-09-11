@@ -30,7 +30,6 @@ from lab_arena.store import (
 )
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
-    LAB_ARENA_COMBINED_PROVIDER_BUDGET_MIGRATION,
     LAB_ARENA_NEXT_DAY_ICP_MIGRATION,
     LAB_ARENA_SOURCE_DISCLOSURE_MIGRATION,
     database_with_lab_arena_migration,
@@ -306,11 +305,18 @@ def test_migration_applies_twice_and_roles_have_exact_attributes(fresh_superuser
         assert len(policies) == 6 and all(name.endswith("_service_read") for _, name in policies)
 
 
-def test_next_day_icp_migration_is_repeatable(superuser):
+def test_next_day_icp_migration_is_repeatable(fresh_superuser):
     migration = (SCRIPTS / LAB_ARENA_NEXT_DAY_ICP_MIGRATION).read_text(
         encoding="utf-8"
     )
-    with superuser.cursor() as cursor:
+    with fresh_superuser.cursor() as cursor:
+        # Historical replay must not downgrade the shared current-schema
+        # database or remove guards installed by later migrations.
+        prior_migrations = DEFAULT_MIGRATIONS[
+            :DEFAULT_MIGRATIONS.index(LAB_ARENA_NEXT_DAY_ICP_MIGRATION)
+        ]
+        for prerequisite in prior_migrations:
+            cursor.execute((SCRIPTS / prerequisite).read_text(encoding="utf-8"))
         cursor.execute(migration)
         cursor.execute(migration)
         cursor.execute(
@@ -320,13 +326,6 @@ def test_next_day_icp_migration_is_repeatable(superuser):
             "AND column_name = 'icp_set_date'"
         )
         assert cursor.fetchone() == ("date",)
-        # Restore the current function definitions after this historical
-        # migration replay so later behavior tests use the current schema.
-        cursor.execute(
-            (SCRIPTS / LAB_ARENA_COMBINED_PROVIDER_BUDGET_MIGRATION).read_text(
-                encoding="utf-8"
-            )
-        )
 
 
 def test_next_day_icp_migration_requires_source_disclosure_migration():

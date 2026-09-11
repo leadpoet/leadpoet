@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Tuple
 
 
 MICROUSD_PER_USD = Decimal("1000000")
@@ -119,6 +119,106 @@ def deepline_cost(response_json: Any) -> Optional[ProviderCost]:
     return None
 
 
+def deepline_billing_history_cost(
+    response_json: Any, *, request_id: str, operation: str
+) -> Tuple[str, Optional[ProviderCost], bool, Optional[str]]:
+    """Match one exact Deepline billing-history entry without retaining it.
+
+    ``pending`` means the requested job is absent. ``nonterminal`` means its
+    charge is present but not final. ``invalid`` means the history shape or
+    exact job match cannot be trusted. Only one ``posted`` or ``free`` entry
+    can produce a cost.
+    """
+
+    if not isinstance(response_json, Mapping):
+        return "invalid", None, False, None
+    recent = response_json.get("recent")
+    if not isinstance(recent, Mapping):
+        return "invalid", None, False, None
+    entries = recent.get("entries")
+    if not isinstance(entries, list) or len(entries) > 50 or any(
+        not isinstance(entry, Mapping) for entry in entries
+    ):
+        return "invalid", None, False, None
+    has_more = recent.get("has_more")
+    if not isinstance(has_more, bool):
+        return "invalid", None, False, None
+    next_cursor = recent.get("next_cursor")
+    if has_more and (
+        not isinstance(next_cursor, str)
+        or not next_cursor.strip()
+        or len(next_cursor) > 2048
+    ):
+        return "invalid", None, False, None
+    if not has_more:
+        next_cursor = None
+    matches = [entry for entry in entries if entry.get("request_id") == request_id]
+    if not matches:
+        return "pending", None, has_more, next_cursor
+    if len(matches) != 1:
+        return "invalid", None, False, None
+
+    entry = matches[0]
+    if entry.get("operation") != operation:
+        return "invalid", None, False, None
+    provider = entry.get("provider")
+    if not isinstance(provider, str) or not provider:
+        return "invalid", None, False, None
+    charge_state = entry.get("charge_state")
+    if not isinstance(charge_state, str):
+        return "invalid", None, False, None
+    if charge_state not in ("posted", "free"):
+        return "nonterminal", None, has_more, next_cursor
+    credits_value = entry.get("credits")
+    if isinstance(credits_value, bool) or not isinstance(
+        credits_value, (int, float, Decimal)
+    ):
+        return "invalid", None, False, None
+    credits = _decimal(credits_value)
+    if credits is None or (charge_state == "free" and credits != 0):
+        return "invalid", None, False, None
+    return (
+        "matched",
+        ProviderCost(
+            microusd=_microusd_ceiling(credits * DEEPLINE_USD_PER_CREDIT),
+            units=credits,
+            unit_name="credits",
+            price_basis="deepline_billing_history_credits_x_0.10_usd",
+        ),
+        has_more,
+        next_cursor,
+    )
+
+
+def deepline_free_completed_cost(
+    parameters: Mapping[str, Any], response_status: Any, response_json: Any
+) -> Optional[ProviderCost]:
+    """Prove the one Deepline operation whose completed call costs zero.
+
+    A present billing object remains authoritative, including when malformed:
+    callers must not replace invalid provider accounting with this fixed zero.
+    """
+
+    if (
+        parameters.get("tool") != "free_simple_company_search"
+        or isinstance(response_status, bool)
+        or response_status != 200
+        or not isinstance(response_json, Mapping)
+        or "billing" in response_json
+        or response_json.get("status") != "completed"
+        or not isinstance(response_json.get("job_id"), str)
+        or not response_json["job_id"].strip()
+        or not isinstance(response_json.get("result"), (Mapping, list))
+    ):
+        return None
+    return ProviderCost(
+        microusd=0,
+        units=Decimal("0"),
+        unit_name="credits",
+        price_basis="deepline_free_simple_company_search_completed_zero",
+    )
+
+
 def deepline_reservation_cost(parameters: Mapping[str, Any]) -> Optional[ProviderCost]:
     """Return a published fixed-call estimate; None means dynamically priced."""
 
@@ -156,7 +256,9 @@ __all__ = [
     "DEEPLINE_USD_PER_CREDIT",
     "ProviderCost",
     "SCRAPINGDOG_USD_PER_CREDIT",
+    "deepline_billing_history_cost",
     "deepline_cost",
+    "deepline_free_completed_cost",
     "deepline_reservation_cost",
     "openrouter_cost",
     "scrapingdog_cost",

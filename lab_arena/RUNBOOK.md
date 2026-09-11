@@ -98,8 +98,11 @@ including failed attempts and retries. OpenRouter uses the provider's
 `usage.cost`, not the admission-only management key. Scrapingdog uses the
 existing endpoint credit map at $0.00005 per credit; approved routes absent
 from that map use five credits, and a company profile uses ten. Deepline uses
-its returned billing credits at $0.10 per credit. Missing billing is uncertain,
-not free. Unknown charges retain their reservation until reconciled.
+the final billing-history entry matched to that call's job ID and operation,
+at $0.10 per credit. Its immediate response can understate the final charge.
+The known-free company search can settle a valid completed response at zero.
+Other missing or ambiguous charges retain their reservation; they are not free.
+Billing-history reads are bounded and private. They never reach the model.
 
 Reservations and settlement share the existing submission lock. Concurrent
 ICPs cannot each claim a fresh budget. Dynamically priced Deepline calls

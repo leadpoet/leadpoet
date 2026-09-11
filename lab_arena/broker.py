@@ -25,7 +25,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote_to_bytes
+from urllib.parse import quote, unquote_to_bytes
 
 import httpx
 
@@ -34,6 +34,9 @@ from lab_arena.contracts import ArenaContractError
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+DEEPLINE_BILLING_HISTORY_URL = (
+    "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
+)
 PRICED_COMPONENTS = ("prompt", "completion", "request", "image", "web_search", "internal_reasoning")
 MAX_PRICE_TABLE_BYTES = 8 * 1024 * 1024
 MICROUSD = Decimal(1_000_000)
@@ -72,6 +75,12 @@ _SAFE_EXCEPTION_CLASSES = frozenset(
         "ValueError",
     }
 )
+_DEEPLINE_JOB_STATUSES = frozenset(
+    {"cancelled", "completed", "failed", "in_progress", "pending", "queued", "running"}
+)
+_DEEPLINE_BILLING_MAX_ATTEMPTS = 3
+_DEEPLINE_BILLING_MAX_SECONDS = 5.0
+_DEEPLINE_BILLING_POLL_SECONDS = 2.0
 
 
 def _safe_exception_class(exc: BaseException) -> str:
@@ -290,6 +299,31 @@ def deepline_cost_microusd(body: bytes) -> Optional[int]:
     return None if cost is None else cost.microusd
 
 
+def _missing_provider_cost_call_doc(
+    response: ProviderResponse, document: Any
+) -> Dict[str, Any]:
+    """Return bounded structural diagnostics without provider content."""
+
+    is_mapping = isinstance(document, Mapping)
+    status = response.status
+    provider_status = (
+        status if isinstance(status, int) and not isinstance(status, bool) else 0
+    )
+    body_bytes = len(response.body) if isinstance(response.body, bytes) else 0
+    diagnostics: Dict[str, Any] = {
+        "reason": "missing_provider_cost",
+        "provider_status": provider_status,
+        "body_bytes": body_bytes,
+        "body_is_mapping": is_mapping,
+        "usage_present": is_mapping and "usage" in document,
+        "billing_present": is_mapping and "billing" in document,
+    }
+    top_status = document.get("status") if is_mapping else None
+    if isinstance(top_status, str) and top_status in _DEEPLINE_JOB_STATUSES:
+        diagnostics["top_level_job_status"] = top_status
+    return diagnostics
+
+
 def inject_credential(outbound: operations.OutboundRequest, secret: str) -> Tuple[str, Dict[str, str]]:
     """Place the credential exactly where the operation table says."""
 
@@ -410,6 +444,93 @@ class HttpxProviderTransport:
 
     def close(self) -> None:
         self._client.close()
+
+
+def _deepline_job_request_id(document: Any) -> Optional[str]:
+    """Return a usable job id only from Deepline's bounded job envelope."""
+
+    if not isinstance(document, Mapping):
+        return None
+    request_id = document.get("job_id")
+    status = document.get("status")
+    if (
+        not isinstance(request_id, str)
+        or not request_id.strip()
+        or len(request_id) > 512
+        or not isinstance(status, str)
+        or status not in _DEEPLINE_JOB_STATUSES
+    ):
+        return None
+    return request_id
+
+
+def _deepline_billing_readback(
+    *,
+    transport: ProviderTransport,
+    secret: str,
+    request_id: str,
+    operation: str,
+    request_deadline: float,
+) -> Optional[provider_costs.ProviderCost]:
+    """Poll bounded billing history and return only one exact terminal charge."""
+
+    readback_deadline = min(
+        request_deadline, time.monotonic() + _DEEPLINE_BILLING_MAX_SECONDS
+    )
+    headers = {
+        "accept": "application/json",
+        "authorization": "Bearer " + secret,
+        "user-agent": "leadpoet-lab-arena-broker/1",
+    }
+    history_url = DEEPLINE_BILLING_HISTORY_URL
+    for request_number in range(_DEEPLINE_BILLING_MAX_ATTEMPTS):
+        now = time.monotonic()
+        if now >= readback_deadline:
+            break
+        if request_number and history_url == DEEPLINE_BILLING_HISTORY_URL:
+            delay = min(
+                _DEEPLINE_BILLING_POLL_SECONDS, max(0.0, readback_deadline - now)
+            )
+            if delay <= 0:
+                break
+            time.sleep(delay)
+            now = time.monotonic()
+            if now >= readback_deadline:
+                break
+        try:
+            response = transport.send(
+                method="GET",
+                url=history_url,
+                headers=headers,
+                body=b"",
+                timeout_seconds=max(0.001, readback_deadline - now),
+            )
+        except ProviderTransportError:
+            continue
+        if _response_contains_credential(response, secret):
+            return None
+        if response.status != 200:
+            continue
+        try:
+            document = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+        state, cost, has_more, next_cursor = provider_costs.deepline_billing_history_cost(
+            document, request_id=request_id, operation=operation
+        )
+        if state == "invalid":
+            return None
+        if state == "matched":
+            return cost
+        if state == "pending" and has_more:
+            if next_cursor is None:
+                return None
+            history_url = DEEPLINE_BILLING_HISTORY_URL + "&recent_cursor=" + quote(
+                next_cursor, safe=""
+            )
+            continue
+        history_url = DEEPLINE_BILLING_HISTORY_URL
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +923,9 @@ class Broker:
             return _error_result("call_uncertain", summary)
         # Build the outbound request from the constant table and inject the credential.
         outbound = operations.build_outbound_request(effective_operation_id, effective_normalized)
+        raw_document: Any = None
+        deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
+        deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
         try:
             url, headers = inject_credential(outbound, secret)
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
@@ -815,6 +939,33 @@ class Broker:
                         {"content-type": "application/json"},
                         b'{"error":{"code":"provider_unavailable"}}',
                     )
+                if effective_operation.provider == "deepline":
+                    try:
+                        raw_document = json.loads(response.body.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError):
+                        raw_document = None
+                    deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
+                        effective_normalized, response.status, raw_document
+                    )
+                    request_id = _deepline_job_request_id(raw_document)
+                    if (
+                        deepline_known_free_cost is None
+                        and 200 <= response.status < 300
+                        and request_id is not None
+                    ):
+                        deepline_operation = effective_normalized.get("tool") or {
+                            "exa.search": "exa_search",
+                            "exa.contents": "exa_contents",
+                        }.get(effective_operation_id)
+                        if not isinstance(deepline_operation, str):
+                            deepline_operation = ""
+                        deepline_readback_cost = _deepline_billing_readback(
+                            transport=self._transport,
+                            secret=secret,
+                            request_id=request_id,
+                            operation=deepline_operation,
+                            request_deadline=request_deadline,
+                        )
             except ProviderTransportError:
                 # Outcome unknown after send: consume the full reservation.
                 result = self._store.mark_uncertain(
@@ -841,11 +992,10 @@ class Broker:
             )
             raw_cost = provider_costs.openrouter_cost(raw_document)
         elif effective_operation.provider == "deepline":
-            try:
-                raw_document = json.loads(response.body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                raw_document = None
-            raw_cost = provider_costs.deepline_cost(raw_document)
+            # A terminal per-job history entry is authoritative. Native
+            # response billing has been observed to understate the posted
+            # charge, so paid calls never fall back to it.
+            raw_cost = deepline_known_free_cost or deepline_readback_cost
             raw_actual = None if raw_cost is None else raw_cost.microusd
         elif effective_operation.provider == "scrapingdog" and 200 <= response.status < 300:
             raw_cost = provider_costs.scrapingdog_cost(
@@ -874,7 +1024,7 @@ class Broker:
                     run_id=context.run_id,
                     lease_token_hash=context.lease_token_hash,
                     call_identity=call_identity,
-                    call_doc={"reason": "missing_provider_cost"},
+                    call_doc=_missing_provider_cost_call_doc(response, raw_document),
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount, "provider_status": int(response.status)})

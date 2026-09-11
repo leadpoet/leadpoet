@@ -30,6 +30,7 @@ import pytest
 import requests
 
 from lab_arena import contracts, operations, runner, shim
+from lab_arena import broker as br
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
@@ -357,7 +358,8 @@ def test_company_verification_routed_page_fetch_uses_provider_deadline(
 
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["actual_final_url"] == source_url
-    assert len(transport.sent) == 1
+    assert [call["method"] for call in transport.sent] == ["POST", "GET"]
+    assert transport.sent[1]["url"] == br.DEEPLINE_BILLING_HISTORY_URL
     assert 59.0 <= transport.sent[0]["timeout"] <= 60.0
     request = json.loads(transport.sent[0]["body"])
     assert request["operation"] == "firecrawl_scrape"

@@ -85,7 +85,8 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     )
     assert replay.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
     assert replay.call["idempotent"] is True
-    assert len(transport.sent) == 1
+    assert [call["method"] for call in transport.sent] == ["POST", "GET"]
+    assert transport.sent[1]["url"] == br.DEEPLINE_BILLING_HISTORY_URL
 
 
 @pytest.mark.parametrize("percent_encoded", [False, True])
@@ -175,7 +176,8 @@ def test_cached_final_url_fails_closed_when_invalid_or_secret_bearing(corruption
     assert json.loads(replay.body) == {"error": {"code": "broker_unavailable"}}
     assert operations.TRUSTED_RESPONSE_URL_HEADER not in replay.headers
     assert secret not in repr(replay.to_document())
-    assert len(transport.sent) == 1
+    assert [call["method"] for call in transport.sent] == ["POST", "GET"]
+    assert transport.sent[1]["url"] == br.DEEPLINE_BILLING_HISTORY_URL
 
 
 def test_miner_execution_does_not_fall_back_to_a_host_scrapingdog_key():

@@ -43,7 +43,7 @@ class _WeightRecorder:
         return "state_unavailable"
 
 
-@pytest.mark.parametrize("failure", [FileNotFoundError, RuntimeError])
+@pytest.mark.parametrize("failure", [FileNotFoundError, RuntimeError, ImportError])
 def test_weight_cycle_starts_before_failing_scorer_setup(failure):
     stop = _ImmediateStop()
     orchestrator = _WeightRecorder()

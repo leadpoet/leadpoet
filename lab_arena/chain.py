@@ -276,6 +276,7 @@ class MetagraphSnapshot:
     coldkeys: Tuple[str, ...]
     validator_permit: Tuple[bool, ...]
     stake: Optional[Tuple[float, ...]] = None
+    active: Optional[Tuple[bool, ...]] = None
 
     def __post_init__(self) -> None:
         _require_int(self.netuid, "netuid", minimum=1)
@@ -295,8 +296,14 @@ class MetagraphSnapshot:
             stake = tuple(float(item) for item in self.stake)
             if len(stake) != len(hotkeys) or any(item != item or item in (float("inf"), float("-inf")) for item in stake):
                 raise ArenaChainError("stake must hold one finite number per uid")
+        active: Optional[Tuple[bool, ...]] = None
+        if self.active is not None:
+            active = tuple(self.active)
+            if len(active) != len(hotkeys) or any(not isinstance(item, bool) for item in active):
+                raise ArenaChainError("active must hold one boolean per uid")
         object.__setattr__(self, "hotkeys", hotkeys)
         object.__setattr__(self, "coldkeys", coldkeys)
+        object.__setattr__(self, "active", active)
         object.__setattr__(self, "validator_permit", permits)
         object.__setattr__(self, "stake", stake)
 
@@ -345,8 +352,8 @@ def metagraph_snapshot_from_object(
 ) -> MetagraphSnapshot:
     """Map a bittensor ``Metagraph`` (or any object with the same fields).
 
-    Requires ``hotkeys``, ``coldkeys`` and ``validator_permit``; reads ``S``
-    (or ``stake``) when present. When the object reports a ``block`` it must
+    Requires ``hotkeys``, ``coldkeys``, ``active``, ``validator_permit`` and
+    ``S`` (or ``stake``). When the object reports a ``block`` it must
     equal ``block_number``: a metagraph that is not pinned to the finalized
     block is refused rather than trusted.
     """
@@ -354,18 +361,19 @@ def metagraph_snapshot_from_object(
     try:
         hotkeys = [str(item) for item in metagraph.hotkeys]
         coldkeys = [str(item) for item in metagraph.coldkeys]
+        active = [bool(_scalar(item)) for item in metagraph.active]
         permits = [bool(_scalar(item)) for item in metagraph.validator_permit]
     except (AttributeError, TypeError, ValueError) as exc:
         raise ArenaChainError("metagraph object lacks the pinned fields") from exc
     stake_source = getattr(metagraph, "S", None)
     if stake_source is None:
         stake_source = getattr(metagraph, "stake", None)
-    stake: Optional[List[float]] = None
-    if stake_source is not None:
-        try:
-            stake = [float(_scalar(item)) for item in stake_source]
-        except (TypeError, ValueError) as exc:
-            raise ArenaChainError("metagraph stake is not numeric") from exc
+    if stake_source is None:
+        raise ArenaChainError("metagraph object lacks the pinned fields")
+    try:
+        stake = [float(_scalar(item)) for item in stake_source]
+    except (TypeError, ValueError) as exc:
+        raise ArenaChainError("metagraph stake is not numeric") from exc
     reported_block = getattr(metagraph, "block", None)
     if reported_block is not None:
         observed = _chain_int(_scalar(reported_block), "metagraph block")
@@ -377,8 +385,9 @@ def metagraph_snapshot_from_object(
         block_hash=block_hash,
         hotkeys=tuple(hotkeys),
         coldkeys=tuple(coldkeys),
+        active=tuple(active),
         validator_permit=tuple(permits),
-        stake=None if stake is None else tuple(stake),
+        stake=tuple(stake),
     )
 
 
@@ -386,11 +395,14 @@ MetagraphSource = Callable[[Any, int, str], MetagraphSnapshot]
 
 
 def bittensor_metagraph_source(config: ArenaChainConfig) -> MetagraphSource:
-    """Read lite neurons through the runtime API at the finalized hash.
+    """Read the SDK's metagraph role fields at the finalized hash.
 
-    Bittensor 9.12.2 passes a scalar ``u16`` to recent substrate metadata that
-    describes this argument as a one-field composite. Retry only that known
-    encoding mismatch and validate every returned UID and account.
+    Bittensor 10.5 populates ``metagraph.active`` and overwrites ``metagraph.S``
+    from ``SubnetInfoRuntimeApi.get_subnet_state``. Read that same response on
+    Arena's existing serialized client, with the same ``Balance.from_rao``
+    conversion, rather than creating another Subtensor connection. Bittensor
+    9.12 passes a scalar ``u16`` to some metadata that describes the parameter
+    as a one-field composite, so retry only that known encoding mismatch.
     """
 
     if not isinstance(config, ArenaChainConfig):
@@ -407,33 +419,47 @@ def bittensor_metagraph_source(config: ArenaChainConfig) -> MetagraphSource:
         try:
             reader = getattr(client, "runtime_call")
             try:
-                response = reader("NeuronInfoRuntimeApi", "get_neurons_lite", [netuid], normalized)
+                response = reader("SubnetInfoRuntimeApi", "get_subnet_state", [netuid], normalized)
             except ValueError as exc:
                 message = str(exc)
                 if "type_def: Composite" not in message or 'type_name: Some("u16")' not in message:
                     raise
-                response = reader("NeuronInfoRuntimeApi", "get_neurons_lite", [[netuid]], normalized)
+                response = reader("SubnetInfoRuntimeApi", "get_subnet_state", [[netuid]], normalized)
         except Exception as exc:
             raise ArenaChainError("finalized metagraph runtime read failed") from exc
-        neurons = _unwrap(response)
-        if not isinstance(neurons, list):
+        state = _unwrap(response)
+        if not isinstance(state, Mapping):
             raise ArenaChainError("finalized metagraph runtime result is invalid")
-        rows = []
-        for raw in neurons:
-            if not isinstance(raw, Mapping):
-                raise ArenaChainError("finalized neuron row is invalid")
-            uid = _chain_int(_runtime_scalar(raw.get("uid")), "neuron uid")
-            if _chain_int(_runtime_scalar(raw.get("netuid")), "neuron netuid") != netuid:
-                raise ArenaChainError("finalized neuron netuid differs")
-            rows.append((uid, raw))
-        rows.sort(key=lambda item: item[0])
-        if [uid for uid, _raw in rows] != list(range(len(rows))):
-            raise ArenaChainError("finalized neuron UIDs are not contiguous")
+        if _chain_int(_runtime_scalar(state.get("netuid")), "subnet state netuid") != netuid:
+            raise ArenaChainError("finalized subnet state netuid differs")
+        try:
+            hotkeys = tuple(
+                _runtime_account(item, "neuron hotkey")
+                for item in state["hotkeys"]
+            )
+            coldkeys = tuple(
+                _runtime_account(item, "neuron coldkey")
+                for item in state["coldkeys"]
+            )
+            active = tuple(
+                _runtime_bool(item, "neuron active") for item in state["active"]
+            )
+            permits = tuple(
+                _runtime_bool(item, "validator permit")
+                for item in state["validator_permit"]
+            )
+            total_stake = tuple(
+                _runtime_stake_tao(item) for item in state["total_stake"]
+            )
+        except (KeyError, TypeError) as exc:
+            raise ArenaChainError("finalized subnet state role fields are invalid") from exc
         return MetagraphSnapshot(
             netuid=netuid, block_number=block_number, block_hash=normalized,
-            hotkeys=tuple(_runtime_account(row.get("hotkey"), "neuron hotkey") for _uid, row in rows),
-            coldkeys=tuple(_runtime_account(row.get("coldkey"), "neuron coldkey") for _uid, row in rows),
-            validator_permit=tuple(_runtime_bool(row.get("validator_permit"), "validator permit") for _uid, row in rows),
+            hotkeys=hotkeys,
+            coldkeys=coldkeys,
+            active=active,
+            validator_permit=permits,
+            stake=total_stake,
         )
 
     return source
@@ -464,6 +490,20 @@ def _runtime_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ArenaChainError("%s is not boolean" % field_name)
     return value
+
+
+def _runtime_stake_tao(value: Any) -> float:
+    """Decode SubnetState.total_stake exactly as Bittensor Metagraph.S does."""
+
+    rao = _chain_int(_runtime_scalar(value), "neuron total stake")
+    if rao < 0:
+        raise ArenaChainError("neuron total stake must be non-negative")
+    try:
+        from bittensor.utils.balance import Balance
+
+        return float(Balance.from_rao(rao).tao)
+    except (ImportError, TypeError, ValueError, AttributeError) as exc:
+        raise ArenaChainError("neuron total stake is invalid") from exc
 
 
 # ---------------------------------------------------------------------------

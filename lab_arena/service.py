@@ -25,6 +25,7 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
+from gateway.utils.hotkey_roles import classify_hotkey_from_metagraph
 
 logger = logging.getLogger(__name__)
 
@@ -57,19 +58,17 @@ CANCEL_REASONS = {
 
 
 def _gateway_validator_authorizer(
-    hotkey: str, *, network_name: str, netuid: int
+    hotkey: str, *, network_name: str, netuid: int, metagraph: Any
 ) -> Tuple[bool, Optional[str]]:
-    """Use the gateway registry for the exact Arena chain scope."""
+    """Apply the gateway's role policy to Arena's finalized metagraph."""
 
-    from gateway.utils import registry
-
-    if (
-        chain_module.normalize_network_name(registry.BITTENSOR_NETWORK)
-        != chain_module.normalize_network_name(network_name)
-        or int(registry.BITTENSOR_NETUID) != int(netuid)
-    ):
-        raise RuntimeError("gateway registry chain scope does not match Arena")
-    return registry.is_registered_hotkey(hotkey)
+    if int(getattr(metagraph, "netuid")) != int(netuid):
+        raise RuntimeError("Arena metagraph chain scope does not match service")
+    return classify_hotkey_from_metagraph(
+        hotkey,
+        metagraph,
+        network_name=chain_module.normalize_network_name(network_name),
+    )
 
 
 class ServiceError(RuntimeError):
@@ -2279,7 +2278,10 @@ class ArenaService:
         if authorizer is None:
             network_name, netuid = self._chain_scope()
             authorizer = lambda candidate: _gateway_validator_authorizer(
-                candidate, network_name=network_name, netuid=netuid
+                candidate,
+                network_name=network_name,
+                netuid=netuid,
+                metagraph=self._config.chain.metagraph(finalized=True),
             )
         try:
             registered, role = authorizer(hotkey)

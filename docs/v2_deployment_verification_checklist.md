@@ -24,6 +24,8 @@ python3.11 -m pytest -q \
   tests/test_arena_validator_launcher.py \
   tests/test_arena_validator_restart.py \
   tests/test_arena_reveal_chain_source.py \
+  tests/test_registry_roles.py \
+  tests/lab_arena/test_lab_arena_chain.py \
   tests/lab_arena/test_lab_arena_service_rules.py \
   tests/lab_arena/test_arena_weight_state.py \
   tests/lab_arena/test_lab_arena_normal_weight_flow.py

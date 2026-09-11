@@ -664,7 +664,11 @@ def main(argv=None) -> int:
                   % keypair.ss58_address, flush=True)
             return 0
 
-        from lab_arena.wiring import build_runner_from_environment
+        def runner_factory():
+            # Scoring-only imports are part of retryable scoring setup too.
+            from lab_arena.wiring import build_runner_from_environment
+
+            return build_runner_from_environment(args, keypair=keypair)
 
         orchestrator = ArenaWeightOrchestrator(
             api=public_api, chain=chain, signer=signer,
@@ -679,7 +683,7 @@ def main(argv=None) -> int:
             signal.signal(signum, lambda _signum, _frame: stop.set())
         run_validator_loops(
             orchestrator=orchestrator,
-            runner_factory=lambda: build_runner_from_environment(args, keypair=keypair),
+            runner_factory=runner_factory,
             epoch_supplier=lambda: chain_module.current_settlement_epoch(chain, cutover),
             stop=stop, poll_seconds=args.poll_seconds, once=args.once,
         )

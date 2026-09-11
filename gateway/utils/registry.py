@@ -13,6 +13,12 @@ from typing import Optional, Tuple
 import time
 import threading
 
+from gateway.utils.hotkey_roles import (
+    STAKE_THRESHOLD,
+    classify_hotkey_from_metagraph,
+    classify_hotkey_role,
+)
+
 # Import configuration
 import sys
 import os
@@ -31,9 +37,6 @@ _fetch_in_progress = False  # Flag to prevent concurrent fetches (async-safe)
 _async_subtensor = None
 
 
-STAKE_THRESHOLD = 500000  # 500K TAO for mainnet stake-based classification
-
-
 def _classify_hotkey_role(active: bool, validator_permit: bool, stake: float) -> Tuple[str, str]:
     """
     Classify registered hotkeys without weakening mainnet validator checks.
@@ -42,23 +45,14 @@ def _classify_hotkey_role(active: bool, validator_permit: bool, stake: float) ->
     enough there. Mainnet keeps the existing requirement that validator
     classification must include validator_permit=True.
     """
-    from gateway.config import BITTENSOR_NETWORK
+    from gateway.config import BITTENSOR_NETWORK as current_network
 
-    is_testnet = BITTENSOR_NETWORK == "test"
-    if is_testnet:
-        if active:
-            return "validator", "testnet, active=True"
-        return "miner", f"testnet, active={active}, permit={validator_permit}, stake={stake:.0f}"
-
-    is_validator = (
-        (active and validator_permit) or
-        (stake > STAKE_THRESHOLD and validator_permit)
+    return classify_hotkey_role(
+        active,
+        validator_permit,
+        stake,
+        network_name=current_network,
     )
-    if is_validator:
-        if active and validator_permit:
-            return "validator", "active=True, permit=True"
-        return "validator", f"stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True"
-    return "miner", f"active={active}, permit={validator_permit}, stake={stake:.0f}"
 
 
 def inject_async_subtensor(async_subtensor):
@@ -338,8 +332,12 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         # Get metagraph using async version (cached, no new instance)
         metagraph = await get_metagraph_async()
         
-        # Check if hotkey exists in metagraph
-        if hotkey not in metagraph.hotkeys:
+        from gateway.config import BITTENSOR_NETWORK as current_network
+
+        registered, role = classify_hotkey_from_metagraph(
+            hotkey, metagraph, network_name=current_network
+        )
+        if not registered:
             print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")
             return False, None
         
@@ -357,7 +355,8 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
+        _role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
+        assert role == _role
         if role == "validator":
             print(f"   ✅ Role: VALIDATOR ({reason})")
         else:
@@ -391,8 +390,12 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         # Get metagraph (cached)
         metagraph = get_metagraph()
         
-        # Check if hotkey exists in metagraph
-        if hotkey not in metagraph.hotkeys:
+        from gateway.config import BITTENSOR_NETWORK as current_network
+
+        registered, role = classify_hotkey_from_metagraph(
+            hotkey, metagraph, network_name=current_network
+        )
+        if not registered:
             print(f"🔍 Registry check: {hotkey[:20]}... NOT FOUND in metagraph")
             return False, None
         
@@ -411,7 +414,8 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
+        _role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
+        assert role == _role
         if role == "validator":
             print(f"   ✅ Role: VALIDATOR ({reason})")
         else:

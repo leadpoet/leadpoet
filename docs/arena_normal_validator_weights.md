@@ -7,8 +7,10 @@ needed to run this process.
 
 ## Scoring and authorization
 
-The gateway's existing subnet registry decides whether a signed hotkey is a
-registered validator. That check authorizes both claims and scoring results.
+The gateway's existing subnet role rule decides whether a signed hotkey is a
+registered validator. Arena applies that shared rule to its finalized chain
+snapshot; it does not depend on another gateway process's initialized client.
+That check authorizes both claims and scoring results.
 Round runner lists do not grant or deny access. Lease ownership, signatures,
 stage rules, code review, and miner self-dealing checks remain in place.
 

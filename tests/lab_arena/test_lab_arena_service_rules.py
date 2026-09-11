@@ -2064,32 +2064,98 @@ def test_claim_accepts_gateway_validator_absent_from_runner_configuration():
     assert service.handle_claim({}) == {"status": "empty"}
 
 
-def test_validator_authority_defaults_to_gateway_registry_lookup(monkeypatch):
-    observed = []
-    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETWORK", "finney")
-    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETUID", 71)
-    monkeypatch.setattr(
-        "gateway.utils.registry.is_registered_hotkey",
-        lambda hotkey: (observed.append(hotkey) or True, "validator"),
-    )
-    service = object.__new__(ArenaService)
-    service._config = SimpleNamespace(network_name="finney", netuid=71)
-
-    service._require_validator_authority("validator-hotkey")
-
-    assert observed == ["validator-hotkey"]
-
-
-def test_validator_authority_rejects_gateway_registry_for_another_subnet(
+def test_standalone_service_default_authority_uses_its_finalized_metagraph(
     monkeypatch,
 ):
-    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETWORK", "finney")
-    monkeypatch.setattr("gateway.utils.registry.BITTENSOR_NETUID", 72)
+    runner = "5" * 48
+    observed = []
+    snapshot = SimpleNamespace(
+        netuid=71,
+        hotkeys=(runner,),
+        active=(True,),
+        validator_permit=(True,),
+        stake=(1.0,),
+    )
+    chain = SimpleNamespace(
+        metagraph=lambda *, finalized: (
+            observed.append(finalized) or snapshot
+        ),
+        hotkeys_owned_by_same_coldkey=lambda _hotkey: [],
+    )
+    service = _runner_claim_service(
+        registered=True, role="validator", configured=False
+    )
+    service._config = SimpleNamespace(
+        network_name="finney",
+        netuid=71,
+        chain=chain,
+        validator_authorizer=None,
+    )
+    monkeypatch.setattr("gateway.utils.registry._async_subtensor", None)
+    monkeypatch.setattr(
+        "gateway.utils.registry.is_registered_hotkey",
+        lambda _hotkey: pytest.fail("standalone service used gateway Subtensor"),
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+    assert observed == [True]
+
+
+@pytest.mark.parametrize(
+    ("hotkeys", "active", "permit", "stake", "expected_code"),
+    [
+        (("other",), (True,), (True,), (1.0,), "runner_hotkey_unregistered"),
+        (("5" * 48,), (True,), (False,), (1.0,), "runner_validator_required"),
+        (("5" * 48,), None, (True,), (1.0,), "runner_validator_authority_unavailable"),
+        (("5" * 48,), (True,), (True,), None, "runner_validator_authority_unavailable"),
+    ],
+)
+def test_standalone_service_default_authority_fails_closed(
+    hotkeys, active, permit, stake, expected_code
+):
+    snapshot = SimpleNamespace(
+        netuid=71,
+        hotkeys=hotkeys,
+        active=active,
+        validator_permit=permit,
+        stake=stake,
+    )
     service = object.__new__(ArenaService)
-    service._config = SimpleNamespace(network_name="finney", netuid=71)
+    service._config = SimpleNamespace(
+        network_name="finney",
+        netuid=71,
+        chain=SimpleNamespace(
+            metagraph=lambda *, finalized: snapshot if finalized else None
+        ),
+        validator_authorizer=None,
+    )
 
     with pytest.raises(ServiceError) as rejected:
-        service._require_validator_authority("validator-hotkey")
+        service._require_validator_authority("5" * 48)
+
+    assert rejected.value.code == expected_code
+
+
+def test_standalone_service_default_authority_rejects_another_subnet():
+    snapshot = SimpleNamespace(
+        netuid=72,
+        hotkeys=("5" * 48,),
+        active=(True,),
+        validator_permit=(True,),
+        stake=(1.0,),
+    )
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(
+        network_name="finney",
+        netuid=71,
+        chain=SimpleNamespace(
+            metagraph=lambda *, finalized: snapshot if finalized else None
+        ),
+        validator_authorizer=None,
+    )
+
+    with pytest.raises(ServiceError) as rejected:
+        service._require_validator_authority("5" * 48)
 
     assert rejected.value.code == "runner_validator_authority_unavailable"
 

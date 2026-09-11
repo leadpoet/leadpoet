@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict
 
 import pytest
 
 from lab_arena import contracts, judgment_cache, scoring
-from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token
+from lab_arena.store import (
+    ArenaStore,
+    ArenaStoreError,
+    PsycopgTransport,
+    hash_lease_token,
+)
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     database_with_lab_arena_migration,
@@ -108,7 +114,7 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
     )
     assert refused["status"] == "no_pending"
 
-    leased, token, _, _ = claim(store, round_id, runner)
+    leased, token, _, _ = claim(store, round_id, runner, excluded=[runner])
     assert leased["status"] == "leased" and leased["kind"] == "score"
     source_run = store.get_run(leased["run_id"])
     assert source_run is not None
@@ -122,7 +128,25 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
         source_scored_run_id=leased["scored_run_id"],
         source_output_ref="arena/x/scores/%s.json" % leased["run_id"],
         source_runner_hotkey=runner,
+        runner_authority_exclusions=leased["runner_authority_exclusions"],
     )
+    forged = dict(evidence)
+    forged["runner_authority_exclusions"] = [
+        participants[0]["miner_hotkey"],
+        runner,
+    ]
+    with pytest.raises(
+        ArenaStoreError, match="lab_arena_judgment_completion_invalid"
+    ):
+        store.complete_attempt(
+            run_id=leased["run_id"],
+            lease_token_hash=hash_lease_token(token),
+            result={"terminal_status": "accepted"},
+            terminal_cause="accepted",
+            output_ref=evidence["source_output_ref"],
+            judgment_evidence=forged,
+            judgment_evidence_hash=contracts.document_hash(forged),
+        )
     accepted = store.complete_attempt(
         run_id=leased["run_id"],
         lease_token_hash=hash_lease_token(token),
@@ -155,7 +179,9 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
     }
     assert store.get_judgment_cache(same_key)["evidence_doc"] == evidence
 
-    failed_lease, failed_token, _, _ = claim(store, round_id, runner)
+    failed_lease, failed_token, _, _ = claim(
+        store, round_id, runner, excluded=[runner]
+    )
     failed_source = store.get_run(failed_lease["run_id"])
     assert failed_source is not None
     assert store.complete_attempt(
@@ -177,8 +203,15 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
         "judgment_group_miner_hotkeys"
     ]
 
-    retry_lease, retry_token, _, _ = claim(store, round_id, runner)
+    newly_linked = hotkey("newly-linked")
+    retry_lease, retry_token, _, _ = claim(
+        store, round_id, runner, excluded=[runner, newly_linked]
+    )
     assert retry_lease["run_id"] == retry["run_id"]
+    assert retry_lease["runner_authority_exclusions"] == sorted([
+        runner,
+        newly_linked,
+    ])
     retry_output = scoring.build_scoring_output(
         retry_lease["scored_run_id"],
         [{"company_name": "failure", "final_score": 55.0}],
@@ -190,6 +223,9 @@ def test_first_accepted_judgment_atomically_accepts_identical_followers_and_fail
         source_scored_run_id=retry["scored_run_id"],
         source_output_ref="arena/x/scores/%s.json" % retry["run_id"],
         source_runner_hotkey=runner,
+        runner_authority_exclusions=retry_lease[
+            "runner_authority_exclusions"
+        ],
     )
     assert store.complete_attempt(
         run_id=retry["run_id"],
@@ -223,7 +259,7 @@ def test_expired_judgment_leader_retry_keeps_the_exact_cache_identity(store, dat
     _commit_plan(store, round_id, 1)
     items = _items(executed, participants, round_id=round_id)[:1]
     assert store.open_scoring(round_id, 1, items, integrity_cache=True)["assignments"] == 1
-    leased, _, _, _ = claim(store, round_id, runner)
+    leased, _, _, _ = claim(store, round_id, runner, excluded=[runner])
     original = store.get_run(leased["run_id"])
 
     psycopg2, dsn = database
@@ -243,3 +279,100 @@ def test_expired_judgment_leader_retry_keeps_the_exact_cache_identity(store, dat
         "judgment_group_leader", "judgment_group_miner_hotkeys",
     ):
         assert retry[field] == original[field]
+
+
+def test_miner_account_failure_promotes_an_identical_follower(store):
+    round_id = "arena-2026-09-11-jcf"
+    runner = hotkey("jc-credential-runner")
+    config = round_config(round_id, [runner])
+    config["integrity_policy"] = "arena_integrity_v1"
+    assert store.create_round(round_id, config)["status"] == "created"
+    participants = frozen_participants(
+        store, round_id, 2, prefix="jc-credential"
+    )
+    commit_round(store, round_id, participants)
+    assert store.open_stage(
+        round_id, 1, participants, list(contracts.stage_positions(1))
+    )["status"] == "ok"
+    executed = _execute_everything(store, round_id, runner)
+    assert store.close_stage(round_id, 1)["status"] == "closed"
+    _commit_plan(store, round_id, 1)
+    items = [
+        item
+        for item in _items(executed, participants, round_id=round_id)
+        if item["icp_position"] == 0
+    ]
+    assert store.open_scoring(
+        round_id, 1, items, integrity_cache=True
+    )["assignments"] == 2
+
+    first, first_token, _, _ = claim(
+        store, round_id, runner, excluded=[runner]
+    )
+    assert store.complete_attempt(
+        run_id=first["run_id"],
+        lease_token_hash=hash_lease_token(first_token),
+        result={"terminal_status": "credential_error"},
+        terminal_cause="credential_error",
+        output_ref="",
+    )["status"] == "failed"
+    first_run = store.get_run(first["run_id"])
+    group = [
+        run for run in store.list_runs(round_id, stage=1, kind="score")
+        if run["judgment_cache_key"] == first_run["judgment_cache_key"]
+    ]
+    assert len(group) == 2
+    assert first_run["status"] == "failed"
+    assert sum(
+        run["status"] == "pending" and run["judgment_group_leader"]
+        for run in group
+    ) == 1
+
+    second, second_token, _, _ = claim(
+        store, round_id, runner, excluded=[runner]
+    )
+    assert second["submission_id"] != first["submission_id"]
+    second_run = store.get_run(second["run_id"])
+    output = scoring.build_scoring_output(
+        second["scored_run_id"],
+        [{"company_name": "same", "final_score": 82.0}],
+    )
+    evidence = judgment_cache.build_evidence_snapshot(
+        output=output,
+        cache_scope=second_run["judgment_scope_doc"],
+        source_score_run_id=second["run_id"],
+        source_scored_run_id=second["scored_run_id"],
+        source_output_ref="arena/x/scores/%s.json" % second["run_id"],
+        source_runner_hotkey=runner,
+        runner_authority_exclusions=second["runner_authority_exclusions"],
+    )
+    assert store.complete_attempt(
+        run_id=second["run_id"],
+        lease_token_hash=hash_lease_token(second_token),
+        result={"terminal_status": "accepted"},
+        terminal_cause="accepted",
+        output_ref=evidence["source_output_ref"],
+        judgment_evidence=evidence,
+        judgment_evidence_hash=contracts.document_hash(evidence),
+    )["status"] == "accepted"
+    final = {
+        run["submission_id"]: run["status"]
+        for run in store.list_runs(round_id, stage=1, kind="score")
+    }
+    assert final[first["submission_id"]] == "failed"
+    assert final[second["submission_id"]] == "accepted"
+
+
+def test_judgment_cache_migration_replays_with_existing_cache_rows(database):
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        migration = (
+            Path(__file__).parents[2] / "scripts" / MIGRATION
+        ).read_text(encoding="utf-8")
+        with connection.cursor() as cursor:
+            cursor.execute(migration)
+            cursor.execute(migration)
+    finally:
+        connection.close()

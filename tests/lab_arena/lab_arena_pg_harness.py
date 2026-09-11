@@ -70,6 +70,15 @@ DEFAULT_MIGRATIONS = (
     LAB_ARENA_VALIDATOR_SCORING_AUTHORITY_MIGRATION,
     LAB_ARENA_UNCERTAIN_COST_ELIGIBILITY_MIGRATION,
 )
+# Keep the historical default intact: several migration tests intentionally
+# exercise intermediate schemas. PostgREST round tests need the current
+# integrity RPCs and their 211-214 prerequisites.
+POSTGREST_MIGRATIONS = DEFAULT_MIGRATIONS + (
+    "211-lab-arena-owner-admission.sql",
+    "212-lab-arena-accepted-judgment-cache.sql",
+    "213-lab-arena-score-integrity.sql",
+    "214-lab-arena-prior-credential-refusal.sql",
+)
 
 _SHIM_SQL = """
 CREATE SCHEMA IF NOT EXISTS extensions;

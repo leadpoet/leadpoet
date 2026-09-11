@@ -3478,14 +3478,14 @@ async def verify_three_stage(
             )
         )
     )
+    exact_ats_employer_binding = _exact_ats_result_binds_company(
+        source_url=fetch_source_url,
+        contents=contents,
+        company_domain=prompt_identity["company"],
+        company_name=company_name,
+    )
     exact_hiring_employer_binding = bool(
-        is_hiring_claim
-        and _exact_ats_result_binds_company(
-            source_url=fetch_source_url,
-            contents=contents,
-            company_domain=prompt_identity["company"],
-            company_name=company_name,
-        )
+        is_hiring_claim and exact_ats_employer_binding
     )
     if exact_hiring_employer_binding:
         row["_exact_hiring_employer_binding"] = True
@@ -3690,7 +3690,7 @@ async def verify_three_stage(
         and _looks_like_job_body(combined_text)
         and (
             _on_lead_domain
-            or exact_hiring_employer_binding
+            or exact_ats_employer_binding
             or (
                 has_linkedin_structured
                 and s3_item.get("same_entity_check") == "pass"

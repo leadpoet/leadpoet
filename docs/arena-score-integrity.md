@@ -27,7 +27,8 @@ historical rounds retain their existing scorer and publication rules.
 - Keep the first terminal company verdict across infrastructure retries. A
   recovered company retains its original index and is checked against already
   verified identity aliases. Infrastructure exhaustion is incomplete judging,
-  not an invented company zero.
+  not an invented company zero. An unavailable bonus signal also leaves an
+  integrity judgment incomplete. Each signal uses its own buyer freshness cap.
 
 ## Qualification and costs
 
@@ -61,6 +62,9 @@ only execution-run identity. Accepted evidence and its original validator
 provenance are hash-bound and stored atomically. Failed judgments are not
 cached. Every recipient retains its own execution output and sourcing cost.
 Validator ownership conflicts must still be excluded when reusing evidence.
+Lease-time exclusions include the submissions' frozen owners and remain bound
+to accepted evidence after ownership changes. A confirmed miner account failure
+allows the next identical output to obtain a judgment with its own credentials.
 
 ## Confirmation before promotion
 
@@ -76,8 +80,9 @@ sources on the same five confirmation ICPs. Do not substitute new candidates,
 pick the best repeated confirmation result, or retry a completed judgment.
 
 The highest eligible confirmation score can win only if it also beats the
-confirmation baseline by at least one point. Original main qualification stays
-fixed. When no challenger qualifies, skip execution and publish no new king.
+confirmation baseline by at least one point. Accepted main company qualifications
+stay fixed; final cost eligibility includes confirmation spend and qualified
+slots. When no challenger qualifies, skip execution and publish no new king.
 Infrastructure gaps cannot be converted into favorable zeros. The database
 guards the cohort, recorded scores, costs, and publication transition.
 
@@ -87,10 +92,13 @@ commitment. Preserve the main bank's existing disclosure schedule.
 
 ## Rollout and verification
 
-Apply repository migrations 211, 212, and 213 in order, after their existing
+Apply repository migrations 211 through 214 in order, after their existing
 prerequisites. Migration 210 is reserved by separate disclosure work; reconcile
 that work before release if it has merged. Deploy the matching gateway and
-judge image together through the existing release process.
+judge image together through the existing release process. Migration 214 keeps
+a proven miner credential refusal distinct from an infrastructure failure when
+its uncertain provider charge blocks a later reservation. It retains the charge.
+Confirmation generation uses the Arena organizer's OpenRouter credential.
 
 Set `LAB_ARENA_INTEGRITY_FROM` to an explicit UTC cutoff timestamp only after
 the matching schema and image are installed. It is unset by default. Startup

@@ -9,7 +9,7 @@ name a cache entry or turn a failure into one.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Sequence
 
 from lab_arena import contracts
 
@@ -135,6 +135,7 @@ def build_evidence_snapshot(
     source_scored_run_id: str,
     source_output_ref: str,
     source_runner_hotkey: str,
+    runner_authority_exclusions: Sequence[str] | None,
 ) -> Dict[str, Any]:
     """Freeze accepted judge evidence independently of its object-store path."""
 
@@ -148,6 +149,18 @@ def build_evidence_snapshot(
     cache_key = scope.pop("cache_key", None)
     if cache_key != contracts.document_hash(scope):
         raise JudgmentCacheError("judgment cache scope hash mismatch")
+    if (
+        not isinstance(runner_authority_exclusions, Sequence)
+        or isinstance(runner_authority_exclusions, (str, bytes))
+        or any(
+            not isinstance(hotkey, str) or not hotkey
+            for hotkey in runner_authority_exclusions
+        )
+    ):
+        raise JudgmentCacheError("judgment authority provenance is incomplete")
+    exclusions = sorted(set(runner_authority_exclusions))
+    if not exclusions or source_runner_hotkey not in exclusions:
+        raise JudgmentCacheError("judgment authority provenance is incomplete")
     snapshot = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "cache_key": cache_key,
@@ -157,6 +170,7 @@ def build_evidence_snapshot(
         "source_output_ref": str(source_output_ref),
         "source_output_hash": contracts.document_hash(output),
         "source_runner_hotkey": str(source_runner_hotkey),
+        "runner_authority_exclusions": exclusions,
         "scoring_output_schema_version": output.get("schema_version"),
         "breakdowns": _json_copy(output["breakdowns"]),
     }
@@ -180,6 +194,7 @@ def validate_evidence_snapshot(
         "schema_version", "cache_key", "scoring_input_hash",
         "source_score_run_id", "source_scored_run_id", "source_output_ref",
         "source_output_hash", "source_runner_hotkey",
+        "runner_authority_exclusions",
         "scoring_output_schema_version", "breakdowns",
     }:
         raise JudgmentCacheError("judgment evidence fields changed")
@@ -192,4 +207,12 @@ def validate_evidence_snapshot(
         raise JudgmentCacheError("judgment evidence hash mismatch")
     if copied["scoring_output_schema_version"] != "leadpoet.lab_arena.scoring_output.v1":
         raise JudgmentCacheError("judgment evidence output schema changed")
+    exclusions = copied["runner_authority_exclusions"]
+    if (
+        not isinstance(exclusions, list)
+        or any(not isinstance(hotkey, str) or not hotkey for hotkey in exclusions)
+        or exclusions != sorted(set(exclusions))
+        or copied["source_runner_hotkey"] not in exclusions
+    ):
+        raise JudgmentCacheError("judgment authority provenance is incomplete")
     return copied

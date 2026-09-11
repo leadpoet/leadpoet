@@ -102,6 +102,19 @@ def _category(value: Any) -> str | None:
     return text or None
 
 
+def _max_age_days(value: Any) -> int | None:
+    if not isinstance(value, Mapping):
+        return None
+    raw = value.get("max_age_days")
+    if raw is None:
+        raw = value.get("intent_max_age_days")
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return days if days > 0 else None
+
+
 def employee_count_buckets_for_icp(icp: Mapping[str, Any]) -> list[str]:
     """Return the exact employee buckets declared by one ICP."""
 
@@ -139,9 +152,11 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
 
     signals: list[str] = []
     evidence_types: list[str | None] = []
+    signal_max_age_days: list[int] = []
     primary_category = str(icp.get("intent_category") or "").strip().upper() or None
-    bonus_categories = {
-        _text(item): _category(item)
+    primary_max_age_days = max(1, int(icp.get("intent_max_age_days") or 365))
+    bonus_metadata = {
+        _text(item): (_category(item), _max_age_days(item))
         for item in (icp.get("bonus_intents") or [])
         if isinstance(item, Mapping) and _text(item)
     }
@@ -153,16 +168,27 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
         if not signal or signal in signals:
             continue
         signals.append(signal)
+        bonus_category, bonus_max_age_days = bonus_metadata.get(
+            signal, (None, None)
+        )
         evidence_types.append(
             _category(item)
-            or bonus_categories.get(signal)
+            or bonus_category
             or (primary_category if index == 0 else None)
+        )
+        signal_max_age_days.append(
+            _max_age_days(item)
+            or bonus_max_age_days
+            or primary_max_age_days
         )
     for item in icp.get("bonus_intents") or []:
         signal = _text(item)
         if signal and signal not in signals:
             signals.append(signal)
             evidence_types.append(_category(item))
+            signal_max_age_days.append(
+                _max_age_days(item) or primary_max_age_days
+            )
     if not signals:
         raise CompetitionScorerInputError("ICP has no intent signal")
 
@@ -198,7 +224,8 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
         "excluded_companies": [str(value) for value in excluded],
         "intent_signals": signals,
         "intent_signal_evidence_types": evidence_types,
-        "intent_max_age_days": max(1, int(icp.get("intent_max_age_days") or 365)),
+        "intent_signal_max_age_days": signal_max_age_days,
+        "intent_max_age_days": primary_max_age_days,
     }
 
 
@@ -429,7 +456,7 @@ class CompetitionCompanyScorer:
 
 
 def scorer_breakdown_has_retryable_infrastructure_failure(
-    breakdown: Mapping[str, Any],
+    breakdown: Mapping[str, Any], *, integrity_policy: bool = False
 ) -> bool:
     if not isinstance(breakdown, Mapping):
         return False
@@ -445,7 +472,9 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 return True
     details = breakdown.get("intent_signals_detail")
     if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
-        if intent_unavailability_requires_retry(details):
+        if intent_unavailability_requires_retry(
+            details, integrity_policy=integrity_policy
+        ):
             return True
     reason = str(breakdown.get("failure_reason") or "").strip().lower()
     return bool(reason) and any(
@@ -529,11 +558,14 @@ def has_verified_primary_intent(details: Sequence[Any]) -> bool:
     return False
 
 
-def intent_unavailability_requires_retry(details: Sequence[Any]) -> bool:
-    """Retry unavailable intent evidence unless a primary verdict scored."""
+def intent_unavailability_requires_retry(
+    details: Sequence[Any], *, integrity_policy: bool = False
+) -> bool:
+    """Retry any unavailable integrity signal; legacy needs no verified primary."""
 
-    return any(_intent_detail_is_unavailable(detail) for detail in details) and not (
-        has_verified_primary_intent(details)
+    unavailable = any(_intent_detail_is_unavailable(detail) for detail in details)
+    return unavailable and (
+        integrity_policy or not has_verified_primary_intent(details)
     )
 
 

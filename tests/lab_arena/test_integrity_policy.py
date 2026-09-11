@@ -84,7 +84,10 @@ def test_confirmation_cohort_is_fixed_top_three_eligible_main_improvements():
 def test_generation_draw_has_separate_identity_without_transmitting_main_bank(monkeypatch):
     from gateway.tasks import icp_generator
     requests = []
-    async def generate(set_id, total_icps, *, generation_context):
+    monkeypatch.setenv("LAB_ARENA_OPENROUTER_API_KEY", "organizer-test-key")
+    monkeypatch.setattr(icp_generator, "OPENROUTER_API_KEY", "")
+    async def generate(set_id, total_icps, *, generation_context, api_key):
+        assert api_key == "organizer-test-key"
         requests.append((set_id, total_icps, generation_context))
         return fresh_icps(), {}, "unused"
     monkeypatch.setattr(icp_generator, "generate_icps_with_openrouter", generate)
@@ -95,6 +98,36 @@ def test_generation_draw_has_separate_identity_without_transmitting_main_bank(mo
     assert requests[0][2] != requests[1][2]
     assert "verified_example_company" not in requests[0][2]
     assert daily_icps()[0]["prompt"] not in requests[0][2]
+
+
+def test_confirmation_generator_uses_explicit_key_without_legacy_alias(monkeypatch):
+    import asyncio
+    from gateway.tasks import icp_generator
+
+    monkeypatch.setattr(icp_generator, "OPENROUTER_API_KEY", "")
+    calls = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, *, headers, json):
+            calls.append(headers["Authorization"])
+            raise icp_generator.httpx.TimeoutException("test provider unavailable")
+
+    monkeypatch.setattr(icp_generator.httpx, "AsyncClient", lambda **kwargs: Client())
+    assert asyncio.run(icp_generator.generate_icps_with_openrouter(
+        20260911, api_key="organizer-test-key",
+    )) is None
+    assert calls == ["Bearer organizer-test-key"]
+    monkeypatch.setattr(icp_generator, "OPENROUTER_API_KEY", "legacy-test-key")
+    assert asyncio.run(icp_generator.generate_icps_with_openrouter(
+        20260911, api_key="",
+    )) is None
+    assert len(calls) == 1
 
 
 def test_integrity_retry_preserves_terminal_scores_and_original_sparse_positions():

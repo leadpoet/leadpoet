@@ -2671,7 +2671,9 @@ async def score_company_competition_intent(
         ) = await score_company_competition_intent_signal(
             company, icp, integrity_policy=integrity_policy
         )
-        if _intent_verifier_unavailable(signal_results):
+        if _intent_verifier_unavailable(
+            signal_results, integrity_policy=integrity_policy
+        ):
             return _zero_company_breakdown(
                 "Intent verification unavailable: verifier provider error",
                 intent_signals_detail=signal_results,
@@ -2698,7 +2700,9 @@ async def score_company_competition_intent(
                     all_signals_unverified,
                     signal_results,
                 ) = repaired
-                if _intent_verifier_unavailable(signal_results):
+                if _intent_verifier_unavailable(
+                    signal_results, integrity_policy=integrity_policy
+                ):
                     return _zero_company_breakdown(
                         "Intent verification unavailable: verifier provider error",
                         intent_signals_detail=signal_results,
@@ -3343,10 +3347,27 @@ async def score_company_competition_intent_signal(
         # P12: keep the verifier's structured per-signal verdict alongside the
         # scalar score so the training corpus sees HOW each claim was decided.
         signal_verdicts: List[dict] = []
+        signal_icp = icp
+        if integrity_policy:
+            signal_max_age_days = list(
+                getattr(icp, "intent_signal_max_age_days", None) or []
+            )
+            if (
+                isinstance(matched_idx, int)
+                and 0 <= matched_idx < len(signal_max_age_days)
+                and isinstance(signal_max_age_days[matched_idx], int)
+                and not isinstance(signal_max_age_days[matched_idx], bool)
+                and signal_max_age_days[matched_idx] > 0
+            ):
+                signal_icp = icp.model_copy(
+                    update={
+                        "intent_max_age_days": signal_max_age_days[matched_idx]
+                    }
+                )
         score, confidence, date_status, content_found_date, _matched_idx = (
             await _score_single_intent_signal(
                 signal,
-                icp,
+                signal_icp,
                 icp_criteria,
                 company.company_name,
                 company.company_website,
@@ -3573,10 +3594,14 @@ def _competition_intent_failure_reason(signal_results: List[dict]) -> str:
     )
 
 
-def _intent_verifier_unavailable(signal_results: List[dict]) -> bool:
+def _intent_verifier_unavailable(
+    signal_results: List[dict], *, integrity_policy: bool = False
+) -> bool:
     """Whether unavailable evidence leaves no verified primary score."""
 
-    return intent_unavailability_requires_retry(signal_results)
+    return intent_unavailability_requires_retry(
+        signal_results, integrity_policy=integrity_policy
+    )
 
 
 def required_intent_satisfied(signal_results: List[dict]) -> bool:

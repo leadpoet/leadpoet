@@ -59,6 +59,10 @@ MIGRATIONS = tuple(
     "scripts/207-lab-arena-code-review.sql",
     "scripts/208-lab-arena-validator-scoring-authority.sql",
     "scripts/209-lab-arena-uncertain-cost-eligibility.sql",
+    "scripts/211-lab-arena-owner-admission.sql",
+    "scripts/212-lab-arena-accepted-judgment-cache.sql",
+    "scripts/213-lab-arena-score-integrity.sql",
+    "scripts/214-lab-arena-prior-credential-refusal.sql",
 )
 EXPECTED_SCHEMA_VERSION = 197
 TESTNET_NETUID = 401
@@ -515,7 +519,7 @@ def _serve(args: argparse.Namespace) -> int:
     import boto3
     from lab_arena import broker as broker_module
     from lab_arena import chain as chain_module
-    from lab_arena import contracts, images, scorer_image_access
+    from lab_arena import confirmation, contracts, images, scorer_image_access
     from lab_arena.api import create_app
     from lab_arena.credentials import CredentialManager
     from lab_arena.code_review_runtime import SubmissionCodeReviewer
@@ -610,6 +614,7 @@ def _serve(args: argparse.Namespace) -> int:
             scorer_image_reference=str(scorer.reference),
             daily_cutoff_hour_utc=None,
             rewards_enabled=False,
+            integrity_from=os.environ.get("LAB_ARENA_INTEGRITY_FROM") or None,
         )
         service = ArenaService(
             ServiceConfig(
@@ -620,6 +625,9 @@ def _serve(args: argparse.Namespace) -> int:
                 chain=chain_reads,
                 verify_signature=chain_module.verify_hotkey_signature,
                 daily_icp_source=lambda *, set_id, active_at: store.current_daily_icp_set(set_id),
+                confirmation_icp_source=lambda **kwargs: confirmation.fresh_confirmation_icps(
+                    **kwargs, api_key=provider_keys["openrouter"],
+                ),
                 banned_hotkeys_source=lambda: (),
                 broker_factory=broker_factory,
                 defaults=defaults,

@@ -13,7 +13,11 @@ from qualification.scoring.arena_integrity import (
     source_dates_from_verdict,
     source_grounded_date_verdict,
 )
-from qualification.scoring.competition import CompetitionCompanyScorer
+from qualification.scoring.competition import (
+    CompetitionCompanyScorer,
+    _normalized_icp,
+    scorer_breakdown_has_retryable_infrastructure_failure,
+)
 from qualification.scoring.evaluation_clock import use_evaluation_date
 
 
@@ -467,6 +471,73 @@ def test_integrity_uses_tighter_textual_buyer_window(monkeypatch) -> None:
     assert result[2] == "out_of_window"
 
 
+def test_integrity_uses_bonus_signal_buyer_window(monkeypatch) -> None:
+    from qualification.scoring import intent_verification_three_stage as verifier
+
+    seen_caps = []
+
+    async def judge(*args, **kwargs):
+        seen_caps.append(kwargs["buyer_max_age_days"])
+        return {
+            "client_ready": True,
+            "decision": "approve",
+            "rejection_reason": "",
+            "stage1": {"status": "supported"},
+            "stage3": {
+                "status": "supported",
+                "decision": "approve",
+                "claim_matches_miner_date": "no_date_in_content",
+            },
+            "scrape": {"result_count": 1, "statuses": []},
+            "company_check": True,
+            "job_publisher_relationship": "not_applicable",
+            "source_publication_dates": [],
+            "verdict": {"signal_evaluations": [{
+                "signal_status": "supported",
+                "verification_mode": "source_grounded",
+                "same_entity_check": "pass",
+                "confidence": "high",
+                "risk_notes": ["source_event_date:2026-03-01"],
+            }]},
+        }
+
+    raw_icp = {
+        **_icp(),
+        "intent_signals": [
+            "Recently raised funding",
+            "Hiring for senior engineering or sales roles",
+        ],
+        "intent_signal": "Recently raised funding",
+        "intent_category": "FUNDING",
+        "intent_max_age_days": 365,
+        "bonus_intents": [{
+            "intent_signal": "Hiring for senior engineering or sales roles",
+            "intent_category": "HIRING",
+            "intent_max_age_days": 90,
+        }],
+    }
+    normalized = _normalized_icp(raw_icp)
+    assert normalized["intent_signal_max_age_days"] == [365, 90]
+    icp = ICPPrompt(**normalized)
+    assert ICPPrompt.model_validate_json(icp.model_dump_json()) == icp
+    signal = _company_model([{
+        "source": "news",
+        "description": "Acme is hiring engineers",
+        "url": "https://news.example.com/acme-hiring",
+        "date": None,
+        "snippet": "Acme is hiring engineers",
+        "matched_icp_signal": 1,
+    }]).intent_signals[0]
+    monkeypatch.setattr(verifier, "verify_three_stage", judge)
+    with use_evaluation_date("2026-09-10"):
+        result = asyncio.run(lead_scorer.score_company_competition_intent_signal(
+            _company_model([signal.model_dump()]), icp, integrity_policy=True
+        ))
+    assert seen_caps == [90]
+    assert result[0] == 0.0
+    assert result[-1][0]["date_verdict"] == "out_of_window"
+
+
 def test_integrity_job_premium_requires_verified_publisher_relationship(
     monkeypatch,
 ) -> None:
@@ -516,6 +587,120 @@ def test_integrity_job_premium_requires_verified_publisher_relationship(
         llm_only_intent_gate=True, integrity_policy=True,
     ))
     assert premium[0] == 60.0
+
+
+def test_integrity_verified_ats_publisher_applies_to_techstack(monkeypatch) -> None:
+    from qualification.scoring import intent_verification_three_stage as verifier
+
+    source_url = "https://boards.greenhouse.io/acme/jobs/12345"
+    answer = {
+        "overall_verdict": "qualified",
+        "overall_confidence": "high",
+        "signal_evaluations": [{
+            "signal_status": "supported",
+            "confidence": "high",
+            "same_entity_check": "pass",
+            "verification_mode": "source_grounded",
+            "evidence_urls_used": [source_url],
+        }],
+    }
+
+    async def call_openrouter(*args, **kwargs):
+        return {"answer": answer, "model": "test-model", "usage": {}}
+
+    async def fetch(*args, **kwargs):
+        return {
+            "results": [{
+                "url": source_url,
+                "text": (
+                    "Acme job description. Responsibilities include Python. "
+                    "Apply for this job."
+                ),
+                "meta": {"kind": "greenhouse_job"},
+            }],
+            "statuses": [],
+        }
+
+    monkeypatch.setattr(verifier, "_call_openrouter", call_openrouter)
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)
+    result = asyncio.run(verifier.verify_three_stage(
+        object(),
+        company_name="Acme",
+        company_linkedin="",
+        company_website="https://acme.com",
+        source_url=source_url,
+        miner_claim="Acme uses Python",
+        target_signal_text="Uses Python in its tech stack",
+        evidence_type="TECHSTACK",
+        declared_source="job_board",
+        stage1_soft_reject=True,
+        integrity_policy=True,
+        buyer_max_age_days=180,
+    ))
+    assert result["job_publisher_relationship"] == "verified"
+
+
+def test_integrity_retries_unavailable_bonus_after_verified_primary() -> None:
+    from lab_arena import scoring
+
+    primary = _positive_breakdown("Acme", "acme.co.uk")
+    primary_detail = primary["intent_signals_detail"][0]
+    unavailable_bonus = {
+        "raw": 0.0,
+        "after_decay": 0.0,
+        "matched_icp_signal": 1,
+        "judge_verdict": {
+            "decision": "rejected_verifier_error",
+            "pipeline_decision": "unavailable",
+            "error_class": "TimeoutError",
+        },
+    }
+    incomplete = {
+        **primary,
+        "company_index": 0,
+        "company_identity_key": "domain:acme.co.uk|name:acme",
+        "company_identity_alias_keys": ["domain:acme.co.uk|name:acme"],
+        "company_qualified": True,
+        "duplicate_company": False,
+        "intent_signals_detail": [primary_detail, unavailable_bonus],
+    }
+    complete = {
+        **incomplete,
+        "intent_signal_raw": 80.0,
+        "intent_signal_final": 80.0,
+        "final_score": 80.0,
+        "intent_signals_detail": [
+            primary_detail,
+            {
+                **unavailable_bonus,
+                "raw": 54.0,
+                "after_decay": 54.0,
+                "judge_verdict": {
+                    "decision": "verified",
+                    "pipeline_decision": "approve",
+                },
+            },
+        ],
+    }
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(incomplete)
+    assert scorer_breakdown_has_retryable_infrastructure_failure(
+        incomplete, integrity_policy=True
+    )
+    calls = []
+
+    def judge(companies, icp, is_reference_model):
+        calls.append(list(companies))
+        return [incomplete if len(calls) == 1 else complete]
+
+    judge.integrity_policy = True
+    rows = scoring.score_work_item(
+        {"scored_run_id": "run"},
+        icp=_icp(),
+        companies=[_public_company("Acme")],
+        scorer=judge,
+    )
+    assert len(calls) == 2
+    assert rows[0]["final_score"] == 80.0
 
 
 def test_integrity_linkedin_job_also_requires_verified_employer(monkeypatch) -> None:

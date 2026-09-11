@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts, integrity, service as svc, verify
+from lab_arena import contracts, integrity, public_dashboard, service as svc, verify
 from lab_arena.chain import MetagraphSnapshot
 from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
@@ -13,7 +13,7 @@ from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS, database_wi
 from tests.lab_arena.test_integrity_policy import fresh_icps
 
 MIGRATIONS = DEFAULT_MIGRATIONS + (
-    "211-lab-arena-owner-admission.sql", "212-lab-arena-accepted-judgment-cache.sql", "213-lab-arena-score-integrity.sql",
+    "211-lab-arena-owner-admission.sql", "212-lab-arena-accepted-judgment-cache.sql", "213-lab-arena-score-integrity.sql", "214-lab-arena-prior-credential-refusal.sql",
 )
 
 
@@ -89,7 +89,7 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
         rows = []
         for index in indexes:
             baseline = companies[index]["company_name"].startswith("PublicBaseline")
-            score = 40.0 if baseline else confirmation_score if icp["icp_id"].startswith("confirmation_") else main_score
+            score = 40.0 if baseline else 40.5 if companies[index]["company_name"].startswith("NotSelected") else confirmation_score if icp["icp_id"].startswith("confirmation_") else main_score
             rows.append({"final_score": score, "company_index": index,
                 "company_identity_key": canonical_company_identity(companies[index]).key,
                 "company_qualified": True, "duplicate_company": False,
@@ -104,6 +104,7 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
     harness.round_id = round_id
     assert config["integrity_policy"] == integrity.POLICY
     challenger = harness.submit("Challenger", round_id)
+    not_selected = harness.submit("NotSelected", round_id)
     failed = harness.submit("Broken", round_id)
     harness.broken.add(failed)
     credential_failed = harness.submit("CredentialFail", round_id) if case == "belowmargin" else None
@@ -131,6 +132,12 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
     assert published["confirmation_bank_hash"] == bank_hash
     assert len(harness.service.store.list_runs(round_id, stage=3, kind="execute")) == (10 if confirmation_required else 0)
     ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
+    assert ranking[not_selected]["main_score"] == 40.5
+    assert ranking[not_selected]["confirmation_selected"] is False
+    visible = {item["submission_id"]: item for item in public_dashboard.submissions_snapshot(harness.service, round_id)["submissions"]}
+    assert visible[not_selected]["main_score"] == 40.5
+    assert visible[not_selected]["status"] == "scored"
+    assert visible[failed]["status"] == "scoring_failed"
     assert ranking[challenger]["main_score"] == main_score
     assert ranking[challenger]["final_score"] == (confirmation_score if confirmation_required else main_score)
     assert ranking[challenger]["cost_summary"]["qualified_company_count"] == (125 if confirmation_required else 100)

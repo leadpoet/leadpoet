@@ -46,6 +46,15 @@ VALIDATOR_SCORING_AUTHORITY_SQL = (
 RETIRED_INCENTIVE_BRIDGE_SQL = (
     SCRIPTS / "203-retire-legacy-incentive-weight-bridge.sql"
 ).read_text(encoding="utf-8")
+OWNER_ADMISSION_SQL = (SCRIPTS / "211-lab-arena-owner-admission.sql").read_text(
+    encoding="utf-8"
+)
+JUDGMENT_CACHE_SQL = (
+    SCRIPTS / "212-lab-arena-accepted-judgment-cache.sql"
+).read_text(encoding="utf-8")
+SCORE_INTEGRITY_SQL = (SCRIPTS / "213-lab-arena-score-integrity.sql").read_text(
+    encoding="utf-8"
+)
 HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
 HISTORICAL_UPLOAD_SHA256 = (
     "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
@@ -318,14 +327,28 @@ def test_every_service_function_is_definer_owned_and_granted_only_to_service():
 def test_state_vocabularies_match_contracts():
     from lab_arena import contracts
 
+    # 179/180 are the original schema, while the current stage-3 vocabulary
+    # and repaired RPC contracts are installed by 211-213. Keep this check
+    # text-only and scoped to the Arena migrations under test.
+    vocabulary_sql = "\n".join(
+        (
+            SQL,
+            DAILY_SQL,
+            CREDENTIAL_SQL,
+            OWNER_ADMISSION_SQL,
+            JUDGMENT_CACHE_SQL,
+            SCORE_INTEGRITY_SQL,
+        )
+    )
+
     for status in contracts.ROUND_STATUSES:
-        assert f"'{status}'" in SQL
+        assert f"'{status}'" in vocabulary_sql
     for outcome in contracts.KING_OUTCOMES:
-        assert f"'{outcome}'" in SQL
+        assert f"'{outcome}'" in vocabulary_sql
     for cause in contracts.TERMINAL_CAUSES:
-        assert f"'{cause}'" in SQL + CREDENTIAL_SQL
+        assert f"'{cause}'" in vocabulary_sql
     for kind in contracts.LEDGER_ENTRY_KINDS:
-        assert f"'{kind}'" in SQL
+        assert f"'{kind}'" in vocabulary_sql
 
 
 def test_unique_indexes_enforce_plan_invariants():

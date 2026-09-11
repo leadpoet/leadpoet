@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_judgment_cache (
   CHECK (evidence_doc ->> 'source_runner_hotkey' = source_runner_hotkey)
 );
 ALTER TABLE public.lab_arena_judgment_cache OWNER TO lab_arena_owner;
+ALTER TABLE public.lab_arena_judgment_cache
+  DROP CONSTRAINT IF EXISTS lab_arena_judgment_cache_authority_snapshot_check;
+ALTER TABLE public.lab_arena_judgment_cache
+  ADD CONSTRAINT lab_arena_judgment_cache_authority_snapshot_check CHECK (
+    pg_catalog.jsonb_typeof(
+      evidence_doc -> 'runner_authority_exclusions'
+    ) IS NOT DISTINCT FROM 'array'
+    AND evidence_doc -> 'runner_authority_exclusions'
+      @> pg_catalog.jsonb_build_array(source_runner_hotkey)
+  );
 
 DROP TRIGGER IF EXISTS lab_arena_judgment_cache_append_only
   ON public.lab_arena_judgment_cache;
@@ -307,7 +317,17 @@ BEGIN
         v_run.scored_run_id
      OR p_judgment_evidence ->> 'source_output_ref' IS DISTINCT FROM p_output_ref
      OR p_judgment_evidence ->> 'source_runner_hotkey' IS DISTINCT FROM
-        v_run.runner_hotkey THEN
+        v_run.runner_hotkey
+     OR pg_catalog.jsonb_typeof(
+          v_run.claim_response -> 'runner_authority_exclusions'
+        ) IS DISTINCT FROM 'array'
+     OR NOT (
+       v_run.claim_response -> 'runner_authority_exclusions'
+       @> pg_catalog.jsonb_build_array(v_run.runner_hotkey)
+     )
+     OR p_judgment_evidence -> 'runner_authority_exclusions'
+        IS DISTINCT FROM
+        v_run.claim_response -> 'runner_authority_exclusions' THEN
     RAISE EXCEPTION 'lab_arena_judgment_completion_invalid'
       USING ERRCODE = '22023';
   END IF;
@@ -378,6 +398,42 @@ $old$;
         v_run.judgment_input_hash, v_run.judgment_scope_doc,
         v_run.judgment_group_leader, v_run.judgment_group_miner_hotkeys
 $new$;
+  v_return_old TEXT := $old$
+  RETURN pg_catalog.jsonb_build_object(
+    'status', v_status, 'idempotent', FALSE,
+    'run_id', p_run_id, 'attempt', v_run.attempt
+  );
+$old$;
+  v_return_new TEXT := $new$
+  -- A miner-account failure belongs only to its submitted output. Let the
+  -- next identical output obtain an independent judgment instead of leaving
+  -- every non-leader permanently unclaimable. Judge infrastructure failures
+  -- retain the same leader and normal retry path.
+  IF v_run.kind = 'score'
+     AND v_run.judgment_cache_key IS NOT NULL
+     AND COALESCE(v_run.judgment_group_leader, FALSE)
+     AND p_terminal_cause = 'credential_error' THEN
+    UPDATE public.lab_arena_runs
+    SET judgment_group_leader = TRUE
+    WHERE run_id = (
+      SELECT follower.run_id
+      FROM public.lab_arena_runs AS follower
+      WHERE follower.round_id = v_run.round_id
+        AND follower.stage = v_run.stage
+        AND follower.kind = 'score'
+        AND follower.judgment_cache_key = v_run.judgment_cache_key
+        AND follower.status = 'pending'
+        AND NOT COALESCE(follower.judgment_group_leader, FALSE)
+      ORDER BY follower.run_id
+      FOR UPDATE
+      LIMIT 1
+    );
+  END IF;
+  RETURN pg_catalog.jsonb_build_object(
+    'status', v_status, 'idempotent', FALSE,
+    'run_id', p_run_id, 'attempt', v_run.attempt
+  );
+$new$;
 BEGIN
   SELECT pg_catalog.pg_get_functiondef(procedure.oid) INTO v_definition
   FROM pg_catalog.pg_proc AS procedure
@@ -387,6 +443,14 @@ BEGIN
     AND procedure.proname = 'lab_arena_complete_attempt'
     AND procedure.pronargs = 5;
   IF pg_catalog.strpos(v_definition, 'v_run.judgment_cache_key') > 0 THEN
+    IF pg_catalog.strpos(
+         v_definition, 'next identical output obtain an independent judgment'
+       ) = 0 THEN
+      IF pg_catalog.strpos(v_definition, v_return_old) = 0 THEN
+        RAISE EXCEPTION 'lab_arena_complete_attempt_return_shape_unexpected';
+      END IF;
+      EXECUTE pg_catalog.replace(v_definition, v_return_old, v_return_new);
+    END IF;
     RETURN;
   END IF;
   IF pg_catalog.strpos(v_definition, v_old_columns) = 0
@@ -398,6 +462,12 @@ BEGIN
   );
   v_definition := pg_catalog.replace(
     v_definition, v_old_values, v_new_values
+  );
+  IF pg_catalog.strpos(v_definition, v_return_old) = 0 THEN
+    RAISE EXCEPTION 'lab_arena_complete_attempt_return_shape_unexpected';
+  END IF;
+  v_definition := pg_catalog.replace(
+    v_definition, v_return_old, v_return_new
   );
   EXECUTE v_definition;
 END;
@@ -456,6 +526,22 @@ $lab_arena_212_expiry_retry_cache$;
 DO $lab_arena_212_group_claim_guard$
 DECLARE
   v_definition TEXT;
+  v_response_old TEXT := $old$
+  v_response := pg_catalog.jsonb_build_object(
+    'status', 'leased',
+$old$;
+  v_response_new TEXT := $new$
+  v_response := pg_catalog.jsonb_build_object(
+    'status', 'leased',
+    'runner_authority_exclusions', pg_catalog.to_jsonb(ARRAY(
+      SELECT DISTINCT excluded.hotkey
+      FROM pg_catalog.unnest(
+        COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[])
+      ) AS excluded(hotkey)
+      WHERE COALESCE(excluded.hotkey, '') <> ''
+      ORDER BY excluded.hotkey
+    )),
+$new$;
   v_old TEXT := $old$
     AND (
       runs.miner_hotkey <> ALL (COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[]))
@@ -516,13 +602,21 @@ BEGIN
   WHERE namespace.nspname = 'public'
     AND procedure.proname = 'lab_arena_claim_assignment'
     AND procedure.pronargs = 9;
-  IF pg_catalog.strpos(v_definition, 'judgment_group_miner_hotkeys') > 0 THEN
-    RETURN;
+  IF pg_catalog.strpos(v_definition, 'judgment_group_miner_hotkeys') = 0 THEN
+    IF pg_catalog.strpos(v_definition, v_old) = 0 THEN
+      RAISE EXCEPTION 'lab_arena_claim_assignment_shape_unexpected';
+    END IF;
+    v_definition := pg_catalog.replace(v_definition, v_old, v_new);
   END IF;
-  IF pg_catalog.strpos(v_definition, v_old) = 0 THEN
-    RAISE EXCEPTION 'lab_arena_claim_assignment_shape_unexpected';
+  IF pg_catalog.strpos(v_definition, 'runner_authority_exclusions') = 0 THEN
+    IF pg_catalog.strpos(v_definition, v_response_old) = 0 THEN
+      RAISE EXCEPTION 'lab_arena_claim_response_shape_unexpected';
+    END IF;
+    v_definition := pg_catalog.replace(
+      v_definition, v_response_old, v_response_new
+    );
   END IF;
-  EXECUTE pg_catalog.replace(v_definition, v_old, v_new);
+  EXECUTE v_definition;
 END;
 $lab_arena_212_group_claim_guard$;
 

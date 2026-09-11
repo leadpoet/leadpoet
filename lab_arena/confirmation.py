@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
@@ -68,7 +69,7 @@ def select_cohort(entries: Sequence[Mapping[str, Any]], eligibility: Mapping[str
         "required": bool(chosen)}
 
 
-def fresh_confirmation_icps(*, round_id: str, evaluation_date: str, main_icps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def fresh_confirmation_icps(*, round_id: str, evaluation_date: str, main_icps: Sequence[Mapping[str, Any]], api_key: str | None = None) -> list[dict[str, Any]]:
     """Generate a separate private bank with the existing trusted generator.
 
     No template fallback: a missing provider result delays commitment rather
@@ -84,7 +85,11 @@ def fresh_confirmation_icps(*, round_id: str, evaluation_date: str, main_icps: S
         "the same realism and breadth requirements."
     )
     def generate():
-        return asyncio.run(asyncio.wait_for(generate_icps_with_openrouter(int(evaluation_date.replace("-", "")), total_icps=20, generation_context=context), timeout=600))
+        return asyncio.run(asyncio.wait_for(generate_icps_with_openrouter(
+            int(evaluation_date.replace("-", "")), total_icps=20,
+            generation_context=context,
+            api_key=os.environ.get("LAB_ARENA_OPENROUTER_API_KEY", "") if api_key is None else api_key,
+        ), timeout=600))
 
     # Service methods may be called from an ASGI event loop or a sync worker.
     with ThreadPoolExecutor(max_workers=1) as pool:

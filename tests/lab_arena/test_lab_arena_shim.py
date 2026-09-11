@@ -52,6 +52,50 @@ ORIGINALS = {
 }
 
 
+@pytest.mark.parametrize("requested_timeout_ms", (60_000, 9_999_999))
+def test_typed_socket_timeout_covers_admission_operation_and_grace(monkeypatch, requested_timeout_ms):
+    reply = shim.encode_worker_response(200, {}, b"{}")
+
+    class RecordingSocket:
+        def __init__(self, *_args):
+            self.timeout = None
+            self.received = len(reply).to_bytes(4, "big") + reply
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def connect(self, _path):
+            return None
+
+        def sendall(self, _data):
+            return None
+
+        def recv(self, size):
+            chunk, self.received = self.received[:size], self.received[size:]
+            return chunk
+
+        def shutdown(self, _how):
+            return None
+
+        def close(self):
+            return None
+
+    connection = RecordingSocket()
+    monkeypatch.setenv(shim.WORKER_SOCKET_ENV, "/tmp/fake-arena-worker.sock")
+    monkeypatch.setattr(shim.socket, "socket", lambda *_args: connection)
+    status, _headers, body = shim.dispatch(
+        "deepline.execute",
+        {"tool": "exa_search", "payload": {"query": "x"}},
+        requested_timeout_ms,
+    )
+    assert status == 200 and body == b"{}"
+    assert connection.timeout == (
+        operations.BUDGET_ADMISSION_MAX_SECONDS
+        + 60.0
+        + shim.SOCKET_GRACE_SECONDS
+    )
+
+
 class FakeWorker:
     """Records frames and answers with a configurable framed document."""
 

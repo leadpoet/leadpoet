@@ -1362,10 +1362,12 @@ def test_dynamic_deepline_retries_transient_budget_busy(monkeypatch):
 
 
 def test_dynamic_deepline_budget_busy_stops_at_the_reserve_deadline(monkeypatch):
-    store = FakeLedgerStore(openrouter_capacity=8_765, budget_busy_responses=100)
-    moments = iter((0.0, 0.1, 1.1))
-    monkeypatch.setattr(br.time, "monotonic", lambda: next(moments, 1.1))
-    monkeypatch.setattr(br.time, "sleep", lambda _seconds: None)
+    store = FakeLedgerStore(openrouter_capacity=8_765, budget_busy_responses=1000)
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
     broker, store, transport = make_broker(store=store)
     result = broker.execute(
         CONTEXT,
@@ -1377,6 +1379,51 @@ def test_dynamic_deepline_budget_busy_stops_at_the_reserve_deadline(monkeypatch)
     assert result.status == 502 and result.call["outcome"] == "not_dispatched"
     assert result.call["reason"] == "budget_busy" and transport.sent == []
     assert store.calls == {} and store.openrouter_capacity == 8_765
+    assert elapsed[0] == pytest.approx(operations.BUDGET_ADMISSION_MAX_SECONDS)
+
+
+def test_dynamic_deepline_admission_wait_does_not_consume_operation_window(monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
+    store = FakeLedgerStore(openrouter_capacity=8_765, budget_busy_responses=65)
+    job_id = "iad1::queued-window"
+
+    class SlowExecutionThenLaggedHistory(FakeTransport):
+        def send(self, **kwargs):
+            if kwargs["method"] == "POST":
+                elapsed[0] += 20.0
+            return super().send(**kwargs)
+
+    broker, store, transport = make_broker(
+        store=store,
+        transport=SlowExecutionThenLaggedHistory([
+            (200, {"job_id": job_id, "status": "completed", "result": {"data": []}}),
+            (200, deepline_history()),
+            (200, deepline_history()),
+            (200, deepline_history()),
+            (200, deepline_history(
+                deepline_history_entry(job_id, "exa_search", 0.1)
+            )),
+        ]),
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+    assert result.status == 200 and result.call["actual_microusd"] == 10_000
+    assert store.log.count("reserve") == 66
+    assert store.log[65:67] == ["reserve", "dispatch"]
+    assert elapsed[0] == pytest.approx(39.0)
+    assert transport.sent[0]["method"] == "POST"
+    assert transport.sent[0]["timeout"] == pytest.approx(60.0)
+    assert transport.sent[1]["timeout"] == pytest.approx(30.0)
+    assert transport.sent[-1]["timeout"] == pytest.approx(24.0)
 
 
 def test_fault_injection_points_produce_single_accounting_results():

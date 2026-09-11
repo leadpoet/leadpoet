@@ -904,8 +904,11 @@ class Broker:
         )
         # Another call can hold money without having spent it. Wait briefly for
         # settlement, using the same identity; do not dispatch or charge twice.
-        request_deadline = time.monotonic() + min(max(1, int(timeout_ms)) / 1000.0, float(effective_operation.timeout_seconds))
-        reserve_deadline = min(time.monotonic() + 20.0, request_deadline - 1.0)
+        operation_timeout_seconds = min(
+            max(1, int(timeout_ms)) / 1000.0,
+            float(effective_operation.timeout_seconds),
+        )
+        reserve_deadline = time.monotonic() + operations.BUDGET_ADMISSION_MAX_SECONDS
         while True:
             reserved = self._store.reserve_call(**reservation_arguments)
             if reserved.get("status") != "budget_busy":
@@ -962,6 +965,10 @@ class Broker:
         if reserve_remaining_budget:
             summary["reservation_basis"] = "remaining_budget_dynamic_deepline"
 
+        # Budget admission has its own bounded wait. Once admitted, the
+        # provider execution and any authoritative billing readback receive
+        # the full caller-requested window, capped by the operation table.
+        request_deadline = time.monotonic() + operation_timeout_seconds
         dispatched = self._store.mark_dispatched(run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity)
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.

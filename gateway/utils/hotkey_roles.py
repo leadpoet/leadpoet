@@ -23,6 +23,10 @@ def classify_hotkey_role(
     """Apply the gateway's validator/miner policy to one registered neuron."""
 
     if network_name == "test":
+        # A registered testnet validator can retain its permit while inactive.
+        # Keep existing active-neuron behavior, without imposing Finney stake.
+        if validator_permit:
+            return "validator", "testnet, permit=True"
         if active:
             return "validator", "testnet, active=True"
         return (

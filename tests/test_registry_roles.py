@@ -31,19 +31,25 @@ def test_shared_gateway_role_classifier_preserves_mainnet_policy():
     ) == (False, None)
 
 
-def test_shared_gateway_role_classifier_preserves_testnet_policy():
+def test_shared_gateway_role_classifier_accepts_inactive_testnet_permit():
     metagraph = SimpleNamespace(
-        hotkeys=("active", "inactive"),
-        active=(True, False),
-        validator_permit=(False, True),
-        S=(0.0, 900_000.0),
+        hotkeys=("active", "permitted", "miner"),
+        active=(True, False, False),
+        validator_permit=(False, True, False),
+        S=(0.0, 0.018, 900_000.0),
     )
 
     assert classify_hotkey_from_metagraph(
         "active", metagraph, network_name="test"
     ) == (True, "validator")
     assert classify_hotkey_from_metagraph(
-        "inactive", metagraph, network_name="test"
+        "permitted", metagraph, network_name="test"
+    ) == (True, "validator")
+    assert classify_hotkey_from_metagraph(
+        "miner", metagraph, network_name="test"
+    ) == (True, "miner")
+    assert classify_hotkey_from_metagraph(
+        "permitted", metagraph, network_name="finney"
     ) == (True, "miner")
 
 

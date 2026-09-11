@@ -498,6 +498,7 @@ inventory_empty_online_runtime() {
 
 empty_runtime_metadata_is_clear() {
   local image_count
+  local audit manifest
 
   if ! image_count="$(
     run_bounded_daemon_inventory docker image ls -aq \
@@ -510,29 +511,21 @@ empty_runtime_metadata_is_clear() {
     echo "Docker images remain after guarded reconciliation: images=$image_count" >&2
     return 1
   fi
-  # Missing directories are empty; access and traversal errors are not.
-  # This function runs in an if condition, so do not rely on shell errexit.
-  if ! sudo python3 - "$DOCKER_ROOT" <<'PY'
-import os
-import sys
-
-root = sys.argv[1]
-try:
-    for relative in ("image/overlay2/layerdb/sha256", "image/overlay2/layerdb/mounts", "overlay2"):
-        try:
-            with os.scandir(os.path.join(root, relative)) as entries:
-                if any(relative != "overlay2" or entry.name != "l" for entry in entries):
-                    raise RuntimeError("Docker metadata remains after reconciliation")
-        except FileNotFoundError:
-            continue
-except (OSError, RuntimeError) as exc:
-    print("ERROR: Docker metadata is not proven empty: " + str(exc), file=sys.stderr)
-    sys.exit(1)
-PY
-  then
+  if ! audit="$(
+    run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+      "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
+      --audit-only
+  )"; then
     echo "ERROR: Docker metadata is not proven empty after guarded reconciliation" >&2
     return 1
   fi
+  if ! manifest="$(
+    printf '%s' "$audit" | online_fully_empty_stale_audit_manifest
+  )"; then
+    echo "ERROR: Docker metadata audit is not a proven empty state after guarded reconciliation" >&2
+    return 1
+  fi
+  [ -n "$manifest" ] || return 1
   return 0
 }
 
@@ -614,36 +607,22 @@ require_same_online_images() {
 }
 
 online_overlay_metadata_layout() {
-  local directory
-  local present=0
-  local absent=0
-  local status
+  python3 -c '
+import json
+import sys
 
-  for directory in \
-      "$ONLINE_DOCKER_ROOT/image/overlay2/layerdb/sha256" \
-      "$ONLINE_DOCKER_ROOT/image/overlay2/layerdb/mounts" \
-      "$ONLINE_DOCKER_ROOT/overlay2"; do
-    if sudo test -d "$directory"; then
-      present=$((present + 1))
-    else
-      status=$?
-      if [ "$status" -ne 1 ]; then
-        echo "ERROR: Docker overlay metadata layout is unreadable: $directory" >&2
-        return 1
-      fi
-      absent=$((absent + 1))
-    fi
-  done
-  if [ "$present" -eq 3 ]; then
-    printf '%s\n' "initialized"
-    return 0
-  fi
-  if [ "$absent" -eq 3 ] && [ -z "$ONLINE_IMAGE_IDS" ]; then
-    printf '%s\n' "absent"
-    return 0
-  fi
-  echo "ERROR: Docker overlay metadata layout is partial or inconsistent with image inventory" >&2
-  return 1
+document = json.load(sys.stdin)
+if document.get("schema_version") != "leadpoet.docker_stale_mount_audit.v3":
+    raise SystemExit("invalid Docker overlay metadata layout schema")
+if document.get("status") != "ready" or document.get("docker_root") != "/var/lib/docker":
+    raise SystemExit("invalid Docker overlay metadata layout identity")
+layout = document.get("metadata_layout")
+if layout not in {"absent", "empty-skeleton", "initialized"}:
+    raise SystemExit("invalid Docker overlay metadata layout")
+if layout in {"absent", "empty-skeleton"} and document.get("active_image_count") != 0:
+    raise SystemExit("empty Docker overlay metadata layout has active images")
+print(layout)
+'
 }
 
 online_stale_audit_manifest() {
@@ -913,7 +892,6 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
     require_same_online_gateway "pre-stale-reclaim"
     require_same_online_docker_root "pre-stale-reclaim"
     require_same_online_images "pre-stale-reclaim"
-    ONLINE_PRE_RECLAIM_METADATA_LAYOUT="$(online_overlay_metadata_layout)"
     if ! ONLINE_PRE_RECLAIM_AUDIT="$(
       run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
         "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
@@ -923,6 +901,9 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
       exit 1
     fi
     printf '%s\n' "$ONLINE_PRE_RECLAIM_AUDIT"
+    ONLINE_PRE_RECLAIM_METADATA_LAYOUT="$(
+      printf '%s' "$ONLINE_PRE_RECLAIM_AUDIT" | online_overlay_metadata_layout
+    )"
     if ! ONLINE_PRE_RECLAIM_MANIFEST="$(
       printf '%s' "$ONLINE_PRE_RECLAIM_AUDIT" \
         | online_stale_audit_manifest_allowing_stale
@@ -954,7 +935,9 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
       exit 1
     fi
     printf '%s\n' "$ONLINE_PRE_RECONCILE_AUDIT"
-    ONLINE_PRE_RECONCILE_METADATA_LAYOUT="$(online_overlay_metadata_layout)"
+    ONLINE_PRE_RECONCILE_METADATA_LAYOUT="$(
+      printf '%s' "$ONLINE_PRE_RECONCILE_AUDIT" | online_overlay_metadata_layout
+    )"
     if [ "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" != "$ONLINE_PRE_RECLAIM_METADATA_LAYOUT" ]; then
       echo "ERROR: Docker overlay metadata layout changed during guarded stale reclaim" >&2
       exit 1
@@ -1010,10 +993,17 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
         exit 1
       fi
       printf '%s\n' "$ONLINE_POST_RECONCILE_AUDIT"
-      ONLINE_POST_RECONCILE_METADATA_LAYOUT="$(online_overlay_metadata_layout)"
+      ONLINE_POST_RECONCILE_METADATA_LAYOUT="$(
+        printf '%s' "$ONLINE_POST_RECONCILE_AUDIT" | online_overlay_metadata_layout
+      )"
       if [ "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" = "initialized" ] \
           && [ "$ONLINE_POST_RECONCILE_METADATA_LAYOUT" != "initialized" ]; then
         echo "ERROR: initialized Docker overlay metadata disappeared during daemon reconciliation" >&2
+        exit 1
+      fi
+      if [ "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" = "empty-skeleton" ] \
+          && [ "$ONLINE_POST_RECONCILE_METADATA_LAYOUT" != "empty-skeleton" ]; then
+        echo "ERROR: canonical empty Docker overlay skeleton changed during daemon reconciliation" >&2
         exit 1
       fi
       if [ "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" = "absent" ]; then
@@ -1030,9 +1020,9 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
         echo "ERROR: Docker audit was invalid after daemon reconciliation" >&2
         exit 1
       fi
-      if [ "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" = "initialized" ]; then
+      if [ "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" != "absent" ]; then
         if [ "$ONLINE_POST_RECONCILE_MANIFEST" != "$ONLINE_PRE_RECONCILE_MANIFEST" ]; then
-          echo "ERROR: active Docker image/layer identity changed during daemon reconciliation" >&2
+          echo "ERROR: active Docker metadata identity changed during daemon reconciliation" >&2
           exit 1
         fi
         if ! printf '%s\n%s\n' "$ONLINE_PRE_RECLAIM_AUDIT" "$ONLINE_POST_RECONCILE_AUDIT" \

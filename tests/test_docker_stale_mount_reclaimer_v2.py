@@ -335,6 +335,7 @@ def test_accepts_a_completely_uninitialized_empty_overlay_layout(
         if argv in (
             ["docker", "images", "-aq", "--no-trunc"],
             ["docker", "ps", "-aq", "--no-trunc"],
+            ["docker", "volume", "ls", "-q"],
         ):
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv == ["docker", "system", "df", "--format", "{{json .}}"]:
@@ -381,6 +382,328 @@ def test_accepts_a_completely_uninitialized_empty_overlay_layout(
     assert result.active_image_count == 0
     assert result.reclaimed_layer_record_count == 0
     assert not (docker_root / "overlay2").exists()
+
+
+def test_accepts_and_preserves_canonical_empty_overlay_skeleton_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docker_root = tmp_path / "docker"
+    docker_root.mkdir()
+
+    def empty_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if argv == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
+            return subprocess.CompletedProcess(argv, 0, str(docker_root) + "\n", "")
+        if argv in (
+            ["docker", "images", "-aq", "--no-trunc"],
+            ["docker", "ps", "-aq", "--no-trunc"],
+            ["docker", "volume", "ls", "-q"],
+        ):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv == ["docker", "system", "df", "--format", "{{json .}}"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {"Type": "Build Cache", "TotalCount": "0", "Active": "0"}
+                )
+                + "\n",
+                "",
+            )
+        if argv == ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if argv == ["findmnt", "-rn", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    absent_audit = audit_stale_docker_overlay_state_v2(
+        runner=empty_runner,
+        expected_root=docker_root,
+    )
+    link_root = docker_root / "overlay2/l"
+    link_root.mkdir(parents=True)
+    backing_device = docker_root / "overlay2/backingFsBlockDev"
+    backing_device.touch()
+    original_lstat = Path.lstat
+
+    def fake_lstat(candidate: Path):
+        if candidate == docker_root / "overlay2":
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o710,
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == link_root:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == backing_device:
+            return SimpleNamespace(
+                st_mode=stat.S_IFBLK | 0o600,
+                st_uid=0,
+                st_gid=0,
+                st_rdev=os.makedev(259, 1),
+                st_size=0,
+            )
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    skeleton_audit = audit_stale_docker_overlay_state_v2(
+        runner=empty_runner,
+        expected_root=docker_root,
+    )
+    result = reclaim_stale_docker_overlay_mounts_v2(
+        runner=empty_runner,
+        expected_root=docker_root,
+    )
+
+    assert absent_audit["active_manifest_hash"] != skeleton_audit["active_manifest_hash"]
+    assert absent_audit["metadata_layout"] == "absent"
+    assert skeleton_audit["metadata_layout"] == "empty-skeleton"
+    assert all(
+        skeleton_audit[field] == 0
+        for field in (
+            "active_container_count",
+            "active_image_count",
+            "active_layer_count",
+            "active_mount_count",
+            "active_overlay_dir_count",
+            "mounted_overlay_count",
+            "stale_layer_record_count",
+            "stale_mount_record_count",
+            "stale_overlay_dir_count",
+            "stale_overlay_link_count",
+        )
+    )
+    assert result.reclaimed_overlay_dir_count == 0
+    assert link_root.is_dir()
+    assert list(link_root.iterdir()) == []
+    assert backing_device.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_part",
+    ["missing-backing", "unknown", "nonempty-l", "symlink-l"],
+)
+def test_refuses_noncanonical_empty_overlay_skeleton_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_part: str,
+) -> None:
+    docker_root = tmp_path / "docker"
+    link_root = docker_root / "overlay2/l"
+    link_root.mkdir(parents=True)
+    backing_device = docker_root / "overlay2/backingFsBlockDev"
+    backing_device.touch()
+    if invalid_part == "missing-backing":
+        backing_device.unlink()
+    elif invalid_part == "unknown":
+        (docker_root / "overlay2/unknown").mkdir()
+    elif invalid_part == "nonempty-l":
+        (link_root / "unexpected").touch()
+    else:
+        link_root.rmdir()
+        symlink_target = docker_root / "empty-link-target"
+        symlink_target.mkdir()
+        link_root.symlink_to(symlink_target, target_is_directory=True)
+
+    original_lstat = Path.lstat
+
+    def fake_lstat(candidate: Path):
+        if candidate == docker_root / "overlay2":
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o710,
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == link_root and invalid_part != "symlink-l":
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == backing_device:
+            return SimpleNamespace(
+                st_mode=stat.S_IFBLK | 0o600,
+                st_uid=0,
+                st_gid=0,
+                st_rdev=os.makedev(259, 1),
+                st_size=0,
+            )
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+    def empty_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if argv == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
+            return subprocess.CompletedProcess(argv, 0, str(docker_root) + "\n", "")
+        if argv in (
+            ["docker", "images", "-aq", "--no-trunc"],
+            ["docker", "ps", "-aq", "--no-trunc"],
+            ["docker", "volume", "ls", "-q"],
+        ):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv == ["docker", "system", "df", "--format", "{{json .}}"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {"Type": "Build Cache", "TotalCount": "0", "Active": "0"}
+                )
+                + "\n",
+                "",
+            )
+        if argv == ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if argv == ["findmnt", "-rn", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    with pytest.raises(
+        DockerStaleMountReclaimerV2Error,
+        match="canonical empty skeleton|link root is not empty|unsafe ownership or mode",
+    ):
+        audit_stale_docker_overlay_state_v2(
+            runner=empty_runner,
+            expected_root=docker_root,
+        )
+
+
+@pytest.mark.parametrize("unsafe_directory", ["overlay-root", "link-root"])
+def test_refuses_empty_overlay_skeleton_with_unsafe_directory_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_directory: str,
+) -> None:
+    docker_root = tmp_path / "docker"
+    link_root = docker_root / "overlay2/l"
+    link_root.mkdir(parents=True)
+    backing_device = docker_root / "overlay2/backingFsBlockDev"
+    backing_device.touch()
+    original_lstat = Path.lstat
+
+    def fake_lstat(candidate: Path):
+        if candidate == docker_root / "overlay2":
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | (
+                    0o755 if unsafe_directory == "overlay-root" else 0o710
+                ),
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == link_root:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | (
+                    0o755 if unsafe_directory == "link-root" else 0o700
+                ),
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == backing_device:
+            return SimpleNamespace(
+                st_mode=stat.S_IFBLK | 0o600,
+                st_uid=0,
+                st_gid=0,
+                st_rdev=os.makedev(259, 1),
+                st_size=0,
+            )
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+    with pytest.raises(
+        DockerStaleMountReclaimerV2Error,
+        match="overlay (root|link root) has unsafe ownership or mode",
+    ):
+        audit_stale_docker_overlay_state_v2(
+            runner=lambda command: subprocess.CompletedProcess(
+                list(command),
+                0,
+                (
+                    str(docker_root) + "\n"
+                    if list(command)
+                    == ["docker", "info", "--format", "{{.DockerRootDir}}"]
+                    else json.dumps(
+                        {"Type": "Build Cache", "TotalCount": "0", "Active": "0"}
+                    )
+                    + "\n"
+                    if list(command)
+                    == ["docker", "system", "df", "--format", "{{json .}}"]
+                    else ""
+                    if list(command) == ["docker", "volume", "ls", "-q"]
+                    else ""
+                ),
+                "",
+            ),
+            expected_root=docker_root,
+        )
+
+
+def test_refuses_empty_overlay_skeleton_with_volume_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docker_root = tmp_path / "docker"
+    link_root = docker_root / "overlay2/l"
+    link_root.mkdir(parents=True)
+    backing_device = docker_root / "overlay2/backingFsBlockDev"
+    backing_device.touch()
+    original_lstat = Path.lstat
+
+    def fake_lstat(candidate: Path):
+        if candidate == docker_root / "overlay2":
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o710,
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == link_root:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_uid=0,
+                st_gid=0,
+            )
+        if candidate == backing_device:
+            return SimpleNamespace(
+                st_mode=stat.S_IFBLK | 0o600,
+                st_uid=0,
+                st_gid=0,
+                st_rdev=os.makedev(259, 1),
+                st_size=0,
+            )
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+    def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if argv == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
+            output = str(docker_root) + "\n"
+        elif argv == ["docker", "system", "df", "--format", "{{json .}}"]:
+            output = (
+                json.dumps(
+                    {"Type": "Build Cache", "TotalCount": "0", "Active": "0"}
+                )
+                + "\n"
+            )
+        elif argv == ["docker", "volume", "ls", "-q"]:
+            output = "volume-one\n"
+        else:
+            output = ""
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    with pytest.raises(
+        DockerStaleMountReclaimerV2Error,
+        match="has volume references",
+    ):
+        audit_stale_docker_overlay_state_v2(
+            runner=runner,
+            expected_root=docker_root,
+        )
 
 
 def test_refuses_partially_initialized_overlay_metadata(tmp_path: Path) -> None:

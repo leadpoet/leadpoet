@@ -63,6 +63,7 @@ class DockerMountReclaimResult:
 @dataclass(frozen=True)
 class _DockerStorageInventory:
     docker_root: Path
+    metadata_layout: str
     image_ids: frozenset[str]
     container_ids: frozenset[str]
     active_chain_ids: frozenset[str]
@@ -220,6 +221,22 @@ def _docker_ids(
         for value in values:
             _validate_hex_id(value, field=label)
     return values
+
+
+def _require_empty_volumes(runner: CommandRunner) -> None:
+    values = [
+        value.strip()
+        for value in _checked_output(
+            runner,
+            ["docker", "volume", "ls", "-q"],
+            label="Docker volume inventory",
+        ).splitlines()
+        if value.strip()
+    ]
+    if values:
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker partially initialized empty overlay metadata has volume references"
+        )
 
 
 def _inspect_documents(
@@ -417,6 +434,77 @@ def _backing_device_identity(path: Path) -> Optional[dict[str, int]]:
     }
 
 
+def _canonical_empty_overlay_skeleton(
+    overlay_root: Path,
+) -> dict[str, int]:
+    """Validate Docker's exact empty overlay2 skeleton."""
+
+    try:
+        entries = {path.name: path for path in overlay_root.iterdir()}
+    except OSError as exc:
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker empty overlay skeleton is unreadable"
+        ) from exc
+    expected_entries = {"l", _BACKING_DEVICE_NAME}
+    if set(entries) != expected_entries:
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker partially initialized overlay metadata is not the canonical empty skeleton"
+        )
+
+    try:
+        overlay_metadata = overlay_root.lstat()
+    except OSError as exc:
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker empty overlay root metadata is unreadable"
+        ) from exc
+    overlay_mode = stat.S_IMODE(overlay_metadata.st_mode)
+    if (
+        not stat.S_ISDIR(overlay_metadata.st_mode)
+        or overlay_metadata.st_uid != 0
+        or overlay_metadata.st_gid != 0
+        or overlay_mode != 0o710
+    ):
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker empty overlay root has unsafe ownership or mode"
+        )
+
+    link_root = entries["l"]
+    try:
+        link_metadata = link_root.lstat()
+    except OSError as exc:
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker empty overlay link root metadata is unreadable"
+        ) from exc
+    link_mode = stat.S_IMODE(link_metadata.st_mode)
+    if (
+        not stat.S_ISDIR(link_metadata.st_mode)
+        or link_metadata.st_uid != 0
+        or link_metadata.st_gid != 0
+        or link_mode != 0o700
+    ):
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker empty overlay link root has unsafe ownership or mode"
+        )
+    try:
+        if any(link_root.iterdir()):
+            raise DockerStaleMountReclaimerV2Error(
+                "Docker empty overlay link root is not empty"
+            )
+    except OSError as exc:
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker empty overlay link root is unreadable"
+        ) from exc
+
+    backing_device_identity = _backing_device_identity(
+        entries[_BACKING_DEVICE_NAME]
+    )
+    if backing_device_identity is None:  # pragma: no cover - bound by iterdir
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker empty overlay backing-device metadata disappeared"
+        )
+    return backing_device_identity
+
+
 def _metadata_manifest_hash(
     *,
     image_rows: Sequence[dict[str, object]],
@@ -560,15 +648,22 @@ def _inventory(
                 f"Docker overlay metadata root is not a directory: {path}"
             )
         metadata_root_states.append(exists)
-    if any(metadata_root_states) and not all(metadata_root_states):
+    empty_overlay_skeleton = metadata_root_states == [False, False, True]
+    if (
+        any(metadata_root_states)
+        and not all(metadata_root_states)
+        and not empty_overlay_skeleton
+    ):
         raise DockerStaleMountReclaimerV2Error(
             "Docker overlay metadata roots are only partially initialized"
         )
-    if not any(metadata_root_states):
+    if not any(metadata_root_states) or empty_overlay_skeleton:
         if image_ids or container_ids:
             raise DockerStaleMountReclaimerV2Error(
                 "Docker overlay metadata is absent while active objects remain"
             )
+        if empty_overlay_skeleton:
+            _require_empty_volumes(runner)
         mounted_overlay_targets = _mounted_overlay_dirs(
             runner,
             docker_root=docker_root,
@@ -594,6 +689,11 @@ def _inventory(
                 "Docker overlay metadata is absent while protected mounts remain: "
                 + ",".join(conflicting_mounts)
             )
+        backing_device_identity = (
+            _canonical_empty_overlay_skeleton(overlay_root)
+            if empty_overlay_skeleton
+            else None
+        )
         active_manifest_hash = _metadata_manifest_hash(
             image_rows=(),
             container_rows=(),
@@ -603,10 +703,13 @@ def _inventory(
             mountdb_root=mountdb_root,
             overlay_root=overlay_root,
             active_links={},
-            backing_device_identity=None,
+            backing_device_identity=backing_device_identity,
         )
         return _DockerStorageInventory(
             docker_root=docker_root,
+            metadata_layout=(
+                "empty-skeleton" if empty_overlay_skeleton else "absent"
+            ),
             image_ids=frozenset(),
             container_ids=frozenset(),
             active_chain_ids=frozenset(),
@@ -884,6 +987,7 @@ def _inventory(
     )
     return _DockerStorageInventory(
         docker_root=docker_root,
+        metadata_layout="initialized",
         image_ids=frozenset(image_ids),
         container_ids=frozenset(container_ids),
         active_chain_ids=frozenset(active_chain_ids),
@@ -1019,6 +1123,7 @@ def audit_stale_docker_overlay_state_v2(
         "active_overlay_dir_count": len(inventory.active_overlay_ids),
         "active_manifest_hash": inventory.active_manifest_hash,
         "docker_root": str(inventory.docker_root),
+        "metadata_layout": inventory.metadata_layout,
         "mounted_overlay_count": len(inventory.mounted_overlay_targets),
         "stale_layer_record_count": len(inventory.stale_layer_records),
         "stale_mount_record_count": len(inventory.stale_mount_records),

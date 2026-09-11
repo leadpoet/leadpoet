@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -140,6 +141,179 @@ def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
         '[ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ]'
         in SCRIPT[SCRIPT.index("protect_exact_host_gateway_runtime()"):lane]
     )
+
+
+def test_canonical_empty_overlay_skeleton_has_a_distinct_guarded_state():
+    layout = SCRIPT[
+        SCRIPT.index("online_overlay_metadata_layout()") : SCRIPT.index(
+            "online_stale_audit_manifest()"
+        )
+    ]
+    shortcut = SCRIPT[
+        SCRIPT.index("empty_runtime_metadata_is_clear()") : SCRIPT.index(
+            "online_image_ids()"
+        )
+    ]
+
+    assert 'layout not in {"absent", "empty-skeleton", "initialized"}' in layout
+    assert "print(layout)" in layout
+    assert "docker_stale_mount_reclaimer_v2.py" in shortcut
+    assert "online_fully_empty_stale_audit_manifest" in shortcut
+    assert "rm -rf" not in shortcut
+    assert (
+        'ONLINE_PRE_RECONCILE_METADATA_LAYOUT" = "empty-skeleton"' in SCRIPT
+    )
+    assert "canonical empty Docker overlay skeleton changed" in SCRIPT
+
+
+def test_online_layout_parser_executes_guarded_empty_skeleton_transition():
+    function_start = SCRIPT.index("online_overlay_metadata_layout()")
+    function_end = SCRIPT.index("\n}\n", function_start) + len("\n}\n")
+    function = SCRIPT[function_start:function_end]
+    guard_start = SCRIPT.index(
+        'if [ "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" = "empty-skeleton" ]'
+    )
+    guard_end = SCRIPT.index("\n      fi", guard_start) + len("\n      fi")
+    guard = SCRIPT[guard_start:guard_end]
+    base = {
+        "active_image_count": 0,
+        "docker_root": "/var/lib/docker",
+        "schema_version": "leadpoet.docker_stale_mount_audit.v3",
+        "status": "ready",
+    }
+    reports = {
+        layout: json.dumps({**base, "metadata_layout": layout})
+        for layout in ("absent", "empty-skeleton", "initialized")
+    }
+    harness = f"""
+set -euo pipefail
+{function}
+ONLINE_PRE_RECONCILE_METADATA_LAYOUT="$(
+  printf '%s' "$1" | online_overlay_metadata_layout
+)"
+ONLINE_POST_RECONCILE_METADATA_LAYOUT="$(
+  printf '%s' "$2" | online_overlay_metadata_layout
+)"
+{guard}
+printf '%s,%s\\n' \
+  "$ONLINE_PRE_RECONCILE_METADATA_LAYOUT" \
+  "$ONLINE_POST_RECONCILE_METADATA_LAYOUT"
+"""
+
+    absent_to_skeleton = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "layout-transition",
+            reports["absent"],
+            reports["empty-skeleton"],
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    stable_skeleton = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "layout-transition",
+            reports["empty-skeleton"],
+            reports["empty-skeleton"],
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    changed_skeleton = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "layout-transition",
+            reports["empty-skeleton"],
+            reports["initialized"],
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert absent_to_skeleton.returncode == 0, absent_to_skeleton.stderr
+    assert absent_to_skeleton.stdout == "absent,empty-skeleton\n"
+    assert stable_skeleton.returncode == 0, stable_skeleton.stderr
+    assert stable_skeleton.stdout == "empty-skeleton,empty-skeleton\n"
+    assert changed_skeleton.returncode != 0
+    assert "canonical empty Docker overlay skeleton changed" in changed_skeleton.stderr
+
+
+def test_empty_runtime_metadata_shortcut_executes_audited_accept_and_refusal():
+    clear_start = SCRIPT.index("empty_runtime_metadata_is_clear()")
+    clear_end = SCRIPT.index("\n}\n", clear_start) + len("\n}\n")
+    clear_function = SCRIPT[clear_start:clear_end]
+    audit_start = SCRIPT.index("online_fully_empty_stale_audit_manifest()")
+    audit_end = SCRIPT.index("\n}\n", audit_start) + len("\n}\n")
+    audit_function = SCRIPT[audit_start:audit_end]
+    count_fields = (
+        "active_container_count",
+        "active_image_count",
+        "active_layer_count",
+        "active_mount_count",
+        "active_overlay_dir_count",
+        "mounted_overlay_count",
+        "stale_layer_record_count",
+        "stale_mount_record_count",
+        "stale_overlay_dir_count",
+        "stale_overlay_link_count",
+    )
+    report = {
+        **{field: 0 for field in count_fields},
+        "active_manifest_hash": "sha256:" + "a" * 64,
+        "docker_root": "/var/lib/docker",
+        "metadata_layout": "empty-skeleton",
+        "schema_version": "leadpoet.docker_stale_mount_audit.v3",
+        "status": "ready",
+    }
+    nonempty_report = {**report, "stale_overlay_dir_count": 1}
+    harness = f"""
+set -euo pipefail
+REPORT="$1"
+REPO_ROOT=/tmp/hermetic-repo
+run_bounded_daemon_inventory() {{ printf '\\n'; }}
+run_bounded_daemon_command() {{ printf '%s' "$REPORT"; }}
+{audit_function}
+{clear_function}
+empty_runtime_metadata_is_clear
+"""
+
+    accepted = subprocess.run(
+        ["bash", "-c", harness, "metadata-shortcut", json.dumps(report)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    refused = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "metadata-shortcut",
+            json.dumps(nonempty_report),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert refused.returncode != 0
+    assert "not a proven empty state" in refused.stderr
 
 
 def test_required_absent_gateway_reconciliation_uses_the_offline_empty_root_lane():

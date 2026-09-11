@@ -566,6 +566,62 @@ def test_openrouter_plain_non_byok_502_uses_insured_zero_and_keeps_provider_erro
     assert transport.sent[0]["headers"]["x-openrouter-metadata"] == "enabled"
 
 
+@pytest.mark.parametrize("model", ("openai/gpt-5.6-sol", "openai/gpt-5.5"))
+@pytest.mark.parametrize("unproven", (None, "request_fee", "byok", "pipeline", "missing_metadata"))
+def test_pydantic_model_error_insurance_keeps_cost_uncertain_without_full_proof(model, unproven):
+    # The submitted harness uses GPT-5.6 Sol, not the small model in CHAT.
+    table = price_table()
+    table["models"][model] = dict(
+        table["models"]["openai/gpt-4o-mini"],
+        prompt="0.000002",
+        completion="0.00001",
+        web_search="0.01",
+        request="0.01" if unproven == "request_fee" else "0",
+    )
+    payload = {
+        "error": {"code": 502, "message": "Provider returned an error"},
+        "openrouter_metadata": {
+            "requested": model,
+            "is_byok": unproven == "byok",
+            "attempt": 1,
+            "attempts": [{"provider": "OpenAI", "status": 502}],
+        },
+    }
+    if unproven == "pipeline":
+        payload["openrouter_metadata"]["pipeline"] = [{"type": "web-search"}]
+    if unproven == "missing_metadata":
+        del payload["openrouter_metadata"]
+    store = FakeLedgerStore()
+    transport = FakeTransport([(502, payload)])
+    broker = br.Broker(
+        store=store,
+        key_for=lambda provider: HOST_KEYS[provider],
+        price_table=table,
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=dict(CHAT, model=model, reasoning={"enabled": True}),
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert transport.sent[0]["headers"]["x-openrouter-metadata"] == "enabled"
+    assert len(transport.sent) == 1  # Never repeat the paid inference request.
+    if unproven is None:
+        assert result.call["actual_microusd"] == 0
+        assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
+        assert store.log == ["reserve", "dispatch", "settle"]
+    else:
+        assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+        assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
 def test_openrouter_insurance_accepts_valid_function_tool_history_without_assistant_content():
     payload = {
         "error": {"code": 502, "message": "Provider returned an error"},

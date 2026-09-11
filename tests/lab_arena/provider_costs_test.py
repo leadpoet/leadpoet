@@ -492,9 +492,15 @@ def test_openrouter_insured_error_requires_zero_valid_request_price(pricing):
 
 
 @pytest.mark.parametrize(
-    "model", ("anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-5")
+    "model",
+    (
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-5",
+        "openai/gpt-5.5",
+        "openai/gpt-5.6-sol",
+    ),
 )
-def test_openrouter_insured_error_allows_optional_sonnet_prices_when_unused(model):
+def test_openrouter_insured_error_allows_optional_model_prices_when_unused(model):
     parameters = {
         "model": model,
         "messages": [{"role": "user", "content": "hello"}],

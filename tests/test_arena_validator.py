@@ -1,14 +1,60 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from lab_arena import contracts
 from lab_arena.validator import (
+    ArenaPublicApi,
     ArenaValidatorError,
     ArenaWeightOrchestrator,
     ArenaWeightPaths,
     _read_hashed_json,
 )
+
+
+def test_weight_api_posts_signed_scope_bound_request(monkeypatch):
+    observed = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit):
+            return b'{"lookup_ok":true,"state":null}'
+
+    def urlopen(request, timeout):
+        observed["request"] = request
+        observed["timeout"] = timeout
+        return Response()
+
+    keypair = SimpleNamespace(
+        ss58_address="5" + "V" * 47,
+        sign=lambda message: b"s" * 64,
+    )
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    api = ArenaPublicApi(
+        "https://arena.example", keypair=keypair,
+        network="finney", netuid=71, timeout_seconds=12,
+        now=lambda: 1_800_000_000,
+    )
+    assert api.accepted_weight_state(32001) is None
+    request = observed["request"]
+    assert request.full_url == "https://arena.example/arena/v1/weight-state"
+    assert request.method == "POST" and observed["timeout"] == 12
+    envelope = json.loads(request.data)
+    assert envelope["scope"] == contracts.SCOPE_WEIGHT_STATE
+    assert envelope["round_id"] == "weight-state"
+    assert envelope["hotkey"] == keypair.ss58_address
+    assert envelope["timestamp"] == 1_800_000_000
+    assert envelope["body"] == {
+        "epoch": 32001, "network": "finney", "netuid": 71,
+    }
+    assert envelope["signature"] == "0x" + (b"s" * 64).hex()
 
 
 class _Era:

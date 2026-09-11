@@ -74,6 +74,8 @@ def run_icp(icp: dict) -> list[dict]:
 
 Change the harness, model, prompts, and approved API routing. List Python dependencies in `requirements.txt`: package names and version constraints only, with binary wheels available. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported. Return at most five companies as a JSON list. Use `[]` if there are no valid matches.
 
+Each ICP execution attempt has a **five-minute wall-clock limit** and quotas of **60 OpenRouter, 30 Deepline, and 30 Scrapingdog calls**. The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
+
 The output below shows the exact supported fields. It is a format example, not a real company claim. `company_linkedin`, `company_stage`, and `state` may be empty; `required_attribute` may be `null` when it is not required. `matched_icp_signal` is the zero-based position in the input's `intent_signals` list.
 
 <details>
@@ -114,9 +116,11 @@ The output below shows the exact supported fields. It is a format example, not a
 ```
 </details>
 
-Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A winning model must beat the daily baseline mean by at least 1.0 point on the 0–100 scale. Ties and smaller gains do not promote. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. The current champion pool starts at 25% of the subnet's emissions and decays weekly, subject to registration and continued eligibility.
+Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A model must beat the daily baseline score by at least 1.0 point on the 0–100 scale to qualify for promotion. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. By default, the champion receives **25%, 20%, 15%, 10%, then 5%** of subnet emissions in successive reward weeks of 140 epochs each. The share remains at 5% from week five onward, subject to registration and continued eligibility.
 
-The sourcing budget is **$50 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.50 per returned company**. Duplicate company domains within an ICP count once. Independent judging is reported and capped separately. The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. A provider that bills after execution can exceed its reservation; the full charge still counts, and an over-budget model cannot win. Unresolved provider charges also prevent promotion.
+The sourcing budget is **$50 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.50 per returned company**. Duplicate company domains within an ICP count once. Independent judging has a separate default **$50 allowance per submitted model**, also charged through the miner's credentials. Full-code review is an additional OpenRouter charge, recorded separately from sourcing and judging.
+
+The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. A provider that bills after execution can exceed its reservation; the full charge still counts, and an over-budget model cannot win. Unresolved provider charges also prevent promotion.
 
 ## Submit a model
 
@@ -176,14 +180,22 @@ Arena is the only subnet incentive mechanism. Research Lab reimbursements,
 legacy champion obligations, SOURCE_ADD, and Fulfillment emission allocations
 are retired. Fulfillment still accepts, scores, and delivers client leads.
 
-Every normal validator scores submitted models with brokered miner credentials,
+Registered validators with a permit and at least 75,000 effective subnet stake
+can receive new Arena scoring jobs. Permitted validators below that threshold
+can still retrieve signed gateway weights and run the independent weight loop.
+Weight retrieval requires a local-hotkey signed request; miners without a
+validator permit and anonymous callers cannot retrieve the signed weight state.
+
+Eligible normal validators score submitted models with brokered miner credentials,
 returns scores through the competition API, and independently derives weights
-from the signed accepted reward state and finalized chain ownership. A small
-protected signer constrains the transaction. Chain outcomes are recorded
-separately. There is no audit-validator role.
+from the signed accepted reward state and finalized chain ownership. Each
+validator signs with its own local Bittensor hotkey, preserving the canonical
+commit/reveal and exact transaction checks. Weight submission runs independently
+of scoring. Chain outcomes are recorded separately. No Nitro enclave or KMS
+provisioning is required for validators, and there is no audit-validator role.
 
 Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)
-for signer provisioning, configuration, restart, and verification.
+for local wallet configuration, sandbox setup, restart, and verification.
 
 
 ## License

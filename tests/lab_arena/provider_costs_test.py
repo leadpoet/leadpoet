@@ -22,6 +22,43 @@ def test_deepline_history_exact_terminal_match_ignores_absent_pagination_fields(
     assert has_more is False and next_offset is None
 
 
+def test_deepline_history_accepts_strict_failed_error_zero_charge():
+    state, cost, has_more, next_offset = deepline_billing_history_cost(
+        {"recent": {"entries": [{
+            "request_id": "job-error", "operation": "exa_search",
+            "provider": "exa", "charge_state": "failed", "status": "error",
+            "credits": 0, "delta": 0,
+        }]}},
+        request_id="job-error", operation="exa_search",
+    )
+    assert state == "matched" and cost is not None and cost.microusd == 0
+    assert cost.price_basis == "deepline_billing_history_failed_zero"
+    assert has_more is False and next_offset is None
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"credits": 0.1},
+        {"delta": 0.1},
+        {"delta": -0.1},
+        {"status": "completed"},
+        {"delta": None},
+    ],
+)
+def test_deepline_history_rejects_nonzero_or_malformed_failed_charge(patch):
+    entry = {
+        "request_id": "job-error", "operation": "exa_search",
+        "provider": "exa", "charge_state": "failed", "status": "error",
+        "credits": 0, "delta": 0,
+    }
+    entry.update(patch)
+    assert deepline_billing_history_cost(
+        {"recent": {"entries": [entry]}},
+        request_id="job-error", operation="exa_search",
+    ) == ("invalid", None, False, None)
+
+
 def test_deepline_history_matches_exact_charge_group_alias():
     state, cost, has_more, next_offset = deepline_billing_history_cost(
         {

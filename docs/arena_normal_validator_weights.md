@@ -7,15 +7,16 @@ needed to run this process.
 
 ## Scoring and authorization
 
-On mainnet, the shared gateway validator rule assigns validator status only to
-registered hotkeys with
-an on-chain validator permit and **at least 75,000 effective subnet stake
-weight**. Exactly 75,000 qualifies. Inactive permitted validators qualify too.
-Arena uses this same rule for new execution/scoring jobs and planned capacity.
+On mainnet, a registered hotkey with an on-chain validator permit has validator
+status, including below 75,000 effective subnet stake weight. New Arena
+execution/scoring jobs and planned capacity additionally require **at least
+75,000 effective subnet stake weight**. Exactly 75,000 qualifies. Activity does
+not bypass the scoring minimum or disqualify a permitted validator.
 Every qualifying validator can claim automatically; round runner lists do not
 grant or deny access. Test networks retain the existing gateway rule: active
-or permitted, without the mainnet stake minimum. There is no second Arena
-validator-eligibility policy.
+or permitted for scoring, without the mainnet stake minimum. Weight retrieval
+requires a validator permit on every network. Both checks use the shared
+gateway role helpers; validator identity is separate from scoring eligibility.
 
 Arena reads chain `total_stake` (Bittensor `Metagraph.S`) from its finalized
 snapshot, with the existing 60-second cache. Stake changes take effect after
@@ -30,6 +31,7 @@ Existing identity and lease protections still apply. Below-threshold claims
 for new work return `403 runner_stake_below_minimum`; the runner idles and keeps weights
 running. No benchmark work or minimum benchmark stake is required to retrieve
 the signed weight state, derive weights, or run the weight submission loop.
+Subnet registration and a validator permit are still required for retrieval.
 An exact signed-request retry can recover its already-issued lease after a
 stake-only drop, without allocating or extending work.
 
@@ -63,6 +65,17 @@ runsc, scoring setup error, or scoring-loop error causes scoring to wait/retry,
 not the weight loop to stop. Scoring works again when its dependency recovers.
 
 ## Weight submission
+
+The validator signs its weight-state request with its own local hotkey. The
+gateway verifies the request signature, freshness, action, epoch, and chain
+scope, then checks registration and the validator permit in its finalized
+metagraph. Anonymous requests and hotkeys without permits cannot retrieve the
+signed weight state, which includes its signed reward basis. Below-threshold
+permitted validators can retrieve this state. The old public reward-basis route
+and `/fulfillment/lab-arena-reward-basis` route are removed, and public round
+responses no longer include the signed reward basis. The signing public key
+and normal public competition results
+remain public; this access rule does not make revealed on-chain weights private.
 
 The validator verifies the gateway signing-key pin and the signed accepted
 Arena state, including the governing reward basis, chain identity, subnet,
@@ -146,7 +159,14 @@ runner-list gate. SQL claims remain restricted to the gateway service role.
 Migrations through 207 remain prerequisites. This is not a change to scores,
 promotion, rewards, or provider accounting.
 
-The 75,000 stake gate needs no additional migration or validator upgrade.
+The validator-only weight access correction needs no additional migration.
+It does require both the updated gateway and updated normal validator client:
+the client now sends a signed POST instead of an unauthenticated GET. Keep
+validator journals and wallets unchanged during the paired update. There is no
+anonymous compatibility fallback. Operators of external validators must also
+update their client; no new wallet or configuration setting is needed.
+
+The 75,000 scoring stake gate itself needs no additional migration.
 Before enabling it, verify qualifying planned capacity for every open round.
 Use the canonical gateway restart and retain existing runs and validator
 journals. Rolling back to a release without this gate reopens low-stake claims;

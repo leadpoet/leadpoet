@@ -25,7 +25,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote_to_bytes
+from urllib.parse import unquote_to_bytes
 
 import httpx
 
@@ -483,12 +483,14 @@ def _deepline_billing_readback(
         "user-agent": "leadpoet-lab-arena-broker/1",
     }
     history_url = DEEPLINE_BILLING_HISTORY_URL
+    current_offset = 0
     for request_number in range(_DEEPLINE_BILLING_MAX_ATTEMPTS):
         # A newly completed job may not yet appear on the newest page. Keep
         # the existing three-page scan, then refresh the newest page instead
         # of spending every read on older history. The time bound is unchanged.
         if request_number == _DEEPLINE_BILLING_MAX_ATTEMPTS - 1:
             history_url = DEEPLINE_BILLING_HISTORY_URL
+            current_offset = 0
         now = time.monotonic()
         if now >= readback_deadline:
             break
@@ -520,21 +522,22 @@ def _deepline_billing_readback(
             document = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             return None
-        state, cost, has_more, next_cursor = provider_costs.deepline_billing_history_cost(
-            document, request_id=request_id, operation=operation
+        state, cost, has_more, next_offset = provider_costs.deepline_billing_history_cost(
+            document, request_id=request_id, operation=operation,
+            current_offset=current_offset,
         )
         if state == "invalid":
             return None
         if state == "matched":
             return cost
         if state == "pending" and has_more:
-            if next_cursor is None:
+            if next_offset is None:
                 return None
-            history_url = DEEPLINE_BILLING_HISTORY_URL + "&recent_cursor=" + quote(
-                next_cursor, safe=""
-            )
+            current_offset = next_offset
+            history_url = DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=" + str(next_offset)
             continue
         history_url = DEEPLINE_BILLING_HISTORY_URL
+        current_offset = 0
     return None
 
 
@@ -604,8 +607,29 @@ def _validated_response_url(value: Any, *, secret: str = "") -> str:
     return response_url
 
 
-def _terminal_response_document(status: int, headers: Mapping[str, str], body: bytes) -> Dict[str, Any]:
-    return {"status": int(status), "headers": dict(headers), "body_b64": base64.b64encode(bytes(body)).decode("ascii")}
+def _terminal_response_document(
+    status: int, headers: Mapping[str, str], body: bytes,
+    *, provider_cost: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    document = {"status": int(status), "headers": dict(headers), "body_b64": base64.b64encode(bytes(body)).decode("ascii")}
+    if provider_cost is not None:
+        document["provider_cost"] = dict(provider_cost)
+    return document
+
+
+def _provider_cost_record(
+    cost: provider_costs.ProviderCost, *, operation: str,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    record = {
+        "basis": cost.price_basis,
+        "units": format(cost.units, "f"),
+        "unit_name": cost.unit_name,
+        "operation": operation,
+    }
+    if request_id is not None:
+        record["request_id"] = request_id
+    return record
 
 
 def _decode_terminal(
@@ -613,11 +637,17 @@ def _decode_terminal(
     *,
     secret: str = "",
 ) -> Tuple[int, Dict[str, str], bytes]:
-    if not isinstance(document, Mapping) or set(document) != {
-        "status",
-        "headers",
-        "body_b64",
-    }:
+    required = {"status", "headers", "body_b64"}
+    if not isinstance(document, Mapping) or set(document) not in (required, required | {"provider_cost"}):
+        raise BrokerError("broker_unavailable")
+    provider_cost = document.get("provider_cost")
+    if provider_cost is not None and (
+        not isinstance(provider_cost, Mapping)
+        or set(provider_cost) not in (
+            {"basis", "units", "unit_name", "operation"},
+            {"basis", "units", "unit_name", "operation", "request_id"},
+        )
+    ):
         raise BrokerError("broker_unavailable")
     try:
         status = int(document["status"])
@@ -931,6 +961,7 @@ class Broker:
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
+        deepline_request_id: Optional[str] = None
         try:
             url, headers = inject_credential(outbound, secret)
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
@@ -953,6 +984,7 @@ class Broker:
                         effective_normalized, response.status, raw_document
                     )
                     request_id = _deepline_job_request_id(raw_document)
+                    deepline_request_id = request_id
                     if (
                         deepline_known_free_cost is None
                         and 200 <= response.status < 300
@@ -1015,6 +1047,21 @@ class Broker:
                     "cost_unit_name": raw_cost.unit_name,
                 }
             )
+        cost_operation = (
+            str(effective_normalized.get("tool") or effective_operation_id)
+            if effective_operation.provider == "deepline"
+            else effective_operation_id
+        )
+        cost_record = None if raw_cost is None else _provider_cost_record(
+            raw_cost,
+            operation=cost_operation,
+            request_id=(
+                deepline_request_id
+                if effective_operation.provider == "deepline"
+                and raw_cost is deepline_readback_cost
+                else None
+            ),
+        )
         failure_stage = "response_adaptation"
         adapted_response_url = ""
         try:
@@ -1072,7 +1119,10 @@ class Broker:
             else:
                 actual = 0  # providers without a reported charge: record the bounded call, not an invented price
             failure_stage = "terminal_response"
-            terminal = _terminal_response_document(sanitized_status, sanitized_headers, sanitized_body)
+            terminal = _terminal_response_document(
+                sanitized_status, sanitized_headers, sanitized_body,
+                provider_cost=cost_record,
+            )
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=int(response.status), actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
             settled = self._store.settle_call(
@@ -1091,7 +1141,8 @@ class Broker:
             if raw_actual is not None and failure_stage != "settlement":
                 refused = _error_result("provider_unavailable", summary)
                 terminal = _terminal_response_document(
-                    refused.status, refused.headers, refused.body
+                    refused.status, refused.headers, refused.body,
+                    provider_cost=cost_record,
                 )
                 try:
                     settled = self._store.settle_call(

@@ -120,8 +120,8 @@ def deepline_cost(response_json: Any) -> Optional[ProviderCost]:
 
 
 def deepline_billing_history_cost(
-    response_json: Any, *, request_id: str, operation: str
-) -> Tuple[str, Optional[ProviderCost], bool, Optional[str]]:
+    response_json: Any, *, request_id: str, operation: str, current_offset: int = 0
+) -> Tuple[str, Optional[ProviderCost], bool, Optional[int]]:
     """Match one exact Deepline billing-history entry without retaining it.
 
     ``pending`` means the requested job is absent. ``nonterminal`` means its
@@ -140,21 +140,22 @@ def deepline_billing_history_cost(
         not isinstance(entry, Mapping) for entry in entries
     ):
         return "invalid", None, False, None
-    has_more = recent.get("has_more")
-    if not isinstance(has_more, bool):
-        return "invalid", None, False, None
-    next_cursor = recent.get("next_cursor")
-    if has_more and (
-        not isinstance(next_cursor, str)
-        or not next_cursor.strip()
-        or len(next_cursor) > 2048
-    ):
-        return "invalid", None, False, None
-    if not has_more:
-        next_cursor = None
     matches = [entry for entry in entries if entry.get("request_id") == request_id]
     if not matches:
-        return "pending", None, has_more, next_cursor
+        has_more = recent.get("has_more")
+        if not isinstance(has_more, bool):
+            return "invalid", None, False, None
+        if not has_more:
+            return "pending", None, False, None
+        next_offset = recent.get("next_offset")
+        if (
+            isinstance(next_offset, bool)
+            or not isinstance(next_offset, int)
+            or next_offset <= current_offset
+            or next_offset > 1_000_000
+        ):
+            return "invalid", None, False, None
+        return "pending", None, True, next_offset
     if len(matches) != 1:
         return "invalid", None, False, None
 
@@ -168,7 +169,7 @@ def deepline_billing_history_cost(
     if not isinstance(charge_state, str):
         return "invalid", None, False, None
     if charge_state not in ("posted", "free"):
-        return "nonterminal", None, has_more, next_cursor
+        return "nonterminal", None, False, None
     credits_value = entry.get("credits")
     if isinstance(credits_value, bool) or not isinstance(
         credits_value, (int, float, Decimal)
@@ -185,8 +186,8 @@ def deepline_billing_history_cost(
             unit_name="credits",
             price_basis="deepline_billing_history_credits_x_0.10_usd",
         ),
-        has_more,
-        next_cursor,
+        False,
+        None,
     )
 
 

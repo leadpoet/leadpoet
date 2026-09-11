@@ -71,7 +71,14 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     assert result.call["actual_microusd"] == 2000
     assert ledger.calls[result.call["call_identity"]]["provider"] == "deepline"
     terminal = ledger.calls[result.call["call_identity"]]["terminal"]
-    assert set(terminal) == {"status", "headers", "body_b64"}
+    assert set(terminal) == {"status", "headers", "body_b64", "provider_cost"}
+    assert terminal["provider_cost"] == {
+        "basis": "deepline_billing_history_credits_x_0.10_usd",
+        "units": "0.02",
+        "unit_name": "credits",
+        "operation": "firecrawl_scrape",
+        "request_id": "test",
+    }
     assert terminal["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
     assert "attacker.example" not in repr(result.to_document())
     assert "attacker.example" not in repr(terminal)

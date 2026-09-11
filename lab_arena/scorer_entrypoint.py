@@ -41,7 +41,8 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
         environ=os.environ,
         credentials=dict(PLACEHOLDER_CREDENTIALS),
     )
-    scorer = scoring.lab_scorer(policy)
+    from lab_arena import contact_policy
+    scorer = scoring.lab_scorer(policy, **({"contact_source_evidence": document.get("contact_source_evidence")} if contact_policy.scorer_enabled(policy) else {}))
     item = {"scored_run_id": scored_run_id}
     try:
         with use_evaluation_date(str(document.get("evaluation_date") or "")):

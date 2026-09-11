@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import integrity, confirmation, icp_disclosure, judgment_cache
+from lab_arena import contact_policy, contact_evidence, integrity, confirmation, icp_disclosure, judgment_cache
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -301,6 +301,7 @@ class RoundDefaults:
     daily_cutoff_hour_utc: Optional[int] = None
     # A new round's cutoff lies at least this far ahead so miners can submit.
     integrity_from: Optional[str] = None
+    contacts_from: Optional[str] = None
     benchmark_disclosure_from: Optional[str] = None
     confirmation_minutes: Tuple[int, int] = (60, 110)
     min_submission_hours: int = 6
@@ -362,6 +363,18 @@ class ServiceConfig:
                     raise ValueError("missing timezone")
             except (ValueError, AttributeError) as exc:
                 raise ServiceError("integrity_activation_invalid", 500) from exc
+        if self.defaults.contacts_from is not None:
+            try:
+                activation = datetime.fromisoformat(self.defaults.contacts_from.replace("Z", "+00:00"))
+                if activation.tzinfo is None or self.defaults.integrity_from is None:
+                    raise ValueError("contact activation requires timezone and integrity activation")
+                integrity_activation = datetime.fromisoformat(self.defaults.integrity_from.replace("Z", "+00:00"))
+                # Contacts are announced at intake open; integrity activates
+                # at the cutoff one day later. Every contact round needs both.
+                if activation + timedelta(days=1) < integrity_activation:
+                    raise ValueError("contact activation precedes integrity activation")
+            except (ValueError, AttributeError) as exc:
+                raise ServiceError("contact_activation_invalid", 500) from exc
         if self.defaults.benchmark_disclosure_from is not None:
             try:
                 icp_disclosure.parse_activation(
@@ -496,9 +509,11 @@ class ArenaService:
         configuration = row.get("configuration_doc") or {}
         try:
             policy_enabled = integrity.enabled(configuration)
+            contacts_enabled = contact_policy.enabled(configuration)
         except ValueError as exc:
             raise ServiceError("unsupported_integrity_policy", 409) from exc
-        if policy_enabled != (configuration.get("scorer_policy", {}).get("scoring_adapter_version") == integrity.SCORING_ADAPTER):
+        adapter = configuration.get("scorer_policy", {}).get("scoring_adapter_version")
+        if contacts_enabled != (adapter == contact_policy.SCORING_ADAPTER) or policy_enabled != contact_policy.integrity_adapter(adapter):
             raise ServiceError("integrity_scorer_policy_mismatch", 409)
         try:
             icp_disclosure.configured_policy(row)
@@ -614,6 +629,8 @@ class ArenaService:
         current = self.current_round()
         if getattr(getattr(self._config, "defaults", None), "integrity_from", None) or (current and integrity.enabled(current.get("configuration_doc") or {})):
             self._require_integrity_schema()
+        if self._config.defaults.contacts_from or (current and contact_policy.enabled(current.get("configuration_doc") or {})):
+            self._require_contact_schema()
         return {
             "database_identity": identity,
             "schema_version": int(schema_version),
@@ -630,6 +647,14 @@ class ArenaService:
             raise ServiceError("integrity_schema_unavailable", 503) from exc
         if not isinstance(result, Mapping) or result.get("schema_version") != "leadpoet.lab_arena.integrity_schema.v1" or result.get("version") != 213:
             raise ServiceError("integrity_schema_invalid", 503)
+
+    def _require_contact_schema(self) -> None:
+        try:
+            result = self._store._transport.rpc("lab_arena_contact_schema_v1", {})
+        except ArenaStoreError as exc:
+            raise ServiceError("contact_schema_unavailable", 503) from exc
+        if not isinstance(result, Mapping) or result.get("schema_version") != "leadpoet.lab_arena.contact_schema.v1" or result.get("version") != 215:
+            raise ServiceError("contact_schema_invalid", 503)
 
     def build_schedule(self, cutoff: datetime) -> Dict[str, str]:
         """Build the round's cutoff and absolute timeout budget.
@@ -738,6 +763,12 @@ class ArenaService:
                 "stage_3_scoring_close": _iso(confirmation_scoring_close),
                 "publication_deadline": _iso(confirmation_scoring_close + timedelta(seconds=1)),
             })
+        if defaults.contacts_from is not None and _parse_iso(document["schedule"]["submission_open"]) >= _parse_iso(defaults.contacts_from):
+            if not integrity.enabled(document):
+                raise ServiceError("contact_policy_requires_integrity", 503)
+            self._require_contact_schema()
+            document["contact_policy"] = contact_policy.POLICY
+            document["scorer_policy"] = scoring.build_scorer_policy(scoring_adapter_version=contact_policy.SCORING_ADAPTER)
         if (
             defaults.benchmark_disclosure_from is not None
             and cutoff >= icp_disclosure.parse_activation(
@@ -1536,11 +1567,19 @@ class ArenaService:
             }
         icps = [dict(icp) for icp in raw_icps if isinstance(icp, Mapping)]
         icp_ids = [str(icp.get("icp_id") or "").strip() for icp in icps]
+        contact_bank_valid = True
+        if contact_policy.enabled(round_row["configuration_doc"]):
+            try:
+                for icp in icps:
+                    contact_policy.validate_icp(icp)
+            except (ValueError, TypeError):
+                contact_bank_valid = False
         if (
             len(icps) != contracts.BENCHMARK_ICP_COUNT
             or len(icps) != len(raw_icps)
             or any(not icp_id for icp_id in icp_ids)
             or len(set(icp_ids)) != len(icp_ids)
+            or not contact_bank_valid
         ):
             self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
             return {
@@ -1614,8 +1653,9 @@ class ArenaService:
             return
         provider = self._config.confirmation_icp_source or confirmation.fresh_confirmation_icps
         evaluation_date = _parse_iso(round_row["configuration_doc"]["schedule"]["submission_cutoff"]).astimezone(timezone.utc).date().isoformat()
-        generated = provider(round_id=round_id, evaluation_date=evaluation_date, main_icps=main_icps)
-        bank = confirmation.build_bank(round_id, generated, main_icps)
+        has_contacts = contact_policy.enabled(round_row["configuration_doc"])
+        generated = provider(round_id=round_id, evaluation_date=evaluation_date, main_icps=main_icps, **({"contacts_required": True} if has_contacts else {}))
+        bank = confirmation.build_bank(round_id, generated, main_icps, contacts_required=has_contacts)
         payload = contracts.canonical_json(bank).encode("utf-8")
         digest = contracts.hash_bytes(payload)
         ref = "arena/%s/confirmation/%s.json" % (round_id, digest.split(":")[-1])
@@ -1751,14 +1791,15 @@ class ArenaService:
                         str(run["output_ref"]), MAX_OUTPUT_BYTES
                     ).decode("utf-8")
                 )
-                companies = validate_output_document(output)["companies"]
+                companies = validate_output_document(output, expected_schema_version=contact_policy.output_schema(configuration))["companies"]
                 position = int(run["icp_position"])
                 scoring_input = scoring.build_scoring_input(
                     scored_run_id=str(run["run_id"]),
-                    icp=integrity.agent_visible_icp(icps[position]),
+                    icp=integrity.agent_visible_icp(icps[position], contacts_required=contact_policy.enabled(configuration)),
                     companies=companies,
                     policy=policy,
                     evaluation_date=str(round_row.get("evaluation_date") or ""),
+                    contact_source_evidence=(contact_evidence.resolve_sources(self._store, run, companies) if contact_policy.enabled(configuration) else None),
                 )
                 cache_scope = judgment_cache.build_cache_scope(
                     scoring_input=scoring_input,
@@ -1922,10 +1963,8 @@ class ArenaService:
                 icp=icp,
                 companies=companies,
                 max_scored_companies=int(policy["max_scored_companies"]),
-                integrity_policy=(
-                    policy.get("scoring_adapter_version")
-                    == "qualification_integrity_v2"
-                ),
+                integrity_policy=contact_policy.integrity_adapter(policy.get("scoring_adapter_version")),
+                contacts_required=contact_policy.scorer_enabled(policy),
             )
         try:
             document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
@@ -1939,10 +1978,8 @@ class ArenaService:
         return scoring.validate_breakdowns_for_item(
             output["breakdowns"], icp=icp, companies=companies,
             max_scored_companies=int(policy["max_scored_companies"]),
-            integrity_policy=(
-                policy.get("scoring_adapter_version")
-                == "qualification_integrity_v2"
-            ),
+            integrity_policy=contact_policy.integrity_adapter(policy.get("scoring_adapter_version")),
+            contacts_required=contact_policy.scorer_enabled(policy),
         )
 
     def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
@@ -2772,10 +2809,16 @@ class ArenaService:
         position = int(response["icp_position"])
         if not 0 <= position < len(icps):
             raise ServiceError("benchmark_data_invalid", 500)
-        lease_icp = integrity.agent_visible_icp(icps[position]) if integrity.enabled(configuration) else icps[position]
+        lease_icp = integrity.agent_visible_icp(icps[position], contacts_required=contact_policy.enabled(configuration)) if integrity.enabled(configuration) else dict(icps[position])
+        # Generation can be enabled before round activation. Only the frozen
+        # round contract can request v2 output, including for legacy rounds.
+        if not contact_policy.enabled(configuration):
+            lease_icp.pop("contact_policy", None)
         lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
         if integrity.enabled(configuration):
             lease["integrity_policy"] = integrity.POLICY
+        if contact_policy.enabled(configuration):
+            lease["contact_policy"] = contact_policy.POLICY
         lease.update({
             "image_digest": configuration["scorer_image_digest"],
             "image_reference": configuration["scorer_image_reference"],
@@ -2788,6 +2831,9 @@ class ArenaService:
                 raise ServiceError("scored_run_missing", 500)
             output = json.loads(self._objects.get(scored["output_ref"]).decode("utf-8"))
             lease.update({"scored_output": output, "scorer_policy": configuration["scorer_policy"]})
+            if contact_policy.enabled(configuration):
+                companies = validate_output_document(output, expected_schema_version=contact_policy.OUTPUT_SCHEMA)["companies"]
+                lease["contact_source_evidence"] = contact_evidence.resolve_sources(self._store, scored, companies)
             return lease
         # An execution uses the participant's private source archive under the
         # same trusted Python image as every other agent.
@@ -2990,6 +3036,21 @@ class ArenaService:
                 raise ServiceError("output_invalid", 400)
             if "failure" in output or output["scored_run_id"] != run.get("scored_run_id"):
                 raise ServiceError("output_invalid", 400)
+            if contact_policy.enabled(round_row["configuration_doc"]):
+                executed = self._store.get_run(str(run["scored_run_id"]))
+                if executed is None or not executed.get("output_ref"):
+                    raise ServiceError("scored_run_missing", 500)
+                companies = validate_output_document(
+                    json.loads(self._objects.get_bounded(executed["output_ref"], MAX_OUTPUT_BYTES)),
+                    expected_schema_version=contact_policy.OUTPUT_SCHEMA,
+                )["companies"]
+                try:
+                    scoring.validate_breakdowns_for_item(
+                        output["breakdowns"], icp=self.evaluation_icps(round_id)[int(run["icp_position"])],
+                        companies=companies, integrity_policy=True, contacts_required=True,
+                    )
+                except scoring.ScoringError as exc:
+                    raise ServiceError("contact_score_invalid", 400) from exc
             output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
             self._objects.put(output_ref, contracts.canonical_json(output).encode("utf-8"))
             if run.get("judgment_cache_key"):
@@ -3014,6 +3075,7 @@ class ArenaService:
             try:
                 output = validate_output_document(
                     body.get("output"),
+                    expected_schema_version=contact_policy.output_schema(round_row["configuration_doc"]),
                     require_intent_dates=not integrity.enabled(
                         round_row["configuration_doc"]
                     ),
@@ -3454,7 +3516,7 @@ class ArenaService:
         result = {
             "round_id": round_id,
             "icps": [
-                {**(integrity.agent_visible_icp(icps[position]) if integrity.enabled(row.get("configuration_doc") or {}) else icps[position]), "icp_position": position,
+                {**(integrity.agent_visible_icp(icps[position], contacts_required=contact_policy.enabled(row.get("configuration_doc") or {})) if integrity.enabled(row.get("configuration_doc") or {}) else icps[position]), "icp_position": position,
                  "baseline_score": disclosure["baseline_scores"].get(position)}
                 for position in disclosure["public_positions"]
             ],
@@ -3558,4 +3620,29 @@ class ArenaService:
                 "final": None if final_entry is None else final_entry.get("final_score"),
             },
         }
+        if contact_policy.enabled(row.get("configuration_doc") or {}):
+            judgments = {}
+            for stage in (1, 2, 3):
+                if public_positions.intersection(contracts.stage_positions(stage)):
+                    judgments.update(self._scoring_outputs(round_id, stage))
+            icps = self.evaluation_icps(round_id) if outputs else []
+            contacts = {}
+            for run in runs:
+                run_id = str(run["run_id"])
+                judge = judgments.get(run_id)
+                if run_id not in outputs or not judge or judge.get("status") != "accepted":
+                    continue
+                try:
+                    breakdowns = self._verified_breakdowns(
+                        judge, icp=icps[int(run["icp_position"])], companies=outputs[run_id]["companies"],
+                        policy=row["configuration_doc"]["scorer_policy"],
+                    )
+                except scoring.ScoringError as exc:
+                    raise ServiceError("public_contact_verification_unavailable", 503) from exc
+                contacts[run_id] = [
+                    {key: value for key, value in verify.redact_breakdown(item).items()
+                     if key in {"company_index", "company_qualified", "contact_qualified", "contact_identity_key", "email_status", "contact_verification"}}
+                    for item in breakdowns
+                ]
+            result["contact_verifications"] = contacts
         return result

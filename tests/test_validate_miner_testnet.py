@@ -233,6 +233,11 @@ def test_serve_pins_the_runtime_service_to_the_requested_round():
     assert "pinned_round_id=round_id" in source
 
 
+def test_serve_passes_contact_activation_to_shadow_round_defaults():
+    source = inspect.getsource(SCRIPT._serve)
+    assert 'contacts_from=os.environ.get("LAB_ARENA_CONTACTS_FROM") or None' in source
+
+
 def test_testnet_database_uses_current_arena_schema_and_review_migration():
     from tests.lab_arena.lab_arena_pg_harness import POSTGREST_MIGRATIONS
 

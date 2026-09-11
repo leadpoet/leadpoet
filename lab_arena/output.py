@@ -16,6 +16,12 @@ from qualification.competition_models import validate_companies as validate_publ
 
 MAX_OUTPUT_BYTES = 512 * 1024
 MAX_COMPANIES = 5
+SUPPORTED_OUTPUT_SCHEMA_VERSIONS = frozenset(
+    {
+        contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION,
+    }
+)
 
 
 class OutputInvalid(ArenaContractError):
@@ -36,12 +42,19 @@ def parse_output_bytes(data: bytes) -> Any:
 
 
 def validate_companies(
-    companies: Any, *, require_intent_dates: bool = False
+    companies: Any,
+    *,
+    require_intent_dates: bool = False,
+    schema_version: str = contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
 ) -> List[Dict[str, Any]]:
     """Validate companies with the shared public competition model."""
 
     try:
-        rows = validate_public_companies(companies, max_companies=MAX_COMPANIES)
+        rows = validate_public_companies(
+            companies,
+            max_companies=MAX_COMPANIES,
+            schema_version=schema_version,
+        )
     except (TypeError, ValueError) as exc:
         raise OutputInvalid("companies fail the public output contract") from exc
     if require_intent_dates and any(
@@ -54,7 +67,10 @@ def validate_companies(
 
 
 def output_document_from_bytes(
-    data: bytes, *, require_intent_dates: bool = False
+    data: bytes,
+    *,
+    require_intent_dates: bool = False,
+    expected_schema_version: str = contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
 ) -> Dict[str, Any]:
     """Parse and validate the model's ``companies.json`` into the output document.
 
@@ -62,6 +78,8 @@ def output_document_from_bytes(
     are ``companies`` and optionally ``schema_version``.
     """
 
+    if expected_schema_version not in SUPPORTED_OUTPUT_SCHEMA_VERSIONS:
+        raise OutputInvalid("unsupported output schema version")
     parsed = parse_output_bytes(data)
     try:
         contracts.check_strict_document(parsed, contracts.OUTPUT_LIMITS)
@@ -74,21 +92,34 @@ def output_document_from_bytes(
             contracts.require_only_keys(parsed, ("schema_version", "companies"))
         except ArenaContractError as exc:
             raise OutputInvalid("output contains unsupported fields") from exc
-        if "schema_version" in parsed and parsed["schema_version"] != contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION:
+        if (
+            "schema_version" in parsed
+            and parsed["schema_version"] != expected_schema_version
+        ):
             raise OutputInvalid("unsupported output schema version")
         companies = parsed.get("companies")
     else:
         raise OutputInvalid("output must be a list or an object")
     validated = validate_companies(
-        companies, require_intent_dates=require_intent_dates
+        companies,
+        require_intent_dates=require_intent_dates,
+        schema_version=expected_schema_version,
     )
-    return {"schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION, "companies": validated}
+    return {"schema_version": expected_schema_version, "companies": validated}
 
 
 def validate_output_document(
-    document: Any, *, require_intent_dates: bool = False
+    document: Any,
+    *,
+    require_intent_dates: bool = False,
+    expected_schema_version: str | None = None,
 ) -> Dict[str, Any]:
-    """Validate an already-parsed output document (the service side of completion)."""
+    """Validate a stored output, optionally requiring its assigned schema.
+
+    ``None`` infers only from the document's declared, known version. Model
+    output parsing uses :func:`output_document_from_bytes`, whose default stays
+    pinned to v1 for backwards compatibility.
+    """
 
     if not isinstance(document, Mapping):
         raise OutputInvalid("output document must be an object")
@@ -96,16 +127,23 @@ def validate_output_document(
         contracts.require_only_keys(document, ("schema_version", "companies"))
     except ArenaContractError as exc:
         raise OutputInvalid("output contains unsupported fields") from exc
-    if document.get("schema_version") != contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION:
+    declared_schema_version = document.get("schema_version")
+    if declared_schema_version not in SUPPORTED_OUTPUT_SCHEMA_VERSIONS:
+        raise OutputInvalid("unsupported output schema version")
+    if (
+        expected_schema_version is not None
+        and declared_schema_version != expected_schema_version
+    ):
         raise OutputInvalid("unsupported output schema version")
     try:
         contracts.check_strict_document(document, contracts.OUTPUT_LIMITS)
     except ArenaContractError as exc:
         raise OutputInvalid(str(exc)) from exc
     return {
-        "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        "schema_version": declared_schema_version,
         "companies": validate_companies(
             document.get("companies"),
             require_intent_dates=require_intent_dates,
+            schema_version=declared_schema_version,
         ),
     }

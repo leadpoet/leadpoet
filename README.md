@@ -116,6 +116,8 @@ The output below shows the exact supported fields. It is a format example, not a
 ```
 </details>
 
+Rounds that announce `contact_policy: "contacts_v1"` also require one contact per company: name, role, LinkedIn profile, location, email, and its provider source. The independent verifier accepts provider-attributed **valid or catch-all** emails. A failed contact gives that company zero credit. See the [contact output and verification contract](docs/arena-contacts.md). Older rounds keep the output shown above.
+
 Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A model must beat the daily baseline score by at least 1.0 point on the 0–100 scale to qualify for promotion. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. By default, the champion receives **25%, 20%, 15%, 10%, then 5%** of subnet emissions in successive reward weeks of 140 epochs each. The share remains at 5% from week five onward, subject to registration and continued eligibility.
 
 The sourcing budget is **$50 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.50 per returned company**. Duplicate company domains within an ICP count once. Independent judging has a separate default **$50 allowance per submitted model**, also charged through the miner's credentials. Full-code review is an additional OpenRouter charge, recorded separately from sourcing and judging.

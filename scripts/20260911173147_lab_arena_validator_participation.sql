@@ -1,4 +1,4 @@
--- Additive minimum-participation evidence. Apply after migration 214.
+-- Additive minimum-participation evidence. Apply after migration 215.
 -- Historical accepted rows intentionally remain NULL: updated_at is mutable.
 BEGIN;
 SET LOCAL lock_timeout = '5s';

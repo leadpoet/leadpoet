@@ -16,14 +16,30 @@ BANK_SCHEMA = "leadpoet.lab_arena.confirmation_bank.v1"
 COHORT_SCHEMA = "leadpoet.lab_arena.confirmation_cohort.v1"
 
 
-def build_bank(round_id: str, icps: Sequence[Mapping[str, Any]], main_icps: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def build_bank(
+    round_id: str,
+    icps: Sequence[Mapping[str, Any]],
+    main_icps: Sequence[Mapping[str, Any]],
+    *,
+    contacts_required: bool = False,
+) -> dict[str, Any]:
     if len(icps) != contracts.CONFIRMATION_ICP_COUNT:
         raise ValueError("confirmation requires exactly five fresh ICPs")
-    seen = {integrity.requirement_fingerprint(icp) for icp in main_icps}
+    seen = {
+        integrity.requirement_fingerprint(icp, contacts_required=contacts_required)
+        for icp in main_icps
+    }
     prepared = []
     for index, icp in enumerate(icps):
-        projected = integrity.agent_visible_icp(icp)
-        fingerprint = integrity.requirement_fingerprint(projected)
+        projected = integrity.agent_visible_icp(
+            icp, contacts_required=contacts_required
+        )
+        if contacts_required:
+            from lab_arena.contact_policy import validate_icp
+            validate_icp(projected)
+        fingerprint = integrity.requirement_fingerprint(
+            projected, contacts_required=contacts_required
+        )
         if fingerprint in seen:
             raise ValueError("confirmation ICP repeats an evaluated requirement set")
         seen.add(fingerprint)
@@ -69,7 +85,14 @@ def select_cohort(entries: Sequence[Mapping[str, Any]], eligibility: Mapping[str
         "required": bool(chosen)}
 
 
-def fresh_confirmation_icps(*, round_id: str, evaluation_date: str, main_icps: Sequence[Mapping[str, Any]], api_key: str | None = None) -> list[dict[str, Any]]:
+def fresh_confirmation_icps(
+    *,
+    round_id: str,
+    evaluation_date: str,
+    main_icps: Sequence[Mapping[str, Any]],
+    api_key: str | None = None,
+    contacts_required: bool = False,
+) -> list[dict[str, Any]]:
     """Generate a separate private bank with the existing trusted generator.
 
     No template fallback: a missing provider result delays commitment rather
@@ -85,23 +108,41 @@ def fresh_confirmation_icps(*, round_id: str, evaluation_date: str, main_icps: S
         "the same realism and breadth requirements."
     )
     def generate():
-        return asyncio.run(asyncio.wait_for(generate_icps_with_openrouter(
-            int(evaluation_date.replace("-", "")), total_icps=contracts.CONFIRMATION_ICP_COUNT,
-            generation_context=context,
-            api_key=os.environ.get("LAB_ARENA_OPENROUTER_API_KEY", "") if api_key is None else api_key,
-        ), timeout=600))
+        kwargs = {
+            "generation_context": context,
+            "api_key": (
+                os.environ.get("LAB_ARENA_OPENROUTER_API_KEY", "")
+                if api_key is None
+                else api_key
+            ),
+        }
+        if contacts_required:
+            kwargs["contacts_required"] = True
+        return asyncio.run(asyncio.wait_for(
+            generate_icps_with_openrouter(
+                int(evaluation_date.replace("-", "")),
+                total_icps=contracts.CONFIRMATION_ICP_COUNT,
+                **kwargs,
+            ),
+            timeout=600,
+        ))
 
     # Service methods may be called from an ASGI event loop or a sync worker.
     with ThreadPoolExecutor(max_workers=1) as pool:
         generated = pool.submit(generate).result(timeout=600)
     if not generated:
         raise ValueError("confirmation generation unavailable")
-    seen = {integrity.requirement_fingerprint(icp) for icp in main_icps}
+    seen = {
+        integrity.requirement_fingerprint(icp, contacts_required=contacts_required)
+        for icp in main_icps
+    }
     candidates = list(generated[0])
     secrets.SystemRandom().shuffle(candidates)
     selected = []
     for icp in candidates:
-        fingerprint = integrity.requirement_fingerprint(icp)
+        fingerprint = integrity.requirement_fingerprint(
+            icp, contacts_required=contacts_required
+        )
         if fingerprint not in seen:
             selected.append(dict(icp))
             seen.add(fingerprint)

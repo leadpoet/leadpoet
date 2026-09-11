@@ -472,6 +472,11 @@ DEEPLINE_TOOLS = (
     "firecrawl_scrape",
     "free_simple_company_search",
     "generic_http_request",
+    "harvestapi_get_profile",
+    "harvestapi_search_leads",
+    "zerobounce_validate",
+    "bounceban_verify_single",
+    "bounceban_get_single_status",
     "harvestapi_get_job",
     "harvestapi_get_post",
     "hunter_discover",
@@ -491,6 +496,11 @@ DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
     "firecrawl_scrape": "firecrawl",
     "free_simple_company_search": "deepline_native",
     "generic_http_request": "generic_http",
+    "harvestapi_get_profile": "harvestapi",
+    "harvestapi_search_leads": "harvestapi",
+    "zerobounce_validate": "zerobounce",
+    "bounceban_verify_single": "bounceban",
+    "bounceban_get_single_status": "bounceban",
     "harvestapi_get_job": "harvestapi",
     "harvestapi_get_post": "harvestapi",
     "hunter_discover": "hunter",
@@ -1377,6 +1387,28 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
     for name, default in operation.defaults.items():
         if name not in normalized:
             normalized[name] = _deep_copy_json(default)
+    if operation_id == "deepline.execute":
+        tool = normalized.get("tool")
+        payload = normalized.get("payload")
+        # These additions are read-only single-record operations. In particular,
+        # no caller-controlled webhook URL is needed for synchronous judging.
+        contact_fields = {
+            "zerobounce_validate": {"email", "ip_address"},
+            "bounceban_verify_single": {"email", "mode", "disable_catchall_verify"},
+            "bounceban_get_single_status": {"id"},
+            "harvestapi_get_profile": {"url", "publicIdentifier", "profileId", "findEmail", "main", "skipSmtp", "includeAboutProfile"},
+        }
+        if tool in contact_fields:
+            if not isinstance(payload, Mapping) or set(payload) - contact_fields[tool]:
+                raise OperationRequestError("invalid_field", "$.payload")
+            if any(not isinstance(value, str) or not value or len(value) > 2048 for value in payload.values()):
+                raise OperationRequestError("invalid_field", "$.payload")
+            required = "id" if tool == "bounceban_get_single_status" else "email"
+            if tool == "harvestapi_get_profile":
+                if not any(payload.get(key) for key in ("url", "publicIdentifier", "profileId")):
+                    raise OperationRequestError("invalid_field", "$.payload")
+            elif not payload.get(required):
+                raise OperationRequestError("invalid_field", "$.payload")
     encoded = contracts.canonical_json(normalized).encode("utf-8")
     if len(encoded) > operation.max_request_bytes:
         raise OperationRequestError("request_too_large")

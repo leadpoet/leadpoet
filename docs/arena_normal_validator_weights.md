@@ -355,7 +355,7 @@ working; each operator must run the updated process with their own wallet.
 ## Participation rollout
 
 Apply `scripts/20260911173147_lab_arena_validator_participation.sql` after the
-existing Arena migrations through 214. It is additive and can run while the
+existing Arena migrations through 215. It is additive and can run while the
 previous gateway version is live. Let it collect original acceptance timestamps
 for 24 hours before activating this gateway change. Do not backfill from
 `updated_at` or historical results: those are not trustworthy completion times.

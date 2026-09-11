@@ -93,6 +93,7 @@ RUN_RESULT_SCHEMA_VERSION = "leadpoet.lab_arena.run_result.v1"
 PUBLICATION_SCHEMA_VERSION = "leadpoet.lab_arena.publication.v1"
 REWARD_BASIS_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v1"
 OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v1"
+CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v2"
 SUBMISSION_SCHEMA_VERSION = "leadpoet.lab_arena.submission.v1"
 PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
 SUBMISSION_COSTS_SCHEMA_VERSION = "leadpoet.lab_arena.submission_costs.v1"
@@ -691,6 +692,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("netuid", "int", required=False, minimum=1),
     F("rewards_enabled", "bool"),
     F("integrity_policy", "str", required=False, choices=("arena_integrity_v1",)),
+    F("contact_policy", "str", required=False, choices=("contacts_v1",)),
     # Optional only for rounds created before delayed benchmark disclosure.
     F(
         "benchmark_disclosure_policy",
@@ -736,17 +738,21 @@ ROUND_CONFIGURATION_FIELDS = (
 
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
-    from lab_arena import integrity
+    from lab_arena import contact_policy, integrity
     is_integrity = integrity.enabled(config)
+    has_contacts = contact_policy.enabled(config)
+    if has_contacts and not is_integrity:
+        raise ArenaContractError("contact policy requires integrity policy")
+    expected_adapter = contact_policy.SCORING_ADAPTER if has_contacts else integrity.SCORING_ADAPTER
     confirmation_keys = {"stage_3_start", "stage_3_close", "stage_3_scoring_close"}
     if is_integrity:
         if any(not config["schedule"].get(key) for key in confirmation_keys):
             raise ArenaContractError("integrity policy requires confirmation schedule")
-        if config["scorer_policy"].get("scoring_adapter_version") != integrity.SCORING_ADAPTER:
+        if config["scorer_policy"].get("scoring_adapter_version") != expected_adapter:
             raise ArenaContractError("integrity policy requires matching scorer adapter")
     elif confirmation_keys.intersection(config["schedule"]):
         raise ArenaContractError("confirmation schedule requires integrity policy")
-    elif config["scorer_policy"].get("scoring_adapter_version") == integrity.SCORING_ADAPTER:
+    elif contact_policy.integrity_adapter(config["scorer_policy"].get("scoring_adapter_version")):
         raise ArenaContractError("integrity scorer adapter requires matching round policy")
     if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
         raise ArenaContractError("round cost-per-company cap cannot be null")

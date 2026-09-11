@@ -1,6 +1,6 @@
-# Bittensor 10 understands the stateful epoch metadata introduced by Finney
-# runtime spec 432. The gateway's measured Python 3.9 runtime remains on the
-# final v9-compatible dependency line until that runtime is rebuilt.
+# Use a fresh Python 3.11 environment for normal Arena validators and gateway
+# hosts. Bittensor 10 supports Finney's stateful epoch metadata. The older
+# Python markers below are retained only for legacy image builds, not validators.
 bittensor>=9.10,<10.0.0; python_version < "3.10"
 bittensor==10.5.0; python_version >= "3.10"
 async-substrate-interface>=1.6.1,<1.7; python_version < "3.10"
@@ -17,7 +17,7 @@ py-sr25519-bindings>=0.2.0; python_version >= "3.10"
 # HTTP and networking
 requests>=2.31.0
 aiohttp>=3.9.5
-aiodns>=3.1.1
+aiodns>=3.5.0
 pysocks>=1.7.1  # SOCKS5 proxy support for DNS queries
 
 # Data processing and ML
@@ -83,8 +83,7 @@ google-cloud-firestore==2.11.1
 google-auth==2.17.3
 firebase-admin>=6.2.0
 
-# Miner-specific
-bt>=0.1.9
+# Bittensor operator CLI (the unrelated PyPI package "bt" is not needed)
 bittensor-cli>=1.0.0
 
 # Code quality and linting
@@ -101,22 +100,21 @@ python-Levenshtein>=0.23.0
 
 
 # Enhanced validation dependencies
-python-whois>=0.7.3
+python-whois>=0.9.5
 fuzzywuzzy>=0.18.0
 
 # Core dependencies
-httpx>=0.27.0
+httpx>=0.28.1
 openrouter>=0.0.16
-firecrawl>=2.16.0
-openai>=1.0.0
+firecrawl>=4.3.6
+openai>=2.1.0
 
 phonenumbers>=8.13.0
 portalocker>=2.7.0
 publicsuffix2>=2.20191221
 
 # Schema validation and configuration
-jsonschema>=4.17.0
-PyYAML>=6.0
+jsonschema>=4.25.1
 
 # throwaway email blocklist
 disposable-email-domains>=0.0.138

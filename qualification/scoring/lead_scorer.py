@@ -96,6 +96,9 @@ from qualification.scoring.company_fit_decision import (
     strict_company_fit_boolean,
 )
 from qualification.scoring.arena_integrity import (
+    bounded_criterion_evidence,
+    fit_evidence_url_hints,
+    MAX_FIT_EVIDENCE_URL_HINTS,
     source_dates_from_verdict,
     source_grounded_date_verdict,
 )
@@ -135,7 +138,6 @@ MAX_COMPANY_ICP_FIT_SCORE = 40
 MAX_COMPANY_INTENT_SIGNAL_SCORE = 60
 MAX_COMPANY_TOTAL_SCORE = MAX_COMPANY_ICP_FIT_SCORE + MAX_COMPANY_INTENT_SIGNAL_SCORE  # = 100
 MAX_COMPETITION_INTENT_SCORE = 100
-MAX_FIT_EVIDENCE_URL_HINTS = 3
 COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT = {
     1: 60.0,
     2: 80.0,
@@ -969,24 +971,7 @@ def _valid_web_evidence_url(value: Any) -> str:
 def _fit_evidence_url_hints(company: CompanyOutput) -> list[str]:
     """Return bounded, prompt-safe public URLs as untrusted lookup hints."""
 
-    hints: list[str] = []
-    for index, value in enumerate(company.fit_evidence_urls):
-        if not isinstance(value, str) or len(value) > 2048:
-            continue
-        try:
-            public_url = public_http_url(value)
-            safe_url = canonical_candidate_prompt_url(
-                public_url,
-                f"fit_evidence_urls[{index}]",
-            )
-        except (TypeError, ValueError):
-            continue
-        if safe_url in hints:
-            continue
-        hints.append(safe_url)
-        if len(hints) == MAX_FIT_EVIDENCE_URL_HINTS:
-            break
-    return hints
+    return fit_evidence_url_hints(company.fit_evidence_urls)
 
 
 def _verified_homepage_identity_anchor(
@@ -2757,6 +2742,10 @@ async def _attempt_competition_evidence_repair(
     the original zero stands. Never raises; bounded to one repair run and at
     most two re-verified sources per company.
     """
+    if integrity_policy:
+        # A rejected integrity bundle is terminal. Optional post-verdict
+        # repair cannot turn it into another draw of the same criterion.
+        return None
     try:
         from qualification.scoring import deepline_evidence_repair as _repair
 
@@ -2774,16 +2763,6 @@ async def _attempt_competition_evidence_repair(
             None,
         )
         if primary is None:
-            return None
-        if integrity_policy and any(
-            isinstance(row, Mapping)
-            and row.get("matched_icp_signal") == 0
-            and row.get("date_verdict") == "out_of_window"
-            for row in (original_signal_results or [])
-        ):
-            # Repair replaces evidence only for the primary criterion. Keep a
-            # confirmed stale primary terminal, while a stale independent bonus
-            # criterion cannot suppress repair of unrelated primary evidence.
             return None
         criterion = ""
         icp_signals = getattr(icp, "intent_signals", None) or []
@@ -3303,7 +3282,20 @@ async def score_company_competition_intent_signal(
             return str(icp_evidence_types[idx] or "UNSPECIFIED").upper()
         return "UNSPECIFIED"
 
-    for signal in company.intent_signals:
+    if integrity_policy:
+        from gateway.qualification.models import IntentSignal
+
+        evidence_groups = [
+            [IntentSignal(**row) for row in group]
+            for group in bounded_criterion_evidence([
+                signal.model_dump(mode="json") for signal in company.intent_signals
+            ])
+        ]
+    else:
+        evidence_groups = [[signal] for signal in company.intent_signals]
+
+    for evidence_group in evidence_groups:
+        signal = evidence_group[0]
         domain = _extract_domain(signal.url)
         if not integrity_policy and domain in seen_domains:
             logger.warning(
@@ -3385,6 +3377,7 @@ async def score_company_competition_intent_signal(
                 llm_only_intent_gate=True,
                 integrity_policy=integrity_policy,
                 verdict_out=signal_verdicts,
+                **({"evidence_signals": evidence_group} if integrity_policy else {}),
             )
         )
         if no_time_decay:
@@ -3447,6 +3440,8 @@ async def score_company_competition_intent_signal(
             ),
             "matched_icp_signal": resolved_idx,
             "evidence_type": _evidence_type_for(resolved_idx),
+            **({"evidence_urls": [item.url for item in evidence_group]}
+               if integrity_policy else {}),
             **({"judge_verdict": judge_verdict} if judge_verdict else {}),
         })
 
@@ -3919,6 +3914,7 @@ async def _score_single_intent_signal(
     enforce_source_integrity: bool = False,
     integrity_policy: bool = False,
     verdict_out: Optional[List[dict]] = None,
+    evidence_signals: Optional[Sequence["IntentSignal"]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -3964,6 +3960,8 @@ async def _score_single_intent_signal(
         }
         return {
             "evidence_url": signal.url,
+            **({"evidence_urls": [item.url for item in evidence_signals]}
+               if evidence_signals else {}),
             "evidence_source": (
                 signal.source.value
                 if hasattr(signal.source, "value")
@@ -4223,6 +4221,11 @@ async def _score_single_intent_signal(
                 stage1_soft_reject=stage1_soft_reject,
                 integrity_policy=integrity_policy,
                 buyer_max_age_days=buyer_max_age_days,
+                **({"evidence_bundle": [
+                    {"url": item.url, "description": item.description,
+                     "date": item.date, "snippet": item.snippet}
+                    for item in evidence_signals
+                ]} if integrity_policy and evidence_signals else {}),
             )
     except Exception as three_stage_error:
         logger.error(
@@ -4442,6 +4445,30 @@ async def _score_single_intent_signal(
         # relationship earns the job premium. Valid unknown publishers retain
         # ordinary web-evidence credit instead of becoming a hard rejection.
         source_multiplier = SOURCE_TYPE_MULTIPLIERS["news"]
+
+    if integrity_policy and evidence_signals and len(evidence_signals) > 1:
+        # Premiums belong to the sources actually used for the combined
+        # verdict. An unrelated job URL cannot lend its premium to news.
+        from qualification.scoring.intent_verification_three_stage import _extract_linkedin_job_id
+
+        cited = set(stage3_item.get("evidence_urls_used") or [])
+        verified_jobs = set(three_stage_result.get("verified_job_source_urls") or [])
+        multipliers = []
+        for item in evidence_signals:
+            if item.url not in cited:
+                continue
+            source = item.source.value if hasattr(item.source, "value") else str(item.source)
+            multiplier = SOURCE_TYPE_MULTIPLIERS.get(source, 0.5)
+            if (source == "job_board" or _extract_linkedin_job_id(item.url)) and item.url not in verified_jobs:
+                multiplier = SOURCE_TYPE_MULTIPLIERS["news"]
+            multipliers.append(multiplier)
+        if not multipliers:
+            _record_verdict(
+                "rejected_three_stage", rejection_reason="combined_evidence_source_unbound",
+                client_ready=False, verification_trace=_verification_trace(three_stage_result),
+            )
+            return 0.0, 0, "uncertain", None, -1
+        source_multiplier = max(multipliers)
 
     logger.info(
         "Intent signal three-stage ACCEPT  decision=%s  "

@@ -27,6 +27,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
     hotkey,
     round_config,
 )
+from tests.lab_arena.judgment_cache_test import _company, _icp
 
 
 MIGRATION = "212-lab-arena-accepted-judgment-cache.sql"
@@ -49,8 +50,8 @@ def store(database):
 def _scope(round_id: str, scored_run_id: str, position: int, marker: str) -> dict:
     document = scoring.build_scoring_input(
         scored_run_id=scored_run_id,
-        icp={"icp_id": "icp-%d" % position, "prompt": "Find %s" % marker},
-        companies=[{"company_name": marker, "website": "https://%s.example" % marker}],
+        icp={**_icp(), "icp_id": "icp-%d" % position, "prompt": "Find %s" % marker},
+        companies=[_company(marker)],
         policy=scoring.build_scorer_policy(),
         evaluation_date="2026-09-02",
     )

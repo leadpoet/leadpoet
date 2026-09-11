@@ -2295,6 +2295,35 @@ class ArenaService:
 
     # -- publication and downstream reward activation -------------------------
 
+    def _confirmation_account_failures(self, round_row: Mapping[str, Any]) -> set[str]:
+        """Derive disqualifications from terminal judgments in the frozen plan.
+
+        Keep the original cohort. A missing judgment or infrastructure failure
+        cannot be treated as a withdrawal; the publication guard verifies the
+        same evidence independently in PostgreSQL.
+        """
+        if not (round_row.get("confirmation_cohort") or {}).get("required"):
+            return set()
+        chosen = self._scoring_outputs(str(round_row["round_id"]), 3)
+        failures: set[str] = set()
+        incomplete: set[str] = set()
+        for item in self._load_scoring_plan(round_row, 3)["work_items"]:
+            submission_id = str(item["submission_id"])
+            run = chosen.get(item["scored_run_id"]) or {}
+            if run.get("status") == "accepted":
+                continue
+            if run.get("status") == "failed" and run.get("terminal_cause") in (
+                "credential_error", "budget_exhausted",
+            ):
+                failures.add(submission_id)
+            else:
+                incomplete.add(submission_id)
+        baseline_ids = {
+            str(row["submission_id"])
+            for row in round_row.get("participants") or [] if row.get("is_king")
+        }
+        return failures - incomplete - baseline_ids
+
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         policy_enabled = integrity.enabled(round_row.get("configuration_doc") or {})
@@ -2310,6 +2339,7 @@ class ArenaService:
         )
         main_scores = {entry["submission_id"]: entry["final_score"] for entry in final_entries}
         cohort = round_row.get("confirmation_cohort") or {}
+        withdrawn = self._confirmation_account_failures(round_row) if policy_enabled else set()
         if policy_enabled and cohort.get("required"):
             confirmation_entries = {entry["submission_id"]: entry for entry in self._score_entries_from_runs(round_row, contracts.stage_positions(3), "final_score")}
             for entry in final_entries:
@@ -2320,9 +2350,16 @@ class ArenaService:
                 round_row,
                 str(entry["submission_id"]),
                 execution_runs,
+                positions=(range(contracts.BENCHMARK_ICP_COUNT)
+                           if entry["submission_id"] in withdrawn else None),
             )
             for entry in final_entries
         }
+        for submission_id in withdrawn:
+            if submission_id in eligibility:
+                eligibility[submission_id].update(
+                    eligible=False, eligibility_reason="confirmation_account_failure"
+                )
         king_entry = next((e for e in final_entries if e["is_king"]), None)
         if king_entry is None or king_entry["final_score"] is None:
             return self._store.cancel_round(

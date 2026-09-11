@@ -1,8 +1,8 @@
 """Pure helpers for the versioned Arena score-integrity policy.
 
-The helpers in this module deliberately do not depend on the scorer models.  The
-Arena parent can therefore use the same identity grouping before a retry that
-the scorer uses after validation, without importing the networked judge.
+The Arena parent and scorer share identity grouping and evidence projection
+without importing the networked judge. Model validation for fit lookup hints
+is imported only when those hints are projected.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from leadpoet_verifier.identity.normalization import (
 
 ARENA_INTEGRITY_POLICY = "arena_integrity_v1"
 ARENA_INTEGRITY_SCORER_ADAPTER = "qualification_integrity_v2"
+MAX_EVIDENCE_PER_CRITERION = 3
+MAX_FIT_EVIDENCE_URL_HINTS = 3
 
 _VERIFIED_IDENTITY_SOURCES = frozenset({
     "company_homepage",
@@ -120,8 +122,8 @@ def canonical_company_identity(
         registrable = normalized_url.domain.registrable_domain
     normalized = normalize_name(name, strip_legal_suffix=True)
     key = (
-        f"domain:{registrable}|linkedin:{verified_linkedin_slug}"
-        if verified and registrable and verified_linkedin_slug
+        f"linkedin:{verified_linkedin_slug}"
+        if verified and verified_linkedin_slug
         else f"domain:{registrable}|name:{normalized}"
     )
     return ArenaCompanyIdentity(
@@ -140,19 +142,17 @@ def same_company_identity(
     """Compare exact names or independently verified LinkedIn identities."""
 
     return bool(
-        left.registrable_domain
-        and left.registrable_domain == right.registrable_domain
-        and (
-            (
-                left.verified
-                and right.verified
-                and left.verified_linkedin_slug
-                and left.verified_linkedin_slug == right.verified_linkedin_slug
-            )
-            or (
-                left.normalized_name
-                and left.normalized_name == right.normalized_name
-            )
+        (
+            left.verified
+            and right.verified
+            and left.verified_linkedin_slug
+            and left.verified_linkedin_slug == right.verified_linkedin_slug
+        )
+        or (
+            left.registrable_domain
+            and left.registrable_domain == right.registrable_domain
+            and left.normalized_name
+            and left.normalized_name == right.normalized_name
         )
     )
 
@@ -167,14 +167,64 @@ def company_identity_alias_keys(identity: ArenaCompanyIdentity) -> tuple[str, ..
         )
     if (
         identity.verified
-        and identity.registrable_domain
         and identity.verified_linkedin_slug
     ):
-        aliases.append(
-            "domain:"
-            f"{identity.registrable_domain}|linkedin:{identity.verified_linkedin_slug}"
-        )
+        aliases.append(f"linkedin:{identity.verified_linkedin_slug}")
     return tuple(dict.fromkeys(aliases))
+
+
+def bounded_criterion_evidence(
+    signals: Sequence[Mapping[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Keep the first three distinct source URLs for each requested criterion.
+
+    The same page gets one claim slot, regardless of repeated text or dates.
+    Preserve first-occurrence order and meaningful URL query parameters. This
+    exact projection is shared by the judge adapter and its cache identity.
+    """
+    groups: dict[int, list[dict[str, Any]]] = {}
+    urls: dict[int, set[str]] = {}
+    for signal in signals:
+        index = int(signal.get("matched_icp_signal", -1))
+        group = groups.setdefault(index, [])
+        seen = urls.setdefault(index, set())
+        if len(group) >= MAX_EVIDENCE_PER_CRITERION:
+            continue
+        raw_url = str(signal.get("url") or "")
+        try:
+            url = normalize_url(raw_url).url
+        except NormalizationError:
+            # Model validation owns unsupported URL forms (for example public
+            # IP literals). Do not turn a model-incompatible row into an
+            # exception in the gateway's cache projection.
+            url = raw_url
+        if url in seen:
+            continue
+        seen.add(url)
+        group.append({**signal, "url": url})
+    return list(groups.values())
+
+
+def fit_evidence_url_hints(values: Sequence[str]) -> list[str]:
+    """Share the exact bounded lookup hints between company judging and cache."""
+    from gateway.qualification.models import canonical_candidate_prompt_url
+    from qualification.competition_models import public_http_url
+
+    hints: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or len(value) > 2048:
+            continue
+        try:
+            safe_url = canonical_candidate_prompt_url(
+                public_http_url(value), f"fit_evidence_urls[{index}]",
+            )
+        except (TypeError, ValueError):
+            continue
+        if safe_url not in hints:
+            hints.append(safe_url)
+        if len(hints) == MAX_FIT_EVIDENCE_URL_HINTS:
+            break
+    return hints
 
 
 def mark_duplicate_companies(

@@ -43,12 +43,7 @@ def _json_copy(value: Any) -> Any:
 
 
 def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
-    """Return every judge-visible field except the per-run transport identity.
-
-    Array order is significant.  In particular, neither companies nor nested
-    claims are sorted or deduplicated: a differently ordered or differently
-    worded output must receive a different judgment.
-    """
+    """Hash the adapter's effective input, excluding unused submitted fields."""
 
     if not isinstance(document, Mapping) or tuple(document.keys()) != _SCORING_INPUT_FIELDS:
         raise JudgmentCacheError("scoring input fields or field order changed")
@@ -56,6 +51,9 @@ def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
         raise JudgmentCacheError("scoring input schema changed")
     copied = _json_copy(document)
     del copied["scored_run_id"]
+    from qualification.scoring.competition import effective_competition_input
+
+    copied.update(effective_competition_input(copied["companies"], copied["icp"]))
     return copied
 
 

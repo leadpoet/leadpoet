@@ -17,9 +17,11 @@ from qualification.employee_buckets import (
     normalize_observed_employee_count_bucket,
 )
 from qualification.scoring.arena_integrity import (
+    bounded_criterion_evidence,
     canonical_company_identity,
     company_fit_verified,
     company_identity_alias_keys,
+    fit_evidence_url_hints,
     verified_identity_receipt,
 )
 
@@ -229,7 +231,9 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
+def _normalized_company(
+    company: Mapping[str, Any], *, integrity_policy: bool = False,
+) -> dict[str, Any]:
     try:
         row = CompetitionCompany.model_validate(company).model_dump(mode="json")
     except Exception as exc:
@@ -249,6 +253,8 @@ def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
         }
         for signal in row["intent_signals"]
     ]
+    if integrity_policy:
+        signals = [signal for group in bounded_criterion_evidence(signals) for signal in group]
     return {
         "company_name": row["company_name"],
         "company_website": row["company_website"],
@@ -260,10 +266,46 @@ def _normalized_company(company: Mapping[str, Any]) -> dict[str, Any]:
         "country": row["country"],
         "state": row["state"],
         "description": row["fit_summary"][:500],
-        "fit_evidence_urls": row["fit_evidence_urls"],
+        "fit_evidence_urls": (fit_evidence_url_hints(row["fit_evidence_urls"])
+                              if integrity_policy else row["fit_evidence_urls"]),
         "intent_signals": signals,
         "required_attribute": row.get("required_attribute"),
     }
+
+
+def effective_competition_input(
+    companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the same normalized first-N inputs consumed by the adapter.
+
+    Company positions and order remain significant. Bucket-skipped companies
+    have no judge input; output padding, unused prose and repeated/capped
+    evidence cannot buy a fresh judgment.
+    """
+    buckets = employee_count_buckets_for_icp(icp)
+    from gateway.qualification.models import CompanyOutput
+
+    rows = []
+    for company in list(companies)[:_company_goal(icp)]:
+        observed = company.get("employee_count")
+        bucket = normalize_employee_count_bucket(observed, default=None) or normalize_observed_employee_count_bucket(observed, default=None)
+        if bucket not in buckets:
+            rows.append({"bucket_skipped": True})
+            continue
+        normalized = _normalized_company(company, integrity_policy=True)
+        try:
+            effective = CompanyOutput(**normalized).model_dump(mode="json")
+        except ValidationError:
+            # Preserve validation inputs for incompatible rows; none reach
+            # the networked judge, and identity still affects their receipts.
+            rows.append(normalized)
+            continue
+        # The binary Arena fit verifier independently resolves these facts.
+        # These fields are validated above but never read during its judging.
+        for ignored in ("state", "description", "required_attribute"):
+            effective.pop(ignored, None)
+        rows.append(effective)
+    return {"icp": _normalized_icp(icp), "companies": rows}
 
 
 def _evidence_source(url: str, *, company_website: str) -> str:
@@ -342,7 +384,7 @@ class CompetitionCompanyScorer:
             ) or normalize_observed_employee_count_bucket(observed, default=None)
             if not bucket or bucket not in allowed_buckets:
                 continue
-            normalized_company = _normalized_company(company)
+            normalized_company = _normalized_company(company, integrity_policy=self.integrity_policy)
             submitted_identity = canonical_company_identity(normalized_company)
             submitted_alias_keys = company_identity_alias_keys(submitted_identity)
             if (

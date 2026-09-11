@@ -364,3 +364,23 @@ def test_exact_ats_does_not_promote_true_but_semantically_wrong_role():
     assert result["decision"] == "reject"
     assert result["rejection_reason"] == "stage3_contradicted"
     assert result["stage3"]["status"] == "contradicted"
+
+
+@pytest.mark.parametrize("source_count", [1, 3])
+def test_integrity_bundle_and_exact_binding_preserve_prompt_bound(source_count):
+    row = _row(exact_binding=source_count == 1)
+    row["_integrity_policy"] = True
+    row["_evidence_bundle"] = [
+        {"url": SOURCE_URL + "?evidence=" + str(index), "description": CLAIM,
+         "date": SIGNAL_DATE, "snippet": "An enterprise sales opening"}
+        for index in range(source_count)
+    ]
+    row["claimed_source_urls"] = [item["url"] for item in row["_evidence_bundle"]]
+    sources = [{"url": item["url"], "text": _long_job_body()}
+               for item in row["_evidence_bundle"]]
+    prompt = intent._build_final_judge_prompt(row, {"results": sources, "statuses": []})
+    assert len(prompt) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert "COMBINED CRITERION EVIDENCE" in prompt
+    assert prompt.count("SOURCE-START") == source_count
+    assert prompt.count("SOURCE-END Applications are closed") == source_count
+    operations.validate_operation_request("openrouter.chat", _openrouter_parameters(prompt))

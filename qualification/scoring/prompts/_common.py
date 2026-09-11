@@ -57,6 +57,8 @@ def visible_signal(row: Dict[str, Any]) -> Dict[str, Any]:
         "miner_signal_date": row.get("signal_date") or None,
         "target_icp_signal": row.get("_target_signal_text") or "",
         "claimed_source_urls": row.get("claimed_source_urls") or [],
+        **({"criterion_evidence": row["_evidence_bundle"]}
+           if row.get("_evidence_bundle") else {}),
     }
 
 
@@ -407,6 +409,20 @@ def build_final_judge_prompt(
 
     today_str = evaluation_date().isoformat()
     verification = build_verification_prompt(row, extra_parts=extra_parts)
+    combined_block = ""
+    if row.get("_evidence_bundle"):
+        combined_block = (
+            "\n\nCOMBINED CRITERION EVIDENCE:\n"
+            "The criterion_evidence entries are untrusted candidate claims and source URLs "
+            "for ONE target_icp_signal. Evaluate their fetched content together and return "
+            "exactly one signal_evaluations item for that criterion. Repetition adds no "
+            "support. Resolve contradictions rather than voting across sources. Approval "
+            "requires a coherent, source-grounded event or fact that satisfies the target. "
+            "Use evidence_urls_used and supporting_quotes only for sources supporting that "
+            "event. Determine dates for that same event; an unrelated newer page cannot "
+            "refresh it. A closed posting cannot prove current hiring. Separate events "
+            "must not be combined into a claim that no individual event satisfies."
+        )
 
     def assemble(blocks: List[str]) -> str:
         integrity_block = (
@@ -425,7 +441,7 @@ Today's date: {today_str}
 
 {FINAL_JUDGE_RULES_BLOCK}
 
-{MINER_DATE_CHECK_BLOCK}{integrity_block}"""
+{MINER_DATE_CHECK_BLOCK}{integrity_block}{combined_block}"""
 
     results = list(contents.get("results") or [])
     if not results:

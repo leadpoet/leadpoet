@@ -2032,13 +2032,18 @@ def _confirmed_source_absence(
         not isinstance(requested_url, str)
         or not requested_url
         or not isinstance(results, list)
-        or results
+        or any(not isinstance(item, Mapping) for item in results)
+        or any(item.get("url") == requested_url for item in results)
     ):
         return False
     statuses = contents.get("statuses")
-    if not isinstance(statuses, list) or len(statuses) != 1:
+    if not isinstance(statuses, list):
         return False
-    status = statuses[0]
+    matching = [item for item in statuses
+                if isinstance(item, Mapping) and item.get("url") == requested_url]
+    if len(matching) != 1:
+        return False
+    status = matching[0]
     return bool(
         isinstance(status, Mapping)
         and status.get("url") == requested_url
@@ -3160,6 +3165,7 @@ async def verify_three_stage(
     stage1_soft_reject: bool = False,
     integrity_policy: bool = False,
     buyer_max_age_days: Optional[int] = None,
+    evidence_bundle: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
 
@@ -3207,6 +3213,23 @@ async def verify_three_stage(
         )
         prompt_source_url = fetch_source_url
         validate_candidate_prompt_text(miner_claim, "intent_signal.description")
+        bundle = []
+        if evidence_bundle is not None:
+            from qualification.scoring.arena_integrity import MAX_EVIDENCE_PER_CRITERION
+
+            if not integrity_policy or not 1 <= len(evidence_bundle) <= MAX_EVIDENCE_PER_CRITERION:
+                raise ValueError("invalid criterion evidence bundle")
+            for evidence in evidence_bundle:
+                url = canonical_candidate_prompt_url(evidence["url"], "intent_signal.url")
+                description = validate_candidate_prompt_text(evidence["description"], "intent_signal.description")
+                snippet = validate_candidate_prompt_text(evidence["snippet"], "intent_signal.snippet")
+                signal_date = evidence.get("date")
+                if signal_date is not None and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(signal_date)) is None:
+                    raise ValueError("intent signal date is invalid")
+                bundle.append({"url": url, "description": description,
+                               "snippet": snippet, "date": signal_date})
+            if bundle[0]["url"] != fetch_source_url or len({item["url"] for item in bundle}) != len(bundle):
+                raise ValueError("criterion sources must be distinct and bound to the primary source")
         prompt_contact_linkedin = candidate_linkedin_prompt_slug(
             contact_linkedin,
             "contact_linkedin",
@@ -3247,8 +3270,10 @@ async def verify_three_stage(
         "signal_date": miner_signal_date,
         "signal_type": "intent",
         "claimed_source_urls": (
-            [prompt_source_url] if prompt_source_url else []
+            [item["url"] for item in bundle] if bundle
+            else [prompt_source_url] if prompt_source_url else []
         ),
+        **({"_evidence_bundle": bundle} if bundle else {}),
         "_target_signal_text": target_signal_text,
         "_declared_source": (declared_source or "").strip().lower() or None,
         "_integrity_policy": bool(integrity_policy),
@@ -3268,7 +3293,7 @@ async def verify_three_stage(
     # wrong_entity verdict on those URLs.
     _on_lead_domain = _url_on_lead_domain(
         fetch_source_url, company_website, company_linkedin,
-    )
+    ) and len(bundle) <= 1
 
     # ── STAGE 1: sonar first-pass ──────────────────────────────────
     s1_prompt = _build_verification_prompt(row)
@@ -3383,11 +3408,10 @@ async def verify_three_stage(
             },
         }
 
-    fetched_contents = await _fetch_sd_then_exa(
-        [fetch_source_url] if fetch_source_url else []
-    )
-    source_absent = _confirmed_source_absence(
-        fetched_contents, fetch_source_url
+    fetched_contents = await _fetch_sd_then_exa(row["claimed_source_urls"])
+    source_absent = all(
+        _confirmed_source_absence(fetched_contents, url)
+        for url in row["claimed_source_urls"]
     )
     contents = _project_contents_for_prompt(fetched_contents)
     source_publication_dates = list(dict.fromkeys(
@@ -3395,7 +3419,14 @@ async def verify_three_stage(
         for result in (contents.get("results") or [])
         if str(result.get("source_publication_date") or "")
     ))
-    if not (contents.get("results") or []):
+    fetched_urls = {_normalize_url(item["url"]) for item in contents["results"]
+                    if item.get("text", "").strip()}
+    incomplete_bundle = bool(bundle) and any(
+        _normalize_url(url) not in fetched_urls
+        and not _confirmed_source_absence(fetched_contents, url)
+        for url in row["claimed_source_urls"]
+    )
+    if not contents["results"] or incomplete_bundle:
         return {
             "client_ready": False,
             # Two independent fetch paths can establish that the exact source
@@ -3411,7 +3442,7 @@ async def verify_three_stage(
             "stage1": stage1_info,
             "scrape": {
                 "statuses": contents.get("statuses") or [],
-                "result_count": 0,
+                "result_count": len(contents["results"]),
             },
             "stage3": None,
             "company_check": None,
@@ -3423,8 +3454,8 @@ async def verify_three_stage(
                         "Independent fetches confirmed that the exact supplied "
                         "evidence URL was not found"
                         if source_absent
-                        else "Every bounded evidence fetch and fallback returned "
-                        "no usable content"
+                        else "At least one bounded evidence fetch and fallback returned "
+                        "no usable content or confirmed absence"
                     ),
                     "confidence": "high",
                 }],
@@ -3485,7 +3516,7 @@ async def verify_three_stage(
         company_name=company_name,
     )
     exact_hiring_employer_binding = bool(
-        is_hiring_claim and exact_ats_employer_binding
+        len(bundle) <= 1 and is_hiring_claim and exact_ats_employer_binding
     )
     if exact_hiring_employer_binding:
         row["_exact_hiring_employer_binding"] = True
@@ -3495,7 +3526,7 @@ async def verify_three_stage(
             continue
         if not is_hiring_claim:
             continue
-        if meta.get("is_closed"):
+        if meta.get("is_closed") and len(bundle) <= 1:
             return {
                 "client_ready": False,
                 "decision": "reject",
@@ -3589,6 +3620,10 @@ async def verify_three_stage(
     s3_envelope = await _call_openrouter(
         client, stage3_model or STAGE3_MODEL, s3_prompt
     )
+    if bundle and not s3_envelope.get("_error"):
+        evaluations = (s3_envelope.get("answer") or {}).get("signal_evaluations")
+        if not isinstance(evaluations, list) or len(evaluations) != 1:
+            s3_envelope = {**s3_envelope, "_error": "invalid_criterion_verdict_count"}
     if s3_envelope.get("_error"):
         return {
             "client_ready": False,
@@ -3729,7 +3764,7 @@ async def verify_three_stage(
         s3_decision = "review"
 
     corroboration_info: Optional[Dict[str, Any]] = None
-    if _corroboration_rescue_enabled() and _medium_corroboration_eligible(
+    if not integrity_policy and _corroboration_rescue_enabled() and _medium_corroboration_eligible(
         row, s3_item, s3_decision
     ):
         rescue = await _rescue_medium_with_corroboration(
@@ -3785,8 +3820,31 @@ async def verify_three_stage(
         "corroboration": corroboration_info,
     }
     if integrity_policy:
+        if len(bundle) > 1:
+            cited = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []}
+            source_publication_dates = list(dict.fromkeys(
+                str(item["source_publication_date"])
+                for item in contents.get("results") or []
+                if item.get("source_publication_date")
+                and _normalize_url(item.get("url") or "") in cited
+            ))
+        verified_job_source_urls = [
+            item["url"] for item in contents.get("results") or []
+            if _looks_like_job_body(item.get("text") or "")
+            and not (item.get("meta") or {}).get("is_closed")
+            and (
+                _url_on_lead_domain(item["url"], company_website, company_linkedin)
+                or _exact_ats_result_binds_company(
+                    source_url=item["url"], contents={"results": [item]},
+                    company_domain=prompt_identity["company"], company_name=company_name,
+                )
+                or ((item.get("meta") or {}).get("kind") == "linkedin_job"
+                    and s3_item.get("same_entity_check") == "pass")
+            )
+        ]
         result.update({
             "source_publication_dates": source_publication_dates,
             "job_publisher_relationship": job_publisher_relationship,
+            "verified_job_source_urls": verified_job_source_urls,
         })
     return result

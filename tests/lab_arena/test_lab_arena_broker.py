@@ -259,52 +259,36 @@ def test_deepline_call_uses_the_host_key_and_settles():
     assert store.calls[call["call_identity"]]["provider"] == "deepline"
 
 
-def test_deepline_reported_billing_becomes_the_settled_amount_and_person_entities_are_dropped():
+def test_deepline_per_call_billing_settles_and_person_entities_are_dropped():
     envelope = {
         "job_id": "iad1::x", "status": "completed",
         "result": {"data": {"requestId": "r", "results": [{"id": "u", "url": "https://a.example", "text": "t", "entities": [{"type": "person", "properties": {"name": "Jane Roe"}}]}]}},
         "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
     }
     broker, store, transport = make_broker(
-        transport=FakeTransport(
-            [
-                (200, envelope),
-                (
-                    200,
-                    deepline_history(
-                        deepline_history_entry("iad1::x", "exa_contents", 0.14)
-                    ),
-                ),
-            ]
-        )
+        transport=FakeTransport([(200, envelope)])
     )
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_contents", "payload": {"urls": ["https://a.example"]}}, action_sequence=0, timeout_ms=5000)
     assert result.status == 200 and b"Jane Roe" not in result.body
     assert json.loads(result.body)["result"]["data"]["results"][0]["entities"] == []
     call = result.call
-    assert call["reserved_microusd"] == 10_000_000 and call["actual_microusd"] == 14_000 and call["outcome"] == "settled"
-    assert call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
-    assert store.calls[call["call_identity"]]["actual"] == 14_000
+    assert call["reserved_microusd"] == 10_000_000 and call["actual_microusd"] == 2_000 and call["outcome"] == "settled"
+    assert call["cost_basis"] == "deepline_billing_credits_charged_x_0.10_usd"
+    assert store.calls[call["call_identity"]]["actual"] == 2_000
     terminal = store.calls[call["call_identity"]]["terminal"]
     assert terminal["provider_cost"] == {
-        "basis": "deepline_billing_history_credits_x_0.10_usd",
-        "units": "0.14",
+        "basis": "deepline_billing_credits_charged_x_0.10_usd",
+        "units": "0.02",
         "unit_name": "credits",
         "operation": "exa_contents",
         "request_id": "iad1::x",
     }
-    assert terminal["provider_cost"]["units"] != str(envelope["billing"]["credits_charged"])
+    assert terminal["provider_cost"]["units"] == str(envelope["billing"]["credits_charged"])
     replay = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_contents", "payload": {"urls": ["https://a.example"]}}, action_sequence=0, timeout_ms=5000)
     assert replay.status == 200 and replay.call["outcome"] == "settled"
     assert store.calls[call["call_identity"]]["terminal"]["provider_cost"] == terminal["provider_cost"]
-    assert len(transport.sent) == 2
+    assert len(transport.sent) == 1
     assert json.loads(transport.sent[0]["body"])["operation"] == "exa_contents"
-    assert transport.sent[1]["method"] == "GET"
-    assert transport.sent[1]["url"] == br.DEEPLINE_BILLING_HISTORY_URL
-    assert transport.sent[1]["url"] == "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
-    assert transport.sent[1]["headers"]["authorization"] == "Bearer " + DL_KEY
-    assert transport.sent[1]["headers"]["accept"] == "application/json"
-    assert transport.sent[1]["body"] == b""
 
 
 def test_scrapingdog_credential_goes_in_the_query_and_never_in_the_model_response():
@@ -709,6 +693,30 @@ def test_real_deepline_free_company_search_without_billing_settles_known_zero():
     assert len(transport.sent) == 1
 
 
+def test_real_deepline_hunter_discover_without_billing_settles_verified_zero():
+    envelope = {
+        "job_id": "iad1::hunter-discover",
+        "result": {"data": [{"domain": "example.com"}]},
+        "status": "completed",
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, json.dumps(envelope).encode("utf-8"))])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "hunter_discover", "payload": {"query": "fintech"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 200 and json.loads(result.body) == envelope
+    assert result.call["outcome"] == "settled"
+    assert result.call["reserved_microusd"] == result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_hunter_discover_completed_zero"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
 def test_real_deepline_free_company_search_keeps_reported_billing():
     envelope = {
         "job_id": "iad1::free-company-search",
@@ -717,22 +725,7 @@ def test_real_deepline_free_company_search_keeps_reported_billing():
         "billing": {"credits_charged": "0.02"},
     }
     broker, store, transport = make_broker(
-        transport=FakeTransport(
-            [
-                (200, json.dumps(envelope).encode("utf-8")),
-                (
-                    200,
-                    deepline_history(
-                        deepline_history_entry(
-                            "iad1::free-company-search",
-                            "free_simple_company_search",
-                            0.02,
-                            provider="deepline_native",
-                        )
-                    ),
-                ),
-            ]
-        )
+        transport=FakeTransport([(200, json.dumps(envelope).encode("utf-8"))])
     )
     result = broker.execute(
         CONTEXT,
@@ -743,9 +736,9 @@ def test_real_deepline_free_company_search_keeps_reported_billing():
     )
     assert result.status == 200 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 2_000
-    assert result.call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
+    assert result.call["cost_basis"] == "deepline_billing_credits_charged_x_0.10_usd"
     assert store.calls[result.call["call_identity"]]["actual"] == 2_000
-    assert len(transport.sent) == 2
+    assert len(transport.sent) == 1
 
 
 def test_real_deepline_free_company_search_malformed_billing_does_not_fall_back():
@@ -856,6 +849,136 @@ def test_deepline_missing_native_billing_recovers_full_positive_history_charge()
     assert 0 < transport.sent[1]["timeout"] <= 30.0
 
 
+def test_deepline_completed_native_billing_is_scoped_to_one_grouped_request():
+    wrapper_job_id = "iad1::wrapper-job"
+    envelope = {
+        "job_id": wrapper_job_id,
+        "result": {"data": []},
+        "status": "completed",
+        # The per-call charge is smaller than the shared history group total.
+        "billing": {"credits_charged": 0.56, "cost_usd": 0.056},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, json.dumps(envelope).encode())])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "predictleads_company_financing_events",
+            "payload": {"company_id_or_domain": "example.com"},
+        },
+        action_sequence=0,
+        timeout_ms=30_000,
+    )
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert result.call["reserved_microusd"] == 56_000
+    assert result.call["actual_microusd"] == 56_000
+    assert result.call["cost_basis"] == "deepline_billing_credits_charged_x_0.10_usd"
+    assert store.calls[result.call["call_identity"]]["actual"] == 56_000
+    assert store.calls[result.call["call_identity"]]["terminal"]["provider_cost"] == {
+        "basis": "deepline_billing_credits_charged_x_0.10_usd",
+        "units": "0.56",
+        "unit_name": "credits",
+        "operation": "predictleads_company_financing_events",
+        "request_id": wrapper_job_id,
+    }
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "envelope"),
+    [
+        (
+            200,
+            {
+                "status": "completed",
+                "result": [],
+                "billing": {"credits_charged": 0.56},
+            },
+        ),
+        (
+            200,
+            {
+                "job_id": "iad1::pending-job",
+                "status": "pending",
+                "result": [],
+                "billing": {"credits_charged": 0.56},
+            },
+        ),
+        (
+            201,
+            {
+                "job_id": "iad1::created-job",
+                "status": "completed",
+                "result": [],
+                "billing": {"credits_charged": 0.56},
+            },
+        ),
+    ],
+)
+def test_deepline_native_billing_requires_http_200_completed_job(
+    provider_status, envelope
+):
+    broker, store, _transport = make_broker(
+        transport=FakeTransport(
+            [(provider_status, json.dumps(envelope).encode("utf-8"))]
+        )
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "predictleads_company_financing_events",
+            "payload": {"company_id_or_domain": "example.com"},
+        },
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+
+
+def test_deepline_shared_history_cost_never_settles_one_request():
+    wrapper_job_id = "iad1::wrapper-job"
+    internal_job_id = "iad1::internal-job"
+    envelope = {
+        "job_id": wrapper_job_id,
+        "result": {"data": []},
+        "status": "completed",
+    }
+    history_entry = {
+        **deepline_history_entry(
+            internal_job_id,
+            "predictleads_company_financing_events",
+            1.12,
+            provider="predictleads",
+        ),
+        "metadata": {"chargeGroupIds": [internal_job_id, wrapper_job_id]},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [
+                (200, json.dumps(envelope).encode()),
+                (200, deepline_history(history_entry)),
+            ]
+        )
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "predictleads_company_financing_events",
+            "payload": {"company_id_or_domain": "example.com"},
+        },
+        action_sequence=0,
+        timeout_ms=30_000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+    assert len(transport.sent) == 2
+
+
 def test_deepline_billing_history_follows_forward_offset_without_poll_delay(monkeypatch):
     monkeypatch.setattr(
         br.time,
@@ -962,7 +1085,7 @@ def test_deepline_billing_history_stops_on_equal_nonadvancing_offset():
     job_id = "iad1::missing-after-equal-offset"
     envelope = {"job_id": job_id, "result": {"data": []}, "status": "completed"}
     broker, store, transport = make_broker(transport=FakeTransport([
-        (200, envelope),
+        (200, json.dumps(envelope).encode()),
         (200, deepline_history(has_more=True, next_offset=50)),
         (200, deepline_history(has_more=True, next_offset=50)),
     ]))
@@ -1025,7 +1148,7 @@ def test_deepline_nonterminal_older_match_resets_offset_before_newest_refresh(mo
     nonterminal = deepline_history_entry(job_id, "exa_search", 0.03, charge_state="temporary_hold")
     envelope = {"job_id": job_id, "result": {"data": []}, "status": "completed"}
     broker, store, transport = make_broker(transport=FakeTransport([
-        (200, envelope),
+        (200, json.dumps(envelope).encode()),
         (200, deepline_history(has_more=True, next_offset=50)),
         (200, deepline_history(nonterminal, has_more=True, next_offset=100)),
         (200, deepline_history(has_more=True, next_offset=50)),
@@ -1053,12 +1176,11 @@ def test_deepline_billing_history_accepts_exact_match_without_exhausting_pages()
         "job_id": job_id,
         "result": {"data": {"results": []}},
         "status": "completed",
-        "billing": {"credits_charged": 0.01},
     }
     broker, store, transport = make_broker(
         transport=FakeTransport(
             [
-                (200, envelope),
+                (200, json.dumps(envelope).encode()),
                 (
                     200,
                     deepline_history(
@@ -1159,13 +1281,13 @@ def test_deepline_invalid_or_conflicting_history_fails_closed(entries):
         "job_id": job_id,
         "result": {"data": {"results": []}},
         "status": "completed",
-        "billing": {"credits_charged": 0.01},
+        "billing": {"credits_charged": "not-a-number"},
     }
     sentinel = "history-private-content-do-not-store"
     history = deepline_history(*entries)
     history["untrusted"] = sentinel
     broker, store, transport = make_broker(
-        transport=FakeTransport([(200, envelope), (200, history)])
+        transport=FakeTransport([(200, json.dumps(envelope).encode()), (200, history)])
     )
     result = broker.execute(
         CONTEXT,
@@ -1189,7 +1311,7 @@ def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monke
         "job_id": job_id,
         "result": {"data": {"results": []}},
         "status": "completed",
-        "billing": {"credits_charged": 0.01},
+        "billing": {"credits_charged": "not-a-number"},
     }
     pending = deepline_history(
         deepline_history_entry(
@@ -1198,7 +1320,8 @@ def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monke
     )
     broker, store, transport = make_broker(
         transport=FakeTransport(
-            [(200, envelope)] + [(200, pending)] * br._DEEPLINE_BILLING_MAX_ATTEMPTS
+            [(200, json.dumps(envelope).encode())]
+            + [(200, pending)] * br._DEEPLINE_BILLING_MAX_ATTEMPTS
         )
     )
     result = broker.execute(
@@ -1240,10 +1363,10 @@ def test_deepline_billing_history_transport_timeout_polls_then_fails_closed(monk
         "job_id": job_id,
         "result": {"data": {"results": []}},
         "status": "completed",
-        "billing": {"credits_charged": 0.01},
+        "billing": {"credits_charged": "not-a-number"},
     }
     broker, store, transport = make_broker(
-        transport=HistoryTimeoutTransport([(200, envelope)])
+        transport=HistoryTimeoutTransport([(200, json.dumps(envelope).encode())])
     )
     result = broker.execute(
         CONTEXT,
@@ -1289,11 +1412,11 @@ def test_deepline_billing_history_credential_echo_is_never_exposed_or_persisted(
         "job_id": job_id,
         "result": {"data": {"results": []}},
         "status": "completed",
-        "billing": {"credits_charged": 0.01},
+        "billing": {"credits_charged": "not-a-number"},
     }
     echo = json.dumps({"recent": {"entries": []}, "echo": DL_KEY}).encode()
     broker, store, transport = make_broker(
-        transport=FakeTransport([(200, envelope), (200, echo)])
+        transport=FakeTransport([(200, json.dumps(envelope).encode()), (200, echo)])
     )
     result = broker.execute(
         CONTEXT,
@@ -1358,14 +1481,16 @@ def test_dynamic_deepline_retries_transient_budget_busy(monkeypatch):
     )
     assert result.status == 200 and result.call["reserved_microusd"] == 8_765
     assert store.log[:2] == ["reserve", "reserve"]
-    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert [sent["method"] for sent in transport.sent] == ["POST"]
 
 
 def test_dynamic_deepline_budget_busy_stops_at_the_reserve_deadline(monkeypatch):
-    store = FakeLedgerStore(openrouter_capacity=8_765, budget_busy_responses=100)
-    moments = iter((0.0, 0.1, 1.1))
-    monkeypatch.setattr(br.time, "monotonic", lambda: next(moments, 1.1))
-    monkeypatch.setattr(br.time, "sleep", lambda _seconds: None)
+    store = FakeLedgerStore(openrouter_capacity=8_765, budget_busy_responses=1000)
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
     broker, store, transport = make_broker(store=store)
     result = broker.execute(
         CONTEXT,
@@ -1377,6 +1502,51 @@ def test_dynamic_deepline_budget_busy_stops_at_the_reserve_deadline(monkeypatch)
     assert result.status == 502 and result.call["outcome"] == "not_dispatched"
     assert result.call["reason"] == "budget_busy" and transport.sent == []
     assert store.calls == {} and store.openrouter_capacity == 8_765
+    assert elapsed[0] == pytest.approx(operations.BUDGET_ADMISSION_MAX_SECONDS)
+
+
+def test_dynamic_deepline_admission_wait_does_not_consume_operation_window(monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    )
+    store = FakeLedgerStore(openrouter_capacity=8_765, budget_busy_responses=65)
+    job_id = "iad1::queued-window"
+
+    class SlowExecutionThenLaggedHistory(FakeTransport):
+        def send(self, **kwargs):
+            if kwargs["method"] == "POST":
+                elapsed[0] += 20.0
+            return super().send(**kwargs)
+
+    broker, store, transport = make_broker(
+        store=store,
+        transport=SlowExecutionThenLaggedHistory([
+            (200, {"job_id": job_id, "status": "completed", "result": {"data": []}, "billing": None}),
+            (200, deepline_history()),
+            (200, deepline_history()),
+            (200, deepline_history()),
+            (200, deepline_history(
+                deepline_history_entry(job_id, "exa_search", 0.1)
+            )),
+        ]),
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+    assert result.status == 200 and result.call["actual_microusd"] == 10_000
+    assert store.log.count("reserve") == 66
+    assert store.log[65:67] == ["reserve", "dispatch"]
+    assert elapsed[0] == pytest.approx(39.0)
+    assert transport.sent[0]["method"] == "POST"
+    assert transport.sent[0]["timeout"] == pytest.approx(60.0)
+    assert transport.sent[1]["timeout"] == pytest.approx(30.0)
+    assert transport.sent[-1]["timeout"] == pytest.approx(24.0)
 
 
 def test_fault_injection_points_produce_single_accounting_results():

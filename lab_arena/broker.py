@@ -904,8 +904,11 @@ class Broker:
         )
         # Another call can hold money without having spent it. Wait briefly for
         # settlement, using the same identity; do not dispatch or charge twice.
-        request_deadline = time.monotonic() + min(max(1, int(timeout_ms)) / 1000.0, float(effective_operation.timeout_seconds))
-        reserve_deadline = min(time.monotonic() + 20.0, request_deadline - 1.0)
+        operation_timeout_seconds = min(
+            max(1, int(timeout_ms)) / 1000.0,
+            float(effective_operation.timeout_seconds),
+        )
+        reserve_deadline = time.monotonic() + operations.BUDGET_ADMISSION_MAX_SECONDS
         while True:
             reserved = self._store.reserve_call(**reservation_arguments)
             if reserved.get("status") != "budget_busy":
@@ -962,6 +965,10 @@ class Broker:
         if reserve_remaining_budget:
             summary["reservation_basis"] = "remaining_budget_dynamic_deepline"
 
+        # Budget admission has its own bounded wait. Once admitted, the
+        # provider execution and any authoritative billing readback receive
+        # the full caller-requested window, capped by the operation table.
+        request_deadline = time.monotonic() + operation_timeout_seconds
         dispatched = self._store.mark_dispatched(run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity)
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.
@@ -974,6 +981,7 @@ class Broker:
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
+        deepline_native_cost: Optional[provider_costs.ProviderCost] = None
         deepline_request_id: Optional[str] = None
         deepline_operation: Optional[str] = None
         try:
@@ -1000,7 +1008,14 @@ class Broker:
                     request_id = _deepline_job_request_id(raw_document)
                     deepline_request_id = request_id
                     if (
-                        deepline_known_free_cost is None
+                        response.status == 200
+                        and request_id is not None
+                        and raw_document.get("status") == "completed"
+                    ):
+                        deepline_native_cost = provider_costs.deepline_cost(raw_document)
+                    if (
+                        deepline_native_cost is None
+                        and deepline_known_free_cost is None
                         and 200 <= response.status < 300
                         and request_id is not None
                     ):
@@ -1043,10 +1058,15 @@ class Broker:
             )
             raw_cost = provider_costs.openrouter_cost(raw_document)
         elif effective_operation.provider == "deepline":
-            # A terminal per-job history entry is authoritative. Native
-            # response billing has been observed to understate the posted
-            # charge, so paid calls never fall back to it.
-            raw_cost = deepline_known_free_cost or deepline_readback_cost
+            # Native billing is scoped to this completed request. Billing
+            # history can aggregate multiple requests into one charge group,
+            # so it is only a fallback when the history parser proves that the
+            # entry is unshared.
+            raw_cost = (
+                deepline_native_cost
+                or deepline_known_free_cost
+                or deepline_readback_cost
+            )
             raw_actual = None if raw_cost is None else raw_cost.microusd
         elif effective_operation.provider == "scrapingdog" and 200 <= response.status < 300:
             raw_cost = provider_costs.scrapingdog_cost(
@@ -1072,7 +1092,10 @@ class Broker:
             request_id=(
                 deepline_request_id
                 if effective_operation.provider == "deepline"
-                and raw_cost is deepline_readback_cost
+                and (
+                    raw_cost is deepline_native_cost
+                    or raw_cost is deepline_readback_cost
+                )
                 else None
             ),
         )

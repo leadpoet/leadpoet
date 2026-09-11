@@ -2988,8 +2988,7 @@ async def _attempt_competition_evidence_repair(
             candidate,
             icp,
             integrity_policy=integrity_policy,
-            company_quality=company_quality,
-            verified_company_identity=verified_company_identity,
+            **({"company_quality": True, "verified_company_identity": verified_company_identity} if company_quality else {}),
         )
         if result[4]:  # still all fabricated — repair found nothing verifiable
             return None

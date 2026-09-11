@@ -28,13 +28,9 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
 )
 
 
-MIGRATION = "20260911200103_lab_arena_company_judgments.sql"
-
-
 @pytest.fixture(scope="module")
 def database():
-    migrations = (*POSTGREST_MIGRATIONS, "216-lab-arena-validator-participation.sql", MIGRATION)
-    yield from database_with_lab_arena_migration(migrations)
+    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS)
 
 
 @pytest.fixture()

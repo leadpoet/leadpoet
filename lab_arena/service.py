@@ -645,7 +645,7 @@ class ArenaService:
             self._require_integrity_schema()
         if self._config.defaults.contacts_from or (current and contact_policy.enabled(current.get("configuration_doc") or {})):
             self._require_contact_schema()
-        if self._config.defaults.company_quality_from or (current and quality_policy.enabled(current.get("configuration_doc") or {})):
+        if getattr(self._config.defaults, "company_quality_from", None) or (current and quality_policy.enabled(current.get("configuration_doc") or {})):
             self._require_company_quality_schema()
         return {
             "database_identity": identity,
@@ -1937,7 +1937,7 @@ class ArenaService:
             stage,
             items,
             integrity_cache=integrity_cache,
-            company_quality_cache=company_quality_cache,
+            **({"company_quality_cache": True} if company_quality_cache else {}),
         )
         return {"status": result.get("status"), "round_status": result.get("round_status"), "assignments": result.get("assignments"), "work_items": len(plan["work_items"])}
 

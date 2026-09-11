@@ -313,6 +313,10 @@ def test_lease_refuses_an_incompatible_or_inconsistent_hit():
 def test_scorer_entrypoint_dispatches_quality_cache_and_returns_new_rows(
     monkeypatch,
 ):
+    # The real entrypoint runs in a separate process. Restore its trusted-mode
+    # environment when this in-process test finishes so later miner tests
+    # exercise the miner boundary.
+    monkeypatch.setenv(scorer_entrypoint.shim.TRUSTED_SCORER_ENV, "1")
     document = _input()
     ref = _refs(document)[0]
     lease = {

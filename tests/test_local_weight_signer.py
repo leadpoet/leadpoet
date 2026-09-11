@@ -1,6 +1,7 @@
 import json
 import sys
 import types
+import urllib.error
 
 import pytest
 
@@ -96,6 +97,134 @@ def test_https_transport_rejects_plaintext_wan_and_oversized_reply():
     )
     with pytest.raises(ValidatorChainSourceV2Error, match="exceeds"):
         transport.call(method="chain_getBlockHash", params=[3], request_id=1)
+
+
+def test_https_transport_retries_transient_http_within_original_deadline():
+    now = [100.0]
+    sleeps = []
+    observed = []
+
+    def open_request(request, *, timeout):
+        observed.append((bytes(request.data), timeout))
+        now[0] += 2.0
+        if len(observed) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "rate limited",
+                {"Retry-After": "3"},
+                None,
+            )
+        return _Response(
+            json.dumps({"jsonrpc": "2.0", "id": 7, "result": "0xabc"}).encode()
+        )
+
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    transport = HttpsJsonRpcTransport(
+        "https://chain.example",
+        timeout_seconds=9,
+        opener=open_request,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+    assert transport.call(method="chain_getBlockHash", params=[3], request_id=7) == "0xabc"
+    assert sleeps == [3.0]
+    assert [timeout for _body, timeout in observed] == [9, 4.0]
+    assert observed[0][0] == observed[1][0]
+
+
+def test_https_transport_exhausts_bounded_transient_http_retries():
+    calls = []
+    sleeps = []
+
+    def open_request(request, *, timeout):
+        calls.append((bytes(request.data), timeout))
+        raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
+
+    transport = HttpsJsonRpcTransport(
+        "https://chain.example",
+        timeout_seconds=30,
+        opener=open_request,
+        clock=lambda: 100.0,
+        sleep=sleeps.append,
+    )
+    with pytest.raises(ValidatorChainSourceV2Error, match="exhausted transient"):
+        transport.call(method="chain_getBlockHash", params=[3], request_id=7)
+    assert len(calls) == 3
+    assert sleeps == [1.0, 3.0]
+    assert calls[0][0] == calls[1][0] == calls[2][0]
+
+
+def test_https_transport_does_not_retry_invalid_or_authenticated_errors():
+    responses = [
+        _Response(b"not-json"),
+        _Response(json.dumps({"jsonrpc": "2.0", "id": 7, "error": {}}).encode()),
+        _Response(b"{}", status=401),
+    ]
+    for response in responses:
+        calls = []
+        transport = HttpsJsonRpcTransport(
+            "https://chain.example",
+            timeout_seconds=9,
+            opener=lambda *_args, **_kwargs: calls.append(1) or response,
+            sleep=lambda _delay: pytest.fail("non-transient responses must not sleep"),
+        )
+        with pytest.raises(ValidatorChainSourceV2Error):
+            transport.call(method="chain_getBlockHash", params=[3], request_id=7)
+        assert calls == [1]
+
+
+def test_https_transport_does_not_cross_deadline_for_retry_after():
+    calls = []
+    sleeps = []
+
+    def open_request(request, *, timeout):
+        calls.append(timeout)
+        raise urllib.error.HTTPError(
+            request.full_url,
+            429,
+            "rate limited",
+            {"Retry-After": "10"},
+            None,
+        )
+
+    transport = HttpsJsonRpcTransport(
+        "https://chain.example",
+        timeout_seconds=9,
+        opener=open_request,
+        clock=lambda: 100.0,
+        sleep=sleeps.append,
+    )
+    with pytest.raises(ValidatorChainSourceV2Error, match="deadline"):
+        transport.call(method="chain_getBlockHash", params=[3], request_id=7)
+    assert calls == [9]
+    assert sleeps == []
+
+
+def test_https_transport_stops_retrying_when_closed():
+    calls = []
+    transport = None
+
+    def open_request(request, *, timeout):
+        calls.append(timeout)
+        raise urllib.error.HTTPError(request.full_url, 502, "bad gateway", {}, None)
+
+    def close_during_backoff(_delay):
+        transport.close()
+
+    transport = HttpsJsonRpcTransport(
+        "https://chain.example",
+        timeout_seconds=9,
+        opener=open_request,
+        clock=lambda: 100.0,
+        sleep=close_during_backoff,
+    )
+    with pytest.raises(ValidatorChainSourceV2Error, match="closed"):
+        transport.call(method="chain_getBlockHash", params=[3], request_id=7)
+    assert calls == [9]
 
 
 def test_python_drand_backend_passes_stateful_sdk_arguments_exactly():

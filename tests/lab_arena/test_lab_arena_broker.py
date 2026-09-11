@@ -654,6 +654,97 @@ def test_successful_deepline_reply_without_billing_is_uncertain():
     }
 
 
+def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
+    envelope = {
+        "request_id": "iad1::bad-input",
+        "requestId": "iad1::bad-input",
+        "error": {"code": "UPSTREAM_BAD_INPUT"},
+    }
+    history = deepline_history({
+        "request_id": "iad1::bad-input", "operation": "exa_search",
+        "provider": "exa", "charge_state": "failed", "status": "error",
+        "credits": 0, "delta": 0,
+    })
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(422, envelope), (200, history)])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 422 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+
+
+def test_deepline_error_native_billing_settles_known_positive_charge():
+    envelope = {
+        "request_id": "iad1::paid-error",
+        "error": {"code": "UPSTREAM_BAD_INPUT"},
+        "billing": {"credits_charged": 0.2},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(422, envelope)])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 422 and result.call["actual_microusd"] == 20_000
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize("provider_status", [401, 402, 403])
+def test_deepline_credential_error_without_charge_stays_uncertain_and_typed(
+    provider_status,
+):
+    envelope = {"request_id": "iad1::bad-key", "error": {"code": "auth"}}
+    broker, store, _transport = make_broker(
+        transport=FakeTransport(
+            [(provider_status, envelope), (200, deepline_history())]
+        ),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 402
+    assert json.loads(result.body) == {
+        "error": {"code": "miner_credentials_unavailable"}
+    }
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"request_id": "a", "requestId": "b", "error": {}},
+        {"job_id": "a", "request_id": "b", "error": {}},
+        {"request_id": "a", "error": {}},
+    ],
+)
+def test_deepline_error_without_exact_final_charge_remains_uncertain(envelope):
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(422, envelope), (200, deepline_history())])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
 @pytest.mark.parametrize("status", [{"message": "not a status"}, ["completed"], "secret-shaped-unrecognized-status"])
 def test_missing_cost_diagnostics_never_store_arbitrary_job_status(status):
     body = json.dumps({"status": status}).encode()
@@ -1679,12 +1770,9 @@ def test_host_account_or_provider_failure_is_infrastructure_for_scoring_and_exec
     broker, store, transport = make_broker(transport=FakeTransport([(status, {"error": {"message": "invalid api key"}})]))
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["error_code"] == "provider_unavailable" and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    if status in (401, 402, 403, 429):
-        assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == 0
-        assert store.openrouter_capacity == 10_000_000
-    else:
-        assert result.call["outcome"] == "uncertain"
-        assert store.openrouter_capacity == 0
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert store.openrouter_capacity == 0
 
 
 def test_true_caller_400_remains_visible_to_the_bundle():

@@ -133,8 +133,8 @@ def deepline_billing_history_cost(
 
     ``pending`` means the requested job is absent. ``nonterminal`` means its
     charge is present but not final. ``invalid`` means the history shape or
-    exact job match cannot be trusted. Only one ``posted`` or ``free`` entry
-    can produce a cost.
+    exact job match cannot be trusted. One ``posted`` or ``free`` entry can
+    produce a cost; a strictly zero ``failed`` error entry proves no charge.
     """
 
     if not isinstance(response_json, Mapping):
@@ -207,13 +207,28 @@ def deepline_billing_history_cost(
     charge_state = entry.get("charge_state")
     if not isinstance(charge_state, str):
         return "invalid", None, False, None
-    if charge_state not in ("posted", "free"):
-        return "nonterminal", None, False, None
     credits_value = entry.get("credits")
     if isinstance(credits_value, bool) or not isinstance(
         credits_value, (int, float, Decimal)
     ):
         return "invalid", None, False, None
+    if charge_state == "failed":
+        delta = _decimal(entry.get("delta"))
+        if entry.get("status") != "error" or credits_value != 0 or delta != 0:
+            return "invalid", None, False, None
+        return (
+            "matched",
+            ProviderCost(
+                microusd=0,
+                units=Decimal("0"),
+                unit_name="credits",
+                price_basis="deepline_billing_history_failed_zero",
+            ),
+            False,
+            None,
+        )
+    if charge_state not in ("posted", "free"):
+        return "nonterminal", None, False, None
     credits = _decimal(credits_value)
     if credits is None or (charge_state == "free" and credits != 0):
         return "invalid", None, False, None

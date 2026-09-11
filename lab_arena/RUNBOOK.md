@@ -3,17 +3,23 @@
 The Arena is a simple agent-bundle competition with a UTC daily cycle:
 
 1. Day 0: generate twenty ICPs, keep them private, and accept model submissions.
-2. Day 1: close Day 0 submissions and reveal all twenty of Day 0's ICPs.
-   Evaluate the frozen baseline and every accepted model on that same set.
-3. Publish the source, final score, and all twenty per-ICP scores as soon as
-   evaluation is complete. There is no additional 24-hour source delay.
+2. Day 1: close Day 0 submissions and evaluate the frozen baseline and every
+   accepted model on the same private set.
+3. Publish source, aggregate final scores, promotion, and rewards as soon as
+   evaluation is complete. There is no additional source delay.
+4. Day 2: for published rounds with `after_scoring_day2_v1`, reveal the main
+   benchmark, confirmation benchmark, outputs, run results, and per-ICP scores
+   together. A cancelled round can reveal only its valid committed benchmark.
+   The boundary is the exact submission cutoff plus 24 hours. Active overruns
+   stay private after that time.
 
 Day 1 also starts a new hidden set and submission window for Day 2. The existing
 two ten-ICP batches are execution details; new rounds do not eliminate models
 between them. The round ID names the evaluation day. `icp_set_date` names the
 previous submission day's bank, which remains fixed during restart and retry.
 Historical rounds retain their actual bank date; they are not relabelled as a
-previous-day evaluation.
+previous-day evaluation. Rounds without the frozen delayed-disclosure marker
+retain their historical disclosure behavior.
 
 The midnight submission cutoff starts the readiness-driven execution and
 scoring batches. Completed work moves to the next batch without fixed 00:30 or
@@ -192,6 +198,32 @@ Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_BANNED_HOTKEYS_PATH`. `LAB_ARENA_REWARDS_ENABLED` defaults to
 `false` and is frozen into each new round. `LAB_ARENA_SIGNING_KEY_ID` is
 needed only when a live, reward-enabled published round is activated.
+
+`LAB_ARENA_BENCHMARK_DISCLOSURE_FROM` is an optional aware timestamp, normalized
+to UTC. For example, `2026-09-13T00:00:00Z` freezes
+`benchmark_disclosure_policy=after_scoring_day2_v1` into each newly created
+round whose cutoff is on or after that instant. An existing round keeps its
+stored configuration. An unknown or null stored policy fails closed. Before
+setting this value, deploy this reader to every service that can serve Arena
+public routes or create rounds. Do not roll back to a version that ignores the
+marker while a marked round still needs privacy. No database migration is
+required because the existing immutable `configuration_doc` stores the policy.
+
+For the September 13 rollout, the already-created September 12 round remains
+on its stored legacy policy. The intended activation marks only a newly created
+round with a cutoff on or after `2026-09-13T00:00:00Z`. Check the narrow update
+before its authorized apply:
+
+```bash
+python3 scripts/configure_lab_arena_production.py \
+  --benchmark-disclosure-from '2026-09-13T00:00:00Z' \
+  --ssh-key /protected/path/to/key --allowed-account ACCOUNT_ID --check
+
+LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1 \
+python3 scripts/configure_lab_arena_production.py \
+  --benchmark-disclosure-from '2026-09-13T00:00:00Z' \
+  --ssh-key /protected/path/to/key --allowed-account ACCOUNT_ID --apply
+```
 
 Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/180-lab-arena-daily-competition.sql`, then

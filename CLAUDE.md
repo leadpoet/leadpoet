@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: PR189 and PR190 combined review
+
+On 2026-09-11 the user explicitly authorized deep review, narrow safe fixes,
+updates and merges of PR189 and PR190, and complete production validation using
+the overnight skills. This covers protected credentials and Supabase access,
+exact committed migrations if required, pushes, canonical gateway and normal
+validator restarts, and fresh real competition tests. Preserve submission
+intake, frozen round policy, validator access, sandbox isolation, accepted work,
+retries, costs, disclosure, promotion, rewards, and finalized weights. Do not
+change concurrent task work or restore retired Research Lab machinery. This
+scope expires when both PRs and their affected live flows are verified.
+
 ## Scoped production authorization: 12-hour Arena launch watch
 
 On 2026-09-11 the user explicitly authorized continuous production monitoring

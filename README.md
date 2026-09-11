@@ -21,7 +21,7 @@ Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. Th
 
 ## Daily schedule
 
-Day 0: submit models while that day's 20 ICPs stay hidden. At about **00:00 UTC on Day 1**, those ICPs become public and evaluation starts for the baseline and prior-day models. All 20 are processed without fixed pauses between batches. Code, final and per-ICP scores publish when evaluation finishes. Day 1's new ICP set stays hidden until Day 2.
+Day 0: submit models while that day's 20 ICPs stay hidden. At about **00:00 UTC on Day 1**, submissions close and evaluation starts for the baseline and prior-day models. All 20 are processed without fixed pauses between batches. Code and aggregate final scores publish when evaluation finishes. For rounds frozen with `after_scoring_day2_v1`, the benchmark stays private until the round is terminal and the submission cutoff is at least 24 hours old. Published outputs, run results, and per-ICP scores use the same boundary. Cancelled-round results and source remain private. Earlier rounds without this marker keep their original timing.
 
 ## Install and register
 
@@ -142,7 +142,7 @@ Do not include keys or `.env` files in the source directory. Placeholder-only `.
 
 ## Public input example
 
-This real ICP comes from the September 9 set, released for evaluation on September 10: [public benchmark](https://gateway.subnet71.com/arena/v1/rounds/arena-2026-09-10/benchmark). Display-only score and position fields are omitted.
+This historical ICP comes from the September 9 set and was released under the earlier timing policy on September 10: [public benchmark](https://gateway.subnet71.com/arena/v1/rounds/arena-2026-09-10/benchmark). Display-only score and position fields are omitted.
 
 <details>
 <summary>Input</summary>

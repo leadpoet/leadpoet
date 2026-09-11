@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import integrity, confirmation, judgment_cache
+from lab_arena import integrity, confirmation, icp_disclosure, judgment_cache
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -300,6 +300,7 @@ class RoundDefaults:
     daily_cutoff_hour_utc: Optional[int] = None
     # A new round's cutoff lies at least this far ahead so miners can submit.
     integrity_from: Optional[str] = None
+    benchmark_disclosure_from: Optional[str] = None
     confirmation_minutes: Tuple[int, int] = (60, 110)
     min_submission_hours: int = 6
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
@@ -360,6 +361,15 @@ class ServiceConfig:
                     raise ValueError("missing timezone")
             except (ValueError, AttributeError) as exc:
                 raise ServiceError("integrity_activation_invalid", 500) from exc
+        if self.defaults.benchmark_disclosure_from is not None:
+            try:
+                icp_disclosure.parse_activation(
+                    self.defaults.benchmark_disclosure_from
+                )
+            except icp_disclosure.IcpDisclosureError as exc:
+                raise ServiceError(
+                    "benchmark_disclosure_activation_invalid", 500
+                ) from exc
         if self.mode not in MODES:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
@@ -489,6 +499,10 @@ class ArenaService:
             raise ServiceError("unsupported_integrity_policy", 409) from exc
         if policy_enabled != (configuration.get("scorer_policy", {}).get("scoring_adapter_version") == integrity.SCORING_ADAPTER):
             raise ServiceError("integrity_scorer_policy_mismatch", 409)
+        try:
+            icp_disclosure.configured_policy(row)
+        except icp_disclosure.IcpDisclosureError as exc:
+            raise ServiceError("benchmark_disclosure_policy_invalid", 503) from exc
         if configuration.get("mode") != self._config.mode:
             raise ServiceError("round_mode_mismatch", 409)
         # Rows created before schema 189 had no explicit chain pair. They are
@@ -723,6 +737,15 @@ class ArenaService:
                 "stage_3_scoring_close": _iso(confirmation_scoring_close),
                 "publication_deadline": _iso(confirmation_scoring_close + timedelta(seconds=1)),
             })
+        if (
+            defaults.benchmark_disclosure_from is not None
+            and cutoff >= icp_disclosure.parse_activation(
+                defaults.benchmark_disclosure_from
+            )
+        ):
+            document["benchmark_disclosure_policy"] = (
+                icp_disclosure.DELAYED_DISCLOSURE_POLICY
+            )
         # Keep the announced intake within the actual all-participant workload.
         # Shadow-only short rehearsals deliberately do not reserve live budgets.
         if self._config.mode == "live":
@@ -735,7 +758,7 @@ class ArenaService:
         if result.get("status") not in ("created", "existing"):
             raise ServiceError("round_create_failed", 500)
         if result.get("status") == "existing":
-            self._round(round_id)
+            return dict(self._round(round_id).get("configuration_doc") or {})
         return configuration
 
     def ensure_daily_round(self, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -3397,8 +3420,7 @@ class ArenaService:
         return view
 
     def _public_icp_disclosure(self, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-        from lab_arena.icp_disclosure import baseline_disclosure, disclosure_metadata
-        if disclosure_metadata(row) is None:
+        if icp_disclosure.disclosure_metadata(row) is None:
             return None
         baselines = [p for p in row.get("participants") or [] if p.get("is_king") is True]
         runs = (
@@ -3410,7 +3432,7 @@ class ArenaService:
             if len(baselines) == 1
             else []
         )
-        return baseline_disclosure(row, runs, self.now())
+        return icp_disclosure.baseline_disclosure(row, runs, self.now())
 
     def public_benchmark(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
@@ -3434,7 +3456,11 @@ class ArenaService:
         if integrity.enabled(row.get("configuration_doc") or {}):
             result["confirmation_bank_hash"] = row.get("confirmation_bank_hash")
             result["private_icp_count"] = contracts.CONFIRMATION_ICP_COUNT
-            if row["status"] == "published":
+            if (
+                row["status"] == "published"
+                or icp_disclosure.configured_policy(row)
+                == icp_disclosure.DELAYED_DISCLOSURE_POLICY
+            ):
                 # The salted original document lets observers check the
                 # commitment without changing the main bank's reveal time.
                 result["confirmation_bank"] = self.confirmation_bank(round_id)
@@ -3462,7 +3488,11 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
-        if integrity.enabled(row.get("configuration_doc") or {}):
+        if integrity.enabled(row.get("configuration_doc") or {}) and (
+            disclosure is not None
+            or icp_disclosure.configured_policy(row)
+            != icp_disclosure.DELAYED_DISCLOSURE_POLICY
+        ):
             public_positions.update(contracts.stage_positions(3))
         runs = [
             run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")

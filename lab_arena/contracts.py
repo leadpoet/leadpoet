@@ -691,6 +691,13 @@ ROUND_CONFIGURATION_FIELDS = (
     F("netuid", "int", required=False, minimum=1),
     F("rewards_enabled", "bool"),
     F("integrity_policy", "str", required=False, choices=("arena_integrity_v1",)),
+    # Optional only for rounds created before delayed benchmark disclosure.
+    F(
+        "benchmark_disclosure_policy",
+        "str",
+        required=False,
+        choices=("after_scoring_day2_v1",),
+    ),
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
     F("stage_1_icp_count", "int", minimum=1),
     F("stage_2_icp_count", "int", minimum=1),
@@ -743,6 +750,11 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("integrity scorer adapter requires matching round policy")
     if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
         raise ArenaContractError("round cost-per-company cap cannot be null")
+    if (
+        "benchmark_disclosure_policy" in config
+        and config["benchmark_disclosure_policy"] is None
+    ):
+        raise ArenaContractError("round benchmark disclosure policy cannot be null")
     if ("network_name" in config) != ("netuid" in config):
         raise ArenaContractError("round network_name and netuid must be supplied together")
     if "network_name" not in config:

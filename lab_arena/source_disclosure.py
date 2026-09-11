@@ -55,8 +55,7 @@ def disclosure_status(
         if isinstance(item, Mapping)
     }
     available_at = _timestamp(row.get("published_at")) if row.get("status") == "published" else None
-    metadata = icp_disclosure.disclosure_metadata(row)
-    public_at = _timestamp(metadata.get("public_at")) if metadata else None
+    public_at = icp_disclosure.source_public_at(row)
     # Historical rounds evaluated on their bank's creation day. Their source
     # becomes eligible on the new next-day boundary, not permanently private.
     if row.get("icp_set_date") is None and available_at is not None and public_at is not None:

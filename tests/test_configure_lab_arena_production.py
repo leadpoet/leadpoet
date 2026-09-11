@@ -76,6 +76,56 @@ def test_daily_cutoff_accepts_hour_six_and_rejects_out_of_range(tmp_path):
         MODULE._validate_args(parsed)
 
 
+@pytest.mark.parametrize("value,expected", [
+    ("2026-09-13T00:00:00Z", "2026-09-13T00:00:00+00:00"),
+    ("2026-09-13T00:00:00+05:30", "2026-09-13T00:00:00+05:30"),
+    ("", ""),
+])
+def test_benchmark_disclosure_timestamp_accepts_timezone_aware_or_empty(value, expected):
+    assert MODULE._validate_benchmark_disclosure_from(value) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "2026-09-13T00:00:00",
+    "2026-09-13",
+    "not-a-timestamp",
+    "2026-09-13T00:00:00Z\n",
+    "2026-09-13T00:00:00Z\r",
+    "2026-09-13T00:00:00Z\x00",
+])
+def test_benchmark_disclosure_timestamp_rejects_naive_or_malformed(value):
+    with pytest.raises(MODULE.ConfigurationError, match="benchmark disclosure timestamp"):
+        MODULE._validate_benchmark_disclosure_from(value)
+
+
+def test_benchmark_disclosure_scope_updates_only_one_key(monkeypatch, tmp_path, capsys):
+    key = tmp_path / "ssh.pem"
+    key.write_text("fixture")
+    calls = []
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    assert MODULE.main([
+        "--benchmark-disclosure-from", "2026-09-13T00:00:00Z", "--check",
+        "--allowed-account", "493765492819", "--ssh-key", str(key),
+    ]) == 0
+    assert len(calls) == 1
+    request = calls[0][1]
+    assert calls[0][0] == MODULE.GATEWAY_HOST
+    assert request["role"] == "benchmark_disclosure_only"
+    assert request["updates"] == {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "2026-09-13T00:00:00+00:00"}
+    assert request["aliases"] == {}
+    assert "service_key" not in request
+    assert request["apply"] is False
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_benchmark_disclosure_scope_requires_no_other_scope():
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--benchmark-disclosure-from", "2026-09-13T00:00:00Z",
+            "--scorer-image-only", "--allowed-account", "493765492819",
+        ])
+
+
 def test_scorer_image_only_requires_a_digest_pinned_registry_reference(tmp_path):
     key = tmp_path / "key"
     key.write_text("fixture")
@@ -409,6 +459,79 @@ def test_remote_scorer_image_scope_rejects_unrelated_targets(tmp_path):
         }
     )
     assert result == {"ok": False, "code": "scorer_image_scope_invalid"}
+
+
+def test_remote_benchmark_disclosure_scope_updates_only_target(tmp_path):
+    source = {
+        "KEEP": "same",
+        "LAB_ARENA_MODE": "live",
+        "LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "old",
+    }
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(source), request_override={
+            "role": "benchmark_disclosure_only",
+            "updates": {
+                "LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "2026-09-13T00:00:00Z",
+            },
+            "aliases": {},
+            "service_key": "",
+        }
+    ))
+    assert updated == {
+        "KEEP": "same",
+        "LAB_ARENA_MODE": "live",
+        "LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "2026-09-13T00:00:00+00:00",
+    }
+
+
+@pytest.mark.parametrize("request_override", [
+    {
+        "updates": {
+            "LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "2026-09-13T00:00:00Z",
+            "KEEP": "must-not-change",
+        },
+        "aliases": {},
+        "service_key": "",
+    },
+    {
+        "updates": {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "2026-09-13T00:00:00Z"},
+        "aliases": {"SOURCE": "TARGET"},
+        "service_key": "",
+    },
+    {
+        "updates": {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "2026-09-13T00:00:00Z"},
+        "aliases": {},
+        "service_key": "sb_secret_forbidden",
+    },
+])
+def test_remote_benchmark_disclosure_scope_rejects_extra_fields(tmp_path, request_override):
+    result = _run_remote_with_fake_aws(
+        tmp_path,
+        json.dumps({"KEEP": "same"}),
+        expect_success=False,
+        request_override={"role": "benchmark_disclosure_only", **request_override},
+    )
+    assert result == {"ok": False, "code": "benchmark_disclosure_scope_invalid"}
+
+
+@pytest.mark.parametrize("value", [
+    "2026-09-13T00:00:00",
+    "2026-09-13T00:00:00Z\n",
+    "not-a-timestamp",
+])
+def test_remote_benchmark_disclosure_scope_rejects_invalid_timestamp(tmp_path, value):
+    result = _run_remote_with_fake_aws(
+        tmp_path,
+        json.dumps({"KEEP": "same"}),
+        expect_success=False,
+        request_override={
+            "role": "benchmark_disclosure_only",
+            "updates": {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": value},
+            "aliases": {},
+            "service_key": "",
+        },
+    )
+    assert result == {"ok": False, "code": "benchmark_disclosure_timestamp_invalid"}
 
 
 def test_prepare_runner_is_standalone_and_does_not_read_or_write_config(monkeypatch, tmp_path, capsys):

@@ -1770,12 +1770,9 @@ def test_host_account_or_provider_failure_is_infrastructure_for_scoring_and_exec
     broker, store, transport = make_broker(transport=FakeTransport([(status, {"error": {"message": "invalid api key"}})]))
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["error_code"] == "provider_unavailable" and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    if status in (401, 402, 403, 429):
-        assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == 0
-        assert store.openrouter_capacity == 10_000_000
-    else:
-        assert result.call["outcome"] == "uncertain"
-        assert store.openrouter_capacity == 0
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert store.openrouter_capacity == 0
 
 
 def test_true_caller_400_remains_visible_to_the_bundle():

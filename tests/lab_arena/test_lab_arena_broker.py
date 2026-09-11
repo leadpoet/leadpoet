@@ -759,6 +759,73 @@ def test_deepline_5xx_without_exact_final_charge_remains_uncertain(envelope):
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
+def test_deepline_hunter_no_bill_502_without_job_id_settles_zero_and_returns_provider_error():
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [(502, {"error": {"code": "upstream_error"}, "detail": {"rows": 1}})]
+        )
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "hunter_discover", "payload": {"domain": "example.com"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_hunter_discover_error_zero"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert [sent["method"] for sent in transport.sent] == ["POST"]
+
+
+def test_deepline_hunter_no_bill_401_settles_zero_and_stays_credential_error():
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(401, {"error": {"code": "auth"}})]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "hunter_discover", "payload": {"domain": "example.com"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 402
+    assert json.loads(result.body) == {
+        "error": {"code": "miner_credentials_unavailable"}
+    }
+    assert result.call["error_code"] == "miner_credentials_unavailable"
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "body"),
+    [
+        ("hunter_discover", {"error": {}, "billing": None}),
+        ("exa_search", {"error": {"code": "upstream_error"}}),
+    ],
+)
+def test_deepline_hunter_malformed_billing_and_nonfree_502_stay_uncertain(tool, body):
+    broker, store, _transport = make_broker(transport=FakeTransport([(502, body)]))
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": tool, "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
 @pytest.mark.parametrize("provider_status", [401, 402, 403])
 def test_deepline_credential_error_without_charge_stays_uncertain_and_typed(
     provider_status,

@@ -211,10 +211,36 @@ def test_deepline_verified_no_bill_completed_tools_settle_zero(tool, basis):
     assert cost.microusd == 0 and cost.price_basis == basis
 
 
+def test_deepline_hunter_no_bill_structured_error_settles_zero_without_job_id():
+    cost = deepline_free_completed_cost(
+        {"tool": "hunter_discover"},
+        502,
+        {"error": {"code": "upstream_error"}},
+    )
+    assert cost is not None
+    assert cost.microusd == 0
+    assert cost.price_basis == "deepline_hunter_discover_error_zero"
+
+
+@pytest.mark.parametrize(
+    ("tool", "response"),
+    [
+        ("exa_search", {"error": {"code": "upstream_error"}}),
+        ("hunter_discover", {"error": {"code": "upstream_error"}, "billing": None}),
+        (
+            "hunter_discover",
+            {"error": {"code": "upstream_error"}, "billing": {"credits": "invalid"}},
+        ),
+    ],
+)
+def test_deepline_error_zero_proof_rejects_nonfree_or_present_billing(tool, response):
+    assert deepline_free_completed_cost({"tool": tool}, 502, response) is None
+
+
 @pytest.mark.parametrize(
     "response_status,response",
     [
-        (500, {"job_id": "wrapper-job", "status": "completed", "result": []}),
+        (399, {"job_id": "wrapper-job", "status": "completed", "result": []}),
         (200, {"status": "completed", "result": []}),
         (200, {"job_id": "wrapper-job", "status": "failed", "result": []}),
         (200, {"job_id": "wrapper-job", "status": "completed"}),

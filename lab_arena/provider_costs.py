@@ -39,6 +39,14 @@ _DEEPLINE_COMPLETED_NO_BILL_BASIS = {
     "free_simple_company_search": "deepline_free_simple_company_search_completed_zero",
     "hunter_discover": "deepline_hunter_discover_completed_zero",
 }
+# The authenticated live contract for hunter_discover was checked on
+# 2026-09-11: billingMode=no_bill, billingSource=free, and a fixed per-call
+# price of zero credits/USD.  A structured provider error therefore also has
+# an exact zero Deepline charge when no billing object contradicts the
+# published contract.
+_DEEPLINE_ERROR_NO_BILL_BASIS = {
+    "hunter_discover": "deepline_hunter_discover_error_zero",
+}
 # Deepline's tool descriptions, checked 2026-09-10. These are reservations,
 # never final charges. Tools with dynamic prices reserve the remaining budget
 # in the database instead of treating an unknown price as zero.
@@ -248,10 +256,13 @@ def deepline_billing_history_cost(
 def deepline_free_completed_cost(
     parameters: Mapping[str, Any], response_status: Any, response_json: Any
 ) -> Optional[ProviderCost]:
-    """Prove a verified Deepline no-bill operation completed at zero cost.
+    """Prove a verified Deepline no-bill operation used zero credits.
 
     A present billing object remains authoritative, including when malformed:
     callers must not replace invalid provider accounting with this fixed zero.
+    Only Hunter's authenticated per-call ``no_bill`` contract also proves a
+    structured HTTP error costs zero.  Other tools still require a valid
+    completed response or exact provider billing.
     """
 
     tool = parameters.get("tool")
@@ -263,10 +274,18 @@ def deepline_free_completed_cost(
     if (
         basis is None
         or isinstance(response_status, bool)
-        or response_status != 200
+        or not isinstance(response_status, int)
         or not isinstance(response_json, Mapping)
         or "billing" in response_json
-        or response_json.get("status") != "completed"
+    ):
+        return None
+    if response_status != 200:
+        error_basis = _DEEPLINE_ERROR_NO_BILL_BASIS.get(tool)
+        if error_basis is None or not 400 <= response_status < 600:
+            return None
+        basis = error_basis
+    elif (
+        response_json.get("status") != "completed"
         or not isinstance(response_json.get("job_id"), str)
         or not response_json["job_id"].strip()
         or len(response_json["job_id"]) > _DEEPLINE_MAX_REQUEST_ID_LENGTH

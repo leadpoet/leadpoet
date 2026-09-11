@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: validator startup configuration
+
+On 2026-09-11 the user explicitly authorized investigation, the narrow safe
+validator startup/local RPC fix, tests, push to main, and production validation
+with the overnight skills. This includes protected credentials and read-only
+inspection, exact committed fixes, and canonical restarts as needed. Preserve
+existing wallets and journals, chain identity and signing checks, competition
+scheduling, scoring, credentials, accepted results, and concurrent work. Do not
+restore retired auditor or Research Lab requirements. This scope expires when
+this startup fix and its end-to-end validation are complete.
+
 ## Scoped production authorization: PR189 and PR190 combined review
 
 On 2026-09-11 the user explicitly authorized deep review, narrow safe fixes,

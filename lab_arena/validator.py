@@ -27,6 +27,8 @@ from lab_arena import contracts
 from lab_arena.contracts import document_hash
 
 MAX_ARENA_WEIGHT_ATTEMPTS = 3
+FINNEY_SN71_API_BASE_URL = "https://gateway.subnet71.com"
+FINNEY_SN71_SIGNING_KEY_HASH = "sha256:fb0a422d437700f468beda94b4d3e05bb22dbaa6141f0e6c5f1dac9e7257d99a"
 _ARENA_ARCHIVED_ATTEMPT_RE = re.compile(
     r"epoch-[0-9]+-attempt-[0-9]+-signed\.json\Z"
 )
@@ -551,7 +553,8 @@ class ArenaWeightOrchestrator:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one normal Leadpoet Arena validator", add_help=True)
     parser.add_argument("--netuid", type=int, default=int(os.environ.get("LAB_ARENA_NETUID", "71")))
-    parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"))
+    parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"), help="Chain identity (finney or test); use --subtensor.chain_endpoint for a local node")
+    parser.add_argument("--subtensor.chain_endpoint", dest="chain_endpoint", default=os.environ.get("LAB_ARENA_CHAIN_ENDPOINT", ""), help="Explicit ws:// or wss:// RPC URL; defaults to the selected network's public endpoint")
     parser.add_argument("--wallet.name", dest="wallet_name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))
     parser.add_argument("--wallet.hotkey", dest="hotkey_name", default=os.environ.get("LAB_ARENA_HOTKEY", "default"))
     parser.add_argument("--wallet.path", dest="wallet_path", default=os.environ.get("LAB_ARENA_WALLET_PATH", "~/.bittensor/wallets"))
@@ -562,13 +565,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--once", action="store_true")
     return parser
-
-
-def _required_environment(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise ArenaValidatorError("%s is required" % name)
-    return value
 
 
 def load_local_hotkey(args):
@@ -672,20 +668,39 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
 
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
-    endpoint = _required_environment("LAB_ARENA_CHAIN_ENDPOINT")
-    key_hash = _required_environment("LAB_ARENA_SIGNING_KEY_HASH")
-    if not args.api_base_url:
-        raise ArenaValidatorError("Arena API URL is required")
     from lab_arena import chain as chain_module
-    from lab_arena.local_weight_signer import build_local_weight_signer
+    from lab_arena.local_weight_signer import (
+        _http_rpc_endpoint, build_local_weight_signer, load_public_chain_signing_profile,
+    )
     from leadpoet_canonical.lab_arena_rewards import signing_key_from_document
 
-    keypair = load_local_hotkey(args)
+    if "://" in args.subtensor_network:
+        raise ArenaValidatorError(
+            "Use --subtensor.network finney (or test) and "
+            "--subtensor.chain_endpoint for the RPC URL"
+        )
+    network = chain_module.normalize_network_name(args.subtensor_network)
+    profile = load_public_chain_signing_profile(network)
     config = chain_module.ArenaChainConfig(
-        endpoint=endpoint, netuid=int(args.netuid),
-        network_name=str(args.subtensor_network),
+        endpoint=args.chain_endpoint.strip() or profile["chain_endpoint"],
+        netuid=int(args.netuid), network_name=network,
         request_timeout_seconds=int(os.environ.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")),
     )
+    # Both chain clients must accept the origin before either contacts it.
+    _http_rpc_endpoint(config.endpoint)
+    finney_sn71 = config.network_name == "finney" and config.netuid == 71
+    args.api_base_url = args.api_base_url.strip().rstrip("/")
+    if not args.api_base_url and finney_sn71:
+        args.api_base_url = FINNEY_SN71_API_BASE_URL
+    if not args.api_base_url:
+        raise ArenaValidatorError("Arena API URL is required for this network/subnet")
+    key_hash = os.environ.get("LAB_ARENA_SIGNING_KEY_HASH", "").strip()
+    if not key_hash and finney_sn71 and args.api_base_url == FINNEY_SN71_API_BASE_URL:
+        key_hash = FINNEY_SN71_SIGNING_KEY_HASH
+    if not key_hash:
+        raise ArenaValidatorError("LAB_ARENA_SIGNING_KEY_HASH is required for this gateway/network/subnet")
+
+    keypair = load_local_hotkey(args)
     chain = chain_module.ArenaChain(config, chain_module.connect_substrate(config))
     signer = None
     try:

@@ -480,11 +480,11 @@ def build_local_weight_signer(
         raise LocalWeightSignerError("Arena burn hotkey policy is required")
 
     profile = load_public_chain_signing_profile(network, path=chain_profile_path)
-    if (
-        profile["network"] != network
-        or profile["chain_endpoint"].rstrip("/") != endpoint.rstrip("/")
-    ):
-        raise LocalWeightSignerError("public chain signing profile differs from chain configuration")
+    if profile["network"] != network:
+        raise LocalWeightSignerError("public chain signing profile differs from chain network")
+    # The profile authenticates chain and signing policy; the selected live
+    # RPC is only a transport. Validate it even when a transport is injected.
+    _http_rpc_endpoint(endpoint)
 
     if isinstance(cutover, SubnetEpochCutover):
         normalized_cutover = cutover.to_dict()

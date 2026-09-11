@@ -131,12 +131,12 @@ from a root shell with the validator's wallet path set explicitly. An ordinary
 unprivileged shell can submit weights but cannot launch this sandbox as
 configured. This is an existing sandbox requirement, not a signing mode.
 
-For Finney SN71, set the trusted public configuration:
+For Finney SN71, the validator includes the public RPC endpoint, gateway URL,
+and trusted gateway signing-key hash. No API keys or public-configuration
+exports are needed. Keep existing state and work paths on updates. On a first
+installation, choose persistent writable directories:
 
 ```bash
-export LAB_ARENA_API_BASE_URL=https://gateway.subnet71.com
-export LAB_ARENA_CHAIN_ENDPOINT=wss://entrypoint-finney.opentensor.ai:443
-export LAB_ARENA_SIGNING_KEY_HASH=sha256:fb0a422d437700f468beda94b4d3e05bb22dbaa6141f0e6c5f1dac9e7257d99a
 export LAB_ARENA_VALIDATOR_STATE_DIR="$PWD/validator-state"
 export LAB_ARENA_RUNNER_WORK_DIR="$PWD/arena-runner"
 export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
@@ -147,8 +147,28 @@ python neurons/validator.py \
   --wallet.path /absolute/path/to/YOUR_WALLETS_DIRECTORY
 ```
 
-Use the current trusted signing-key pin supplied by the subnet operator if it
-changes. Do not blindly accept a key fetched from an untrusted gateway.
+For a local **Finney node**, keep the network identity and add the RPC endpoint:
+
+```bash
+# Add to the validator command above:
+--subtensor.chain_endpoint ws://127.0.0.1:9944
+```
+
+The endpoint must serve both WebSocket and HTTP JSON-RPC at the same origin.
+Use `wss://` for a remote node; plaintext `ws://` is permitted only on loopback.
+The node must follow the selected network and support the finalized reads used
+by the validator. Finney archive proofs still use the pinned public archive.
+Do not put an RPC URL in `--subtensor.network`, and do not set the endpoint to
+the bare word `finney`. A TLS connection reset means the RPC connection failed;
+check the node, TLS proxy, and network path without disabling certificate checks.
+
+An explicit `--subtensor.chain_endpoint` overrides `LAB_ARENA_CHAIN_ENDPOINT`;
+otherwise that environment setting overrides the network's public endpoint.
+Existing `LAB_ARENA_API_BASE_URL` and `LAB_ARENA_SIGNING_KEY_HASH` overrides
+remain supported. A different gateway, network, or subnet requires its explicit
+trusted gateway URL and signing-key pin. Finney SN71 defaults are not used to
+trust a custom gateway. Use the trusted pin supplied by the subnet operator if
+it changes. Do not blindly accept a key fetched from a gateway.
 The hotkey must already exist as a private regular wallet file (mode 0600).
 The validator does not create or replace wallets.
 

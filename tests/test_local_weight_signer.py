@@ -2,6 +2,7 @@ import json
 import sys
 import types
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -296,7 +297,7 @@ def test_python_drand_backend_rejects_an_installed_package_without_v2_api(
         BittensorDrandBackend()
 
 
-def test_builder_uses_public_profile_local_wallet_and_compatible_client_methods():
+def test_builder_uses_public_profile_with_local_chain_transport_and_compatible_client_methods():
     from bittensor_wallet import Keypair
 
     keypair = Keypair.create_from_seed("0x" + ("01" * 32))
@@ -304,7 +305,7 @@ def test_builder_uses_public_profile_local_wallet_and_compatible_client_methods(
     live = _Transport()
     archive = _Transport()
     config = ArenaChainConfig(
-        endpoint="wss://entrypoint-finney.opentensor.ai:443",
+        endpoint="ws://127.0.0.1:9944",
         netuid=71,
         network_name="finney",
         request_timeout_seconds=4,
@@ -322,6 +323,7 @@ def test_builder_uses_public_profile_local_wallet_and_compatible_client_methods(
         finalization_sleep=lambda _seconds: None,
     )
     assert client.extrinsic_period == 8
+    assert client._chain_profile == load_public_chain_signing_profile("finney")
 
     calls = []
     client._signer.prepare = lambda request: calls.append(("prepare", request)) or {"ok": 1}
@@ -370,7 +372,7 @@ def test_builder_uses_public_profile_local_wallet_and_compatible_client_methods(
         client.prepare({})
 
 
-def test_public_profile_selection_is_network_specific_and_config_bound():
+def test_public_profile_selection_is_network_and_cutover_bound():
     assert load_public_chain_signing_profile("finney")["network"] == "finney"
     assert load_public_chain_signing_profile("test")["network"] == "test"
     with pytest.raises(LocalWeightSignerError, match="no public"):
@@ -379,21 +381,128 @@ def test_public_profile_selection_is_network_specific_and_config_bound():
     from bittensor_wallet import Keypair
 
     signing_key, signing_key_hash = _arena_key()
-    wrong_endpoint = ArenaChainConfig(
-        endpoint="wss://other.example:443",
+    custom_endpoint = ArenaChainConfig(
+        endpoint="wss://rpc.operator.example:443",
         netuid=71,
         network_name="finney",
         request_timeout_seconds=4,
     )
-    with pytest.raises(LocalWeightSignerError, match="differs"):
+    test_profile = (
+        Path(__file__).resolve().parents[1]
+        / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+    )
+    with pytest.raises(LocalWeightSignerError, match="chain network"):
         build_local_weight_signer(
             Keypair.create_from_seed("0x" + ("02" * 32)),
-            wrong_endpoint,
+            custom_endpoint,
             signing_key,
             signing_key_hash,
             load_arena_cutover({}),
             burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+            chain_profile_path=test_profile,
         )
+
+    wrong_cutover = load_arena_cutover({}).to_dict()
+    wrong_cutover["network_genesis_hash"] = "0x" + "0" * 64
+    wrong_cutover.pop("mapping_hash")
+    with pytest.raises(LocalWeightSignerError, match="cutover differs"):
+        build_local_weight_signer(
+            Keypair.create_from_seed("0x" + ("02" * 32)),
+            custom_endpoint,
+            signing_key,
+            signing_key_hash,
+            wrong_cutover,
+            burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "message"),
+    [
+        ("ws://rpc.operator.example:9944", "loopback"),
+        ("wss://user:password@rpc.operator.example:443", "credential-free origin"),
+        ("wss://rpc.operator.example:443/rpc", "credential-free origin"),
+    ],
+)
+def test_builder_validates_custom_endpoint_with_injected_transports(endpoint, message):
+    from bittensor_wallet import Keypair
+
+    signing_key, signing_key_hash = _arena_key()
+    config = types.SimpleNamespace(
+        endpoint=endpoint,
+        netuid=71,
+        network_name="finney",
+        request_timeout_seconds=4,
+    )
+    with pytest.raises(LocalWeightSignerError, match=message):
+        build_local_weight_signer(
+            Keypair.create_from_seed("0x" + ("03" * 32)),
+            config,
+            signing_key,
+            signing_key_hash,
+            load_arena_cutover({}),
+            burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+            live_transport=_Transport(),
+            archive_transport=_Transport(),
+            drand_backend=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("runtime", "message"),
+    [
+        (
+            {
+                "spec_version": 438,
+                "transaction_version": 1,
+                "genesis_hash": "0" * 64,
+            },
+            "runtime genesis differs",
+        ),
+        (
+            {
+                "spec_version": 438,
+                "transaction_version": 2,
+                "genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+            },
+            "runtime transactionVersion differs",
+        ),
+    ],
+)
+def test_custom_chain_transport_readiness_rejects_wrong_chain_identity(runtime, message):
+    from bittensor_wallet import Keypair
+
+    keypair = Keypair.create_from_seed("0x" + ("04" * 32))
+    signing_key, signing_key_hash = _arena_key()
+    client = build_local_weight_signer(
+        keypair,
+        ArenaChainConfig(
+            endpoint="wss://rpc.operator.example:443",
+            netuid=71,
+            network_name="finney",
+            request_timeout_seconds=4,
+        ),
+        signing_key,
+        signing_key_hash,
+        load_arena_cutover({}),
+        burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        live_transport=_Transport(),
+        archive_transport=_Transport(),
+        drand_backend=object(),
+        finalization_sleep=lambda _seconds: None,
+    )
+    client._chain_source.read_finalized_snapshot = lambda **_kwargs: {
+        "finalized_block_hash": "2" * 64,
+        "header": {"block": 104},
+        "metagraph": {"hotkeys": [keypair.ss58_address]},
+        "epoch_authority": {"settlement_epoch_id": 32001},
+    }
+    client._chain_source.read_chain_signing_runtime = lambda **_kwargs: runtime
+    try:
+        with pytest.raises(ValueError, match=message):
+            client.readiness(32001)
+    finally:
+        client.close()
 
 
 def test_builder_rejects_an_unpinned_finney_archive():

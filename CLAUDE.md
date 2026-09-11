@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: PR190 scoring review and validation
+
+On 2026-09-10 the user explicitly authorized PR190 review and end-to-end
+validation with the overnight skills. This covers protected production and
+Supabase inspection, required secrets, narrow scoring fixes and committed
+migrations, pushes and safe merge, canonical gateway/normal-validator restarts,
+and real competition validation. Preserve concurrent stake work, credential
+isolation, historical round policy, disclosure, accepted-state integrity, and
+reward security. Do not restore retired Research Lab or auditor machinery.
+This scope expires when PR190 and its live validation are complete.
+
 ## Scoped production authorization: normal Arena local-wallet validators
 
 On 2026-09-10 the user explicitly authorized the normal Arena local-wallet

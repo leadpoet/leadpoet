@@ -514,7 +514,7 @@ def _serve(args: argparse.Namespace) -> int:
     import boto3
     from lab_arena import broker as broker_module
     from lab_arena import chain as chain_module
-    from lab_arena import contracts, images
+    from lab_arena import contracts, images, scorer_image_access
     from lab_arena.api import create_app
     from lab_arena.credentials import CredentialManager
     from lab_arena.code_review_runtime import SubmissionCodeReviewer
@@ -625,6 +625,10 @@ def _serve(args: argparse.Namespace) -> int:
                 network_name=TESTNET_NETWORK,
                 netuid=TESTNET_NETUID,
                 pinned_round_id=round_id,
+                scorer_image_access=scorer_image_access.ecr_provider_from_repository(
+                    os.environ["LAB_ARENA_REGISTRY_REPOSITORY"],
+                    rules=images.ImageRules(),
+                ),
                 baseline_source_fetcher=fetch_public_source_archive,
                 reward_signer_factory=None,
                 credential_manager=credential_manager,

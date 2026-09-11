@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import types
 
 import pytest
 
@@ -21,12 +20,10 @@ SCRIPT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SCRIPT)
 
 
-def test_testnet_server_uses_real_gateway_validator_scope():
+def test_testnet_authorization_is_independent_of_mainnet_process_registry():
     source = """
 import json
 from types import SimpleNamespace
-from scripts.validate_miner_testnet import _configure_testnet_registry
-_configure_testnet_registry()
 from gateway.utils import registry
 from lab_arena.service import _gateway_validator_authorizer
 def unexpected_global_registry(_hotkey):
@@ -43,21 +40,8 @@ print(json.dumps({'result':result,'network':registry.BITTENSOR_NETWORK,'netuid':
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == {
-        "result": [True, "validator"], "network": "test", "netuid": 401,
+        "result": [True, "validator"], "network": "finney", "netuid": 71,
     }
-
-
-@pytest.mark.parametrize("module_name", ["gateway.config", "gateway.utils.registry"])
-def test_testnet_server_refuses_loaded_mainnet_registry(monkeypatch, module_name):
-    monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
-    monkeypatch.setenv("BITTENSOR_NETUID", "71")
-    monkeypatch.setitem(sys.modules, module_name, types.SimpleNamespace(
-        BITTENSOR_NETWORK="finney", BITTENSOR_NETUID=71,
-    ))
-    with pytest.raises(SCRIPT.ConfigurationError, match="different chain"):
-        SCRIPT._configure_testnet_registry()
-    assert os.environ["BITTENSOR_NETWORK"] == "finney"
-    assert os.environ["BITTENSOR_NETUID"] == "71"
 
 
 def test_database_guard_accepts_only_named_loopback_target():

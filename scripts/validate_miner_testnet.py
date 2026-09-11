@@ -486,20 +486,6 @@ def _validate_chain_endpoint(endpoint: str) -> str:
     return endpoint
 
 
-def _configure_testnet_registry() -> None:
-    """Bind the standalone test server to the same test chain as its registry."""
-
-    for name in ("gateway.config", "gateway.utils.registry"):
-        loaded = sys.modules.get(name)
-        if loaded is not None and (
-            getattr(loaded, "BITTENSOR_NETWORK", None) != TESTNET_NETWORK
-            or getattr(loaded, "BITTENSOR_NETUID", None) != TESTNET_NETUID
-        ):
-            raise ConfigurationError("gateway registry already loaded for a different chain")
-    os.environ["BITTENSOR_NETWORK"] = TESTNET_NETWORK
-    os.environ["BITTENSOR_NETUID"] = str(TESTNET_NETUID)
-
-
 def _serve(args: argparse.Namespace) -> int:
     prefix = _validate_s3_prefix(args.s3_prefix)
     if args.bucket != DEFAULT_BUCKET:
@@ -514,7 +500,6 @@ def _serve(args: argparse.Namespace) -> int:
     if args.resume_round and not args.round_id:
         raise ConfigurationError("--resume-round requires the exact --round-id")
     cutoff, round_id = _cutoff_and_round(args)
-    _configure_testnet_registry()
     _assert_aws_account(args.aws_region, args.expected_aws_account)
     secret = _load_gateway_secret(args.gateway_secret_id, args.aws_region)
     provider_keys = {

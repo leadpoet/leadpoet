@@ -115,7 +115,19 @@ async def _request_sidecar(
     headers: Mapping[str, str],
     testnet: bool = False,
 ) -> httpx.Response:
-    timeout = httpx.Timeout(connect=3.0, read=150.0, write=30.0, pool=3.0)
+    parts = path.split("/")
+    provider_call = (
+        method == "POST"
+        and len(parts) == 4
+        and parts[:2] == ["v1", "runs"]
+        and parts[3] == "provider"
+    )
+    # Match the validator's bounded provider window: 20s admission, 120s
+    # execution, 30s billing reconciliation, and 15s transport grace. Other
+    # routes retain their existing deadline; no paid request is retried here.
+    timeout = httpx.Timeout(
+        connect=3.0, read=185.0 if provider_call else 150.0, write=30.0, pool=3.0
+    )
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=False,

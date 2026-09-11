@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -157,6 +158,84 @@ def test_proxy_contains_sidecar_failure(monkeypatch):
     response = _app().get("/arena/v1/current")
     assert response.status_code == 503
     assert response.json() == {"detail": "agent competition is unavailable"}
+
+
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+def test_provider_proxy_allows_admission_execution_and_billing(monkeypatch, prefix):
+    from lab_arena import operations
+    from lab_arena.runner import MAX_PROVIDER_API_TIMEOUT_SECONDS
+
+    required_seconds = (
+        operations.BUDGET_ADMISSION_MAX_SECONDS
+        + max(operation.timeout_seconds for operation in operations.OPERATIONS.values())
+        + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+    )
+    observed = []
+
+    class SidecarClient:
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+            observed.append(timeout)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def request(self, *_args, **_kwargs):
+            # Model a valid slow response without sleeping or calling a provider.
+            if self.timeout.read < required_seconds:
+                raise httpx.ReadTimeout("billing response exceeded proxy deadline")
+            return httpx.Response(200, json={"status": "settled"})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy.httpx, "AsyncClient", SidecarClient)
+    response = _app().post(
+        prefix + "/v1/runs/run-1/provider",
+        json={"timeout_ms": 120000},
+        headers={"x-lab-arena-lease": "a" * 64},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "settled"}
+    assert observed[0].read >= MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert observed[0].connect == 3.0
+    assert observed[0].write == 30.0
+    assert observed[0].pool == 3.0
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/arena/v1/current"),
+        ("POST", "/arena/v1/submissions/presign"),
+        ("POST", "/arena/v1/runs/run-1/complete"),
+        ("GET", "/arena/v1/runs/run-1/provider"),
+        ("POST", "/arena/v1/runs/run-1/provider/extra"),
+    ],
+)
+def test_non_provider_proxy_timeout_is_unchanged(monkeypatch, method, path):
+    observed = []
+
+    class SidecarClient:
+        def __init__(self, *, timeout, **_kwargs):
+            observed.append(timeout)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def request(self, *_args, **_kwargs):
+            return httpx.Response(200, json={})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy.httpx, "AsyncClient", SidecarClient)
+    assert _app().request(method, path).status_code == 200
+    assert observed[0].read == 150.0
 
 
 def test_testnet_route_is_disabled_by_default(monkeypatch):

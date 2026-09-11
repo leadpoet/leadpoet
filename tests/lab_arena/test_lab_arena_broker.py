@@ -372,6 +372,45 @@ def test_scrapingdog_credential_echo_is_blocked_before_return_or_persistence(pro
 
 
 @pytest.mark.parametrize(
+    ("status", "chunks", "expected_provenance"),
+    [
+        (200, [b"abcd"], "response_too_large"),
+        (302, [b"redirect"], "redirect_rejected"),
+    ],
+)
+def test_http_transport_labels_synthetic_generic_response(status, chunks, expected_provenance):
+    class Response:
+        status_code = status
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def iter_bytes(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            yield from chunks
+
+    class Client:
+        def stream(self, *args, **kwargs):
+            return Response()
+
+        def close(self):
+            pass
+
+    transport = br.HttpxProviderTransport(client=Client(), max_response_bytes=3)
+    response = transport.send(
+        method="POST", url="https://example.com/execute", headers={}, body=b"{}",
+        timeout_seconds=1,
+    )
+    assert response.status == 502
+    assert response.body == operations.GENERIC_UNAVAILABLE_BODY
+    assert response.internal_provenance == expected_provenance
+
+
+@pytest.mark.parametrize(
     "provider_body",
     (b"<html>ordinary provider content</html>", b'{"text":"\\ud800"}'),
     ids=("ordinary", "json_lone_surrogate"),
@@ -1090,6 +1129,89 @@ def test_deepline_5xx_without_exact_final_charge_remains_uncertain(envelope):
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert result.call["actual_microusd"] == result.call["reserved_microusd"]
     assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
+@pytest.mark.parametrize(
+    ("tool_error", "top_level_id", "expected_methods"),
+    [
+        ({"requestId": "provider-or-deepline", "operation": "exa_search"}, None, ["POST"]),
+        ({"requestId": "nested-conflict", "operation": "exa_search"}, "top-level-id", ["POST", "GET"]),
+        ({"requestId": "nested-wrong-operation", "operation": "exa_contents"}, None, ["POST"]),
+    ],
+)
+def test_deepline_tool_error_request_id_is_not_used_as_billing_identity(
+    tool_error, top_level_id, expected_methods
+):
+    envelope = {"error": {"code": "upstream_error"}, "tool_error": tool_error}
+    if top_level_id is not None:
+        envelope["request_id"] = top_level_id
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(502, envelope)])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert [sent["method"] for sent in transport.sent] == expected_methods
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    if top_level_id is None:
+        assert "deepline_job_id" not in diagnostic
+    else:
+        assert diagnostic["deepline_job_id"] == top_level_id
+    assert "provider-or-deepline" not in json.dumps(diagnostic)
+    assert "nested-conflict" not in json.dumps(diagnostic)
+    assert "nested-wrong-operation" not in json.dumps(diagnostic)
+
+
+@pytest.mark.parametrize(
+    "provenance", ["response_too_large", "redirect_rejected"]
+)
+def test_deepline_synthetic_transport_response_keeps_full_liability_and_provenance(provenance):
+    class SyntheticTransport(FakeTransport):
+        def send(self, **kwargs):
+            self.sent.append(kwargs)
+            return br.ProviderResponse(
+                502, {"content-type": "application/json"},
+                operations.GENERIC_UNAVAILABLE_BODY, provenance,
+            )
+
+    broker, store, transport = make_broker(transport=SyntheticTransport([]))
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert diagnostic["response_provenance"] == provenance
+    assert [sent["method"] for sent in transport.sent] == ["POST"]
+    replay = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    assert replay.status == 409
+    assert [sent["method"] for sent in transport.sent] == ["POST"]
+
+
+def test_deepline_credential_echo_provenance_contains_no_secret():
+    envelope = {"error": {"code": "upstream_error"}, "echo": DL_KEY}
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(502, envelope)])
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0, timeout_ms=1000,
+    )
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert diagnostic["response_provenance"] == "credential_echo"
+    assert DL_KEY not in json.dumps(diagnostic)
+    assert DL_KEY not in result.body.decode()
+    assert len(transport.sent) == 1
 
 
 def test_deepline_hunter_no_bill_502_without_job_id_settles_zero_and_returns_provider_error():

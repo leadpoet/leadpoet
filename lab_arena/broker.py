@@ -340,6 +340,12 @@ def _missing_provider_cost_call_doc(
                 "deepline_operation": deepline_operation,
             }
         )
+    if response.internal_provenance in (
+        "credential_echo",
+        "redirect_rejected",
+        "response_too_large",
+    ):
+        diagnostics["response_provenance"] = response.internal_provenance
     return diagnostics
 
 
@@ -367,6 +373,9 @@ class ProviderResponse:
     status: int
     headers: Mapping[str, str]
     body: bytes
+    # Broker-internal provenance for a synthetic generic response. Never
+    # forwarded as a provider header or model-visible response field.
+    internal_provenance: Optional[str] = None
 
 
 def _response_contains_credential(response: ProviderResponse, secret: str) -> bool:
@@ -456,9 +465,17 @@ class HttpxProviderTransport:
             raise ProviderTransportError(type(exc).__name__) from exc
         finally:
             _PROVIDER_HTTP_IN_FLIGHT.reset(log_token)
-        if oversized or 300 <= status < 400:
+        if 300 <= status < 400:
             # Redirects are never followed; a redirecting provider is unavailable.
-            return ProviderResponse(502, {"content-type": "application/json"}, operations.GENERIC_UNAVAILABLE_BODY)
+            return ProviderResponse(
+                502, {"content-type": "application/json"},
+                operations.GENERIC_UNAVAILABLE_BODY, "redirect_rejected",
+            )
+        if oversized:
+            return ProviderResponse(
+                502, {"content-type": "application/json"},
+                operations.GENERIC_UNAVAILABLE_BODY, "response_too_large",
+            )
         return ProviderResponse(status, response_headers, bytes(content))
 
     def close(self) -> None:
@@ -1101,6 +1118,7 @@ class Broker:
                         502,
                         {"content-type": "application/json"},
                         b'{"error":{"code":"provider_unavailable"}}',
+                        "credential_echo",
                     )
                 if effective_operation.provider == "openrouter":
                     try:

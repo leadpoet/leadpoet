@@ -14,6 +14,7 @@ import copy
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import posixpath
 import re
@@ -88,6 +89,26 @@ DOCKER_HUB_HOSTS = ("docker.io", "index.docker.io")
 DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SIGNED_URL_LOG_LOCK = threading.Lock()
+
+
+class _HttpxQueryRedaction(logging.Filter):
+    """Hide bearer query strings from httpx's request completion log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == "httpx"
+            and record.msg == 'HTTP Request: %s %s "%s %d %s"'
+            and isinstance(record.args, tuple)
+            and len(record.args) == 5
+        ):
+            arguments = list(record.args)
+            arguments[1] = str(arguments[1]).split("?", 1)[0]
+            record.args = tuple(arguments)
+        return True
+
+
+_HTTPX_QUERY_REDACTION = _HttpxQueryRedaction()
 _COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 _PATH_RE = re.compile(r"^" + _COMPONENT + r"(?:/" + _COMPONENT + r")*$")
 _HOST_RE = re.compile(r"^(?:localhost|127\.0\.0\.1|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)(?::[0-9]{1,5})?$")
@@ -419,6 +440,24 @@ class RegistryClient:
         timeout = httpx.Timeout(self._remaining(deadline)).as_dict()
         return self._http.build_request(method, url, extensions={"timeout": timeout}, **kwargs)
 
+    def _send_capability_request(
+        self,
+        request: httpx.Request,
+    ) -> httpx.Response:
+        """Send a bearer URL while filtering httpx's full-URL info record."""
+
+        logger = logging.getLogger("httpx")
+        with _SIGNED_URL_LOG_LOCK:
+            logger.addFilter(_HTTPX_QUERY_REDACTION)
+            try:
+                return self._http.send(
+                    request,
+                    stream=True,
+                    follow_redirects=False,
+                )
+            finally:
+                logger.removeFilter(_HTTPX_QUERY_REDACTION)
+
     # -- transport ------------------------------------------------------------
 
     def base_url(self, registry: str) -> str:
@@ -647,6 +686,72 @@ class RegistryClient:
 
     # -- blobs --------------------------------------------------------------------
 
+    def _stream_exact_blob_response(
+        self,
+        response: httpx.Response,
+        *,
+        expected_size: int,
+        expected_digest: str,
+        sink: Callable[[bytes], Any],
+        deadline: Optional[float],
+    ) -> int:
+        """Follow safe redirects and stream bytes bound to one descriptor."""
+
+        try:
+            hops = 0
+            while response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get("location")
+                prior_url = str(response.request.url)
+                response.close()
+                hops += 1
+                if not location or hops > MAX_BLOB_REDIRECTS:
+                    raise ImageError(RULE_UNAVAILABLE, "blob redirect chain is invalid")
+                location = urljoin(prior_url, location)
+                self._validate_network_url(location, "blob redirect")
+                try:
+                    response = self._send_capability_request(
+                        self._build_request("GET", location, deadline=deadline)
+                    )
+                except httpx.HTTPError:
+                    # Signed URLs are bearer capabilities. Do not retain the
+                    # library exception, which can contain the full query.
+                    raise ImageError(
+                        RULE_UNAVAILABLE, "blob store request failed"
+                    ) from None
+                self._remaining(deadline)
+                self._validate_response_peer(response, "blob store")
+            if response.status_code == 404:
+                raise ImageError(
+                    RULE_UNAVAILABLE,
+                    "blob %s is missing" % expected_digest[:19],
+                )
+            if response.status_code != 200:
+                raise ImageError(
+                    RULE_UNAVAILABLE,
+                    "blob request answered %d" % response.status_code,
+                )
+            hasher = hashlib.sha256()
+            received = 0
+            for chunk in response.iter_bytes():
+                self._remaining(deadline)
+                received += len(chunk)
+                if received > expected_size:
+                    raise ImageError(
+                        RULE_DIGEST_MISMATCH,
+                        "blob %s is larger than its descriptor"
+                        % expected_digest[:19],
+                    )
+                hasher.update(chunk)
+                sink(chunk)
+        finally:
+            response.close()
+        if received != expected_size or "sha256:" + hasher.hexdigest() != expected_digest:
+            raise ImageError(
+                RULE_DIGEST_MISMATCH,
+                "blob %s does not match its descriptor" % expected_digest[:19],
+            )
+        return received
+
     def stream_blob(
         self,
         registry: str,
@@ -659,45 +764,59 @@ class RegistryClient:
     ) -> int:
         """Stream one blob into ``sink``; the byte count and digest must match."""
 
-        response = self._send(registry, "/v2/%s/blobs/%s" % (repository, digest), stream=True, deadline=deadline)
+        response = self._send(
+            registry,
+            "/v2/%s/blobs/%s" % (repository, digest),
+            stream=True,
+            deadline=deadline,
+        )
+        return self._stream_exact_blob_response(
+            response,
+            expected_size=expected_size,
+            expected_digest=digest,
+            sink=sink,
+            deadline=deadline,
+        )
+
+    def stream_url(
+        self,
+        url: str,
+        *,
+        expected_size: int,
+        expected_digest: str,
+        sink: Callable[[bytes], Any],
+        deadline: Optional[float] = None,
+    ) -> int:
+        """Stream one public HTTPS capability URL without retaining its value."""
+
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+            or not isinstance(expected_digest, str)
+            or not _DIGEST_RE.fullmatch(expected_digest)
+        ):
+            raise ImageError(RULE_MANIFEST_INVALID, "blob descriptor is invalid")
+        self._validate_network_url(url, "leased blob")
         try:
-            hops = 0
-            while response.status_code in (301, 302, 303, 307, 308):
-                location = response.headers.get("location")
-                response.close()
-                hops += 1
-                if not location or hops > MAX_BLOB_REDIRECTS:
-                    raise ImageError(RULE_UNAVAILABLE, "blob redirect chain is invalid")
-                location = urljoin(str(response.request.url), location)
-                self._validate_network_url(location, "blob redirect")
-                try:
-                    response = self._http.send(
-                        self._build_request("GET", location, deadline=deadline),
-                        stream=True,
-                        follow_redirects=False,
-                    )
-                except httpx.HTTPError as exc:
-                    raise ImageError(RULE_UNAVAILABLE, "blob store unreachable: %s" % type(exc).__name__) from exc
-                self._remaining(deadline)
-                self._validate_response_peer(response, "blob store")
-            if response.status_code == 404:
-                raise ImageError(RULE_UNAVAILABLE, "blob %s is missing" % digest[:19])
-            if response.status_code != 200:
-                raise ImageError(RULE_UNAVAILABLE, "blob request answered %d" % response.status_code)
-            hasher = hashlib.sha256()
-            received = 0
-            for chunk in response.iter_bytes():
-                self._remaining(deadline)
-                received += len(chunk)
-                if received > expected_size:
-                    raise ImageError(RULE_DIGEST_MISMATCH, "blob %s is larger than its descriptor" % digest[:19])
-                hasher.update(chunk)
-                sink(chunk)
-        finally:
+            response = self._send_capability_request(
+                self._build_request("GET", url, deadline=deadline)
+            )
+        except httpx.HTTPError:
+            raise ImageError(RULE_UNAVAILABLE, "leased blob request failed") from None
+        try:
+            self._remaining(deadline)
+            self._validate_response_peer(response, "leased blob")
+        except Exception:
             response.close()
-        if received != expected_size or "sha256:" + hasher.hexdigest() != digest:
-            raise ImageError(RULE_DIGEST_MISMATCH, "blob %s does not match its descriptor" % digest[:19])
-        return received
+            raise
+        return self._stream_exact_blob_response(
+            response,
+            expected_size=expected_size,
+            expected_digest=expected_digest,
+            sink=sink,
+            deadline=deadline,
+        )
 
     def get_blob(
         self,

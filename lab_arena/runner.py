@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from lab_arena import contracts, images, operations, runtime, scoring, shim, source_bundle
+from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
 
@@ -227,6 +227,8 @@ class ArenaApiClient(Protocol):
 
     def source(self, run_id: str, lease_token: str) -> bytes: ...
 
+    def image_access(self, run_id: str, lease_token: str) -> Dict[str, Any]: ...
+
     def current(self) -> Dict[str, Any]: ...
 
     def round(self, round_id: str) -> Dict[str, Any]: ...
@@ -336,6 +338,60 @@ class HttpArenaApiClient:
         except httpx.HTTPError as exc:
             raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
         return b"".join(chunks)
+
+    def image_access(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+        """Fetch one bounded, transient scorer-image access document."""
+
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", run_id):
+            raise RunnerError("run id is invalid")
+        try:
+            with self._client.stream(
+                "GET",
+                self._base_url + "/arena/v1/runs/%s/image-access" % run_id,
+                headers={"x-lab-arena-lease": lease_token},
+                timeout=httpx.Timeout(API_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status_code != 200:
+                    raise RunnerError(
+                        "run image access is unavailable: HTTP %d"
+                        % response.status_code
+                    )
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        declared_size = int(declared)
+                    except ValueError:
+                        raise RunnerError("run image access length is invalid") from None
+                    if declared_size < 0 or declared_size > leased_images.MAX_IMAGE_ACCESS_DOCUMENT_BYTES:
+                        raise RunnerError("run image access exceeds the document limit")
+                chunks = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > leased_images.MAX_IMAGE_ACCESS_DOCUMENT_BYTES:
+                        raise RunnerError("run image access exceeds the document limit")
+                    chunks.append(chunk)
+        except RunnerError:
+            raise
+        except httpx.HTTPError:
+            # The lease token and returned signed URLs are bearer capabilities.
+            raise RunnerError("Arena API image access transport failure") from None
+        try:
+            payload = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise RunnerError("Arena API returned invalid image access JSON") from None
+        if not isinstance(payload, dict):
+            raise RunnerError("Arena API returned a non-object image access document")
+        if set(payload) != {
+            "schema_version",
+            "image_reference",
+            "image_digest",
+            "manifest_b64",
+            "manifest_media_type",
+            "blobs",
+        } or payload.get("schema_version") != leased_images.IMAGE_ACCESS_SCHEMA_VERSION:
+            raise RunnerError("Arena API returned an invalid image access document")
+        return payload
 
     def round(self, round_id: str) -> Dict[str, Any]:
         return self._get("/arena/v1/rounds/%s" % round_id, "round %s" % round_id)
@@ -476,7 +532,12 @@ class ImageCache:
             self._in_use.pop(victim, None)
             _remove_cache_path(rootfs.parent)
 
-    def _rootfs_for_locked(self, image_digest: str, image_reference: str) -> Path:
+    def _rootfs_for_locked(
+        self,
+        image_digest: str,
+        image_reference: str,
+        exporter: Optional[ImageExporter] = None,
+    ) -> Path:
         path = self._ready.get(image_digest)
         if path is not None and path.is_dir() and not path.is_symlink():
             self._ready.move_to_end(image_digest)
@@ -491,7 +552,7 @@ class ImageCache:
             _remove_cache_path(target)
         target.mkdir(parents=True)
         try:
-            self._exporter(image_reference, image_digest, target)
+            (exporter or self._exporter)(image_reference, image_digest, target)
             rootfs = target / "rootfs"
             if rootfs.is_symlink() or not rootfs.is_dir():
                 raise RunnerError("image exporter produced no root filesystem")
@@ -512,20 +573,32 @@ class ImageCache:
             raise RunnerError("image cache capacity is in use")
         return rootfs
 
-    def rootfs_for(self, image_digest: str, image_reference: str = "") -> Path:
+    def rootfs_for(
+        self,
+        image_digest: str,
+        image_reference: str = "",
+        *,
+        exporter: Optional[ImageExporter] = None,
+    ) -> Path:
         if not isinstance(image_digest, str) or not IMAGE_DIGEST_RE.match(image_digest):
             raise RunnerError("image digest is invalid")
         with self._lock:
-            return self._rootfs_for_locked(image_digest, image_reference)
+            return self._rootfs_for_locked(image_digest, image_reference, exporter)
 
     @contextmanager
-    def acquire(self, image_digest: str, image_reference: str = "") -> Iterator[Path]:
+    def acquire(
+        self,
+        image_digest: str,
+        image_reference: str = "",
+        *,
+        exporter: Optional[ImageExporter] = None,
+    ) -> Iterator[Path]:
         """Pin one cached rootfs until the caller's sandbox has stopped."""
 
         if not isinstance(image_digest, str) or not IMAGE_DIGEST_RE.match(image_digest):
             raise RunnerError("image digest is invalid")
         with self._lock:
-            rootfs = self._rootfs_for_locked(image_digest, image_reference)
+            rootfs = self._rootfs_for_locked(image_digest, image_reference, exporter)
             self._in_use[image_digest] = self._in_use.get(image_digest, 0) + 1
         try:
             yield rootfs
@@ -1367,10 +1440,26 @@ class AssignmentExecutor:
             # read-only mounts; no miner image metadata is accepted.
             image_reference = str(lease.get("image_reference") or "")
             _check_runtime_image(image_reference, str(lease["image_digest"]))
-            with ExitStack() as resources:
-                rootfs = resources.enter_context(
-                    config.image_cache.acquire(str(lease["image_digest"]), image_reference)
+            image_exporter = None
+            if leased_images.is_ecr_reference(image_reference):
+                image_exporter = leased_images.leased_image_exporter(
+                    config.api,
+                    str(lease["run_id"]),
+                    lease_token,
                 )
+            with ExitStack() as resources:
+                if image_exporter is None:
+                    image_context = config.image_cache.acquire(
+                        str(lease["image_digest"]),
+                        image_reference,
+                    )
+                else:
+                    image_context = config.image_cache.acquire(
+                        str(lease["image_digest"]),
+                        image_reference,
+                        exporter=image_exporter,
+                    )
+                rootfs = resources.enter_context(image_context)
                 source_dir = dependency_dir = None
                 if not scoring_run:
                     source_dir, dependency_dir = resources.enter_context(

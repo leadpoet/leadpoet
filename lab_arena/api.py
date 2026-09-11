@@ -214,6 +214,16 @@ def create_app(service: ArenaService) -> FastAPI:
         payload = await run_in_threadpool(service.handle_source, run_id, lease_token)
         return Response(content=payload, media_type="application/gzip")
 
+    @app.get("/arena/v1/runs/{run_id}/image-access")
+    async def scorer_image_access(
+        run_id: str,
+        x_lab_arena_lease: Optional[str] = Header(default=None),
+    ) -> JSONResponse:
+        lease_token = _lease_header(x_lab_arena_lease)
+        return await no_store_public_call(
+            service.handle_scorer_image_access, run_id, lease_token
+        )
+
     @app.post("/arena/v1/runs/{run_id}/complete")
     async def complete(run_id: str, request: Request) -> Any:
         envelope = await _read_json(

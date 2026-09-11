@@ -26,6 +26,9 @@ python3.11 -m pytest -q \
   tests/test_arena_reveal_chain_source.py \
   tests/test_registry_roles.py \
   tests/lab_arena/test_lab_arena_chain.py \
+  tests/lab_arena/test_scorer_image_access.py \
+  tests/lab_arena/test_leased_images.py \
+  tests/lab_arena/test_scorer_delivery_roundtrip.py \
   tests/lab_arena/test_lab_arena_service_rules.py \
   tests/lab_arena/test_arena_weight_state.py \
   tests/lab_arena/test_lab_arena_normal_weight_flow.py
@@ -35,6 +38,9 @@ The gate must prove:
 
 - Miner models use their own brokered provider credentials, without secret
   values entering stored artifacts, results, or logs.
+- An uncached private scorer image downloads under an active validator lease
+  without validator AWS credentials. Exact image/blob hashes and size limits
+  remain enforced, and temporary download URLs do not enter logs or disk.
 - Standard scoring and promotion produce the governing Arena reward basis.
 - Accepted state is immutable, signed, current, and bound to the intended
   network, genesis, subnet, and epoch. Conflicts and missing state stop signing.

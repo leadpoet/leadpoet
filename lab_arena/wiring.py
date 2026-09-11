@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, signing
+from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, scorer_image_access, signing
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
@@ -396,6 +396,17 @@ def build_service_from_environment(mode: str):
         raise ServiceError("scorer_image_unresolved:%s" % exc.rule_id, 500) from exc
     finally:
         registry.close()
+    trusted_repository = os.environ.get("LAB_ARENA_REGISTRY_REPOSITORY", "").strip()
+    try:
+        image_access = (
+            scorer_image_access.ecr_provider_from_repository(
+                trusted_repository, rules=image_rules
+            )
+            if trusted_repository
+            else None
+        )
+    except scorer_image_access.ScorerImageAccessError:
+        raise ServiceError("scorer_image_access_configuration_invalid", 500) from None
     rewards_enabled = _rewards_enabled_from_environment()
     defaults = RoundDefaults(
         runner_hotkeys=runners,
@@ -452,6 +463,7 @@ def build_service_from_environment(mode: str):
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
+        scorer_image_access=image_access,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
         baseline_promoter_factory=baseline_promoter_from_environment,
         accepted_burn_hotkey=(

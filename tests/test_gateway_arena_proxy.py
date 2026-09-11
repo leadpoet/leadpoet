@@ -90,6 +90,32 @@ def test_proxy_refuses_oversized_and_invalid_paths(monkeypatch):
     assert client.get("/arena/v1//current").status_code == 404
 
 
+def test_lease_image_access_preserves_authorization_and_no_store(monkeypatch):
+    observed = {}
+
+    async def forward(method, path, *, query, body, headers):
+        observed.update(method=method, path=path, headers=dict(headers))
+        assert query == "" and body == b""
+        return httpx.Response(
+            200, json={"schema_version": "leadpoet.arena.scorer_image_access.v1"},
+            headers={"cache-control": "no-store", "x-content-type-options": "nosniff"},
+        )
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    response = _app().get(
+        "/arena/v1/runs/run-1/image-access",
+        headers={"x-lab-arena-lease": "a" * 64, "authorization": "not-forwarded"},
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert observed == {
+        "method": "GET", "path": "v1/runs/run-1/image-access",
+        "headers": {"x-lab-arena-lease": "a" * 64},
+    }
+
+
 def test_proxy_uses_the_shared_larger_limit_only_for_completions(monkeypatch):
     observed = {}
 

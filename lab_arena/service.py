@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
+from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     validate_accepted_weight_state,
@@ -336,6 +336,11 @@ class ServiceConfig:
     # inject a deterministic lookup without constructing a live metagraph.
     validator_authorizer: Optional[
         Callable[[str], Tuple[bool, Optional[str]]]
+    ] = None
+    # Returns temporary access only for the scorer image frozen into a run's
+    # round. Generic public registries do not configure this ECR-only path.
+    scorer_image_access: Optional[
+        Callable[[str, str], Mapping[str, Any]]
     ] = None
 
     def __post_init__(self) -> None:
@@ -2416,6 +2421,70 @@ class ArenaService:
         if len(payload) != expected_size:
             raise ServiceError("run_source_integrity_failed", 500)
         return payload
+
+    def handle_scorer_image_access(
+        self, run_id: str, lease_token: str
+    ) -> Mapping[str, Any]:
+        """Return ECR blob capabilities only to the active lease's validator."""
+
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        round_id = str(run.get("round_id") or "")
+        self._require_round_ownership(round_id)
+        expected_token_hash = str(run.get("lease_token_hash") or "")
+        if not expected_token_hash or not hmac.compare_digest(
+            expected_token_hash, hash_lease_token(lease_token)
+        ):
+            raise ServiceError("lease_invalid", 401)
+        if run.get("status") != "leased":
+            raise ServiceError("lease_inactive", 409)
+        raw_expiry = run.get("lease_expires_at")
+        try:
+            if isinstance(raw_expiry, datetime):
+                expiry = raw_expiry
+            else:
+                encoded_expiry = str(raw_expiry).replace("Z", "+00:00")
+                try:
+                    expiry = datetime.fromisoformat(encoded_expiry)
+                except ValueError:
+                    expiry = datetime.strptime(
+                        encoded_expiry, "%Y-%m-%dT%H:%M:%S.%f%z"
+                    )
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            raise ServiceError("lease_invalid", 401) from None
+        if expiry.astimezone(timezone.utc) <= self.now():
+            raise ServiceError("lease_expired", 409)
+        round_row = self._round(round_id)
+        if round_row.get("status") in TERMINAL_STATUSES:
+            raise ServiceError("round_ended", 409)
+        runner_hotkey = str(run.get("runner_hotkey") or "")
+        try:
+            contracts.require_hotkey(runner_hotkey)
+        except ArenaContractError:
+            raise ServiceError("lease_invalid", 401) from None
+        self._require_validator_authority(runner_hotkey)
+        provider = self._config.scorer_image_access
+        if provider is None:
+            raise ServiceError("scorer_image_access_unsupported", 409)
+        configuration = round_row.get("configuration_doc") or {}
+        image_reference = str(configuration.get("scorer_image_reference") or "")
+        image_digest = str(configuration.get("scorer_image_digest") or "")
+        access = None
+        failed = False
+        try:
+            access = provider(image_reference, image_digest)
+        except scorer_image_access_module.ScorerImageAccessError:
+            failed = True
+        except Exception:
+            failed = True
+        if failed:
+            # Raise outside the handler. Thus, an SDK exception containing a
+            # signed URL is not retained as this public error's context.
+            raise ServiceError("scorer_image_access_unavailable", 503) from None
+        return access
 
     def _broker_for(self, round_id: str) -> broker_module.Broker:
         with self._lock:

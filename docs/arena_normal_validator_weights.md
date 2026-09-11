@@ -20,6 +20,19 @@ credentials remain in the gateway broker. Validators and submitted models do
 not receive the raw keys. The existing gVisor/runsc sandbox is still needed for
 scoring; removing Nitro does not remove the model sandbox.
 
+On a private ECR scorer cache miss, the runner uses its active lease to get
+temporary download links from the gateway. The gateway limits access to the
+exact common scorer image frozen into that round. The runner uses the existing
+OCI digest, size, platform, and safe extraction checks before caching the image.
+Validators need no AWS account or shared registry credential. Public registry
+images keep their existing download path.
+
+Download links are bearer capabilities. They are sent with `Cache-Control:
+no-store`, kept in memory, and excluded from logs. ECR links last at most one
+hour and can remain valid after the issuing lease ends. The gateway issues
+them only while the requesting validator's lease is active. Miner provider
+credentials are separate and remain in the gateway broker.
+
 Weights start independently, before scoring setup. An empty queue, missing
 runsc, scoring setup error, or scoring-loop error causes scoring to wait/retry,
 not the weight loop to stop. Scoring works again when its dependency recovers.
@@ -124,6 +137,10 @@ The primary controller defaults to
 `requirements.txt` in that dedicated environment before restarting, or set
 `VALIDATOR_PYTHON_BIN` to an already prepared compatible environment. Keep the
 old environment intact so rollback can still start the previous service.
+
+The gateway retains its existing read-only ECR access and trusted scorer
+repository setting. The validator does not need those settings. No additional
+database migration or artifact-staging service is needed for scorer downloads.
 
 The sample systemd service supervises the same normal validator. SIGTERM stops
 new claims and drains current work. The old enclave need not be terminated to

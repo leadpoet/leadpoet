@@ -113,6 +113,17 @@ class StubService:
         self.calls["source"] = (run_id, lease_token)
         return b"source archive"
 
+    def handle_scorer_image_access(self, run_id, lease_token):
+        self.calls["image_access"] = (run_id, lease_token)
+        return {
+            "schema_version": "leadpoet.arena.scorer_image_access.v1",
+            "image_reference": "registry.example/scorer@sha256:" + "a" * 64,
+            "image_digest": "sha256:" + "a" * 64,
+            "manifest_b64": "e30=",
+            "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+            "blobs": [],
+        }
+
     def handle_complete(self, envelope):
         if envelope.get("bad"):
             raise ServiceError("run_result_invalid", 400)
@@ -324,6 +335,20 @@ def test_provider_frames_carry_the_judges_long_prompts(client):
     from lab_arena import contracts as c
 
     c.check_strict_document(frame, c.PROVIDER_FRAME_LIMITS)  # the service applies these to the frame
+
+
+def test_scorer_image_access_is_lease_scoped_and_never_cacheable(client):
+    http, service = client
+    response = http.get(
+        "/arena/v1/runs/r1/image-access",
+        headers={"x-lab-arena-lease": "a" * 64},
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert service.calls["image_access"] == ("r1", "a" * 64)
+    assert response.json()["schema_version"] == "leadpoet.arena.scorer_image_access.v1"
+    assert http.get("/arena/v1/runs/r1/image-access").status_code == 401
 
 
 

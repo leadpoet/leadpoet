@@ -2808,7 +2808,11 @@ class ArenaService:
         position = int(response["icp_position"])
         if not 0 <= position < len(icps):
             raise ServiceError("benchmark_data_invalid", 500)
-        lease_icp = integrity.agent_visible_icp(icps[position], contacts_required=contact_policy.enabled(configuration)) if integrity.enabled(configuration) else icps[position]
+        lease_icp = integrity.agent_visible_icp(icps[position], contacts_required=contact_policy.enabled(configuration)) if integrity.enabled(configuration) else dict(icps[position])
+        # Generation can be enabled before round activation. Only the frozen
+        # round contract can request v2 output, including for legacy rounds.
+        if not contact_policy.enabled(configuration):
+            lease_icp.pop("contact_policy", None)
         lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
         if integrity.enabled(configuration):
             lease["integrity_policy"] = integrity.POLICY

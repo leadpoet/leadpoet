@@ -267,6 +267,26 @@ def _validate_benchmark_disclosure_from(value: str) -> str:
     return normalized
 
 
+def _validate_contacts_from(value: str) -> str:
+    """Validate the optional timezone-aware contact activation timestamp."""
+    if not isinstance(value, str):
+        raise ConfigurationError("contact activation timestamp must be an ISO timestamp")
+    if value == "":
+        return value
+    if any(ch in value for ch in "\r\n\x00"):
+        raise ConfigurationError("contact activation timestamp contains a forbidden character")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "contact activation timestamp must be a valid ISO timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ConfigurationError("contact activation timestamp must include a timezone")
+    return normalized
+
+
 def gateway_updates(values: Mapping[str, str], args: argparse.Namespace, service_key: str) -> dict[str, str]:
     _validate_service_key(service_key)
     return {
@@ -423,6 +443,35 @@ if request["role"] == "benchmark_disclosure_only":
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             fail("benchmark_disclosure_timestamp_invalid")
     updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"] = value
+if request["role"] == "contacts_from_only":
+    if (
+        set(updates) != {"LAB_ARENA_CONTACTS_FROM"}
+        or request.get("aliases")
+        or request.get("service_key")
+    ):
+        fail("contacts_from_scope_invalid")
+    value = updates["LAB_ARENA_CONTACTS_FROM"]
+    if not isinstance(value, str) or any(ch in value for ch in "\r\n\x00"):
+        fail("contacts_from_timestamp_invalid")
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    if value:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            fail("contacts_from_timestamp_invalid")
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            fail("contacts_from_timestamp_invalid")
+    updates["LAB_ARENA_CONTACTS_FROM"] = value
+if request["role"] == "contacts_generation_only":
+    if (
+        set(updates) != {"LAB_ARENA_CONTACTS_GENERATION_ENABLED"}
+        or request.get("aliases")
+        or request.get("service_key")
+    ):
+        fail("contacts_generation_scope_invalid")
+    if updates["LAB_ARENA_CONTACTS_GENERATION_ENABLED"] not in {"true", "false"}:
+        fail("contacts_generation_scope_invalid")
 if request["role"] in ("gateway", "miner_credentials"):
     for source, target in request["aliases"].items():
         raw_value = str(values.get(source) or "").strip()
@@ -643,6 +692,8 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
     scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
     scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
+    scope.add_argument("--contacts-from", default=None, metavar="TIMESTAMP", help="set or clear the future contact activation timestamp")
+    scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
@@ -672,9 +723,20 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("--daily-cutoff-utc must be between 0 and 23")
     if args.benchmark_disclosure_from is not None:
         _validate_benchmark_disclosure_from(args.benchmark_disclosure_from)
+    if getattr(args, "contacts_from", None) is not None:
+        _validate_contacts_from(args.contacts_from)
     if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
-    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None or args.scorer_image_only or args.validator_credential_kms_guard or args.benchmark_disclosure_from is not None
+    narrow_scope = (
+        args.prepare_runner
+        or args.miner_credentials_only
+        or args.testnet_proxy is not None
+        or args.scorer_image_only
+        or args.validator_credential_kms_guard
+        or args.benchmark_disclosure_from is not None
+        or getattr(args, "contacts_from", None) is not None
+        or getattr(args, "contacts_generation", None) is not None
+    )
     if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
         raise ConfigurationError("validator IAM guard requires the exact production account")
     if args.miner_credential_kms_key_id is not None and not args.miner_credentials_only:
@@ -726,6 +788,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "updates": {
                     "LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": _validate_benchmark_disclosure_from(
                         args.benchmark_disclosure_from
+                    )
+                },
+            }
+            result = _ssh(args.gateway_host, args.ssh_key, request)
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
+        if args.contacts_from is not None:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "contacts_from_only", "aliases": {},
+                "updates": {
+                    "LAB_ARENA_CONTACTS_FROM": _validate_contacts_from(args.contacts_from)
+                },
+            }
+            result = _ssh(args.gateway_host, args.ssh_key, request)
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
+        if args.contacts_generation is not None:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "contacts_generation_only", "aliases": {},
+                "updates": {
+                    "LAB_ARENA_CONTACTS_GENERATION_ENABLED": (
+                        "true" if args.contacts_generation == "enabled" else "false"
                     )
                 },
             }

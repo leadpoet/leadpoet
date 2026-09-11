@@ -73,6 +73,10 @@ def test_contact_claim_normalizes_identity_location_and_source() -> None:
         lambda row: row["email_source"].update(tool="arbitrary_lookup"),
         lambda row: row["email_source"].pop("broker_call_id"),
         lambda row: row.update(email="password=secret-value"),
+        lambda row: row.update(email=".ada@example.com"),
+        lambda row: row.update(email="ada.@example.com"),
+        lambda row: row.update(email="ada..lovelace@example.com"),
+        lambda row: row.update(email=f"{'a' * 65}@example.com"),
     ],
 )
 def test_contact_claim_rejects_missing_unsupported_or_unsafe_values(mutate) -> None:

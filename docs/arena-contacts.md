@@ -50,6 +50,8 @@ The gateway resolves broker references against the scored execution's ledger.
 The verifier can re-fetch record-ID sources through Deepline. It checks the
 LinkedIn person, name, current employer, reported title, requested role and
 seniority, contact location, and exact email returned by the provider.
+An explicit former-position flag fails the employer check. A second current
+title cannot qualify a different submitted title.
 
 ZeroBounce is the primary email check. Both **valid** and **catch-all** pass.
 Catch-all is retained as its own status and does not need to become deliverable.
@@ -90,6 +92,12 @@ applies to both.
    **submission-open time** is at or after the contact timestamp opt in. This
    announces the contract before intake begins. Leave it unset until deployment
    and activation are approved.
+
+The protected configuration helper supports `--contacts-generation enabled`
+and `--contacts-from TIMESTAMP` as separate scopes. Check each first, then use
+its existing authorized `--apply` mode. Generation alone does not change the
+output contract of a company-only round. Do not activate contacts before the
+matching scorer image and baseline are installed and live verification passes.
 
 Keep both activation settings unset for local compatibility tests. For rollback,
 stop creating new contact rounds and finish existing ones with their frozen

@@ -211,6 +211,8 @@ class ContactClaim(BaseModel):
         if _EMAIL_RE.fullmatch(text) is None:
             raise ValueError("email must be a valid work email address")
         local, domain = text.rsplit("@", 1)
+        if len(local) > 64 or local.startswith(".") or local.endswith(".") or ".." in local:
+            raise ValueError("email must be a valid work email address")
         try:
             domain = domain.encode("idna").decode("ascii")
         except UnicodeError as exc:

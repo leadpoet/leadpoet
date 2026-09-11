@@ -98,6 +98,27 @@ def test_benchmark_disclosure_timestamp_rejects_naive_or_malformed(value):
         MODULE._validate_benchmark_disclosure_from(value)
 
 
+@pytest.mark.parametrize("value,expected", [
+    ("2026-09-13T00:00:00Z", "2026-09-13T00:00:00+00:00"),
+    ("2026-09-13T00:00:00+05:30", "2026-09-13T00:00:00+05:30"),
+    ("", ""),
+])
+def test_contacts_from_timestamp_accepts_timezone_aware_or_empty(value, expected):
+    assert MODULE._validate_contacts_from(value) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "2026-09-13T00:00:00",
+    "2026-09-13",
+    "not-a-timestamp",
+    "2026-09-13T00:00:00Z\n",
+    "2026-09-13T00:00:00Z\x00",
+])
+def test_contacts_from_timestamp_rejects_naive_or_malformed(value):
+    with pytest.raises(MODULE.ConfigurationError, match="contact activation timestamp"):
+        MODULE._validate_contacts_from(value)
+
+
 def test_benchmark_disclosure_scope_updates_only_one_key(monkeypatch, tmp_path, capsys):
     key = tmp_path / "ssh.pem"
     key.write_text("fixture")
@@ -124,6 +145,58 @@ def test_benchmark_disclosure_scope_requires_no_other_scope():
             "--benchmark-disclosure-from", "2026-09-13T00:00:00Z",
             "--scorer-image-only", "--allowed-account", "493765492819",
         ])
+
+
+def test_contacts_scopes_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--contacts-from", "2026-09-13T00:00:00Z",
+            "--contacts-generation", "enabled", "--allowed-account", "493765492819",
+        ])
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--contacts-from", "2026-09-13T00:00:00Z",
+            "--benchmark-disclosure-from", "2026-09-13T00:00:00Z",
+            "--allowed-account", "493765492819",
+        ])
+
+
+@pytest.mark.parametrize("option,role,updates", [
+    (
+        ["--contacts-from", "2026-09-13T00:00:00Z"],
+        "contacts_from_only",
+        {"LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00+00:00"},
+    ),
+    (
+        ["--contacts-from", ""],
+        "contacts_from_only",
+        {"LAB_ARENA_CONTACTS_FROM": ""},
+    ),
+    (
+        ["--contacts-generation", "enabled"],
+        "contacts_generation_only",
+        {"LAB_ARENA_CONTACTS_GENERATION_ENABLED": "true"},
+    ),
+    (
+        ["--contacts-generation", "disabled"],
+        "contacts_generation_only",
+        {"LAB_ARENA_CONTACTS_GENERATION_ENABLED": "false"},
+    ),
+])
+def test_contacts_scope_updates_only_one_key(monkeypatch, tmp_path, capsys, option, role, updates):
+    key = tmp_path / "ssh.pem"
+    key.write_text("fixture")
+    calls = []
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    assert MODULE.main(option + ["--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
+    assert len(calls) == 1
+    request = calls[0][1]
+    assert request["role"] == role
+    assert request["updates"] == updates
+    assert request["aliases"] == {}
+    assert "service_key" not in request
+    assert request["apply"] is False
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_scorer_image_only_requires_a_digest_pinned_registry_reference(tmp_path):
@@ -532,6 +605,109 @@ def test_remote_benchmark_disclosure_scope_rejects_invalid_timestamp(tmp_path, v
         },
     )
     assert result == {"ok": False, "code": "benchmark_disclosure_timestamp_invalid"}
+
+
+def test_remote_contacts_from_scope_updates_only_target_and_uses_cas(tmp_path):
+    source = {
+        "KEEP": "same",
+        "LAB_ARENA_MODE": "live",
+        "LAB_ARENA_CONTACTS_FROM": "old",
+    }
+    result, state = _run_remote_with_fake_aws(
+        tmp_path,
+        json.dumps(source),
+        return_state=True,
+        request_override={
+            "role": "contacts_from_only",
+            "updates": {"LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00Z"},
+            "aliases": {},
+            "service_key": "",
+        },
+    )
+    assert result["changed_keys"] == ["LAB_ARENA_CONTACTS_FROM"]
+    assert result["before_version"] == "initial"
+    assert result["applied"] is True
+    assert state["current"] != "initial"
+    updated = json.loads(state["versions"][state["current"]])
+    assert updated == {
+        "KEEP": "same",
+        "LAB_ARENA_MODE": "live",
+        "LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00+00:00",
+    }
+
+
+@pytest.mark.parametrize("selection,expected", [("enabled", "true"), ("disabled", "false")])
+def test_remote_contacts_generation_scope_preserves_unrelated_values(tmp_path, selection, expected):
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path,
+        json.dumps({"KEEP": "same", "LAB_ARENA_MODE": "live"}),
+        request_override={
+            "role": "contacts_generation_only",
+            "updates": {"LAB_ARENA_CONTACTS_GENERATION_ENABLED": expected},
+            "aliases": {},
+            "service_key": "",
+        },
+    ))
+    assert updated == {
+        "KEEP": "same",
+        "LAB_ARENA_MODE": "live",
+        "LAB_ARENA_CONTACTS_GENERATION_ENABLED": expected,
+    }
+
+
+@pytest.mark.parametrize("role,updates,extra", [
+    (
+        "contacts_from_only",
+        {"LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00Z", "KEEP": "must-not-change"},
+        {"aliases": {}, "service_key": ""},
+    ),
+    (
+        "contacts_from_only",
+        {"LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00Z"},
+        {"aliases": {"SOURCE": "TARGET"}, "service_key": ""},
+    ),
+    (
+        "contacts_generation_only",
+        {"LAB_ARENA_CONTACTS_GENERATION_ENABLED": "true", "KEEP": "must-not-change"},
+        {"aliases": {}, "service_key": ""},
+    ),
+    (
+        "contacts_generation_only",
+        {"LAB_ARENA_CONTACTS_GENERATION_ENABLED": "true"},
+        {"aliases": {}, "service_key": "sb_secret_forbidden"},
+    ),
+])
+def test_remote_contacts_scopes_reject_extra_fields(tmp_path, role, updates, extra):
+    result = _run_remote_with_fake_aws(
+        tmp_path,
+        json.dumps({"KEEP": "same"}),
+        expect_success=False,
+        request_override={"role": role, "updates": updates, **extra},
+    )
+    assert result == {
+        "ok": False,
+        "code": "contacts_from_scope_invalid" if role == "contacts_from_only" else "contacts_generation_scope_invalid",
+    }
+
+
+@pytest.mark.parametrize("value", [
+    "2026-09-13T00:00:00",
+    "2026-09-13T00:00:00Z\n",
+    "not-a-timestamp",
+])
+def test_remote_contacts_from_scope_rejects_invalid_timestamp(tmp_path, value):
+    result = _run_remote_with_fake_aws(
+        tmp_path,
+        json.dumps({"KEEP": "same"}),
+        expect_success=False,
+        request_override={
+            "role": "contacts_from_only",
+            "updates": {"LAB_ARENA_CONTACTS_FROM": value},
+            "aliases": {},
+            "service_key": "",
+        },
+    )
+    assert result == {"ok": False, "code": "contacts_from_timestamp_invalid"}
 
 
 def test_prepare_runner_is_standalone_and_does_not_read_or_write_config(monkeypatch, tmp_path, capsys):

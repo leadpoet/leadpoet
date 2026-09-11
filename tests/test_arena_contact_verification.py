@@ -275,6 +275,25 @@ def test_unsafe_email_evidence_overrides_valid_or_deliverable_status() -> None:
     assert bounce_result["contact_verification"]["decision"] == "mismatch"
 
 
+def test_camel_case_do_not_mail_flag_overrides_valid_status() -> None:
+    execute = ScriptedExecute(
+        {
+            "zerobounce_validate": [
+                {
+                    "status": "valid",
+                    "address": "ada@acme.com",
+                    "doNotMail": True,
+                }
+            ]
+        }
+    )
+
+    result = _run(execute=execute)
+
+    assert result["email_status"] == "invalid"
+    assert result["contact_verification"]["decision"] == "mismatch"
+
+
 def test_provider_returned_email_must_match_the_requested_email() -> None:
     zero = ScriptedExecute(
         {
@@ -340,6 +359,55 @@ def test_only_current_matching_employer_and_role_are_used() -> None:
 
     assert result["contact_verification"]["decision"] == "mismatch"
     assert result["contact_verification"]["reason"] == "contact_company_mismatch"
+
+
+def test_explicitly_noncurrent_position_cannot_qualify() -> None:
+    profile = _profile(
+        currentPosition={
+            "title": "Vice President of Sales",
+            "company": {"name": "Acme", "domain": "acme.com"},
+            "isCurrent": False,
+            "endDate": None,
+        },
+        experience=[],
+    )
+
+    result = _run(
+        source=_source(profile),
+        execute=ScriptedExecute({"zerobounce_validate": [_zero("valid")]}),
+    )
+
+    assert result["contact_verification"]["decision"] == "mismatch"
+    assert result["contact_verification"]["reason"] == "contact_company_mismatch"
+
+
+def test_unrelated_concurrent_role_cannot_qualify_the_claimed_role() -> None:
+    company = _company()
+    company["contact"] = _contact(role="Board Advisor")
+    profile = _profile(
+        currentPosition=[
+            {
+                "title": "Board Advisor",
+                "company": {"name": "Acme", "domain": "acme.com"},
+                "isCurrent": True,
+            },
+            {
+                "title": "Vice President of Sales",
+                "company": {"name": "Acme", "domain": "acme.com"},
+                "isCurrent": True,
+            },
+        ],
+        experience=[],
+    )
+
+    result = _run(
+        company=company,
+        source=_source(profile),
+        execute=ScriptedExecute({}),
+    )
+
+    assert result["contact_verification"]["decision"] == "mismatch"
+    assert result["contact_verification"]["reason"] == "contact_role_not_targeted"
 
 
 def test_exact_email_must_belong_to_the_matching_profile() -> None:
@@ -671,6 +739,27 @@ def test_retryable_email_timeout_is_retried_without_rechecking_completed_source(
     assert "source" in result["contact_verification"]["evidence_hashes"]
 
 
+def test_nested_email_provider_error_is_retried_and_does_not_fall_back() -> None:
+    failed = {
+        "toolResponse": {
+            "rawV2": {
+                "statusCode": 429,
+                "error": "rate limited",
+            }
+        }
+    }
+    execute = ScriptedExecute({"zerobounce_validate": [failed, failed]})
+
+    result = _run(execute=execute)
+
+    assert result["contact_verification"]["decision"] == "unavailable"
+    assert result["contact_verification"]["reason"] == "contact_provider_rate_limited"
+    assert [tool for tool, _ in execute.calls] == [
+        "zerobounce_validate",
+        "zerobounce_validate",
+    ]
+
+
 def test_known_invalid_email_never_falls_back_to_bounceban() -> None:
     execute = ScriptedExecute({"zerobounce_validate": [_zero("invalid")]})
 
@@ -758,6 +847,24 @@ def test_record_only_evidence_is_refetched_and_must_match_returned_record() -> N
             "findEmail": "true",
         },
     )
+
+
+def test_record_reference_must_match_the_selected_provider_profile() -> None:
+    company = _company()
+    company["contact"] = _contact(
+        email_source={
+            "provider": "harvestapi",
+            "tool": "harvestapi_get_profile",
+            "record_id": "claimed-profile",
+        }
+    )
+    source = _source(_profile(id="different-profile"))
+    source["call_identity"] = {"record_id": "claimed-profile"}
+
+    result = _run(company=company, source=source, execute=ScriptedExecute({}))
+
+    assert result["contact_verification"]["decision"] == "mismatch"
+    assert result["contact_verification"]["reason"] == "email_source_reference_invalid"
 
 
 def test_actual_harvest_profile_shape_verifies_position_location_and_email() -> None:

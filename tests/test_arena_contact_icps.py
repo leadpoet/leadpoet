@@ -90,6 +90,17 @@ def test_contact_icp_model_round_trips_structured_geography() -> None:
         ICPPrompt.model_validate({**value, "contact_geography": {"country": ["US"]}})
 
 
+@pytest.mark.parametrize("invalid", ["missing_roles", "invalid_country"])
+def test_confirmation_rejects_incomplete_contact_requirements(invalid) -> None:
+    candidates = [_icp(f"Contact role {index}") for index in range(5)]
+    if invalid == "missing_roles":
+        candidates[2]["target_roles"] = []
+    else:
+        candidates[2]["contact_geography"]["countries"] = ["not-a-country"]
+    with pytest.raises(ValueError):
+        confirmation.build_bank("round", candidates, [_icp()], contacts_required=True)
+
+
 def test_template_contact_requirements_are_coherent_and_do_not_copy_hq() -> None:
     legacy = icp_generator.generate_single_icp("legacy", "Software", seed=7)
     assert legacy["target_roles"] == []

@@ -11,7 +11,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import contracts, runtime, scoring, verify
+from lab_arena import contracts, runtime, scoring, service as svc, verify
+from lab_arena.promotion import GitPromoter
 from lab_arena.contact_evidence import source_key
 from qualification.scoring.arena_integrity import (
     canonical_company_identity,
@@ -88,6 +89,47 @@ def _claim(company: dict, *, valid_role: bool) -> dict:
             "record_id": f"profile-{slug}",
         },
     }
+
+
+def test_contact_generation_does_not_activate_an_existing_company_round(
+    database, tmp_path
+) -> None:
+    psycopg2, dsn = database
+    harness = fixtures.Harness(
+        lambda: psycopg2.connect(**dsn), tmp_path,
+        challengers=["CompanyOnly"], runners=["alpha"],
+    )
+    harness.service.config.daily_icp_source = lambda **kwargs: {
+        "status": "ready", "set_id": int(kwargs["set_id"]),
+        "icps": _contact_icps(daily_icps()),
+    }
+    original = harness.sandbox.run_icp
+    observed = []
+
+    def run_icp(spec, **kwargs):
+        document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
+        assert "contact_policy" not in document["icp"]
+        observed.append(document["schema_version"])
+        return original(spec, **kwargs)
+
+    harness.sandbox.run_icp = run_icp
+    harness.clock.now = datetime.now(timezone.utc)
+    round_id = "arena-2026-12-01-companyonly"
+    configuration = harness.service.create_round(
+        harness.clock.now + timedelta(hours=12), round_id=round_id,
+    )
+    assert "contact_policy" not in configuration
+    harness.round_id = round_id
+    submission = harness.submit("CompanyOnly", round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    harness.advance_until("published", runners=1)
+    outputs = harness.service.public_results(round_id, submission)["outputs"]
+    assert len(outputs) == contracts.BENCHMARK_ICP_COUNT
+    assert observed
+    assert all(
+        output["schema_version"] == contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION
+        for output in outputs.values()
+    )
 
 
 async def _contact_result(company: dict, icp: dict, source: dict) -> dict:
@@ -202,8 +244,9 @@ def _install_contact_sandbox(harness: ContactHarness) -> None:
     harness.sandbox.run_icp = run_icp
 
 
+@pytest.mark.parametrize("delayed_disclosure", [False, True])
 def test_contact_round_saves_scores_budget_counts_and_public_receipts(
-    database, tmp_path
+    database, tmp_path, delayed_disclosure
 ) -> None:
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
@@ -213,7 +256,17 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
     _install_contact_sandbox(harness)
     harness.chain.epoch = 29_000
     harness.clock.now = datetime.now(timezone.utc)
-    round_id = "arena-2026-12-01-contacts"
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        rewards_enabled=True,
+        benchmark_disclosure_from=(
+            "2026-01-01T00:00:00Z" if delayed_disclosure else None
+        ),
+    )
+    round_id = (
+        "arena-2026-12-01-contactsdelay"
+        if delayed_disclosure else "arena-2026-12-01-contacts"
+    )
     configuration = harness.service.create_round(
         harness.clock.now + timedelta(hours=12), round_id=round_id
     )
@@ -223,7 +276,11 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         "qualification_contacts_v3"
     )
     winner = harness.submit("ContactWinner", round_id)
+    with pytest.raises(svc.ServiceError, match="results_not_public"):
+        harness.service.public_results(round_id, winner)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    harness.advance_until("scored", runners=1, max_steps=100)
+    harness.service = harness.build_service()
     published = harness.advance_until("published", runners=1, max_steps=100)
 
     assert published["king_outcome"] == "crowned"
@@ -247,7 +304,45 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         for run in saved
     )
 
+    # Contact qualification must still permit the existing winner promotion
+    # and reward path. Neither operation waits for public benchmark details.
+    repository_root = tmp_path / "promotion-repository"
+    repository_root.mkdir()
+    remote = fixtures.promotion_repository(repository_root)
+    harness.service.config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "promotion-objects"
+    )
+    assert harness.service.promote_pending_baselines() == {
+        "status": "ok", "promoted": 1,
+    }
+    assert harness.service.activate_reward(round_id)["status"] == "activated"
+    promoted = harness.service.store.get_round(round_id)
+    preserved = {
+        key: promoted[key] for key in (
+            "publication_doc", "promotion_doc", "baseline_promoted_at",
+            "reward_basis_doc", "reward_activated_at", "effective_reward_epoch",
+        )
+    }
+    assert harness.service.public_reward_basis(
+        int(promoted["effective_reward_epoch"])
+    ) == promoted["reward_basis_doc"]
+
     public = harness.service.public_results(round_id, winner)
+    if delayed_disclosure:
+        assert public["outputs"] == {}
+        assert public["contact_verifications"] == {}
+        assert public["run_results"] == []
+        with pytest.raises(svc.ServiceError, match="benchmark_not_public"):
+            harness.service.public_benchmark(round_id)
+        harness.service = harness.build_service()
+        reveal_at = datetime.fromisoformat(
+            configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")
+        ) + timedelta(hours=24)
+        harness.clock.now = reveal_at - timedelta(microseconds=1)
+        assert harness.service.public_results(round_id, winner) == public
+        harness.clock.now = reveal_at
+        public = harness.service.public_results(round_id, winner)
+        assert len(harness.service.public_benchmark(round_id)["icps"]) == 20
     assert len(public["outputs"]) == contracts.MAX_EVALUATION_ICP_COUNT
     assert len(public["contact_verifications"]) == contracts.MAX_EVALUATION_ICP_COUNT
     first_output = next(iter(public["outputs"].values()))
@@ -274,4 +369,6 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
     )
     assert "elements" not in json.dumps(verification)
     assert "currentPosition" not in json.dumps(verification)
+    after = harness.service.store.get_round(round_id)
+    assert {key: after[key] for key in preserved} == preserved
     fixtures.assert_canary_absent(harness, connect)

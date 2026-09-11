@@ -34,6 +34,9 @@ def build_bank(
         projected = integrity.agent_visible_icp(
             icp, contacts_required=contacts_required
         )
+        if contacts_required:
+            from lab_arena.contact_policy import validate_icp
+            validate_icp(projected)
         fingerprint = integrity.requirement_fingerprint(
             projected, contacts_required=contacts_required
         )

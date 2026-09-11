@@ -228,20 +228,31 @@ async def _default_execute(tool: str, payload: Mapping[str, Any]) -> Any:
 
 
 def _response_error(value: Any) -> Optional[str]:
-    if not isinstance(value, Mapping):
-        return None
-    status_code = value.get("status_code", value.get("statusCode"))
-    try:
-        code = int(status_code) if status_code is not None else 0
-    except (TypeError, ValueError):
-        code = 0
-    if code == 429:
-        return "contact_provider_rate_limited"
-    if code >= 500:
-        return "contact_provider_error"
-    status = _norm(value.get("status"))
-    if status in {"failed", "error"} or value.get("error"):
-        return "contact_provider_error"
+    records = [value]
+    unwrapped = _unwrap_data(value)
+    if unwrapped is not value:
+        records.append(unwrapped)
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        status_code = record.get("status_code", record.get("statusCode"))
+        if status_code is None and isinstance(record.get("status"), int):
+            status_code = record.get("status")
+        try:
+            code = int(status_code) if status_code is not None else 0
+        except (TypeError, ValueError):
+            code = 0
+        if code == 429:
+            return "contact_provider_rate_limited"
+        if code >= 500:
+            return "contact_provider_error"
+        status = _norm(record.get("status"))
+        error = _norm(record.get("error"))
+        not_found = code == 404 and (
+            "not found" in error or "no profile" in error
+        )
+        if status in {"failed", "error"} or (error and not not_found):
+            return "contact_provider_error"
     return None
 
 
@@ -372,6 +383,8 @@ def _profile_name(profile: Mapping[str, Any]) -> str:
 
 
 def _is_current_experience(item: Mapping[str, Any]) -> bool:
+    if item.get("current") is False or item.get("isCurrent") is False:
+        return False
     if item.get("current") is True or item.get("isCurrent") is True:
         return True
     end = item.get("endDate", item.get("end_date"))
@@ -388,10 +401,14 @@ def _is_current_experience(item: Mapping[str, Any]) -> bool:
 def _current_positions(profile: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     positions: list[Mapping[str, Any]] = []
     current = profile.get("currentPosition", profile.get("current_position"))
-    if isinstance(current, Mapping):
+    if isinstance(current, Mapping) and _is_current_experience(current):
         positions.append(current)
     elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
-        positions.extend(item for item in current[:10] if isinstance(item, Mapping))
+        positions.extend(
+            item
+            for item in current[:10]
+            if isinstance(item, Mapping) and _is_current_experience(item)
+        )
     experience = profile.get("experience") or profile.get("experiences") or []
     if isinstance(experience, Sequence) and not isinstance(experience, (str, bytes, bytearray)):
         positions.extend(
@@ -770,14 +787,20 @@ def _truthy_flag(value: Any) -> bool:
 def _email_evidence_unsafe(*records: Any) -> bool:
     flag_names = (
         "is_disposable",
+        "isDisposable",
         "disposable",
         "is_abuse",
+        "isAbuse",
         "abuse",
         "do_not_mail",
+        "doNotMail",
         "is_do_not_mail",
+        "isDoNotMail",
         "is_spamtrap",
+        "isSpamtrap",
         "spamtrap",
         "is_toxic",
+        "isToxic",
         "toxic",
     )
     status_names = ("status", "sub_status", "result", "verdict", "classification")
@@ -796,7 +819,15 @@ def _email_evidence_unsafe(*records: Any) -> bool:
 
 
 def _email_evidence_is_catch_all(*records: Any) -> bool:
-    flag_names = ("is_accept_all", "accept_all", "catchall_domain", "catch_all_domain")
+    flag_names = (
+        "is_accept_all",
+        "isAcceptAll",
+        "accept_all",
+        "acceptAll",
+        "catchall_domain",
+        "catchAllDomain",
+        "catch_all_domain",
+    )
     status_names = ("status", "sub_status", "result", "verdict", "classification")
     catch_all = set(_CATCH_ALL_EMAIL_STATUSES) | {"catchall_domain"}
     for record in records:
@@ -972,14 +1003,14 @@ def _source_reference_matches(contact: Mapping[str, Any], source: Mapping[str, A
     if broker_claim and broker_claim != broker_actual:
         return False
     record_claim = _text(attribution.get("record_id"))
-    record_actual = _text(
-        identity.get("record_id")
-        or profile.get("recordId")
-        or profile.get("record_id")
-        or profile.get("id")
+    identity_record = _text(identity.get("record_id"))
+    profile_record = _text(
+        profile.get("recordId") or profile.get("record_id") or profile.get("id")
     )
-    if record_claim and record_claim != record_actual:
-        return False
+    if record_claim:
+        available_records = [value for value in (identity_record, profile_record) if value]
+        if not available_records or any(record_claim != value for value in available_records):
+            return False
     return bool(broker_claim or record_claim)
 
 
@@ -1113,8 +1144,13 @@ async def verify_contact(
     subchecks["company"] = {"status": "pass", "reason": "contact_company_verified"}
 
     claimed_role = _text(contact.get("role"))
-    actual_roles = [_position_title(position) for position in matching_positions]
-    if claimed_role and not any(_normalize_title(role) == _normalize_title(claimed_role) for role in actual_roles):
+    claimed_role_normalized = _normalize_title(claimed_role)
+    actual_roles = [
+        _position_title(position)
+        for position in matching_positions
+        if _normalize_title(_position_title(position)) == claimed_role_normalized
+    ]
+    if not actual_roles:
         subchecks["role"] = {"status": "fail", "reason": "contact_role_mismatch"}
         return _result(contact, "mismatch", "contact_role_mismatch", subchecks=subchecks, evidence_hashes=evidence_hashes, evidence_timestamps=evidence_timestamps)
     targets = _get(icp, "target_roles") or []

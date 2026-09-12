@@ -32,6 +32,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
     LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
+    POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
@@ -205,16 +206,15 @@ def integrated_database():
                     SCRIPTS / LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION
                 ).read_text(encoding="utf-8")
             )
-            # Current service completion reads delayed provider billing even
-            # when this controlled round made no paid calls.
-            for migration in (
-                "214-lab-arena-prior-credential-refusal.sql",
-                "218-lab-arena-cross-provider-credential-refusal.sql",
-                "223-lab-arena-cancelled-call-late-settlement.sql",
-                "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
-                "227-lab-arena-champion-funding.sql",
-            ):
-                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            # Finish the current schema after proving the retirement upgrade.
+            # New rounds use the same cost/publication policy as production.
+            applied_migrations = staged_migrations + (
+                LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
+                LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
+            )
+            for migration in POSTGREST_MIGRATIONS:
+                if migration not in applied_migrations:
+                    cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute(
                 "SELECT to_regclass('public.' || name) FROM unnest(%s::text[]) name",
                 (list(RETIRED_INCENTIVE_TABLES),),

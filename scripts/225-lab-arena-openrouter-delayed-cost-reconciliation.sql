@@ -22,6 +22,12 @@ BEGIN
 END;
 $lab_arena_225_prerequisites$;
 
+-- Hosted migration runners are non-superusers. They can transfer a new
+-- function to lab_arena_owner only while that target role has CREATE on the
+-- containing schema. Keep the grant inside this transaction and revoke it
+-- before commit, as the earlier Arena migrations do.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_list_openrouter_cost_reconciliations_v1(
   p_round_id TEXT,
   p_run_id TEXT,
@@ -376,4 +382,5 @@ COMMENT ON FUNCTION public.lab_arena_reconcile_openrouter_cost_v1(
 ) IS 'Service-only append-only settlement of one retained OpenRouter generation identity.';
 
 NOTIFY pgrst, 'reload schema';
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

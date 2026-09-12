@@ -84,6 +84,8 @@ _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+# Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
+# The requested Scrapingdog-compatible response keeps its existing 2 MiB cap.
 _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
 # Documented post-mortem billing identity:
 # https://openrouter.ai/docs/guides/features/router-metadata#error-responses

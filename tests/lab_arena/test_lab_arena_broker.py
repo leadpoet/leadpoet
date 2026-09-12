@@ -419,6 +419,59 @@ def test_http_transport_labels_synthetic_generic_response(status, chunks, expect
     assert response.internal_provenance == expected_provenance
 
 
+def test_http_transport_per_call_limit_accepts_exact_boundary_only():
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def iter_bytes(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            yield self.body
+
+    class Client:
+        def __init__(self):
+            self.body = b""
+
+        def stream(self, *args, **kwargs):
+            return Response(self.body)
+
+        def close(self):
+            pass
+
+    client = Client()
+    transport = br.HttpxProviderTransport(client=client, max_response_bytes=3)
+    client.body = b"abcd"
+    accepted = transport.send(
+        method="POST",
+        url="https://example.com/execute",
+        headers={},
+        body=b"{}",
+        timeout_seconds=1,
+        max_response_bytes=4,
+    )
+    assert accepted.status == 200 and accepted.body == b"abcd"
+    client.body = b"abcde"
+    refused = transport.send(
+        method="POST",
+        url="https://example.com/execute",
+        headers={},
+        body=b"{}",
+        timeout_seconds=1,
+        max_response_bytes=4,
+    )
+    assert refused.status == 502
+    assert refused.internal_provenance == "response_too_large"
+
+
 def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html():
     requested_url = "https://wonderskin.com/"
     tail_marker = "raw-envelope-tail-must-not-be-persisted"

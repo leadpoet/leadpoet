@@ -19,7 +19,13 @@ MIGRATIONS = DEFAULT_MIGRATIONS + (
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(MIGRATIONS)
+    yield from database_with_lab_arena_migration(
+        MIGRATIONS
+        + (
+            "223-lab-arena-cancelled-call-late-settlement.sql",
+            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+        )
+    )
 
 
 def test_integrity_migration_replays_and_keeps_private_function_grants(database):

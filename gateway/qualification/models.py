@@ -788,7 +788,7 @@ class ICPPrompt(BaseModel):
     # NOTE: As of May 2026 the model competition is single-path company-mode
     # (miners return a ``CompanyOutput``).  There is no ``mode`` field on
     # this schema — it was briefly present during the transition but has
-    # been removed.  Fulfillment-side use of ``ICPPrompt`` is unchanged.
+    # been removed.
 
     # PRIMARY FIELD - Models should interpret this natural language prompt
     prompt: str = Field("", description="Natural language prompt describing the ideal customer (PRIMARY)")

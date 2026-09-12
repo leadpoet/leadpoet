@@ -15,7 +15,13 @@ from tests.lab_arena.test_integrity_round import IntegrityHarness, MIGRATIONS
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(MIGRATIONS)
+    yield from database_with_lab_arena_migration(
+        MIGRATIONS
+        + (
+            "223-lab-arena-cancelled-call-late-settlement.sql",
+            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+        )
+    )
 
 
 def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(

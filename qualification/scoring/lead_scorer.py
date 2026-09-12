@@ -1746,9 +1746,15 @@ def _is_same_domain_unproven_web_identity(
     """Recognize a complete same-domain alias observation without accepting it."""
 
     value = receipt or {}
+    reason_code = value.get("reason_code")
+    submitted_linkedin_slug = value.get("submitted_linkedin_slug")
     return bool(
         value.get("decision") == COMPANY_FIT_UNAVAILABLE
-        and value.get("reason_code") == "identity_not_proven"
+        and reason_code
+        in {
+            "identity_not_proven",
+            "identity_name_alias_unresolved",
+        }
         and value.get("evidence_source") == "company_web_reverification"
         and all(
             isinstance(value.get(field), str)
@@ -1761,8 +1767,20 @@ def _is_same_domain_unproven_web_identity(
                 "observed_linkedin_slug",
             )
         )
-        and value.get("submitted_linkedin_slug") == ""
         and value.get("submitted_domain") == value.get("observed_domain")
+        and (
+            (
+                reason_code == "identity_not_proven"
+                and submitted_linkedin_slug == ""
+            )
+            or (
+                reason_code == "identity_name_alias_unresolved"
+                and isinstance(submitted_linkedin_slug, str)
+                and bool(submitted_linkedin_slug.strip())
+                and submitted_linkedin_slug == value.get("observed_linkedin_slug")
+                and value.get("submitted_name") != value.get("observed_name")
+            )
+        )
     )
 
 

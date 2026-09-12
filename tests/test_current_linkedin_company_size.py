@@ -888,6 +888,139 @@ def test_identity_insufficient_path_does_not_hide_malformed_evidence():
     )
 
 
+def _complete_same_slug_name_alias_receipt(**updates):
+    receipt = {
+        "decision": "unavailable",
+        "reason_code": "identity_name_alias_unresolved",
+        "evidence_source": "company_web_reverification",
+        "submitted_name": "acmeinternationalholdings",
+        "submitted_domain": "acme.example.com",
+        "submitted_linkedin_slug": "acme",
+        "observed_name": "acme",
+        "observed_domain": "acme.example.com",
+        "observed_linkedin_slug": "acme",
+    }
+    receipt.update(updates)
+    return receipt
+
+
+def test_complete_same_slug_name_alias_is_explicitly_unproven_identity():
+    receipt = _complete_same_slug_name_alias_receipt()
+
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {},
+        ("identity",),
+        identity_receipt=receipt,
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"submitted_linkedin_slug": ""},
+        {"observed_linkedin_slug": "other"},
+        {"observed_domain": "other.example.com"},
+        {"observed_name": ""},
+        {"evidence_source": "company_homepage"},
+        {"submitted_name": "acme"},
+    ],
+)
+def test_incomplete_or_mismatched_same_slug_name_alias_stays_retryable(updates):
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {},
+        ("identity",),
+        identity_receipt=_complete_same_slug_name_alias_receipt(**updates),
+    )
+
+
+@pytest.mark.parametrize(
+    ("homepage_reason", "expected_retryable"),
+    [
+        ("website returned HTTP 404", False),
+        ("website returned HTTP 502", True),
+    ],
+)
+def test_same_slug_unproven_name_alias_preserves_homepage_failure_classification(
+    monkeypatch,
+    homepage_reason,
+    expected_retryable,
+):
+    company = _company().model_copy(
+        update={
+            "company_name": "Acme International Holdings",
+            "country": "Canada",
+        }
+    )
+    icp = _icp().model_copy(
+        update={"geography": "Canada", "country": "Canada"}
+    )
+    verdict = _verdict(observed_size=None, size_matches=None, employee_url="")
+    verdict.update(
+        observed_company_name="Acme",
+        observed_hq_country="Canada",
+        employee_size_evidence_quote="",
+        geography_evidence_quote="Acme is headquartered in Canada.",
+    )
+    provider_calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable(homepage_reason)
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return dict(verdict), ""
+
+    async def unexpected_fetch(_url):
+        raise AssertionError("missing employee-size evidence must not be fetched")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_request_company_reverify_json",
+        provider,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        unexpected_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer.score_company_competition_intent(
+            company,
+            icp,
+            0.0,
+            0.0,
+            set(),
+            company_quality=True,
+        )
+    )
+    breakdown = result.model_dump(mode="json")
+    receipt = breakdown["verifier_gate_receipts"][0]
+
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.final_score == 0.0
+    assert result.failure_reason.startswith("Company fit unavailable:")
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["dimension_evidence"]["identity"]["web_identity_receipt"][
+        "reason_code"
+    ] == "identity_name_alias_unresolved"
+    assert scorer_breakdown_has_retryable_infrastructure_failure(
+        breakdown
+    ) is expected_retryable
+    assert (receipt.get("failure_class") == "insufficient_fit_evidence") is (
+        not expected_retryable
+    )
+
+
 def test_direct_size_repair_clears_an_earlier_invalid_linkedin_citation(
     monkeypatch,
 ):

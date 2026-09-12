@@ -254,6 +254,72 @@ def test_legacy_verifier_includes_supplied_identity_in_both_judge_prompts(
     assert all(identity in call.args[2] for call in calls.await_args_list)
 
 
+def test_legacy_euno_receipt_without_linkedin_is_present_in_both_prompts(
+    monkeypatch,
+):
+    url = (
+        "https://thenextweb.com/news/"
+        "euno-raises-23m-series-a-n47-ai-agent-context-platform"
+    )
+    stage_one = _verdict(url)
+    stage_three = _verdict(url)
+    for envelope in (stage_one, stage_three):
+        evaluation = envelope["answer"]["signal_evaluations"][0]
+        evaluation["claim"] = "Euno raised a $23 million Series A."
+        evaluation["supporting_quotes"] = [
+            "Euno has raised a $23m Series A led by N47."
+        ]
+    calls = AsyncMock(side_effect=[stage_one, stage_three])
+    fetch = AsyncMock(return_value={
+        "results": [{
+            "url": url,
+            "title": "Euno raises $23M Series A",
+            "text": "Euno has raised a $23m Series A led by N47.",
+        }],
+        "statuses": [{"source": "scrapingdog", "stage": "ok"}],
+    })
+    monkeypatch.setattr(
+        "qualification.scoring.intent_verification_three_stage._call_openrouter",
+        calls,
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa",
+        fetch,
+    )
+
+    result = asyncio.run(verify_three_stage(
+        object(),
+        company_name="Euno",
+        company_linkedin="",
+        company_website="https://euno.ai",
+        source_url=url,
+        miner_claim="Euno raised a $23 million Series A.",
+        target_signal_text="Announced a funding round in the last 12 months",
+        miner_signal_date="2026-09-10",
+        evidence_type="FUNDING",
+        stage1_soft_reject=True,
+        company_quality=False,
+        verified_company_identity=_quality_receipt(
+            submitted_name="euno",
+            submitted_domain="euno.ai",
+            submitted_linkedin_slug="",
+            observed_name="euno",
+            observed_domain="euno.ai",
+            observed_linkedin_slug="",
+            verified_legal_name_aliases=[],
+        ),
+    ))
+
+    assert result["client_ready"] is True
+    assert calls.await_count == 2
+    identity = (
+        '<verified_company_identity>{"canonical_name":"euno",'
+        '"company_domain":"euno.ai","linkedin_company_slug":""}'
+        "</verified_company_identity>"
+    )
+    assert all(identity in call.args[2] for call in calls.await_args_list)
+
+
 def test_legacy_verifier_without_identity_preserves_prior_prompt(monkeypatch):
     url = "https://news.example.com/acme-product"
     calls = AsyncMock(side_effect=[_verdict(url), _verdict(url)])

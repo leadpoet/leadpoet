@@ -1102,8 +1102,10 @@ def _url_on_lead_domain(source_url: str,
 
 def _verified_company_identity_context(
     value: Optional[Mapping[str, Any]],
+    *,
+    require_linkedin: bool = False,
 ) -> Dict[str, Any]:
-    """Project only a complete independently observed company identity."""
+    """Project only a validated independently observed company identity."""
 
     if not isinstance(value, Mapping):
         return {}
@@ -1116,10 +1118,10 @@ def _verified_company_identity_context(
     raw_name = value.get("observed_name")
     raw_domain = value.get("observed_domain")
     raw_linkedin_slug = value.get("observed_linkedin_slug")
-    if not all(
-        isinstance(item, str)
-        for item in (raw_name, raw_domain, raw_linkedin_slug)
-    ):
+    if raw_linkedin_slug is None:
+        raw_linkedin_slug = ""
+    identity_parts = (raw_name, raw_domain, raw_linkedin_slug)
+    if not all(isinstance(item, str) for item in identity_parts):
         return {}
     name = raw_name.strip()
     domain = raw_domain.strip().casefold()
@@ -1129,14 +1131,17 @@ def _verified_company_identity_context(
         or raw_domain != domain
         or raw_linkedin_slug != linkedin_slug
         or not re.fullmatch(r"[a-z0-9]{1,200}", name)
-        or not linkedin_slug
         or not re.fullmatch(
             r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
             r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
             domain,
         )
-        or not re.fullmatch(
-            r"[a-z0-9][a-z0-9._%+-]{0,99}", linkedin_slug
+        or (require_linkedin and not linkedin_slug)
+        or (
+            linkedin_slug
+            and not re.fullmatch(
+                r"[a-z0-9][a-z0-9._%+-]{0,99}", linkedin_slug
+            )
         )
     ):
         return {}
@@ -3397,7 +3402,10 @@ async def verify_three_stage(
         ):
             raise ValueError("intent signal date is invalid")
         verified_identity_context = (
-            _verified_company_identity_context(verified_company_identity)
+            _verified_company_identity_context(
+                verified_company_identity,
+                require_linkedin=company_quality,
+            )
             if verified_company_identity is not None
             else {}
         )

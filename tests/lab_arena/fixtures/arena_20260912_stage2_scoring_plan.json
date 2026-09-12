@@ -1,0 +1,477 @@
+{
+  "round_id": "arena-2026-09-12",
+  "schema_version": "leadpoet.lab_arena.scoring_plan.v1",
+  "stage": 2,
+  "work_items": [
+    {
+      "icp_position": 10,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:10:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:10:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 11,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:11:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:11:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 12,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:12:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:12:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 13,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:13:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:13:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 14,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:14:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:14:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 15,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:15:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:15:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 16,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:16:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:16:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 17,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:17:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:17:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 18,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:18:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:18:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 19,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:baseline-2026-09-12:2:19:1.json",
+      "scored_run_id": "arena-2026-09-12:baseline-2026-09-12:2:19:1",
+      "submission_id": "baseline-2026-09-12"
+    },
+    {
+      "icp_position": 10,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:10:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:10:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 11,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:11:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:11:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 12,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:12:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:12:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 13,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:13:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:13:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 14,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:14:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:14:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 15,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:15:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:15:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 16,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:16:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:16:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 17,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:17:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:17:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 18,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:18:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:18:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 19,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:19:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-1460c4e33f19f923b969ef2fd941072f:2:19:1",
+      "submission_id": "sub-1460c4e33f19f923b969ef2fd941072f"
+    },
+    {
+      "icp_position": 11,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:11:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:11:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 12,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:12:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:12:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 13,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:13:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:13:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 14,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:14:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:14:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 15,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:15:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:15:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 16,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:16:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:16:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 18,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:18:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:18:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 19,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:19:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-64750217950f089a3bec21ee6fe72d6e:2:19:1",
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "icp_position": 10,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:10:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:10:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 11,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:11:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:11:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 12,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:12:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:12:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 13,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:13:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:13:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 14,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:14:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:14:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 15,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:15:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:15:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 16,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:16:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:16:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 17,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:17:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:17:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 18,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:18:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:18:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 19,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:19:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-67fdb5d43bc8f9ea4cb6e74df4797037:2:19:1",
+      "submission_id": "sub-67fdb5d43bc8f9ea4cb6e74df4797037"
+    },
+    {
+      "icp_position": 10,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:10:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:10:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 11,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:11:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:11:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 12,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:12:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:12:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 13,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:13:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:13:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 14,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:14:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:14:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 15,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:15:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:15:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 16,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:16:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:16:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 17,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:17:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:17:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 18,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:18:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:18:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 19,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:19:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-c2ab2d55f187807c2793433701485825:2:19:1",
+      "submission_id": "sub-c2ab2d55f187807c2793433701485825"
+    },
+    {
+      "icp_position": 10,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:10:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:10:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 11,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:11:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:11:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 12,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:12:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:12:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 13,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:13:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:13:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 14,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:14:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:14:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 15,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:15:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:15:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 16,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:16:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:16:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 17,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:17:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:17:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 18,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:18:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:18:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 19,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:19:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-ddd33c5c142f317e0279265f179b5bc1:2:19:1",
+      "submission_id": "sub-ddd33c5c142f317e0279265f179b5bc1"
+    },
+    {
+      "icp_position": 10,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:10:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:10:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 11,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:11:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:11:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 12,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:12:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:12:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 13,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:13:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:13:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 14,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:14:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:14:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 15,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:15:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:15:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 16,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:16:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:16:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 17,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:17:2.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:17:2",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 18,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:18:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:18:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    },
+    {
+      "icp_position": 19,
+      "output_ref": "arena/arena-2026-09-12/outputs/arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:19:1.json",
+      "scored_run_id": "arena-2026-09-12:sub-eb8a764bc501efb7d47f9c6c74d49756:2:19:1",
+      "submission_id": "sub-eb8a764bc501efb7d47f9c6c74d49756"
+    }
+  ],
+  "zero_rows": [
+    {
+      "cause": "model_timeout",
+      "icp_position": 10,
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "cause": "model_error",
+      "icp_position": 17,
+      "submission_id": "sub-64750217950f089a3bec21ee6fe72d6e"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 10,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 11,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 12,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 13,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 14,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 15,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 16,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 17,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 18,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    },
+    {
+      "cause": "credential_error",
+      "icp_position": 19,
+      "submission_id": "sub-d39d12f74f5f6fb56837d22890c7dd94"
+    }
+  ]
+}

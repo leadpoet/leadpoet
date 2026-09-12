@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
+# Set back to True to re-enforce the recent-accepted-work requirement on a
+# high-stake validator's accepted weight-state read. Turned off 2026-09-12:
+# from 22:06Z the gate refused every such read at ~4/min, and validator.py
+# treats that exact refusal as blocked_on_participation and skips the round's
+# weight publication entirely.
+PARTICIPATION_GATE_ENFORCED = False
 TERMINAL_STATUSES = ("published", "cancelled")
 ACTIVE_ROUND_STATUSES = tuple(
     status for status in contracts.ROUND_STATUSES if status not in TERMINAL_STATUSES
@@ -4031,7 +4037,7 @@ class ArenaService:
             raise ServiceError(str(exc), 403) from None
         except Exception:
             raise ServiceError("validator_snapshot_unavailable", 503) from None
-        if stake > MIN_VALIDATOR_STAKE_WEIGHT:
+        if stake > MIN_VALIDATOR_STAKE_WEIGHT and PARTICIPATION_GATE_ENFORCED:
             try:
                 participated = self.store.has_recent_participation(
                     network, netuid, validated["hotkey"]

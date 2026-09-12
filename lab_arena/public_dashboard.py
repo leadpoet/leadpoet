@@ -37,6 +37,12 @@ _COST_COUNTER_KEYS = (
     "refused_calls",
     "call_count",
 )
+_SUCCESSFUL_CALL_COST_COUNTER_KEYS = (
+    "successful_microusd",
+    "successful_calls",
+    "success_unresolved_microusd",
+    "success_unresolved_calls",
+)
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
@@ -97,10 +103,15 @@ def _safe_integer(value: Any) -> Optional[int]:
     return value
 
 
-def _cost_bucket(value: Any) -> Optional[dict]:
+def _cost_bucket(
+    value: Any, *, successful_call_policy: bool = False
+) -> Optional[dict]:
     if not isinstance(value, Mapping):
         return None
-    projected = {key: _safe_integer(value.get(key)) for key in _COST_COUNTER_KEYS}
+    counter_keys = _COST_COUNTER_KEYS + (
+        _SUCCESSFUL_CALL_COST_COUNTER_KEYS if successful_call_policy else ()
+    )
+    projected = {key: _safe_integer(value.get(key)) for key in counter_keys}
     if any(item is None for item in projected.values()):
         return None
     raw_providers = value.get("providers")
@@ -116,7 +127,7 @@ def _cost_bucket(value: Any) -> Optional[dict]:
             return None
         seen.add(provider)
         row = {"provider": provider}
-        for key in _COST_COUNTER_KEYS:
+        for key in counter_keys:
             number = _safe_integer(raw.get(key))
             if number is None:
                 return None
@@ -126,7 +137,9 @@ def _cost_bucket(value: Any) -> Optional[dict]:
     return projected
 
 
-def _cost_projection(ranking: Mapping[str, Any]) -> dict:
+def _cost_projection(
+    ranking: Mapping[str, Any], *, sourcing_cost_eligibility_policy: Any = None
+) -> dict:
     """Allow-list a final cost result; never pass publication fields through."""
 
     eligible = ranking.get("eligible")
@@ -154,11 +167,33 @@ def _cost_projection(ranking: Mapping[str, Any]) -> dict:
     projected_summary = {key: _safe_integer(summary.get(key)) for key in scalar_keys}
     if "qualified_company_count" in summary:
         projected_summary["qualified_company_count"] = _safe_integer(summary["qualified_company_count"])
-    execution = _cost_bucket(summary.get("execution"))
-    judge = _cost_bucket(summary.get("judge"))
+    successful_call_policy = (
+        sourcing_cost_eligibility_policy
+        == contracts.SUCCESSFUL_CALLS_COST_POLICY
+    )
+    execution = _cost_bucket(
+        summary.get("execution"),
+        successful_call_policy=successful_call_policy,
+    )
+    judge = _cost_bucket(
+        summary.get("judge"),
+        successful_call_policy=successful_call_policy,
+    )
     if any(item is None for item in projected_summary.values()) or execution is None or judge is None:
         return {}
     projected_summary.update({"execution": execution, "judge": judge})
+    if successful_call_policy:
+        projected_summary.update(
+            {
+                "sourcing_cost_eligibility_policy": (
+                    contracts.SUCCESSFUL_CALLS_COST_POLICY
+                ),
+                "competition_sourcing_microusd": (
+                    execution["successful_microusd"]
+                    + execution["success_unresolved_microusd"]
+                ),
+            }
+        )
     return {
         "cost_summary": projected_summary,
         "eligible": eligible,
@@ -201,6 +236,8 @@ def _champion_submission_id(row: Mapping[str, Any]) -> Optional[str]:
 
 def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Optional[dict]]:
     published = row.get("status") == "published"
+    configuration = row.get("configuration_doc")
+    configuration = configuration if isinstance(configuration, Mapping) else {}
     final = _rankings(row, "final_ranking") if published else {}
     baseline = None
     champion = None
@@ -219,7 +256,14 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
             "final_score": _score(ranking.get("final_score")),
         }
         if published:
-            projected.update(_cost_projection(ranking))
+            projected.update(
+                _cost_projection(
+                    ranking,
+                    sourcing_cost_eligibility_policy=configuration.get(
+                        "sourcing_cost_eligibility_policy"
+                    ),
+                )
+            )
         if is_baseline:
             baseline = projected
         elif submission_id == champion_id:
@@ -425,7 +469,18 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                 ),
             }
         if round_status == "published":
-            projected.update(_cost_projection(final))
+            configuration = row.get("configuration_doc")
+            configuration = (
+                configuration if isinstance(configuration, Mapping) else {}
+            )
+            projected.update(
+                _cost_projection(
+                    final,
+                    sourcing_cost_eligibility_policy=configuration.get(
+                        "sourcing_cost_eligibility_policy"
+                    ),
+                )
+            )
             if "main_score" in final:
                 projected["main_score"] = _score(final.get("main_score"))
                 projected["confirmation_selected"] = final.get("confirmation_selected") is True

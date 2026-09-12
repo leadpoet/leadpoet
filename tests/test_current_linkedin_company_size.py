@@ -97,6 +97,44 @@ def _homepage_anchor():
     )
 
 
+def _install_exa_bodies(monkeypatch, *bodies):
+    pending = list(bodies)
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            return self.body
+
+    class Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return Response(pending.pop(0))
+
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
+    return calls, pending
+
+
 def test_literal_company_size_is_bounded_to_about_section():
     text = """# Acme
 
@@ -119,6 +157,127 @@ Company size 51-200 employees
     assert linkedin_company_size.extract_linkedin_company_size(
         "## About us\nView all 89 employees\n## Employees at Acme"
     ) is None
+
+
+def test_dutch_company_size_is_canonicalized_inside_translated_about_section():
+    text = """Imagine Pediatrics | LinkedIn
+
+403 medewerkers
+
+## Over ons
+
+Imagine Pediatrics provides pediatric care.
+
+Bedrijfsgrootte
+501 - 1.000 medewerkers
+
+## Medewerkers van Imagine Pediatrics
+
+Alle 403 medewerkers weergeven
+"""
+
+    assert linkedin_company_size.extract_linkedin_company_size(text) == {
+        "employee_count": "501-1,000",
+        "quote": "Bedrijfsgrootte\n501 - 1.000 medewerkers",
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## Over ons\n52.304 volgers\nVacatures weergeven\n## Updates",
+        "## Over ons\nAlle 403 medewerkers weergeven\n## Updates",
+        "## Over ons\nBedrijfsgrootte\n403 medewerkers\n## Updates",
+        (
+            "## Over ons\nGeen grootteveld.\n"
+            "## Medewerkers van Acme\nBedrijfsgrootte\n501 - 1.000 medewerkers"
+        ),
+    ],
+)
+def test_translated_parser_rejects_unrelated_or_non_bucket_numbers(text):
+    assert linkedin_company_size.extract_linkedin_company_size(text) is None
+
+
+def test_authentication_wall_is_retryable_fetch_failure(monkeypatch):
+    wall = """Cadastre-se | LinkedIn
+# Cadastre-se no LinkedIn
+E-mail
+Senha (+ de 6 caracteres)
+## Entrar
+E-mail ou telefone
+Senha
+"""
+    body = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [
+            {
+                "url": "https://linkedin.com/company/acme",
+                "text": wall,
+            }
+        ],
+    }
+    calls, pending = _install_exa_bodies(monkeypatch, body)
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme"
+        )
+    ) is None
+    assert len(calls) == 1
+    assert pending == []
+
+
+@pytest.mark.parametrize(
+    "blocked_text",
+    [
+        "Access Denied\nRequest blocked. You don't have permission to access this page.",
+        (
+            "Security Verification | LinkedIn\nSecurity check\n"
+            "Additional verification required. Verify you are human."
+        ),
+        "Robot Check | LinkedIn\nVerify you are human to continue.",
+    ],
+)
+def test_http_200_blocked_page_is_retryable_fetch_failure(
+    monkeypatch,
+    blocked_text,
+):
+    body = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [
+            {
+                "url": "https://linkedin.com/company/acme",
+                "text": blocked_text,
+            }
+        ],
+    }
+    calls, pending = _install_exa_bodies(monkeypatch, body)
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme"
+        )
+    ) is None
+    assert len(calls) == 1
+    assert pending == []
+
+
+def test_public_profile_footer_blocker_mentions_do_not_hide_company_size():
+    text = """Acme | LinkedIn
+## About us
+Acme provides workflow software.
+Company size
+51-200 employees
+## Updates
+Our security product can show an Access Denied or Robot Check page.
+Users may need to verify they are human.
+"""
+
+    assert not linkedin_company_size._is_linkedin_access_wall(text)
+    assert linkedin_company_size.extract_linkedin_company_size(text) == {
+        "employee_count": "51-200",
+        "quote": "Company size\n51-200 employees",
+    }
 
 
 def test_exa_contents_request_is_uncached_and_bound_to_returned_url(monkeypatch):
@@ -321,7 +480,10 @@ def test_successful_exact_profile_without_company_size_is_insufficient(
                 "results": [
                     {
                         "url": "https://linkedin.com/company/acme",
-                        "text": "Acme builds workflow software.\nView all employees",
+                        "text": (
+                            "## Over ons\nAcme bouwt workflowsoftware.\n"
+                            "Website\nhttps://acme.example.com"
+                        ),
                     }
                 ],
             }
@@ -521,22 +683,120 @@ def test_current_profile_replaces_stale_linkedin_match_or_mismatch(
     assert fetches == ["https://www.linkedin.com/company/acme"]
 
 
-def test_failed_refresh_clears_stale_size_and_is_reused_on_schema_repair(monkeypatch):
+def test_login_wall_failure_allows_existing_retry_to_use_translated_profile(
+    monkeypatch,
+):
     provider_calls = []
-    fetches = []
+    wall = """Cadastre-se | LinkedIn
+# Cadastre-se no LinkedIn
+E-mail
+Senha (+ de 6 caracteres)
+"""
+    dutch_profile = """Acme | LinkedIn
+## Over ons
+Acme provides workflow software.
+Bedrijfsgrootte
+501 - 1.000 medewerkers
+## Medewerkers van Acme
+Alle 403 medewerkers weergeven
+"""
+    bodies = [
+        {
+            "statuses": [{"status": "success", "source": "crawled"}],
+            "results": [
+                {
+                    "url": "https://linkedin.com/company/acme",
+                    "text": wall,
+                }
+            ],
+        },
+        {
+            "statuses": [{"status": "success", "source": "crawled"}],
+            "results": [
+                {
+                    "url": "https://linkedin.com/company/acme",
+                    "text": dutch_profile,
+                }
+            ],
+        },
+    ]
+    exa_calls, pending = _install_exa_bodies(monkeypatch, *bodies)
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return _verdict(observed_size=None, size_matches=None), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+
+    first = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp().model_copy(update={"employee_count": "501-1,000"}),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+    retryable = scorer_breakdown_has_retryable_infrastructure_failure(
+        {"verifier_gate_receipts": [first.receipt("company_fit")]}
+    )
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp().model_copy(update={"employee_count": "501-1,000"}),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert first.decision == COMPANY_FIT_UNAVAILABLE
+    assert first.details["failure_class"] == "employee_size_verification_failed"
+    assert retryable
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_MATCH
+    )
+    assert result.details["provider_observations"]["observed_employee_count"] == (
+        "501-1,000"
+    )
+    assert result.details["dimension_evidence"]["employee_size"] == {
+        "url": "https://linkedin.com/company/acme",
+        "quote": "Bedrijfsgrootte\n501 - 1.000 medewerkers",
+    }
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+        "lead_scorer_reverify",
+    ]
+    assert len(exa_calls) == 2
+    assert pending == []
+
+
+def test_failed_refresh_clears_stale_size_after_bounded_schema_retry(monkeypatch):
+    provider_calls = []
     original_verdict = _verdict()
+    wall = """Cadastre-se | LinkedIn
+# Cadastre-se no LinkedIn
+E-mail
+Senha (+ de 6 caracteres)
+"""
+    body = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [
+            {
+                "url": "https://linkedin.com/company/acme",
+                "text": wall,
+            }
+        ],
+    }
+    exa_calls, pending = _install_exa_bodies(monkeypatch, body)
 
     async def provider(**kwargs):
         provider_calls.append(kwargs["telemetry_purpose"])
         return original_verdict, ""
 
-    async def fetch(url):
-        fetches.append(url)
-        return None
-
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
-    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
 
     result = asyncio.run(
         lead_scorer._llm_reverify_company(
@@ -560,7 +820,8 @@ def test_failed_refresh_clears_stale_size_and_is_reused_on_schema_repair(monkeyp
         "lead_scorer_reverify",
         "lead_scorer_reverify_schema_repair",
     ]
-    assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert len(exa_calls) == 1
+    assert pending == []
     assert result.details["failure_class"] == (
         "employee_size_verification_failed"
     )

@@ -910,7 +910,7 @@ Before outputting any ICP, mentally verify: "Can I name at least ONE real, curre
 
 If you cannot name a specific real company that fits, the ICP is INVALID. Broaden one of the constraints (geography, stage, employee band, sub-industry) until you CAN name at least one real company. Do not output an unrealistic combination under any circumstances.
 
-To enforce this, every ICP MUST include a `verified_example_company` field naming the real company you found while verifying. This is not optional. If you cannot fill this field with a real company, you must rewrite the ICP with broader constraints until you can.
+To enforce this, every ICP MUST include a `verified_example_company` field naming the real company you found while verifying. Please double-check that this company meets all the ICP criteria. This is not optional. If you cannot fill this field with a real company, you must rewrite the ICP with broader constraints until you can.
 
 DO NOT generate ICPs where:
 - The industry × stage × geography intersection has zero real companies you can name

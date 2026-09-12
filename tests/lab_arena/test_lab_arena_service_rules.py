@@ -502,6 +502,7 @@ def _completion_service(*, registered=True, role="validator", run_runner="runner
         get_run=lambda _run_id: run,
         complete_attempt=lambda **_kwargs: {"status": "failed"},
     )
+    service._reconcile_openrouter_cost = lambda *_args, **_kwargs: {"status": "none"}
     return service
 
 
@@ -585,6 +586,7 @@ def test_service_acceptance_scopes_missing_signal_dates_to_integrity(
     service._objects = SimpleNamespace(
         put=lambda reference, payload: stored.append((reference, payload))
     )
+    service._reconcile_openrouter_cost = lambda *_args, **_kwargs: {"status": "none"}
 
     if accepted:
         assert service.handle_complete({}) == {"status": "accepted"}

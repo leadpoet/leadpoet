@@ -219,12 +219,18 @@ Set these values on the Arena service host:
 Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_NETWORK`, `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`,
 `LAB_ARENA_DAILY_CUTOFF_UTC` (default `0`),
-`LAB_ARENA_MAX_CHALLENGERS` (default `16`, hard limit `256`),
+`LAB_ARENA_MAX_CHALLENGERS` (default `20`, hard schema limit `256`),
 `LAB_ARENA_MAX_IMAGE_BYTES` for the trusted scorer image,
 `LAB_ARENA_POOL_PERCENT`, and
 `LAB_ARENA_BANNED_HOTKEYS_PATH`. `LAB_ARENA_REWARDS_ENABLED` defaults to
 `false` and is frozen into each new round. `LAB_ARENA_SIGNING_KEY_ID` is
 needed only when a live, reward-enabled published round is activated.
+
+The challenger limit excludes the baseline. Each hotkey can have one accepted
+model per daily round, without replacement; different hotkeys can share a
+coldkey. The configured admission limit is not reduced by the conservative
+runner workload estimate. Worker concurrency, stage deadlines, and spending
+limits remain enforced; a full round can require more runner capacity.
 
 `LAB_ARENA_BENCHMARK_DISCLOSURE_FROM` is an optional aware timestamp, normalized
 to UTC. For example, `2026-09-13T00:00:00Z` freezes

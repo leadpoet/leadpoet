@@ -23,13 +23,13 @@ def test_a_days_cycle_fits_inside_twenty_four_hours():
     assert set(svc.DEFAULT_STAGE_MINUTES) == {"benchmark", "stage_1", "stage_1_scoring", "stage_2", "final_scoring"}
 
 
-def test_default_daily_windows_fit_the_default_competition_load():
-    """One default runner can retry every agent AND judge run on all 20 ICPs."""
+def test_conservative_capacity_estimate_fits_the_default_daily_windows():
+    """The conservative estimate reserves retries; it is not an admission cap."""
 
     from tests.lab_arena.test_lab_arena_capacity import configuration
     from lab_arena.capacity import ATTEMPT_OVERHEAD_SECONDS, daily_challenger_capacity
 
-    challengers = min(contracts.DEFAULT_MAX_CHALLENGERS, daily_challenger_capacity(configuration()))
+    challengers = daily_challenger_capacity(configuration())
     stage_1_participants = challengers + 1  # daily baseline plus miners
     stage_2_participants = stage_1_participants
     stage_1_runs = stage_1_participants * contracts.STAGE_1_ICP_COUNT

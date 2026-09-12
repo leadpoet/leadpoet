@@ -29,6 +29,7 @@ GATEWAY_RESTART_TIMING_STAGES = frozenset(
         "docker_disk_cleanup",
         "gateway_health_check",
         "gateway_process_launch",
+        "gateway_supervisor_install",
         "git_activate",
         "git_prepare",
         "git_prepared_tree_verification",

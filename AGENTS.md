@@ -8,8 +8,8 @@ with the overnight validation skills. This includes protected production and
 Supabase access, exact committed migrations, pushes, canonical gateway and
 normal-validator restarts, and full live validation. Preserve submitted source,
 credentials, accepted outputs, provider charges, frozen round rules and timing,
-weights, and concurrent work. Correct only proven failure-classification defects
-and safely resume the same affected round. Do not restore retired Research Lab
+weights, and concurrent work. Correct only proven defects in submission, provider
+accounting, verification, and scoring, and safely resume the same affected round. Do not restore retired Research Lab
 machinery. This authority expires when recovery and validation are complete.
 
 ## Scoped production authorization: PR195 scoring and verifier review

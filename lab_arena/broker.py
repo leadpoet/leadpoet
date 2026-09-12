@@ -84,6 +84,9 @@ _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+# Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
+# The requested Scrapingdog-compatible response keeps its existing 2 MiB cap.
+_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
 # Documented post-mortem billing identity:
 # https://openrouter.ai/docs/guides/features/router-metadata#error-responses
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"
@@ -413,7 +416,16 @@ def _response_contains_credential(response: ProviderResponse, secret: str) -> bo
 
 
 class ProviderTransport(Protocol):
-    def send(self, *, method: str, url: str, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> ProviderResponse: ...
+    def send(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_seconds: float,
+        max_response_bytes: Optional[int] = None,
+    ) -> ProviderResponse: ...
 
 
 _PROVIDER_HTTP_IN_FLIGHT = contextvars.ContextVar("arena_provider_http_in_flight", default=False)
@@ -444,9 +456,29 @@ class HttpxProviderTransport:
         for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.proxy"):
             logging.getLogger(name).addFilter(_PROVIDER_HTTP_LOG_FILTER)
 
-    def send(self, *, method: str, url: str, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> ProviderResponse:
+    def send(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_seconds: float,
+        max_response_bytes: Optional[int] = None,
+    ) -> ProviderResponse:
         if not url.startswith("https://"):
             raise ProviderTransportError("non-https target")
+        response_limit = (
+            self._max_response_bytes
+            if max_response_bytes is None
+            else max_response_bytes
+        )
+        if (
+            isinstance(response_limit, bool)
+            or not isinstance(response_limit, int)
+            or response_limit < 1
+        ):
+            raise ProviderTransportError("invalid response limit")
         log_token = _PROVIDER_HTTP_IN_FLIGHT.set(True)
         try:
             with self._client.stream(method, url, headers=dict(headers), content=body, timeout=httpx.Timeout(float(timeout_seconds))) as response:
@@ -455,7 +487,7 @@ class HttpxProviderTransport:
                 content = bytearray()
                 oversized = False
                 for chunk in response.iter_bytes(chunk_size=64 * 1024):
-                    if len(content) + len(chunk) > self._max_response_bytes:
+                    if len(content) + len(chunk) > response_limit:
                         oversized = True
                         break
                     content.extend(chunk)
@@ -1111,7 +1143,23 @@ class Broker:
             url, headers = inject_credential(outbound, secret)
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
-                response = self._transport.send(method=outbound.target.method, url=url, headers=headers, body=outbound.body, timeout_seconds=timeout_seconds)
+                response = self._transport.send(
+                    method=outbound.target.method,
+                    url=url,
+                    headers=headers,
+                    body=outbound.body,
+                    timeout_seconds=timeout_seconds,
+                    **(
+                        {
+                            "max_response_bytes": (
+                                _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                            )
+                        }
+                        if route is not None
+                        and route.adapter == "firecrawl_raw_html"
+                        else {}
+                    ),
+                )
                 # A provider must not echo its authorization secret into a
                 # stored response or back to untrusted submitted code.
                 if _response_contains_credential(response, secret):

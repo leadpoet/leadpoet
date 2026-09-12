@@ -1102,8 +1102,10 @@ def _url_on_lead_domain(source_url: str,
 
 def _verified_company_identity_context(
     value: Optional[Mapping[str, Any]],
+    *,
+    require_linkedin: bool = False,
 ) -> Dict[str, Any]:
-    """Project only a complete independently observed company identity."""
+    """Project only a validated independently observed company identity."""
 
     if not isinstance(value, Mapping):
         return {}
@@ -1113,20 +1115,33 @@ def _verified_company_identity_context(
         not in {"company_homepage", "company_web_reverification"}
     ):
         return {}
-    name = str(value.get("observed_name") or "").strip()
-    domain = str(value.get("observed_domain") or "").strip().casefold()
-    linkedin_slug = str(value.get("observed_linkedin_slug") or "").strip().casefold()
+    raw_name = value.get("observed_name")
+    raw_domain = value.get("observed_domain")
+    raw_linkedin_slug = value.get("observed_linkedin_slug")
+    if raw_linkedin_slug is None:
+        raw_linkedin_slug = ""
+    identity_parts = (raw_name, raw_domain, raw_linkedin_slug)
+    if not all(isinstance(item, str) for item in identity_parts):
+        return {}
+    name = raw_name.strip()
+    domain = raw_domain.strip().casefold()
+    linkedin_slug = raw_linkedin_slug.strip().casefold()
     if (
-        not name
-        or len(name) > 200
-        or not linkedin_slug
+        raw_name != name
+        or raw_domain != domain
+        or raw_linkedin_slug != linkedin_slug
+        or not re.fullmatch(r"[a-z0-9]{1,200}", name)
         or not re.fullmatch(
             r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
             r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
             domain,
         )
-        or not re.fullmatch(
-            r"[a-z0-9][a-z0-9._%+-]{0,99}", linkedin_slug
+        or (require_linkedin and not linkedin_slug)
+        or (
+            linkedin_slug
+            and not re.fullmatch(
+                r"[a-z0-9][a-z0-9._%+-]{0,99}", linkedin_slug
+            )
         )
     ):
         return {}
@@ -2248,10 +2263,17 @@ def _build_final_judge_prompt(
     return prompt
 
 
-def _company_quality_identity_instructions(row: Mapping[str, Any]) -> str:
+def _verified_company_identity_instructions(
+    row: Mapping[str, Any], verified_identity: Mapping[str, Any]
+) -> str:
     """Tell the model how to separate a publisher from an event subject."""
 
     official_source = row.get("_source_on_verified_company_property") is True
+    trusted_identity = {
+        "canonical_name": verified_identity["observed_name"],
+        "company_domain": verified_identity["observed_domain"],
+        "linkedin_company_slug": verified_identity["observed_linkedin_slug"],
+    }
     official_context = (
         "The server independently verified that the supplied source is on the "
         "matched company's official property. Grounded first-person wording such "
@@ -2262,6 +2284,13 @@ def _company_quality_identity_instructions(row: Mapping[str, Any]) -> str:
     )
     return (
         "\n\nCOMPANY IDENTITY ATTRIBUTION:\n"
+        "The following server-verified identity is trusted identity context, "
+        "but it is not proof that the claimed event occurred. A source can bind "
+        "to this company by explicitly naming the same canonical company even "
+        "when it does not print the company domain or LinkedIn URL.\n"
+        "<verified_company_identity>"
+        + json.dumps(trusted_identity, sort_keys=True, separators=(",", ":"))
+        + "</verified_company_identity>\n"
         + official_context
         + "Separately identify the subject of the claimed event. A publisher's "
         "customer story, case study, partner announcement, portfolio story, or "
@@ -3372,12 +3401,17 @@ async def verify_three_stage(
             or re.fullmatch(r"\d{4}-\d{2}-\d{2}", miner_signal_date) is None
         ):
             raise ValueError("intent signal date is invalid")
-        quality_identity = (
-            _verified_company_identity_context(verified_company_identity)
-            if company_quality
+        verified_identity_context = (
+            _verified_company_identity_context(
+                verified_company_identity,
+                require_linkedin=company_quality,
+            )
+            if verified_company_identity is not None
             else {}
         )
-        if company_quality and not quality_identity:
+        if (
+            company_quality or verified_company_identity is not None
+        ) and not verified_identity_context:
             raise ValueError("independently verified company identity is required")
     except (TypeError, ValueError):
         return {
@@ -3435,7 +3469,9 @@ async def verify_three_stage(
     ) and len(bundle) <= 1
     _on_verified_company_property = bool(
         company_quality
-        and _url_on_verified_company_identity(fetch_source_url, quality_identity)
+        and _url_on_verified_company_identity(
+            fetch_source_url, verified_identity_context
+        )
         and len(bundle) <= 1
     )
     official_publisher_binding = (
@@ -3448,8 +3484,10 @@ async def verify_three_stage(
 
     # ── STAGE 1: sonar first-pass ──────────────────────────────────
     s1_prompt = _build_verification_prompt(row)
-    if company_quality:
-        s1_prompt += _company_quality_identity_instructions(row)
+    if verified_identity_context:
+        s1_prompt += _verified_company_identity_instructions(
+            row, verified_identity_context
+        )
     s1_envelope = await _call_openrouter(
         client, stage1_model or STAGE1_MODEL, s1_prompt
     )
@@ -3776,8 +3814,10 @@ async def verify_three_stage(
 
     # ── STAGE 3: sonar-pro final judge ─────────────────────────────
     s3_prompt = _build_final_judge_prompt(row, contents)
-    if company_quality:
-        s3_prompt += _company_quality_identity_instructions(row)
+    if verified_identity_context:
+        s3_prompt += _verified_company_identity_instructions(
+            row, verified_identity_context
+        )
     s3_envelope = await _call_openrouter(
         client, stage3_model or STAGE3_MODEL, s3_prompt
     )
@@ -4101,7 +4141,9 @@ async def verify_three_stage(
             and not (item.get("meta") or {}).get("is_closed")
             and (
                 (
-                    _url_on_verified_company_identity(item["url"], quality_identity)
+                    _url_on_verified_company_identity(
+                        item["url"], verified_identity_context
+                    )
                     if company_quality
                     else _url_on_lead_domain(
                         item["url"], company_website, company_linkedin

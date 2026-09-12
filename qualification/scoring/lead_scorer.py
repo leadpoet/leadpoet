@@ -442,7 +442,7 @@ def _has_stage_proof_uncertainty(value: str) -> bool:
 def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
     return (
         re.compile(
-            rf"\b(?:raised|closed|secured|completed|announced|received)\b"
+            rf"\b(?:raised|closed|secured|completed|announc(?:ed|ing)|received)\b"
             rf".{{0,60}}\b{label}\b",
             re.I,
         ),
@@ -2999,7 +2999,12 @@ async def _attempt_competition_evidence_repair(
             candidate,
             icp,
             integrity_policy=integrity_policy,
-            **({"company_quality": True, "verified_company_identity": verified_company_identity} if company_quality else {}),
+            **({"company_quality": True} if company_quality else {}),
+            **(
+                {"verified_company_identity": verified_company_identity}
+                if verified_company_identity is not None
+                else {}
+            ),
         )
         if result[4]:  # still all fabricated — repair found nothing verifiable
             return None

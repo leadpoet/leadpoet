@@ -133,7 +133,16 @@ class FakeTransport:
         self.sent: List[Dict[str, Any]] = []
         self.synthetic_deepline_history = None
 
-    def send(self, *, method, url, headers, body, timeout_seconds):
+    def send(
+        self,
+        *,
+        method,
+        url,
+        headers,
+        body,
+        timeout_seconds,
+        max_response_bytes=None,
+    ):
         self.sent.append({"method": method, "url": url, "headers": dict(headers), "body": body, "timeout": timeout_seconds})
         response_headers = {}
         if self.fail:
@@ -408,6 +417,171 @@ def test_http_transport_labels_synthetic_generic_response(status, chunks, expect
     assert response.status == 502
     assert response.body == operations.GENERIC_UNAVAILABLE_BODY
     assert response.internal_provenance == expected_provenance
+
+
+def test_http_transport_per_call_limit_accepts_exact_boundary_only():
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def iter_bytes(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            yield self.body
+
+    class Client:
+        def __init__(self):
+            self.body = b""
+
+        def stream(self, *args, **kwargs):
+            return Response(self.body)
+
+        def close(self):
+            pass
+
+    client = Client()
+    transport = br.HttpxProviderTransport(client=client, max_response_bytes=3)
+    client.body = b"abcd"
+    accepted = transport.send(
+        method="POST",
+        url="https://example.com/execute",
+        headers={},
+        body=b"{}",
+        timeout_seconds=1,
+        max_response_bytes=4,
+    )
+    assert accepted.status == 200 and accepted.body == b"abcd"
+    client.body = b"abcde"
+    refused = transport.send(
+        method="POST",
+        url="https://example.com/execute",
+        headers={},
+        body=b"{}",
+        timeout_seconds=1,
+        max_response_bytes=4,
+    )
+    assert refused.status == 502
+    assert refused.internal_provenance == "response_too_large"
+
+
+@pytest.mark.parametrize("credential_echo", [False, True])
+def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(credential_echo):
+    requested_url = "https://wonderskin.com/"
+    tail_marker = DL_KEY if credential_echo else "raw-envelope-tail-must-not-be-persisted"
+    raw_html_bytes = 5_030_336
+    raw_html = (
+        "<html>"
+        + ("x" * (raw_html_bytes - len(tail_marker) - len("<html></html>")))
+        + tail_marker
+        + "</html>"
+    )
+    assert len(raw_html.encode("utf-8")) == raw_html_bytes
+    envelope_document = {
+        "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
+        "job_id": "iad1::large-firecrawl-envelope",
+        "result": {"data": {
+            "rawHtml": raw_html,
+            "metadata": {
+                "sourceURL": requested_url,
+                "url": requested_url,
+                "statusCode": 200,
+            },
+        }},
+        "status": "completed",
+        "provider_metadata_padding": "",
+    }
+    envelope = json.dumps(
+        envelope_document, separators=(",", ":")
+    ).encode("utf-8")
+    envelope_document["provider_metadata_padding"] = "p" * (
+        5_271_155 - len(envelope)
+    )
+    envelope = json.dumps(
+        envelope_document, separators=(",", ":")
+    ).encode("utf-8")
+    assert len(envelope) == 5_271_155
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def iter_bytes(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            for offset in range(0, len(envelope), chunk_size):
+                yield envelope[offset:offset + chunk_size]
+
+    class Client:
+        def stream(self, *args, **kwargs):
+            return Response()
+
+        def close(self):
+            pass
+
+    transport = br.HttpxProviderTransport(
+        client=Client(), max_response_bytes=4 * 1024 * 1024
+    )
+    scoring_context = br.RunContext(**{
+        **CONTEXT.__dict__,
+        "kind": "score",
+        "round_id": "arena-2026-09-12",
+    })
+    broker, store, _ = make_broker(
+        transport=transport,
+        credential_for=lambda _context, _provider: DL_KEY,
+        funding_source_for=lambda _context: "miner_key",
+    )
+
+    result = broker.execute(
+        scoring_context,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": requested_url},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+
+    if credential_echo:
+        # The credential is beyond both the old transport and visible limits.
+        # Scan the full accepted envelope before adaptation can truncate it.
+        assert result.status == 502 and result.call["outcome"] == "uncertain"
+        assert DL_KEY not in json.dumps(result.to_document())
+        assert DL_KEY not in json.dumps(store.calls)
+        return
+
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 2_000
+    assert result.call["reserved_microusd"] == 10_000_000
+    assert len(result.body) == operations.OPERATIONS[
+        "scrapingdog.scrape"
+    ].max_response_bytes
+    assert tail_marker.encode() not in result.body
+    assert store.openrouter_capacity == 9_998_000
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    persisted_body = base64.b64decode(terminal["body_b64"])
+    assert persisted_body == result.body
+    assert tail_marker.encode() not in persisted_body
+    assert b'"billing"' not in persisted_body
+    assert b'"provider_metadata_padding"' not in persisted_body
+    assert terminal["provider_cost"] == {
+        "basis": "deepline_billing_credits_charged_x_0.10_usd",
+        "units": "0.02",
+        "unit_name": "credits",
+        "operation": "firecrawl_scrape",
+        "request_id": "iad1::large-firecrawl-envelope",
+    }
 
 
 @pytest.mark.parametrize(

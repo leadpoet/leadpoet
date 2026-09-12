@@ -1,4 +1,4 @@
--- Migration 220: exclude fully reused company judgments from participation.
+-- Migration 221: exclude fully reused company judgments from participation.
 -- Apply after 217. Existing participation timestamps remain unchanged.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -88,7 +88,7 @@ SET search_path = pg_catalog
 AS $lab_arena_participation_schema$
   SELECT pg_catalog.jsonb_build_object(
     'schema_version', 'leadpoet.lab_arena.participation_schema.v1',
-    'version', 220
+    'version', 221
   );
 $lab_arena_participation_schema$;
 ALTER FUNCTION public.lab_arena_participation_schema_v1()

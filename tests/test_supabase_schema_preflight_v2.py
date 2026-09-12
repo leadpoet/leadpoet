@@ -77,7 +77,7 @@ def _opener(
     capabilities = {
         "lab_arena_participation_schema_v1": {
             "schema_version": "leadpoet.lab_arena.participation_schema.v1",
-            "version": 220,
+            "version": 221,
         },
         "lab_arena_code_review_schema_v1": {
             "schema_version": "leadpoet.lab_arena.code_review.v1",
@@ -130,7 +130,7 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     )
     assert result["status"] == "ready"
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
-    assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 220
+    assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 221
 
 
 def test_code_review_preflight_uses_only_the_scoped_arena_role():

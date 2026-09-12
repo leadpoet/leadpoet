@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from urllib.parse import quote
 
+import httpx
 import pytest
 
 from lab_arena import broker as br
@@ -674,6 +676,122 @@ def test_default_http_transport_does_not_inherit_proxy_environment():
         assert transport._client._trust_env is False
     finally:
         transport.close()
+
+
+class _ReadTimeoutAfterHeaders(httpx.SyncByteStream):
+    def __iter__(self):
+        yield b'{"partial":'
+        raise httpx.ReadTimeout("synthetic read timeout")
+
+
+@pytest.mark.parametrize(
+    ("response_headers", "expected_generation_id"),
+    (
+        ({}, None),
+        ({"X-Generation-Id": "invalid/generation/id"}, None),
+        (
+            [
+                ("X-Generation-Id", "gen-conflict-one"),
+                ("X-Generation-Id", "gen-conflict-two"),
+            ],
+            None,
+        ),
+        ({"X-Generation-Id": "gen-stream-timeout"}, "gen-stream-timeout"),
+    ),
+    ids=("missing", "invalid", "conflicting_duplicates", "valid"),
+)
+def test_http_transport_retains_only_one_valid_generation_header_on_read_timeout(
+    response_headers, expected_generation_id
+):
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers=response_headers,
+                stream=_ReadTimeoutAfterHeaders(),
+            )
+        )
+    )
+    transport = br.HttpxProviderTransport(client=client)
+    try:
+        with pytest.raises(br.ProviderTransportError) as raised:
+            transport.send(
+                method="POST",
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={},
+                body=b"{}",
+                timeout_seconds=1,
+            )
+    finally:
+        transport.close()
+
+    assert raised.value.openrouter_generation_id == expected_generation_id
+    assert str(raised.value) == "ReadTimeout"
+
+
+@pytest.mark.parametrize(
+    ("secret", "echoed_header"),
+    (
+        (KEY, KEY),
+        (ECHO_KEY, ENCODED_ECHO_KEY),
+    ),
+    ids=("raw", "url_encoded"),
+)
+def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
+    caplog, secret, echoed_header
+):
+    def timed_out_response(request):
+        assert request.headers["authorization"] == "Bearer " + secret
+        return httpx.Response(
+            200,
+            headers={"X-Generation-Id": echoed_header},
+            stream=_ReadTimeoutAfterHeaders(),
+        )
+
+    inner = br.HttpxProviderTransport(
+        client=httpx.Client(
+            transport=httpx.MockTransport(timed_out_response)
+        )
+    )
+    exception_messages = []
+
+    class CapturingTransport:
+        def send(self, **kwargs):
+            try:
+                return inner.send(**kwargs)
+            except br.ProviderTransportError as exc:
+                exception_messages.append(str(exc))
+                raise
+
+    store = FakeLedgerStore()
+    broker = br.Broker(
+        store=store,
+        key_for=lambda provider: (
+            secret if provider == "openrouter" else HOST_KEYS[provider]
+        ),
+        price_table=price_table(),
+        transport=CapturingTransport(),
+        clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
+    )
+    caplog.set_level(logging.DEBUG)
+    try:
+        result = broker.execute(
+            CONTEXT,
+            operation_id="openrouter.chat",
+            parameters=CHAT,
+            action_sequence=0,
+            timeout_ms=30000,
+        )
+    finally:
+        inner.close()
+
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    retained = json.dumps(store.calls)
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert diagnostic == {"reason": "transport_failure"}
+    assert exception_messages == ["ReadTimeout"]
+    assert secret not in caplog.text and secret not in retained
+    assert echoed_header not in caplog.text and echoed_header not in retained
 
 
 CONTEXT = br.RunContext(run_id="r1", assignment_id="arena-2026-09-02:s1:1:0", icp_position=0, lease_token_hash=contracts.document_hash("lease"), miner_hotkey="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", submission_id="s1", stage=1)
@@ -1561,6 +1679,134 @@ def test_delayed_exact_generation_settles_after_restart_without_second_post(
             generation_id=generation_id,
         ).microusd
     )
+
+
+def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog):
+    generation_id = "gen-stream-timeout-recovery"
+    methods = []
+
+    def timed_out_post(request):
+        methods.append(request.method)
+        assert request.method == "POST"
+        assert request.headers["authorization"] == "Bearer " + KEY
+        return httpx.Response(
+            200,
+            headers={"X-Generation-Id": generation_id},
+            stream=_ReadTimeoutAfterHeaders(),
+        )
+
+    first_transport = br.HttpxProviderTransport(
+        client=httpx.Client(transport=httpx.MockTransport(timed_out_post))
+    )
+    first_broker, store, _ = make_broker(transport=first_transport)
+    caplog.set_level(logging.DEBUG)
+    try:
+        first = first_broker.execute(
+            CONTEXT,
+            operation_id="openrouter.chat",
+            parameters=CHAT,
+            action_sequence=0,
+            timeout_ms=30000,
+        )
+    finally:
+        first_transport.close()
+
+    diagnostic = store.calls[first.call["call_identity"]]["uncertain_doc"]
+    assert first.status == 502 and first.call["outcome"] == "uncertain"
+    assert diagnostic == {
+        "reason": "missing_provider_cost",
+        "provider_status": 0,
+        "body_bytes": 0,
+        "body_is_mapping": False,
+        "usage_present": False,
+        "billing_present": False,
+        "openrouter_generation_id": generation_id,
+        "credential_fingerprint": br._credential_fingerprint(KEY),
+        "transport_failure": True,
+    }
+    assert methods == ["POST"]
+    assert KEY not in caplog.text
+    assert KEY not in json.dumps(store.calls)
+
+    candidate = {
+        "uncertain_entry_id": 1,
+        "round_id": "arena-2026-09-02",
+        "run_id": CONTEXT.run_id,
+        "submission_id": CONTEXT.submission_id,
+        "miner_hotkey": CONTEXT.miner_hotkey,
+        "assignment_id": CONTEXT.assignment_id,
+        "stage": CONTEXT.stage,
+        "icp_position": CONTEXT.icp_position,
+        "attempt": CONTEXT.attempt,
+        "kind": CONTEXT.kind,
+        "call_identity": first.call["call_identity"],
+        "generation_id": diagnostic["openrouter_generation_id"],
+        "credential_fingerprint": diagnostic["credential_fingerprint"],
+        "funding_source": "host",
+        "run_status": "leased",
+        "lease_expires_at": "2026-09-02T01:20:00Z",
+    }
+
+    def exact_generation_get(request):
+        methods.append(request.method)
+        assert request.method == "GET"
+        assert str(request.url) == br.OPENROUTER_GENERATION_URL + generation_id
+        assert request.headers["authorization"] == "Bearer " + KEY
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": generation_id,
+                    "total_cost": "0.001234",
+                    "usage": "0.001234",
+                }
+            },
+        )
+
+    second_transport = br.HttpxProviderTransport(
+        client=httpx.Client(
+            transport=httpx.MockTransport(exact_generation_get)
+        )
+    )
+    restarted_broker, _same_store, _ = make_broker(
+        store=store, transport=second_transport
+    )
+    try:
+        reconciled = restarted_broker.reconcile_openrouter_cost(candidate)
+    finally:
+        second_transport.close()
+
+    assert methods == ["POST", "GET"]
+    assert reconciled == {
+        "status": "settled",
+        "idempotent": False,
+        "actual_microusd": 1234,
+    }
+    assert store.calls[first.call["call_identity"]]["actual"] == 1234
+    assert KEY not in caplog.text
+
+
+def test_non_openrouter_transport_failure_ignores_generation_identity():
+    class Transport:
+        def send(self, **_kwargs):
+            raise br.ProviderTransportError(
+                "ReadTimeout",
+                openrouter_generation_id="gen-must-be-ignored",
+            )
+
+    broker, store, _ = make_broker(transport=Transport())
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "fintech"}},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
+        "reason": "transport_failure"
+    }
 
 
 def test_delayed_generation_requires_the_original_credential_without_a_get():

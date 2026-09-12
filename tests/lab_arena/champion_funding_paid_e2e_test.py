@@ -38,7 +38,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -206,6 +206,14 @@ class DiagnosticProviderTransport:
         sequence = self._next_sequence()
         host = str(urlsplit(url).hostname or "")
         provider = self._PROVIDER_BY_HOST.get(host, "unknown")
+        authorization = next((v for k, v in headers.items() if k.lower() == "authorization"), "")
+        credential = (
+            parse_qs(urlsplit(url).query).get("api_key", [""])[0]
+            if provider == "scrapingdog" else authorization.removeprefix("Bearer ")
+        )
+        assert credential, "broker omitted the real outbound provider credential"
+        credential_hash = _safe_hash(credential.encode())
+        del credential, authorization
         try:
             response = self._inner.send(
                 method=method,
@@ -220,6 +228,7 @@ class DiagnosticProviderTransport:
                 "provider_http_receipt",
                 sequence=sequence,
                 provider=provider,
+                credential_hash=credential_hash,
                 request_host=host,
                 http_status=None,
                 classification="infrastructure_transport_failure",
@@ -259,6 +268,7 @@ class DiagnosticProviderTransport:
             "provider_http_receipt",
             sequence=sequence,
             provider=provider,
+            credential_hash=credential_hash,
             request_host=host,
             http_status=int(response.status),
             classification=classification,
@@ -943,18 +953,28 @@ def _assert_real_paid_cycle(
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                """SELECT DISTINCT run_id
+                """SELECT DISTINCT run_id, provider
                      FROM public.lab_arena_ledger
                     WHERE round_id = %s AND submission_id = %s
-                      AND provider = 'openrouter' AND funding_source = 'miner_key'
+                      AND funding_source = 'miner_key'
                       AND entry_kind = 'settlement'
                       AND terminal_response ->> 'status' = '200'""",
                 (row["round_id"], submission_id),
             )
-            paid_run_ids = {item[0] for item in cursor.fetchall()}
+            paid_run_providers = set(cursor.fetchall())
     finally:
         connection.close()
-    assert paid_run_ids >= {run["run_id"] for run in executions}
+    assert paid_run_providers >= {
+        (run["run_id"], provider) for run in executions for provider in contracts.PROVIDERS
+    }
+    for provider in contracts.PROVIDERS:
+        expected = _safe_hash(harness._paid_miner_credentials[provider].encode())
+        assert any(
+            item.get("event") == "provider_http_receipt"
+            and item.get("provider") == provider and item.get("http_status") == 200
+            and item.get("credential_hash") == expected
+            for item in harness.evidence.document["checkpoints"]
+        )
 
 
 def _ledger_summary(
@@ -1307,6 +1327,7 @@ def _fallback_evidence(
                 assert set(attempts) <= {1, 2, 3, 4}
                 if attempts != [1, 2, 3, 4]:
                     continue  # A concurrent run can observe the already durable latch.
+                assert all(item[3] == "miner_key" for item in ledger)
                 proofs.append({
                     "run_id": run["run_id"],
                     "attempts": attempts,
@@ -1353,6 +1374,28 @@ def _activate_verified(harness: PaidHarness, factor_ppm: int) -> dict[str, Any]:
         expected_public_key_hash=harness.signer.public_key_hash,
     )
     assert digest == persisted["reward_basis_hash"]
+    burn_hotkey = keypair("paid-champion-burn").ss58_address
+    accepted = weight_state.build_accepted_weight_state(
+        harness.signer, network="test", genesis_hash="1" * 64, netuid=401,
+        epoch=int(persisted["effective_reward_epoch"]), valid_from_block=1,
+        valid_until_block=360, reward_basis=persisted, burn_hotkey=burn_hotkey,
+        issued_at=persisted["published_at"],
+    )
+    arena_weights.verify_accepted_weight_state_signature(
+        accepted, public_key_der=harness.signer.public_key_der,
+        expected_public_key_hash=harness.signer.public_key_hash,
+    )
+    champion_hotkey = harness.service.store.get_round(harness.round_id)["king_hotkey"]
+    vector = arena_weights.derive_arena_weights(accepted, [champion_hotkey, burn_hotkey])
+    expected_share = champion_values(persisted, persisted["effective_reward_epoch"], [champion_hotkey])["champion_share"]
+    assert vector["champion_share_ppb"] == round(expected_share * 1_000_000_000)
+    assert vector["burned_residual_ppb"] == 1_000_000_000 - vector["champion_share_ppb"]
+    harness.evidence.add(
+        "signed_weight_vector_verified", round_id=harness.round_id,
+        factor_ppm=factor_ppm, champion_share_ppb=vector["champion_share_ppb"],
+        burned_residual_ppb=vector["burned_residual_ppb"],
+        reward_basis_hash=persisted["reward_basis_hash"],
+    )
     return persisted
 
 

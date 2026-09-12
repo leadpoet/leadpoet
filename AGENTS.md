@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: September 12 miner submission recovery
+
+On 2026-09-11 the user explicitly authorized investigation and narrow repair of
+submission `sub-ddd33c5c142f317e0279265f179b5bc1` in round `arena-2026-09-12`,
+with the overnight validation skills. This includes protected production and
+Supabase access, exact committed migrations, pushes, canonical gateway and
+normal-validator restarts, and full live validation. Preserve submitted source,
+credentials, accepted outputs, provider charges, frozen round rules and timing,
+weights, and concurrent work. Correct only proven failure-classification defects
+and safely resume the same affected round. Do not restore retired Research Lab
+machinery. This authority expires when recovery and validation are complete.
+
 ## Scoped production authorization: PR195 scoring and verifier review
 
 On 2026-09-11 the user explicitly authorized deep review, narrow fixes, update

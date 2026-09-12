@@ -472,9 +472,10 @@ def test_http_transport_per_call_limit_accepts_exact_boundary_only():
     assert refused.internal_provenance == "response_too_large"
 
 
-def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html():
+@pytest.mark.parametrize("credential_echo", [False, True])
+def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(credential_echo):
     requested_url = "https://wonderskin.com/"
-    tail_marker = "raw-envelope-tail-must-not-be-persisted"
+    tail_marker = DL_KEY if credential_echo else "raw-envelope-tail-must-not-be-persisted"
     raw_html_bytes = 5_030_336
     raw_html = (
         "<html>"
@@ -551,6 +552,14 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html():
         action_sequence=0,
         timeout_ms=60_000,
     )
+
+    if credential_echo:
+        # The credential is beyond both the old transport and visible limits.
+        # Scan the full accepted envelope before adaptation can truncate it.
+        assert result.status == 502 and result.call["outcome"] == "uncertain"
+        assert DL_KEY not in json.dumps(result.to_document())
+        assert DL_KEY not in json.dumps(store.calls)
+        return
 
     assert result.status == 200 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 2_000

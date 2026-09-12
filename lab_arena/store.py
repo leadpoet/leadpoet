@@ -47,6 +47,13 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_freeze_champion_funding": (("p_round_id", "text"),),
+    "lab_arena_provider_funding": (("p_run_id", "text"), ("p_provider", "text")),
+    "lab_arena_mark_champion_provider_fallback": (
+        ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_provider", "text"), ("p_evidence", "jsonb"),
+    ),
+    "lab_arena_champion_funding_schema_v1": (),
     "lab_arena_whoami": (),
     "lab_arena_schema_version_v1": (),
     "lab_arena_code_review_schema_v1": (),
@@ -591,6 +598,40 @@ class ArenaStore:
         self._lease_ttl_seconds = int(lease_ttl_seconds)
 
     # -- identity ---------------------------------------------------------
+
+    def freeze_champion_funding(self, round_id: str) -> Dict[str, Any]:
+        """Pin the last promoted miner independently of the baseline source."""
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_freeze_champion_funding", {"p_round_id": round_id}
+        ), "freeze_champion_funding")
+
+    def provider_funding(self, run_id: str, provider: str) -> Dict[str, Any]:
+        """Read the run's immutable payer, including historical billing calls."""
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_provider_funding", {"p_run_id": run_id, "p_provider": provider}
+        ), "provider_funding")
+
+    def champion_provider_restart_required(self, run_id: str, provider: str) -> bool:
+        return self.provider_funding(run_id, provider).get("restart_required") is True
+
+    def mark_champion_provider_fallback(
+        self, run_id: str, lease_token_hash: str, provider: str,
+        evidence: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_mark_champion_provider_fallback", {
+                "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+                "p_provider": provider, "p_evidence": dict(evidence),
+            }
+        ), "mark_champion_provider_fallback")
+
+    def champion_funding_schema(self) -> Dict[str, Any]:
+        result = _require_mapping(self._transport.rpc(
+            "lab_arena_champion_funding_schema_v1", {}
+        ), "champion_funding_schema")
+        if result != {"version": 227, "provider_attempts": 4, "reward_factor_ppm": 500000}:
+            raise ArenaStoreError("champion funding schema mismatch")
+        return result
 
     def whoami(self) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_whoami", {}), "whoami")

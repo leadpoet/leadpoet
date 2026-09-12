@@ -30,6 +30,8 @@ from lab_arena.contracts import (
 )
 from leadpoet_canonical import lab_arena_rewards as _kernel
 from leadpoet_canonical.lab_arena_rewards import (  # noqa: F401  (re-exported: one kernel)
+    FALLBACK_CHAMPION_REWARD_FACTOR_PPM,
+    FULL_CHAMPION_REWARD_FACTOR_PPM,
     LabArenaRewardError,
     PAYING_KING_OUTCOMES,
     champion_uid_for_hotkey,
@@ -132,6 +134,7 @@ def reward_basis_document(
     king_hotkey: str,
     previous_king_start_epoch: Optional[int] = None,
     reward_constants: Optional[Mapping[str, Any]] = None,
+    champion_reward_factor_ppm: int = FULL_CHAMPION_REWARD_FACTOR_PPM,
 ) -> Dict[str, Any]:
     """Build and hash (but do not sign) the immutable reward-basis document.
 
@@ -139,6 +142,8 @@ def reward_basis_document(
     ``king_start_epoch`` follows :func:`king_start_epoch_for_outcome`.
     ``reward_constants`` are the round configuration's (the constants the
     round was announced with); the defaults apply when none are given.
+    ``champion_reward_factor_ppm`` applies one signed full or half factor to
+    that configured share. It is never derived from an earlier basis.
     """
 
     outcome = require_king_outcome(king_outcome)
@@ -152,6 +157,18 @@ def reward_basis_document(
             raise ValueError("%s outcome requires a king hotkey" % outcome)
         hotkey = king_hotkey
     constants = validate_reward_constants(reward_constants) if reward_constants is not None else reward_constants_document()
+    if (
+        isinstance(champion_reward_factor_ppm, bool)
+        or not isinstance(champion_reward_factor_ppm, int)
+        or champion_reward_factor_ppm
+        not in (
+            FALLBACK_CHAMPION_REWARD_FACTOR_PPM,
+            FULL_CHAMPION_REWARD_FACTOR_PPM,
+        )
+    ):
+        raise ValueError(
+            "champion_reward_factor_ppm must be 500000 or 1000000"
+        )
     document = {
         "schema_version": REWARD_BASIS_SCHEMA_VERSION,
         "round_id": str(round_id),
@@ -161,5 +178,6 @@ def reward_basis_document(
         "king_outcome": outcome,
         "king_start_epoch": king_start_epoch_for_outcome(outcome, effective, previous_king_start_epoch),
         "reward_constants": constants,
+        "champion_reward_factor_ppm": champion_reward_factor_ppm,
     }
     return finalize_reward_basis(document)

@@ -122,6 +122,8 @@ Rounds that announce `company_quality_policy: "company_quality_v1"` require a ma
 
 Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A model must beat the daily baseline score by at least 1.0 point on the 0–100 scale to qualify for promotion. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. By default, the champion receives **25%, 20%, 15%, 10%, then 5%** of subnet emissions in successive reward weeks of 140 epochs each. The share remains at 5% from week five onward, subject to registration and continued eligibility.
 
+**Champion miners must keep their submitted API credentials funded; if Leadpoet must fund a champion rebenchmark via fallback credentials, that period’s champion incentive is reduced by 50%.**
+
 The sourcing budget is **$80 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.80 per returned company**. Duplicate company domains within an ICP count once. Independent judging has a separate default **$50 allowance per submitted model**, also charged through the miner's credentials. Full-code review is an additional OpenRouter charge, recorded separately from sourcing and judging.
 
 The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. A provider that bills after execution can exceed its reservation; the full charge still counts, and an over-budget model cannot win. Unresolved provider charges also prevent promotion.

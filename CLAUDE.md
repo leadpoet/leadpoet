@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: champion credential funding and fallback
+
+On 2026-09-12 the user explicitly authorized champion-miner funding of Arena
+rebenchmarks, bounded account-failure retries, durable per-provider fallback,
+and a single relative 50% champion incentive reduction with next-cycle recovery.
+This covers protected production and credential inspection, exact committed
+Supabase migrations, narrow code changes, pushes and safe merges, canonical
+gateway/normal-validator restarts, and complete end-to-end validation. Preserve
+champion ownership across owner repository edits, completed ICPs, uncertain and
+settled provider charges, scoring, promotion, signed rewards, weight submission,
+and concurrent work. Use the overnight skills' operational permissions; do not
+start their goals or restore retired services. Paid validation remains subject
+to the user-approved total budget. This scope expires when implementation and
+production validation complete.
+
 ## Scoped production authorization: complete Fulfillment removal
 
 On 2026-09-11 the user explicitly authorized complete removal of the legacy

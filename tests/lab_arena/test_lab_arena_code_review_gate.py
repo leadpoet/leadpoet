@@ -69,7 +69,8 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     miner = {"submission_id": "miner", "miner_hotkey": "miner-owner", "is_king": False,
              "code_review_status": "reviewing", "code_review_attempts": 1,
              "source_ref": "miner", "source_size_bytes": 10, "status": "accepted"}
-    round_row = {"round_id": "arena-test", "configuration_doc": {"baseline_hotkey": "host",
+    round_row = {"round_id": "arena-test", "champion_funding_frozen": True,
+                 "configuration_doc": {"baseline_hotkey": "host",
                  "schedule": {"benchmark_deadline": "2026-09-11T00:30:00Z"}}}
     updates = []
     service = object.__new__(ArenaService)
@@ -78,6 +79,7 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     service._round = lambda _: round_row
     service._initial_baseline = lambda _: baseline
     service._store = SimpleNamespace(
+        freeze_champion_funding=lambda _round_id: {"status": "existing"},
         list_submissions=lambda _, status: [baseline, miner] if status == "accepted" else [],
         update_submission=lambda *args: updates.append(args) or {"status": "ok"},
     )

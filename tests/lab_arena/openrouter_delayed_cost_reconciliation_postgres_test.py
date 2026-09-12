@@ -23,7 +23,11 @@ def database():
 
 @pytest.fixture(scope="module")
 def database_before_225():
-    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS[:-1])
+    yield from database_with_lab_arena_migration(
+        POSTGREST_MIGRATIONS[:POSTGREST_MIGRATIONS.index(
+            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql"
+        )]
+    )
 
 
 @pytest.fixture()

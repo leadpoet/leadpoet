@@ -198,8 +198,11 @@ def integrated_database():
             # Current service completion reads delayed provider billing even
             # when this controlled round made no paid calls.
             for migration in (
+                "214-lab-arena-prior-credential-refusal.sql",
+                "218-lab-arena-cross-provider-credential-refusal.sql",
                 "223-lab-arena-cancelled-call-late-settlement.sql",
                 "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+                "227-lab-arena-champion-funding.sql",
             ):
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute(

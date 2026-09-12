@@ -487,8 +487,11 @@ def database():
     yield from database_with_lab_arena_migration(
         DEFAULT_MIGRATIONS
         + (
+            "214-lab-arena-prior-credential-refusal.sql",
+            "218-lab-arena-cross-provider-credential-refusal.sql",
             "223-lab-arena-cancelled-call-late-settlement.sql",
             "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+            "227-lab-arena-champion-funding.sql",
         )
     )
 

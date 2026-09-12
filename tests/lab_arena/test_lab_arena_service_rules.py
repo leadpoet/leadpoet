@@ -532,6 +532,49 @@ def test_completion_requires_lease_owner_and_accepts_authorized_owner():
     assert _completion_service().handle_complete({}) == {"status": "failed"}
 
 
+def test_champion_restart_completion_does_not_wait_for_delayed_openrouter_cost():
+    service = _completion_service()
+    validated, round_row = service._request_round()
+    validated["body"]["result"] = {
+        **validated["body"]["result"],
+        "terminal_status": "accepted",
+    }
+    validated["body"]["output"] = _stored_public_output("Partial Company")
+    service._request_round = lambda *_args, **_kwargs: (validated, round_row)
+    run = {
+        **service._store.get_run("run-1"),
+        "status": "leased",
+        "champion_restart_required": True,
+    }
+    completed = []
+    service._store = SimpleNamespace(
+        get_run=lambda _run_id: run,
+        complete_attempt=lambda **kwargs: completed.append(kwargs)
+        or {"status": "failed"},
+    )
+    service._objects = SimpleNamespace(
+        put=lambda *_args, **_kwargs: pytest.fail("partial output was stored")
+    )
+    service._reconcile_openrouter_cost = lambda *_args, **_kwargs: pytest.fail(
+        "durable champion restart waited for delayed billing"
+    )
+
+    assert service.handle_complete({}) == {"status": "failed"}
+    assert len(completed) == 1
+    assert completed[0]["terminal_cause"] == "provider_error"
+    assert completed[0]["result"]["terminal_status"] == "provider_error"
+    assert completed[0]["output_ref"] == ""
+
+    ordinary = _completion_service()
+    ordinary._reconcile_openrouter_cost = lambda *_args, **_kwargs: {
+        "status": "unavailable"
+    }
+    assert ordinary.handle_complete({}) == {
+        "status": "accounting_open",
+        "open_calls": 1,
+    }
+
+
 @pytest.mark.parametrize(
     ("configuration", "accepted"),
     [({}, False), ({"integrity_policy": "arena_integrity_v1"}, True)],
@@ -750,7 +793,15 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
     miner_b = "5" + "C" * 47
     constants = rewards.reward_constants_document()
 
-    def activate(daily_hotkey="", previous_hotkey="", previous_start=80):
+    def activate(
+        daily_hotkey="",
+        previous_hotkey="",
+        previous_start=80,
+        previous_factor=1_000_000,
+        champion_hotkey="",
+        fallback_providers=(),
+        complete_baseline=False,
+    ):
         signer = signing.LocalSigner.generate()
         prior = []
         if previous_hotkey:
@@ -764,6 +815,7 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
                     king_outcome="defended",
                     previous_king_start_epoch=previous_start,
                     reward_constants=constants,
+                    champion_reward_factor_ppm=previous_factor,
                 ),
                 hash_field="reward_basis_hash",
             )
@@ -775,6 +827,36 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
             }]
 
         captured = {}
+        baseline_id = "baseline-2026-09-02"
+        run_rows = []
+        if complete_baseline:
+            for stage in (1, 2):
+                for position in contracts.stage_positions(stage):
+                    execute_id = "baseline-execute-%d-%d" % (stage, position)
+                    run_rows.extend(
+                        (
+                            {
+                                "run_id": execute_id,
+                                "submission_id": baseline_id,
+                                "stage": stage,
+                                "icp_position": position,
+                                "attempt": 1,
+                                "kind": "execute",
+                                "status": "accepted",
+                                "per_icp_score": 75.0,
+                            },
+                            {
+                                "run_id": "baseline-score-%d-%d" % (stage, position),
+                                "submission_id": baseline_id,
+                                "stage": stage,
+                                "icp_position": position,
+                                "attempt": 1,
+                                "kind": "score",
+                                "status": "accepted",
+                                "scored_run_id": execute_id,
+                            },
+                        )
+                    )
 
         reward_queries = []
 
@@ -788,6 +870,10 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
             def published_reward_bases(**kwargs):
                 reward_queries.append(("bases", kwargs))
                 return prior
+
+            @staticmethod
+            def list_runs(_round_id, *, kind=None, **_kwargs):
+                return [run for run in run_rows if kind is None or run["kind"] == kind]
 
             @staticmethod
             def activate_reward(_round_id, basis, key):
@@ -809,6 +895,16 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
             "round_id": "arena-2026-09-02",
             "status": "published",
             "reward_activated_at": None,
+            "champion_funding_frozen": True,
+            "champion_hotkey": champion_hotkey or None,
+            "champion_fallback_providers": list(fallback_providers),
+            "participants": [
+                {
+                    "submission_id": baseline_id,
+                    "miner_hotkey": baseline,
+                    "is_king": True,
+                }
+            ],
             "configuration_doc": {
                 "mode": "live",
                 "rewards_enabled": True,
@@ -848,6 +944,45 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
     )
     same = activate(daily_hotkey=miner_a, previous_hotkey=miner_a)
     assert (same["king_outcome"], same["king_start_epoch"]) == ("defended", 80)
+    assert same["champion_reward_factor_ppm"] == 1_000_000
+    fallback = activate(
+        previous_hotkey=miner_a,
+        champion_hotkey=miner_a,
+        fallback_providers=("openrouter",),
+    )
+    assert fallback["champion_reward_factor_ppm"] == 500_000
+    unrelated_fallback = activate(
+        previous_hotkey=miner_a,
+        champion_hotkey=miner_b,
+        fallback_providers=("openrouter",),
+    )
+    assert unrelated_fallback["champion_reward_factor_ppm"] == 1_000_000
+    new_winner = activate(
+        daily_hotkey=miner_b,
+        previous_hotkey=miner_a,
+        champion_hotkey=miner_a,
+        fallback_providers=("openrouter",),
+    )
+    assert new_winner["champion_reward_factor_ppm"] == 1_000_000
+    retained_half = activate(
+        previous_hotkey=miner_a,
+        previous_factor=500_000,
+        champion_hotkey=miner_a,
+    )
+    assert retained_half["champion_reward_factor_ppm"] == 500_000
+    restored = activate(
+        previous_hotkey=miner_a,
+        previous_factor=500_000,
+        champion_hotkey=miner_a,
+        complete_baseline=True,
+    )
+    assert restored["champion_reward_factor_ppm"] == 1_000_000
+    with pytest.raises(ServiceError, match="champion_funding_state_invalid"):
+        activate(
+            previous_hotkey=miner_a,
+            champion_hotkey=miner_a,
+            fallback_providers=("unknown",),
+        )
     changed = activate(daily_hotkey=miner_b, previous_hotkey=miner_a)
     assert (changed["king_outcome"], changed["king_hotkey"], changed["king_start_epoch"]) == (
         "crowned", miner_b, 101,
@@ -1585,6 +1720,10 @@ def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
 
     class Store:
         @staticmethod
+        def freeze_champion_funding(_round_id):
+            return {"status": "existing"}
+
+        @staticmethod
         def list_submissions(_round_id, status):
             return [baseline] if status == "accepted" else []
 
@@ -1597,6 +1736,7 @@ def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
     service._store = Store()
     service._round = lambda _round_id: {
         "round_id": "arena-2026-09-02",
+        "champion_funding_frozen": True,
         "configuration_doc": {
             "baseline_hotkey": configured,
             "baseline_source_url": "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
@@ -1630,6 +1770,10 @@ def test_each_new_day_uses_the_public_baseline_even_after_a_miner_won_yesterday(
 
     class Store:
         @staticmethod
+        def freeze_champion_funding(_round_id):
+            return {"status": "existing"}
+
+        @staticmethod
         def list_submissions(_round_id, status):
             return [baseline] if status == "accepted" else []
 
@@ -1641,6 +1785,7 @@ def test_each_new_day_uses_the_public_baseline_even_after_a_miner_won_yesterday(
     service._store = Store()
     service._round = lambda _round_id: {
         "round_id": "arena-2026-09-03",
+        "champion_funding_frozen": True,
         "configuration_doc": {
             "baseline_hotkey": baseline_hotkey,
             "max_challengers": 10,

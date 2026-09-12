@@ -86,6 +86,7 @@ _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
+CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS = 4
 _OPENROUTER_GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 _CREDENTIAL_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
@@ -824,10 +825,13 @@ def _validated_response_url(value: Any, *, secret: str = "") -> str:
 def _terminal_response_document(
     status: int, headers: Mapping[str, str], body: bytes,
     *, provider_cost: Optional[Mapping[str, Any]] = None,
+    account_failure_evidence: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     document = {"status": int(status), "headers": dict(headers), "body_b64": base64.b64encode(bytes(body)).decode("ascii")}
     if provider_cost is not None:
         document["provider_cost"] = dict(provider_cost)
+    if account_failure_evidence is not None:
+        document["account_failure_evidence"] = dict(account_failure_evidence)
     return document
 
 
@@ -852,7 +856,8 @@ def _decode_terminal(
     secret: str = "",
 ) -> Tuple[int, Dict[str, str], bytes]:
     required = {"status", "headers", "body_b64"}
-    if not isinstance(document, Mapping) or set(document) not in (required, required | {"provider_cost"}):
+    allowed = required | {"provider_cost", "account_failure_evidence"}
+    if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
     provider_cost = document.get("provider_cost")
     if provider_cost is not None and (
@@ -863,6 +868,9 @@ def _decode_terminal(
         )
     ):
         raise BrokerError("broker_unavailable")
+    _validated_account_failure_evidence(
+        document.get("account_failure_evidence")
+    )
     try:
         status = int(document["status"])
         headers = dict(document["headers"])
@@ -884,6 +892,52 @@ def _decode_terminal(
             secret=secret,
         )
     return status, headers, body
+
+
+def _validated_account_failure_evidence(
+    account_failure: Any,
+) -> Optional[Mapping[str, Any]]:
+    if account_failure is None:
+        return None
+    if (
+        not isinstance(account_failure, Mapping)
+        or set(account_failure) != {
+            "error_class",
+            "provider_status",
+            "base_call_identity",
+            "provider_attempt",
+            "action_sequence",
+        }
+        or account_failure.get("error_class")
+        != "account_credential_failure"
+        or isinstance(account_failure.get("provider_status"), bool)
+        or account_failure.get("provider_status") not in (401, 402, 403, 429)
+        or not isinstance(account_failure.get("base_call_identity"), str)
+        or _CREDENTIAL_FINGERPRINT_RE.fullmatch(
+            account_failure["base_call_identity"]
+        ) is None
+        or isinstance(account_failure.get("provider_attempt"), bool)
+        or account_failure.get("provider_attempt") not in (1, 2, 3, 4)
+        or isinstance(account_failure.get("action_sequence"), bool)
+        or not isinstance(account_failure.get("action_sequence"), int)
+        or account_failure.get("action_sequence") < 0
+    ):
+        raise BrokerError("broker_unavailable")
+    return account_failure
+
+
+def _account_failure_matches_call(
+    evidence: Mapping[str, Any],
+    *,
+    base_call_identity: str,
+    provider_attempt: int,
+    action_sequence: int,
+) -> bool:
+    return (
+        evidence.get("base_call_identity") == base_call_identity
+        and evidence.get("provider_attempt") == provider_attempt
+        and evidence.get("action_sequence") == action_sequence
+    )
 
 
 def _error_result(code: str, call: Mapping[str, Any]) -> BrokerResult:
@@ -933,12 +987,69 @@ def _openrouter_effective_response(response: ProviderResponse) -> ProviderRespon
     statuses = []
     for error in errors:
         code = error.get("code") if isinstance(error, Mapping) else None
+        if code == "rate_limit_exceeded":
+            code = 429
         if isinstance(code, bool) or not isinstance(code, int) or not 400 <= code <= 599:
             raise operations.OperationResponseError("invalid_response")
         statuses.append(code)
     if len(set(statuses)) != 1:
         raise operations.OperationResponseError("invalid_response")
     return ProviderResponse(statuses[0], response.headers, response.body)
+
+
+def _miner_credential_failure(
+    provider: str,
+    response: ProviderResponse,
+    *,
+    champion_credential_retry: bool,
+) -> bool:
+    """Return true only for a failure tied to the submitted account.
+
+    OpenRouter can relay an upstream provider 429 through the submitted
+    OpenRouter account. Its documented metadata identifies that provider, so
+    Arena treats that response as infrastructure instead of miner account
+    exhaustion. An unqualified OpenRouter 429 remains an account rate limit.
+    """
+
+    if response.status in (401, 402, 403):
+        return True
+    if response.status != 429 or not champion_credential_retry:
+        return False
+    if provider != "openrouter":
+        return True
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return True
+    if not isinstance(document, Mapping):
+        return True
+    errors: List[Any] = []
+    if document.get("error") is not None:
+        errors.append(document.get("error"))
+    choices = document.get("choices")
+    if isinstance(choices, list):
+        errors.extend(
+            choice.get("error")
+            for choice in choices
+            if isinstance(choice, Mapping) and choice.get("error") is not None
+        )
+    for error in errors:
+        metadata = error.get("metadata") if isinstance(error, Mapping) else None
+        if not isinstance(metadata, Mapping):
+            continue
+        provider_name = metadata.get("provider_name")
+        if isinstance(provider_name, str) and provider_name.strip():
+            return False
+        provider_responses = metadata.get("provider_responses")
+        if isinstance(provider_responses, list) and any(
+            isinstance(item, Mapping)
+            and isinstance(item.get("provider_name"), str)
+            and item["provider_name"].strip()
+            and item.get("status") == 429
+            for item in provider_responses
+        ):
+            return False
+    return True
 
 
 class Broker:
@@ -956,6 +1067,18 @@ class Broker:
         lease_ttl_seconds: int = contracts.LEASE_TTL_SECONDS,
         credential_for: Optional[Callable[[RunContext, str], str]] = None,
         funding_source_for: Optional[Callable[[RunContext], str]] = None,
+        provider_funding_source_for: Optional[
+            Callable[[RunContext, str], str]
+        ] = None,
+        retry_miner_credential_for: Optional[
+            Callable[[RunContext], bool]
+        ] = None,
+        mark_provider_fallback: Optional[
+            Callable[[RunContext, str, Mapping[str, Any]], Mapping[str, Any]]
+        ] = None,
+        provider_restart_required_for: Optional[
+            Callable[[RunContext, str], bool]
+        ] = None,
     ) -> None:
         self._store = store
         # Host-only callers retain key_for. Production supplies the scoped
@@ -964,6 +1087,10 @@ class Broker:
         self._key_for = key_for
         self._credential_for = credential_for
         self._funding_source_for = funding_source_for
+        self._provider_funding_source_for = provider_funding_source_for
+        self._retry_miner_credential_for = retry_miner_credential_for
+        self._mark_provider_fallback = mark_provider_fallback
+        self._provider_restart_required_for = provider_restart_required_for
         self._price_table = validate_price_table(price_table)
         # Judge models are what scoring runs may call; they are pinned by the
         # scorer policy and priced from the same table.
@@ -1046,7 +1173,9 @@ class Broker:
                 round_id=str(candidate["round_id"]),
             )
             funding_source = (
-                self._funding_source_for(context)
+                self._provider_funding_source_for(context, "openrouter")
+                if self._provider_funding_source_for
+                else self._funding_source_for(context)
                 if self._funding_source_for
                 else "host"
             )
@@ -1100,6 +1229,124 @@ class Broker:
         action_sequence: int,
         timeout_ms: int,
     ) -> BrokerResult:
+        """Execute one model action with bounded champion credential retries.
+
+        Ordinary miner, scoring, and organizer calls still make one provider
+        attempt.  A daily champion baseline execution may make the initial
+        miner-funded call plus three retries.  Every retry keeps the same
+        request and action sequence but receives a distinct ledger identity.
+        """
+
+        try:
+            retry_miner_credential = bool(
+                self._retry_miner_credential_for(context)
+            ) if self._retry_miner_credential_for else False
+        except (BrokerError, KeyError, TypeError, ValueError):
+            return _error_result(
+                "broker_unavailable", {"operation_id": str(operation_id)}
+            )
+        last_result: Optional[BrokerResult] = None
+        account_provider_status: Optional[int] = None
+        base_call_identity: Optional[str] = None
+        for provider_attempt in range(1, CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS + 1):
+            result = self._execute_once(
+                context,
+                operation_id=operation_id,
+                parameters=parameters,
+                action_sequence=action_sequence,
+                timeout_ms=timeout_ms,
+                provider_attempt=provider_attempt,
+                champion_credential_retry=retry_miner_credential,
+            )
+            last_result = result
+            if result.call.get("provider_fallback_required") is True:
+                return result
+            if not (
+                retry_miner_credential
+                and result.call.get("funding_source") == "miner_key"
+                and result.call.get("error_code")
+                == "miner_credentials_unavailable"
+            ):
+                return result
+            if result.call.get("provider_status") in (401, 402, 403, 429):
+                account_provider_status = int(result.call["provider_status"])
+            if isinstance(result.call.get("base_call_identity"), str):
+                base_call_identity = result.call["base_call_identity"]
+            if provider_attempt < CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS:
+                continue
+            provider = str(result.call.get("provider") or "")
+            if not provider or self._mark_provider_fallback is None:
+                return BrokerResult(
+                    result.status,
+                    result.headers,
+                    result.body,
+                    dict(
+                        result.call,
+                        champion_credential_attempts=provider_attempt,
+                        provider_fallback_required=True,
+                    ),
+                )
+            evidence = {
+                "error_class": "account_credential_failure",
+                "provider_status": account_provider_status,
+                "action_sequence": action_sequence,
+                "provider_attempts": provider_attempt,
+                "base_call_identity": base_call_identity,
+            }
+            try:
+                marked = self._mark_provider_fallback(
+                    context, provider, evidence
+                )
+            except Exception:
+                return _error_result(
+                    "broker_unavailable",
+                    dict(
+                        result.call,
+                        champion_credential_attempts=provider_attempt,
+                        provider_fallback_required=True,
+                    ),
+                )
+            if not isinstance(marked, Mapping) or marked.get("status") not in (
+                "marked",
+                "existing",
+            ):
+                code = "lease_stale" if (
+                    isinstance(marked, Mapping)
+                    and marked.get("status") == "stale"
+                ) else "broker_unavailable"
+                return _error_result(
+                    code,
+                    dict(
+                        result.call,
+                        champion_credential_attempts=provider_attempt,
+                        provider_fallback_required=True,
+                    ),
+                )
+            return BrokerResult(
+                result.status,
+                result.headers,
+                result.body,
+                dict(
+                    result.call,
+                    champion_credential_attempts=provider_attempt,
+                    provider_fallback_required=True,
+                    provider_fallback_marked=True,
+                ),
+            )
+        assert last_result is not None
+        return last_result
+
+    def _execute_once(
+        self,
+        context: RunContext,
+        *,
+        operation_id: str,
+        parameters: Mapping[str, Any],
+        action_sequence: int,
+        timeout_ms: int,
+        provider_attempt: int,
+        champion_credential_retry: bool,
+    ) -> BrokerResult:
         operation = operations.OPERATIONS.get(operation_id)
         if operation is None:
             return _error_result("invalid_request", {"operation_id": str(operation_id)})
@@ -1111,9 +1358,53 @@ class Broker:
             return _error_result("invalid_request", {"operation_id": operation_id})
         funding_source = "host"
         try:
-            funding_source = self._funding_source_for(context) if self._funding_source_for else "host"
+            funding_source = (
+                self._provider_funding_source_for(context, operation.provider)
+                if self._provider_funding_source_for
+                else self._funding_source_for(context)
+                if self._funding_source_for
+                else "host"
+            )
             if funding_source not in ("host", "miner_key"):
                 raise BrokerError("broker_unavailable")
+            if (
+                champion_credential_retry
+                and funding_source == "miner_key"
+                and self._provider_restart_required_for is not None
+                and self._provider_restart_required_for(
+                    context, operation.provider
+                )
+            ):
+                if self._mark_provider_fallback is None:
+                    raise BrokerError("broker_unavailable")
+                marked = self._mark_provider_fallback(
+                    context,
+                    operation.provider,
+                    {
+                        "error_class": "account_credential_failure",
+                        "provider_status": None,
+                        "action_sequence": action_sequence,
+                        "provider_attempts": (
+                            CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS
+                        ),
+                        "base_call_identity": None,
+                    },
+                )
+                if not isinstance(marked, Mapping) or marked.get(
+                    "status"
+                ) not in ("marked", "existing"):
+                    raise BrokerError("broker_unavailable")
+                return _error_result(
+                    "miner_credentials_unavailable",
+                    {
+                        "operation_id": operation_id,
+                        "provider": operation.provider,
+                        "funding_source": funding_source,
+                        "provider_attempt": provider_attempt,
+                        "provider_fallback_required": True,
+                        "provider_fallback_marked": True,
+                    },
+                )
             route = scoring_provider_compat.route_for(
                 kind=getattr(context, "kind", "execute"),
                 funding_source=funding_source,
@@ -1133,7 +1424,15 @@ class Broker:
         except (BrokerError, KeyError, operations.OperationError) as exc:
             if not isinstance(exc, BrokerError):
                 exc = BrokerError("broker_unavailable")
-            return _error_result(exc.code, {"operation_id": operation_id, "funding_source": funding_source})
+            return _error_result(
+                exc.code,
+                {
+                    "operation_id": operation_id,
+                    "provider": operation.provider,
+                    "funding_source": funding_source,
+                    "provider_attempt": provider_attempt,
+                },
+            )
         openrouter_credential_fingerprint = (
             _credential_fingerprint(secret)
             if effective_operation.provider == "openrouter"
@@ -1162,7 +1461,7 @@ class Broker:
         except BrokerError as exc:
             return _error_result(exc.code, {"operation_id": operation_id})
         request_hash = contracts.document_hash(normalized)
-        call_identity = contracts.provider_call_identity(
+        base_call_identity = contracts.provider_call_identity(
             assignment_id=context.assignment_id,
             attempt=int(getattr(context, "attempt", 1)),
             icp_position=context.icp_position,
@@ -1170,14 +1469,24 @@ class Broker:
             operation_id=operation_id,
             request_hash=request_hash,
         )
+        call_identity = base_call_identity
+        if provider_attempt > 1:
+            call_identity = contracts.document_hash(
+                {
+                    "base_call_identity": call_identity,
+                    "provider_attempt": provider_attempt,
+                }
+            )
         summary: Dict[str, Any] = {
             "call_identity": call_identity,
+            "base_call_identity": base_call_identity,
             "operation_id": operation_id,
             "provider": effective_operation.provider,
             "funding_source": funding_source,
             "request_hash": request_hash,
             "reserved_microusd": amount,
             "action_sequence": action_sequence,
+            "provider_attempt": provider_attempt,
         }
         if reservation_cost is not None:
             summary.update(
@@ -1205,7 +1514,7 @@ class Broker:
             provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
+            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
         # Another call can hold money without having spent it. Wait briefly for
@@ -1226,6 +1535,51 @@ class Broker:
         status = reserved.get("status")
         if status == "stale":
             return _error_result("lease_stale", summary)
+        if status == "champion_restart_required":
+            if (
+                not champion_credential_retry
+                or funding_source != "miner_key"
+                or self._mark_provider_fallback is None
+            ):
+                return _error_result("broker_unavailable", summary)
+            try:
+                marked = self._mark_provider_fallback(
+                    context,
+                    effective_operation.provider,
+                    {
+                        "error_class": "account_credential_failure",
+                        "provider_status": None,
+                        "action_sequence": action_sequence,
+                        "provider_attempts": (
+                            CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS
+                        ),
+                        "base_call_identity": base_call_identity,
+                    },
+                )
+            except Exception:
+                return _error_result("broker_unavailable", summary)
+            if not isinstance(marked, Mapping) or marked.get("status") not in (
+                "marked",
+                "existing",
+            ):
+                return _error_result(
+                    (
+                        "lease_stale"
+                        if isinstance(marked, Mapping)
+                        and marked.get("status") == "stale"
+                        else "broker_unavailable"
+                    ),
+                    summary,
+                )
+            return _error_result(
+                "miner_credentials_unavailable",
+                dict(
+                    summary,
+                    outcome="not_dispatched",
+                    provider_fallback_required=True,
+                    provider_fallback_marked=True,
+                ),
+            )
         if status == "refused":
             summary["outcome"] = "refused"
             summary["reason"] = reserved.get("reason")
@@ -1239,9 +1593,10 @@ class Broker:
             return _error_result("budget_refused", summary)
         if status == "settled":
             # Repeated request for a settled identity: the stored response, no second dispatch.
+            terminal_document = reserved.get("terminal_response")
             try:
                 terminal_status, terminal_headers, terminal_body = _decode_terminal(
-                    reserved.get("terminal_response"),
+                    terminal_document,
                     secret=secret,
                 )
             except BrokerError:
@@ -1258,9 +1613,46 @@ class Broker:
                     error = None
                 if isinstance(error, dict) and error.get("code") == "miner_credentials_unavailable":
                     summary["error_code"] = "miner_credentials_unavailable"
+                    evidence = _validated_account_failure_evidence(
+                        terminal_document.get("account_failure_evidence")
+                        if isinstance(terminal_document, Mapping)
+                        else None
+                    )
+                    if evidence is not None:
+                        if not _account_failure_matches_call(
+                            evidence,
+                            base_call_identity=base_call_identity,
+                            provider_attempt=provider_attempt,
+                            action_sequence=action_sequence,
+                        ):
+                            return _error_result("broker_unavailable", summary)
+                        summary["provider_status"] = evidence["provider_status"]
             return BrokerResult(terminal_status, terminal_headers, terminal_body, summary)
         if status in ("dispatched", "uncertain"):
             summary["outcome"] = "uncertain"
+            if (
+                status == "uncertain"
+                and champion_credential_retry
+                and funding_source == "miner_key"
+            ):
+                try:
+                    evidence = _validated_account_failure_evidence(
+                        reserved.get("account_failure_evidence")
+                    )
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                if evidence is not None:
+                    if not _account_failure_matches_call(
+                        evidence,
+                        base_call_identity=base_call_identity,
+                        provider_attempt=provider_attempt,
+                        action_sequence=action_sequence,
+                    ):
+                        return _error_result("broker_unavailable", summary)
+                    summary["provider_status"] = evidence["provider_status"]
+                    return _error_result(
+                        "miner_credentials_unavailable", summary
+                    )
             return _error_result("call_uncertain", summary)
         if status == "recovered":
             summary["outcome"] = "recovered"
@@ -1492,6 +1884,14 @@ class Broker:
         try:
             if effective_operation.provider == "openrouter":
                 response = _openrouter_effective_response(response)
+            miner_credential_failure = (
+                funding_source == "miner_key"
+                and _miner_credential_failure(
+                    effective_operation.provider,
+                    response,
+                    champion_credential_retry=champion_credential_retry,
+                )
+            )
             missing_deepline_cost = (
                 effective_operation.provider == "deepline" and raw_actual is None
             )
@@ -1501,29 +1901,45 @@ class Broker:
                 and raw_actual is None
             )
             if missing_deepline_cost or missing_openrouter_cost:
+                account_failure_evidence = None
+                if (
+                    champion_credential_retry
+                    and miner_credential_failure
+                ):
+                    account_failure_evidence = {
+                        "error_class": "account_credential_failure",
+                        "provider_status": int(response.status),
+                        "base_call_identity": base_call_identity,
+                        "provider_attempt": provider_attempt,
+                        "action_sequence": action_sequence,
+                    }
+                uncertain_doc = _missing_provider_cost_call_doc(
+                    response,
+                    raw_document,
+                    deepline_request_id=deepline_request_id,
+                    deepline_operation=deepline_operation,
+                    openrouter_generation_id=openrouter_generation_id,
+                    credential_fingerprint=openrouter_credential_fingerprint,
+                )
+                if account_failure_evidence is not None:
+                    uncertain_doc["account_failure_evidence"] = (
+                        account_failure_evidence
+                    )
                 result = self._store.mark_uncertain(
                     run_id=context.run_id,
                     lease_token_hash=context.lease_token_hash,
                     call_identity=call_identity,
-                    call_doc=_missing_provider_cost_call_doc(
-                        response,
-                        raw_document,
-                        deepline_request_id=deepline_request_id,
-                        deepline_operation=deepline_operation,
-                        openrouter_generation_id=openrouter_generation_id,
-                        credential_fingerprint=openrouter_credential_fingerprint,
-                    ),
+                    call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount, "provider_status": int(response.status)})
                 if (
-                    missing_deepline_cost
-                    and funding_source == "miner_key"
-                    and response.status in (401, 402, 403)
+                    (missing_deepline_cost or missing_openrouter_cost)
+                    and miner_credential_failure
                 ):
                     return _error_result("miner_credentials_unavailable", summary)
                 return _error_result("provider_unavailable", summary)
-            if funding_source == "miner_key" and response.status in (401, 402, 403):
+            if miner_credential_failure:
                 failure_stage = "response_sanitization"
                 refused = _error_result("miner_credentials_unavailable", summary)
                 sanitized_status, sanitized_headers, sanitized_body = refused.status, refused.headers, refused.body
@@ -1564,6 +1980,18 @@ class Broker:
             terminal = _terminal_response_document(
                 sanitized_status, sanitized_headers, sanitized_body,
                 provider_cost=cost_record,
+                account_failure_evidence=(
+                    {
+                        "error_class": "account_credential_failure",
+                        "provider_status": int(response.status),
+                        "base_call_identity": base_call_identity,
+                        "provider_attempt": provider_attempt,
+                        "action_sequence": action_sequence,
+                    }
+                    if champion_credential_retry
+                    and miner_credential_failure
+                    else None
+                ),
             )
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=int(response.status), actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
@@ -1623,7 +2051,7 @@ class Broker:
                 summary.update({"outcome": "uncertain", "actual_microusd": amount})
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
-        if settle_status == "settled" and funding_source == "miner_key" and response.status in (401, 402, 403):
+        if settle_status == "settled" and miner_credential_failure:
             summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": int(response.status)})
             return _error_result("miner_credentials_unavailable", summary)
         if settle_status == "settled" and operations.provider_status_is_infrastructure(response.status):

@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 PROFILE_MAX_CHARACTERS = 4_000
 PROFILE_TIMEOUT_SECONDS = 30.0
+# Exa defaults live crawls to 10 seconds.  Keep this below the outer request
+# timeout while giving the exact fresh-profile fetch more time to complete.
+PROFILE_LIVECRAWL_TIMEOUT_MILLISECONDS = 20_000
 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
     "insufficient_evidence"
 ] = "insufficient_evidence"
@@ -159,6 +162,7 @@ async def fetch_current_linkedin_company_size(
         "ids": [profile_url],
         "text": {"maxCharacters": PROFILE_MAX_CHARACTERS},
         "maxAgeHours": 0,
+        "livecrawlTimeout": PROFILE_LIVECRAWL_TIMEOUT_MILLISECONDS,
     }
     try:
         timeout = aiohttp.ClientTimeout(total=PROFILE_TIMEOUT_SECONDS)

@@ -382,7 +382,7 @@ _SCORER_REVERIFY_SYSTEM_PROMPT = (
 _STAGE_PROOF_NEGATED_OR_UNCERTAIN_RE = re.compile(
     r"\b(?:not|never|no|without|unconfirmed|rumou?red|plans?|planned|"
     r"planning|proposed|future|seeks?|seeking|expects?|expected|targets?|"
-    r"targeted|might|could|would|will)\b(?:\W+\w+){0,6}\W*$",
+    r"targeted|pending|might|could|would|will)\b(?:\W+\w+){0,6}\W*$",
     re.I,
 )
 _STAGE_PROOF_HISTORICAL_RE = re.compile(
@@ -432,6 +432,11 @@ def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
             rf".{{0,60}}\b{label}\b",
             re.I,
         ),
+        re.compile(
+            rf"\bwe(?:\s+are|['’]re)\s+(?:excited|thrilled)\s+to\s+"
+            rf"announce\s+our\b.{{0,60}}\b{label}\b",
+            re.I,
+        ),
     )
 
 
@@ -452,7 +457,7 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+listed\s+(?:shares?|stock)\b", re.I),
     re.compile(
         r"(?:^|[.!?;:\n]\s*)"
-        r"(?:[A-Z][A-Za-z0-9&.'’+-]*\s+){1,8}"
+        r"(?:[A-Z][A-Za-z0-9&,.'’+-]*\s+){1,8}"
         r"\((?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\)",
     ),
     re.compile(

@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: all scored Arena submissions audit
+
+On 2026-09-12 the user authorized a complete audit of every scored Arena miner
+submission using the overnight skills. This includes protected production,
+Supabase, submission, provider and validator evidence; narrow fixes for proven
+bugs; tests, pushes, canonical gateway/normal-validator restarts and validation.
+Preserve frozen round rules, submitted models, accepted results, provider costs,
+identity checks, promotion, rewards, weights and concurrent work. Leave ambiguous
+policy changes for the user. Do not restore retired Research Lab machinery.
+This scope expires when the audit and any proven fixes are verified.
+
 ## Scoped production authorization: employee-size retrieval and ICP prompt
 
 On 2026-09-12 the user authorized the single agreed ICP verification sentence,

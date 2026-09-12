@@ -658,6 +658,13 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             "Public",
             "Public",
             True,
+            "GXO Logistics, Inc. (NYSE: GXO)",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
             "Acme shares are publicly traded on Nasdaq and will be delisted next year.",
             COMPANY_FIT_MATCH,
         ),
@@ -716,6 +723,31 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             "Conviction, and Greenoaks.",
             COMPANY_FIT_MATCH,
         ),
+        (
+            "Series B",
+            "Series B",
+            True,
+            "We are excited to announce our $40M Series B fundraise led by "
+            "Battery Ventures, coming just 4 months after announcing our "
+            "Series A.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Series A",
+            "Series B",
+            False,
+            "We are excited to announce our $40M Series B fundraise led by "
+            "Battery Ventures, coming just 4 months after announcing our "
+            "Series A.",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            "Series C+",
+            "Series C+",
+            True,
+            "We're thrilled to announce our $55M Series C funding round.",
+            COMPANY_FIT_MATCH,
+        ),
     ],
 )
 def test_stage_decision_requires_category_specific_proof(
@@ -768,6 +800,14 @@ def test_stage_decision_requires_category_specific_proof(
             "Public",
             True,
             "Old National Bancorp (NASDAQ: ONB), delisted in 2024.",
+        ),
+        ("Public", True, "Formerly GXO Logistics, Inc. (NYSE: GXO)."),
+        ("Public", True, "Not GXO Logistics, Inc. (NYSE: GXO)."),
+        ("Public", True, "GXO Logistics, Inc. (OTC: GXO)."),
+        (
+            "Public",
+            True,
+            "GXO Logistics, Inc. (NYSE: GXO), delisted in 2024.",
         ),
         ("Public", True, "Not Old National Bancorp (NASDAQ: ONB)."),
         ("Series C+", False, "Acme closed its Series B financing."),
@@ -833,6 +873,26 @@ def test_stage_decision_requires_category_specific_proof(
             True,
             "Day.ai plans to announce its $20M Series A next month.",
         ),
+        (
+            "Series B",
+            True,
+            "We will be thrilled to announce our $40M Series B next month.",
+        ),
+        (
+            "Series B",
+            True,
+            "We plan to announce our $40M Series B next month.",
+        ),
+        (
+            "Series B",
+            True,
+            "We intend to announce our $40M Series B next month.",
+        ),
+        (
+            "Series B",
+            True,
+            "We are excited to announce our pending $40M Series B.",
+        ),
     ],
 )
 def test_stage_decision_rejects_unproven_or_contradictory_observations(
@@ -858,6 +918,30 @@ def test_stage_decision_rejects_unproven_or_contradictory_observations(
     assert result.details["dimension_decisions"]["stage"] == (
         COMPANY_FIT_UNAVAILABLE
     )
+
+
+def test_public_ticker_stage_proof_does_not_override_company_identity_mismatch():
+    verdict = _explicitly_unproven_fit_verdict()
+    verdict.update(
+        observed_company_name="Other Company",
+        observed_company_website="https://other.example.com",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote="GXO Logistics, Inc. (NYSE: GXO)",
+    )
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=_icp(company_stage="Public"),
+        company=_company(name="GXO Logistics", website="https://gxo.com"),
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    assert result.details["identity_decision"] == COMPANY_FIT_MISMATCH
+    assert result.decision == COMPANY_FIT_MISMATCH
 
 
 @pytest.mark.parametrize(

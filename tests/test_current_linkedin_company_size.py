@@ -262,6 +262,51 @@ Contraseña (más de 6 caracteres)
 Email
 Mật khẩu (6 ký tự trở lên)
 """,
+        """Iscriviti | LinkedIn
+# Iscriviti a LinkedIn
+Email o telefono
+Password
+""",
+        """الاشتراك | LinkedIn
+# الانضمام إلى LinkedIn
+البريد الإلكتروني أو رقم الهاتف
+كلمة المرور
+""",
+        """Zarejestruj się | LinkedIn
+# Dołącz do LinkedIn
+Adres e-mail lub numer telefonu
+Hasło
+""",
+        """Daftar | LinkedIn
+# Sertai LinkedIn
+E-mel atau nombor telefon
+Kata laluan
+""",
+        """Daftar | LinkedIn
+# Bergabung dengan LinkedIn
+Email atau telepon
+Kata sandi
+""",
+        """Anmelden | LinkedIn
+# Mitglied bei LinkedIn werden
+E-Mail-Adresse/Telefon
+Passwort
+""",
+        """Inschrijven | LinkedIn
+# Word lid van LinkedIn
+E-mail of telefoonnummer
+Wachtwoord
+""",
+        """ลงทะเบียน | LinkedIn
+# เข้าร่วม LinkedIn
+อีเมลหรือโทรศัพท์
+รหัสผ่าน
+""",
+        """Εγγραφή | LinkedIn
+# Εγγραφείτε στο LinkedIn
+Email ή τηλέφωνο
+Κωδικός πρόσβασης
+""",
     ],
 )
 def test_observed_localized_authentication_walls_are_retryable(
@@ -286,6 +331,52 @@ def test_observed_localized_authentication_walls_are_retryable(
     ) is None
     assert len(calls) == 1
     assert pending == []
+
+
+@pytest.mark.parametrize(
+    ("wall_title", "username_field", "password_field"),
+    [
+        ("Iscriviti | LinkedIn", "Email o telefono", "Password"),
+        (
+            "الاشتراك | LinkedIn",
+            "البريد الإلكتروني أو رقم الهاتف",
+            "كلمة المرور",
+        ),
+        (
+            "Zarejestruj się | LinkedIn",
+            "Adres e-mail lub numer telefonu",
+            "Hasło",
+        ),
+        ("Daftar | LinkedIn", "E-mel atau nombor telefon", "Kata laluan"),
+        ("Daftar | LinkedIn", "Email atau telepon", "Kata sandi"),
+        ("Anmelden | LinkedIn", "E-Mail-Adresse/Telefon", "Passwort"),
+        ("Inschrijven | LinkedIn", "E-mail of telefoonnummer", "Wachtwoord"),
+        ("ลงทะเบียน | LinkedIn", "อีเมลหรือโทรศัพท์", "รหัสผ่าน"),
+        ("Εγγραφή | LinkedIn", "Email ή τηλέφωνο", "Κωδικός πρόσβασης"),
+    ],
+)
+def test_company_page_with_localized_login_links_keeps_company_size(
+    wall_title,
+    username_field,
+    password_field,
+):
+    text = f"""Acme | LinkedIn
+## About us
+Acme provides workflow software.
+Company size
+51-200 employees
+## Updates
+Use these links to manage your account:
+{wall_title}
+{username_field}
+{password_field}
+"""
+
+    assert not linkedin_company_size._is_linkedin_access_wall(text)
+    assert linkedin_company_size.extract_linkedin_company_size(text) == {
+        "employee_count": "51-200",
+        "quote": "Company size\n51-200 employees",
+    }
 
 
 @pytest.mark.parametrize(

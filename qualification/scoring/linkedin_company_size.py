@@ -49,24 +49,41 @@ _EMPLOYEE_SUFFIX = re.compile(
 # authentication words are not enough to classify the fetch as blocked.
 _ACCESS_WALL_TITLES = {
     "aanmelden | linkedin",
+    "anmelden | linkedin",
     "cadastre-se | linkedin",
+    "daftar | linkedin",
     "entrar | linkedin",
     "inloggen | linkedin",
+    "inschrijven | linkedin",
+    "iscriviti | linkedin",
     "join linkedin",
     "linkedin login, sign in",
     "registrarse | linkedin",
+    "zarejestruj się | linkedin",
     "s’inscrire | linkedin",
     "sign in | linkedin",
     "sign up | linkedin",
     "đăng ký | linkedin",
+    "εγγραφή | linkedin",
+    "الاشتراك | linkedin",
+    "ลงทะเบียน | linkedin",
 }
 _ACCESS_WALL_CREDENTIAL_FIELDS = (
+    ("adres e-mail lub numer telefonu", "hasło"),
+    ("e-mail-adresse/telefon", "passwort"),
+    ("e-mail of telefoonnummer", "wachtwoord"),
+    ("e-mel atau nombor telefon", "kata laluan"),
+    ("email atau telepon", "kata sandi"),
     ("email or phone", "password"),
+    ("email o telefono", "password"),
+    ("email ή τηλέφωνο", "κωδικός πρόσβασης"),
     ("email", "contraseña"),
     ("email", "mật khẩu"),
     ("e-mail", "senha"),
     ("e-mail", "mot de passe"),
     ("e-mail", "wachtwoord"),
+    ("البريد الإلكتروني أو رقم الهاتف", "كلمة المرور"),
+    ("อีเมลหรือโทรศัพท์", "รหัสผ่าน"),
 )
 _BLOCKED_PAGE_TITLES = {
     "access denied",
@@ -158,7 +175,7 @@ def _is_linkedin_access_wall(text: str) -> bool:
     authentication_wall = (
         any(line in _ACCESS_WALL_TITLES for line in top_lines)
         and any(
-            all(field in folded for field in fields)
+            all(field.casefold() in folded for field in fields)
             for fields in _ACCESS_WALL_CREDENTIAL_FIELDS
         )
     )

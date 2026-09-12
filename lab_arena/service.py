@@ -741,7 +741,7 @@ class ArenaService:
                 eligible.append(hotkey)
         if not eligible:
             raise ServiceError("daily_runner_capacity_insufficient", 503)
-        # This planned runner set sizes the announced daily capacity and stays
+        # This planned runner set checks minimum schedule capacity and stays
         # in the document for schema compatibility. It never grants authority.
         return eligible, banned
 
@@ -827,13 +827,13 @@ class ArenaService:
             document["benchmark_disclosure_policy"] = (
                 icp_disclosure.DELAYED_DISCLOSURE_POLICY
             )
-        # Keep the announced intake within the actual all-participant workload.
-        # Shadow-only short rehearsals deliberately do not reserve live budgets.
+        # Require enough planned capacity to run a competition. Admission uses
+        # the explicit challenger limit, not the worst-case retry estimate.
+        # Worker, deadline, and spending limits still apply to every job.
         if self._config.mode == "live":
             supported = capacity.daily_challenger_capacity(document)
             if supported < 1:
                 raise ServiceError("daily_runner_capacity_insufficient", 503)
-            document["max_challengers"] = min(document["max_challengers"], supported)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
         if result.get("status") not in ("created", "existing"):
@@ -1167,8 +1167,6 @@ class ArenaService:
                     *registration_args, owner_admission=owner_admission
                 )
         except ArenaStoreError as exc:
-            if "lab_arena_owner_active_submission" in str(exc):
-                raise ServiceError("owner_active_submission_exists", 409) from exc
             if "lab_arena_submission_owner_changed" in str(exc):
                 raise ServiceError("submission_owner_changed", 409) from exc
             if "lab_arena_submission_conflict" in str(exc):

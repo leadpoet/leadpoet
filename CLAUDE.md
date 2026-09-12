@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: hotkey admission and twenty challengers
+
+On 2026-09-12 the user explicitly authorized removal of the shared coldkey
+entry limit, retention of one accepted model per hotkey without replacement,
+and expansion of daily challenger admission to 20. This covers production
+inspection, exact committed Supabase migrations, narrow code changes, tests,
+push to main, and canonical gateway/normal-validator restarts with the
+overnight skills. Preserve source, credentials, accepted work, finalized owner
+metadata, self-scoring exclusions, rewards, budgets, schedules, worker limits,
+and concurrent changes. This scope expires after production verification.
+
 ## Scoped production authorization: champion credential funding and fallback
 
 On 2026-09-12 the user explicitly authorized champion-miner funding of Arena

@@ -86,6 +86,7 @@ POSTGREST_MIGRATIONS = DEFAULT_MIGRATIONS + (
     "223-lab-arena-cancelled-call-late-settlement.sql",
     "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
     "227-lab-arena-champion-funding.sql",
+    "228-lab-arena-hotkey-admission.sql",
 )
 
 _SHIM_SQL = """

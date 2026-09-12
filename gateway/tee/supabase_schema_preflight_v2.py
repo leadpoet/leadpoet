@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 
 CODE_REVIEW_MIGRATION = "scripts/207-lab-arena-code-review.sql"
 PARTICIPATION_MIGRATION = "scripts/216-lab-arena-validator-participation.sql"
-ORIGINAL_JUDGMENTS_MIGRATION = "scripts/218-lab-arena-participation-original-judgments.sql"
+ORIGINAL_JUDGMENTS_MIGRATION = "scripts/220-lab-arena-participation-original-judgments.sql"
 PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
@@ -38,7 +38,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
 SCHEMA_CAPABILITIES = (
     ("lab_arena_participation_schema_v1", {
         "schema_version": "leadpoet.lab_arena.participation_schema.v1",
-        "version": 218,
+        "version": 220,
     }),
     ("lab_arena_code_review_schema_v1", {
         "schema_version": "leadpoet.lab_arena.code_review.v1",

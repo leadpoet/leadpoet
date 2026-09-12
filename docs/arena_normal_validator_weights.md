@@ -399,7 +399,7 @@ for 24 hours before activating this gateway change. Do not backfill from
 The gateway schema preflight requires the new column and lookup RPC.
 
 Before activating participation enforcement, also apply
-`scripts/218-lab-arena-participation-original-judgments.sql` after migration 217.
+`scripts/220-lab-arena-participation-original-judgments.sql` after migration 217.
 It excludes score jobs made entirely from accepted company-judgment cache hits.
 A score job that supplies at least one new judgment can still count. Existing
 acceptance timestamps and scoring results are not rewritten.

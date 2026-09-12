@@ -1731,6 +1731,86 @@ def test_miner_key_failure_does_not_become_an_infrastructure_failure(
     assert api.completions[0]["body"].get("output") in (None, {})
 
 
+def test_proven_miner_key_failure_dominates_an_earlier_provider_outage(tmp_path):
+    from tests.lab_arena.test_lab_arena_broker import (
+        CHAT,
+        CONTEXT,
+        FakeTransport,
+        HOST_KEYS,
+        deepline_history,
+        make_broker,
+    )
+
+    broker_kwargs = {
+        "funding_source_for": lambda _context: "miner_key",
+        "credential_for": lambda _context, provider: HOST_KEYS[provider],
+    }
+    outage_broker, _, _ = make_broker(
+        transport=FakeTransport([(503, {"error": {"code": "unavailable"}})]),
+        **broker_kwargs,
+    )
+    outage = outage_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+    credential_broker, _, _ = make_broker(
+        transport=FakeTransport(
+            [
+                (402, {"request_id": "iad1::bad-key", "error": {"code": "auth"}}),
+                (200, deepline_history()),
+            ]
+        ),
+        **broker_kwargs,
+    )
+    credential = credential_broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "fintech"}},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+    assert outage.call["error_code"] == "provider_unavailable"
+    assert credential.call["error_code"] == "miner_credentials_unavailable"
+
+    class MixedFailureRuntime(BridgingRuntime):
+        def run_icp(self, spec, **_):
+            self.specs.append(spec)
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                first_status, _, _ = shim.dispatch(
+                    "openrouter.chat",
+                    {
+                        "model": "openai/gpt-4o-mini",
+                        "messages": [{"role": "user", "content": "find companies"}],
+                    },
+                    5000,
+                )
+                second_status, _, _ = shim.dispatch(
+                    "deepline.execute",
+                    {"tool": "exa_search", "payload": {"query": "fintech"}},
+                    5000,
+                )
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            assert (first_status, second_status) == (502, 402)
+            return runtime.fake_result(exit_code=1, output_bytes=None)
+
+    api = FakeApi(
+        [lease()],
+        broker_documents=[outage.to_document(), credential.to_document()],
+    )
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, MixedFailureRuntime()))
+
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "credential_error"
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
 @pytest.mark.parametrize("code", ["budget_refused", "budget_exhausted"])
 def test_miner_scoring_funding_failure_is_challenger_specific(tmp_path, code):
     from lab_arena import scoring

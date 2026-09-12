@@ -1617,7 +1617,7 @@ class AssignmentExecutor:
             ) and terminal != "accepted":
                 terminal = "credential_error"
                 output_document = None
-            if provider_infrastructure_failed and terminal != "accepted":
+            elif provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
                 if scoring_run:

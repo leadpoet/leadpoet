@@ -17,7 +17,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import claim, hotkey
 
 MIGRATION = (
     Path(__file__).resolve().parents[2]
-    / "scripts/218-lab-arena-participation-original-judgments.sql"
+    / "scripts/220-lab-arena-participation-original-judgments.sql"
 )
 
 
@@ -196,7 +196,7 @@ def test_only_original_company_judgment_work_earns_participation(
                 "schema_version": (
                     "leadpoet.lab_arena.participation_schema.v1"
                 ),
-                "version": 218,
+                "version": 220,
             }
             cursor.execute(
                 """

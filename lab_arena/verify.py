@@ -189,7 +189,8 @@ def per_icp_score(
     ``sum(final scores clamped to 0..100) / N - penalty / N``, floored at the
     policy floor, where the penalty is the Lab's false-positive counters over
     the breakdowns multiplied by the policy points. The evaluator's default
-    per-ICP mean is never used.
+    per-ICP mean is never used. Company-quality rounds also multiply by the
+    fraction of requested companies that qualify.
     """
 
     validated_policy = validate_scorer_policy(policy)
@@ -207,6 +208,15 @@ def per_icp_score(
         ],
         score_floor=validated_policy["fp_penalty_icp_floor"],
     )
+    if validated_policy.get("company_quality_policy") == "company_quality_v1":
+        # Reward completing this buyer request. Missing, rejected and duplicate
+        # companies cannot increase coverage by filling otherwise empty slots.
+        qualified = sum(
+            row.get("company_qualified") is True
+            and row.get("duplicate_company") is not True
+            for row in rows[:goal]
+        )
+        result["per_icp_score"] *= qualified / goal
     return dict(result)
 
 
@@ -245,7 +255,14 @@ def scored_row(
     rows = _require_list(breakdowns, "breakdowns")
     if len(rows) != len(scored):
         raise ArenaContractError("expected %d breakdowns for %d scored companies" % (len(scored), len(rows)))
-    from lab_arena import contact_policy
+    from lab_arena import contact_policy, quality_policy
+    if quality_policy.scorer_enabled(validated_policy):
+        from lab_arena.scoring import validate_breakdowns_for_item
+        validate_breakdowns_for_item(
+            rows, icp=icp, companies=sliced, max_scored_companies=validated_policy["max_scored_companies"],
+            integrity_policy=True, company_quality=True,
+            contacts_required=contact_policy.scorer_enabled(validated_policy),
+        )
     if contact_policy.scorer_enabled(validated_policy):
         for item in rows:
             contact_policy.validate_contact_breakdown(item)
@@ -273,9 +290,9 @@ def _require_position(value: Any) -> int:
 
 
 def stage_score(per_icp_scores: Sequence[float], denominator: int) -> float:
-    """Sum of exactly ``denominator`` per-ICP scores divided by it.
+    """Aggregate exactly ``denominator`` scores under the frozen round rule.
 
-    Summation is exact (rational arithmetic over each score's shortest
+    Historical summation is exact (rational arithmetic over each score's shortest
     decimal form) so the result is independent of row order and an exact
     challenger-versus-king tie is a true equality.
     """

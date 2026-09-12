@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import contact_policy, contact_evidence, integrity, confirmation, icp_disclosure, judgment_cache
+from lab_arena import company_judgments, contact_policy, contact_evidence, integrity, confirmation, icp_disclosure, judgment_cache, quality_policy
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -302,6 +302,7 @@ class RoundDefaults:
     # A new round's cutoff lies at least this far ahead so miners can submit.
     integrity_from: Optional[str] = None
     contacts_from: Optional[str] = None
+    company_quality_from: Optional[str] = None
     benchmark_disclosure_from: Optional[str] = None
     confirmation_minutes: Tuple[int, int] = (60, 110)
     min_submission_hours: int = 6
@@ -375,6 +376,16 @@ class ServiceConfig:
                     raise ValueError("contact activation precedes integrity activation")
             except (ValueError, AttributeError) as exc:
                 raise ServiceError("contact_activation_invalid", 500) from exc
+        if self.defaults.company_quality_from is not None:
+            try:
+                activation = datetime.fromisoformat(self.defaults.company_quality_from.replace("Z", "+00:00"))
+                if activation.tzinfo is None or self.defaults.integrity_from is None:
+                    raise ValueError("company quality requires timezone and integrity activation")
+                integrity_activation = datetime.fromisoformat(self.defaults.integrity_from.replace("Z", "+00:00"))
+                if activation + timedelta(days=1) < integrity_activation:
+                    raise ValueError("company quality precedes integrity activation")
+            except (ValueError, AttributeError) as exc:
+                raise ServiceError("company_quality_activation_invalid", 500) from exc
         if self.defaults.benchmark_disclosure_from is not None:
             try:
                 icp_disclosure.parse_activation(
@@ -510,11 +521,15 @@ class ArenaService:
         try:
             policy_enabled = integrity.enabled(configuration)
             contacts_enabled = contact_policy.enabled(configuration)
+            quality_enabled = quality_policy.enabled(configuration)
+            scorer_quality = quality_policy.scorer_enabled(configuration.get("scorer_policy") or {})
         except ValueError as exc:
             raise ServiceError("unsupported_integrity_policy", 409) from exc
         adapter = configuration.get("scorer_policy", {}).get("scoring_adapter_version")
         if contacts_enabled != (adapter == contact_policy.SCORING_ADAPTER) or policy_enabled != contact_policy.integrity_adapter(adapter):
             raise ServiceError("integrity_scorer_policy_mismatch", 409)
+        if quality_enabled != scorer_quality or (quality_enabled and not policy_enabled):
+            raise ServiceError("company_quality_scorer_policy_mismatch", 409)
         try:
             icp_disclosure.configured_policy(row)
         except icp_disclosure.IcpDisclosureError as exc:
@@ -631,6 +646,8 @@ class ArenaService:
             self._require_integrity_schema()
         if self._config.defaults.contacts_from or (current and contact_policy.enabled(current.get("configuration_doc") or {})):
             self._require_contact_schema()
+        if getattr(self._config.defaults, "company_quality_from", None) or (current and quality_policy.enabled(current.get("configuration_doc") or {})):
+            self._require_company_quality_schema()
         return {
             "database_identity": identity,
             "schema_version": int(schema_version),
@@ -655,6 +672,14 @@ class ArenaService:
             raise ServiceError("contact_schema_unavailable", 503) from exc
         if not isinstance(result, Mapping) or result.get("schema_version") != "leadpoet.lab_arena.contact_schema.v1" or result.get("version") != 215:
             raise ServiceError("contact_schema_invalid", 503)
+
+    def _require_company_quality_schema(self) -> None:
+        try:
+            result = self._store._transport.rpc("lab_arena_company_quality_schema_v1", {})
+        except ArenaStoreError as exc:
+            raise ServiceError("company_quality_schema_unavailable", 503) from exc
+        if not isinstance(result, Mapping) or result.get("schema_version") != "leadpoet.lab_arena.company_quality_schema.v1" or result.get("version") != 1:
+            raise ServiceError("company_quality_schema_invalid", 503)
 
     def build_schedule(self, cutoff: datetime) -> Dict[str, str]:
         """Build the round's cutoff and absolute timeout budget.
@@ -773,6 +798,15 @@ class ArenaService:
             self._require_contact_schema()
             document["contact_policy"] = contact_policy.POLICY
             document["scorer_policy"] = scoring.build_scorer_policy(scoring_adapter_version=contact_policy.SCORING_ADAPTER)
+        if defaults.company_quality_from is not None and _parse_iso(document["schedule"]["submission_open"]) >= datetime.fromisoformat(defaults.company_quality_from.replace("Z", "+00:00")):
+            if not integrity.enabled(document):
+                raise ServiceError("company_quality_requires_integrity", 503)
+            self._require_company_quality_schema()
+            document["company_quality_policy"] = quality_policy.POLICY
+            document["scorer_policy"] = scoring.build_scorer_policy(
+                scoring_adapter_version=document["scorer_policy"]["scoring_adapter_version"],
+                company_quality=True,
+            )
         if (
             defaults.benchmark_disclosure_from is not None
             and cutoff >= icp_disclosure.parse_activation(
@@ -1774,8 +1808,17 @@ class ArenaService:
         for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
             accepted[str(run["run_id"])] = run
         items: List[Dict[str, Any]] = []
-        integrity_cache = integrity.enabled(round_row.get("configuration_doc") or {})
-        icps = self.evaluation_icps(round_id) if integrity_cache else []
+        company_quality_cache = quality_policy.enabled(
+            round_row.get("configuration_doc") or {}
+        )
+        integrity_cache = (
+            integrity.enabled(round_row.get("configuration_doc") or {})
+            and not company_quality_cache
+        )
+        icps = (
+            self.evaluation_icps(round_id)
+            if integrity_cache or company_quality_cache else []
+        )
         configuration = round_row.get("configuration_doc") or {}
         policy = configuration.get("scorer_policy") or {}
         for item in plan["work_items"]:
@@ -1789,7 +1832,7 @@ class ArenaService:
                 "icp_position": int(run["icp_position"]),
                 "output_ref": run["output_ref"],
             }
-            if integrity_cache:
+            if integrity_cache or company_quality_cache:
                 output = json.loads(
                     self._objects.get_bounded(
                         str(run["output_ref"]), MAX_OUTPUT_BYTES
@@ -1805,20 +1848,44 @@ class ArenaService:
                     evaluation_date=str(round_row.get("evaluation_date") or ""),
                     contact_source_evidence=(contact_evidence.resolve_sources(self._store, run, companies) if contact_policy.enabled(configuration) else None),
                 )
-                cache_scope = judgment_cache.build_cache_scope(
-                    scoring_input=scoring_input,
-                    round_id=round_id,
-                    network_name=str(round_row.get("arena_network_name") or ""),
-                    netuid=int(round_row.get("arena_netuid") or 0),
-                    scorer_image_digest=str(configuration.get("scorer_image_digest") or ""),
-                    scorer_image_reference=str(configuration.get("scorer_image_reference") or ""),
-                    integrity_policy=str(configuration.get("integrity_policy") or ""),
-                )
-                work_item.update({
-                    "judgment_cache_key": cache_scope["cache_key"],
-                    "judgment_scope_doc": cache_scope,
-                    "judgment_input_hash": cache_scope["scoring_input_hash"],
-                })
+                if company_quality_cache:
+                    work_item["company_judgment_refs"] = (
+                        company_judgments.build_company_scopes(
+                            scoring_input=scoring_input,
+                            round_id=round_id,
+                            network_name=str(
+                                round_row.get("arena_network_name") or ""
+                            ),
+                            netuid=int(round_row.get("arena_netuid") or 0),
+                            scorer_image_digest=str(
+                                configuration.get("scorer_image_digest") or ""
+                            ),
+                            scorer_image_reference=str(
+                                configuration.get("scorer_image_reference") or ""
+                            ),
+                            integrity_policy=str(
+                                configuration.get("integrity_policy") or ""
+                            ),
+                            company_quality_policy=str(
+                                configuration.get("company_quality_policy") or ""
+                            ),
+                        )
+                    )
+                else:
+                    cache_scope = judgment_cache.build_cache_scope(
+                        scoring_input=scoring_input,
+                        round_id=round_id,
+                        network_name=str(round_row.get("arena_network_name") or ""),
+                        netuid=int(round_row.get("arena_netuid") or 0),
+                        scorer_image_digest=str(configuration.get("scorer_image_digest") or ""),
+                        scorer_image_reference=str(configuration.get("scorer_image_reference") or ""),
+                        integrity_policy=str(configuration.get("integrity_policy") or ""),
+                    )
+                    work_item.update({
+                        "judgment_cache_key": cache_scope["cache_key"],
+                        "judgment_scope_doc": cache_scope,
+                        "judgment_input_hash": cache_scope["scoring_input_hash"],
+                    })
             items.append(work_item)
         if integrity_cache:
             grouped: Dict[str, List[Dict[str, Any]]] = {}
@@ -1871,7 +1938,11 @@ class ArenaService:
                     item["judgment_group_leader"] = index == 0
                     item["judgment_group_miner_hotkeys"] = group_miners
         result = self._store.open_scoring(
-            round_id, stage, items, integrity_cache=integrity_cache
+            round_id,
+            stage,
+            items,
+            integrity_cache=integrity_cache,
+            **({"company_quality_cache": True} if company_quality_cache else {}),
         )
         return {"status": result.get("status"), "round_status": result.get("round_status"), "assignments": result.get("assignments"), "work_items": len(plan["work_items"])}
 
@@ -1936,7 +2007,233 @@ class ArenaService:
                 chosen[run["scored_run_id"]] = run
         return chosen
 
+    def _company_judgment_evidence(
+        self,
+        *,
+        cache_key: str,
+        company_input_hash: str,
+        authority_slot: int,
+    ) -> Dict[str, Any]:
+        """Read and fully bind one immutable company judgment variant."""
+
+        cached = self._store.get_company_judgment(cache_key, authority_slot)
+        if cached is None:
+            raise scoring.ScoringError(
+                "accepted company judgment cache entry is missing"
+            )
+        if cached.get("company_input_hash") != company_input_hash:
+            raise scoring.ScoringError(
+                "accepted company judgment input binding is invalid"
+            )
+        try:
+            company_judgments.validate_company_ref({
+                "schema_version": company_judgments.COMPANY_REF_SCHEMA_VERSION,
+                "company_index": 0,
+                "cache_key": cache_key,
+                "company_input_hash": company_input_hash,
+                "scope_doc": cached.get("scope_doc") or {},
+            })
+            evidence = company_judgments.validate_evidence_snapshot(
+                cached.get("evidence_doc") or {},
+                cache_key=cache_key,
+                company_input_hash=company_input_hash,
+                authority_slot=authority_slot,
+                evidence_hash=str(cached.get("evidence_hash") or ""),
+            )
+        except company_judgments.CompanyJudgmentError as exc:
+            raise scoring.ScoringError(
+                "accepted company judgment evidence is invalid"
+            ) from exc
+        source = self._store.get_run(str(evidence["source_score_run_id"]))
+        if (
+            source is None
+            or source.get("kind") != "score"
+            or source.get("status") != "accepted"
+            or source.get("runner_hotkey") != evidence["source_runner_hotkey"]
+            or source.get("scored_run_id") != evidence["source_scored_run_id"]
+            or source.get("output_ref") != evidence["source_output_ref"]
+            or source.get("claim_request_id")
+            != evidence["source_claim_request_id"]
+            or source.get("claim_request_hash")
+            != evidence["source_claim_request_hash"]
+            or int(source.get("lease_generation") or 0)
+            != evidence["source_lease_generation"]
+            or (source.get("claim_response") or {}).get(
+                "runner_authority_exclusions"
+            ) != evidence["runner_authority_exclusions"]
+            or cached.get("source_score_run_id")
+            != evidence["source_score_run_id"]
+            or cached.get("source_scored_run_id")
+            != evidence["source_scored_run_id"]
+            or cached.get("source_runner_hotkey")
+            != evidence["source_runner_hotkey"]
+        ):
+            raise scoring.ScoringError(
+                "accepted company judgment authority is invalid"
+            )
+        try:
+            source_output = json.loads(
+                self._objects.get_bounded(
+                    str(evidence["source_output_ref"]),
+                    scoring.MAX_SCORING_OUTPUT_BYTES,
+                ).decode("utf-8")
+            )
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise scoring.ScoringError(
+                "accepted company judgment source output is unavailable"
+            ) from exc
+        if contracts.document_hash(source_output) != evidence["source_output_hash"]:
+            raise scoring.ScoringError(
+                "accepted company judgment source output hash is invalid"
+            )
+        try:
+            validated_output = scoring.validate_scoring_output_document(
+                source_output
+            )
+        except scoring.ScoringError as exc:
+            raise scoring.ScoringError(
+                "accepted company judgment source output is invalid"
+            ) from exc
+        matching_rows = [
+            row for row in validated_output.get("company_judgments") or []
+            if row.get("cache_key") == cache_key
+            and row.get("company_input_hash") == company_input_hash
+            and row.get("authority_slot") == authority_slot
+        ]
+        if (
+            validated_output.get("scored_run_id")
+            != evidence["source_scored_run_id"]
+            or len(matching_rows) != 1
+            or matching_rows[0].get("raw_judgment")
+            != evidence["raw_judgment"]
+        ):
+            raise scoring.ScoringError(
+                "accepted company judgment source output is not bound"
+            )
+        return evidence
+
+    def _validated_company_judgment_lease(
+        self,
+        context: Mapping[str, Any],
+        *,
+        recipient_miner_hotkey: str,
+        baseline: bool,
+    ) -> Dict[str, Any]:
+        try:
+            lease = company_judgments.validate_lease_context(context)
+        except company_judgments.CompanyJudgmentError as exc:
+            raise scoring.ScoringError(
+                "company judgment lease context is invalid"
+            ) from exc
+        for hit in lease["hits"]:
+            evidence = self._company_judgment_evidence(
+                cache_key=hit["cache_key"],
+                company_input_hash=hit["company_input_hash"],
+                authority_slot=hit["authority_slot"],
+            )
+            if evidence != hit["evidence_doc"]:
+                raise scoring.ScoringError(
+                    "company judgment lease evidence changed"
+                )
+            if (
+                not baseline
+                and recipient_miner_hotkey
+                in evidence["runner_authority_exclusions"]
+            ):
+                raise scoring.ScoringError(
+                    "company judgment lease authority is incompatible"
+                )
+        return lease
+
+    def _company_quality_breakdowns(
+        self,
+        run: Mapping[str, Any],
+        *,
+        icp: Mapping[str, Any],
+        companies: Sequence[Mapping[str, Any]],
+        policy: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Rebuild list context from immutable raw company evidence."""
+
+        submission = self._store.get_submission(str(run["submission_id"])) or {}
+        context = self._validated_company_judgment_lease(
+            (run.get("claim_response") or {}).get("company_judgment_cache") or {},
+            recipient_miner_hotkey=str(run.get("miner_hotkey") or ""),
+            baseline=bool(submission.get("is_king")),
+        )
+        try:
+            document = json.loads(
+                self._objects.get_bounded(
+                    str(run["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES
+                ).decode("utf-8")
+            )
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise scoring.ScoringError("scoring output is not valid JSON") from exc
+        output = scoring.validate_scoring_output_document(document)
+        if output["scored_run_id"] != run["scored_run_id"]:
+            raise scoring.ScoringError("scoring output names the wrong execution run")
+        try:
+            company_judgments.validate_new_company_judgments(
+                output.get("company_judgments") or [],
+                lease_context=context,
+            )
+        except company_judgments.CompanyJudgmentError as exc:
+            raise scoring.ScoringError(
+                "scoring output company judgments are invalid"
+            ) from exc
+
+        rows = sorted(
+            context["hits"] + context["misses"],
+            key=lambda item: item["company_index"],
+        )
+        raw_by_key: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        raw = []
+        for item in rows:
+            identity = (item["cache_key"], item["authority_slot"])
+            if identity not in raw_by_key:
+                evidence = self._company_judgment_evidence(
+                    cache_key=item["cache_key"],
+                    company_input_hash=item["company_input_hash"],
+                    authority_slot=item["authority_slot"],
+                )
+                if (
+                    not bool(submission.get("is_king"))
+                    and str(run.get("miner_hotkey") or "")
+                    in evidence["runner_authority_exclusions"]
+                ):
+                    raise scoring.ScoringError(
+                        "accepted company judgment authority is incompatible"
+                    )
+                raw_by_key[identity] = evidence["raw_judgment"]
+            raw.append(raw_by_key[identity])
+        from qualification.scoring.competition import (
+            apply_company_judgment_context,
+        )
+
+        recomputed = apply_company_judgment_context(
+            list(companies)[:len(rows)],
+            raw,
+            contacts_required=contact_policy.scorer_enabled(policy),
+        )
+        if output["breakdowns"] != recomputed:
+            raise scoring.ScoringError(
+                "scoring output company context does not match the gateway"
+            )
+        return scoring.validate_breakdowns_for_item(
+            recomputed,
+            icp=icp,
+            companies=companies,
+            max_scored_companies=int(policy["max_scored_companies"]),
+            integrity_policy=True,
+            contacts_required=contact_policy.scorer_enabled(policy),
+            company_quality=True,
+        )
+
     def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        if run.get("company_judgment_refs") is not None:
+            return self._company_quality_breakdowns(
+                run, icp=icp, companies=companies, policy=policy
+            )
         cache_key = str(run.get("judgment_cache_key") or "")
         if cache_key:
             cached = self._store.get_judgment_cache(cache_key)
@@ -2823,6 +3120,8 @@ class ArenaService:
             lease["integrity_policy"] = integrity.POLICY
         if contact_policy.enabled(configuration):
             lease["contact_policy"] = contact_policy.POLICY
+        if quality_policy.enabled(configuration):
+            lease["company_quality_policy"] = quality_policy.POLICY
         lease.update({
             "image_digest": configuration["scorer_image_digest"],
             "image_reference": configuration["scorer_image_reference"],
@@ -2830,13 +3129,34 @@ class ArenaService:
         if response.get("kind") == "score":
             # A scoring assignment: the validator runs the pinned judge image on
             # the scored output with the signed scorer policy.
+            if quality_policy.enabled(configuration):
+                submission = self._store.get_submission(
+                    str(response["submission_id"])
+                ) or {}
+                try:
+                    self._validated_company_judgment_lease(
+                        response.get("company_judgment_cache") or {},
+                        recipient_miner_hotkey=str(
+                            response.get("miner_hotkey") or ""
+                        ),
+                        baseline=bool(submission.get("is_king")),
+                    )
+                except scoring.ScoringError as exc:
+                    raise ServiceError(
+                        "company_judgment_cache_invalid", 500
+                    ) from exc
             scored = self._store.get_run(str(response.get("scored_run_id") or ""))
             if scored is None or not scored.get("output_ref"):
                 raise ServiceError("scored_run_missing", 500)
             output = json.loads(self._objects.get(scored["output_ref"]).decode("utf-8"))
             lease.update({"scored_output": output, "scorer_policy": configuration["scorer_policy"]})
             if contact_policy.enabled(configuration):
-                companies = validate_output_document(output, expected_schema_version=contact_policy.OUTPUT_SCHEMA)["companies"]
+                companies = validate_output_document(
+                    output,
+                    expected_schema_version=contact_policy.output_schema(
+                        configuration
+                    ),
+                )["companies"]
                 lease["contact_source_evidence"] = contact_evidence.resolve_sources(self._store, scored, companies)
             return lease
         # An execution uses the participant's private source archive under the
@@ -3033,6 +3353,16 @@ class ArenaService:
         output_ref = ""
         judgment_evidence = None
         judgment_evidence_hash = ""
+        company_judgment_evidence = None
+        output_hash = ""
+        completion_request_hash = ""
+        company_quality_run = (
+            quality_policy.enabled(round_row.get("configuration_doc") or {})
+            and run.get("company_judgment_refs") is not None
+        )
+        if company_quality_run:
+            company_judgment_evidence = []
+            completion_request_hash = contracts.request_bytes_hash(validated)
         if terminal_status == "accepted" and kind == "score":
             try:
                 output = scoring.validate_scoring_output_document(body.get("output"))
@@ -3040,24 +3370,149 @@ class ArenaService:
                 raise ServiceError("output_invalid", 400)
             if "failure" in output or output["scored_run_id"] != run.get("scored_run_id"):
                 raise ServiceError("output_invalid", 400)
-            if contact_policy.enabled(round_row["configuration_doc"]):
+            if (
+                contact_policy.enabled(round_row["configuration_doc"])
+                or company_quality_run
+            ):
                 executed = self._store.get_run(str(run["scored_run_id"]))
                 if executed is None or not executed.get("output_ref"):
                     raise ServiceError("scored_run_missing", 500)
                 companies = validate_output_document(
                     json.loads(self._objects.get_bounded(executed["output_ref"], MAX_OUTPUT_BYTES)),
-                    expected_schema_version=contact_policy.OUTPUT_SCHEMA,
+                    expected_schema_version=contact_policy.output_schema(
+                        round_row["configuration_doc"]
+                    ),
                 )["companies"]
                 try:
                     scoring.validate_breakdowns_for_item(
                         output["breakdowns"], icp=self.evaluation_icps(round_id)[int(run["icp_position"])],
-                        companies=companies, integrity_policy=True, contacts_required=True,
+                        companies=companies,
+                        integrity_policy=True,
+                        contacts_required=contact_policy.enabled(
+                            round_row["configuration_doc"]
+                        ),
+                        company_quality=company_quality_run,
                     )
                 except scoring.ScoringError as exc:
-                    raise ServiceError("contact_score_invalid", 400) from exc
+                    raise ServiceError("score_invalid", 400) from exc
             output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
-            self._objects.put(output_ref, contracts.canonical_json(output).encode("utf-8"))
-            if run.get("judgment_cache_key"):
+            output_bytes = contracts.canonical_json(output).encode("utf-8")
+            self._objects.put(output_ref, output_bytes)
+            output_hash = contracts.document_hash(output)
+            if company_quality_run:
+                context = (run.get("claim_response") or {}).get(
+                    "company_judgment_cache"
+                ) or {}
+                try:
+                    submission = self._store.get_submission(
+                        str(run["submission_id"])
+                    ) or {}
+                    validated_context = self._validated_company_judgment_lease(
+                        context,
+                        recipient_miner_hotkey=str(
+                            run.get("miner_hotkey") or ""
+                        ),
+                        baseline=bool(submission.get("is_king")),
+                    )
+                    new_judgments = (
+                        company_judgments.validate_new_company_judgments(
+                            output.get("company_judgments") or [],
+                            lease_context=validated_context,
+                        )
+                    )
+                    new_by_key = {
+                        item["cache_key"]: item["raw_judgment"]
+                        for item in new_judgments
+                    }
+                    hit_by_key = {
+                        item["cache_key"]: item["evidence_doc"]["raw_judgment"]
+                        for item in validated_context["hits"]
+                    }
+                    lease_rows = sorted(
+                        validated_context["hits"]
+                        + validated_context["misses"],
+                        key=lambda item: item["company_index"],
+                    )
+                    raw_rows = [
+                        (
+                            hit_by_key[item["cache_key"]]
+                            if item["cache_key"] in hit_by_key
+                            else new_by_key[item["cache_key"]]
+                        )
+                        for item in lease_rows
+                    ]
+                    from qualification.scoring.competition import (
+                        apply_company_judgment_context,
+                    )
+
+                    expected_breakdowns = apply_company_judgment_context(
+                        companies[:len(lease_rows)],
+                        raw_rows,
+                        contacts_required=contact_policy.enabled(
+                            round_row["configuration_doc"]
+                        ),
+                    )
+                    if output["breakdowns"] != expected_breakdowns:
+                        raise company_judgments.CompanyJudgmentError(
+                            "company judgment destination context mismatch"
+                        )
+                    refs = [
+                        company_judgments.validate_company_ref(ref)
+                        for ref in run.get("company_judgment_refs") or []
+                    ]
+                    for new_judgment in new_judgments:
+                        company_ref = next(
+                            (
+                                ref for ref in refs
+                                if ref["cache_key"]
+                                == new_judgment["cache_key"]
+                                and ref["company_index"]
+                                == new_judgment["company_index"]
+                            ),
+                            None,
+                        )
+                        if company_ref is None:
+                            raise company_judgments.CompanyJudgmentError(
+                                "company judgment ref is missing"
+                            )
+                        evidence = company_judgments.build_evidence_snapshot(
+                            new_judgment=new_judgment,
+                            company_ref=company_ref,
+                            source_score_run_id=run_id,
+                            source_scored_run_id=str(run["scored_run_id"]),
+                            source_output_ref=output_ref,
+                            source_output_hash=output_hash,
+                            source_runner_hotkey=str(validated["hotkey"]),
+                            source_claim_request_id=str(
+                                run.get("claim_request_id") or ""
+                            ),
+                            source_claim_request_hash=str(
+                                run.get("claim_request_hash") or ""
+                            ),
+                            source_lease_generation=int(
+                                run.get("lease_generation") or 0
+                            ),
+                            source_completion_request_hash=(
+                                completion_request_hash
+                            ),
+                            runner_authority_exclusions=(
+                                run.get("claim_response") or {}
+                            ).get("runner_authority_exclusions"),
+                        )
+                        company_judgment_evidence.append({
+                            "cache_key": evidence["cache_key"],
+                            "company_input_hash": evidence[
+                                "company_input_hash"
+                            ],
+                            "authority_slot": evidence["authority_slot"],
+                            "evidence_hash": contracts.document_hash(evidence),
+                            "evidence_doc": evidence,
+                        })
+                except company_judgments.CompanyJudgmentError as exc:
+                    raise ServiceError(
+                        "company_judgment_output_invalid", 400
+                    ) from exc
+            elif run.get("judgment_cache_key"):
                 scope = dict(run.get("judgment_scope_doc") or {})
                 scope["cache_key"] = str(run["judgment_cache_key"])
                 try:
@@ -3092,6 +3547,9 @@ class ArenaService:
             run_id=run_id, lease_token_hash=hash_lease_token(lease_token), result=run_result, terminal_cause=terminal_status,
             output_ref=output_ref, judgment_evidence=judgment_evidence,
             judgment_evidence_hash=judgment_evidence_hash,
+            company_judgment_evidence=company_judgment_evidence,
+            output_hash=output_hash if company_quality_run else "",
+            completion_request_hash=completion_request_hash,
         )
         return result
 

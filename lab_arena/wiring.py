@@ -427,6 +427,7 @@ def build_service_from_environment(mode: str):
         rewards_enabled=rewards_enabled,
         integrity_from=os.environ.get("LAB_ARENA_INTEGRITY_FROM") or None,
         contacts_from=os.environ.get("LAB_ARENA_CONTACTS_FROM") or None,
+        company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
     )
 

@@ -2507,12 +2507,12 @@
       "symbol": "_has_explicitly_unproven_fit_dimensions"
     },
     {
-      "ast_sha256": "sha256:09d3976c8345086b3e0f249d71d94f60edbc71061bc6c0f5ee27c6dfbe2b3f31",
+      "ast_sha256": "sha256:fb156e8855fe3111b6318c24a5c5feb0616ead03fd1eabbda500514d8b0405be",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
     {
-      "ast_sha256": "sha256:5641ea0e56272710e6abc9a093debe41411aba0ebf26a7af6d96dcf1f9e356f4",
+      "ast_sha256": "sha256:93951a5e709091e14a791d4b2920a2ba8ad1914a431aeb0299b2657eacc57cef",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_reverify_decision"
     },

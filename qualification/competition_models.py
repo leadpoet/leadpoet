@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 COMPETITION_OUTPUT_SCHEMA_V1 = "leadpoet.lab_arena.output.v1"
 COMPETITION_OUTPUT_SCHEMA_V2 = "leadpoet.lab_arena.output.v2"
+COMPETITION_OUTPUT_SCHEMA_V3 = "leadpoet.lab_arena.output.v3"
+COMPETITION_OUTPUT_SCHEMA_V4 = "leadpoet.lab_arena.output.v4"
 
 
 def public_http_url(value: Any, *, allow_empty: bool = False) -> str:
@@ -132,6 +134,27 @@ class CompetitionCompanyV2(CompetitionCompany):
     contact: Any = None
 
 
+
+class CompetitionCompanyV3(CompetitionCompany):
+    """Preserve new required-field claims for independent row-level checks."""
+
+    company_linkedin: Any = None
+    state: Any = None
+
+    @field_validator("company_linkedin")
+    @classmethod
+    def validate_linkedin(cls, value: Any) -> Any:
+        # The quality gate rejects missing/malformed claims for this company.
+        # Do not reject the other four companies at the document boundary.
+        return value
+
+
+class CompetitionCompanyV4(CompetitionCompanyV3):
+    """Company-quality requirements together with the frozen contact policy."""
+
+    contact: Any = None
+
+
 def validate_companies(
     values: Any,
     *,
@@ -148,11 +171,19 @@ def validate_companies(
         company_model = CompetitionCompany
     elif schema_version == COMPETITION_OUTPUT_SCHEMA_V2:
         company_model = CompetitionCompanyV2
+    elif schema_version == COMPETITION_OUTPUT_SCHEMA_V3:
+        company_model = CompetitionCompanyV3
+    elif schema_version == COMPETITION_OUTPUT_SCHEMA_V4:
+        company_model = CompetitionCompanyV4
     else:
         raise ValueError("unsupported output schema version")
     rows: list[dict[str, Any]] = []
     for value in values:
         if not isinstance(value, Mapping):
             raise ValueError("each company must be an object")
-        rows.append(company_model.model_validate(value).model_dump(mode="json"))
+        row = company_model.model_validate(value).model_dump(mode="json")
+        if schema_version in (COMPETITION_OUTPUT_SCHEMA_V3, COMPETITION_OUTPUT_SCHEMA_V4):
+            from qualification.company_quality import normalize_company_claim
+            row, _ = normalize_company_claim(row)
+        rows.append(row)
     return rows

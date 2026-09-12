@@ -26,18 +26,23 @@ CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
 ] = "insufficient_evidence"
 
 _ABOUT_SECTION_HEADING = re.compile(
-    r"(?:#{1,6}\s*)?(?:About(?: us)?|Over ons)",
+    r"(?:#{1,6}\s*)?(?:About(?: us)?|Over ons|Sobre nós)",
     re.IGNORECASE,
 )
 _ABOUT_SECTION_END_HEADING = re.compile(
-    r"(?:#{1,6}\s*)?(?:Employees(?: at\b.*)?|Medewerkers van(?:\b.*)?|Updates)",
+    r"(?:#{1,6}\s*)?(?:Employees(?: at\b.*)?|Medewerkers van(?:\b.*)?|"
+    r"Funcionários da(?:\b.*)?|Updates)",
     re.IGNORECASE,
 )
 _COMPANY_SIZE_FIELD = re.compile(
-    r"(?:\*\*)?(?:Company size|Bedrijfsgrootte)(?:\*\*)?\s*:?(?:\s+(?P<value>.+))?",
+    r"(?:\*\*)?(?:Company size|Bedrijfsgrootte|Tamanho da empresa)"
+    r"(?:\*\*)?\s*:?(?:\s+(?P<value>.+))?",
     re.IGNORECASE,
 )
-_EMPLOYEE_SUFFIX = re.compile(r"\s+(?:employees?|medewerkers)\s*$", re.IGNORECASE)
+_EMPLOYEE_SUFFIX = re.compile(
+    r"\s+(?:employees?|medewerkers|funcionários)\s*$",
+    re.IGNORECASE,
+)
 
 # These are exact LinkedIn authentication-page titles, paired with credential
 # fields. A public company page can contain sign-in links, so links or isolated
@@ -49,12 +54,18 @@ _ACCESS_WALL_TITLES = {
     "inloggen | linkedin",
     "join linkedin",
     "linkedin login, sign in",
+    "registrarse | linkedin",
+    "s’inscrire | linkedin",
     "sign in | linkedin",
     "sign up | linkedin",
+    "đăng ký | linkedin",
 }
 _ACCESS_WALL_CREDENTIAL_FIELDS = (
     ("email or phone", "password"),
+    ("email", "contraseña"),
+    ("email", "mật khẩu"),
     ("e-mail", "senha"),
+    ("e-mail", "mot de passe"),
     ("e-mail", "wachtwoord"),
 )
 _BLOCKED_PAGE_TITLES = {
@@ -159,7 +170,7 @@ def _is_linkedin_access_wall(text: str) -> bool:
 
 
 def _canonical_linkedin_company_size(value: str) -> Optional[str]:
-    """Map an exact English or Dutch LinkedIn band to its canonical form."""
+    """Map an exact English, Dutch, or Portuguese band to canonical form."""
 
     raw = _EMPLOYEE_SUFFIX.sub("", value.strip().strip("*").strip())
     for band in LINKEDIN_EMPLOYEE_BUCKETS:

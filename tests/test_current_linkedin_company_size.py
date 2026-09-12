@@ -182,6 +182,23 @@ Alle 403 medewerkers weergeven
     }
 
 
+def test_portuguese_company_size_is_bounded_and_canonicalized():
+    text = """Estuary | LinkedIn
+Visualizar todos os 66 funcionários
+## Sobre nós
+Estuary provides real-time data integration.
+Tamanho da empresa
+11-50 funcionários
+## Funcionários da Estuary
+Ver 66 funcionários na empresa Estuary
+"""
+
+    assert linkedin_company_size.extract_linkedin_company_size(text) == {
+        "employee_count": "11-50",
+        "quote": "Tamanho da empresa\n11-50 funcionários",
+    }
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -207,6 +224,50 @@ Senha (+ de 6 caracteres)
 E-mail ou telefone
 Senha
 """
+    body = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [
+            {
+                "url": "https://linkedin.com/company/acme",
+                "text": wall,
+            }
+        ],
+    }
+    calls, pending = _install_exa_bodies(monkeypatch, body)
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme"
+        )
+    ) is None
+    assert len(calls) == 1
+    assert pending == []
+
+
+@pytest.mark.parametrize(
+    "wall",
+    [
+        """S’inscrire | LinkedIn
+# S’inscrire sur LinkedIn
+E-mail
+Mot de passe (6 caractères ou plus)
+""",
+        """Registrarse | LinkedIn
+# Únete a LinkedIn
+Email
+Contraseña (más de 6 caracteres)
+""",
+        """Đăng ký | LinkedIn
+# Tham gia LinkedIn
+Email
+Mật khẩu (6 ký tự trở lên)
+""",
+    ],
+)
+def test_observed_localized_authentication_walls_are_retryable(
+    monkeypatch,
+    wall,
+):
     body = {
         "statuses": [{"status": "success", "source": "crawled"}],
         "results": [

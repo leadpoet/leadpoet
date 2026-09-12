@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "da72e10e0c142d5916ecfa411693031686360c08",
+  "baseline_commit": "7ae24d5c0f5d0295805308e76cb95e0393635a01",
   "entries": [
     {
       "ast_sha256": "sha256:de08a5c8644e61d0fe92fdf6ca08f443e90b1e5395bb968d3be609bc45ef351c",
@@ -1887,7 +1887,7 @@
       "symbol": "ScoringExecutorV2._execute_provider_preflight"
     },
     {
-      "ast_sha256": "sha256:0332d31be0b081d07d2dd659dc8b9543d7f3a8d8de585b086741e8487d280e78",
+      "ast_sha256": "sha256:1cef096546acb077325d949b70b6f82a33f34b32507f4c7aa7c8a2c33bf68ebd",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:5259ff973efe652acd09342d1321b5919083f949f14d683fce1756bc44962ee2",
-  "protected_source_commit": "0673e4496617dce3c772391c74a13435050c0038",
+  "manifest_hash": "sha256:58bb0ffbb6878c4ae05b1ed69b70e85c8c3970c7edbe0ebed317c4b374b7266d",
+  "protected_source_commit": "7ae24d5c0f5d0295805308e76cb95e0393635a01",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

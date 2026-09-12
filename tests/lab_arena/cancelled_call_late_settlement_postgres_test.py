@@ -132,6 +132,9 @@ def test_cancellation_that_locks_first_accepts_exact_late_reply_once(resources):
     assert store.cancel_round(call["round_id"], "test_cancel")["status"] == "cancelled"
     assert _kinds(store, call["identity"]) == ["reservation", "dispatch", "uncertain"]
     assert _spend(connect, call["submission_id"]) == 800_000
+    cancelled_run = store.get_run(call["run"]["run_id"])
+    assert cancelled_run["status"] == "failed"
+    assert cancelled_run["participation_accepted_at"] is None
 
     terminal = _terminal(marker="Y2FuY2VsLWZpcnN0")
     settled = store.settle_call(
@@ -155,6 +158,7 @@ def test_cancellation_that_locks_first_accepts_exact_late_reply_once(resources):
     assert sum(row["settled_microusd"] for row in costs["providers"]) == 234_567
     assert sum(row["reserved_or_uncertain_microusd"] for row in costs["providers"]) == 0
     assert sum(row["uncertain_calls"] for row in costs["providers"]) == 0
+    assert store.get_run(call["run"]["run_id"]) == cancelled_run
 
     replay = store.settle_call(
         run_id=call["run"]["run_id"],
@@ -166,6 +170,7 @@ def test_cancellation_that_locks_first_accepts_exact_late_reply_once(resources):
     assert replay["status"] == "settled"
     assert replay["idempotent"] is True
     assert replay["late_reconciliation"] is True
+    assert store.get_run(call["run"]["run_id"]) == cancelled_run
     conflict = store.settle_call(
         run_id=call["run"]["run_id"],
         lease_token_hash=call["token_hash"],
@@ -176,6 +181,7 @@ def test_cancellation_that_locks_first_accepts_exact_late_reply_once(resources):
     assert conflict == {"status": "conflict", "call_identity": call["identity"]}
     assert _kinds(store, call["identity"]).count("settlement") == 1
     assert _spend(connect, call["submission_id"]) == 234_567
+    assert store.get_run(call["run"]["run_id"]) == cancelled_run
 
 
 def test_known_cost_error_can_settle_but_unpriced_error_cannot(resources):

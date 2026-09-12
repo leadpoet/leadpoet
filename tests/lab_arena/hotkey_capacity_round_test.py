@@ -19,6 +19,17 @@ def database():
 connect = fixtures.connect
 
 
+@pytest.fixture()
+def self_dealing_database():
+    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS)
+
+
+@pytest.fixture()
+def self_dealing_connect(self_dealing_database):
+    psycopg2, dsn = self_dealing_database
+    return lambda: psycopg2.connect(**dsn)
+
+
 def test_default_admission_is_twenty_with_one_planned_runner(connect, tmp_path, monkeypatch):
     harness = fixtures.Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     harness.service.config.defaults = replace(harness.service.config.defaults, max_challengers=contracts.DEFAULT_MAX_CHALLENGERS)
@@ -79,6 +90,9 @@ def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(
             runs = harness.service.store.list_runs(harness.round_id, stage=stage, kind=kind)
             assert len(runs) == 21 * 10
             assert {run["status"] for run in runs} == {"accepted"}
+    assert harness.service.store.has_recent_participation(
+        "finney", 71, harness.runner_keys[0]
+    )
     ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
     assert published["king_outcome"] == "crowned"
     for submission, original in original_rows.items():
@@ -94,3 +108,109 @@ def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(
         assert len(public["outputs"]) >= 20
         assert all(output["companies"] for output in public["outputs"].values())
     fixtures.assert_canary_absent(harness, connect)
+
+
+def test_shared_owner_validator_cannot_claim_sibling_submissions(
+    self_dealing_connect, tmp_path
+):
+    """Signed claims exclude every submission owned by the runner's coldkey."""
+
+    flavors = ["SiblingOne", "SiblingTwo", "ForeignOwner"]
+    harness = ContactHarness(
+        self_dealing_connect,
+        tmp_path,
+        challengers=flavors,
+        runners=["alpha"],
+    )
+    _install_contact_sandbox(harness)
+    runner_hotkey = harness.runner_keys[0]
+    sibling_hotkeys = {
+        fixtures.keypair("svc-miner-SiblingOne").ss58_address,
+        fixtures.keypair("svc-miner-SiblingTwo").ss58_address,
+    }
+    foreign_hotkey = fixtures.keypair(
+        "svc-miner-ForeignOwner"
+    ).ss58_address
+    original_metagraph = harness.chain.metagraph
+
+    def metagraph(*, finalized=True):
+        snapshot = original_metagraph(finalized=finalized)
+        owner_by_hotkey = dict(zip(snapshot.hotkeys, snapshot.coldkeys))
+        shared_owner = owner_by_hotkey[runner_hotkey]
+        return replace(
+            snapshot,
+            coldkeys=tuple(
+                shared_owner if hotkey in sibling_hotkeys else owner_by_hotkey[hotkey]
+                for hotkey in snapshot.hotkeys
+            ),
+            stake=tuple(
+                75_000.0 if hotkey == runner_hotkey else stake
+                for hotkey, stake in zip(snapshot.hotkeys, snapshot.stake)
+            ),
+        )
+
+    harness.chain.metagraph = metagraph
+    snapshot = harness.chain.metagraph(finalized=True)
+    runner_uid = snapshot.hotkeys.index(runner_hotkey)
+    assert snapshot.validator_permit[runner_uid] is True
+    assert snapshot.stake[runner_uid] == 75_000.0
+    harness.chain.epoch = 49_001
+    harness.clock.now = datetime.now(timezone.utc)
+    harness.round_id = "arena-2098-01-04-selfdeal"
+    harness.service.create_round(
+        harness.clock.now + timedelta(hours=12), round_id=harness.round_id
+    )
+    submitted = {
+        flavor: harness.submit(flavor, harness.round_id) for flavor in flavors
+    }
+    rows = {
+        flavor: harness.service.store.get_submission(submission_id)
+        for flavor, submission_id in submitted.items()
+    }
+    assert rows["SiblingOne"]["owner_coldkey"] == runner_hotkey
+    assert rows["SiblingTwo"]["owner_coldkey"] == runner_hotkey
+    assert rows["ForeignOwner"]["owner_coldkey"] != runner_hotkey
+
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    committed = harness.service.advance_round(harness.round_id)
+    assert committed["status"] == "ok", committed
+    round_row = harness.service.store.get_round(harness.round_id)
+    for participant in round_row["participants"]:
+        harness.flavors.setdefault(
+            participant["submission_id"], "PublicBaseline"
+        )
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 40
+
+    harness.run_stage_with_runners(1)
+
+    accepted = [
+        run
+        for run in harness.service.store.list_runs(
+            harness.round_id, stage=1, status="accepted", kind="execute"
+        )
+        if run["runner_hotkey"] == runner_hotkey
+    ]
+    assert len(accepted) == 20
+    assert {run["miner_hotkey"] for run in accepted} == {
+        foreign_hotkey,
+        harness.baseline_hotkey,
+    }
+    assert not sibling_hotkeys & {
+        run["miner_hotkey"] for run in accepted
+    }
+    sibling_runs = [
+        run
+        for run in harness.service.store.list_runs(
+            harness.round_id, stage=1, kind="execute"
+        )
+        if run["miner_hotkey"] in sibling_hotkeys
+    ]
+    assert len(sibling_runs) == 20
+    assert {run["status"] for run in sibling_runs} == {"pending"}
+    assert all(run["runner_hotkey"] is None for run in sibling_runs)
+    assert all(run["participation_accepted_at"] is None for run in sibling_runs)
+    assert all(run["participation_accepted_at"] is not None for run in accepted)
+    assert harness.service.store.has_recent_participation(
+        "finney", 71, runner_hotkey
+    )

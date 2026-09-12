@@ -1,12 +1,16 @@
-"""One executable proof from Arena scoring through two normal-validator outcomes."""
+"""One executable proof from Arena scoring through three normal-validator outcomes."""
 
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
+import urllib.request
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 from bittensor_wallet import Keypair
@@ -18,7 +22,12 @@ from lab_arena.service import ServiceError
 from lab_arena.local_weight_signer import LocalArenaWeightSigner
 from lab_arena.store import ArenaStoreError
 from lab_arena.promotion import GitPromoter
-from lab_arena.validator import ArenaWeightOrchestrator, ArenaWeightPaths
+from lab_arena.validator import (
+    ArenaParticipationRequired,
+    ArenaPublicApi,
+    ArenaWeightOrchestrator,
+    ArenaWeightPaths,
+)
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
@@ -95,6 +104,7 @@ def integrated_database():
             LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
         )
     )
+    staged_migrations += ("216-lab-arena-validator-participation.sql",)
     database = database_with_lab_arena_migration(staged_migrations)
     psycopg2, dsn = next(database)
     connection = psycopg2.connect(**dsn)
@@ -391,11 +401,49 @@ class _HostChain:
         return self.finalized_head(), self.refresh_metagraph(), True
 
 
-class _Api:
-    def __init__(self, service): self.service = service
-    def signing_key(self): return self.service.signing_key_document()
-    def accepted_weight_state(self, epoch): return self.service.public_weight_state(epoch)["state"]
-    def submit_chain_outcome(self, document): return self.service.record_chain_outcome(document)
+class _BufferedResponse:
+    """The small urllib response surface used by ``ArenaPublicApi``."""
+
+    def __init__(self, body):
+        self._body = bytes(body)
+
+    def read(self, limit=-1):
+        return self._body if limit is None or limit < 0 else self._body[:limit]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _test_client_urlopen(client):
+    """Route urllib calls into FastAPI without permitting a network fallback."""
+
+    def urlopen(request, *, timeout):
+        assert timeout > 0
+        parsed = urlsplit(request.full_url)
+        assert (parsed.scheme, parsed.netloc) == ("https", "arena.example")
+        target = parsed.path + (("?" + parsed.query) if parsed.query else "")
+        response = client.request(
+            request.get_method(), target, content=request.data,
+            headers=dict(request.header_items()),
+        )
+        if response.status_code >= 400:
+            raise urllib.error.HTTPError(
+                request.full_url, response.status_code, "test gateway response",
+                dict(response.headers), io.BytesIO(response.content),
+            )
+        return _BufferedResponse(response.content)
+
+    return urlopen
+
+
+def _public_api(key, clock):
+    return ArenaPublicApi(
+        "https://arena.example", keypair=key, network="finney", netuid=71,
+        now=lambda: clock().timestamp(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -403,7 +451,7 @@ class _Api:
     ((30, 32000, 32001, False), (31, 32002, 32004, True)),
     ids=("new-scoring-basis", "no-new-miner-or-scoring"),
 )
-def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
+def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
     integrated_database, tmp_path, monkeypatch,
     round_day, round_epoch, reward_epoch, uses_prior_basis,
 ):
@@ -420,6 +468,18 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
     harness.service.config.defaults.runner_hotkeys = (harness.runner_keys[0],)
     harness.chain.stakes[harness.runner_keys[1]] = 75_000
     harness.chain.active[harness.runner_keys[1]] = False
+    working_key = Keypair.create_from_uri("//svc-runner-alpha")
+    assert working_key.ss58_address == harness.runner_keys[0]
+    harness.clock.now = datetime.now(timezone.utc)
+    if not uses_prior_basis:
+        with TestClient(create_app(harness.service)) as http, monkeypatch.context() as patcher:
+            patcher.setattr(urllib.request, "urlopen", _test_client_urlopen(http))
+            with pytest.raises(
+                ArenaParticipationRequired, match="validator_participation_required"
+            ):
+                _public_api(working_key, harness.clock).accepted_weight_state(
+                    reward_epoch
+                )
     participants = _start_round(harness, day=round_day, epoch=round_epoch)
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.advance_until("published", runners=2)
@@ -433,8 +493,16 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
     harness.service.config.accepted_burn_hotkey = burn
     harness.chain.accepted_weight_epoch_scope = lambda: {"genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03", "epoch": reward_epoch, "valid_from_block": 100, "valid_until_block": 459}
     harness.chain.epoch = reward_epoch
-    state = harness.service.public_weight_state(reward_epoch)["state"]
-    assert state == harness.service.public_weight_state(reward_epoch)["state"]
+    # A fresh gateway process must recover participation from PostgreSQL. Its
+    # second signed read must then recover the accepted state from PostgreSQL.
+    restarted_gateway = harness.build_service()
+    restarted_gateway.config.accepted_burn_hotkey = burn
+    with TestClient(create_app(restarted_gateway)) as http, monkeypatch.context() as patcher:
+        patcher.setattr(urllib.request, "urlopen", _test_client_urlopen(http))
+        working_api = _public_api(working_key, harness.clock)
+        state = working_api.accepted_weight_state(reward_epoch)
+        assert state is not None
+        assert state == working_api.accepted_weight_state(reward_epoch)
     if uses_prior_basis:
         # No new round, miner, or scoring run produced this state. The last
         # activated signed basis remains the governing economic authority.
@@ -446,6 +514,13 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
             {**state, "state_hash": "sha256:" + "0" * 64},
         )
     harness.clock.now = datetime.now(timezone.utc)
+
+    # The same high-stake validator now receives the real signed state after
+    # running accepted jobs through the normal execution/scoring flow.
+    with TestClient(create_app(restarted_gateway)) as http:
+        allowed = http.post("/arena/v1/weight-state", json=_weight_request(working_key, epoch=reward_epoch))
+        assert allowed.status_code == 200 and allowed.json()["state"] == state
+        assert allowed.headers["cache-control"] == "no-store"
 
     profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
     outcomes, vectors = [], []
@@ -543,80 +618,86 @@ def test_scoring_reward_two_normal_validators_restart_and_chain_readback(
             "/arena/v1/rounds/%s" % harness.round_id
         ).json()
         assert "reward_basis" not in public_round
-    for index in range(2):
-        key = Keypair.create_from_uri("//ArenaNormalValidator%d" % index)
-        harness.chain.runners.append(key.ss58_address)
-        harness.chain.stakes[key.ss58_address] = 1 if index == 0 else 75_000
-        harness.service._require_validator_authority(key.ss58_address)
-        if index == 0:
-            with pytest.raises(ServiceError, match="runner_stake_below_minimum"):
-                harness.service._benchmark_validator_uid(harness.chain.metagraph(), key.ss58_address)
-        with TestClient(create_app(harness.service)) as public:
-            assert public.get(
-                "/arena/v1/weight-state", params={"epoch": reward_epoch}
-            ).status_code == 405
-            response = public.post(
-                "/arena/v1/weight-state",
-                json=_weight_request(key, epoch=reward_epoch),
+    signing_cases = (
+        ("accepted-high-stake", working_key, 100_000),
+        ("below-threshold", Keypair.create_from_uri("//ArenaNormalValidator0"), 1),
+        ("exact-threshold", Keypair.create_from_uri("//ArenaNormalValidator1"), 75_000),
+    )
+    with TestClient(create_app(restarted_gateway)) as http, monkeypatch.context() as patcher:
+        patcher.setattr(urllib.request, "urlopen", _test_client_urlopen(http))
+        for label, key, stake in signing_cases:
+            if key.ss58_address not in harness.chain.runners:
+                harness.chain.runners.append(key.ss58_address)
+            harness.chain.stakes[key.ss58_address] = stake
+            restarted_gateway._require_validator_authority(key.ss58_address)
+            if stake < 75_000:
+                with pytest.raises(ServiceError, match="runner_stake_below_minimum"):
+                    restarted_gateway._benchmark_validator_uid(
+                        harness.chain.metagraph(), key.ss58_address
+                    )
+            if key.ss58_address != working_key.ss58_address:
+                assert not restarted_gateway.store.has_recent_participation(
+                    "finney", 71, key.ss58_address
+                )
+            api = _public_api(key, harness.clock)
+            assert api.accepted_weight_state(reward_epoch) == state
+            hotkeys = [burn]
+            if state["reward_basis"]["king_hotkey"]:
+                hotkeys.append(state["reward_basis"]["king_hotkey"])
+            source = _ExternalSource(
+                hotkeys,
+                key.public_key.hex(),
+                profile["genesis_hash"],
+                epoch=reward_epoch,
             )
-            assert response.status_code == 200 and response.json()["state"] == state
-        hotkeys = [burn]
-        if state["reward_basis"]["king_hotkey"]:
-            hotkeys.append(state["reward_basis"]["king_hotkey"])
-        source = _ExternalSource(
-            hotkeys,
-            key.public_key.hex(),
-            profile["genesis_hash"],
-            epoch=reward_epoch,
-        )
-        signer_client = _local_signer_client(
-            key=key,
-            source=source,
-            profile=profile,
-            arena_signer=harness.signer,
-            burn=burn,
-        )
-        host_chain = _HostChain(source, key.ss58_address)
-        paths = ArenaWeightPaths(tmp_path / ("v%d" % index))
-        orchestrator = ArenaWeightOrchestrator(
-            api=_Api(harness.service), chain=host_chain, signer=signer_client,
-            validator_hotkey=key.ss58_address, expected_signing_key_hash=harness.signer.public_key_hash,
-            paths=paths, extrinsic_period=int(profile["extrinsic_period"]),
-        )
-        assert orchestrator.run_once(reward_epoch) == "broadcast"
-        signed_path = paths.signed(reward_epoch)
-        outcome_path = paths.outcome(reward_epoch)
-        signed_bytes = signed_path.read_bytes()
-        signed = json.loads(signed_bytes)
-        vectors.append((signed["sparse_uids"], signed["sparse_weights_u16"]))
-        source.expected_weights = list(zip(signed["sparse_uids"], signed["sparse_weights_u16"]))
-        # A new in-process signer has no memory of the first attempt.  It must
-        # authenticate and restore the exact bytes from the durable journal.
-        restarted_signer = _local_signer_client(
-            key=key,
-            source=source,
-            profile=profile,
-            arena_signer=harness.signer,
-            burn=burn,
-        )
-        restarted = ArenaWeightOrchestrator(
-            api=_Api(harness.service), chain=host_chain, signer=restarted_signer,
-            validator_hotkey=key.ss58_address, expected_signing_key_hash=harness.signer.public_key_hash,
-            paths=paths, extrinsic_period=int(profile["extrinsic_period"]),
-        )
-        assert restarted.run_once(reward_epoch) == "rebroadcast"
-        assert signed_path.read_bytes() == signed_bytes
-        source.included = True
-        assert restarted.run_once(reward_epoch) == "included_pending_reveal"
-        assert signed_path.read_bytes() == signed_bytes
-        assert not outcome_path.exists()
-        assert len(host_chain.broadcasts) == 2
-        source.revealed = True
-        assert restarted.run_once(reward_epoch) == "finalized"
-        outcomes.append(outcome_path.read_bytes())
-    assert len(harness.service.public_chain_outcomes(reward_epoch)["outcomes"]) == 2
-    assert outcomes[0] != outcomes[1]
-    assert vectors[0] == vectors[1]
+            signer_client = _local_signer_client(
+                key=key,
+                source=source,
+                profile=profile,
+                arena_signer=harness.signer,
+                burn=burn,
+            )
+            host_chain = _HostChain(source, key.ss58_address)
+            paths = ArenaWeightPaths(tmp_path / label)
+            orchestrator = ArenaWeightOrchestrator(
+                api=api, chain=host_chain, signer=signer_client,
+                validator_hotkey=key.ss58_address, expected_signing_key_hash=harness.signer.public_key_hash,
+                paths=paths, extrinsic_period=int(profile["extrinsic_period"]),
+            )
+            assert orchestrator.run_once(reward_epoch) == "broadcast"
+            signed_path = paths.signed(reward_epoch)
+            outcome_path = paths.outcome(reward_epoch)
+            signed_bytes = signed_path.read_bytes()
+            signed = json.loads(signed_bytes)
+            vectors.append((signed["sparse_uids"], signed["sparse_weights_u16"]))
+            source.expected_weights = list(zip(signed["sparse_uids"], signed["sparse_weights_u16"]))
+            # A new in-process signer has no memory of the first attempt.  It must
+            # authenticate and restore the exact bytes from the durable journal.
+            restarted_signer = _local_signer_client(
+                key=key,
+                source=source,
+                profile=profile,
+                arena_signer=harness.signer,
+                burn=burn,
+            )
+            restarted = ArenaWeightOrchestrator(
+                api=api, chain=host_chain, signer=restarted_signer,
+                validator_hotkey=key.ss58_address, expected_signing_key_hash=harness.signer.public_key_hash,
+                paths=paths, extrinsic_period=int(profile["extrinsic_period"]),
+            )
+            assert restarted.run_once(reward_epoch) == "rebroadcast"
+            assert signed_path.read_bytes() == signed_bytes
+            source.included = True
+            assert restarted.run_once(reward_epoch) == "included_pending_reveal"
+            assert signed_path.read_bytes() == signed_bytes
+            assert not outcome_path.exists()
+            assert len(host_chain.broadcasts) == 2
+            source.revealed = True
+            assert restarted.run_once(reward_epoch) == "finalized"
+            outcomes.append(outcome_path.read_bytes())
+    assert len(harness.service.public_chain_outcomes(reward_epoch)["outcomes"]) == 3
+    assert len(set(outcomes)) == 3
+    assert vectors[0] == vectors[1] == vectors[2]
     first_report = harness.service.public_chain_outcomes(reward_epoch)["outcomes"][0]
     assert first_report["finalized_block_hash"] == "4" * 64
     assert first_report["extrinsic_hash"].startswith("0x")

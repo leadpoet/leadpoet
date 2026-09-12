@@ -7,7 +7,11 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 CODE_REVIEW_MIGRATION = "scripts/207-lab-arena-code-review.sql"
+PARTICIPATION_MIGRATION = "scripts/216-lab-arena-validator-participation.sql"
+ORIGINAL_JUDGMENTS_MIGRATION = "scripts/221-lab-arena-participation-original-judgments.sql"
+PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
+    (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
     (CODE_REVIEW_MIGRATION, "lab_arena_submissions", ("submission_id", "code_review_status", "code_review_doc")),
     ("scripts/125-research-lab-artifact-key-lineage.sql", "research_lab_provider_evidence_cache_v2", ("artifact_master_key_ref_hash",)),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutovers_v1", ("mapping_hash", "network_genesis_hash", "netuid", "first_subnet_epoch_index", "first_settlement_epoch_id")),
@@ -17,6 +21,8 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_chain_outcomes", ("network", "netuid", "epoch", "validator_hotkey", "request_id", "extrinsic_hash", "outcome_doc", "created_at")),
 )
 REQUIRED_SUPABASE_V2_RPCS = (
+    (PARTICIPATION_MIGRATION, "lab_arena_has_recent_participation_v1"),
+    (ORIGINAL_JUDGMENTS_MIGRATION, "lab_arena_participation_schema_v1"),
     (CODE_REVIEW_MIGRATION, "lab_arena_code_review_schema_v1"),
     (CODE_REVIEW_MIGRATION, "lab_arena_begin_submission_review"),
     (CODE_REVIEW_MIGRATION, "lab_arena_finish_submission_review"),
@@ -30,6 +36,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
     ("scripts/203-retire-legacy-incentive-weight-bridge.sql", "lab_arena_incentive_retirement_schema_v1"),
 )
 SCHEMA_CAPABILITIES = (
+    ("lab_arena_participation_schema_v1", {
+        "schema_version": "leadpoet.lab_arena.participation_schema.v1",
+        "version": 221,
+    }),
     ("lab_arena_code_review_schema_v1", {
         "schema_version": "leadpoet.lab_arena.code_review.v1",
         "version": 207,
@@ -42,7 +52,7 @@ SCHEMA_CAPABILITIES = (
     ("lab_arena_incentive_retirement_schema_v1", {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203}),
 )
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
-PRIVATE_ARENA_CAPABILITIES = frozenset({"lab_arena_code_review_schema_v1"})
+PRIVATE_ARENA_CAPABILITIES = frozenset({"lab_arena_code_review_schema_v1", "lab_arena_participation_schema_v1"})
 
 class SupabaseSchemaPreflightV2Error(RuntimeError):
     """The selected release cannot use the live PostgREST schema."""
@@ -97,8 +107,8 @@ def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *,
         }
     migrations = set()
     for migration, table, columns in REQUIRED_SUPABASE_V2_SCHEMA:
-        probe_url = arena_supabase_url if migration == CODE_REVIEW_MIGRATION else supabase_url
-        probe_headers = arena_headers if migration == CODE_REVIEW_MIGRATION else headers
+        probe_url = arena_supabase_url if migration in PRIVATE_ARENA_MIGRATIONS else supabase_url
+        probe_headers = arena_headers if migration in PRIVATE_ARENA_MIGRATIONS else headers
         request = Request(f"{probe_url}/rest/v1/{table}?{urlencode({'select': ','.join(columns), 'limit': '0'})}", headers=probe_headers)
         try:
             with opener(request, timeout=timeout_seconds) as response:
@@ -138,7 +148,7 @@ def verify_required_supabase_v2_schema(parent_environment: Mapping[str, str], *,
     for migration, function_name in required_rpcs:
         authority = (
             "lab_arena_service"
-            if migration == CODE_REVIEW_MIGRATION else "service_role"
+            if migration in PRIVATE_ARENA_MIGRATIONS else "service_role"
         )
         paths = schema_paths[authority]
         if f"/rpc/{function_name}" not in paths:

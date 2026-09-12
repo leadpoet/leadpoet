@@ -18,6 +18,7 @@ from tests.lab_arena.arena_20260912_recovery_postgres_test import (
 )
 from tests.lab_arena.arena_20260912_scoring_recovery_postgres_test import (
     FINALISTS,
+    MIGRATION_221,
     PRODUCTION_PLAN_MD5,
     PRODUCTION_SCORER,
     _apply_220,
@@ -28,7 +29,15 @@ from tests.lab_arena.lab_arena_pg_harness import (
     POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
 )
-from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete, sha
+from tests.lab_arena.participation_original_judgments_postgres_test import (
+    _has_recent_participation,
+)
+from tests.lab_arena.test_lab_arena_migration_postgres import (
+    claim,
+    complete,
+    hotkey,
+    sha,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -698,6 +707,153 @@ def test_third_recovery_preserves_work_costs_and_completes(database):
         before_replay = store.get_round(ROUND_ID)
         _apply_224(connection)
         assert store.get_round(ROUND_ID) == before_replay
+    finally:
+        connection.close()
+        transport.close()
+
+
+def test_third_recovery_preserves_and_mints_only_fresh_participation(database):
+    connection, store, transport = _seed_third_cancellation(database)
+    preserved_run_id = f"{ROUND_ID}:{PRESERVED_SUBMISSION}:2:10:score:1"
+    preserved_token_hash = hash_lease_token("224-preserved-participation")
+    recovered_runner = hotkey("224-fresh-participation-runner")
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(MIGRATION_221.read_text(encoding="utf-8"))
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER "
+                "lab_arena_rounds_write_once"
+            )
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET status='stage2_scoring', "
+                "stage_generation=(SELECT stage_generation FROM "
+                "public.lab_arena_runs WHERE run_id=%s) WHERE round_id=%s",
+                (preserved_run_id, ROUND_ID),
+            )
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER "
+                "lab_arena_rounds_write_once"
+            )
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_runs DISABLE TRIGGER "
+                "lab_arena_runs_terminal"
+            )
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET status='leased', "
+                "lease_token_hash=%s, lease_expires_at=clock_timestamp() + "
+                "interval '5 minutes', claim_request_id=%s, "
+                "claim_request_hash=%s, claim_response='{}'::jsonb, "
+                "result_doc=NULL, output_ref=NULL, terminal_cause=NULL, "
+                "terminal_doc=NULL WHERE run_id=%s AND status='accepted' "
+                "AND runner_hotkey=%s AND participation_accepted_at IS NULL",
+                (
+                    preserved_token_hash,
+                    "3" * 32,
+                    sha("224-preserved-participation-request"),
+                    preserved_run_id,
+                    RUNNER,
+                ),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_runs ENABLE TRIGGER "
+                "lab_arena_runs_terminal"
+            )
+
+        assert complete(
+            store,
+            preserved_run_id,
+            preserved_token_hash,
+            "accepted",
+            output_ref=f"arena/{ROUND_ID}/objects/{preserved_run_id}.json",
+        )["status"] == "accepted"
+        preserved = store.get_run(preserved_run_id)
+        preserved_at = preserved["participation_accepted_at"]
+        assert preserved_at is not None
+        assert preserved["runner_hotkey"] == RUNNER
+        assert _has_recent_participation(database, RUNNER)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER "
+                "lab_arena_rounds_write_once"
+            )
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET status='cancelled', "
+                "stage_generation=11 WHERE round_id=%s",
+                (ROUND_ID,),
+            )
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER "
+                "lab_arena_rounds_write_once"
+            )
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs "
+                "WHERE round_id=%s AND participation_accepted_at IS NOT NULL",
+                (ROUND_ID,),
+            )
+            assert cursor.fetchone()[0] == 1
+
+        assert recovered_runner != RUNNER
+        assert not _has_recent_participation(database, recovered_runner)
+        _apply_224(connection)
+        preserved = store.get_run(preserved_run_id)
+        assert preserved["participation_accepted_at"] == preserved_at
+        assert preserved["runner_hotkey"] == RUNNER
+        assert _has_recent_participation(database, RUNNER)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs "
+                "WHERE round_id=%s AND participation_accepted_at IS NOT NULL",
+                (ROUND_ID,),
+            )
+            assert cursor.fetchone()[0] == 1
+
+        recovered, recovered_token, _, _ = claim(
+            store, ROUND_ID, recovered_runner, parallelism=100, ceiling=100
+        )
+        assert recovered["status"] == "leased"
+        assert recovered["assignment_id"].endswith(":recovery220:recovery224")
+        leased = store.get_run(recovered["run_id"])
+        assert leased["runner_hotkey"] == recovered_runner
+        assert leased["participation_accepted_at"] is None
+        assert not _has_recent_participation(database, recovered_runner)
+
+        recovered_token_hash = hash_lease_token(recovered_token)
+        output_ref = f"arena/{ROUND_ID}/recovered/{recovered['run_id']}.json"
+        assert complete(
+            store,
+            recovered["run_id"],
+            recovered_token_hash,
+            "accepted",
+            output_ref=output_ref,
+        )["status"] == "accepted"
+        accepted = store.get_run(recovered["run_id"])
+        recovered_at = accepted["participation_accepted_at"]
+        assert recovered_at is not None
+        assert accepted["runner_hotkey"] == recovered_runner
+        assert _has_recent_participation(database, recovered_runner)
+        assert _has_recent_participation(database, RUNNER)
+
+        replay = complete(
+            store,
+            recovered["run_id"],
+            recovered_token_hash,
+            "accepted",
+            output_ref=output_ref,
+        )
+        assert replay["status"] == "accepted" and replay["idempotent"] is True
+        assert store.get_run(recovered["run_id"])[
+            "participation_accepted_at"
+        ] == recovered_at
+
+        _apply_224(connection)
+        preserved = store.get_run(preserved_run_id)
+        accepted = store.get_run(recovered["run_id"])
+        assert preserved["participation_accepted_at"] == preserved_at
+        assert preserved["runner_hotkey"] == RUNNER
+        assert accepted["participation_accepted_at"] == recovered_at
+        assert accepted["runner_hotkey"] == recovered_runner
     finally:
         connection.close()
         transport.close()

@@ -1,17 +1,28 @@
 """Arena-only gateway schema preflight contract."""
 import json
+from pathlib import Path
+import re
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 
 import pytest
 
 from gateway.tee.supabase_schema_preflight_v2 import (
-    CODE_REVIEW_MIGRATION,
+    PRIVATE_ARENA_MIGRATIONS,
     REQUIRED_SUPABASE_V2_RPCS,
     REQUIRED_SUPABASE_V2_SCHEMA,
     SupabaseSchemaPreflightV2Error,
     verify_required_supabase_v2_schema,
 )
+
+
+def test_required_migrations_use_canonical_deployment_filenames():
+    root = Path(__file__).resolve().parents[1]
+    paths = {row[0] for row in REQUIRED_SUPABASE_V2_SCHEMA + REQUIRED_SUPABASE_V2_RPCS}
+    for relative in paths:
+        path = root / relative
+        assert path.is_file()
+        assert re.fullmatch(r"[0-9]{2,4}-[a-z0-9][a-z0-9-]*\.sql", path.name)
 
 
 def _environment():
@@ -37,12 +48,12 @@ def _opener(
     service_role_paths = {
         f"/rpc/{name}": {}
         for migration, name in REQUIRED_SUPABASE_V2_RPCS
-        if migration != CODE_REVIEW_MIGRATION
+        if migration not in PRIVATE_ARENA_MIGRATIONS
     }
     arena_paths = {
         f"/rpc/{name}": {}
         for migration, name in REQUIRED_SUPABASE_V2_RPCS
-        if migration == CODE_REVIEW_MIGRATION
+        if migration in PRIVATE_ARENA_MIGRATIONS
     }
     retired_tables = {
         "validator_sourcing_epoch_inputs_v2",
@@ -64,6 +75,10 @@ def _opener(
         service_role_paths.pop(f"/rpc/{missing}", None)
         arena_paths.pop(f"/rpc/{missing}", None)
     capabilities = {
+        "lab_arena_participation_schema_v1": {
+            "schema_version": "leadpoet.lab_arena.participation_schema.v1",
+            "version": 221,
+        },
         "lab_arena_code_review_schema_v1": {
             "schema_version": "leadpoet.lab_arena.code_review.v1",
             "version": 207,
@@ -84,7 +99,9 @@ def _opener(
         arena_url = urlparse(request.full_url).netloc == "arena.example"
         private_review = (
             path.endswith("/lab_arena_submissions")
+            or path.endswith("/lab_arena_runs")
             or path.endswith("/rpc/lab_arena_code_review_schema_v1")
+            or path.endswith("/rpc/lab_arena_participation_schema_v1")
         )
         if enforce_role_separation and private_review and not arena_authority:
             raise HTTPError(request.full_url, 403, "private", {}, None)
@@ -113,6 +130,7 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     )
     assert result["status"] == "ready"
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
+    assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 221
 
 
 def test_code_review_preflight_uses_only_the_scoped_arena_role():
@@ -157,12 +175,23 @@ def test_preflight_accepts_current_schema_without_retired_host_receipt_storage()
     "put_research_lab_provider_evidence_cache_v2",
     "research_lab_stateful_subnet_epoch_cutover_public_state_v1",
     "lab_arena_publish_weight_state_v1",
+    "lab_arena_has_recent_participation_v1",
+    "lab_arena_participation_schema_v1",
+    "lab_arena_runs",
 ])
 def test_preflight_still_requires_active_scoring_epoch_and_arena_dependencies(missing):
     with pytest.raises(SupabaseSchemaPreflightV2Error, match="required (schema|RPC)"):
         verify_required_supabase_v2_schema(
             _environment(),
             opener=_opener(missing=missing),
+        )
+
+
+def test_preflight_rejects_participation_schema_before_original_judgment_fix():
+    with pytest.raises(SupabaseSchemaPreflightV2Error, match="participation_schema_v1 capability differs"):
+        verify_required_supabase_v2_schema(
+            _environment(),
+            opener=_opener(bad_capability="lab_arena_participation_schema_v1"),
         )
 
 

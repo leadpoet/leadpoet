@@ -67,6 +67,7 @@ MIGRATIONS = tuple(
     "scripts/216-lab-arena-validator-participation.sql",
     "scripts/217-lab-arena-company-judgments.sql",
     "scripts/218-lab-arena-cross-provider-credential-refusal.sql",
+    "scripts/221-lab-arena-participation-original-judgments.sql",
     "scripts/223-lab-arena-cancelled-call-late-settlement.sql",
     "scripts/225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
     "scripts/227-lab-arena-champion-funding.sql",

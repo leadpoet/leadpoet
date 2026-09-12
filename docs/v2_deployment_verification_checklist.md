@@ -31,6 +31,11 @@ python3.11 -m pytest -q \
   tests/lab_arena/test_lab_arena_chain.py \
   tests/lab_arena/test_validator_eligibility.py \
   tests/lab_arena/test_validator_stake_flow.py \
+  tests/lab_arena/test_validator_participation.py \
+  tests/lab_arena/test_validator_participation_postgres.py \
+  tests/lab_arena/participation_original_judgments_postgres_test.py \
+  tests/lab_arena/judgment_cache_postgres_test.py \
+  tests/test_supabase_schema_preflight_v2.py \
   tests/lab_arena/test_lab_arena_store.py \
   tests/lab_arena/test_scorer_image_access.py \
   tests/lab_arena/test_leased_images.py \
@@ -61,7 +66,11 @@ The gate must prove:
   commitment or a missing pending commitment alone does not prove success.
 - Delayed outcome reports and older epoch recovery do not change rewards or
   prevent the current epoch from progressing.
-- Scoring setup/cycle failures and claim denials do not stop weights. New
+- Scoring setup/cycle failures and claim denials do not stop the weight loop.
+  Above 75,000 effective stake, new weight state requires an original accepted
+  job within 24 hours; no idle exemption applies. Score jobs made entirely from
+  company-judgment cache hits earn no credit. Denial pauses new signing;
+  signed recovery and pending reveals remain available. New
   mainnet execute/score claims use the shared gateway scoring rule: registration, a
   validator permit, and effective stake >=75,000, regardless of activity or
   runner lists. Testnet retains its active-or-permitted policy without the
@@ -69,7 +78,10 @@ The gate must prove:
   Capacity counts eligible planned runners with the same shared rule.
 - Weight-state and signed reward-basis retrieval require fresh, scope-bound
   local-hotkey authentication plus finalized subnet registration and a validator
-  permit on every network. No scoring minimum applies to weight retrieval.
+  permit on every network. The participation gate uses that same finalized
+  snapshot, applies strictly above 75,000, and checks the database before every
+  delivery, including already-published state. Missing chain/database data
+  fails closed. Exactly 75,000 and below retain permit-based access.
   Unauthenticated, forged, wrong-scope, stale, unregistered, and non-permitted
   requests are denied before state lookup/publication. Public round responses
   must not expose the signed reward basis as an alternate route. Mainnet roles

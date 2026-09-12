@@ -1,7 +1,8 @@
 """One normal Arena validator: score leases and publish independently derived weights.
 
 It depends only on the Arena public API, finalized chain reads, and the
-validator's local Bittensor hotkey. Scoring availability never gates weights.
+validator's local Bittensor hotkey. Recent accepted work gates new weight state
+for high-stake validators; existing signed transactions recover independently.
 """
 
 from __future__ import annotations
@@ -37,6 +38,10 @@ _ARENA_ARCHIVED_ATTEMPT_RE = re.compile(
 
 class ArenaValidatorError(RuntimeError):
     """The Arena validator cannot safely continue its current operation."""
+
+
+class ArenaParticipationRequired(ArenaValidatorError):
+    """The gateway requires a recent accepted job before returning weight state."""
 
 
 class ArenaSignerClient(Protocol):
@@ -154,7 +159,21 @@ class ArenaPublicApi:
                 request, timeout=self.timeout_seconds
             ) as response:
                 body = response.read(2 * 1024 * 1024 + 1)
-        except (OSError, urllib.error.HTTPError) as exc:
+        except urllib.error.HTTPError as exc:
+            # Only this bounded, exact denial is actionable. Never log response
+            # bodies, which may originate from an upstream proxy.
+            try:
+                with exc:
+                    denial = exc.read(4097)
+                value = json.loads(denial) if len(denial) <= 4096 else None
+            except (OSError, ValueError, UnicodeError):
+                value = None
+            if exc.code == 403 and value == {
+                "status": "rejected", "code": "validator_participation_required"
+            }:
+                raise ArenaParticipationRequired("validator_participation_required") from None
+            raise ArenaValidatorError("Arena accepted-state read failed") from None
+        except OSError as exc:
             raise ArenaValidatorError("Arena accepted-state read failed") from exc
         if len(body) > 2 * 1024 * 1024:
             raise ArenaValidatorError("Arena accepted-state response is too large")
@@ -433,7 +452,10 @@ class ArenaWeightOrchestrator:
                 raise ArenaValidatorError("signed Arena weight extrinsic expired without finalization")
 
         signing_key = self.api.signing_key()
-        state = self._verified_state(epoch, signing_key)
+        try:
+            state = self._verified_state(epoch, signing_key)
+        except ArenaParticipationRequired:
+            return "blocked_on_participation"
         if state is None:
             return "state_unavailable"
         if retry_state is not None and state != retry_state:
@@ -648,12 +670,12 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
             except Exception as exc:
                 scoring_failed = True
                 if isinstance(exc, RuntimeHostError):
-                    print("Arena validator scoring unavailable: phase=%s %s; weights continue"
+                    print("Arena validator scoring unavailable: phase=%s %s; weight loop continues"
                           % ("setup" if runner is None else "cycle", runtime_host_diagnostic(exc)),
                           file=sys.stderr, flush=True)
                 else:
                     # Arbitrary provider errors can contain credential-bearing URLs.
-                    print("Arena validator scoring cycle failed: type=%s; weights continue"
+                    print("Arena validator scoring cycle failed: type=%s; weight loop continues"
                           % type(exc).__name__, file=sys.stderr, flush=True)
                 if runner is not None:
                     try:

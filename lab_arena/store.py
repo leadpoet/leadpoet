@@ -55,8 +55,14 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     ),
     "lab_arena_champion_funding_schema_v1": (),
     "lab_arena_whoami": (),
+    "lab_arena_has_recent_participation_v1": (
+        ("p_network", "text"),
+        ("p_netuid", "integer"),
+        ("p_runner_hotkey", "text"),
+    ),
     "lab_arena_schema_version_v1": (),
     "lab_arena_code_review_schema_v1": (),
+    "lab_arena_participation_schema_v1": (),
     "lab_arena_validator_scoring_authority_schema_v1": (),
     "lab_arena_integrity_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
@@ -710,6 +716,26 @@ class ArenaStore:
         return result
 
     # -- accepted weight state ------------------------------------------
+
+    def has_recent_participation(
+        self, network: str, netuid: int, runner_hotkey: str
+    ) -> bool:
+        """Require an original accepted job in the database's last 24 hours."""
+
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_has_recent_participation_v1",
+                {
+                    "p_network": str(network),
+                    "p_netuid": int(netuid),
+                    "p_runner_hotkey": str(runner_hotkey),
+                },
+            ),
+            "has_recent_participation",
+        )
+        if set(result) != {"eligible"} or type(result["eligible"]) is not bool:
+            raise ArenaStoreError("participation response is invalid")
+        return result["eligible"]
 
     def get_weight_state(self, network: str, netuid: int, epoch: int) -> Optional[Dict[str, Any]]:
         rows = self._transport.select(

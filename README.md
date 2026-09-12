@@ -126,7 +126,9 @@ Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. 
 
 The sourcing budget is **$80 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.80 per returned company**. Duplicate company domains within an ICP count once. Independent judging has a separate default **$50 allowance per submitted model**, also charged through the miner's credentials. Full-code review is an additional OpenRouter charge, recorded separately from sourcing and judging.
 
-The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. A provider that bills after execution can exceed its reservation; the full charge still counts, and an over-budget model cannot win. Unresolved provider charges also prevent promotion.
+The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. All actual provider charges, including charged failures, remain in billing and spending protection. A provider that bills after execution can exceed its reservation; the full charge is still recorded.
+
+New rounds announce `sourcing_cost_eligibility_policy: successful_calls_v1`. For promotion eligibility, only successful sourcing calls count toward the sourcing and per-company cost limits. Successful empty responses count, and a successful call still counts if the submitted model later crashes or discards its answer. Failed calls are excluded from this competition cost, even when the provider charges for them. Successful sourcing calls with unresolved charges still require billing recovery. Uncertain judge billing alone does not disqualify complete, valid scoring. Existing rounds retain the cost rules with which they were created.
 
 ## Submit a model
 

@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: successful-call competition cost
+
+On 2026-09-12 the user authorized the agreed successful-call cost eligibility
+policy, implementation, exact committed Supabase migrations, push to main,
+canonical gateway/normal-validator restarts, and live validation through the
+overnight skills. Apply the policy only to newly created rounds. Count only
+successful sourcing calls toward competition cost, retain all actual billing
+and existing spending/retry limits, and remove judge-cost uncertainty alone as
+a disqualification for complete valid scoring. Preserve frozen rounds,
+historical results, scoring rules, credentials, promotion, rewards, weights,
+and concurrent work. No historical reruns or scoring-version redesign is in
+scope. This authority expires after deployment and validation complete.
+
 ## Scoped production authorization: all scored Arena submissions audit
 
 On 2026-09-12 the user authorized a complete audit of every scored Arena miner

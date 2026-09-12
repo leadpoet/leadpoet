@@ -104,7 +104,11 @@ def integrated_database():
             LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
         )
     )
-    staged_migrations += ("216-lab-arena-validator-participation.sql",)
+    staged_migrations += (
+        "216-lab-arena-validator-participation.sql",
+        "223-lab-arena-cancelled-call-late-settlement.sql",
+        "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+    )
     database = database_with_lab_arena_migration(staged_migrations)
     psycopg2, dsn = next(database)
     connection = psycopg2.connect(**dsn)

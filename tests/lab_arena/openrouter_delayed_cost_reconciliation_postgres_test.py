@@ -12,6 +12,9 @@ from tests.lab_arena.lab_arena_pg_harness import (
     POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
 )
+from tests.lab_arena.participation_original_judgments_postgres_test import (
+    _has_recent_participation,
+)
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, open_round, sha
 
 
@@ -224,6 +227,73 @@ def test_reconciliation_is_atomic_idempotent_and_owner_bound(resources):
     assert len(_settlements(store, identity)) == 1
 
 
+def test_reconciliation_after_n_minus_one_acceptance_preserves_participation(
+    resources, database
+):
+    store, _connect = resources
+    round_id, _submission_id, run, token_hash = _round_and_run(
+        store, "accepted"
+    )
+    runner = store.get_run(run["run_id"])["runner_hotkey"]
+    fingerprint = "sha256:" + "f" * 64
+    generation_id = "gen-accepted"
+    identity = _uncertain_call(
+        store,
+        run,
+        token_hash,
+        label="accepted",
+        sequence=0,
+        generation_id=generation_id,
+        credential_fingerprint=fingerprint,
+    )
+
+    # An N-1 service could complete after the uncertainty became terminal.
+    # Exercise that SQL RPC directly; the current service normally reconciles
+    # first and waits while provider cost remains unavailable.
+    completed = store.complete_attempt(
+        run_id=run["run_id"],
+        lease_token_hash=token_hash,
+        result={"terminal_status": "accepted"},
+        terminal_cause="accepted",
+        output_ref="arena/%s/accepted.json" % round_id,
+    )
+    assert completed["status"] == "accepted"
+    accepted_before = store.get_run(run["run_id"])
+    accepted_at = accepted_before["participation_accepted_at"]
+    assert accepted_at is not None
+    assert accepted_before["status"] == "accepted"
+    assert accepted_before["runner_hotkey"] == runner
+    assert _has_recent_participation(database, runner)
+
+    candidates = store.list_openrouter_cost_reconciliations(
+        round_id, run_id=run["run_id"]
+    )
+    assert len(candidates) == 1
+    assert candidates[0]["run_status"] == "accepted"
+    arguments = {
+        "round_id": round_id,
+        "run_id": run["run_id"],
+        "call_identity": identity,
+        "uncertain_entry_id": candidates[0]["uncertain_entry_id"],
+        "generation_id": generation_id,
+        "credential_fingerprint": fingerprint,
+        "actual_microusd": 123,
+        "cost_units": "0.000123",
+    }
+    settled = store.reconcile_openrouter_cost(**arguments)
+    assert settled["status"] == "settled" and settled["idempotent"] is False
+    assert store.get_run(run["run_id"]) == accepted_before
+    assert _has_recent_participation(database, runner)
+
+    replay = store.reconcile_openrouter_cost(**arguments)
+    assert replay["status"] == "settled" and replay["idempotent"] is True
+    accepted_after = store.get_run(run["run_id"])
+    assert accepted_after == accepted_before
+    assert accepted_after["participation_accepted_at"] == accepted_at
+    assert accepted_after["runner_hotkey"] == runner
+    assert len(_settlements(store, identity)) == 1
+
+
 def test_list_cursor_skips_unavailable_first_item_and_wraps(resources):
     store, _connect = resources
     round_id = "arena-2026-09-12-cursor"
@@ -320,7 +390,9 @@ def test_malformed_missing_identity_and_terminal_round_stay_unchanged(resources)
     assert store.list_openrouter_cost_reconciliations(round_id, limit=20) == []
 
 
-def test_settlement_before_completion_preserves_the_normal_retry_claim(resources):
+def test_settlement_before_completion_preserves_the_normal_retry_claim(
+    resources, database
+):
     store, _connect = resources
     round_id = "arena-2026-09-12-retry"
     runners, _participants = open_round(
@@ -333,6 +405,7 @@ def test_settlement_before_completion_preserves_the_normal_retry_claim(resources
     )
     run, token, _, _ = claim(store, round_id, runners[0])
     token_hash = hash_lease_token(token)
+    assert not _has_recent_participation(database, runners[0])
     fingerprint = "sha256:" + "e" * 64
     generation_id = "gen-retry"
     identity = _uncertain_call(
@@ -367,8 +440,27 @@ def test_settlement_before_completion_preserves_the_normal_retry_claim(resources
     )
     assert completed["status"] == "failed"
     assert completed["confirmation_attempt"] == 2
-    retried, _token, _request_id, _request_hash = claim(
+    assert store.get_run(run["run_id"])["participation_accepted_at"] is None
+    assert not _has_recent_participation(database, runners[0])
+    retried, retry_token, _request_id, _request_hash = claim(
         store, round_id, runners[1]
     )
     assert retried["assignment_id"] == run["assignment_id"]
     assert retried["attempt"] == 2
+    retried_run = store.get_run(retried["run_id"])
+    assert retried_run["runner_hotkey"] == runners[1]
+    assert retried_run["participation_accepted_at"] is None
+    assert not _has_recent_participation(database, runners[1])
+    accepted = store.complete_attempt(
+        run_id=retried["run_id"],
+        lease_token_hash=hash_lease_token(retry_token),
+        result={"terminal_status": "accepted"},
+        terminal_cause="accepted",
+        output_ref="arena/%s/retry-accepted.json" % round_id,
+    )
+    assert accepted["status"] == "accepted"
+    accepted_run = store.get_run(retried["run_id"])
+    assert accepted_run["runner_hotkey"] == runners[1]
+    assert accepted_run["participation_accepted_at"] is not None
+    assert _has_recent_participation(database, runners[1])
+    assert not _has_recent_participation(database, runners[0])

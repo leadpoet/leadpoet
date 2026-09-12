@@ -445,6 +445,7 @@ class ArenaService:
         )
         self._scorer_policy = scoring.build_scorer_policy()
         self._brokers: Dict[str, broker_module.Broker] = {}
+        self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
 
     # -- accessors -------------------------------------------------------------
 
@@ -3316,6 +3317,36 @@ class ArenaService:
                 self._brokers[round_id] = broker
             return broker
 
+    def _reconcile_openrouter_cost(
+        self, round_id: str, *, run_id: str = ""
+    ) -> Dict[str, Any]:
+        """Perform at most one exact billing GET without holding service locks."""
+
+        cursor_key = (round_id, run_id)
+        with self._lock:
+            after_entry_id = self._openrouter_reconciliation_after.get(
+                cursor_key, 0
+            )
+        items = self._store.list_openrouter_cost_reconciliations(
+            round_id,
+            run_id=run_id,
+            after_entry_id=after_entry_id,
+            limit=1,
+        )
+        if not items:
+            return {"status": "none"}
+        candidate = items[0]
+        with self._lock:
+            self._openrouter_reconciliation_after[cursor_key] = int(
+                candidate.get("uncertain_entry_id") or 0
+            )
+        result = self._broker_for(round_id).reconcile_openrouter_cost(candidate)
+        return {
+            "status": str(result.get("status") or "unavailable"),
+            "run_status": str(candidate.get("run_status") or ""),
+            "lease_expires_at": str(candidate.get("lease_expires_at") or ""),
+        }
+
     def handle_provider(self, run_id: str, lease_token: str, frame: Any) -> Dict[str, Any]:
         if not isinstance(frame, Mapping) or set(frame) != {"operation_id", "parameters", "timeout_ms", "action_sequence"}:
             raise ServiceError("frame_invalid", 400)
@@ -3349,6 +3380,13 @@ class ArenaService:
         if kind == "execute" and terminal_status in ("judge_error", "judge_timeout"):
             raise ServiceError("run_result_cause_kind_mismatch", 400)
         lease_token = self._lease_token_for_run(validated, run)
+        if run.get("status") not in ("accepted", "failed"):
+            billing = self._reconcile_openrouter_cost(round_id, run_id=run_id)
+            if billing["status"] not in ("none", "settled"):
+                # Reuse the runner's existing bounded accounting-open retry
+                # window. The same signed completion is preserved while the
+                # exact generation GET catches up; no new model attempt starts.
+                return {"status": "accounting_open", "open_calls": 1}
         output_ref = ""
         judgment_evidence = None
         judgment_evidence_hash = ""
@@ -3596,6 +3634,24 @@ class ArenaService:
         self._invalidate_hot_round()
         try:
             row = self._round(round_id)
+            if row["status"] not in ("open",) + TERMINAL_STATUSES:
+                billing = self._reconcile_openrouter_cost(round_id)
+                if (
+                    billing["status"] not in ("none", "settled")
+                    and billing["run_status"] == "leased"
+                ):
+                    try:
+                        lease_active = self.now() < _parse_iso(
+                            billing["lease_expires_at"]
+                        )
+                    except (TypeError, ValueError):
+                        lease_active = False
+                    if lease_active:
+                        return {
+                            "status": "retry",
+                            "round_status": row["status"],
+                            "reason": "provider_billing_pending",
+                        }
             if row["status"] == "open":
                 # At cutoff, reject source uploads that were not finalized
                 # before participant freeze.

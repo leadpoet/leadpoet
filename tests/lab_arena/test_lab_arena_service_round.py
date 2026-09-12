@@ -149,7 +149,16 @@ class FakeProviderTransport:
         self._deepline_lock = threading.Lock()
         self._deepline_jobs = []
 
-    def send(self, *, method, url, headers, body, timeout_seconds):
+    def send(
+        self,
+        *,
+        method,
+        url,
+        headers,
+        body,
+        timeout_seconds,
+        max_response_bytes=None,
+    ):
         if "-refused" in url or any("-refused" in str(value) for value in headers.values()):
             # The provider rejects a revoked miner key.
             return br.ProviderResponse(401, {"content-type": "application/json"}, b'{"error": "invalid key"}')

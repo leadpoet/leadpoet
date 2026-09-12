@@ -1355,7 +1355,10 @@ def _fallback_evidence(
                     """SELECT COALESCE(entry_doc ->> 'provider_attempt',
                                        entry_doc #>> '{call,provider_attempt}'), entry_kind,
                               amount_microusd, funding_source,
-                              terminal_response ->> 'status'
+                              COALESCE(
+                                terminal_response #>> '{account_failure_evidence,provider_status}',
+                                entry_doc #>> '{call,account_failure_evidence,provider_status}'
+                              ), terminal_response ->> 'status'
                          FROM public.lab_arena_ledger
                         WHERE run_id = %s AND provider = %s
                         ORDER BY created_at, entry_id""",
@@ -1371,6 +1374,7 @@ def _fallback_evidence(
                     "run_id": run["run_id"],
                     "attempts": attempts,
                     "provider_statuses": sorted({int(item[4]) for item in ledger if item[4]}),
+                    "standardized_statuses": sorted({int(item[5]) for item in ledger if item[5]}),
                     "ledger_rows": len(ledger),
                     "miner_rows": sum(item[3] == "miner_key" for item in ledger),
                     "reserved_liability_microusd": sum(int(item[2] or 0) for item in ledger if item[1] == "reservation"),

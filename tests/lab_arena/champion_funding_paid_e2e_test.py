@@ -550,6 +550,16 @@ class LocalEntrypointRuntime:
                 for secret in self.forbidden:
                     if secret and secret in output_bytes:
                         raise AssertionError("secret appeared in child process output")
+                # Preserve the exact test output for private failure diagnosis.
+                # The public receipt remains content-free. Secret checks above
+                # cover this file before any bytes are retained.
+                diagnostic_kind = "scorer" if spec.entry_command == runtime.SCORER_ENTRY_COMMAND else "agent"
+                diagnostic_dir = self.evidence.path.parent / ("private-" + diagnostic_kind + "-results")
+                diagnostic_dir.mkdir(mode=0o700, exist_ok=True)
+                diagnostic_path = diagnostic_dir / (hashlib.sha256(output_bytes).hexdigest() + ".json")
+                descriptor = os.open(diagnostic_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(descriptor, "wb") as diagnostic_file:
+                    diagnostic_file.write(output_bytes)
                 if spec.entry_command == runtime.SCORER_ENTRY_COMMAND:
                     document = json.loads(output_bytes)
                     self.evidence.add(

@@ -1,5 +1,14 @@
 # Agent Instructions
 
+## Scoped production authorization: employee-size retrieval and ICP prompt
+
+On 2026-09-12 the user authorized the single agreed ICP verification sentence,
+narrow employee-size retrieval and translated-page fixes, focused tests,
+push to main, canonical gateway/normal-validator restarts, and live validation
+through the overnight skills. Preserve identity checks, scoring rules, cost
+limits, existing bounded retries, accepted work, and concurrent changes.
+This authority expires when these fixes and production validation complete.
+
 ## Scoped production authorization: hotkey admission and twenty challengers
 
 On 2026-09-12 the user explicitly authorized removal of the shared coldkey

@@ -25,6 +25,57 @@ CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
     "insufficient_evidence"
 ] = "insufficient_evidence"
 
+_ABOUT_SECTION_HEADING = re.compile(
+    r"(?:#{1,6}\s*)?(?:About(?: us)?|Over ons)",
+    re.IGNORECASE,
+)
+_ABOUT_SECTION_END_HEADING = re.compile(
+    r"(?:#{1,6}\s*)?(?:Employees(?: at\b.*)?|Medewerkers van(?:\b.*)?|Updates)",
+    re.IGNORECASE,
+)
+_COMPANY_SIZE_FIELD = re.compile(
+    r"(?:\*\*)?(?:Company size|Bedrijfsgrootte)(?:\*\*)?\s*:?(?:\s+(?P<value>.+))?",
+    re.IGNORECASE,
+)
+_EMPLOYEE_SUFFIX = re.compile(r"\s+(?:employees?|medewerkers)\s*$", re.IGNORECASE)
+
+# These are exact LinkedIn authentication-page titles, paired with credential
+# fields. A public company page can contain sign-in links, so links or isolated
+# authentication words are not enough to classify the fetch as blocked.
+_ACCESS_WALL_TITLES = {
+    "aanmelden | linkedin",
+    "cadastre-se | linkedin",
+    "entrar | linkedin",
+    "inloggen | linkedin",
+    "join linkedin",
+    "linkedin login, sign in",
+    "sign in | linkedin",
+    "sign up | linkedin",
+}
+_ACCESS_WALL_CREDENTIAL_FIELDS = (
+    ("email or phone", "password"),
+    ("e-mail", "senha"),
+    ("e-mail", "wachtwoord"),
+)
+_BLOCKED_PAGE_TITLES = {
+    "access denied",
+    "access denied | linkedin",
+    "robot check",
+    "robot check | linkedin",
+    "security check | linkedin",
+    "security verification | linkedin",
+}
+_BLOCKED_PAGE_MARKERS = (
+    "access to this page has been denied",
+    "additional verification required",
+    "checking your browser",
+    "request blocked",
+    "security check",
+    "verify you are human",
+    "verifying you are human",
+    "you don't have permission to access",
+)
+
 
 class CurrentLinkedInCompanySizeEvidence(TypedDict):
     employee_count: str
@@ -80,6 +131,46 @@ def is_linkedin_evidence_url(value: Any) -> bool:
     )
 
 
+def _is_linkedin_access_wall(text: str) -> bool:
+    """Return whether exact-profile text is an authentication or block wall."""
+
+    visible_lines = [
+        line.strip().lstrip("#").strip().casefold()
+        for line in text[:PROFILE_MAX_CHARACTERS].splitlines()
+        if line.strip()
+    ]
+    top_lines = visible_lines[:4]
+    folded = "\n".join(visible_lines)
+    blocked_body = "\n".join(
+        line for line in visible_lines if line not in _BLOCKED_PAGE_TITLES
+    )
+    authentication_wall = (
+        any(line in _ACCESS_WALL_TITLES for line in top_lines)
+        and any(
+            all(field in folded for field in fields)
+            for fields in _ACCESS_WALL_CREDENTIAL_FIELDS
+        )
+    )
+    blocked_page = (
+        any(line in _BLOCKED_PAGE_TITLES for line in top_lines)
+        and any(marker in blocked_body for marker in _BLOCKED_PAGE_MARKERS)
+    )
+    return authentication_wall or blocked_page
+
+
+def _canonical_linkedin_company_size(value: str) -> Optional[str]:
+    """Map an exact English or Dutch LinkedIn band to its canonical form."""
+
+    raw = _EMPLOYEE_SUFFIX.sub("", value.strip().strip("*").strip())
+    for band in LINKEDIN_EMPLOYEE_BUCKETS:
+        localized = re.escape(band)
+        localized = localized.replace(r"\-", r"\s*[-\u2013]\s*")
+        localized = localized.replace(",", r"[,.]")
+        if re.fullmatch(localized, raw, re.IGNORECASE):
+            return band
+    return None
+
+
 def extract_linkedin_company_size(text: Any) -> Optional[dict[str, str]]:
     """Extract only LinkedIn's literal Company size field from About."""
 
@@ -91,34 +182,17 @@ def extract_linkedin_company_size(text: Any) -> Optional[dict[str, str]]:
     for index, line in enumerate(lines):
         visible = line.strip().strip("*").strip()
         if about_start is None:
-            if re.fullmatch(
-                r"(?:#{1,6}\s*)?About(?: us)?",
-                visible,
-                re.IGNORECASE,
-            ):
+            if _ABOUT_SECTION_HEADING.fullmatch(visible):
                 about_start = index + 1
             continue
-        if re.fullmatch(
-            r"(?:#{1,6}\s*)?(?:Employees(?: at\b.*)?|Updates)",
-            visible,
-            re.IGNORECASE,
-        ):
+        if _ABOUT_SECTION_END_HEADING.fullmatch(visible):
             about_end = index
             break
     if about_start is None:
         return None
 
-    bands = "|".join(re.escape(value) for value in LINKEDIN_EMPLOYEE_BUCKETS)
-    value_pattern = re.compile(
-        rf"^(?P<band>{bands})(?:\s+employees?)?$",
-        re.IGNORECASE,
-    )
-    field_pattern = re.compile(
-        r"^(?:\*\*)?Company size(?:\*\*)?\s*:?(?:\s+(?P<value>.+))?$",
-        re.IGNORECASE,
-    )
     for index in range(about_start, about_end):
-        field_match = field_pattern.fullmatch(lines[index].strip())
+        field_match = _COMPANY_SIZE_FIELD.fullmatch(lines[index].strip())
         if field_match is None:
             continue
         raw_value = str(field_match.group("value") or "").strip().strip("*").strip()
@@ -130,14 +204,14 @@ def extract_linkedin_company_size(text: Any) -> Optional[dict[str, str]]:
                     raw_value = candidate
                     quote_end = next_index
                     break
-        value_match = value_pattern.fullmatch(raw_value)
-        if value_match is None:
+        employee_count = _canonical_linkedin_company_size(raw_value)
+        if employee_count is None:
             return None
         quote = "\n".join(lines[index : quote_end + 1]).strip()
         if not quote:
             return None
         return {
-            "employee_count": value_match.group("band"),
+            "employee_count": employee_count,
             "quote": quote[:500],
         }
     return None
@@ -148,10 +222,10 @@ async def fetch_current_linkedin_company_size(
 ) -> Optional[CurrentLinkedInCompanySizeResult]:
     """Return exact size proof, explicit no-size content, or retryable failure.
 
-    A successful exact-profile result with no canonical Company size, or the
-    provider's exact-profile ``CRAWL_NOT_FOUND`` result, returns the explicit
-    insufficient-evidence outcome. Transport, other status, and malformed-result
-    failures return ``None``.
+    A successful exact-profile About result with no canonical Company size, or
+    the provider's exact-profile ``CRAWL_NOT_FOUND`` result, returns the explicit
+    insufficient-evidence outcome. Authentication or block walls, transport
+    failures, other status failures, and malformed results return ``None``.
     """
 
     requested_slug = linkedin_company_page_slug(profile_url)
@@ -247,6 +321,8 @@ async def fetch_current_linkedin_company_size(
         return None
     text = result.get("text")
     if not isinstance(text, str):
+        return None
+    if _is_linkedin_access_wall(text):
         return None
     extracted = extract_linkedin_company_size(text)
     if extracted is None:

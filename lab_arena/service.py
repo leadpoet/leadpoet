@@ -635,6 +635,12 @@ class ArenaService:
                 ) from exc
         else:
             raise ServiceError("function_probe_invalid:%s" % cost_function, 500)
+        try:
+            self._store.successful_call_cost_schema()
+        except ArenaStoreError as exc:
+            raise ServiceError(
+                "successful_call_cost_schema_unavailable", 500
+            ) from exc
         today = int(self.now().strftime("%Y%m%d"))
         source = self._config.daily_icp_source(set_id=today, active_at=self.now())
         if not isinstance(source, Mapping) or source.get("status") not in (
@@ -774,6 +780,9 @@ class ArenaService:
             "scorer_policy": self._scorer_policy,
             "execution_cap_microusd": defaults.execution_cap_microusd,
             "cost_per_company_microusd": defaults.cost_per_company_microusd,
+            "sourcing_cost_eligibility_policy": (
+                contracts.SUCCESSFUL_CALLS_COST_POLICY
+            ),
             "scoring_cap_microusd": defaults.scoring_cap_microusd,
             "scorer_image_digest": defaults.scorer_image_digest,
             "scorer_image_reference": defaults.scorer_image_reference,
@@ -2566,7 +2575,7 @@ class ArenaService:
 
     @staticmethod
     def _cost_kind_summary(
-        costs: Mapping[str, Any], kind: str
+        costs: Mapping[str, Any], kind: str, *, include_successful: bool = False
     ) -> Dict[str, Any]:
         providers = []
         totals = {
@@ -2586,11 +2595,22 @@ class ArenaService:
             "refused_calls",
             "call_count",
         )
+        policy_counter_keys = (
+            "successful_microusd",
+            "successful_calls",
+            "success_unresolved_microusd",
+            "success_unresolved_calls",
+        )
+        if include_successful:
+            counter_keys += policy_counter_keys
+            totals.update({key: 0 for key in policy_counter_keys})
         for raw in costs["providers"]:
             if raw["kind"] != kind:
                 continue
             row = {"provider": raw["provider"]}
             for key in counter_keys:
+                if key not in raw:
+                    raise ServiceError("successful_call_cost_schema_unavailable", 500)
                 value = int(raw[key])
                 row[key] = value
                 totals[key] += value
@@ -2631,9 +2651,27 @@ class ArenaService:
                 "eligible": False,
                 "eligibility_reason": "stored_output_invalid",
             }
+        successful_call_policy = (
+            configuration.get("sourcing_cost_eligibility_policy")
+            == contracts.SUCCESSFUL_CALLS_COST_POLICY
+        )
         costs = self._store.submission_costs(submission_id)
-        execution = self._cost_kind_summary(costs, "execute")
-        judge = self._cost_kind_summary(costs, "score")
+        execution = self._cost_kind_summary(
+            costs, "execute", include_successful=successful_call_policy
+        )
+        judge = self._cost_kind_summary(
+            costs, "score", include_successful=successful_call_policy
+        )
+        required_policy_counters = (
+            "successful_microusd",
+            "successful_calls",
+            "success_unresolved_microusd",
+            "success_unresolved_calls",
+        )
+        if successful_call_policy and any(
+            key not in execution for key in required_policy_counters
+        ):
+            raise ServiceError("successful_call_cost_schema_unavailable", 500)
         execution_cap = int(configuration["execution_cap_microusd"])
         per_company_cap = int(configuration["cost_per_company_microusd"])
         eligibility_cap = min(execution_cap, per_company_cap * qualified)
@@ -2646,6 +2684,18 @@ class ArenaService:
             # Judge spend is reported, but it does not enter sourcing eligibility.
             "judge": judge,
         }
+        if successful_call_policy:
+            summary.update(
+                {
+                    "sourcing_cost_eligibility_policy": (
+                        contracts.SUCCESSFUL_CALLS_COST_POLICY
+                    ),
+                    "competition_sourcing_microusd": (
+                        execution["successful_microusd"]
+                        + execution["success_unresolved_microusd"]
+                    ),
+                }
+            )
         if integrity.enabled(configuration):
             summary["qualified_company_count"] = qualified
             selected = self._selected_accepted_execution_runs(runs, submission_id)
@@ -2657,15 +2707,30 @@ class ArenaService:
                 "eligible": False,
                 "eligibility_reason": "provider_calls_inflight",
             }
-        if execution["uncertain_calls"] or judge["uncertain_calls"]:
+        if successful_call_policy and execution["success_unresolved_calls"]:
             return {
                 "cost_summary": summary,
                 "eligible": False,
                 "eligibility_reason": "provider_cost_uncertain",
             }
-        if execution["conservative_microusd"] > execution_cap:
+        if (
+            not successful_call_policy
+            and (execution["uncertain_calls"] or judge["uncertain_calls"])
+        ):
+            return {
+                "cost_summary": summary,
+                "eligible": False,
+                "eligibility_reason": "provider_cost_uncertain",
+            }
+        efficiency_cost = (
+            execution["successful_microusd"]
+            + execution["success_unresolved_microusd"]
+            if successful_call_policy
+            else execution["conservative_microusd"]
+        )
+        if efficiency_cost > execution_cap:
             reason = "execution_cap_exceeded"
-        elif execution["conservative_microusd"] > per_company_cap * qualified:
+        elif efficiency_cost > per_company_cap * qualified:
             reason = "cost_per_company_exceeded"
         else:
             reason = "eligible"

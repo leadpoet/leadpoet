@@ -97,6 +97,7 @@ CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v2"
 SUBMISSION_SCHEMA_VERSION = "leadpoet.lab_arena.submission.v1"
 PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
 SUBMISSION_COSTS_SCHEMA_VERSION = "leadpoet.lab_arena.submission_costs.v1"
+SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_v1"
 SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
 JSON_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 
@@ -726,6 +727,14 @@ ROUND_CONFIGURATION_FIELDS = (
         minimum=1,
         maximum=JSON_SAFE_INTEGER_MAX,
     ),
+    # New rounds opt in explicitly. Absence preserves the historical rule,
+    # including for a round that was already open when this field shipped.
+    F(
+        "sourcing_cost_eligibility_policy",
+        "str",
+        required=False,
+        choices=(SUCCESSFUL_CALLS_COST_POLICY,),
+    ),
     F("scoring_cap_microusd", "int", minimum=1),
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
@@ -824,6 +833,11 @@ SUBMISSION_COST_PROVIDER_FIELDS = (
     F("uncertain_calls", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
     F("refused_calls", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
     F("call_count", "int", minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    # Optional only for compatibility with the pre-policy aggregate RPC.
+    F("successful_microusd", "int", required=False, minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("successful_calls", "int", required=False, minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("success_unresolved_microusd", "int", required=False, minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
+    F("success_unresolved_calls", "int", required=False, minimum=0, maximum=JSON_SAFE_INTEGER_MAX),
 )
 
 SUBMISSION_COSTS_FIELDS = (
@@ -853,6 +867,20 @@ def validate_submission_costs(document: Any) -> Dict[str, Any]:
             raise ArenaContractError("submission cost terminal counters exceed call count")
         if row["refused_calls"] > row["call_count"]:
             raise ArenaContractError("submission cost refused calls exceed call count")
+        policy_keys = {
+            "successful_microusd",
+            "successful_calls",
+            "success_unresolved_microusd",
+            "success_unresolved_calls",
+        }
+        present_policy_keys = policy_keys.intersection(row)
+        if present_policy_keys and present_policy_keys != policy_keys:
+            raise ArenaContractError("submission successful-call costs are incomplete")
+        if present_policy_keys and (
+            row["successful_calls"] + row["success_unresolved_calls"]
+            > row["call_count"]
+        ):
+            raise ArenaContractError("submission successful-call counters exceed call count")
     for kind in ASSIGNMENT_KINDS:
         matching = [row for row in costs["providers"] if row["kind"] == kind]
         for key in (
@@ -862,8 +890,12 @@ def validate_submission_costs(document: Any) -> Dict[str, Any]:
             "uncertain_calls",
             "refused_calls",
             "call_count",
+            "successful_microusd",
+            "successful_calls",
+            "success_unresolved_microusd",
+            "success_unresolved_calls",
         ):
-            if sum(int(row[key]) for row in matching) > JSON_SAFE_INTEGER_MAX:
+            if sum(int(row.get(key, 0)) for row in matching) > JSON_SAFE_INTEGER_MAX:
                 raise ArenaContractError("submission cost aggregate exceeds safe integer range")
     return costs
 

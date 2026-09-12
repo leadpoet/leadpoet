@@ -89,6 +89,11 @@ def _opener(
         "lab_arena_schema_version_v1": {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197},
         "lab_arena_weight_state_schema_v1": {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202},
         "lab_arena_incentive_retirement_schema_v1": {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203},
+        "lab_arena_successful_call_cost_schema_v1": {
+            "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",
+            "version": 229,
+            "policy": "successful_calls_v1",
+        },
     }
     def open_(request, timeout):
         path = urlparse(request.full_url).path
@@ -102,6 +107,7 @@ def _opener(
             or path.endswith("/lab_arena_runs")
             or path.endswith("/rpc/lab_arena_code_review_schema_v1")
             or path.endswith("/rpc/lab_arena_participation_schema_v1")
+            or path.endswith("/rpc/lab_arena_successful_call_cost_schema_v1")
         )
         if enforce_role_separation and private_review and not arena_authority:
             raise HTTPError(request.full_url, 403, "private", {}, None)
@@ -131,6 +137,7 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     assert result["status"] == "ready"
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
     assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 221
+    assert result["schema_capabilities"]["lab_arena_successful_call_cost_schema_v1"]["version"] == 229
 
 
 def test_code_review_preflight_uses_only_the_scoped_arena_role():
@@ -177,6 +184,7 @@ def test_preflight_accepts_current_schema_without_retired_host_receipt_storage()
     "lab_arena_publish_weight_state_v1",
     "lab_arena_has_recent_participation_v1",
     "lab_arena_participation_schema_v1",
+    "lab_arena_successful_call_cost_schema_v1",
     "lab_arena_runs",
 ])
 def test_preflight_still_requires_active_scoring_epoch_and_arena_dependencies(missing):
@@ -192,6 +200,19 @@ def test_preflight_rejects_participation_schema_before_original_judgment_fix():
         verify_required_supabase_v2_schema(
             _environment(),
             opener=_opener(bad_capability="lab_arena_participation_schema_v1"),
+        )
+
+
+def test_preflight_rejects_wrong_successful_call_cost_capability():
+    with pytest.raises(
+        SupabaseSchemaPreflightV2Error,
+        match="successful_call_cost_schema_v1 capability differs",
+    ):
+        verify_required_supabase_v2_schema(
+            _environment(),
+            opener=_opener(
+                bad_capability="lab_arena_successful_call_cost_schema_v1"
+            ),
         )
 
 

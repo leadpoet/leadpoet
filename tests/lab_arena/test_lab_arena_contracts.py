@@ -219,6 +219,18 @@ def test_round_configuration_contains_only_plain_public_settings():
     assert c.validate_round_configuration(adjustable)["reward_constants"]["pool_percent"] == 5
 
 
+def test_successful_call_cost_policy_round_trips_and_rejects_unknown_values():
+    document = base_round_configuration()
+    document["cost_per_company_microusd"] = 500_000
+    document["sourcing_cost_eligibility_policy"] = c.SUCCESSFUL_CALLS_COST_POLICY
+    validated = c.validate_round_configuration(document)
+    assert validated["sourcing_cost_eligibility_policy"] == "successful_calls_v1"
+
+    document["sourcing_cost_eligibility_policy"] = "unknown"
+    with pytest.raises(c.ArenaContractError):
+        c.validate_round_configuration(document)
+
+
 def test_source_submission_contract_has_two_small_signed_steps():
     presign = {
         "source_size_bytes": 123,

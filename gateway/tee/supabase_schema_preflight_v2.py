@@ -9,7 +9,8 @@ from urllib.request import Request, urlopen
 CODE_REVIEW_MIGRATION = "scripts/207-lab-arena-code-review.sql"
 PARTICIPATION_MIGRATION = "scripts/216-lab-arena-validator-participation.sql"
 ORIGINAL_JUDGMENTS_MIGRATION = "scripts/221-lab-arena-participation-original-judgments.sql"
-PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION})
+SUCCESSFUL_CALL_COST_MIGRATION = "scripts/229-lab-arena-successful-call-cost-eligibility.sql"
+PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
     (CODE_REVIEW_MIGRATION, "lab_arena_submissions", ("submission_id", "code_review_status", "code_review_doc")),
@@ -26,6 +27,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (CODE_REVIEW_MIGRATION, "lab_arena_code_review_schema_v1"),
     (CODE_REVIEW_MIGRATION, "lab_arena_begin_submission_review"),
     (CODE_REVIEW_MIGRATION, "lab_arena_finish_submission_review"),
+    (SUCCESSFUL_CALL_COST_MIGRATION, "lab_arena_successful_call_cost_schema_v1"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "put_research_lab_provider_evidence_cache_v2"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "research_lab_provider_persistence_batch_contract_v1"),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
@@ -50,9 +52,14 @@ SCHEMA_CAPABILITIES = (
     ("lab_arena_schema_version_v1", {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197}),
     ("lab_arena_weight_state_schema_v1", {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}),
     ("lab_arena_incentive_retirement_schema_v1", {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203}),
+    ("lab_arena_successful_call_cost_schema_v1", {
+        "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",
+        "version": 229,
+        "policy": "successful_calls_v1",
+    }),
 )
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
-PRIVATE_ARENA_CAPABILITIES = frozenset({"lab_arena_code_review_schema_v1", "lab_arena_participation_schema_v1"})
+PRIVATE_ARENA_CAPABILITIES = frozenset({"lab_arena_code_review_schema_v1", "lab_arena_participation_schema_v1", "lab_arena_successful_call_cost_schema_v1"})
 
 class SupabaseSchemaPreflightV2Error(RuntimeError):
     """The selected release cannot use the live PostgREST schema."""

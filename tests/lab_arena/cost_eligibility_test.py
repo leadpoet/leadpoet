@@ -101,6 +101,33 @@ def _costs(submission_id: str, *rows: dict) -> dict:
     )
 
 
+def _successful_row(
+    amount: int,
+    *,
+    kind: str = "execute",
+    successful_microusd: int = 0,
+    successful_calls: int = 0,
+    success_unresolved_microusd: int = 0,
+    success_unresolved_calls: int = 0,
+    uncertain_calls: int = 0,
+    inflight_calls: int = 0,
+    call_count: int = 1,
+) -> dict:
+    return {
+        **_provider_row(
+            amount,
+            kind=kind,
+            uncertain_calls=uncertain_calls,
+            inflight_calls=inflight_calls,
+            call_count=call_count,
+        ),
+        "successful_microusd": successful_microusd,
+        "successful_calls": successful_calls,
+        "success_unresolved_microusd": success_unresolved_microusd,
+        "success_unresolved_calls": success_unresolved_calls,
+    }
+
+
 def _cost_service(
     *,
     amount: int,
@@ -289,6 +316,106 @@ def test_uncertain_judge_cost_also_fails_cost_eligibility():
     assert result["eligible"] is False
     assert result["eligibility_reason"] == "provider_cost_uncertain"
     assert result["cost_summary"]["judge"]["uncertain_calls"] == 1
+
+
+def test_new_policy_counts_only_successful_sourcing_and_reports_all_actual_cost():
+    service, row, submission_id, runs = _cost_service(
+        amount=600_000, populated_positions={0}
+    )
+    row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.SUCCESSFUL_CALLS_COST_POLICY
+    )
+    service._store.submission_costs = lambda requested: _costs(
+        requested,
+        _successful_row(
+            600_000,
+            successful_microusd=200_000,
+            successful_calls=1,
+            call_count=2,
+        ),
+        _successful_row(
+            10_000,
+            kind="score",
+            uncertain_calls=1,
+            success_unresolved_microusd=10_000,
+            success_unresolved_calls=1,
+        ),
+    )
+
+    result = service._submission_cost_eligibility(row, submission_id, runs)
+
+    assert result["eligible"] is True
+    assert result["cost_summary"]["execution"]["settled_microusd"] == 600_000
+    assert result["cost_summary"]["competition_sourcing_microusd"] == 200_000
+    assert result["cost_summary"]["judge"]["uncertain_calls"] == 1
+
+
+def test_new_policy_keeps_successful_missing_charge_unresolved():
+    service, row, submission_id, runs = _cost_service(
+        amount=0, populated_positions={0}
+    )
+    row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.SUCCESSFUL_CALLS_COST_POLICY
+    )
+    service._store.submission_costs = lambda requested: _costs(
+        requested,
+        _successful_row(
+            0,
+            uncertain_calls=1,
+            success_unresolved_microusd=500_000,
+            success_unresolved_calls=1,
+        ) | {"reserved_or_uncertain_microusd": 500_000},
+    )
+
+    result = service._submission_cost_eligibility(row, submission_id, runs)
+
+    assert result["eligible"] is False
+    assert result["eligibility_reason"] == "provider_cost_uncertain"
+    assert result["cost_summary"]["competition_sourcing_microusd"] == 500_000
+
+
+def test_new_policy_charged_failed_call_does_not_enter_efficiency_cap():
+    service, row, submission_id, runs = _cost_service(
+        amount=50_000_001, populated_positions={0}
+    )
+    row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.SUCCESSFUL_CALLS_COST_POLICY
+    )
+    service._store.submission_costs = lambda requested: _costs(
+        requested,
+        _successful_row(50_000_001, call_count=1),
+    )
+
+    result = service._submission_cost_eligibility(row, submission_id, runs)
+
+    assert result["eligible"] is True
+    assert result["cost_summary"]["execution"]["settled_microusd"] == 50_000_001
+    assert result["cost_summary"]["competition_sourcing_microusd"] == 0
+
+
+def test_new_policy_keeps_judge_inflight_safeguard():
+    service, row, submission_id, runs = _cost_service(
+        amount=0, populated_positions={0}
+    )
+    row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.SUCCESSFUL_CALLS_COST_POLICY
+    )
+    service._store.submission_costs = lambda requested: _costs(
+        requested,
+        _successful_row(0, successful_calls=1, successful_microusd=0),
+        _successful_row(
+            0,
+            kind="score",
+            inflight_calls=1,
+            success_unresolved_calls=1,
+            success_unresolved_microusd=1,
+        ),
+    )
+
+    result = service._submission_cost_eligibility(row, submission_id, runs)
+
+    assert result["eligible"] is False
+    assert result["eligibility_reason"] == "provider_calls_inflight"
 
 
 @pytest.mark.parametrize(
@@ -562,6 +689,11 @@ def _startup_service(cost_rpc_result):
             "schema_version": "leadpoet.lab_arena.validator_scoring_authority.v1",
             "version": 208,
             "authority": "gateway_subnet_validator_role",
+        },
+        successful_call_cost_schema=lambda: {
+            "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",
+            "version": 229,
+            "policy": "successful_calls_v1",
         },
         _transport=transport,
     )

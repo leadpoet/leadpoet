@@ -39,6 +39,9 @@ VALIDATOR_SCORING_AUTHORITY_SCHEMA_VERSION = (
     "leadpoet.lab_arena.validator_scoring_authority.v1"
 )
 COMPANY_QUALITY_SCHEMA_VERSION = "leadpoet.lab_arena.company_quality_schema.v1"
+SUCCESSFUL_CALL_COST_SCHEMA_VERSION = (
+    "leadpoet.lab_arena.successful_call_cost_schema.v1"
+)
 SERVICE_ROLE_NAME = "lab_arena_service"
 
 # Parameter order and PostgreSQL casts for every service-callable function.
@@ -67,6 +70,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_integrity_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
     "lab_arena_company_quality_schema_v1": (),
+    "lab_arena_successful_call_cost_schema_v1": (),
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_submission_costs": (("p_submission_id", "text"),),
@@ -713,6 +717,21 @@ class ArenaStore:
             or result.get("version") != 1
         ):
             raise ArenaStoreError("company quality schema mismatch")
+        return result
+
+    def successful_call_cost_schema(self) -> Dict[str, Any]:
+        """Require the successful-sourcing-call aggregate and SQL guard."""
+
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_successful_call_cost_schema_v1", {}),
+            "successful_call_cost_schema",
+        )
+        if (
+            result.get("schema_version") != SUCCESSFUL_CALL_COST_SCHEMA_VERSION
+            or result.get("version") != 229
+            or result.get("policy") != "successful_calls_v1"
+        ):
+            raise ArenaStoreError("successful-call cost schema mismatch")
         return result
 
     # -- accepted weight state ------------------------------------------

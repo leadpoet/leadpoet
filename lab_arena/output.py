@@ -20,6 +20,8 @@ SUPPORTED_OUTPUT_SCHEMA_VERSIONS = frozenset(
     {
         contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
         contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        "leadpoet.lab_arena.output.v3",
+        "leadpoet.lab_arena.output.v4",
     }
 )
 

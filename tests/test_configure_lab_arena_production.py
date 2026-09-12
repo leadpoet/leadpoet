@@ -163,6 +163,16 @@ def test_contacts_scopes_are_mutually_exclusive():
 
 @pytest.mark.parametrize("option,role,updates", [
     (
+        ["--company-quality-from", "2026-09-13T00:00:00Z"],
+        "company_quality_from_only",
+        {"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00+00:00"},
+    ),
+    (
+        ["--company-quality-from", ""],
+        "company_quality_from_only",
+        {"LAB_ARENA_COMPANY_QUALITY_FROM": ""},
+    ),
+    (
         ["--contacts-from", "2026-09-13T00:00:00Z"],
         "contacts_from_only",
         {"LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00+00:00"},
@@ -767,3 +777,28 @@ def test_miner_credentials_can_be_disabled_without_changing_other_configuration(
     assert MODULE.main(["--miner-credentials-only", "--miner-credential-kms-key-id", "", "--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
     assert calls[0]["updates"] == {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": ""}
     assert calls[0]["aliases"] == {}
+
+
+@pytest.mark.parametrize("value", ["2026-09-13T00:00:00Z", ""])
+def test_remote_company_quality_activation_preserves_other_settings(tmp_path, value):
+    initial = {"KEEP": "same", "LAB_ARENA_CONTACTS_FROM": "2026-09-12T00:00:00Z", "LAB_ARENA_MODE": "live"}
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(initial), request_override={
+            "role": "company_quality_from_only",
+            "updates": {"LAB_ARENA_COMPANY_QUALITY_FROM": value},
+            "aliases": {}, "service_key": "",
+        },
+    ))
+    assert updated == {**initial, "LAB_ARENA_COMPANY_QUALITY_FROM": value.replace("Z", "+00:00")}
+
+
+@pytest.mark.parametrize("updates,expected", [
+    ({"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00"}, "company_quality_from_timestamp_invalid"),
+    ({"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00Z", "KEEP": "changed"}, "company_quality_from_scope_invalid"),
+])
+def test_remote_company_quality_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
+    result = _run_remote_with_fake_aws(
+        tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
+        request_override={"role": "company_quality_from_only", "updates": updates, "aliases": {}, "service_key": ""},
+    )
+    assert result == {"ok": False, "code": expected}

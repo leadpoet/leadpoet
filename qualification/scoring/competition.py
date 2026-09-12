@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
+from leadpoet_verifier.identity.normalization import normalize_name
 from pydantic import ValidationError
 from qualification.competition_models import CompetitionCompany
 from qualification.employee_buckets import (
@@ -236,6 +237,7 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
 def _normalized_company(
     company: Mapping[str, Any], *, integrity_policy: bool = False,
     contacts_required: bool = False,
+    company_quality: bool = False,
 ) -> dict[str, Any]:
     try:
         # V2 carries a contact claim which the independent contact gate owns.
@@ -243,7 +245,14 @@ def _normalized_company(
         company_input = dict(company)
         if contacts_required:
             company_input.pop("contact", None)
-        row = CompetitionCompany.model_validate(company_input).model_dump(mode="json")
+        if company_quality:
+            from qualification.competition_models import CompetitionCompanyV3
+            from qualification.company_quality import normalize_company_claim
+            row, _errors = normalize_company_claim(
+                CompetitionCompanyV3.model_validate(company_input).model_dump(mode="json")
+            )
+        else:
+            row = CompetitionCompany.model_validate(company_input).model_dump(mode="json")
     except Exception as exc:
         raise CompetitionScorerInputError(
             "company does not satisfy the competition output schema"
@@ -287,6 +296,7 @@ def effective_competition_input(
     *,
     contacts_required: bool = False,
     contact_source_evidence: Mapping[str, Any] | None = None,
+    company_quality: bool = False,
 ) -> dict[str, Any]:
     """Project the same normalized first-N inputs consumed by the adapter.
 
@@ -301,14 +311,29 @@ def effective_competition_input(
     for company in list(companies)[:_company_goal(icp)]:
         observed = company.get("employee_count")
         bucket = normalize_employee_count_bucket(observed, default=None) or normalize_observed_employee_count_bucket(observed, default=None)
-        if bucket not in buckets:
+        if bucket not in buckets and not company_quality:
             rows.append({"bucket_skipped": True})
             continue
         normalized = _normalized_company(
             company,
             integrity_policy=True,
             contacts_required=contacts_required,
+            company_quality=company_quality,
         )
+        if company_quality:
+            from qualification.company_quality import normalize_company_claim
+            _claim, errors = normalize_company_claim(company)
+            if errors or bucket not in buckets:
+                # No networked judgment, but retain every identity-affecting
+                # input so a deterministic zero cannot bind to another firm.
+                effective = dict(normalized)
+                effective["company_quality_errors"] = list(errors)
+                if bucket not in buckets:
+                    effective["bucket_skipped"] = True
+                if contacts_required:
+                    effective.update(_effective_contact_input(company, contact_source_evidence))
+                rows.append(effective)
+                continue
         try:
             effective = CompanyOutput(**normalized).model_dump(mode="json")
         except ValidationError:
@@ -318,8 +343,12 @@ def effective_competition_input(
             continue
         # The binary Arena fit verifier independently resolves these facts.
         # These fields are validated above but never read during its judging.
-        for ignored in ("state", "description", "required_attribute"):
+        for ignored in (("description", "required_attribute") if company_quality else ("state", "description", "required_attribute")):
             effective.pop(ignored, None)
+        if company_quality:
+            from qualification.company_quality import is_united_states
+            if not is_united_states(effective.get("country")):
+                effective.pop("state", None)
         if contacts_required:
             effective.update(
                 _effective_contact_input(company, contact_source_evidence)
@@ -405,12 +434,18 @@ def _effective_contact_input(
         contact_source_semantics,
     )
 
-    source_semantics = contact_source_semantics(source)
     attribution = contact.get("email_source") or {}
+    source_semantics = contact_source_semantics(
+        source,
+        broker_call_id=attribution.get("broker_call_id"),
+        record_id=attribution.get("record_id"),
+    )
     effective_source = {
         "provider": attribution.get("provider"),
         "tool": attribution.get("tool"),
     }
+    if attribution.get("broker_call_id"):
+        effective_source["broker_call_id"] = attribution["broker_call_id"]
     if attribution.get("record_id"):
         effective_source["record_id"] = attribution["record_id"]
     return {
@@ -526,9 +561,7 @@ def _verified_company_for_contact(
     ).strip()
     return {
         "company_name": str(
-            verified_receipt.get("observed_name")
-            or company.get("company_name")
-            or ""
+            company.get("company_name") or ""
         ),
         "company_website": (
             f"https://{observed_domain}" if observed_domain else ""
@@ -572,6 +605,145 @@ async def _classify_contact_role(
     return parsed[0]["match"]
 
 
+def raw_company_judgment(breakdown: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove list-dependent decisions before storing an intrinsic judgment."""
+    return {
+        key: value for key, value in breakdown.items()
+        if key not in {"company_index", "company_qualified", "duplicate_company", "duplicate_of_index"}
+    }
+
+
+def bucket_skipped_judgment() -> dict[str, Any]:
+    result = _model_contract_incompatible_breakdown()
+    result.update(bucket_skipped=True, failure_reason="employee_bucket_skipped")
+    return result
+
+
+def company_quality_identity_verified(receipt: Any) -> bool:
+    """A quality identity must contain independently observed usable handles."""
+    from qualification.company_quality import canonical_company_linkedin
+    from qualification.competition_models import public_http_url
+
+    if not isinstance(receipt, Mapping):
+        return False
+    name = receipt.get("observed_name")
+    domain = receipt.get("observed_domain")
+    slug = receipt.get("observed_linkedin_slug")
+    if any(not isinstance(value, str) or not value.strip() for value in (name, domain, slug)):
+        return False
+    try:
+        observed = urlsplit("https://" + domain)
+        if (observed.hostname != domain or observed.port is not None
+            or observed.path or observed.query or observed.fragment
+            or observed.username or observed.password):
+            return False
+        public_http_url("https://" + domain)
+        linkedin = canonical_company_linkedin("https://linkedin.com/company/" + slug)
+        if linkedin.rsplit("/", 1)[-1] != slug.casefold():
+            return False
+        identity = canonical_company_identity({}, verified_identity_receipt=receipt)
+        return bool(identity.verified and identity.registrable_domain and identity.normalized_name and identity.verified_linkedin_slug)
+    except (TypeError, ValueError):
+        return False
+
+
+def _verified_domain_name_hq_key(
+    company: Mapping[str, Any], verified_domain: str
+) -> tuple[str, ...] | None:
+    """Identify an exact-name company alias without merging subsidiaries."""
+    from qualification.company_quality import canonical_us_state
+    from qualification.contact_models import normalize_country_code
+
+    name = normalize_name(str(company.get("company_name") or ""))
+    try:
+        country = normalize_country_code(company.get("country"))
+    except ValueError:
+        country = normalize_name(str(company.get("country") or ""))
+    state = canonical_us_state(company.get("state")) if country == "US" else ""
+    domain = str(verified_domain or "").strip().casefold()
+    if not name or not domain or not country:
+        return None
+    return ("verified_domain_name_hq", domain, name, country, state)
+
+
+def apply_company_judgment_context(
+    companies: Sequence[Mapping[str, Any]],
+    raw_breakdowns: Sequence[Mapping[str, Any]],
+    *, contacts_required: bool = False,
+) -> list[dict[str, Any]]:
+    """Bind immutable single-company decisions to this list's verified identities.
+
+    Inputs cover every first-N slot, including explicit bucket-skipped zeros.
+    Only independently verified aliases can reserve another company's identity.
+    """
+    from qualification.company_quality import normalize_company_claim
+    from qualification.scoring.company_fit_decision import company_quality_receipt_matches_claim
+
+    if len(companies) != len(raw_breakdowns):
+        raise CompetitionScorerInputError("company judgments must cover every company")
+    result = []
+    seen_identities: dict[tuple[str, ...], tuple[str, int]] = {}
+    for index, (company, raw) in enumerate(zip(companies, raw_breakdowns)):
+        if raw.get("bucket_skipped") is True:
+            continue
+        row = json.loads(json.dumps(raw, allow_nan=False))
+        claim, errors = normalize_company_claim(company)
+        receipt = verified_identity_receipt(row.get("verifier_gate_receipts"))
+        identity = canonical_company_identity(claim, verified_identity_receipt=receipt)
+        aliases = list(company_identity_alias_keys(identity)) or [identity.key]
+        fit = (company_fit_verified(row) and company_quality_identity_verified(receipt)
+               and company_quality_receipt_matches_claim(receipt, claim) and not errors)
+        company_ready = bool(
+            fit
+            and has_verified_primary_intent(row.get("intent_signals_detail") or [])
+        )
+        qualified = bool(company_ready)
+        if contacts_required:
+            qualified = qualified and row.get("contact_qualified") is True
+        identity_keys: list[tuple[str, ...]] = []
+        if fit and identity.verified_linkedin_slug:
+            identity_keys.append(("linkedin", identity.verified_linkedin_slug))
+        if fit:
+            domain_name_hq_key = _verified_domain_name_hq_key(
+                claim, identity.registrable_domain
+            )
+            if domain_name_hq_key is not None:
+                identity_keys.append(domain_name_hq_key)
+        prior = None
+        if company_ready:
+            prior = next(
+                (seen_identities[key] for key in identity_keys if key in seen_identities),
+                None,
+            )
+        duplicate = prior is not None
+        qualified = bool(qualified and not duplicate)
+        row.update(
+            company_index=index,
+            company_identity_key=prior[0] if prior else identity.key,
+            company_identity_alias_keys=aliases,
+            company_qualified=bool(qualified),
+            duplicate_company=duplicate,
+        )
+        if duplicate:
+            row["duplicate_of_index"] = prior[1]
+            row["failure_reason"] = "duplicate_company_identity"
+            for field in ("icp_fit", "decision_maker", "intent_signal_raw", "intent_signal_final", "cost_penalty", "time_penalty"):
+                row[field] = 0.0
+        if not qualified:
+            row["final_score"] = 0.0
+        if contacts_required and (not company_ready or duplicate):
+            row["verifier_gate_receipts"] = [
+                item for item in row.get("verifier_gate_receipts") or []
+                if not isinstance(item, Mapping) or item.get("gate") != "contact"
+            ]
+            _merge_contact_breakdown(row, _not_evaluated_contact(company))
+        if qualified:
+            for key in identity_keys:
+                seen_identities[key] = (identity.key, index)
+        result.append(row)
+    return result
+
+
 class CompetitionCompanyScorer:
     """Use the production company judge for baseline and miner outputs."""
 
@@ -581,9 +753,11 @@ class CompetitionCompanyScorer:
         *,
         contacts_required: bool = False,
         contact_source_evidence: Mapping[str, Any] | None = None,
+        company_quality: bool = False,
     ) -> None:
+        self.company_quality = bool(company_quality)
         self.contacts_required = bool(contacts_required)
-        self.integrity_policy = bool(integrity_policy or self.contacts_required)
+        self.integrity_policy = bool(integrity_policy or self.contacts_required or self.company_quality)
         self.contact_source_evidence = (
             dict(contact_source_evidence)
             if isinstance(contact_source_evidence, Mapping)
@@ -600,6 +774,21 @@ class CompetitionCompanyScorer:
         return [float(row.get("final_score") or 0.0) for row in rows]
 
     async def score_with_breakdowns(
+        self,
+        companies: Sequence[Mapping[str, Any]],
+        icp: Mapping[str, Any],
+        is_reference_model: bool,
+    ) -> list[dict[str, Any]]:
+        if not self.company_quality:
+            return await self._score_with_breakdowns(companies, icp, is_reference_model)
+        sliced = list(companies)[:_company_goal(icp)]
+        raw = []
+        for company in sliced:
+            rows = await self._score_with_breakdowns([company], icp, is_reference_model)
+            raw.append(raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment())
+        return apply_company_judgment_context(sliced, raw, contacts_required=self.contacts_required)
+
+    async def _score_with_breakdowns(
         self,
         companies: Sequence[Mapping[str, Any]],
         icp: Mapping[str, Any],
@@ -626,10 +815,21 @@ class CompetitionCompanyScorer:
             ) or normalize_observed_employee_count_bucket(observed, default=None)
             if not bucket or bucket not in allowed_buckets:
                 continue
+            if self.company_quality:
+                from qualification.company_quality import normalize_company_claim
+                company, errors = normalize_company_claim(company)
+                if errors:
+                    invalid = _model_contract_incompatible_breakdown()
+                    invalid["failure_reason"] = ";".join(errors)
+                    if self.contacts_required:
+                        _merge_contact_breakdown(invalid, _not_evaluated_contact(company))
+                    breakdowns.append(invalid)
+                    continue
             normalized_company = _normalized_company(
                 company,
                 integrity_policy=self.integrity_policy,
                 contacts_required=self.contacts_required,
+                company_quality=self.company_quality,
             )
             contact_company = dict(company)
             submitted_identity = canonical_company_identity(normalized_company)
@@ -687,6 +887,7 @@ class CompetitionCompanyScorer:
                 seen_companies=(seen_companies if not self.integrity_policy else set()),
                 is_reference_model=bool(is_reference_model),
                 integrity_policy=self.integrity_policy,
+                **({"company_quality": True} if self.company_quality else {}),
             )
             breakdown = (
                 result.model_dump(mode="json")

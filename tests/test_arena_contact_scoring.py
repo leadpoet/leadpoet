@@ -325,7 +325,7 @@ def test_legacy_effective_input_is_unchanged_when_contact_mode_is_off() -> None:
         effective_competition_input([_company()], _icp())
 
 
-def test_contact_effective_input_hashes_semantics_and_excludes_call_metadata() -> None:
+def test_contact_effective_input_hashes_semantics_and_excludes_unused_metadata() -> None:
     company = _company()
     evidence = {
         "broker-1": {
@@ -357,7 +357,6 @@ def test_contact_effective_input_hashes_semantics_and_excludes_call_metadata() -
         [company], _icp(), contacts_required=True, contact_source_evidence=evidence
     )
     metadata_changed = deepcopy(evidence)
-    metadata_changed["broker-1"]["call_identity"] = "replacement-id"
     metadata_changed["broker-1"]["observed_at"] = "2030-01-01T00:00:00Z"
     metadata_changed["broker-1"]["response"]["job_id"] = "job-two"
     metadata_changed["broker-1"]["response"]["billing"] = {"credits": 999}
@@ -366,6 +365,14 @@ def test_contact_effective_input_hashes_semantics_and_excludes_call_metadata() -
         _icp(),
         contacts_required=True,
         contact_source_evidence=metadata_changed,
+    )
+    identity_changed = deepcopy(evidence)
+    identity_changed["broker-1"]["call_identity"] = "replacement-id"
+    identity_bound = effective_competition_input(
+        [company],
+        _icp(),
+        contacts_required=True,
+        contact_source_evidence=identity_changed,
     )
     response_changed = deepcopy(evidence)
     response_changed["broker-1"]["response"]["result"]["data"]["element"]["id"] = "person-2"
@@ -377,9 +384,10 @@ def test_contact_effective_input_hashes_semantics_and_excludes_call_metadata() -
     )
 
     assert first == second
+    assert first != identity_bound
     assert first != third
     row = first["companies"][0]
-    assert "broker_call_id" not in row["contact"]["email_source"]
+    assert row["contact"]["email_source"]["broker_call_id"] == "broker-1"
     assert first["icp"]["target_roles"] == ["Vice President of Sales"]
     assert first["icp"]["contact_geography"] == {
         "countries": ["US"],

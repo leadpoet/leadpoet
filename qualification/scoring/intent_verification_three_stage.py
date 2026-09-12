@@ -1100,6 +1100,97 @@ def _url_on_lead_domain(source_url: str,
     return False
 
 
+def _verified_company_identity_context(
+    value: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Project only a complete independently observed company identity."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    if (
+        value.get("decision") != "match"
+        or value.get("evidence_source")
+        not in {"company_homepage", "company_web_reverification"}
+    ):
+        return {}
+    name = str(value.get("observed_name") or "").strip()
+    domain = str(value.get("observed_domain") or "").strip().casefold()
+    linkedin_slug = str(value.get("observed_linkedin_slug") or "").strip().casefold()
+    if (
+        not name
+        or len(name) > 200
+        or not linkedin_slug
+        or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+            r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
+            domain,
+        )
+        or not re.fullmatch(
+            r"[a-z0-9][a-z0-9._%+-]{0,99}", linkedin_slug
+        )
+    ):
+        return {}
+    raw_aliases = value.get("verified_legal_name_aliases")
+    aliases = (
+        [
+            alias.strip()
+            for alias in raw_aliases[:3]
+            if isinstance(alias, str) and alias.strip() and len(alias.strip()) <= 200
+        ]
+        if isinstance(raw_aliases, list)
+        else []
+    )
+    return {
+        "observed_name": name,
+        "observed_domain": domain,
+        "observed_linkedin_slug": linkedin_slug,
+        "verified_legal_name_aliases": list(dict.fromkeys(aliases)),
+        "evidence_source": str(value.get("evidence_source")),
+    }
+
+
+def _url_on_verified_company_identity(
+    source_url: str,
+    verified_identity: Mapping[str, Any],
+) -> bool:
+    """Recognize an official publisher only from the verified receipt."""
+
+    try:
+        parsed = urlparse(source_url)
+        source_host = _strip_www(parsed.hostname or "")
+    except (TypeError, ValueError):
+        return False
+    if not source_host:
+        return False
+    domain = _strip_www(
+        str(verified_identity.get("observed_domain") or "").casefold()
+    )
+    if domain and (
+        source_host == domain or source_host.endswith("." + domain)
+    ):
+        return True
+    slug = str(
+        verified_identity.get("observed_linkedin_slug") or ""
+    ).casefold()
+    if not slug or not (
+        source_host == "linkedin.com" or source_host.endswith(".linkedin.com")
+    ):
+        return False
+    decoded_path = parsed.path
+    for _ in range(4):
+        parts = [part.casefold() for part in decoded_path.split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            return False
+        next_path = unquote(decoded_path)
+        if next_path == decoded_path:
+            break
+        decoded_path = next_path
+    parts = [part.casefold() for part in decoded_path.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        return False
+    return len(parts) >= 2 and parts[:2] == ["company", slug]
+
+
 def _exact_ats_tenant_binds_company(
     source_url: str,
     *,
@@ -2157,6 +2248,34 @@ def _build_final_judge_prompt(
     return prompt
 
 
+def _company_quality_identity_instructions(row: Mapping[str, Any]) -> str:
+    """Tell the model how to separate a publisher from an event subject."""
+
+    official_source = row.get("_source_on_verified_company_property") is True
+    official_context = (
+        "The server independently verified that the supplied source is on the "
+        "matched company's official property. Grounded first-person wording such "
+        "as we, our, and us may therefore identify the publisher without a literal "
+        "company-name mention. "
+        if official_source
+        else ""
+    )
+    return (
+        "\n\nCOMPANY IDENTITY ATTRIBUTION:\n"
+        + official_context
+        + "Separately identify the subject of the claimed event. A publisher's "
+        "customer story, case study, partner announcement, portfolio story, or "
+        "news roundup is not evidence that the event happened to the publisher "
+        "when the source says it happened to another company. For job evidence, "
+        "an ATS tenant slug or URL resemblance is only a lookup hint; require "
+        "source-grounded employer evidence from the fetched job body, an official "
+        "careers page, or a reliable independent observation. Do not infer factual "
+        "identity from keywords alone. Set same_entity_check=pass only when source "
+        "context grounds the event subject to the company; use unclear when the "
+        "subject remains ambiguous."
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Stage 2 — SD-primary + Exa-fallback per URL
 # ─────────────────────────────────────────────────────────────────────
@@ -2428,6 +2547,8 @@ def _structured_verdict_error(answer: Mapping[str, Any]) -> str:
 
 async def _call_openrouter(
     client: httpx.AsyncClient, model: str, prompt: str,
+    *,
+    max_attempts: int = 3,
 ) -> Dict[str, Any]:
     from qualification.scoring.openrouter_options import (
         include_reasoning_default,
@@ -2461,7 +2582,8 @@ async def _call_openrouter(
     reasoning_dropped = False
     if request_reasoning:
         body["include_reasoning"] = True
-    for attempt in range(3):
+    attempts = max(1, min(int(max_attempts), 3))
+    for attempt in range(attempts):
         try:
             r = await client.post(
                 f"{OPENROUTER_BASE_URL}/chat/completions",
@@ -2472,6 +2594,8 @@ async def _call_openrouter(
                 json=body, timeout=TIMEOUT_SECONDS,
             )
             if r.status_code == 429:
+                if attempts == 1:
+                    return {"_error": "http_429"}
                 await asyncio.sleep(8 * (attempt + 1))
                 continue
             if r.status_code != 200:
@@ -2498,7 +2622,7 @@ async def _call_openrouter(
                     attempt + 1,
                     type(exc).__name__,
                 )
-                if attempt == 2:
+                if attempt + 1 >= attempts:
                     return {"_error": "invalid_json_envelope"}
                 await asyncio.sleep(1)
                 continue
@@ -2528,7 +2652,7 @@ async def _call_openrouter(
                     model,
                     attempt + 1,
                 )
-                if attempt == 2:
+                if attempt + 1 >= attempts:
                     return {
                         "_error": "invalid_json_content",
                         "provider_usage": provider_usage,
@@ -2544,7 +2668,7 @@ async def _call_openrouter(
                     attempt + 1,
                     verdict_error,
                 )
-                if attempt == 2:
+                if attempt + 1 >= attempts:
                     return {
                         "_error": "inconsistent_structured_verdict",
                         "provider_usage": provider_usage,
@@ -2570,7 +2694,7 @@ or copy a status from the previous answer's explanation.
                 "provider_usage": provider_usage,
             }
         except (httpx.TimeoutException, httpx.NetworkError) as e:
-            if attempt == 2:
+            if attempt + 1 >= attempts:
                 return {"_error": f"{type(e).__name__}: {e}"}
             await asyncio.sleep(3)
     return {"_error": "retries_exhausted"}
@@ -2610,13 +2734,19 @@ def _apply_guardrails(
     return verdict
 
 
-def _decision(verdict: Dict[str, Any]) -> str:
+def _decision(
+    verdict: Dict[str, Any], *, company_quality: bool = False
+) -> str:
     item = ((verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     if item.get("same_entity_check") == "fail":
         return "reject"
     if (
         item.get("signal_status") == "supported"
         and item.get("confidence") == "high"
+        and (
+            not company_quality
+            or item.get("same_entity_check") == "pass"
+        )
     ):
         return "approve"
     if item.get("signal_status") in {"contradicted", "wrong_entity"}:
@@ -3164,6 +3294,8 @@ async def verify_three_stage(
     declared_source: Optional[str] = None,
     stage1_soft_reject: bool = False,
     integrity_policy: bool = False,
+    company_quality: bool = False,
+    verified_company_identity: Optional[Mapping[str, Any]] = None,
     buyer_max_age_days: Optional[int] = None,
     evidence_bundle: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
@@ -3240,6 +3372,13 @@ async def verify_three_stage(
             or re.fullmatch(r"\d{4}-\d{2}-\d{2}", miner_signal_date) is None
         ):
             raise ValueError("intent signal date is invalid")
+        quality_identity = (
+            _verified_company_identity_context(verified_company_identity)
+            if company_quality
+            else {}
+        )
+        if company_quality and not quality_identity:
+            raise ValueError("independently verified company identity is required")
     except (TypeError, ValueError):
         return {
             "client_ready": False,
@@ -3294,9 +3433,23 @@ async def verify_three_stage(
     _on_lead_domain = _url_on_lead_domain(
         fetch_source_url, company_website, company_linkedin,
     ) and len(bundle) <= 1
+    _on_verified_company_property = bool(
+        company_quality
+        and _url_on_verified_company_identity(fetch_source_url, quality_identity)
+        and len(bundle) <= 1
+    )
+    official_publisher_binding = (
+        _on_verified_company_property if company_quality else _on_lead_domain
+    )
+    if company_quality:
+        row["_source_on_verified_company_property"] = (
+            _on_verified_company_property
+        )
 
     # ── STAGE 1: sonar first-pass ──────────────────────────────────
     s1_prompt = _build_verification_prompt(row)
+    if company_quality:
+        s1_prompt += _company_quality_identity_instructions(row)
     s1_envelope = await _call_openrouter(
         client, stage1_model or STAGE1_MODEL, s1_prompt
     )
@@ -3327,7 +3480,9 @@ async def verify_three_stage(
         s1_verdict_raw = (s1_envelope.get("answer") or {})
         s1_verdict = _apply_guardrails(row, s1_verdict_raw)
         s1_item = ((s1_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
-        s1_decision = _decision(s1_verdict)
+        s1_decision = _decision(
+            s1_verdict, company_quality=company_quality
+        )
         stage1_info = {
             "model": s1_envelope.get("model"),
             "status": s1_item.get("signal_status"),
@@ -3358,7 +3513,8 @@ async def verify_three_stage(
         # (same_entity_check == "fail"), downgrade to review.  URLs on
         # the lead's own property are structural proof of same-entity.
         if (
-            _on_lead_domain
+            not company_quality
+            and _on_lead_domain
             and s1_item.get("signal_status") == "wrong_entity"
             and s1_item.get("same_entity_check") == "fail"
         ):
@@ -3476,7 +3632,7 @@ async def verify_three_stage(
         derived_domain_brand = str(prompt_identity["company"] or "").split(
             ".", 1
         )[0]
-        if _on_lead_domain:
+        if official_publisher_binding:
             company_check = True
         elif derived_domain_brand and company_in_scrape(
             derived_domain_brand,
@@ -3509,11 +3665,14 @@ async def verify_three_stage(
             )
         )
     )
-    exact_ats_employer_binding = _exact_ats_result_binds_company(
-        source_url=fetch_source_url,
-        contents=contents,
-        company_domain=prompt_identity["company"],
-        company_name=company_name,
+    exact_ats_employer_binding = bool(
+        not company_quality
+        and _exact_ats_result_binds_company(
+            source_url=fetch_source_url,
+            contents=contents,
+            company_domain=prompt_identity["company"],
+            company_name=company_name,
+        )
     )
     exact_hiring_employer_binding = bool(
         len(bundle) <= 1 and is_hiring_claim and exact_ats_employer_binding
@@ -3617,6 +3776,8 @@ async def verify_three_stage(
 
     # ── STAGE 3: sonar-pro final judge ─────────────────────────────
     s3_prompt = _build_final_judge_prompt(row, contents)
+    if company_quality:
+        s3_prompt += _company_quality_identity_instructions(row)
     s3_envelope = await _call_openrouter(
         client, stage3_model or STAGE3_MODEL, s3_prompt
     )
@@ -3718,7 +3879,72 @@ async def verify_three_stage(
                 s3_verdict_raw["overall_confidence"] = "high"
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
-    s3_decision = _decision(s3_verdict)
+    identity_clarification: Optional[Dict[str, Any]] = None
+    if (
+        company_quality
+        and s3_item.get("signal_status") == "supported"
+        and s3_item.get("confidence") == "high"
+        and s3_item.get("same_entity_check") == "unclear"
+    ):
+        clarification_prompt = (
+            s3_prompt
+            + "\n\nONE BOUNDED IDENTITY CLARIFICATION:\n"
+            "The prior result found the claim supported but left the event subject "
+            "unclear. Re-read only the supplied fetched source context. Decide "
+            "whether the event happened to the target company, to a customer or "
+            "other third party, or cannot be resolved. Return one complete fresh "
+            "schema-valid verdict. Do not treat the publisher, domain, ATS tenant "
+            "slug, or keyword overlap alone as proof of the event subject."
+        )
+        clarification_envelope = await _call_openrouter(
+            client,
+            stage3_model or STAGE3_MODEL,
+            clarification_prompt,
+            max_attempts=1,
+        )
+        if clarification_envelope.get("_error"):
+            return {
+                "client_ready": False,
+                "decision": "unavailable",
+                "rejection_reason": (
+                    "stage3_identity_clarification_error:"
+                    f"{clarification_envelope['_error']}"
+                ),
+                "stage1": stage1_info,
+                "scrape": {
+                    "statuses": contents.get("statuses") or [],
+                    "result_count": len(contents.get("results") or []),
+                },
+                "stage3": {
+                    "model": stage3_model or STAGE3_MODEL,
+                    "status": "llm_error",
+                    "confidence": None,
+                    "decision": "unavailable",
+                    "same_entity_check": "unclear",
+                    "usage": {},
+                    "error": clarification_envelope.get("_error"),
+                },
+                "company_check": company_check,
+                "verdict": s3_verdict,
+                "identity_clarification": {
+                    "attempted": True,
+                    "resolved": False,
+                    "provider_error": True,
+                },
+            }
+        clarified_raw = clarification_envelope.get("answer") or {}
+        clarified = _apply_guardrails(row, clarified_raw)
+        clarified_items = clarified.get("signal_evaluations") or []
+        if isinstance(clarified_items, list) and len(clarified_items) == 1:
+            s3_envelope = clarification_envelope
+            s3_verdict = clarified
+            s3_item = clarified_items[0]
+        identity_clarification = {
+            "attempted": True,
+            "resolved": s3_item.get("same_entity_check") in {"pass", "fail"},
+            "provider_error": False,
+        }
+    s3_decision = _decision(s3_verdict, company_quality=company_quality)
     closed_only_hiring_evidence = False
     if integrity_policy and is_hiring_claim and len(bundle) > 1:
         cited_urls = {
@@ -3749,7 +3975,7 @@ async def verify_three_stage(
         if is_job_board
         and _looks_like_job_body(combined_text)
         and (
-            _on_lead_domain
+            official_publisher_binding
             or exact_ats_employer_binding
             or (
                 has_linkedin_structured
@@ -3778,7 +4004,8 @@ async def verify_three_stage(
     # verdict (which shouldn't happen with the updated prompt, but is
     # defended against here) is left as-is.
     if (
-        _on_lead_domain
+        not company_quality
+        and _on_lead_domain
         and s3_item.get("signal_status") == "wrong_entity"
         and s3_item.get("same_entity_check") == "fail"
     ):
@@ -3832,6 +4059,12 @@ async def verify_three_stage(
         if corroboration_info is not None:
             client_ready = False
             reason = f"corroboration_{corroboration_info.get('reason') or 'failed'}"
+        elif (
+            company_quality
+            and s3_item.get("same_entity_check") != "pass"
+        ):
+            client_ready = False
+            reason = "stage3_identity_unresolved"
         else:
             client_ready = review_as_accept
             reason = "" if review_as_accept else "stage3_review"
@@ -3847,6 +4080,11 @@ async def verify_three_stage(
         "company_check": company_check,
         "verdict": s3_verdict,
         "corroboration": corroboration_info,
+        **(
+            {"identity_clarification": identity_clarification}
+            if identity_clarification is not None
+            else {}
+        ),
     }
     if integrity_policy:
         if len(bundle) > 1:
@@ -3862,10 +4100,21 @@ async def verify_three_stage(
             if _looks_like_job_body(item.get("text") or "")
             and not (item.get("meta") or {}).get("is_closed")
             and (
-                _url_on_lead_domain(item["url"], company_website, company_linkedin)
-                or _exact_ats_result_binds_company(
-                    source_url=item["url"], contents={"results": [item]},
-                    company_domain=prompt_identity["company"], company_name=company_name,
+                (
+                    _url_on_verified_company_identity(item["url"], quality_identity)
+                    if company_quality
+                    else _url_on_lead_domain(
+                        item["url"], company_website, company_linkedin
+                    )
+                )
+                or (
+                    not company_quality
+                    and _exact_ats_result_binds_company(
+                        source_url=item["url"],
+                        contents={"results": [item]},
+                        company_domain=prompt_identity["company"],
+                        company_name=company_name,
+                    )
                 )
                 or ((item.get("meta") or {}).get("kind") == "linkedin_job"
                     and s3_item.get("same_entity_check") == "pass")

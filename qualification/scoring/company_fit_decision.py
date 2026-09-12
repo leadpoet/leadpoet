@@ -206,6 +206,7 @@ def evaluate_company_identity(
     observed_website: Any,
     observed_linkedin: Any = "",
     evidence_source: Any = "",
+    company_quality: bool = False,
 ) -> dict[str, str]:
     """Bind the submitted name, website, and LinkedIn to one observed entity."""
 
@@ -277,6 +278,13 @@ def evaluate_company_identity(
             observed_linkedin_slug=observed["linkedin_slug"],
             evidence_source=source,
         )
+        if company_quality and not parenthetical_names_align:
+            # Exact domain/LinkedIn agreement can show that both observations
+            # point at one entity, but it cannot invent an unstated legal-name
+            # or brand alias.  The caller may still resolve the alias from an
+            # explicit, independently verified homepage identity record.
+            receipt.update(reason_code="identity_name_alias_unresolved")
+            return receipt
         # A matching registrable domain with a different common/legal name is
         # not proof of a conflict by itself. Keep the result unavailable when
         # there is no second stable identifier to bind the alias.
@@ -303,6 +311,87 @@ def evaluate_company_identity(
             return receipt
     receipt.update(decision="match", reason_code="verifier_accepted")
     return receipt
+
+
+def company_quality_receipt_matches_claim(
+    receipt: Any,
+    company: Mapping[str, Any],
+) -> bool:
+    """Validate that a quality receipt is canonical and binds this exact claim."""
+
+    if (
+        not isinstance(receipt, Mapping)
+        or not isinstance(company, Mapping)
+        or receipt.get("decision") != COMPANY_FIT_MATCH
+        or receipt.get("evidence_source") not in _INDEPENDENT_IDENTITY_SOURCES
+    ):
+        return False
+    claimed_name = _company_name(company.get("company_name"))
+    claimed_domain = _canonical_domain(company.get("company_website"))
+    claimed_linkedin_slug = _linkedin_slug(company.get("company_linkedin"))
+    if (
+        not claimed_name
+        or not claimed_domain
+        or not claimed_linkedin_slug
+        or receipt.get("submitted_name") != claimed_name
+        or receipt.get("submitted_domain") != claimed_domain
+        or receipt.get("submitted_linkedin_slug") != claimed_linkedin_slug
+    ):
+        return False
+
+    raw_observed_name = receipt.get("observed_name")
+    raw_observed_domain = receipt.get("observed_domain")
+    raw_observed_linkedin_slug = receipt.get("observed_linkedin_slug")
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (
+            raw_observed_name,
+            raw_observed_domain,
+            raw_observed_linkedin_slug,
+        )
+    ):
+        return False
+    observed_name = _company_name(raw_observed_name)
+    observed_domain = _canonical_domain(raw_observed_domain)
+    observed_linkedin_slug = _linkedin_slug(
+        "https://www.linkedin.com/company/"
+        f"{raw_observed_linkedin_slug}"
+    )
+    if (
+        raw_observed_name != observed_name
+        or raw_observed_domain != observed_domain
+        or raw_observed_linkedin_slug != observed_linkedin_slug
+    ):
+        return False
+
+    evaluated = evaluate_company_identity(
+        submitted_name=company.get("company_name"),
+        submitted_website=company.get("company_website"),
+        submitted_linkedin=company.get("company_linkedin"),
+        observed_name=observed_name,
+        observed_website=f"https://{observed_domain}",
+        observed_linkedin=(
+            "https://www.linkedin.com/company/"
+            f"{observed_linkedin_slug}"
+        ),
+        evidence_source=receipt.get("evidence_source"),
+        company_quality=True,
+    )
+    if evaluated.get("decision") == COMPANY_FIT_MATCH:
+        return True
+    if evaluated.get("reason_code") != "identity_name_alias_unresolved":
+        return False
+
+    raw_aliases = receipt.get("verified_legal_name_aliases")
+    if not isinstance(raw_aliases, list) or len(raw_aliases) > 3:
+        return False
+    return any(
+        isinstance(alias, str)
+        and bool(alias.strip())
+        and len(alias.strip()) <= 200
+        and _company_name(alias) == observed_name
+        for alias in raw_aliases
+    )
 
 
 class CompanyFitDecisionResult(tuple):

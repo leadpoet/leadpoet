@@ -88,6 +88,7 @@ POSTGREST_MIGRATIONS = DEFAULT_MIGRATIONS + (
     "227-lab-arena-champion-funding.sql",
     "228-lab-arena-hotkey-admission.sql",
     "229-lab-arena-successful-call-cost-eligibility.sql",
+    "230-lab-arena-successful-call-cost-permissions.sql",
 )
 
 _SHIM_SQL = """

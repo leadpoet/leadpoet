@@ -91,7 +91,7 @@ def _opener(
         "lab_arena_incentive_retirement_schema_v1": {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203},
         "lab_arena_successful_call_cost_schema_v1": {
             "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",
-            "version": 229,
+            "version": 230,
             "policy": "successful_calls_v1",
         },
     }
@@ -137,7 +137,7 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     assert result["status"] == "ready"
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
     assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 221
-    assert result["schema_capabilities"]["lab_arena_successful_call_cost_schema_v1"]["version"] == 229
+    assert result["schema_capabilities"]["lab_arena_successful_call_cost_schema_v1"]["version"] == 230
 
 
 def test_code_review_preflight_uses_only_the_scoped_arena_role():

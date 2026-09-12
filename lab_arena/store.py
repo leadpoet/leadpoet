@@ -728,7 +728,7 @@ class ArenaStore:
         )
         if (
             result.get("schema_version") != SUCCESSFUL_CALL_COST_SCHEMA_VERSION
-            or result.get("version") != 229
+            or result.get("version") != 230
             or result.get("policy") != "successful_calls_v1"
         ):
             raise ArenaStoreError("successful-call cost schema mismatch")

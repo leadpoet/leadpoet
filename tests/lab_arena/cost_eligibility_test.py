@@ -692,7 +692,7 @@ def _startup_service(cost_rpc_result):
         },
         successful_call_cost_schema=lambda: {
             "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",
-            "version": 229,
+            "version": 230,
             "policy": "successful_calls_v1",
         },
         _transport=transport,

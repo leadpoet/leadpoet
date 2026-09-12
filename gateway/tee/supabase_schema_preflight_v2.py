@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 CODE_REVIEW_MIGRATION = "scripts/207-lab-arena-code-review.sql"
 PARTICIPATION_MIGRATION = "scripts/216-lab-arena-validator-participation.sql"
 ORIGINAL_JUDGMENTS_MIGRATION = "scripts/221-lab-arena-participation-original-judgments.sql"
-SUCCESSFUL_CALL_COST_MIGRATION = "scripts/229-lab-arena-successful-call-cost-eligibility.sql"
+SUCCESSFUL_CALL_COST_MIGRATION = "scripts/230-lab-arena-successful-call-cost-permissions.sql"
 PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
@@ -54,7 +54,7 @@ SCHEMA_CAPABILITIES = (
     ("lab_arena_incentive_retirement_schema_v1", {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203}),
     ("lab_arena_successful_call_cost_schema_v1", {
         "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",
-        "version": 229,
+        "version": 230,
         "policy": "successful_calls_v1",
     }),
 )

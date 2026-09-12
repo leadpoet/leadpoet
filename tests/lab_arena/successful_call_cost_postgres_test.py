@@ -23,6 +23,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
 
 
 MIGRATION = "229-lab-arena-successful-call-cost-eligibility.sql"
+PERMISSIONS_MIGRATION = "230-lab-arena-successful-call-cost-permissions.sql"
 
 
 @pytest.fixture
@@ -173,8 +174,9 @@ def test_migration_replay_and_confirmation_helper_binding(database):
     migration = Path(__file__).resolve().parents[2] / "scripts" / MIGRATION
     try:
         with connection.cursor() as cursor:
-            cursor.execute(migration.read_text(encoding="utf-8"))
-            cursor.execute(migration.read_text(encoding="utf-8"))
+            for _ in range(2):
+                cursor.execute(migration.read_text(encoding="utf-8"))
+                cursor.execute((migration.parent / PERMISSIONS_MIGRATION).read_text())
             cursor.execute(
                 "SELECT public.lab_arena_successful_call_cost_schema_v1()"
             )
@@ -182,7 +184,7 @@ def test_migration_replay_and_confirmation_helper_binding(database):
                 "schema_version": (
                     "leadpoet.lab_arena.successful_call_cost_schema.v1"
                 ),
-                "version": 229,
+                "version": 230,
                 "policy": "successful_calls_v1",
             }
             cursor.execute(
@@ -197,7 +199,7 @@ def test_migration_replay_and_confirmation_helper_binding(database):
 
 
 def test_n_minus_one_old_round_cost_rpc_shape_is_unchanged():
-    migrations = tuple(name for name in POSTGREST_MIGRATIONS if name != MIGRATION)
+    migrations = tuple(name for name in POSTGREST_MIGRATIONS if name not in (MIGRATION, PERMISSIONS_MIGRATION))
     database = database_with_lab_arena_migration(migrations)
     connection = None
     try:
@@ -237,6 +239,7 @@ def test_n_minus_one_old_round_cost_rpc_shape_is_unchanged():
             before = cursor.fetchone()[0]
             migration = Path(__file__).resolve().parents[2] / "scripts" / MIGRATION
             cursor.execute(migration.read_text(encoding="utf-8"))
+            cursor.execute((migration.parent / PERMISSIONS_MIGRATION).read_text())
             cursor.execute(
                 "SELECT public.lab_arena_submission_costs(%s)",
                 (participants[0]["submission_id"],),
@@ -254,6 +257,69 @@ def test_n_minus_one_old_round_cost_rpc_shape_is_unchanged():
             "call_count",
         }
         contracts.validate_submission_costs(after)
+    finally:
+        if connection is not None:
+            connection.close()
+        database.close()
+
+
+def test_supabase_default_grants_cannot_expose_private_cost_functions():
+    migrations = tuple(
+        name for name in POSTGREST_MIGRATIONS
+        if name not in (MIGRATION, PERMISSIONS_MIGRATION)
+    )
+    database = database_with_lab_arena_migration(migrations)
+    connection = None
+    try:
+        psycopg2, dsn = next(database)
+        connection = psycopg2.connect(**dsn)
+        connection.autocommit = True
+        scripts = Path(__file__).resolve().parents[2] / "scripts"
+        with connection.cursor() as cursor:
+            # Match production's named default grants, absent from a fresh PG.
+            cursor.execute(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE "
+                "ON FUNCTIONS TO anon, authenticated, service_role"
+            )
+            cursor.execute((scripts / MIGRATION).read_text())
+            cursor.execute(
+                "SELECT has_function_privilege('anon', "
+                "'public.lab_arena__successful_call_cost_state(text,text,text)', 'execute')"
+            )
+            assert cursor.fetchone()[0] is True
+            for _ in range(2):
+                cursor.execute((scripts / PERMISSIONS_MIGRATION).read_text())
+            cursor.execute(
+                "SELECT p.oid, p.proname, role_name, "
+                "has_function_privilege(role_name,p.oid,'execute') "
+                "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "CROSS JOIN unnest(ARRAY['anon','authenticated','service_role',"
+                "'lab_arena_service','lab_arena_owner']) role_name "
+                "WHERE n.nspname='public' AND (p.proname LIKE 'lab_arena__successful_call%' "
+                "OR p.proname IN ('lab_arena_submission_costs','lab_arena_successful_call_cost_schema_v1'))"
+            )
+            rows = cursor.fetchall()
+            assert len(rows) == 30
+            for _, name, role, allowed in rows:
+                expected = role == 'lab_arena_owner' or (
+                    role == 'lab_arena_service' and name in (
+                        'lab_arena_submission_costs',
+                        'lab_arena_successful_call_cost_schema_v1',
+                    )
+                )
+                assert allowed is expected, (name, role)
+            cursor.execute("SET ROLE anon")
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "SELECT public.lab_arena__successful_call_cost_state(NULL,NULL,NULL)"
+                )
+            cursor.execute("RESET ROLE")
+            cursor.execute("SET ROLE lab_arena_service")
+            cursor.execute("SELECT public.lab_arena_successful_call_cost_schema_v1()")
+            assert cursor.fetchone()[0]['version'] == 230
+            cursor.execute("SELECT public.lab_arena_submission_costs('no-submission')")
+            assert cursor.fetchone()[0]['providers'] == []
+            cursor.execute("RESET ROLE")
     finally:
         if connection is not None:
             connection.close()

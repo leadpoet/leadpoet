@@ -121,6 +121,22 @@ class BrokerError(RuntimeError):
 class ProviderTransportError(RuntimeError):
     """The provider request failed at the transport layer (outcome unknown)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        openrouter_generation_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.openrouter_generation_id = (
+            openrouter_generation_id.strip()
+            if isinstance(openrouter_generation_id, str)
+            and _OPENROUTER_GENERATION_ID_RE.fullmatch(
+                openrouter_generation_id.strip()
+            )
+            else None
+        )
+
 
 # ---------------------------------------------------------------------------
 # OpenRouter price table (section 7.3)
@@ -506,11 +522,15 @@ class HttpxProviderTransport:
             or response_limit < 1
         ):
             raise ProviderTransportError("invalid response limit")
+        openrouter_generation_id: Optional[str] = None
         log_token = _PROVIDER_HTTP_IN_FLIGHT.set(True)
         try:
             with self._client.stream(method, url, headers=dict(headers), content=body, timeout=httpx.Timeout(float(timeout_seconds))) as response:
                 status = int(response.status_code)
                 response_headers = {k.lower(): v for k, v in response.headers.items()}
+                _, openrouter_generation_id = _openrouter_generation_identity(
+                    None, response_headers
+                )
                 content = bytearray()
                 oversized = False
                 for chunk in response.iter_bytes(chunk_size=64 * 1024):
@@ -519,7 +539,10 @@ class HttpxProviderTransport:
                         break
                     content.extend(chunk)
         except httpx.HTTPError as exc:
-            raise ProviderTransportError(type(exc).__name__) from exc
+            raise ProviderTransportError(
+                type(exc).__name__,
+                openrouter_generation_id=openrouter_generation_id,
+            ) from exc
         finally:
             _PROVIDER_HTTP_IN_FLIGHT.reset(log_token)
         if 300 <= status < 400:
@@ -1816,11 +1839,36 @@ class Broker:
                                 + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
                             ),
                         )
-            except ProviderTransportError:
+            except ProviderTransportError as exc:
                 # Outcome unknown after send: consume the full reservation.
+                uncertain_doc: Dict[str, Any] = {"reason": "transport_failure"}
+                if (
+                    effective_operation.provider == "openrouter"
+                    and exc.openrouter_generation_id is not None
+                    and openrouter_credential_fingerprint is not None
+                    and not _response_contains_credential(
+                        ProviderResponse(
+                            0,
+                            {
+                                _OPENROUTER_GENERATION_HEADER: (
+                                    exc.openrouter_generation_id
+                                )
+                            },
+                            b"",
+                        ),
+                        secret,
+                    )
+                ):
+                    uncertain_doc = _missing_provider_cost_call_doc(
+                        ProviderResponse(0, {}, b""),
+                        None,
+                        openrouter_generation_id=exc.openrouter_generation_id,
+                        credential_fingerprint=openrouter_credential_fingerprint,
+                    )
+                    uncertain_doc["transport_failure"] = True
                 result = self._store.mark_uncertain(
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                    call_doc={"reason": "transport_failure"}, lease_ttl_seconds=self._lease_ttl_seconds,
+                    call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount})
                 return _error_result("provider_unavailable", summary)

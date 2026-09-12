@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: Pydantic reliability recovery
+
+On 2026-09-12 the user explicitly authorized the overnight validation skills
+to repair the cancelled Pydantic competition flow and prove an unmodified
+Pydantic submission through complete, cost-eligible production scoring and
+publication. This covers protected production and provider inspection,
+credentials, Supabase, narrow code changes and committed migrations, pushes,
+safe merges, canonical gateway/normal-validator restarts, and guarded recovery.
+Preserve submitted source, accepted work, legitimate and uncertain costs,
+frozen scoring rules, disclosure, promotion, rewards, weights, sandbox
+protections and concurrent work. Do not force eligibility or restore retired
+Research Lab, auditor, SOURCE_ADD or Nitro machinery. This scope expires when
+the reliability recovery and complete live Pydantic validation are finished.
+
 ## Scoped production authorization: September 12 miner submission recovery
 
 On 2026-09-11 the user explicitly authorized investigation and narrow repair of

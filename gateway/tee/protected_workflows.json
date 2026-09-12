@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "5c064e9fb3379310f76c37ec844b3068edbeb535",
+  "baseline_commit": "0de8befcf382723809c31b1035742588dee0f309",
   "entries": [
     {
       "ast_sha256": "sha256:3b0e06adab3d4d8093d2686426273807fdfc79b86bd9f0f1e9a90dc57930ae8d",
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:9955dab5acb9c2d222eea5aefd55c9de6800e0153a5923ccdb75ff75e9a51417",
-  "protected_source_commit": "5c064e9fb3379310f76c37ec844b3068edbeb535",
+  "manifest_hash": "sha256:6489d266a2e1858e1cfef911f4d16c4871d8d3b135fe94ceb457221e5d1acc23",
+  "protected_source_commit": "0de8befcf382723809c31b1035742588dee0f309",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

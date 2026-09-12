@@ -75,6 +75,10 @@ def _opener(
         service_role_paths.pop(f"/rpc/{missing}", None)
         arena_paths.pop(f"/rpc/{missing}", None)
     capabilities = {
+        "lab_arena_participation_schema_v1": {
+            "schema_version": "leadpoet.lab_arena.participation_schema.v1",
+            "version": 218,
+        },
         "lab_arena_code_review_schema_v1": {
             "schema_version": "leadpoet.lab_arena.code_review.v1",
             "version": 207,
@@ -97,6 +101,7 @@ def _opener(
             path.endswith("/lab_arena_submissions")
             or path.endswith("/lab_arena_runs")
             or path.endswith("/rpc/lab_arena_code_review_schema_v1")
+            or path.endswith("/rpc/lab_arena_participation_schema_v1")
         )
         if enforce_role_separation and private_review and not arena_authority:
             raise HTTPError(request.full_url, 403, "private", {}, None)
@@ -125,6 +130,7 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     )
     assert result["status"] == "ready"
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
+    assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 218
 
 
 def test_code_review_preflight_uses_only_the_scoped_arena_role():
@@ -170,6 +176,7 @@ def test_preflight_accepts_current_schema_without_retired_host_receipt_storage()
     "research_lab_stateful_subnet_epoch_cutover_public_state_v1",
     "lab_arena_publish_weight_state_v1",
     "lab_arena_has_recent_participation_v1",
+    "lab_arena_participation_schema_v1",
     "lab_arena_runs",
 ])
 def test_preflight_still_requires_active_scoring_epoch_and_arena_dependencies(missing):
@@ -177,6 +184,14 @@ def test_preflight_still_requires_active_scoring_epoch_and_arena_dependencies(mi
         verify_required_supabase_v2_schema(
             _environment(),
             opener=_opener(missing=missing),
+        )
+
+
+def test_preflight_rejects_participation_schema_before_original_judgment_fix():
+    with pytest.raises(SupabaseSchemaPreflightV2Error, match="participation_schema_v1 capability differs"):
+        verify_required_supabase_v2_schema(
+            _environment(),
+            opener=_opener(bad_capability="lab_arena_participation_schema_v1"),
         )
 
 

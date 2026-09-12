@@ -33,6 +33,7 @@ python3.11 -m pytest -q \
   tests/lab_arena/test_validator_stake_flow.py \
   tests/lab_arena/test_validator_participation.py \
   tests/lab_arena/test_validator_participation_postgres.py \
+  tests/lab_arena/participation_original_judgments_postgres_test.py \
   tests/lab_arena/judgment_cache_postgres_test.py \
   tests/test_supabase_schema_preflight_v2.py \
   tests/lab_arena/test_lab_arena_store.py \
@@ -67,8 +68,9 @@ The gate must prove:
   prevent the current epoch from progressing.
 - Scoring setup/cycle failures and claim denials do not stop the weight loop.
   Above 75,000 effective stake, new weight state requires an original accepted
-  job within 24 hours; no idle exemption applies. Denial pauses new signing but
-  preserves signed recovery and pending reveals. New
+  job within 24 hours; no idle exemption applies. Score jobs made entirely from
+  company-judgment cache hits earn no credit. Denial pauses new signing;
+  signed recovery and pending reveals remain available. New
   mainnet execute/score claims use the shared gateway scoring rule: registration, a
   validator permit, and effective stake >=75,000, regardless of activity or
   runner lists. Testnet retains its active-or-permitted policy without the

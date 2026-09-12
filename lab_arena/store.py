@@ -55,6 +55,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     ),
     "lab_arena_schema_version_v1": (),
     "lab_arena_code_review_schema_v1": (),
+    "lab_arena_participation_schema_v1": (),
     "lab_arena_validator_scoring_authority_schema_v1": (),
     "lab_arena_integrity_schema_v1": (),
     "lab_arena_contact_schema_v1": (),

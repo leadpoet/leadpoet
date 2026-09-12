@@ -148,6 +148,9 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
         if function == "lab_arena_code_review_schema_v1":
             assert harness.transport.rpc(function, params)["version"] == 207
             continue
+        if function == "lab_arena_participation_schema_v1":
+            assert harness.transport.rpc(function, params)["version"] == 218
+            continue
         if function == "lab_arena_integrity_schema_v1":
             assert harness.transport.rpc(function, params)["version"] == 213
             continue

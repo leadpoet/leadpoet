@@ -398,6 +398,13 @@ for 24 hours before activating this gateway change. Do not backfill from
 `updated_at` or historical results: those are not trustworthy completion times.
 The gateway schema preflight requires the new column and lookup RPC.
 
+Before activating participation enforcement, also apply
+`scripts/218-lab-arena-participation-original-judgments.sql` after migration 217.
+It excludes score jobs made entirely from accepted company-judgment cache hits.
+A score job that supplies at least one new judgment can still count. Existing
+acceptance timestamps and scoring results are not rewritten.
+The existing gateway schema preflight requires this migration before restart.
+
 Ensure validators can claim enough jobs before activation. This minimum-work
 policy keeps the existing scheduler; it does not guarantee a job to every
 validator. With no accepted job for 24 hours, access stops even on an empty

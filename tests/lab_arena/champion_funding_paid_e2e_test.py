@@ -332,6 +332,8 @@ class OpenRouterChildKey:
             timeout_seconds=30,
             max_response_bytes=1_048_576,
         )
+        if method == "DELETE" and response.status == 404:
+            return {}  # A lost deletion acknowledgement is safe to retry.
         if response.status < 200 or response.status >= 300:
             raise AssertionError(
                 "OpenRouter child-key request failed with HTTP %d" % response.status
@@ -414,7 +416,14 @@ class OpenRouterChildKey:
     def delete(self) -> None:
         if self.key_hash:
             try:
-                self._request("DELETE", "/" + self.key_hash)
+                for attempt in range(2):
+                    try:
+                        self._request("DELETE", "/" + self.key_hash)
+                        return
+                    except Exception:
+                        if attempt:
+                            raise
+                        time.sleep(1)
             finally:
                 self.runtime_key = ""
 

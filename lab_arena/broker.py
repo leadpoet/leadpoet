@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 import contextvars
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -83,7 +85,9 @@ _DEEPLINE_BILLING_MAX_ATTEMPTS = 24
 _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
+OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _OPENROUTER_GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+_CREDENTIAL_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
 # The requested Scrapingdog-compatible response keeps its existing 2 MiB cap.
 _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
@@ -314,6 +318,8 @@ def _missing_provider_cost_call_doc(
     *,
     deepline_request_id: Optional[str] = None,
     deepline_operation: Optional[str] = None,
+    openrouter_generation_id: Optional[str] = None,
+    credential_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return bounded structural diagnostics without provider content."""
 
@@ -339,6 +345,20 @@ def _missing_provider_cost_call_doc(
             {
                 "deepline_job_id": deepline_request_id,
                 "deepline_operation": deepline_operation,
+            }
+        )
+    if (
+        openrouter_generation_id is not None
+        and credential_fingerprint is not None
+        and _OPENROUTER_GENERATION_ID_RE.fullmatch(openrouter_generation_id)
+        and _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint)
+    ):
+        # These fields stay in the service-only ledger. They bind a later
+        # exact generation lookup to the credential that sent the paid call.
+        diagnostics.update(
+            {
+                "openrouter_generation_id": openrouter_generation_id,
+                "credential_fingerprint": credential_fingerprint,
             }
         )
     if response.internal_provenance in (
@@ -367,6 +387,12 @@ def inject_credential(outbound: operations.OutboundRequest, secret: str) -> Tupl
         separator = "&" if "?" in outbound.url else "?"
         return outbound.url + separator + "%s=%s" % (placement.name, urlrequest.quote(secret, safe="")), headers
     raise BrokerError("broker_unavailable")
+
+
+def _credential_fingerprint(secret: str) -> str:
+    """Return an internal stable binding without retaining the credential."""
+
+    return "sha256:" + hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -647,12 +673,6 @@ def _openrouter_generation_readback(
         reconciliation_deadline,
         time.monotonic() + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
     )
-    headers = {
-        "accept": "application/json",
-        "authorization": "Bearer " + secret,
-        "user-agent": "leadpoet-lab-arena-broker/1",
-    }
-    url = OPENROUTER_GENERATION_URL + quote(generation_id, safe="")
     for attempt in range(_OPENROUTER_BILLING_MAX_ATTEMPTS):
         now = time.monotonic()
         if now >= readback_deadline:
@@ -668,32 +688,69 @@ def _openrouter_generation_readback(
             now = time.monotonic()
             if now >= readback_deadline:
                 break
-        try:
-            response = transport.send(
-                method="GET",
-                url=url,
-                headers=headers,
-                body=b"",
-                timeout_seconds=max(0.001, readback_deadline - now),
-            )
-        except ProviderTransportError:
-            continue
-        if _response_contains_credential(response, secret):
-            return None
-        if response.status in (401, 403):
-            return None
-        if response.status != 200:
-            continue
-        try:
-            document = json.loads(response.body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            return None
-        cost = provider_costs.openrouter_generation_cost(
-            document, generation_id=generation_id
+        state, cost = _openrouter_generation_readback_once(
+            transport=transport,
+            secret=secret,
+            generation_id=generation_id,
+            timeout_seconds=min(
+                operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
+                max(0.001, readback_deadline - now),
+            ),
         )
+        if state == "retry":
+            continue
         if cost is not None:
             return cost
+        if state == "terminal":
+            return None
     return None
+
+
+def _openrouter_generation_readback_once(
+    *,
+    transport: ProviderTransport,
+    secret: str,
+    generation_id: str,
+    timeout_seconds: float,
+) -> Tuple[str, Optional[provider_costs.ProviderCost]]:
+    """Read one exact generation once; never send another paid request."""
+
+    if (
+        _OPENROUTER_GENERATION_ID_RE.fullmatch(generation_id) is None
+        or not 0 < float(timeout_seconds)
+        <= operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+    ):
+        return "terminal", None
+    headers = {
+        "accept": "application/json",
+        "authorization": "Bearer " + secret,
+        "user-agent": "leadpoet-lab-arena-broker/1",
+    }
+    url = OPENROUTER_GENERATION_URL + quote(generation_id, safe="")
+    try:
+        response = transport.send(
+            method="GET",
+            url=url,
+            headers=headers,
+            body=b"",
+            timeout_seconds=float(timeout_seconds),
+        )
+    except ProviderTransportError:
+        return "retry", None
+    if _response_contains_credential(response, secret):
+        return "terminal", None
+    if response.status in (401, 403):
+        return "terminal", None
+    if response.status != 200:
+        return "retry", None
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "terminal", None
+    cost = provider_costs.openrouter_generation_cost(
+        document, generation_id=generation_id
+    )
+    return ("found", cost) if cost is not None else ("retry", None)
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +798,8 @@ class CallStore(Protocol):
     def settle_call(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def mark_uncertain(self, **kwargs: Any) -> Dict[str, Any]: ...
+
+    def reconcile_openrouter_cost(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
 
@@ -930,6 +989,106 @@ class Broker:
         normalized = openrouter_normalized(parameters)
         return normalized, int(normalized["max_tokens"])
 
+    def reconcile_openrouter_cost(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        timeout_seconds: float = OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        """Settle one retained exact generation without repeating its POST."""
+
+        required = {
+            "uncertain_entry_id",
+            "round_id",
+            "run_id",
+            "submission_id",
+            "miner_hotkey",
+            "assignment_id",
+            "stage",
+            "icp_position",
+            "attempt",
+            "kind",
+            "call_identity",
+            "generation_id",
+            "credential_fingerprint",
+            "funding_source",
+            "run_status",
+            "lease_expires_at",
+        }
+        if not isinstance(candidate, Mapping) or set(candidate) != required:
+            return {"status": "invalid"}
+        generation_id = candidate.get("generation_id")
+        credential_fingerprint = candidate.get("credential_fingerprint")
+        if (
+            not isinstance(generation_id, str)
+            or _OPENROUTER_GENERATION_ID_RE.fullmatch(generation_id) is None
+            or not isinstance(credential_fingerprint, str)
+            or _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint) is None
+            or isinstance(candidate.get("uncertain_entry_id"), bool)
+            or not isinstance(candidate.get("uncertain_entry_id"), int)
+            or int(candidate["uncertain_entry_id"]) < 1
+            or candidate.get("kind") not in ("execute", "score")
+            or candidate.get("funding_source") not in ("host", "miner_key")
+            or not 0 < float(timeout_seconds) <= OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
+        ):
+            return {"status": "invalid"}
+        try:
+            context = RunContext(
+                run_id=str(candidate["run_id"]),
+                assignment_id=str(candidate["assignment_id"]),
+                icp_position=int(candidate["icp_position"]),
+                lease_token_hash="",
+                miner_hotkey=str(candidate["miner_hotkey"]),
+                submission_id=str(candidate["submission_id"]),
+                stage=int(candidate["stage"]),
+                kind=str(candidate["kind"]),
+                attempt=int(candidate["attempt"]),
+                round_id=str(candidate["round_id"]),
+            )
+            funding_source = (
+                self._funding_source_for(context)
+                if self._funding_source_for
+                else "host"
+            )
+            secret = (
+                self._credential_for(context, "openrouter")
+                if self._credential_for
+                else self._key_for("openrouter")
+            )
+            if (
+                not isinstance(secret, str)
+                or not secret
+                or funding_source != candidate["funding_source"]
+                or not hmac.compare_digest(
+                    _credential_fingerprint(secret), credential_fingerprint
+                )
+            ):
+                return {"status": "credential_mismatch"}
+            state, cost = _openrouter_generation_readback_once(
+                transport=self._transport,
+                secret=secret,
+                generation_id=generation_id,
+                timeout_seconds=float(timeout_seconds),
+            )
+        except (BrokerError, KeyError, TypeError, ValueError):
+            return {"status": "unavailable"}
+        finally:
+            if "secret" in locals():
+                secret = ""
+                del secret
+        if cost is None:
+            return {"status": "pending" if state == "retry" else "unavailable"}
+        return self._store.reconcile_openrouter_cost(
+            round_id=str(candidate["round_id"]),
+            run_id=str(candidate["run_id"]),
+            call_identity=str(candidate["call_identity"]),
+            uncertain_entry_id=int(candidate["uncertain_entry_id"]),
+            generation_id=generation_id,
+            credential_fingerprint=credential_fingerprint,
+            actual_microusd=cost.microusd,
+            cost_units=format(cost.units, "f"),
+        )
+
     # -- execution ------------------------------------------------------------
 
     def execute(
@@ -975,6 +1134,11 @@ class Broker:
             if not isinstance(exc, BrokerError):
                 exc = BrokerError("broker_unavailable")
             return _error_result(exc.code, {"operation_id": operation_id, "funding_source": funding_source})
+        openrouter_credential_fingerprint = (
+            _credential_fingerprint(secret)
+            if effective_operation.provider == "openrouter"
+            else None
+        )
         max_output_tokens = 0
         reservation_cost: Optional[provider_costs.ProviderCost] = None
         reserve_remaining_budget = False
@@ -1346,6 +1510,8 @@ class Broker:
                         raw_document,
                         deepline_request_id=deepline_request_id,
                         deepline_operation=deepline_operation,
+                        openrouter_generation_id=openrouter_generation_id,
+                        credential_fingerprint=openrouter_credential_fingerprint,
                     ),
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )

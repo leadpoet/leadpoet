@@ -115,6 +115,22 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_mark_dispatched": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text")),
     "lab_arena_settle_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_actual_microusd", "bigint"), ("p_terminal_response", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_mark_uncertain": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
+    "lab_arena_list_openrouter_cost_reconciliations_v1": (
+        ("p_round_id", "text"),
+        ("p_run_id", "text"),
+        ("p_after_entry_id", "bigint"),
+        ("p_limit", "integer"),
+    ),
+    "lab_arena_reconcile_openrouter_cost_v1": (
+        ("p_round_id", "text"),
+        ("p_run_id", "text"),
+        ("p_call_identity", "text"),
+        ("p_uncertain_entry_id", "bigint"),
+        ("p_generation_id", "text"),
+        ("p_credential_fingerprint", "text"),
+        ("p_actual_microusd", "bigint"),
+        ("p_cost_units", "text"),
+    ),
     "lab_arena_complete_attempt": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_result", "jsonb"), ("p_terminal_cause", "text"), ("p_output_ref", "text")),
     "lab_arena_complete_attempt_v2": (
         ("p_run_id", "text"),
@@ -1175,6 +1191,62 @@ class ArenaStore:
                 },
             ),
             "mark_uncertain",
+        )
+
+    def list_openrouter_cost_reconciliations(
+        self,
+        round_id: str,
+        *,
+        run_id: str = "",
+        after_entry_id: int = 0,
+        limit: int = 1,
+    ) -> List[Dict[str, Any]]:
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_list_openrouter_cost_reconciliations_v1",
+                {
+                    "p_round_id": str(round_id),
+                    "p_run_id": str(run_id),
+                    "p_after_entry_id": int(after_entry_id),
+                    "p_limit": int(limit),
+                },
+            ),
+            "list_openrouter_cost_reconciliations",
+        )
+        if result.get("status") != "ok" or not isinstance(result.get("items"), list):
+            raise ArenaStoreError("openrouter cost reconciliation list is malformed")
+        return [
+            _require_mapping(item, "openrouter cost reconciliation item")
+            for item in result["items"]
+        ]
+
+    def reconcile_openrouter_cost(
+        self,
+        *,
+        round_id: str,
+        run_id: str,
+        call_identity: str,
+        uncertain_entry_id: int,
+        generation_id: str,
+        credential_fingerprint: str,
+        actual_microusd: int,
+        cost_units: str,
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_reconcile_openrouter_cost_v1",
+                {
+                    "p_round_id": str(round_id),
+                    "p_run_id": str(run_id),
+                    "p_call_identity": str(call_identity),
+                    "p_uncertain_entry_id": int(uncertain_entry_id),
+                    "p_generation_id": str(generation_id),
+                    "p_credential_fingerprint": str(credential_fingerprint),
+                    "p_actual_microusd": int(actual_microusd),
+                    "p_cost_units": str(cost_units),
+                },
+            ),
+            "reconcile_openrouter_cost",
         )
 
     def complete_attempt(

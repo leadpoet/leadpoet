@@ -178,6 +178,7 @@ def test_exa_contents_request_is_uncached_and_bound_to_returned_url(monkeypatch)
         "ids": ["https://www.linkedin.com/company/acme"],
         "text": {"maxCharacters": 4000},
         "maxAgeHours": 0,
+        "livecrawlTimeout": 20000,
     }
     assert calls[0][1]["headers"]["x-api-key"] == "test-exa-key"
 
@@ -258,6 +259,8 @@ def test_invalid_requested_profile_url_never_calls_exa(monkeypatch):
     ],
 )
 def test_exa_contents_envelope_or_source_failure_is_unavailable(monkeypatch, body):
+    calls = []
+
     class Response:
         status = 200
 
@@ -280,7 +283,8 @@ def test_exa_contents_envelope_or_source_failure_is_unavailable(monkeypatch, bod
         async def __aexit__(self, *_args):
             return None
 
-        def post(self, *_args, **_kwargs):
+        def post(self, *_args, **kwargs):
+            calls.append(kwargs["json"])
             return Response()
 
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
@@ -291,6 +295,12 @@ def test_exa_contents_envelope_or_source_failure_is_unavailable(monkeypatch, bod
             "https://linkedin.com/company/acme"
         )
     ) is None
+    assert calls == [{
+        "ids": ["https://linkedin.com/company/acme"],
+        "text": {"maxCharacters": 4000},
+        "maxAgeHours": 0,
+        "livecrawlTimeout": 20000,
+    }]
 
 
 def test_successful_exact_profile_without_company_size_is_insufficient(

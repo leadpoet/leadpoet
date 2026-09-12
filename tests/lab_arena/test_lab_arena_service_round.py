@@ -38,7 +38,10 @@ from lab_arena.store import (
 )
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena.icp_fixtures import daily_icps
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import (
+    DEFAULT_MIGRATIONS,
+    database_with_lab_arena_migration,
+)
 
 KEYS: Dict[str, Keypair] = {}
 # Miners' own provider keys, injected by the fake broker: none may ever reach a row, object, event, or bundle.
@@ -481,7 +484,13 @@ class FixtureObjectStore(svc.LocalObjectStore):
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration()
+    yield from database_with_lab_arena_migration(
+        DEFAULT_MIGRATIONS
+        + (
+            "223-lab-arena-cancelled-call-late-settlement.sql",
+            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+        )
+    )
 
 
 @pytest.fixture(scope="module")

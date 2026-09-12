@@ -317,8 +317,8 @@ def test_supabase_default_grants_cannot_expose_private_cost_functions():
             cursor.execute("SET ROLE lab_arena_service")
             cursor.execute("SELECT public.lab_arena_successful_call_cost_schema_v1()")
             assert cursor.fetchone()[0]['version'] == 230
-            cursor.execute("SELECT public.lab_arena_submission_costs('no-submission')")
-            assert cursor.fetchone()[0]['providers'] == []
+            with pytest.raises(psycopg2.errors.NoDataFound, match='lab_arena_submission_missing'):
+                cursor.execute("SELECT public.lab_arena_submission_costs('no-submission')")
             cursor.execute("RESET ROLE")
     finally:
         if connection is not None:

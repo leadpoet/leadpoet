@@ -126,6 +126,43 @@ class FakeLedgerStore:
             call["uncertain_doc"] = dict(call_doc)
             return {"status": "uncertain", "idempotent": False, "amount_microusd": call["amount"]}
 
+    def reconcile_openrouter_cost(
+        self,
+        *,
+        round_id,
+        run_id,
+        call_identity,
+        uncertain_entry_id,
+        generation_id,
+        credential_fingerprint,
+        actual_microusd,
+        cost_units,
+    ):
+        with self.lock:
+            self.log.append("reconcile")
+            call = self.calls[call_identity]
+            if call["kind"] == "settlement":
+                return {
+                    "status": "settled",
+                    "idempotent": True,
+                    "actual_microusd": call["actual"],
+                }
+            assert call["kind"] == "uncertain"
+            assert call["uncertain_doc"]["openrouter_generation_id"] == generation_id
+            assert call["uncertain_doc"]["credential_fingerprint"] == credential_fingerprint
+            call.update(
+                {
+                    "kind": "settlement",
+                    "actual": actual_microusd,
+                    "cost_units": cost_units,
+                }
+            )
+            return {
+                "status": "settled",
+                "idempotent": False,
+                "actual_microusd": actual_microusd,
+            }
+
 class FakeTransport:
     def __init__(self, responses=None, *, fail=False):
         self.responses = list(responses or [])
@@ -981,6 +1018,121 @@ def test_openrouter_generation_conflict_or_failed_readback_stays_uncertain(respo
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
     assert store.log == ["reserve", "dispatch", "uncertain"]
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    if len(responses) == 1:
+        assert "openrouter_generation_id" not in diagnostic
+        assert "credential_fingerprint" not in diagnostic
+    else:
+        assert diagnostic["openrouter_generation_id"] == "gen-readback-fails"
+        assert diagnostic["credential_fingerprint"] == br._credential_fingerprint(KEY)
+
+
+@pytest.mark.parametrize("exact_cost", ("0", "0.001234", "1.25"))
+def test_delayed_exact_generation_settles_after_restart_without_second_post(
+    monkeypatch, exact_cost
+):
+    generation_id = "gen-delayed-after-inline-window"
+    error = {"error": {"code": 502, "message": "Provider returned an error"}}
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    first_broker, store, first_transport = make_broker(
+        transport=FakeTransport(
+            [(502, error, {"X-Generation-Id": generation_id})]
+        )
+    )
+
+    first = first_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+    diagnostic = store.calls[first.call["call_identity"]]["uncertain_doc"]
+    candidate = {
+        "uncertain_entry_id": 1,
+        "round_id": "arena-2026-09-02",
+        "run_id": CONTEXT.run_id,
+        "submission_id": CONTEXT.submission_id,
+        "miner_hotkey": CONTEXT.miner_hotkey,
+        "assignment_id": CONTEXT.assignment_id,
+        "stage": CONTEXT.stage,
+        "icp_position": CONTEXT.icp_position,
+        "attempt": CONTEXT.attempt,
+        "kind": CONTEXT.kind,
+        "call_identity": first.call["call_identity"],
+        "generation_id": diagnostic["openrouter_generation_id"],
+        "credential_fingerprint": diagnostic["credential_fingerprint"],
+        "funding_source": "host",
+        "run_status": "leased",
+        "lease_expires_at": "2026-09-02T01:20:00Z",
+    }
+    second_transport = FakeTransport(
+        [
+            (
+                200,
+                {
+                    "data": {
+                        "id": generation_id,
+                        "total_cost": exact_cost,
+                        "usage": exact_cost,
+                    }
+                },
+            )
+        ]
+    )
+    restarted_broker, _same_store, _ = make_broker(
+        store=store, transport=second_transport
+    )
+
+    reconciled = restarted_broker.reconcile_openrouter_cost(candidate)
+
+    assert first.call["outcome"] == "uncertain"
+    assert [request["method"] for request in first_transport.sent] == ["POST"]
+    assert [request["method"] for request in second_transport.sent] == ["GET"]
+    assert reconciled["status"] == "settled"
+    assert store.calls[first.call["call_identity"]]["actual"] == (
+        br.provider_costs.openrouter_generation_cost(
+            {
+                "data": {
+                    "id": generation_id,
+                    "total_cost": exact_cost,
+                    "usage": exact_cost,
+                }
+            },
+            generation_id=generation_id,
+        ).microusd
+    )
+
+
+def test_delayed_generation_requires_the_original_credential_without_a_get():
+    store = FakeLedgerStore()
+    transport = FakeTransport()
+    broker, _store, _ = make_broker(store=store, transport=transport)
+    candidate = {
+        "uncertain_entry_id": 1,
+        "round_id": "arena-2026-09-02",
+        "run_id": CONTEXT.run_id,
+        "submission_id": CONTEXT.submission_id,
+        "miner_hotkey": CONTEXT.miner_hotkey,
+        "assignment_id": CONTEXT.assignment_id,
+        "stage": CONTEXT.stage,
+        "icp_position": CONTEXT.icp_position,
+        "attempt": CONTEXT.attempt,
+        "kind": CONTEXT.kind,
+        "call_identity": contracts.document_hash("call"),
+        "generation_id": "gen-other-key",
+        "credential_fingerprint": br._credential_fingerprint(
+            "sk-or-v1-" + "z" * 40
+        ),
+        "funding_source": "host",
+        "run_status": "leased",
+        "lease_expires_at": "2026-09-02T01:20:00Z",
+    }
+
+    assert broker.reconcile_openrouter_cost(candidate) == {
+        "status": "credential_mismatch"
+    }
+    assert transport.sent == []
 
 
 def test_openrouter_http_200_error_finished_choice_is_normalized():

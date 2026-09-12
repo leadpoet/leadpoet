@@ -762,7 +762,11 @@ class ArenaService:
                 "stage_3_scoring_close": _iso(confirmation_scoring_close),
                 "publication_deadline": _iso(confirmation_scoring_close + timedelta(seconds=1)),
             })
-        if defaults.contacts_from is not None and _parse_iso(document["schedule"]["submission_open"]) >= _parse_iso(defaults.contacts_from):
+        if (
+            defaults.contacts_from is not None
+            and _parse_iso(document["schedule"]["submission_open"])
+            >= datetime.fromisoformat(defaults.contacts_from.replace("Z", "+00:00"))
+        ):
             if not integrity.enabled(document):
                 raise ServiceError("contact_policy_requires_integrity", 503)
             self._require_contact_schema()

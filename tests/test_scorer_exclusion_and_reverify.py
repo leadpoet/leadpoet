@@ -707,6 +707,15 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             "Acme shares are publicly traded on Nasdaq.",
             COMPANY_FIT_MISMATCH,
         ),
+        (
+            "Series A",
+            "Series A",
+            True,
+            "Today we're announcing our $20M Series A, led by Sequoia Capital "
+            "with participation from Sound Ventures, Permanent Capital, "
+            "Conviction, and Greenoaks.",
+            COMPANY_FIT_MATCH,
+        ),
     ],
 )
 def test_stage_decision_requires_category_specific_proof(
@@ -813,6 +822,16 @@ def test_stage_decision_requires_category_specific_proof(
             "Series A",
             True,
             "Acme provides technology for Series A funding rounds.",
+        ),
+        (
+            "Series A",
+            True,
+            "Day.ai will be announcing its $20M Series A next month.",
+        ),
+        (
+            "Series A",
+            True,
+            "Day.ai plans to announce its $20M Series A next month.",
         ),
     ],
 )

@@ -98,8 +98,23 @@ def test_hook_rescues_all_fabricated(monkeypatch):
                  "excerpt": "TestCo raised a round",
                  "published_date": "2026-07-02"}]
 
-    async def fake_rescore(candidate, icp_arg, *, integrity_policy=False):
+    receipt = {
+        "decision": "match",
+        "evidence_source": "company_web_reverification",
+        "observed_name": "testco",
+        "observed_domain": "testco.com",
+        "observed_linkedin_slug": "testco",
+    }
+
+    async def fake_rescore(
+        candidate,
+        icp_arg,
+        *,
+        integrity_policy=False,
+        verified_company_identity=None,
+    ):
         assert integrity_policy is False
+        assert verified_company_identity == receipt
         assert candidate.intent_signals[0].url == "https://testco.com/blog/round"
         return (60.0, 55.0, 0.9, 8, False, [{"raw": 60.0}])
 
@@ -108,7 +123,9 @@ def test_hook_rescues_all_fabricated(monkeypatch):
         lead_scorer, "score_company_competition_intent_signal", fake_rescore
     )
     out = asyncio.run(
-        lead_scorer._attempt_competition_evidence_repair(_company(), _icp())
+        lead_scorer._attempt_competition_evidence_repair(
+            _company(), _icp(), verified_company_identity=receipt
+        )
     )
     assert out is not None
     assert out[4] is False and out[1] == 55.0

@@ -16,6 +16,7 @@ from qualification.scoring.company_fit_decision import (
     company_fit_unavailable,
 )
 from qualification.scoring.competition import (
+    CompetitionCompanyScorer,
     competition_score_from_breakdowns,
     count_penalizable_false_positives,
     has_verified_primary_intent,
@@ -472,6 +473,143 @@ def test_unproven_structured_fit_scores_zero_without_arena_retry(
         arena_scoring.build_scorer_policy(),
     )
     assert row["per_icp_score"] == 0.0
+
+
+def test_day_present_progressive_series_a_scores_through_arena(monkeypatch):
+    company = _company().model_copy(update={
+        "company_name": "Day.ai",
+        "company_website": "https://day.ai",
+        "company_linkedin": "",
+        "industry": "Software",
+        "employee_count": "11-50",
+        "company_stage": "Series A",
+        "description": "AI-native CRM platform.",
+    })
+    competition_company = {
+        "company_name": company.company_name,
+        "company_website": company.company_website,
+        "company_linkedin": company.company_linkedin,
+        "industry": company.industry,
+        "employee_count": company.employee_count,
+        "company_stage": company.company_stage,
+        "country": company.country,
+        "state": company.state,
+        "fit_summary": "Day.ai matches the requested CRM software market.",
+        "fit_evidence_urls": ["https://day.ai/"],
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "Day.ai announced its $20M Series A.",
+            "date": "2025-10-22",
+            "why_now": "The financing supports continued company growth.",
+            "url": (
+                "https://www.day.ai/resources/"
+                "series-a-and-the-beginning-of-the-shift-in-crm"
+            ),
+            "snippet": (
+                "Today we're announcing our $20M Series A, led by Sequoia."
+            ),
+        }],
+    }
+    icp_model = _icp().model_copy(update={
+        "industry": "Software",
+        "sub_industry": "AI-native CRM platform",
+        "employee_count": "11-50",
+        "company_stage": "Series A",
+        "product_service": "CRM software",
+    })
+    verdict = _structured_fit_verdict_with_unproven("stage")
+    verdict.update(
+        observed_company_name="Day AI",
+        observed_company_website="https://day.ai/",
+        observed_company_linkedin="https://linkedin.com/company/day-ai",
+        observed_employee_count="11-50",
+        employee_size_evidence_url="https://yespress.io/day-ai",
+        employee_size_evidence_quote="The company is roughly 35 people.",
+        observed_industry="Software",
+        observed_subindustry="AI-native CRM platform",
+        industry_evidence_url="https://day.ai/",
+        industry_evidence_quote=(
+            "Day agents run your go-to-market around the clock and bring you "
+            "the finished work to review, in real time."
+        ),
+        observed_hq_country="United States",
+        observed_hq_state="Massachusetts",
+        geography_evidence_url="https://yespress.io/day-ai",
+        geography_evidence_quote=(
+            "Day.ai is a small company in Winchester, Massachusetts."
+        ),
+        observed_company_stage="Series A",
+        stage_matches=True,
+        stage_evidence_url=(
+            "https://www.day.ai/resources/"
+            "series-a-and-the-beginning-of-the-shift-in-crm"
+        ),
+        stage_evidence_quote=(
+            "Today we're announcing our $20M Series A, led by Sequoia "
+            "Capital with participation from Sound Ventures, Permanent "
+            "Capital, Conviction, and Greenoaks."
+        ),
+        reason="All requested fit dimensions are independently verified.",
+    )
+    provider_calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return verdict, ""
+
+    async def intent_score(*_args, **kwargs):
+        receipt = kwargs["verified_company_identity"]
+        assert kwargs["company_quality"] is False
+        assert receipt["observed_name"] == "dayai"
+        assert receipt["observed_domain"] == "day.ai"
+        return 54.0, 54.0, 1.0, 90, False, [
+            _verified_detail(after_decay=54.0)
+        ]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", provider
+    )
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", intent_score
+    )
+
+    scorer_calls = 0
+
+    adapter = CompetitionCompanyScorer()
+
+    async def scorer(companies, icp, is_reference_model):
+        nonlocal scorer_calls
+        scorer_calls += 1
+        return await adapter.score_with_breakdowns(
+            companies, icp, is_reference_model
+        )
+
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": "day-present-progressive-stage"},
+        icp=icp_model.model_dump(mode="json"),
+        companies=[competition_company],
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert scorer_calls == 1
+    assert provider_calls == ["lead_scorer_reverify"]
+    assert accepted[0]["final_score"] == 54.0
+    assert accepted[0]["intent_signals_detail"] == [
+        _verified_detail(after_decay=54.0)
+    ]
+    receipt = accepted[0]["verifier_gate_receipts"][0]
+    assert receipt["decision"] == "match"
+    assert receipt["company_fit_dimensions"]["stage"] == "match"
 
 
 def test_complete_unproven_industry_scores_zero_without_arena_retry(

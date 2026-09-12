@@ -41,6 +41,9 @@ The verifier preserves independently established company identity between
 homepage, fit and signal checks. Independently verified LinkedIn identity
 deduplicates companies across domains within one buyer request. Separate
 subsidiaries retain credit when their distinct identities are established.
+Verified LinkedIn aliases also deduplicate when the registrable domain, exact
+display name, and verified headquarters country and U.S. state agree. Differently
+named aliases remain ambiguous unless independent evidence joins their identity.
 The same company may still qualify for different buyer requests.
 
 ## Individual company judgments

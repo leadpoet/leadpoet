@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
+from leadpoet_verifier.identity.normalization import normalize_name
 from pydantic import ValidationError
 from qualification.competition_models import CompetitionCompany
 from qualification.employee_buckets import (
@@ -646,6 +647,25 @@ def company_quality_identity_verified(receipt: Any) -> bool:
         return False
 
 
+def _verified_domain_name_hq_key(
+    company: Mapping[str, Any], verified_domain: str
+) -> tuple[str, ...] | None:
+    """Identify an exact-name company alias without merging subsidiaries."""
+    from qualification.company_quality import canonical_us_state
+    from qualification.contact_models import normalize_country_code
+
+    name = normalize_name(str(company.get("company_name") or ""))
+    try:
+        country = normalize_country_code(company.get("country"))
+    except ValueError:
+        country = normalize_name(str(company.get("country") or ""))
+    state = canonical_us_state(company.get("state")) if country == "US" else ""
+    domain = str(verified_domain or "").strip().casefold()
+    if not name or not domain or not country:
+        return None
+    return ("verified_domain_name_hq", domain, name, country, state)
+
+
 def apply_company_judgment_context(
     companies: Sequence[Mapping[str, Any]],
     raw_breakdowns: Sequence[Mapping[str, Any]],
@@ -662,7 +682,7 @@ def apply_company_judgment_context(
     if len(companies) != len(raw_breakdowns):
         raise CompetitionScorerInputError("company judgments must cover every company")
     result = []
-    seen_linkedin: dict[str, tuple[str, int]] = {}
+    seen_identities: dict[tuple[str, ...], tuple[str, int]] = {}
     for index, (company, raw) in enumerate(zip(companies, raw_breakdowns)):
         if raw.get("bucket_skipped") is True:
             continue
@@ -680,16 +700,21 @@ def apply_company_judgment_context(
         qualified = bool(company_ready)
         if contacts_required:
             qualified = qualified and row.get("contact_qualified") is True
-        linkedin_key = (
-            f"linkedin:{identity.verified_linkedin_slug}"
-            if fit and identity.verified_linkedin_slug
-            else ""
-        )
-        prior = (
-            seen_linkedin.get(linkedin_key)
-            if company_ready and linkedin_key
-            else None
-        )
+        identity_keys: list[tuple[str, ...]] = []
+        if fit and identity.verified_linkedin_slug:
+            identity_keys.append(("linkedin", identity.verified_linkedin_slug))
+        if fit:
+            domain_name_hq_key = _verified_domain_name_hq_key(
+                claim, identity.registrable_domain
+            )
+            if domain_name_hq_key is not None:
+                identity_keys.append(domain_name_hq_key)
+        prior = None
+        if company_ready:
+            prior = next(
+                (seen_identities[key] for key in identity_keys if key in seen_identities),
+                None,
+            )
         duplicate = prior is not None
         qualified = bool(qualified and not duplicate)
         row.update(
@@ -712,8 +737,9 @@ def apply_company_judgment_context(
                 if not isinstance(item, Mapping) or item.get("gate") != "contact"
             ]
             _merge_contact_breakdown(row, _not_evaluated_contact(company))
-        if qualified and linkedin_key:
-            seen_linkedin[linkedin_key] = (identity.key, index)
+        if qualified:
+            for key in identity_keys:
+                seen_identities[key] = (identity.key, index)
         result.append(row)
     return result
 

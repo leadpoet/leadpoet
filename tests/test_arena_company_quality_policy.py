@@ -133,6 +133,73 @@ def test_distinct_verified_linkedin_entities_survive_weak_alias_collision():
     assert [row["duplicate_company"] for row in result] == [False, False]
 
 
+def test_verified_regional_linkedin_aliases_for_same_company_get_one_credit():
+    rows = [
+        company(company_linkedin="https://linkedin.com/company/acme-us"),
+        company(company_linkedin="https://linkedin.com/company/acme-west"),
+    ]
+    raw = [
+        _positive_breakdown("Acme", "acme.com", "acme-us"),
+        _positive_breakdown("Acme", "acme.com", "acme-west"),
+    ]
+
+    result = apply_company_judgment_context(rows, raw)
+
+    assert [row["final_score"] for row in result] == [60, 0]
+    assert [row["duplicate_company"] for row in result] == [False, True]
+    assert result[1]["duplicate_of_index"] == 0
+
+
+@pytest.mark.parametrize(
+    ("country", "state"),
+    [("Canada", "Ontario"), ("United States", "NY")],
+)
+def test_same_display_name_and_domain_at_distinct_verified_hqs_stay_distinct(
+    country, state
+):
+    rows = [
+        company(company_linkedin="https://linkedin.com/company/acme-us"),
+        company(
+            company_linkedin="https://linkedin.com/company/acme-ca",
+            country=country,
+            state=state,
+        ),
+    ]
+    raw = [
+        _positive_breakdown("Acme", "acme.com", "acme-us"),
+        _positive_breakdown("Acme", "acme.com", "acme-ca"),
+    ]
+
+    result = apply_company_judgment_context(rows, raw)
+
+    assert [row["final_score"] for row in result] == [60, 60]
+    assert [row["duplicate_company"] for row in result] == [False, False]
+
+
+def test_non_us_country_alias_and_optional_state_cannot_evade_alias_dedup():
+    rows = [
+        company(
+            company_linkedin="https://linkedin.com/company/acme-ca",
+            country="Canada",
+            state="Ontario",
+        ),
+        company(
+            company_linkedin="https://linkedin.com/company/acme-canada",
+            country="CA",
+            state="Quebec",
+        ),
+    ]
+    raw = [
+        _positive_breakdown("Acme", "acme.com", "acme-ca"),
+        _positive_breakdown("Acme", "acme.com", "acme-canada"),
+    ]
+
+    result = apply_company_judgment_context(rows, raw)
+
+    assert [row["final_score"] for row in result] == [60, 0]
+    assert [row["duplicate_company"] for row in result] == [False, True]
+
+
 def test_first_failed_intent_does_not_block_one_later_verified_duplicate():
     rows = [company(), company()]
     failed = _positive_breakdown("Acme", "acme.com", "acme")
@@ -144,6 +211,22 @@ def test_first_failed_intent_does_not_block_one_later_verified_duplicate():
 
     assert [row["final_score"] for row in result] == [0, 60]
     assert [row["company_qualified"] for row in result] == [False, True]
+    assert not any(row["duplicate_company"] for row in result)
+
+
+def test_failed_intent_does_not_reserve_verified_regional_alias():
+    rows = [
+        company(company_linkedin="https://linkedin.com/company/acme-us"),
+        company(company_linkedin="https://linkedin.com/company/acme-west"),
+    ]
+    failed = _positive_breakdown("Acme", "acme.com", "acme-us")
+    failed["intent_signals_detail"][0]["after_decay"] = 0
+    failed["final_score"] = 0
+    valid = _positive_breakdown("Acme", "acme.com", "acme-west")
+
+    result = apply_company_judgment_context(rows, [failed, valid])
+
+    assert [row["final_score"] for row in result] == [0, 60]
     assert not any(row["duplicate_company"] for row in result)
 
 
@@ -303,13 +386,28 @@ def test_verified_contact_binding_keeps_multiword_claim_name():
     )
 
 
-def test_first_failed_contact_does_not_block_one_later_verified_duplicate():
+@pytest.mark.parametrize(
+    ("first_slug", "second_slug"),
+    [("acme", "acme"), ("acme-us", "acme-west")],
+)
+def test_first_failed_contact_does_not_block_one_later_verified_duplicate(
+    first_slug, second_slug
+):
     from tests.test_arena_contact_scoring import _contact, _contact_result
     from qualification.scoring.competition import _merge_contact_breakdown
 
-    rows = [company(contact=_contact()), company(contact=_contact(slug="grace"))]
-    failed = _positive_breakdown("Acme", "acme.com", "acme")
-    valid = _positive_breakdown("Acme", "acme.com", "acme")
+    rows = [
+        company(
+            contact=_contact(),
+            company_linkedin=f"https://linkedin.com/company/{first_slug}",
+        ),
+        company(
+            contact=_contact(slug="grace"),
+            company_linkedin=f"https://linkedin.com/company/{second_slug}",
+        ),
+    ]
+    failed = _positive_breakdown("Acme", "acme.com", first_slug)
+    valid = _positive_breakdown("Acme", "acme.com", second_slug)
     _merge_contact_breakdown(failed, _contact_result(qualified=False))
     _merge_contact_breakdown(
         valid, _contact_result(qualified=True, email_status="valid")
@@ -324,14 +422,29 @@ def test_first_failed_contact_does_not_block_one_later_verified_duplicate():
     assert not any(row["duplicate_company"] for row in result)
 
 
-def test_contact_duplicate_context_survives_generic_quality_revalidation():
+@pytest.mark.parametrize(
+    ("first_slug", "second_slug"),
+    [("acme", "acme"), ("acme-us", "acme-west")],
+)
+def test_contact_duplicate_context_survives_generic_quality_revalidation(
+    first_slug, second_slug
+):
     from tests.test_arena_contact_scoring import _contact, _contact_result
     from qualification.scoring.competition import _merge_contact_breakdown
 
-    rows = [company(contact=_contact()), company(contact=_contact(slug="grace"))]
+    rows = [
+        company(
+            contact=_contact(),
+            company_linkedin=f"https://linkedin.com/company/{first_slug}",
+        ),
+        company(
+            contact=_contact(slug="grace"),
+            company_linkedin=f"https://linkedin.com/company/{second_slug}",
+        ),
+    ]
     raw = [
-        _positive_breakdown("Acme", "acme.com", "acme"),
-        _positive_breakdown("Acme", "acme.com", "acme"),
+        _positive_breakdown("Acme", "acme.com", first_slug),
+        _positive_breakdown("Acme", "acme.com", second_slug),
     ]
     for breakdown in raw:
         contact_result = _contact_result(qualified=True, email_status="valid")

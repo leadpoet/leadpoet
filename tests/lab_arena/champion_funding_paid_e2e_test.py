@@ -1376,7 +1376,8 @@ def _assert_frozen_owner(
 def _activate_verified(harness: PaidHarness, factor_ppm: int) -> dict[str, Any]:
     basis = _activate(harness, factor_ppm)
     harness.service = harness.build_service()
-    persisted = harness.service.store.get_round(harness.round_id)["reward_basis_doc"]
+    round_row = harness.service.store.get_round(harness.round_id)
+    persisted = round_row["reward_basis_doc"]
     assert persisted == basis
     digest = verify_reward_basis_signature(
         persisted,
@@ -1395,13 +1396,20 @@ def _activate_verified(harness: PaidHarness, factor_ppm: int) -> dict[str, Any]:
         accepted, public_key_der=harness.signer.public_key_der,
         expected_public_key_hash=harness.signer.public_key_hash,
     )
-    champion_hotkey = harness.service.store.get_round(harness.round_id)["king_hotkey"]
+    # A no-new-winner publication has an empty daily king field. Rewards
+    # retain the incumbent through the signed basis, which is authoritative.
+    champion_hotkey = persisted["king_hotkey"]
+    expected_owner = round_row.get("champion_hotkey") or (
+        (round_row.get("publication_doc") or {}).get("king_decision") or {}
+    ).get("king_hotkey")
+    assert champion_hotkey and champion_hotkey == expected_owner
     vector = arena_weights.derive_arena_weights(accepted, [champion_hotkey, burn_hotkey])
     expected_share = champion_values(persisted, persisted["effective_reward_epoch"], [champion_hotkey])["champion_share"]
     assert vector["champion_share_ppb"] == round(expected_share * 1_000_000_000)
     assert vector["burned_residual_ppb"] == 1_000_000_000 - vector["champion_share_ppb"]
     harness.evidence.add(
         "signed_weight_vector_verified", round_id=harness.round_id,
+        champion_hotkey=champion_hotkey, reward_outcome=persisted["king_outcome"],
         factor_ppm=factor_ppm, champion_share_ppb=vector["champion_share_ppb"],
         burned_residual_ppb=vector["burned_residual_ppb"],
         reward_basis_hash=persisted["reward_basis_hash"],

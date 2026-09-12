@@ -11,9 +11,8 @@ gateway/normal-validator restarts, and complete end-to-end validation. Preserve
 champion ownership across owner repository edits, completed ICPs, uncertain and
 settled provider charges, scoring, promotion, signed rewards, weight submission,
 and concurrent work. Use the overnight skills' operational permissions; do not
-start their goals or restore retired services. Paid validation remains subject
-to the user-approved total budget. This scope expires when implementation and
-production validation complete.
+start their goals or restore retired services. This scope expires when
+implementation and production validation complete.
 
 ## Scoped production authorization: complete Fulfillment removal
 
@@ -232,5 +231,3 @@ The user explicitly authorized `$overnight-rebenchmark-validation` on 2026-09-09
 17. Run safe, independent calls together and return concise results. Handle dependent calls, writes, approvals, and failure-sensitive calls separately.
 
 18. Routine handoff: run `git diff --check`; run `python3 -m py_compile` for touched Python files; for Pydantic changes, round-trip JSON; for scoring changes, scan for silent exception sentinels. Ask before adding production dependencies.
-
-29. Minimize OpenRouter test spend; run full evaluations or spend-to-limit tests only within an explicit user-approved total budget covering all runs and retries.

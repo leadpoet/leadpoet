@@ -1,8 +1,7 @@
 """Batched LLM role-match judge.
 
-Called from ``gateway/fulfillment/scoring.py::score_fulfillment_batch`` as
-a pre-pass over leads whose role classification fell into the gray zone
-(Path 2 token-overlap, no Path 1 title+function match).  See bug audit
+Used by Arena contact scoring for role classifications in the gray zone.
+See bug audit
 2026-06-03: the previous behaviour was to auto-accept the gray zone,
 which produced ~30 false positives across the five Revamped labels
 (CTO vs Sales-CRO target, Executive Assistant to CEO vs CEO target, etc.).

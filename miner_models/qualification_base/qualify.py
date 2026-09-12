@@ -29,10 +29,9 @@ your return value.  As of May 2026 the competition is single-path:
 miners must return a ``CompanyOutput`` dict matching the schema in
 ``gateway/qualification/models.py``.
 
-There is no person / role / email / seniority dimension.  Surfacing
-contacts cleanly requires Apify / LinkedIn scraping, which we do not
-want baked into the base miner.  Fulfillment miners can layer their
-own contact enrichment on top of a license-clean base model.
+There is no person / role / email / seniority dimension. Surfacing contacts
+cleanly requires Apify / LinkedIn scraping, which is outside the company-only
+submission contract.
 
 Pydantic ``extra = 'forbid'`` is set on ``CompanyOutput``: any extra
 key (e.g. a ``full_name`` or ``email`` field) gives an instant 0 for

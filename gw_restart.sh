@@ -2019,6 +2019,10 @@ src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 raw = src.read_text()
 restart_only_keys = {
+    # Remove credentials that belonged only to the retired lead service.
+    "APIFY_API_TOKEN",
+    "DEEPL_API_KEY",
+    "LEADPOET_INTERNAL_SECRET",
     "GATEWAY_DEPLOY_COMMIT",
     "GATEWAY_ENV_FILE",
     "GATEWAY_PRIVATE_KEY_PATH",
@@ -2068,7 +2072,7 @@ except Exception:
 if isinstance(parsed, dict):
     lines = []
     for key, value in parsed.items():
-        if key in restart_only_keys:
+        if key in restart_only_keys or key == "ENABLE_FULFILLMENT" or key.startswith("FULFILLMENT_"):
             continue
         if isinstance(value, (dict, list)):
             value = json.dumps(value, separators=(",", ":"))
@@ -2087,7 +2091,7 @@ else:
             parts = [candidate]
         assignment = parts[0] if len(parts) == 1 else candidate
         key = assignment.split("=", 1)[0].strip() if "=" in assignment else ""
-        if key in restart_only_keys:
+        if key in restart_only_keys or key == "ENABLE_FULFILLMENT" or key.startswith("FULFILLMENT_"):
             continue
         lines.append(raw_line)
     raw = "\n".join(lines)
@@ -2109,6 +2113,10 @@ from pathlib import Path
 env_path = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 skip_keys = {
+    # Remove credentials that belonged only to the retired lead service.
+    "APIFY_API_TOKEN",
+    "DEEPL_API_KEY",
+    "LEADPOET_INTERNAL_SECRET",
     "AWS_ACCESS_KEY_ID",
     "AWS_CA_BUNDLE",
     "AWS_CONFIG_FILE",
@@ -2239,7 +2247,7 @@ for raw_line in env_path.read_text(errors="replace").replace("\x00", "\n").split
     else:
         key, value = parts[0].split("=", 1)
     key = key.strip()
-    if key in skip_keys:
+    if key in skip_keys or key == "ENABLE_FULFILLMENT" or key.startswith("FULFILLMENT_"):
         continue
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
         continue
@@ -2259,6 +2267,10 @@ import sys
 pid = sys.argv[1]
 out_path = sys.argv[2]
 skip_keys = {
+    # Remove credentials that belonged only to the retired lead service.
+    "APIFY_API_TOKEN",
+    "DEEPL_API_KEY",
+    "LEADPOET_INTERNAL_SECRET",
     "AWS_ACCESS_KEY_ID",
     "AWS_CA_BUNDLE",
     "AWS_CONFIG_FILE",
@@ -2378,7 +2390,7 @@ for kv in data.split(b"\0"):
     if "=" not in s:
         continue
     k, v = s.split("=", 1)
-    if k in skip_keys:
+    if k in skip_keys or k == "ENABLE_FULFILLMENT" or k.startswith("FULFILLMENT_"):
         continue
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
         continue

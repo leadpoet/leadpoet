@@ -104,11 +104,7 @@ def integrated_database():
             LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
         )
     )
-    staged_migrations += (
-        "216-lab-arena-validator-participation.sql",
-        "223-lab-arena-cancelled-call-late-settlement.sql",
-        "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
-    )
+    staged_migrations += ("216-lab-arena-validator-participation.sql",)
     database = database_with_lab_arena_migration(staged_migrations)
     psycopg2, dsn = next(database)
     connection = psycopg2.connect(**dsn)
@@ -209,6 +205,13 @@ def integrated_database():
                     SCRIPTS / LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION
                 ).read_text(encoding="utf-8")
             )
+            # Current service completion reads delayed provider billing even
+            # when this controlled round made no paid calls.
+            for migration in (
+                "223-lab-arena-cancelled-call-late-settlement.sql",
+                "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+            ):
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute(
                 "SELECT to_regclass('public.' || name) FROM unnest(%s::text[]) name",
                 (list(RETIRED_INCENTIVE_TABLES),),

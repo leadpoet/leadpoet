@@ -2,7 +2,7 @@
   "baseline_commit": "4f15f7539d75961ac6d9d0e46e6cd6d2d62a1995",
   "entries": [
     {
-      "ast_sha256": "sha256:3b0e06adab3d4d8093d2686426273807fdfc79b86bd9f0f1e9a90dc57930ae8d",
+      "ast_sha256": "sha256:de08a5c8644e61d0fe92fdf6ca08f443e90b1e5395bb968d3be609bc45ef351c",
       "path": "gateway/main.py",
       "symbol": "lifespan"
     },
@@ -147,7 +147,7 @@
       "symbol": "HASH_SUFFIXES"
     },
     {
-      "ast_sha256": "sha256:d32e77d4cb95d6f22ee20b3d2bfe9c3e2401c313872a86a335ff09634298c7e9",
+      "ast_sha256": "sha256:78bc9d936e81bb64975c6dacbb54c1212c25f450e8998a191a4b694e88f2789f",
       "path": "gateway/tee/code_hash.py",
       "symbol": "INCLUDE_DIRS"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:560c8cb981fd4841106cbd461002f8e9d5aeea917fde0f3ab0b9370d7a6afcc7",
-  "protected_source_commit": "4f15f7539d75961ac6d9d0e46e6cd6d2d62a1995",
+  "manifest_hash": "sha256:f54539835b7ebe1662bdad64a3ac55cbd6e87aa6b45b012f5c1c0752a8cada3c",
+  "protected_source_commit": "acb096aa1bd34460001bd561d5f6cb1e4d1df0d0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

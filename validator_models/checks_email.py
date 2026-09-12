@@ -1380,27 +1380,18 @@ async def submit_and_poll_truelist(emails: List[str]) -> Tuple[str, Dict[str, di
 
 async def verify_emails_inline(
     emails: List[str],
-    validation_strategy: Optional[str] = None,
 ) -> Dict[str, dict]:
     """
     Verify emails using TrueList's INLINE verification API (not batch).
 
-    This is the primary verification path for the fulfillment pipeline
-    (called from gateway/fulfillment/scoring.py::_run_batch_email_verification
-    as a two-stage thorough → enhanced flow) and the inline FALLBACK for the
-    sourcing pipeline when TrueList's batch API silently drops emails.
+    This is the inline fallback for the sourcing pipeline when TrueList's
+    batch API silently drops emails.
 
     Rate limit: 10 requests/second per TrueList docs.
     Each request can verify up to 3 emails (space-separated).
 
     Args:
         emails: List of email addresses to verify.
-        validation_strategy: Optional TrueList inline strategy
-            ("quick" / "accurate" / "thorough" / "enhanced").  When ``None``
-            (default), the request omits the parameter and TrueList applies
-            its server-side default — this preserves prior behavior for the
-            sourcing inline-fallback call sites.  Fulfillment uses
-            "thorough" on the first pass and "enhanced" on retries.
 
     Returns:
         Dict mapping email -> result dict with status, passed, needs_retry.
@@ -1417,8 +1408,7 @@ async def verify_emails_inline(
     PASS_STATUSES = {"email_ok"}  # Only email_ok passes - accept_all is rejected
     RETRY_STATUSES = {"unknown", "unknown_error", "timeout", "error", "failed_greylisted"}
 
-    strategy_label = validation_strategy or "default"
-    print(f"   🔍 Inline verification ({strategy_label}) for {len(emails)} emails...")
+    print(f"   🔍 Inline verification for {len(emails)} emails...")
     import time as _time
     _start = _time.time()
 
@@ -1429,9 +1419,6 @@ async def verify_emails_inline(
                 email_param = " ".join(batch)
 
                 url = f"https://api.truelist.io/api/v1/verify_inline?email={email_param}"
-                if validation_strategy:
-                    url += f"&validation_strategy={validation_strategy}"
-
                 try:
                     async with session.post(url, headers=headers, timeout=35, proxy=HTTP_PROXY_URL) as response:
                         if response.status == 429:
@@ -1875,12 +1862,7 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
 
     Timeouts:
       HEAD: fixed 10s (fast path; healthy sites should respond well within this).
-      GET fallback: ``FULFILLMENT_WEBSITE_TIMEOUT_S`` env var, default 10s. The
-        validator deploy sets this to 30s in fulfillment-worker containers
-        (qualification workers leave it unset → 10s) so slow / cold-start
-        client sites that 10s used to kill have a chance to resolve, while
-        the qualification scoring path stays unchanged.  Worst case for a
-        truly dead site is HEAD(10s) + GET(timeout_s) = 20s/40s respectively.
+      GET fallback: fixed 10s. Worst case for a dead site is 20s total.
     """
     import ssl
 
@@ -1889,10 +1871,7 @@ async def verify_company(company_domain: str) -> Tuple[bool, str]:
     if not company_domain.startswith(("http://", "https://")):
         company_domain = f"https://{company_domain}"
 
-    try:
-        get_timeout_s = int(os.getenv("FULFILLMENT_WEBSITE_TIMEOUT_S", "10"))
-    except ValueError:
-        get_timeout_s = 10
+    get_timeout_s = 10
 
     # Status codes that indicate website exists (pass immediately)
     # 429 = Too Many Requests (rate limiting/bot protection) - proves site exists, just blocking automated requests

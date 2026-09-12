@@ -3073,10 +3073,8 @@ _LEGAL_SUFFIXES_RE = re.compile(
 def _normalize_for_name_match(name: str) -> str:
     """Strip trademark symbols, legal suffixes, normalize whitespace, lower.
 
-    Keep in sync with fulfillment_person_verification._normalize_company —
-    both compare lead-side `business` strings against vendor-side scraped
-    company names, and they MUST agree on what counts as the canonical form
-    or Stage 4 and Stage 5 will disagree on the same lead.
+    This canonical form is used to compare lead-side ``business`` strings
+    against vendor-side scraped company names.
     """
     s = _TRADEMARK_SYMBOLS_RE.sub('', name).strip()
     s = _LEGAL_SUFFIXES_RE.sub('', s).strip().rstrip(',').strip()

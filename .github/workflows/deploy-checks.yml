@@ -20,7 +20,6 @@ permissions:
 env:
   CI: "true"
   DISABLE_BACKGROUND_TASKS: "true"
-  ENABLE_FULFILLMENT: "false"
   LANGFUSE_ENABLED: "false"
   SUPABASE_URL: "http://localhost:54321"
   SUPABASE_ANON_KEY: "ci-anon-key"
@@ -32,7 +31,6 @@ env:
   OPENROUTER_API_KEY: "ci-openrouter-key"
   OPENROUTER_KEY: "ci-openrouter-key"
   SCRAPINGDOG_API_KEY: "ci-scrapingdog-key"
-  ZEROBOUNCE_API_KEY: "ci-zerobounce-key"
   BITTENSOR_NETWORK: "test"
   BITTENSOR_NETUID: "71"
   GATEWAY_PRIVATE_KEY_PASSWORD: "ci-gateway-key-password"

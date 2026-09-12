@@ -7,7 +7,6 @@ from starlette.responses import PlainTextResponse
 
 from gateway.utils.circuit_breaker import db_breaker
 from gateway.utils.db_executor import DB_QUEUE_HIGH_WATER, DB_THREADS, db_queue_depth
-from gateway.utils.hotkey_bucket import ALL_BUCKETS, RECENT_NONCES
 from gateway.utils.loop_watchdog import last_ping_age_seconds
 from gateway.utils import ops_registry
 
@@ -37,10 +36,4 @@ async def metrics() -> str:
                     lines.append(f'gateway_priority_{key}{{class="{label}"}} {count}')
             else:
                 lines.append(f"gateway_priority_{key} {value}")
-    for bucket in ALL_BUCKETS:
-        snap = bucket.snapshot()
-        name = snap["name"]
-        for key in ("active_keys", "allowed", "denied", "observed_denied"):
-            lines.append(f'gateway_hotkey_bucket_{key}{{bucket="{name}"}} {snap[key]}')
-    lines.append(f'gateway_recent_nonces_active {RECENT_NONCES.snapshot()["active_nonces"]}')
     return "\n".join(lines) + "\n"

@@ -35,17 +35,9 @@ from gateway.config import (
 
 logger = logging.getLogger(__name__)
 
-# Bounded HTTP read timeout (seconds) for SYNCHRONOUS Supabase clients.
-# The synchronous postgrest client defaults to a 120s timeout, and the
-# fulfillment lifecycle tick makes these sync calls directly on the asyncio
-# event loop. When the PostgREST layer intermittently stalls (Postgres itself
-# stays idle/fast), the tick's sequential calls each block up to 120s, wedging
-# the ENTIRE gateway — every endpoint returns 000 and miners get read-timeouts
-# for minutes until the connections finally die. Capping at 30s means the first
-# stalled call raises at 30s; the lifecycle loop's try/except then aborts that
-# tick and retries next interval, so a stall becomes a ~30s blip instead of a
-# multi-minute outage. 30s is far above normal PostgREST latency (sub-second to
-# a few seconds), so legitimate queries never trip it.
+# Bounded HTTP read timeout (seconds) for synchronous Supabase clients.
+# This prevents one stalled PostgREST request from holding a worker for the
+# library default of 120 seconds. Normal requests complete well below the cap.
 _SYNC_HTTP_TIMEOUT_SECONDS = int(
     os.getenv(
         "SUPABASE_TIMEOUT_SECONDS",

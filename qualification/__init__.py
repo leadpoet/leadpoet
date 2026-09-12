@@ -1,1 +1,1 @@
-"""Shared company schemas and scoring used by Arena and fulfillment."""
+"""Shared company schemas and scoring used by Arena."""

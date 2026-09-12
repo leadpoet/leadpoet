@@ -19,9 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #                              raw-trace recorder (hosted worker).
 #   captured_v2_receipt      — enclave-originated TLS attempts and provider
 #                              outcomes are committed to signed V2 receipts.
-#   uncaptured_by_decision   — dated owner decision 2026-07-02: no fulfillment
-#                              trajectory capture (fulfillment gateway paths,
-#                              miner production models, subnet validator).
+#   uncaptured_by_decision   — dated owner decision for production call sites
+#                              that do not write trajectory capture records.
 #   not_a_call_site          — proxy/key/url-pattern infrastructure or ops
 #                              tooling that mentions the URL without producing
 #                              production training data.
@@ -36,23 +35,12 @@ CALL_SITE_REGISTRY = {
     "leadpoet_verifier/semantic_gates.py": "uncaptured_by_decision",
     "validator_models/stage5_verification.py": "captured",
     "gateway/tee/provider_semantics_v2.py": "captured_v2_receipt",
-    # -- uncaptured by dated owner decision (2026-07-02): no fulfillment
-    # trajectory capture ----------------------------------------------------
-    "gateway/fulfillment/icp_checks.py": "uncaptured_by_decision",
-    "gateway/fulfillment/intent_details.py": "uncaptured_by_decision",
-    "gateway/fulfillment/role_expander.py": "uncaptured_by_decision",
+    # -- uncaptured by dated owner decision ---------------------------------
     "gateway/tasks/icp_generator.py": "uncaptured_by_decision",
-    "miner_models/Main_fulfillment_model/config.py": "uncaptured_by_decision",
-    "miner_models/Main_fulfillment_model/stage4_helpers.py": "uncaptured_by_decision",
-    "miner_models/Main_fulfillment_model/web_discovery.py": "uncaptured_by_decision",
-    "miner_models/fulfillment_sourcer.py": "uncaptured_by_decision",
     "miner_models/intent_model.py": "uncaptured_by_decision",
     "miner_models/lead_sorcerer_main/src/domain.py": "uncaptured_by_decision",
     "neurons/validator.py": "uncaptured_by_decision",
     "validator_models/checks_icp.py": "uncaptured_by_decision",
-    "validator_models/fulfillment_attribute_verification.py": "uncaptured_by_decision",
-    "validator_models/fulfillment_company_verification.py": "uncaptured_by_decision",
-    "validator_models/fulfillment_person_verification.py": "uncaptured_by_decision",
     "validator_models/stage4_helpers.py": "uncaptured_by_decision",
     "validator_models/stage4_person_verification.py": "uncaptured_by_decision",
     # The closed-lab training-trace sink was retired on 2026-09-04. Arena

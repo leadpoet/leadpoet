@@ -83,8 +83,7 @@ this state without recent work. Validators above 75,000 need an original
 accepted execute or score job in the same network/subnet within the last 24
 hours. The database records acceptance time once. Claims, failures, replays,
 cached results, and diagnostic commands do not extend it. There is no idle
-exemption. The old public reward-basis route
-and `/fulfillment/lab-arena-reward-basis` route are removed, and public round
+exemption. The old public reward-basis routes are removed, and public round
 responses no longer include the signed reward basis. The signing public key
 and normal public competition results
 remain public; this access rule does not make revealed on-chain weights private.

@@ -78,15 +78,10 @@ VALIDATOR_EXACT = {
     "/weights/inputs/v2",
     "/weights/subnet-epoch/candidate/v1",
     "/weights/subnet-epoch/boundary/v1",
-    "/fulfillment/scoring",
-    "/fulfillment/score",
-    "/fulfillment/rewards/active",
 }
 VALIDATOR_PREFIXES = (
     "/epoch/",
     "/qualification/validator/",
-    "/fulfillment/ban/",
-    "/fulfillment/results/",
 )
 _ALLOCATION_PREFIX = "/research-lab/allocations/"
 _INTERNAL_KEY_HEADER = b"x-leadpoet-internal-key"
@@ -94,14 +89,10 @@ MINER_EXACT = {
     "/presign",
     "/submit",
     "/submit/",
-    "/fulfillment/requests/active",
-    "/fulfillment/commit",
-    "/fulfillment/reveal",
 }
 MINER_PREFIXES = (
     "/arena/v1/submissions/",
     "/testnet/arena/v1/submissions/",
-    "/fulfillment/excluded-now/",
 )
 
 

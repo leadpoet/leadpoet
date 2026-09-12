@@ -471,9 +471,8 @@ class IntentSignal(BaseModel):
          in ``_INTENT_INJECTION_PATTERNS`` scans for evident gaming
          phrases ("ignore previous instructions", ChatML control tokens,
          direct score steering, role-hijacking lines, etc.).  Any match
-         raises a ``ValueError``, which causes the parent ``FulfillmentLead``
-         to fail validation and the lead to be silently dropped from the
-         miner's submission with no points earned.  Blanket length caps
+         raises a ``ValueError``, which causes the parent model to fail
+         validation. Blanket length caps
          (description ≤ 350, snippet ≤ 600) tightened from prior values
          to reduce the room for crafted attacks.
 
@@ -490,18 +489,13 @@ class IntentSignal(BaseModel):
     url: str = Field(..., description="URL to the source of the intent signal")
     date: Optional[str] = Field(None, description="Date of the signal in ISO 8601 format (YYYY-MM-DD), or null if no verifiable date")
     snippet: str = Field(..., max_length=600, description="Relevant text snippet extracted from source URL")
-    # REQUIRED on miner submission: index into the request's
-    # icp_details.intent_signals list of the client-listed signal that THIS
-    # evidence is meant to satisfy.  The gateway's Tier 3 intent scorer
+    # REQUIRED on miner submission: index into the ICP's intent_signals list
+    # for the signal that this evidence is meant to satisfy. The scorer
     # rejects any signal with matched_icp_signal == -1 or out of range
     # (see qualification/scoring/lead_scorer.py::_score_single_intent_signal).
     #
     # Model-level default is -1 (NOT strictly required at the Pydantic
-    # layer) for the same reason FulfillmentICP.company defaults to "" —
-    # historical icp_details / lead_data JSON in the DB has no such field
-    # and must continue to re-parse without crashing, otherwise validator-
-    # side ``FulfillmentLead(**lead_data)`` wedges every in-flight signal
-    # scoring cycle (see .cursor/rules/stress-test-protocol.mdc rule #3).
+    # layer) so older stored JSON without the field can still be parsed.
     # Enforcement that the value is set (≥ 0 AND < len(icp.intent_signals))
     # happens at scoring time, not at parse time.
     matched_icp_signal: int = Field(
@@ -509,7 +503,7 @@ class IntentSignal(BaseModel):
         ge=-1,
         description=(
             "REQUIRED on miner submission. Zero-based index into the "
-            "fulfillment request's icp_details.intent_signals list of the "
+            "ICP intent_signals list of the "
             "client-listed intent signal that this evidence is meant to "
             "prove.  The gateway rejects intent signals with -1 or out-of-"
             "range values at Tier 3 scoring time."
@@ -658,21 +652,14 @@ class LeadOutputRedacted(BaseModel):
 # As of May 2026 the model competition is transitioning from "surface a
 # specific high-intent lead (company + contact) from the published leads
 # table" to "surface companies from the open web with verified intent
-# signals."  Fulfillment miners can then layer their own contact
-# enrichment on top.  Why the shift:
+# signals." Why the shift:
 #
 #   * Finding contacts requires Apify / LinkedIn scraping; baking that
 #     into the base miner model would force every miner who builds on it
 #     to take on those licensing risks.
-#   * The genuinely hard part of fulfillment is surfacing companies with
-#     intent, not finding employees once you have the company.  Making
-#     the competition target that hard part lets every fulfillment miner
-#     benefit from the best agent selected by the daily competition.
-#
 # This is THE output schema for the model competition (as of May 2026).
-# ``LeadOutput`` below is retained because gateway-side fulfillment code
-# (gateway/fulfillment/*) still consumes contact-shaped lead rows, but
-# the model competition no longer produces or scores LeadOutput.
+# ``LeadOutput`` remains for stored-data compatibility, but the model
+# competition no longer produces or scores it.
 
 class RequiredAttributeClaim(BaseModel):
     """The model's required-attribute validation result for one company.
@@ -878,9 +865,8 @@ class ICPPrompt(BaseModel):
     # Sibling list mapping 1:1 to ``intent_signals`` carrying the
     # buyer-side evidence_type for each signal (HIRING / FUNDING /
     # SOCIAL_POSTING / PODCAST_APPEARANCE / TECHSTACK / CASE_STUDY /
-    # OTHER / None).  Populated by ``FulfillmentICP.to_icp_prompt`` when
-    # the source spec carries structured signals; left empty for legacy
-    # qualification ICPs that only have a plain text list.  Consumers
+    # OTHER / None). Left empty for legacy qualification ICPs that only
+    # have a plain text list. Consumers
     # (lead_scorer.py) prefer this when present; absence means
     # ``evidence_type=None`` and the downstream prompt dispatcher falls
     # through to the default builder (legacy-compat behavior).

@@ -23,7 +23,7 @@ proxy's own environment, so a container never needs (or sees) a real key.
 W3 (sourceexperiments.md): upstream routing is a validated, hash-audited
 registry instead of a hardcoded table; every call appends a usage-ledger row
 with caller attribution bound at proxy spawn (or via worker-issued tokens —
-never trusted from container-supplied identity claims); lab/fulfillment keys
+never trusted from container-supplied identity claims); service keys
 are split behind ``RESEARCH_LAB_PROVIDER_KEY_SPLIT`` which also removes the
 silent ``QUALIFICATION_*`` fallback.
 
@@ -105,7 +105,7 @@ _VALID_AUTH_KINDS = ("header", "query", "bearer", "none")
 # Legacy fallback env chains, used ONLY while the key split is off. With
 # RESEARCH_LAB_PROVIDER_KEY_SPLIT on, lab traffic authenticates exclusively
 # from lab-scoped keys and a missing key is a hard, attributed failure —
-# never a silent borrow of fulfillment (QUALIFICATION_*) credentials.
+# never a silent borrow of another service's credentials.
 _LEGACY_CREDENTIAL_FALLBACKS: dict[str, tuple[str, ...]] = {
     "exa": ("EXA_API_KEY",),
     "sd": ("SCRAPINGDOG_API_KEY", "QUALIFICATION_SCRAPINGDOG_API_KEY"),

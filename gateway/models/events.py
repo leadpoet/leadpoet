@@ -47,15 +47,6 @@ class EventType(str, Enum):
     CHAMPION_SELECTED = "CHAMPION_SELECTED"
     EMISSIONS_DISTRIBUTED = "EMISSIONS_DISTRIBUTED"
 
-    # Lead Fulfillment System
-    FULFILLMENT_REQUEST_CREATED = "FULFILLMENT_REQUEST_CREATED"
-    FULFILLMENT_COMMIT = "FULFILLMENT_COMMIT"
-    FULFILLMENT_REVEAL = "FULFILLMENT_REVEAL"
-    FULFILLMENT_SCORED = "FULFILLMENT_SCORED"
-    FULFILLMENT_BAN = "FULFILLMENT_BAN"
-    FULFILLMENT_RECYCLED = "FULFILLMENT_RECYCLED"
-
-
 class BaseEvent(BaseModel):
     """Base event structure for all transparency log events"""
     
@@ -147,4 +138,3 @@ class WeightCommitEvent(BaseEvent):
     
     event_type: EventType = EventType.WEIGHT_COMMIT
     payload: WeightCommitPayload
-

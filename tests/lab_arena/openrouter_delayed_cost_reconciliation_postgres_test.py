@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,11 @@ from tests.lab_arena.test_lab_arena_migration_postgres import claim, open_round,
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS)
+
+
+@pytest.fixture(scope="module")
+def database_before_225():
+    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS[:-1])
 
 
 @pytest.fixture()
@@ -109,6 +115,78 @@ def _settlements(store: ArenaStore, identity: str):
         for row in store.list_ledger(call_identity=identity)
         if row["entry_kind"] == "settlement"
     ]
+
+
+def test_migration_225_applies_under_hosted_non_superuser(database_before_225):
+    psycopg2, dsn = database_before_225
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "scripts/225-lab-arena-openrouter-delayed-cost-reconciliation.sql"
+    ).read_text(encoding="utf-8")
+    password = dsn.get("password", "arena-test")
+    with psycopg2.connect(**dsn) as control:
+        control.autocommit = True
+        with control.cursor() as cursor:
+            cursor.execute(
+                "CREATE ROLE billing_migrator LOGIN NOSUPERUSER INHERIT PASSWORD %s",
+                (password,),
+            )
+            cursor.execute("GRANT lab_arena_owner TO billing_migrator")
+            cursor.execute(
+                "GRANT USAGE, CREATE ON SCHEMA public TO billing_migrator "
+                "WITH GRANT OPTION"
+            )
+            cursor.execute(
+                "SELECT has_schema_privilege('lab_arena_owner', 'public', 'CREATE')"
+            )
+            assert cursor.fetchone() == (False,)
+
+    migrator_dsn = dict(dsn, user="billing_migrator", password=password)
+    with psycopg2.connect(**migrator_dsn) as connection:
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user"
+            )
+            assert cursor.fetchone() == (False,)
+            cursor.execute(migration)
+            cursor.execute(
+                "SELECT has_schema_privilege('lab_arena_owner', 'public', 'CREATE'), "
+                "has_schema_privilege('lab_arena_service', 'public', 'CREATE')"
+            )
+            assert cursor.fetchone() == (False, False)
+            cursor.execute(
+                "SELECT procedure.proname, owner.rolname "
+                "FROM pg_catalog.pg_proc AS procedure "
+                "JOIN pg_catalog.pg_namespace AS namespace "
+                "ON namespace.oid = procedure.pronamespace "
+                "JOIN pg_catalog.pg_roles AS owner "
+                "ON owner.oid = procedure.proowner "
+                "WHERE namespace.nspname = 'public' "
+                "AND procedure.proname IN ("
+                "'lab_arena_list_openrouter_cost_reconciliations_v1', "
+                "'lab_arena_reconcile_openrouter_cost_v1') "
+                "ORDER BY procedure.proname"
+            )
+            assert cursor.fetchall() == [
+                ("lab_arena_list_openrouter_cost_reconciliations_v1", "lab_arena_owner"),
+                ("lab_arena_reconcile_openrouter_cost_v1", "lab_arena_owner"),
+            ]
+            for signature in (
+                "public.lab_arena_list_openrouter_cost_reconciliations_v1(text,text,bigint,integer)",
+                "public.lab_arena_reconcile_openrouter_cost_v1(text,text,text,bigint,text,text,bigint,text)",
+            ):
+                cursor.execute(
+                    "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                    ("lab_arena_service", signature),
+                )
+                assert cursor.fetchone() == (True,)
+                for role in ("anon", "authenticated", "service_role"):
+                    cursor.execute(
+                        "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                        (role, signature),
+                    )
+                    assert cursor.fetchone() == (False,)
 
 
 def test_reconciliation_functions_are_service_only(resources):

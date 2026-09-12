@@ -2636,6 +2636,32 @@ def test_deepline_completed_native_billing_is_scoped_to_one_grouped_request():
     assert len(transport.sent) == 1
 
 
+def test_deepline_completed_poll_can_return_inner_pending_and_still_succeed():
+    envelope = {
+        "job_id": "iad1::poll-request",
+        "status": "completed",
+        "result": {"data": {"jobId": "external-job", "status": "pending"}},
+        "billing": {"credits_charged": 0.01},
+    }
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, envelope)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "harvestapi_get_job",
+            "payload": {"jobId": "external-job"},
+        },
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 200
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is True
+
+
 @pytest.mark.parametrize(
     ("provider_status", "envelope", "expected_call_succeeded"),
     [

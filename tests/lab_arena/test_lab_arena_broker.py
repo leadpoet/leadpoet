@@ -1177,8 +1177,8 @@ def test_openrouter_error_with_known_usage_settles_the_exact_charge():
     assert store.calls[result.call["call_identity"]]["actual"] == 10
 
 
-def test_openrouter_plain_non_byok_502_uses_insured_zero_and_keeps_provider_error():
-    payload = {
+def _insured_openrouter_error():
+    return {
         "error": {"code": 502, "message": "Provider returned an error"},
         "openrouter_metadata": {
             "requested": "openai/gpt-4o-mini",
@@ -1188,6 +1188,10 @@ def test_openrouter_plain_non_byok_502_uses_insured_zero_and_keeps_provider_erro
         },
         "user_id": "harmless-documented-field",
     }
+
+
+def test_openrouter_plain_non_byok_502_uses_insured_zero_and_keeps_provider_error():
+    payload = _insured_openrouter_error()
     broker, store, transport = make_broker(
         transport=FakeTransport([(502, payload)])
     )
@@ -1349,9 +1353,9 @@ def test_openrouter_502_with_nonzero_separate_request_price_stays_uncertain():
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
-def test_openrouter_missing_native_cost_reads_exact_generation_once():
+def test_openrouter_exact_generation_cost_precedes_insured_error():
     generation_id = "gen-test-123"
-    error = {"error": {"code": 502, "message": "Provider returned an error"}}
+    error = _insured_openrouter_error()
     generation = {
         "data": {
             "id": generation_id,
@@ -1384,6 +1388,40 @@ def test_openrouter_missing_native_cost_reads_exact_generation_once():
     assert terminal["provider_cost"]["request_id"] == generation_id
 
 
+def test_openrouter_valid_generation_header_allows_strict_insured_error_after_404s(
+    monkeypatch,
+):
+    monkeypatch.setattr(br.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(br.time, "sleep", lambda _seconds: None)
+    generation_id = "gen-insured-after-readback"
+    error = _insured_openrouter_error()
+    not_found = (404, {"error": {"code": 404, "message": "not found"}})
+    transport = FakeTransport(
+        [(502, error, {"X-Generation-Id": generation_id})]
+        + [not_found] * br._OPENROUTER_BILLING_MAX_ATTEMPTS
+    )
+    broker, store, _transport = make_broker(transport=transport)
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == (
+        "openrouter_zero_completion_insurance_error_20260911"
+    )
+    assert [sent["method"] for sent in transport.sent] == ["POST"] + [
+        "GET"
+    ] * br._OPENROUTER_BILLING_MAX_ATTEMPTS
+    assert transport.responses == []
+    assert store.log == ["reserve", "dispatch", "settle"]
+
+
 @pytest.mark.parametrize(
     "responses",
     [
@@ -1397,13 +1435,35 @@ def test_openrouter_missing_native_cost_reads_exact_generation_once():
         [
             (
                 502,
+                _insured_openrouter_error(),
+                {"X-Generation-Id": "invalid/generation/id"},
+            )
+        ],
+        [
+            (
+                502,
+                _insured_openrouter_error(),
+                {
+                    "X-Generation-Id": "gen-header-one",
+                    "x-generation-id": "gen-header-two",
+                },
+            )
+        ],
+        [
+            (
+                502,
                 {"error": {"code": 502, "message": "Provider returned an error"}},
                 {"X-Generation-Id": "gen-readback-fails"},
             ),
             (401, {"error": {"code": 401, "message": "not authorized"}}),
         ],
     ],
-    ids=("conflicting_ids", "readback_failure"),
+    ids=(
+        "conflicting_body_and_header_ids",
+        "invalid_header_id",
+        "conflicting_header_ids",
+        "valid_header_with_unproven_error",
+    ),
 )
 def test_openrouter_generation_conflict_or_failed_readback_stays_uncertain(responses):
     broker, store, _transport = make_broker(transport=FakeTransport(responses))

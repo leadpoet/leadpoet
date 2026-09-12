@@ -30,7 +30,14 @@ MIGRATION = "215-lab-arena-contacts.sql"
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(MIGRATIONS + (MIGRATION,))
+    yield from database_with_lab_arena_migration(
+        MIGRATIONS
+        + (
+            MIGRATION,
+            "223-lab-arena-cancelled-call-late-settlement.sql",
+            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+        )
+    )
 
 
 def _contact_icps(rows: list[dict]) -> list[dict]:

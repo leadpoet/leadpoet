@@ -88,7 +88,16 @@ class QualityHarness(IntegrityHarness):
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(MIGRATIONS + ("215-lab-arena-contacts.sql", "216-lab-arena-validator-participation.sql", QUALITY_MIGRATION))
+    yield from database_with_lab_arena_migration(
+        MIGRATIONS
+        + (
+            "215-lab-arena-contacts.sql",
+            "216-lab-arena-validator-participation.sql",
+            QUALITY_MIGRATION,
+            "223-lab-arena-cancelled-call-late-settlement.sql",
+            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+        )
+    )
 
 
 @pytest.mark.parametrize("with_contacts", [False, True])

@@ -72,7 +72,7 @@
       "symbol": "build_arweave_checkpoint_log_event"
     },
     {
-      "ast_sha256": "sha256:faeeec347fdfbefccdf00c43430ce2b5a5822ad71ec19e44909066b9bd3ed495",
+      "ast_sha256": "sha256:471558f872d537c9d8ec04f7c44a162c9582a2e381700d7487f99a6ea3825811",
       "path": "gateway/tasks/hourly_batch.py",
       "symbol": "hourly_batch_task"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:5259ff973efe652acd09342d1321b5919083f949f14d683fce1756bc44962ee2",
-  "protected_source_commit": "0673e4496617dce3c772391c74a13435050c0038",
+  "manifest_hash": "sha256:4e5c1965ed9608503ad1739f6d715a1a3aa6749b70f9614ef319ddee939c11d2",
+  "protected_source_commit": "3a02e0abeba0210737f2438590cf091fec5b79e2",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

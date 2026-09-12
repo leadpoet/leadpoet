@@ -14,7 +14,6 @@ from tests.lab_arena.test_integrity_policy import fresh_icps
 
 MIGRATIONS = DEFAULT_MIGRATIONS + (
     "211-lab-arena-owner-admission.sql", "212-lab-arena-accepted-judgment-cache.sql", "213-lab-arena-score-integrity.sql", "214-lab-arena-prior-credential-refusal.sql",
-    "223-lab-arena-cancelled-call-late-settlement.sql", "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
 )
 
 

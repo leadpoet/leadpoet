@@ -24,6 +24,7 @@ def database():
         + (
             "223-lab-arena-cancelled-call-late-settlement.sql",
             "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
+            "227-lab-arena-champion-funding.sql",
         )
     )
 

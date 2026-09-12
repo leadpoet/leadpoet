@@ -6,20 +6,14 @@ from fastapi import HTTPException
 from gateway.middleware.body_size import BodySizeLimitMiddleware
 from gateway.middleware.priority import classify_path
 from gateway.utils.circuit_breaker import CircuitBreaker
-from gateway.utils.hotkey_bucket import HotkeyBuckets, enforce, observe
 
 
 def test_priority_route_classification_is_explicit():
     assert classify_path("/weights/submit") == "validator"
     assert classify_path("/weights/submit/v2") == "validator"
-    assert classify_path("/fulfillment/scoring") == "validator"
-    assert classify_path("/fulfillment/rewards/active") == "validator"
-    assert classify_path("/fulfillment/requests/active") == "miner"
-    assert classify_path("/fulfillment/commit") == "miner"
-    assert classify_path("/fulfillment/reveal") == "miner"
     assert classify_path("/research-lab/source-adapters") == "other"
     assert classify_path("/research-lab/source-adapters/status") == "other"
-    assert classify_path("/fulfillment/results/abc") == "validator"
+    assert classify_path("/fulfillment/retired") == "other"
     assert classify_path("/health") == "other"
     assert classify_path("/not-weights/submit") == "other"
 
@@ -49,21 +43,6 @@ def test_body_size_middleware_rejects_large_content_length():
 
     assert called is False
     assert sent[0]["status"] == 413
-
-
-def test_hotkey_bucket_enforce_and_observe_only():
-    bucket = HotkeyBuckets("test", rate_per_min=0.001, burst=1)
-
-    enforce(bucket, "5test")
-    with pytest.raises(HTTPException) as exc:
-        enforce(bucket, "5test")
-    assert exc.value.status_code == 429
-
-    # Observe-only mode records pressure but never raises. This is what
-    # unauthenticated active-request polling uses to avoid third-party quota
-    # griefing against a real miner hotkey.
-    observe(bucket, "5test")
-    assert bucket.snapshot()["observed_denied"] >= 1
 
 
 def test_circuit_breaker_opens_and_recovers(monkeypatch):

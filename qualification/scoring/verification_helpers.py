@@ -1241,26 +1241,10 @@ def _domains_share_owner(left: DomainParts, right: DomainParts) -> bool:
     return left.registrable_domain == right.registrable_domain
 
 
-def _is_government_or_education_domain(domain: str) -> bool:
-    """Allow public registries and education sites in the ``other`` bucket."""
-    labels = [label for label in domain.split(".") if label]
-    if not labels:
-        return False
-    if labels[-1] in {"gov", "government", "edu"}:
-        return True
-    return bool(
-        len(labels) >= 2
-        and len(labels[-1]) == 2
-        and labels[-2] in {"gov", "government", "edu", "ac"}
-    )
-
-
 def check_source_url_mismatch(
     source_str: str,
     url: str,
     company_website: Optional[str] = None,
-    *,
-    reject_unknown_third_party: bool = False,
 ) -> Optional[str]:
     """
     Check if the declared source type is plausible given the URL domain.
@@ -1270,9 +1254,7 @@ def check_source_url_mismatch(
     ``company_website`` makes first-party classifications identity-bound:
     ``company_website`` must use the lead's domain, while ``job_board`` may use
     either a recognized hiring platform or a careers/jobs property owned by the
-    lead.  With ``reject_unknown_third_party=True`` (the fulfillment policy),
-    the low-trust ``other`` bucket is limited to public-sector/education
-    domains instead of accepting an arbitrary self-published site.
+    lead.
     """
     source_lower = source_str.lower().strip()
     
@@ -1284,11 +1266,6 @@ def check_source_url_mismatch(
     company_domain = company_parts.ascii_host if company_parts else ""
 
     if source_lower == "company_website":
-        if company_parts is None and reject_unknown_third_party:
-            return (
-                "Source declared as 'company_website' but the lead has no "
-                "usable company website domain to bind the evidence to"
-            )
         if company_parts is not None:
             if _domains_share_owner(url_parts, company_parts):
                 return None
@@ -1320,16 +1297,6 @@ def check_source_url_mismatch(
                 f"owned by the lead company — source type should be "
                 f"'company_website'"
             )
-        if (
-            reject_unknown_third_party
-            and not _is_government_or_education_domain(url_domain)
-        ):
-            return (
-                f"Source declared as 'other' but URL domain '{url_domain}' is "
-                f"an unrecognized third-party publisher; fulfillment evidence "
-                f"must use a recognized platform, a correctly classified lead-"
-                f"owned page, or a government/education source"
-            )
         return None
 
     allowed = _SOURCE_DOMAIN_ALLOWLIST.get(source_lower)
@@ -1345,9 +1312,8 @@ def check_source_url_mismatch(
         and company_parts is not None
         and _domains_share_owner(url_parts, company_parts)
     ):
-        # Ownership is the deterministic part of the pre-gate. Fulfillment
-        # always fetches the exact page and the declared-source job-body gate
-        # below Stage 2 proves that the owned page is actually a job listing.
+        # Ownership is the deterministic part of the pre-gate. The later
+        # content check proves that the owned page is actually a job listing.
         return None
 
     return (
@@ -2678,7 +2644,7 @@ async def scrapingdog_tiktok(url: str) -> str:
 # it returns a "Contact us for IG scraping" stub regardless of input. Routing
 # IG URLs through generic scrape made every IG-based intent signal fail Tier 3
 # verification (snippet verbatim check could never match because the fetched
-# content was always the stub message). This blocked any fulfillment ICP that
+# content was always the stub message). This blocked any ICP that
 # specified Instagram metrics (e.g., "<10k followers", "no posts in 30 days",
 # "running paid IG ads").
 #
@@ -2687,7 +2653,7 @@ async def scrapingdog_tiktok(url: str) -> str:
 #   business-account flag, category, recent posts (caption + timestamp).
 # That's enough to ground signals like "Tampa restaurant with weak online
 # presence (<500 followers, last post 90+ days ago)" — which is the shape of
-# the Flaer fulfillment request that's currently un-fulfillable.
+# a buyer can request.
 #
 # Post URLs (instagram.com/p/{shortcode}, /reel/{shortcode}) don't expose the
 # author's username deterministically, so we fall back to skipping rather than

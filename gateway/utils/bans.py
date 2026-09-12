@@ -1,10 +1,4 @@
-"""
-Ban Utilities (shared across qualification and fulfillment)
-
-Extracted from gateway/qualification/api/submit.py (WP0b) so both
-qualification and fulfillment endpoints can import ban functions
-without cross-module coupling.
-"""
+"""Ban utilities shared by gateway admission and scoring paths."""
 
 import asyncio
 import logging

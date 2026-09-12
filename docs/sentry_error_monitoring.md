@@ -151,7 +151,7 @@ field allowlist. It removes or redacts:
    accepted.
 
 Messages touching protected model, provider, Research Lab, qualification,
-fulfillment, lead-processing, or LLM-client surfaces are replaced wholesale by
+lead-processing, or LLM-client surfaces are replaced wholesale by
 `[leadpoet-redacted:protected-surface]`. `redact-all` applies that policy to
 every message and drops breadcrumbs.
 

@@ -75,9 +75,8 @@ gateway verifies the request signature, freshness, action, epoch, and chain
 scope, then checks registration and the validator permit in its finalized
 metagraph. Anonymous requests and hotkeys without permits cannot retrieve the
 signed weight state, which includes its signed reward basis. Below-threshold
-permitted validators can retrieve this state. The old public reward-basis route
-and `/fulfillment/lab-arena-reward-basis` route are removed, and public round
-responses no longer include the signed reward basis. The signing public key
+permitted validators can retrieve this state. The old public reward-basis routes
+are removed, and public round responses no longer include the signed reward basis. The signing public key
 and normal public competition results
 remain public; this access rule does not make revealed on-chain weights private.
 

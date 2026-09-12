@@ -13,7 +13,7 @@ protection boundaries (``research_lab/observability/redaction.py``,
   prompt builder must never export source text; file/function/line survive
   for debugging.
 - Events that touch a protected surface (Research Lab, trajectory/training
-  capture, model internals, fulfillment/qualification lead content, LLM
+  capture, model internals, qualification lead content, LLM
   provider clients) keep exception TYPE, stack, and logger name — but their
   messages are replaced with a redaction token. Regex scrubbing cannot be
   trusted to recognize prompts, ICPs, trajectories, benchmarks, or lead
@@ -111,12 +111,11 @@ _ALLOWED_SPAN_KEYS = frozenset(
 # content entirely. A prefix matches itself and any dotted submodule.
 # These are the surfaces where messages can embed trajectory/training IP or
 # unredacted contact data: the Research Lab engine and capture pipeline,
-# model internals, lead fulfillment/qualification content paths, and the
+# model internals, qualification lead content paths, and the
 # LLM provider clients whose exceptions echo request/response fragments.
 PROTECTED_MODULE_PREFIXES: Tuple[str, ...] = (
     "research_lab",
     "gateway.research_lab",
-    "gateway.fulfillment",
     "gateway.qualification",
     "qualification",
     "leadpoet_verifier",
@@ -148,7 +147,6 @@ PROTECTED_MODULE_PREFIXES: Tuple[str, ...] = (
 # is unavailable (scripts running as __main__, site-packages clients).
 PROTECTED_PATH_FRAGMENTS: Tuple[str, ...] = (
     "/research_lab/",
-    "/fulfillment/",
     "/qualification/",
     "/leadpoet_verifier/",
     "/miner_models/",

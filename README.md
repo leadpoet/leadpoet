@@ -180,9 +180,8 @@ This historical ICP comes from the September 9 set and was released under the ea
 
 ## Validators and rewards
 
-Arena is the only subnet incentive mechanism. Research Lab reimbursements,
-legacy champion obligations, SOURCE_ADD, and Fulfillment emission allocations
-are retired. Fulfillment still accepts, scores, and delivers client leads.
+Arena is the only subnet incentive and work-allocation mechanism. Research Lab
+reimbursements, legacy champion obligations, and SOURCE_ADD are retired.
 
 Registered validators with a permit and at least 75,000 effective subnet stake
 can receive new Arena scoring jobs. Permitted validators below that threshold

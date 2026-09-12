@@ -51,11 +51,10 @@ def test_production_scoring_lock_is_exact_complete_and_matches_input():
     assert "rapidfuzz" not in inputs
 
 
-def test_scoring_runtime_provisions_all_openrouter_fallback_keys():
+def test_scoring_runtime_provisions_active_openrouter_keys():
     assert {
         "OPENROUTER_API_KEY",
         "QUALIFICATION_OPENROUTER_API_KEY",
-        "FULFILLMENT_OPENROUTER_API_KEY",
         "OPENROUTER_KEY",
     } <= set(SCORING_RUNTIME_ENV_NAMES)
 

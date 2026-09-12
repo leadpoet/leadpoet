@@ -1001,8 +1001,7 @@ class SubmitLeadEvent(BaseModel):
 # Open-pool sourcing is DISABLED.
 #
 # As of May 2026 we stopped accepting miner-sourced leads for the open
-# marketplace.  Miners now only earn rewards via the fulfillment flow
-# (/fulfillment/request, /fulfillment/commit, /fulfillment/reveal, ...).
+# marketplace.
 #
 # This handler is kept in place so any miner client that still calls
 # POST /submit/ gets an unambiguous 410 Gone with a clear message,
@@ -1014,9 +1013,7 @@ class SubmitLeadEvent(BaseModel):
 
 _SOURCING_DISABLED_MESSAGE = (
     "Open-pool lead submission is disabled. Miners can no longer submit "
-    "leads via /presign + /submit/. Earn rewards via the fulfillment flow "
-    "instead: GET /fulfillment/requests/active, then POST /fulfillment/commit "
-    "and POST /fulfillment/reveal."
+    "leads via /presign + /submit/."
 )
 
 
@@ -3558,5 +3555,4 @@ async def _submit_lead_disabled_legacy(event: SubmitLeadEvent):
                 }
             }
         )
-
 

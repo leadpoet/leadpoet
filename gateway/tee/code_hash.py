@@ -51,7 +51,6 @@ INCLUDE_DIRS = (
     "middleware",
     "research_lab",
     "qualification",
-    "fulfillment",
     "leadpoet_canonical",
     "validator_models",
     "miner_models",

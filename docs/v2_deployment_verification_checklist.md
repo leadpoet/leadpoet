@@ -74,7 +74,7 @@ The gate must prove:
   requests are denied before state lookup/publication. Public round responses
   must not expose the signed reward basis as an alternate route. Mainnet roles
   remain validator for permitted hotkeys below the scoring minimum.
-  The retired Fulfillment reward-basis route and its unsigned client are absent.
+  The retired unsigned reward-basis route and its client are absent.
 
 For database changes, apply the exact migration to disposable PostgreSQL.
 Exercise upgrades with representative old objects and dependency constraints,

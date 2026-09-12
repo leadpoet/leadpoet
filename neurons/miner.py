@@ -51,11 +51,7 @@ from Leadpoet.utils.cloud_db import (
     fetch_miner_curation_request,
     push_miner_curation_result,
     check_linkedin_combo_duplicate,
-    gateway_poll_fulfillment_requests,
-    gateway_submit_fulfillment_commit,
-    gateway_reveal_fulfillment,
 )
-from Leadpoet.utils.hashing import hash_lead, HASH_SCHEMA_VERSION
 import logging
 import httpx
 import requests
@@ -98,13 +94,9 @@ class Miner(BaseMinerNeuron):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.sourcing_task: Optional[asyncio.Task] = None
         self.cloud_task: Optional[asyncio.Task] = None
-        self.fulfillment_task: Optional[asyncio.Task] = None
         self._bg_interval: int = 60
         self._miner_hotkey: Optional[str] = None
-        self._pending_fulfillment: Dict[str, dict] = {}  # request_id -> state
         self._sourcing_active: bool = False
-        self._fulfillment_semaphore = asyncio.Semaphore(
-            int(os.environ.get("FULFILLMENT_MAX_CONCURRENT_SOURCES", "2")))
         
         bt.logging.info(f"✅ Miner initialized (using trustless gateway - no JWT tokens)")
 
@@ -638,261 +630,6 @@ class Miner(BaseMinerNeuron):
 
             # Poll every 1 second for instant response
             await asyncio.sleep(1)
-
-    # ---------------------------------------------------------------
-    #  Fulfillment persistence helpers (crash recovery)
-    # ---------------------------------------------------------------
-
-    _FULFILLMENT_DIR = "fulfillment_pending"
-
-    def _save_pending_fulfillment(self, request_id: str, state: dict) -> None:
-        """Persist a pending commit to disk so reveals survive crashes.
-        Uses write-to-tmp + rename for atomicity."""
-        try:
-            os.makedirs(self._FULFILLMENT_DIR, exist_ok=True)
-            path = os.path.join(self._FULFILLMENT_DIR, f"{request_id}.json")
-            tmp_path = path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(state, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-        except Exception as e:
-            bt.logging.warning(f"Failed to persist fulfillment state for {request_id[:8]}: {e}")
-
-    def _remove_pending_fulfillment(self, request_id: str) -> None:
-        """Remove on-disk state after a successful reveal (or expiry)."""
-        self._pending_fulfillment.pop(request_id, None)
-        try:
-            path = os.path.join(self._FULFILLMENT_DIR, f"{request_id}.json")
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception as e:
-            bt.logging.warning(f"Failed to remove fulfillment state file for {request_id[:8]}: {e}")
-
-    def _load_pending_fulfillment(self) -> None:
-        """Recover pending commits from disk on startup."""
-        if not os.path.isdir(self._FULFILLMENT_DIR):
-            return
-        count = 0
-        for fname in os.listdir(self._FULFILLMENT_DIR):
-            if not fname.endswith(".json"):
-                continue
-            request_id = fname[:-5]
-            if request_id in self._pending_fulfillment:
-                continue
-            try:
-                path = os.path.join(self._FULFILLMENT_DIR, fname)
-                with open(path, "r") as f:
-                    state = json.load(f)
-                self._pending_fulfillment[request_id] = state
-                count += 1
-            except Exception as e:
-                bt.logging.warning(f"Failed to load fulfillment state {fname}: {e}")
-        if count:
-            bt.logging.info(f"Recovered {count} pending fulfillment commit(s) from disk")
-
-    # ---------------------------------------------------------------
-    #  Fulfillment loop — poll gateway, source leads, commit/reveal
-    # ---------------------------------------------------------------
-
-    async def fulfillment_loop(self, miner_hotkey: str):
-        """Background loop: poll for ICP fulfillment requests, source leads,
-        commit hashes, then reveal after the commit window closes."""
-        print("🔄 Fulfillment loop started (polling every 30s)")
-        poll_interval = int(os.environ.get("FULFILLMENT_POLL_INTERVAL", "30"))
-
-        self._load_pending_fulfillment()
-
-        while True:
-            try:
-                # Phase 1: poll for active requests (skip sourcing when
-                # AXON is not yielding or the main sourcing_loop is active)
-                skip_sourcing = False
-                if not self.sourcing_mode:
-                    bt.logging.debug("Fulfillment: AXON not yielding, skipping new sourcing")
-                    skip_sourcing = True
-                if self._sourcing_active:
-                    bt.logging.debug("Fulfillment: sourcing_loop active, deferring new sourcing")
-                    skip_sourcing = True
-
-                if not skip_sourcing:
-                    data = gateway_poll_fulfillment_requests(self.wallet)
-                    active_requests = data.get("requests", []) if isinstance(data, dict) else []
-                else:
-                    active_requests = []
-
-                for req in active_requests:
-                    request_id = req.get("request_id", "")
-                    if not request_id or request_id in self._pending_fulfillment:
-                        continue
-
-                    icp = req.get("icp", {})
-                    num_leads = req.get("num_leads", 10)
-                    industry = icp.get("industry", None)
-
-                    print(f"\n🎯 Fulfillment: sourcing {num_leads} leads for {request_id[:8]}... (industry={industry})")
-
-                    try:
-                        async with self._fulfillment_semaphore:
-                            leads = await self._source_fulfillment_leads(
-                                icp, num_leads, miner_hotkey,
-                            )
-                    except Exception as e:
-                        print(f"   ❌ Fulfillment sourcing failed for {request_id[:8]}: {e}")
-                        continue
-
-                    if not leads:
-                        print(f"   ⚠️ No leads sourced for {request_id[:8]}")
-                        continue
-
-                    # Hash each lead and build commit entries
-                    lead_dicts = [ld.model_dump(mode="json") for ld in leads]
-                    hashes = [
-                        {"hash": hash_lead(ld, HASH_SCHEMA_VERSION)}
-                        for ld in lead_dicts
-                    ]
-
-                    try:
-                        result = gateway_submit_fulfillment_commit(
-                            self.wallet,
-                            request_id,
-                            hashes,
-                            schema_version=HASH_SCHEMA_VERSION,
-                        )
-                        submission_id = result.get("submission_id", "")
-                        if not submission_id:
-                            print(f"   ⚠️ Commit rejected for {request_id[:8]}: {result}")
-                            continue
-
-                        state = {
-                            "submission_id": submission_id,
-                            "leads": lead_dicts,
-                            "reveal_after": req.get("window_end", ""),
-                        }
-                        self._pending_fulfillment[request_id] = state
-                        self._save_pending_fulfillment(request_id, state)
-                        print(f"   ✅ Committed {len(hashes)} lead hashes for {request_id[:8]}... (reveal after {req.get('window_end', '?')})")
-                    except Exception as e:
-                        print(f"   ❌ Commit failed for {request_id[:8]}: {e}")
-
-                # Phase 2: reveal any commits whose window has closed
-                now = datetime.now(timezone.utc)
-                revealed = []
-                for rid, state in list(self._pending_fulfillment.items()):
-                    reveal_after = state.get("reveal_after", "")
-                    if not reveal_after:
-                        continue
-                    try:
-                        deadline = datetime.fromisoformat(reveal_after.replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        continue
-
-                    if now < deadline:
-                        continue
-
-                    print(f"\n📤 Revealing {len(state['leads'])} leads for {rid[:8]}...")
-                    try:
-                        gateway_reveal_fulfillment(
-                            self.wallet,
-                            rid,
-                            state["submission_id"],
-                            state["leads"],
-                        )
-                        print(f"   ✅ Reveal successful for {rid[:8]}!")
-                        revealed.append(rid)
-                    except Exception as e:
-                        print(f"   ❌ Reveal failed for {rid[:8]}: {e}")
-                        revealed.append(rid)
-
-                for rid in revealed:
-                    self._remove_pending_fulfillment(rid)
-
-                await asyncio.sleep(poll_interval)
-
-            except asyncio.CancelledError:
-                bt.logging.info("Fulfillment loop cancelled")
-                break
-            except Exception as e:
-                bt.logging.error(f"Fulfillment loop error: {e}")
-                await asyncio.sleep(poll_interval)
-
-    async def _source_fulfillment_leads(
-        self,
-        icp: dict,
-        num_leads: int,
-        miner_hotkey: str,
-    ) -> list:
-        """Source leads matching a fulfillment ICP using the fulfillment sourcer.
-
-        Uses ScrapingDog + OpenRouter to discover real companies, find real
-        decision-makers, and mine verifiable intent signals from the web.
-        Falls back to the legacy get_leads pipeline if the sourcer fails.
-        """
-        from gateway.fulfillment.models import FulfillmentLead, IntentSignal
-
-        try:
-            from miner_models.Main_fulfillment_model.discovery import source_fulfillment_leads
-            raw_leads = await source_fulfillment_leads(icp, num_leads=num_leads)
-        except Exception as e:
-            bt.logging.error(f"Fulfillment sourcer failed: {e}")
-            raw_leads = []
-
-        if not raw_leads:
-            bt.logging.warning(f"No leads sourced for {icp.get('industry', '?')}")
-            return []
-
-        fulfillment_leads = []
-        for lead_dict in raw_leads:
-            try:
-                signals = []
-                for sig in lead_dict.get("intent_signals", []):
-                    signals.append(IntentSignal(
-                        source=sig.get("source", "other"),
-                        description=sig.get("description", ""),
-                        url=sig.get("url", ""),
-                        date=sig.get("date"),
-                        snippet=sig.get("snippet", "")[:1000],
-                        # REQUIRED on submission: miner must declare which
-                        # client-listed intent signal this evidence proves.
-                        # Pass through whatever the upstream miner model
-                        # produced; -1 default in the schema means "not set"
-                        # and is rejected at Tier 3 scoring time.
-                        matched_icp_signal=int(sig.get("matched_icp_signal", -1)),
-                    ))
-                if not signals:
-                    bt.logging.warning(f"Skipping lead {lead_dict.get('full_name')} — no intent signals")
-                    continue
-
-                fl = FulfillmentLead(
-                    full_name=lead_dict.get("full_name", ""),
-                    email=lead_dict.get("email", ""),
-                    linkedin_url=lead_dict.get("linkedin_url", ""),
-                    phone=lead_dict.get("phone", ""),
-                    business=lead_dict.get("business", ""),
-                    company_linkedin=lead_dict.get("company_linkedin", ""),
-                    company_website=lead_dict.get("company_website", ""),
-                    employee_count=lead_dict.get("employee_count", ""),
-                    company_hq_country=lead_dict.get("company_hq_country", ""),
-                    company_hq_state=lead_dict.get("company_hq_state", ""),
-                    company_hq_city=lead_dict.get("company_hq_city", ""),
-                    industry=lead_dict.get("industry", ""),
-                    sub_industry=lead_dict.get("sub_industry", ""),
-                    country=lead_dict.get("country", ""),
-                    city=lead_dict.get("city", ""),
-                    state=lead_dict.get("state", ""),
-                    role=lead_dict.get("role", ""),
-                    role_type=lead_dict.get("role_type", "Sales"),
-                    seniority=lead_dict.get("seniority", "VP"),
-                    intent_signals=signals,
-                )
-                fulfillment_leads.append(fl)
-                bt.logging.info(f"✅ Built FulfillmentLead: {fl.full_name} @ {fl.business}")
-            except Exception as e:
-                bt.logging.warning(f"Skipping lead — validation error: {e}")
-                continue
-
-        return fulfillment_leads
 
     async def _forward_async(self, synapse: LeadRequest) -> LeadRequest:
         import time as _t
@@ -1511,7 +1248,7 @@ def update_miner_stats(hotkey, valid_count):
             json.dump(miners, f, indent=2)
 
 
-async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000, mode="sourcing"):
+async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000):
     logging.getLogger('bittensor.subtensor').setLevel(logging.WARNING)
     logging.getLogger('bittensor.axon').setLevel(logging.WARNING)
     miner._loop = asyncio.get_running_loop()
@@ -1520,24 +1257,13 @@ async def run_miner(miner, miner_hotkey=None, interval=60, queue_maxsize=1000, m
 
     tasks = []
 
-    if mode == "sourcing":
-        miner.sourcing_task = asyncio.create_task(
-            miner.sourcing_loop(interval, miner_hotkey), name="sourcing_loop")
-        tasks.append("sourcing_loop - Continuous lead sourcing via trustless gateway")
-
-        if os.environ.get("ENABLE_FULFILLMENT", "false").lower() == "true":
-            miner.fulfillment_task = asyncio.create_task(
-                miner.fulfillment_loop(miner_hotkey), name="fulfillment_loop")
-            tasks.append("fulfillment_loop - Lead fulfillment commit-reveal system")
-
-    elif mode == "fulfillment":
-        miner.fulfillment_task = asyncio.create_task(
-            miner.fulfillment_loop(miner_hotkey), name="fulfillment_loop")
-        tasks.append("fulfillment_loop - Lead fulfillment commit-reveal system (ONLY)")
+    miner.sourcing_task = asyncio.create_task(
+        miner.sourcing_loop(interval, miner_hotkey), name="sourcing_loop")
+    tasks.append("sourcing_loop - Continuous lead sourcing via trustless gateway")
 
     for i, t in enumerate(tasks, 1):
         print(f"   {i}. {t}")
-    print(f"✅ Started {len(tasks)} background task(s) in {mode.upper()} mode")
+    print(f"✅ Started {len(tasks)} background task(s) in SOURCING mode")
 
     while True:
         await asyncio.sleep(1)
@@ -1637,12 +1363,6 @@ def _choose_primary_miner_mode(input_fn=input, output_fn=print) -> str:
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
-    parser.add_argument(
-        "--mode",
-        choices=("menu", "fulfillment"),
-        default="menu",
-        help="use fulfillment only for the legacy background worker",
-    )
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -1763,13 +1483,7 @@ def main():
         else:
             bt.logging.info(f"✅ Contributor terms attestation valid (hash: {TERMS_VERSION_HASH[:16]}...)")
     
-    # Fulfillment remains callable for existing operators, but it is not a
-    # primary submission action in the miner menu.
-    miner_mode = (
-        "fulfillment"
-        if args.mode == "fulfillment"
-        else _choose_primary_miner_mode()
-    )
+    miner_mode = _choose_primary_miner_mode()
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
     if miner_mode == "agent_competition":
@@ -1851,7 +1565,7 @@ def main():
         miner_hotkey = miner.wallet.hotkey.ss58_address
         interval = 60
         queue_maxsize = 1000
-        await run_miner(miner, miner_hotkey, interval, queue_maxsize, mode=miner_mode)
+        await run_miner(miner, miner_hotkey, interval, queue_maxsize)
 
     asyncio.run(run_selected_mode())
 

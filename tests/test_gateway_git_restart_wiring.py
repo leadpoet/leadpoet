@@ -1315,6 +1315,68 @@ def test_gateway_live_env_clone_removes_both_prepared_release_paths(
     assert "GATEWAY_PREPARED_V2_RELEASE_MANIFEST" not in cloned
 
 
+@pytest.mark.parametrize("secret_format", ["json", "dotenv"])
+def test_restart_drops_retired_service_environment_at_every_source(
+    tmp_path: Path, secret_format: str,
+) -> None:
+    """Old live env and cached secrets cannot repopulate retired settings."""
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    def body(marker: str) -> str:
+        start = script.index(marker) + len(marker)
+        return script[start:script.index("\nPY\n", start)]
+
+    values = {
+        "ENABLE_FULFILLMENT": "true",
+        "APIFY_API_TOKEN": "retired-apify",
+        "DEEPL_API_KEY": "retired-translation",
+        "LEADPOET_INTERNAL_SECRET": "retired-route-secret",
+        "FULFILLMENT_MAX_PARALLEL_REQUESTS": "99",
+        "FULFILLMENT_OPENROUTER_API_KEY": "retired-fixture-key",
+        "OPENROUTER_API_KEY": "shared-fixture-key",
+        "LAB_ARENA_MODE": "live",
+        "QUAL_MAX_COST_PER_LEAD_USD": "0.8",
+    }
+    secret = tmp_path / "secret"
+    cache = tmp_path / "cache"
+    prepared = tmp_path / "prepared"
+    inherited = tmp_path / "inherited"
+    cloned = tmp_path / "cloned"
+    secret.write_text(
+        json.dumps(values) if secret_format == "json" else
+        "\n".join(f"export {key}={shlex.quote(value)}" for key, value in values.items())
+    )
+    hydrate = body('python3 - "$SECRET_TMP" "$GATEWAY_ENV_FILE" <<\'PY\'\n')
+    subprocess.run(
+        [sys.executable, "-", str(secret), str(cache)], input=hydrate,
+        text=True, check=True, capture_output=True, timeout=5,
+    )
+    # Exercise the independently used cache parser with old settings as well.
+    stale_cache = tmp_path / "stale-cache"
+    stale_cache.write_text("\n".join(f"{key}={value}" for key, value in values.items()))
+    prepare = body('python3 - "$GATEWAY_ENV_FILE" "$ENV_SECRET" <<\'PY\'\n')
+    subprocess.run(
+        [sys.executable, "-", str(stale_cache), str(prepared)], input=prepare,
+        text=True, check=True, capture_output=True, timeout=5,
+    )
+    inherited.write_bytes(b"\0".join(f"{key}={value}".encode() for key, value in values.items()))
+    clone = body('python3 - "$PID" "$ENV_CLONE" <<\'PY\'\n').replace(
+        'f"/proc/{pid}/environ"', repr(str(inherited))
+    )
+    subprocess.run(
+        [sys.executable, "-", "fixture", str(cloned)], input=clone,
+        text=True, check=True, capture_output=True, timeout=5,
+    )
+    retired = {"APIFY_API_TOKEN", "DEEPL_API_KEY", "LEADPOET_INTERNAL_SECRET"}
+    expected = {key: value for key, value in values.items() if "FULFILLMENT" not in key and key not in retired}
+    for output in (cache, prepared, cloned):
+        observed = dict(
+            shlex.split(line.removeprefix("export "))[0].split("=", 1)
+            for line in output.read_text().splitlines()
+        )
+        assert observed == expected
+
+
 def test_gateway_candidate_reexec_rebinds_restart_identity_before_telemetry() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 

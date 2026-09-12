@@ -81,7 +81,7 @@ release succeeds. It dynamically:
    reads but redirects every mutable Research Lab write to the clone;
 7. runs the candidate's exact `gw_restart.sh --commit` and requires matching
    build, attestation, PCR0, and V2 readiness;
-8. keeps production writes and fulfillment disabled while running the public
+8. keeps production writes disabled while running the public
    PydanticAI baseline in a clone-local Arena shadow round;
 9. executes and scores all twenty daily ICPs, restarts the Arena service and
    runner between stages, and checks recovery, persistence, and publication;
@@ -283,7 +283,7 @@ runner; no additional copy is created.
   deletion or rewriting of copied production daily state.
 - The externally reachable candidate gateway keeps miner submissions disabled.
   Arena admissions run only against the disposable clone. Production model
-  mutation, promotion, fulfillment, and telemetry remain disabled.
+  mutation, promotion, and telemetry remain disabled.
 - Production Finney is read-only. The adapter cannot forward the final chain
   RPC and cannot fabricate receipts or success.
 - Every identity, source archive, release artifact, allocation, and evidence

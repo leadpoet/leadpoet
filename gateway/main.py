@@ -84,22 +84,12 @@ from gateway.db.client import create_http1_sync_client
 # NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
 # submit hash+values in one request to /validate. No separate reveal phase needed.
 from gateway.api import epoch, validate, manifest, submit, attest, attestation
-from gateway.api import role_translate
 from gateway.api.arena_proxy import router as arena_proxy_router
 from gateway.api.arena_proxy import testnet_router as arena_testnet_proxy_router
 from gateway.api import metrics as metrics_api
 
 # Research Lab is an authoritative V2 service. Import failures must abort
 # startup instead of silently launching a gateway without its protected path.
-
-# Import fulfillment router (Lead Fulfillment System)
-try:
-    from gateway.fulfillment.api import fulfillment_router
-    _FULFILLMENT_ROUTER_AVAILABLE = True
-except Exception as _fulfillment_import_err:
-    _FULFILLMENT_ROUTER_AVAILABLE = False
-    import logging as _logging
-    _logging.getLogger(__name__).warning(f"Fulfillment router import failed: {_fulfillment_import_err}")
 
 # Import background tasks
 # NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means
@@ -300,8 +290,6 @@ async def lifespan(app: FastAPI):
     hourly_batch_task_handle = None
     rate_limiter_task = None
     icp_task = None
-    fulfillment_task_handle = None
-    hotkey_bucket_cleanup_task = None
 
     # Now use async_subtensor in a try/finally to ensure cleanup
     try:
@@ -381,8 +369,8 @@ async def lifespan(app: FastAPI):
             print("   This is for LOCAL TESTING ONLY!")
 
             # Keep the immutable audit path alive during local/testnet Research
-            # Lab testing. This does not re-enable legacy epoch, checkpoint, ICP,
-            # qualification, or fulfillment loops; it only drains the TEE buffer
+            # Lab testing. This does not re-enable legacy epoch, checkpoint, or ICP
+            # loops; it only drains the TEE buffer
             # into the existing batched Arweave checkpoint flow.
             hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
             print("✅ Hourly Arweave batch task started (EXCEPTION: runs even with DISABLE_BACKGROUND_TASKS)")
@@ -397,11 +385,6 @@ async def lifespan(app: FastAPI):
                 print("✅ ICP rotation task started (EXCEPTION: runs even with DISABLE_BACKGROUND_TASKS)")
                 print("   → Only writes to: qualification_private_icp_sets")
 
-            if os.getenv("ENABLE_FULFILLMENT", "false").lower() == "true" and _FULFILLMENT_ROUTER_AVAILABLE:
-                from gateway.fulfillment.lifecycle import fulfillment_lifecycle_task
-                fulfillment_task_handle = asyncio.create_task(fulfillment_lifecycle_task())
-                print("✅ Fulfillment lifecycle task started (EXCEPTION: runs even with DISABLE_BACKGROUND_TASKS)")
-                print("   → Only writes to: fulfillment_* tables")
         else:
             # Start epoch monitor (polling loop - bulletproof)
             epoch_monitor_task = asyncio.create_task(epoch_monitor.start())
@@ -423,26 +406,10 @@ async def lifespan(app: FastAPI):
             rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
             print("✅ Rate limiter cleanup task started")
 
-            async def _hotkey_bucket_cleanup_loop():
-                from gateway.utils.hotkey_bucket import ALL_BUCKETS, RECENT_NONCES
-                while True:
-                    await asyncio.sleep(300)
-                    for bucket in ALL_BUCKETS:
-                        bucket.prune()
-                    RECENT_NONCES.prune()
-
-            hotkey_bucket_cleanup_task = asyncio.create_task(_hotkey_bucket_cleanup_loop())
-            print("✅ Hotkey bucket cleanup task started")
-        
             # ICP rotation task (resets daily at 12 AM ET)
             # Note: Initial ICP set already created above (outside skip_bg_tasks check)
             icp_task = asyncio.create_task(icp_rotation_task())
             print("✅ ICP rotation task started (resets 12 AM ET daily)")
-
-            if os.getenv("ENABLE_FULFILLMENT", "false").lower() == "true" and _FULFILLMENT_ROUTER_AVAILABLE:
-                from gateway.fulfillment.lifecycle import fulfillment_lifecycle_task
-                fulfillment_task_handle = asyncio.create_task(fulfillment_lifecycle_task())
-                print("✅ Fulfillment lifecycle task started")
 
         app.state.event_signing_identity = dict(event_signing_identity)
         
@@ -475,9 +442,7 @@ async def lifespan(app: FastAPI):
             anchor_task,
             hourly_batch_task_handle,
             rate_limiter_task,
-            hotkey_bucket_cleanup_task,
             icp_task,
-            fulfillment_task_handle,
         ]
         
         # Filter out None tasks (when DISABLE_BACKGROUND_TASKS=true)
@@ -605,14 +570,10 @@ app.include_router(manifest.router)
 # app.include_router(submit.router)
 app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
-app.include_router(role_translate.router)  # POST /fulfillment/translate-role (DeepL-backed cache)
 app.include_router(metrics_api.router)
 
 app.include_router(arena_proxy_router)
 app.include_router(arena_testnet_proxy_router)
-
-if _FULFILLMENT_ROUTER_AVAILABLE:
-    app.include_router(fulfillment_router)
 
 # ============================================================
 # Health Check Endpoints
@@ -716,9 +677,7 @@ async def v2_authority_health():
 
 _SOURCING_DISABLED_MESSAGE = (
     "Open-pool lead submission is disabled. Miners can no longer submit "
-    "leads via /presign + /submit/. Earn rewards via the fulfillment flow "
-    "instead: GET /fulfillment/requests/active, then POST /fulfillment/commit "
-    "and POST /fulfillment/reveal."
+    "leads via /presign + /submit/."
 )
 
 

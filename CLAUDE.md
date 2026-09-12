@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: complete Fulfillment removal
+
+On 2026-09-11 the user explicitly authorized complete removal of the legacy
+Fulfillment service from source and production through the overnight skills.
+This includes protected read-only inspection, credentials, narrow code changes,
+exact committed migrations that delete Fulfillment-only database objects,
+pushes and safe merges, and canonical gateway/normal-validator restarts.
+Delete its implementation, routes, workers, settings, and startup hooks; do not
+retain disabled or compatibility service paths. Preserve shared Arena, baseline,
+scoring, provider, weight, and qualification behavior and all concurrent work.
+Verify database removal and the live unaffected flows before completion.
+This authority expires when removal and production verification complete.
+
 ## Scoped production authorization: September 12 miner submission recovery
 
 On 2026-09-11 the user explicitly authorized investigation and narrow repair of
@@ -190,3 +203,5 @@ The user explicitly authorized `$overnight-rebenchmark-validation` on 2026-09-09
 17. Run safe, independent calls together and return concise results. Handle dependent calls, writes, approvals, and failure-sensitive calls separately.
 
 18. Routine handoff: run `git diff --check`; run `python3 -m py_compile` for touched Python files; for Pydantic changes, round-trip JSON; for scoring changes, scan for silent exception sentinels. Ask before adding production dependencies.
+
+29. Minimize OpenRouter test spend; run full evaluations or spend-to-limit tests only within an explicit user-approved total budget covering all runs and retries.

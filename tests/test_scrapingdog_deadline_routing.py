@@ -1,12 +1,9 @@
-import asyncio
 import unittest
 from unittest import mock
 
-import aiohttp
 import httpx
 
 from qualification.scoring import intent_verification_three_stage as intent
-from validator_models import fulfillment_attribute_verification as attributes
 
 
 class _HttpxClient:
@@ -26,39 +23,6 @@ class _HttpxClient:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
-
-
-class _AiohttpResponse:
-    def __init__(self, status, body, headers=None):
-        self.status = status
-        self._body = body
-        self.headers = headers or {}
-
-    async def text(self):
-        return self._body
-
-
-class _AiohttpContext:
-    def __init__(self, outcome):
-        self.outcome = outcome
-
-    async def __aenter__(self):
-        if isinstance(self.outcome, BaseException):
-            raise self.outcome
-        return self.outcome
-
-    async def __aexit__(self, *_args):
-        return False
-
-
-class _AiohttpSession:
-    def __init__(self, outcomes):
-        self.outcomes = list(outcomes)
-        self.calls = []
-
-    def get(self, url, **kwargs):
-        self.calls.append((url, kwargs))
-        return _AiohttpContext(self.outcomes.pop(0))
 
 
 class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
@@ -292,67 +256,6 @@ class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(
             intent._SD_TIER_TIMEOUT["full_combined"],
             intent.SCRAPINGDOG_PROVIDER_DEADLINE_S,
-        )
-
-
-class AttributeScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
-    async def test_client_deadline_stops_scrapingdog_ladder(self):
-        session = _AiohttpSession([asyncio.TimeoutError()])
-        with mock.patch.object(attributes, "SCRAPINGDOG_KEY", "test"), \
-                mock.patch.object(
-                    attributes,
-                    "_wayback_fetch",
-                    new=mock.AsyncMock(return_value=(False, "", "wayback_no_snapshot")),
-                ):
-            result = await attributes.fetch_url_via_scrapingdog(
-                session,
-                "https://unreachable.example",
-            )
-
-        self.assertFalse(result[0])
-        self.assertEqual(len(session.calls), 1)
-        self.assertIn("client_deadline:baseline", result[2])
-
-    async def test_provider_5xx_stops_scrapingdog_ladder(self):
-        session = _AiohttpSession([
-            _AiohttpResponse(503, "provider unavailable"),
-        ])
-        with mock.patch.object(attributes, "SCRAPINGDOG_KEY", "test"), \
-                mock.patch.object(
-                    attributes,
-                    "_wayback_fetch",
-                    new=mock.AsyncMock(return_value=(False, "", "wayback_no_snapshot")),
-                ):
-            result = await attributes.fetch_url_via_scrapingdog(
-                session,
-                "https://provider-failure.example",
-            )
-
-        self.assertFalse(result[0])
-        self.assertEqual(len(session.calls), 1)
-        self.assertIn("http_503", result[2])
-
-    async def test_transport_error_stops_scrapingdog_ladder(self):
-        session = _AiohttpSession([aiohttp.ClientConnectionError("unreachable")])
-        with mock.patch.object(attributes, "SCRAPINGDOG_KEY", "test"), \
-                mock.patch.object(
-                    attributes,
-                    "_wayback_fetch",
-                    new=mock.AsyncMock(return_value=(False, "", "wayback_no_snapshot")),
-                ):
-            result = await attributes.fetch_url_via_scrapingdog(
-                session,
-                "https://unreachable.example",
-            )
-
-        self.assertFalse(result[0])
-        self.assertEqual(len(session.calls), 1)
-        self.assertIn("transport_error:ClientConnectionError", result[2])
-
-    def test_terminal_tier_has_provider_delivery_margin(self):
-        self.assertGreater(
-            attributes._SD_TIER_TIMEOUT["full_combined"],
-            attributes.SCRAPINGDOG_PROVIDER_DEADLINE_S,
         )
 
 

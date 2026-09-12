@@ -1372,7 +1372,6 @@ def _entity_plausibly_present(company_name: str, scraped_text: str) -> bool:
 def _get_openrouter_key() -> str:
     return (
         os.environ.get("OPENROUTER_API_KEY")
-        or os.environ.get("FULFILLMENT_OPENROUTER_API_KEY")
         or os.environ.get("OPENROUTER_KEY")
         or ""
     )

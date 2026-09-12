@@ -26,9 +26,7 @@ lead_scorer.py.  Role / seniority / email validation are intentionally
 ABSENT here — see module-level comment at the top of lead_scorer.py for
 the May 2026 company-mode cutover rationale.
 
-CRITICAL: This is validator-side qualification logic.
-Do NOT modify any existing validation in validator_models/automated_checks.py
-(which is fulfillment-side).
+This is validator-side qualification logic.
 """
 
 import os

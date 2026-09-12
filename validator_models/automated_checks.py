@@ -843,9 +843,6 @@ async def run_stage4_5_repscore(
     lead: dict,
     email_result: dict,
     stage0_2_data: dict,
-    skip_stage3: bool = False,
-    skip_stage4: bool = False,
-    skip_stage5: bool = False,
 ) -> Tuple[bool, dict]:
     """
     Run Stage 4, Stage 5, and Rep Score checks only.
@@ -919,104 +916,79 @@ async def run_stage4_5_repscore(
     # ========================================================================
     print(f"🔍 Stage 3: Email verification (from batch) for {email} @ {company}")
 
-    if skip_stage3:
-        # Fulfillment: contact emails are sourced out-of-band and are not
-        # verified, so email is optional and never gates a lead.  Record a
-        # neutral, non-passing status (email_score=0, email_status="skipped")
-        # and proceed straight to Stage 4/5 + rep score without rejecting.
-        # Open-mining callers leave skip_stage3=False and keep the original
-        # TrueList gating behavior.
-        lead["email_verifier_status"] = "Skipped"
-        lead["email_verifier_disposable"] = False
-        lead["email_verifier_role_based"] = False
-        lead["email_verifier_free"] = False
-        automated_checks_data["stage_3_email"]["email_status"] = "skipped"
-        automated_checks_data["stage_3_email"]["email_score"] = 0
-        automated_checks_data["stage_3_email"]["is_disposable"] = False
-        automated_checks_data["stage_3_email"]["is_role_based"] = False
-        automated_checks_data["stage_3_email"]["is_free"] = False
-        print("   ⏭️  Stage 3: Skipped (email optional, not verified)")
+    # Map TrueList batch status to internal format for lead["email_verifier_status"]
+    # This matches the mapping in run_automated_checks() Stage 3 data collection
+    batch_status = email_result.get("status", "unknown")
+
+    if batch_status == "email_ok":
+        lead["email_verifier_status"] = "Valid"
+        email_status = "valid"
+        email_passed = True
+    elif batch_status in ["disposable"]:
+        lead["email_verifier_status"] = "Disposable"
+        email_status = "invalid"
+        email_passed = False
+    elif batch_status in ["failed_no_mailbox", "failed_syntax_check", "failed_mx_check"]:
+        lead["email_verifier_status"] = "Invalid"
+        email_status = "invalid"
+        email_passed = False
     else:
-        # Map TrueList batch status to internal format for lead["email_verifier_status"]
-        # This matches the mapping in run_automated_checks() Stage 3 data collection
-        batch_status = email_result.get("status", "unknown")
+        # unknown, timeout, error - should have been retried, treat as failure
+        lead["email_verifier_status"] = "Unknown"
+        email_status = "unknown"
+        email_passed = False
 
-        if batch_status == "email_ok":
-            lead["email_verifier_status"] = "Valid"
-            email_status = "valid"
-            email_passed = True
-        elif batch_status in ["disposable"]:
-            lead["email_verifier_status"] = "Disposable"
-            email_status = "invalid"
-            email_passed = False
-        elif batch_status in ["failed_no_mailbox", "failed_syntax_check", "failed_mx_check"]:
-            lead["email_verifier_status"] = "Invalid"
-            email_status = "invalid"
-            email_passed = False
-        else:
-            # unknown, timeout, error - should have been retried, treat as failure
-            lead["email_verifier_status"] = "Unknown"
-            email_status = "unknown"
-            email_passed = False
+    # Populate batch result flags on lead (for downstream compatibility)
+    lead["email_verifier_disposable"] = email_result.get("is_disposable", False)
+    lead["email_verifier_role_based"] = email_result.get("is_role_based", False)
+    lead["email_verifier_free"] = email_result.get("is_free", False)
 
-        # Populate batch result flags on lead (for downstream compatibility)
-        lead["email_verifier_disposable"] = email_result.get("is_disposable", False)
-        lead["email_verifier_role_based"] = email_result.get("is_role_based", False)
-        lead["email_verifier_free"] = email_result.get("is_free", False)
+    # Collect Stage 3 email data
+    automated_checks_data["stage_3_email"]["email_status"] = email_status
+    automated_checks_data["stage_3_email"]["email_score"] = 10 if email_passed else 0
+    automated_checks_data["stage_3_email"]["is_disposable"] = lead.get("email_verifier_disposable", False)
+    automated_checks_data["stage_3_email"]["is_role_based"] = lead.get("email_verifier_role_based", False)
+    automated_checks_data["stage_3_email"]["is_free"] = lead.get("email_verifier_free", False)
 
-        # Collect Stage 3 email data
-        automated_checks_data["stage_3_email"]["email_status"] = email_status
-        automated_checks_data["stage_3_email"]["email_score"] = 10 if email_passed else 0
-        automated_checks_data["stage_3_email"]["is_disposable"] = lead.get("email_verifier_disposable", False)
-        automated_checks_data["stage_3_email"]["is_role_based"] = lead.get("email_verifier_role_based", False)
-        automated_checks_data["stage_3_email"]["is_free"] = lead.get("email_verifier_free", False)
+    if not email_passed:
+        rejection_reason = email_result.get("rejection_reason") or {
+            "stage": "Stage 3: Email Verification (Batch)",
+            "check_name": "truelist_batch",
+            "message": f"Email verification failed: {batch_status}",
+            "failed_fields": ["email"]
+        }
+        print(f"   ❌ Stage 3 failed: {rejection_reason.get('message', 'Email verification failed')}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
 
-        if not email_passed:
-            rejection_reason = email_result.get("rejection_reason") or {
-                "stage": "Stage 3: Email Verification (Batch)",
-                "check_name": "truelist_batch",
-                "message": f"Email verification failed: {batch_status}",
-                "failed_fields": ["email"]
-            }
-            print(f"   ❌ Stage 3 failed: {rejection_reason.get('message', 'Email verification failed')}")
-            automated_checks_data["passed"] = False
-            automated_checks_data["rejection_reason"] = rejection_reason
-            return False, automated_checks_data
-
-        print("   ✅ Stage 3 passed (batch verified)")
+    print("   ✅ Stage 3 passed (batch verified)")
 
     # ========================================================================
     # Stage 4: LinkedIn/GSE Validation (HARD)
     # EXTRACTED VERBATIM from run_automated_checks()
     # ========================================================================
-    if skip_stage4:
-        print(f"   ⏭️  Stage 4: Skipped (Apify verified) for {email} @ {company}")
-        automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
-        automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
-        automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "apify")
-        automated_checks_data["stage_4_linkedin"]["source"] = "apify"
-    else:
-        print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
+    print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
 
-        passed, rejection_reason = await check_linkedin_gse(lead)
+    passed, rejection_reason = await check_linkedin_gse(lead)
 
-        # Collect Stage 4 data even on failure
-        automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
-        automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
+    # Collect Stage 4 data even on failure
+    automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
+    automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
 
-        if not passed:
-            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
-            print(f"   ❌ Stage 4 failed: {msg}")
-            automated_checks_data["passed"] = False
-            automated_checks_data["rejection_reason"] = rejection_reason
-            return False, automated_checks_data
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 4 failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        return False, automated_checks_data
 
-        print("   ✅ Stage 4 passed")
+    print("   ✅ Stage 4 passed")
 
-        # Collect Stage 4 data after successful check
-        automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
-        automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
-        automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
+    # Collect Stage 4 data after successful check
+    automated_checks_data["stage_4_linkedin"]["linkedin_verified"] = True
+    automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
+    automated_checks_data["stage_4_linkedin"]["llm_confidence"] = lead.get("llm_confidence", "none")
 
     # ========================================================================
     # Stage 5: Role/Region/Industry Verification (HARD)
@@ -1026,39 +998,27 @@ async def run_stage4_5_repscore(
     # - Early exit: if region fails → skip industry
     # - Anti-gaming: rejects if miner puts multiple states in region
     # ========================================================================
-    if skip_stage5:
-        print(f"   ⏭️  Stage 5: Skipped (fulfillment verified) for {email} @ {company}")
-        automated_checks_data["stage_5_verification"]["company_name_verified"] = lead.get("stage5_name_match", False)
-        automated_checks_data["stage_5_verification"]["company_size_verified"] = lead.get("stage5_size_match", False)
-        automated_checks_data["stage_5_verification"]["company_hq_verified"] = lead.get("stage5_hq_match", False)
-        automated_checks_data["stage_5_verification"]["industry_verified"] = lead.get("stage5_industry_match", False)
-        automated_checks_data["stage_5_verification"]["extracted_name"] = lead.get("stage5_extracted_name")
-        automated_checks_data["stage_5_verification"]["extracted_size"] = lead.get("stage5_extracted_size")
-        automated_checks_data["stage_5_verification"]["extracted_hq"] = lead.get("stage5_extracted_hq")
-        automated_checks_data["stage_5_verification"]["extracted_industry"] = lead.get("stage5_extracted_industry")
-        automated_checks_data["stage_5_verification"]["source"] = "fulfillment_company_verification"
-    else:
-        print(f"🔍 Stage 5: Role/Region/Industry verification for {email} @ {company}")
+    print(f"🔍 Stage 5: Role/Region/Industry verification for {email} @ {company}")
 
-        passed, rejection_reason = await check_stage5_unified(lead)
+    passed, rejection_reason = await check_stage5_unified(lead)
 
-        # Collect Stage 5 data (company verification - role/location handled by Stage 4)
-        automated_checks_data["stage_5_verification"]["company_name_verified"] = lead.get("stage5_name_match", False)
-        automated_checks_data["stage_5_verification"]["company_size_verified"] = lead.get("stage5_size_match", False)
-        automated_checks_data["stage_5_verification"]["company_hq_verified"] = lead.get("stage5_hq_match", False)
-        automated_checks_data["stage_5_verification"]["industry_verified"] = lead.get("stage5_industry_match", False)
-        automated_checks_data["stage_5_verification"]["extracted_name"] = lead.get("stage5_extracted_name")
-        automated_checks_data["stage_5_verification"]["extracted_size"] = lead.get("stage5_extracted_size")
-        automated_checks_data["stage_5_verification"]["extracted_hq"] = lead.get("stage5_extracted_hq")
-        automated_checks_data["stage_5_verification"]["extracted_industry"] = lead.get("stage5_extracted_industry")
+    # Collect Stage 5 data (company verification - role/location handled by Stage 4)
+    automated_checks_data["stage_5_verification"]["company_name_verified"] = lead.get("stage5_name_match", False)
+    automated_checks_data["stage_5_verification"]["company_size_verified"] = lead.get("stage5_size_match", False)
+    automated_checks_data["stage_5_verification"]["company_hq_verified"] = lead.get("stage5_hq_match", False)
+    automated_checks_data["stage_5_verification"]["industry_verified"] = lead.get("stage5_industry_match", False)
+    automated_checks_data["stage_5_verification"]["extracted_name"] = lead.get("stage5_extracted_name")
+    automated_checks_data["stage_5_verification"]["extracted_size"] = lead.get("stage5_extracted_size")
+    automated_checks_data["stage_5_verification"]["extracted_hq"] = lead.get("stage5_extracted_hq")
+    automated_checks_data["stage_5_verification"]["extracted_industry"] = lead.get("stage5_extracted_industry")
 
-        if not passed:
-            msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
-            print(f"   ❌ Stage 5 failed: {msg}")
-            automated_checks_data["passed"] = False
-            automated_checks_data["rejection_reason"] = rejection_reason
-            automated_checks_data["stage_5_verification"]["early_exit"] = rejection_reason.get("early_exit") if rejection_reason else None
-            return False, automated_checks_data
+    if not passed:
+        msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
+        print(f"   ❌ Stage 5 failed: {msg}")
+        automated_checks_data["passed"] = False
+        automated_checks_data["rejection_reason"] = rejection_reason
+        automated_checks_data["stage_5_verification"]["early_exit"] = rejection_reason.get("early_exit") if rejection_reason else None
+        return False, automated_checks_data
 
     print("   ✅ Stage 5 passed")
 

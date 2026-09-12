@@ -10,8 +10,7 @@ The historical lead-mode pipeline (DB row equality, role / seniority /
 decision-maker LLM, email validation) has been removed in favor of a
 single-path company-mode pipeline.  Rationale: cleanly finding
 contacts requires Apify / LinkedIn scraping, which we do not want
-baked into the base miner model.  Fulfillment miners can layer their
-own contact enrichment on top of a license-clean base model.
+baked into the base miner model.
 
 Scoring flow:
   1. ``run_company_zero_checks`` — deterministic gates (industry +
@@ -29,15 +28,7 @@ Scoring flow:
 
 Max Score: MAX_COMPANY_TOTAL_SCORE = 100.
 
-Cross-module dependencies kept for fulfillment compatibility:
-  * ``_score_single_intent_signal``, ``_apply_signal_time_decay``,
-    ``_extract_domain``, ``detect_structural_similarity`` are
-    imported by ``gateway/fulfillment/scoring.py``.  Do not rename
-    or move them.
-
-CRITICAL: This module is the validator-side model-competition scorer
-ONLY.  It must not import from or be coupled to fulfillment-side
-verification (Stage 4 person verification, etc.).
+This module is the validator-side model-competition scorer.
 """
 
 import os
@@ -53,7 +44,7 @@ from urllib.parse import unquote, urlparse, urlsplit
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import (
-    LeadOutput,        # re-exported for fulfillment imports via this module
+    LeadOutput,
     ICPPrompt,
     LeadScoreBreakdown,
     CompanyOutput,
@@ -74,7 +65,6 @@ from qualification.scoring.country_data import US_STATES
 from qualification.scoring.verification_helpers import (
     is_generic_intent_description,
     check_future_date,
-    check_source_url_mismatch,
     openrouter_chat,
 )
 from qualification.scoring.intent_signal_gate import (
@@ -153,9 +143,7 @@ COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT = {
 }
 
 # Per-signal LLM score cap (each individual intent signal scores 0-60
-# inside ``_score_single_intent_signal``).  Kept as an alias for the
-# previous lead-mode name because ``_score_single_intent_signal`` is
-# also imported directly by ``gateway/fulfillment/scoring.py``.
+# inside ``_score_single_intent_signal``).
 MAX_INTENT_SIGNAL_SCORE = MAX_COMPANY_INTENT_SIGNAL_SCORE
 
 # LLM temperature for scoring (slightly higher for nuanced scoring)
@@ -186,9 +174,7 @@ def _company_fit_failure_reason(
 # open web (see module docstring).  The historical lead-mode helpers
 # (_score_single_intent_signal, _apply_signal_time_decay,
 # _extract_domain, detect_structural_similarity, time-bound ICP
-# regex, etc.) remain in this module — they are reused by
-# gateway/fulfillment/scoring.py for fulfillment-side ranking, which
-# DOES still need contact-aware scoring.  Do not move them.
+# regex, etc.) remain in this module because company-mode scoring uses them.
 #
 # Total max score = MAX_COMPANY_TOTAL_SCORE = 100 (40 ICP + 60 intent),
 # so the existing champion thresholds in CONFIG
@@ -3577,13 +3563,11 @@ async def score_company_competition_intent_signal(
                 company_linkedin=getattr(company, "company_linkedin", "") or "",
                 product_service_context=getattr(icp, "product_service", "") or "",
                 trust_signal_date=trust_signal_date,
-                # Competition path: let Stage 3 make the content decision.
-                # reject so Stage 3 makes the call. Fulfillment calls
-                # _score_single_intent_signal directly and keeps the default.
+                # Let Stage 3 make the content decision.
                 stage1_soft_reject=True,
-                # Competition path: skip the keyword/length
+                # Skip the keyword/length
                 # genericity pre-gate so the three-stage LLM verifier is the sole
-                # intent judge. Fulfillment keeps the cheap deterministic gate.
+                # intent judge.
                 llm_only_intent_gate=True,
                 integrity_policy=integrity_policy,
                 company_quality=company_quality,
@@ -3853,13 +3837,11 @@ def aggregate_competition_intent_scores(signal_scores: List[float]) -> float:
 # ``_apply_signal_time_decay``, ``_extract_domain``,
 # ``_parse_intent_score_response``, ``SOURCE_TYPE_MULTIPLIERS``,
 # ``SOURCES_DATE_*``, ``_TIME_BOUND_ICP_PHRASES`` /
-# ``_icp_signal_is_time_bound`` are KEPT because they are imported
-# directly by ``gateway/fulfillment/scoring.py`` for fulfillment-side
-# lead ranking, which still operates on contacts.
+# ``_icp_signal_is_time_bound`` are used by company-mode intent scoring.
 # =============================================================================
 
 # =============================================================================
-# Intent Signal Scoring  (shared helpers used by company-mode AND fulfillment)
+# Intent Signal Scoring
 # =============================================================================
 
 # Source type quality multipliers - high-value sources get full credit
@@ -4123,7 +4105,6 @@ async def _score_single_intent_signal(
     trust_signal_date: bool = False,
     stage1_soft_reject: bool = False,
     llm_only_intent_gate: bool = False,
-    enforce_source_integrity: bool = False,
     integrity_policy: bool = False,
     company_quality: bool = False,
     verified_company_identity: Optional[Mapping[str, Any]] = None,
@@ -4240,38 +4221,12 @@ async def _score_single_intent_signal(
     source_str = signal.source.value if hasattr(signal.source, "value") else str(signal.source)
     source_lower = source_str.lower()
 
-    # Fulfillment-only publisher/category integrity gate. The miner's declared
-    # ``source`` controls its score multiplier, so accepting that label without
-    # validating the URL lets an arbitrary self-published page claim the 1.0x
-    # ``job_board`` multiplier. The Research Lab calls this shared helper with
-    # the default disabled because its source contract and receipts are
-    # evaluated separately; gateway fulfillment opts in explicitly.
-    if enforce_source_integrity:
-        source_mismatch = check_source_url_mismatch(
-            source_str,
-            signal.url,
-            company_website,
-            reject_unknown_third_party=True,
-        )
-        if source_mismatch:
-            logger.warning(
-                "Intent signal rejected: source URL integrity — %s",
-                source_mismatch,
-            )
-            _record_verdict(
-                "rejected_pregate",
-                rejection_reason="source_url_mismatch",
-                source_integrity_error=source_mismatch,
-            )
-            return 0.0, 0, "source_mismatch", None, -1
-
     # The keyword/length genericity pre-gate is a cheap deterministic filter that
     # runs before the three-stage LLM verifier. It has no vocabulary for several
     # valid intent categories (leadership change, market expansion, regulatory
     # clearance), so on-topic short descriptions in those categories get rejected
     # as templated before the content-aware verifier ever sees them. The
-    # research-lab path opts out so the LLM verifier is the sole judge; the
-    # fulfillment/lead path keeps the cheap gate.
+    # company scoring opts out so the LLM verifier is the sole judge.
     if not llm_only_intent_gate:
         is_generic, generic_reason = is_generic_intent_description(signal.description or "")
         if is_generic:
@@ -4395,12 +4350,7 @@ async def _score_single_intent_signal(
     # check rather than being silently dropped.
     #
     # PRIMARY source: ``icp.intent_signal_evidence_types`` (sibling list
-    # indexed alongside ``intent_signals``).  Populated by
-    # ``FulfillmentICP.to_icp_prompt`` from the structured spec.  This
-    # exists because ``to_icp_prompt`` collapses ``intent_signals`` to a
-    # plain ``List[str]`` for back-compat with the qualification LLM
-    # prompt, so we can't reach back through the now-stringified entry
-    # to find the structured ``evidence_type`` field.
+    # indexed alongside ``intent_signals``).
     target_evidence_type = None
     icp_ets = getattr(icp, "intent_signal_evidence_types", None) or []
     if isinstance(icp_ets, list) and miner_asserted_idx < len(icp_ets):
@@ -4428,11 +4378,7 @@ async def _score_single_intent_signal(
                 target_signal_text=target_signal_text,
                 miner_signal_date=(str(signal.date) if signal.date else None),
                 evidence_type=target_evidence_type,
-                declared_source=(
-                    source_lower
-                    if enforce_source_integrity or integrity_policy
-                    else None
-                ),
+                declared_source=(source_lower if integrity_policy else None),
                 stage1_soft_reject=stage1_soft_reject,
                 integrity_policy=integrity_policy,
                 company_quality=company_quality,

@@ -68,6 +68,7 @@ MIGRATIONS = tuple(
     "scripts/217-lab-arena-company-judgments.sql",
     "scripts/218-lab-arena-cross-provider-credential-refusal.sql",
     "scripts/221-lab-arena-participation-original-judgments.sql",
+    "scripts/223-lab-arena-cancelled-call-late-settlement.sql",
 )
 EXPECTED_SCHEMA_VERSION = 197
 TESTNET_NETUID = 401

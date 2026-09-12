@@ -829,6 +829,11 @@ def _canonical_us_state(
     text = value.strip()
     if not text:
         return ""
+    if text.casefold() in {
+        "dc", "d.c.", "district of columbia", "washington dc",
+        "washington, dc", "washington d.c.", "washington, d.c.",
+    }:
+        return "District of Columbia"
     if case_insensitive_abbreviation:
         return canonical_quality_us_state(text)
     elif len(text) == 2 and text.isupper():
@@ -839,6 +844,12 @@ def _canonical_us_state(
 def _requested_us_states(value: Any) -> frozenset[str]:
     """Return only explicit, unambiguous US state constraints."""
 
+    whole = " ".join(str(value or "").split()).casefold()
+    if whole in {
+        "dc", "d.c.", "district of columbia", "washington dc",
+        "washington, dc", "washington d.c.", "washington, d.c.",
+    }:
+        return frozenset({"District of Columbia"})
     tokens = [
         token.strip()
         for token in re.split(

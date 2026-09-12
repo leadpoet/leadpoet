@@ -3,13 +3,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
+import io
 import json
-import random
+import subprocess
+import tarfile
 from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import contracts, contact_policy, public_dashboard, quality_policy, runtime, scoring, verify
+from lab_arena import contracts, contact_policy, public_dashboard, quality_policy, runtime, scoring
+from lab_arena.promotion import GitPromoter
 from lab_arena.service import ArenaService, RoundDefaults, ServiceConfig, ServiceError
 from qualification.scoring.competition import apply_company_judgment_context
 from tests.lab_arena import test_lab_arena_service_round as fixtures
@@ -17,7 +21,7 @@ from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migrati
 from tests.lab_arena.test_integrity_round import IntegrityHarness, MIGRATIONS
 from tests.test_arena_company_quality_policy import _positive_breakdown
 
-QUALITY_MIGRATION = "20260911200103_lab_arena_company_judgments.sql"
+QUALITY_MIGRATION = "217-lab-arena-company-judgments.sql"
 
 
 def config(defaults, store=None):
@@ -58,31 +62,40 @@ class QualityHarness(IntegrityHarness):
         service.config.defaults = replace(service.config.defaults, company_quality_from="2026-01-01T00:00:00Z")
         return service
 
+    def run_stage_with_runners(self, count=2):
+        """Give each configured validator a claim opportunity per pass."""
+        scheduled_now = self.clock.now
+        self.clock.now = datetime.now(timezone.utc)
+        runners = [self.runner(index) for index in range(count)]
+        try:
+            while any([runner.run_once() for runner in runners]):
+                pass
+        finally:
+            for runner in runners:
+                runner.close()
+            self.clock.now = scheduled_now
+        abandoned = [
+            completed
+            for runner in runners
+            for completed in runner.completed
+            if completed.get("error")
+        ]
+        assert not abandoned, (
+            "runners abandoned work: %s; api errors: %s"
+            % (abandoned[:3], fixtures.InProcessApi.errors[:3])
+        )
+
 
 @pytest.fixture()
 def database():
     yield from database_with_lab_arena_migration(MIGRATIONS + ("215-lab-arena-contacts.sql", "216-lab-arena-validator-participation.sql", QUALITY_MIGRATION))
 
 
-def test_database_coverage_score_matches_validator_exactly(database):
-    psycopg2, dsn = database
-    random_values = random.Random(190)
-    cases = [[100, 100, 10, 0, 0], [40] * 5, [40] * 4 + [0], [100] * 10 + [0] * 10]
-    cases += [[value] * 5 for value in (0, 100, 0.1234567890125, 0.1234567890135, 1e-28)]
-    cases += [[random_values.random() * 100 for _ in range(n)] for n in (5, 10, 20) for _ in range(100)]
-    with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
-        for values in cases:
-            cursor.execute("SELECT public.lab_arena__company_quality_stage_score(%s::double precision[])", (values,))
-            assert cursor.fetchone()[0] == verify.stage_score(values, len(values), company_quality=True), values
-        for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
-            cursor.execute("SELECT has_function_privilege(%s, 'public.lab_arena__company_quality_stage_score(double precision[])', 'EXECUTE')", (role,))
-            assert cursor.fetchone()[0] is False
-
-
 @pytest.mark.parametrize("with_contacts", [False, True])
 def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_path, with_contacts):
     psycopg2, dsn = database
-    harness = QualityHarness(lambda: psycopg2.connect(**dsn), tmp_path, challengers=["Broad", "Spiky"], runners=["alpha", "beta"])
+    challengers = ["Broad", "Sparse", "Padded"]
+    harness = QualityHarness(lambda: psycopg2.connect(**dsn), tmp_path, challengers=challengers, runners=["alpha", "beta"])
     if with_contacts:
         from tests.lab_arena.contact_round_test import _contact_icps
         source = harness.service.config.daily_icp_source
@@ -91,7 +104,8 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
         harness.service.config.daily_icp_source = lambda **kwargs: {**source(**kwargs), "icps": _contact_icps(source(**kwargs)["icps"])}
         harness.service.config.confirmation_icp_source = lambda **kwargs: _contact_icps(confirmation_source(**kwargs))
     original = harness.sandbox.run_icp
-    observed = []
+    scoring_leases = []
+    judged_companies = []
 
     def run_icp(spec, **kwargs):
         document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
@@ -102,6 +116,23 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
             if not base.output_bytes:
                 return base
             rows = json.loads(base.output_bytes)["companies"]
+            flavor = rows[0]["company_name"].split(" Company ", 1)[0]
+            if flavor == "Sparse":
+                rows = rows[:2]
+            elif flavor == "Padded":
+                # Padded repeats the two exact Sparse winners, then repeats the
+                # first winner and adds two rows with invalid intent evidence.
+                # Reusable raw judgments therefore cross validator assignments.
+                for index in (0, 1):
+                    rows[index].update(
+                        company_name=f"Sparse Company {index}",
+                        company_website=f"https://sparse-{index}.example.com",
+                        fit_evidence_urls=[f"https://sparse-{index}.example.com/about"],
+                    )
+                    rows[index]["intent_signals"][0].update(
+                        url=f"https://news.example.com/Sparse/{index}",
+                    )
+                rows[2] = deepcopy(rows[0])
             for row in rows:
                 slug = row["company_name"].lower().replace(" ", "-")
                 row.update(company_linkedin=f"https://linkedin.com/company/{slug}", state="CA")
@@ -110,15 +141,18 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
                     row["contact"] = _claim(row, valid_role=True)
             return runtime.fake_result(exit_code=0, output_bytes=json.dumps({"companies": rows}).encode())
         icp = document["icp"]
-        confirmation = str(icp["icp_id"]).startswith("confirmation_")
-        position = int(str(icp["icp_id"]).rsplit("_", 1)[-1]) - 1
+        lease = document["company_judgment_cache"]
+        scoring_leases.append({
+            "hits": [item["company_index"] for item in lease["hits"]],
+            "misses": [item["company_index"] for item in lease["misses"]],
+        })
         def judge(companies, buyer, _reference):
             c = companies[0]
             name = c["company_name"]
             flavor = name.split(" Company ", 1)[0]
-            score = 40 if flavor == "PublicBaseline" else (50 if confirmation else 60)
-            if flavor == "Spiky":
-                score = [100, 100, 10, 0, 0][position % 5] if confirmation else 80
+            score = 20 if flavor == "PublicBaseline" else 35
+            if name in ("Sparse Company 0", "Sparse Company 1"):
+                score = 100
             slug = name.lower().replace(" ", "-")
             raw = _positive_breakdown(name, urlsplit(c["company_website"]).hostname, slug)
             raw.update(final_score=score, intent_signal_raw=score, intent_signal_final=score)
@@ -130,7 +164,13 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
                 from qualification.scoring.competition import _merge_contact_breakdown
                 evidence = document["contact_source_evidence"][source_key(c)]
                 _merge_contact_breakdown(raw, asyncio.run(_contact_result(c, buyer, evidence)))
-            observed.append((flavor, confirmation, position))
+            if name in ("Padded Company 3", "Padded Company 4"):
+                # These are valid output rows but have no verified primary
+                # intent. High intrinsic score text cannot turn them into
+                # qualified padding.
+                raw["intent_signals_detail"] = []
+                raw["failure_reason"] = "primary intent was not verified"
+            judged_companies.append(name)
             return apply_company_judgment_context(companies, [raw], contacts_required=with_contacts)
         judge.company_quality = judge.integrity_policy = True
         judge.contacts_required = with_contacts
@@ -143,25 +183,100 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
     harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
     harness.round_id = round_id
     broad = harness.submit("Broad", round_id)
-    spiky = harness.submit("Spiky", round_id)
+    sparse = harness.submit("Sparse", round_id)
+    padded = harness.submit("Padded", round_id)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     harness.advance_until("scored", runners=2, max_steps=120)
+
+    persisted = harness.service.store.list_runs(round_id, kind="execute")
+    main_positions = set(range(contracts.BENCHMARK_ICP_COUNT))
+    broad_main = [run for run in persisted if run["submission_id"] == broad and run["icp_position"] in main_positions]
+    sparse_main = [run for run in persisted if run["submission_id"] == sparse and run["icp_position"] in main_positions]
+    padded_main = [run for run in persisted if run["submission_id"] == padded and run["icp_position"] in main_positions]
+    assert len(broad_main) == len(sparse_main) == len(padded_main) == contracts.BENCHMARK_ICP_COUNT
+    assert all(run["terminal_cause"] == "accepted" and float(run["per_icp_score"]) == 35 for run in broad_main)
+    assert all(run["terminal_cause"] == "accepted" and float(run["per_icp_score"]) == 16 for run in sparse_main)
+    assert all(run["terminal_cause"] == "accepted" and float(run["per_icp_score"]) == 16 for run in padded_main)
+    assert all(
+        [row["company_qualified"] for row in run["qualification_doc"]["companies"]]
+        == [True, True]
+        for run in sparse_main
+    )
+    if with_contacts:
+        assert all(
+            [row["contact_qualified"] for row in run["qualification_doc"]["companies"]]
+            == [True, True]
+            for run in sparse_main
+        )
+        assert all(
+            [row["contact_qualified"] for row in run["qualification_doc"]["companies"]]
+            == [True, True, False, False, False]
+            for run in padded_main
+        )
+    else:
+        assert all(
+            all("contact_qualified" not in row for row in run["qualification_doc"]["companies"])
+            for run in sparse_main + padded_main
+        )
+    assert all(
+        [row["company_qualified"] for row in run["qualification_doc"]["companies"]]
+        == [True, True, False, False, False]
+        for run in padded_main
+    )
+    assert all(
+        [row["duplicate_company"] for row in run["qualification_doc"]["companies"]]
+        == [False, False, True, False, False]
+        for run in padded_main
+    )
+
     harness.service = harness.build_service()
     published = harness.advance_until("published", runners=2, max_steps=120)
     assert published["king_outcome"] == "crowned"
     ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
-    assert ranking[broad]["final_score"] == 50
-    assert ranking[spiky]["main_score"] == 80
-    assert ranking[spiky]["final_score"] == verify.stage_score([100, 100, 10, 0, 0], 5, company_quality=True)
+    assert ranking[broad]["main_score"] == ranking[broad]["final_score"] == 35
+    assert ranking[sparse]["main_score"] == 16
+    assert ranking[sparse]["final_score"] is None
+    assert ranking[padded]["main_score"] == 16
+    assert ranking[padded]["final_score"] is None
     assert published["publication_doc"]["final_ranking"][0]["submission_id"] == broad
     results = harness.service.public_results(round_id, broad)
     assert len(results["outputs"]) == contracts.MAX_EVALUATION_ICP_COUNT
+    assert all(len(output["companies"]) == 5 for output in results["outputs"].values())
+    assert all(
+        float(row["per_icp_score"]) == 35
+        for rows in results["scores"].values() for row in rows
+    )
     expected_schema = contact_policy.output_schema(published["configuration_doc"])
     assert all(output["schema_version"] == expected_schema for output in results["outputs"].values())
     if with_contacts:
         assert len(results["contact_verifications"]) == contracts.MAX_EVALUATION_ICP_COUNT
-    assert public_dashboard._stage1_scores(harness.service, published)[broad] == 60
-    assert observed
+        assert all(
+            [row["contact_qualified"] for row in rows] == [True] * 5
+            for rows in results["contact_verifications"].values()
+        )
+    assert public_dashboard._stage1_scores(harness.service, published)[broad] == 35
+
+    score_runs = harness.service.store.list_runs(round_id, kind="score")
+    assert len({run["runner_hotkey"] for run in score_runs if run["status"] == "accepted"}) == 2
+    assert any(item["hits"] for item in scoring_leases)
+    assert judged_companies.count("Sparse Company 0") < 2 * contracts.BENCHMARK_ICP_COUNT
+
+    repository_root = tmp_path / "quality-promotion-repository"
+    repository_root.mkdir()
+    remote = fixtures.promotion_repository(repository_root)
+    harness.service._config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "quality-promotion-objects"
+    )
+    harness.clock.now = datetime.fromisoformat(
+        str(published["published_at"]).replace("Z", "+00:00")
+    )
+    assert harness.service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
+    promoted = subprocess.run(
+        ("git", "--git-dir", str(remote), "archive", "--format=tar.gz", "lab"),
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(promoted), mode="r:gz") as archive:
+        assert archive.extractfile("flavor.txt").read().decode("utf-8") == "Broad"
 
 
 def test_historical_rounds_still_publish_after_quality_migration(database, tmp_path, monkeypatch):

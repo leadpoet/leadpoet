@@ -468,8 +468,7 @@ def build_stage_scores(
     scores: Dict[str, float] = {}
     denominator = len(expected_positions)
     for submission_id, values in by_submission.items():
-        from lab_arena import quality_policy
-        scores[submission_id] = verify.stage_score(values, denominator, company_quality=quality_policy.scorer_enabled(validated_policy))
+        scores[submission_id] = verify.stage_score(values, denominator)
     return {
         **({"integrity_policy": "arena_integrity_v1"} if validated_policy["scoring_adapter_version"] in ("qualification_integrity_v2", "qualification_contacts_v3") else {}),
         "stage": stage,

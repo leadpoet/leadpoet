@@ -1176,7 +1176,18 @@ def _url_on_verified_company_identity(
         source_host == "linkedin.com" or source_host.endswith(".linkedin.com")
     ):
         return False
-    parts = [part.casefold() for part in parsed.path.split("/") if part]
+    decoded_path = parsed.path
+    for _ in range(4):
+        parts = [part.casefold() for part in decoded_path.split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            return False
+        next_path = unquote(decoded_path)
+        if next_path == decoded_path:
+            break
+        decoded_path = next_path
+    parts = [part.casefold() for part in decoded_path.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        return False
     return len(parts) >= 2 and parts[:2] == ["company", slug]
 
 

@@ -351,6 +351,78 @@ def test_simultaneous_overlapping_reservations_do_not_duplicate_or_block(
     assert len(set(leased_keys)) == 2
 
 
+def test_multi_key_overlap_releases_after_failure_and_eventually_reuses(store):
+    round_id = "arena-2026-09-11-c7"
+    participants, items = _open(
+        store,
+        round_id=round_id,
+        markers_by_submission=[
+            ["shared", "first-only"],
+            ["shared", "second-only"],
+        ],
+    )
+    first_runner = hotkey("c7-validator-1")
+    first, first_token, _, _ = claim(
+        store, round_id, first_runner, excluded=[first_runner]
+    )
+    assert first["status"] == "leased"
+    assert first["submission_id"] == participants[0]["submission_id"]
+    assert len(first["company_judgment_cache"]["misses"]) == 2
+
+    waiting_runner = hotkey("c7-validator-2")
+    blocked, _, _, _ = claim(
+        store, round_id, waiting_runner, excluded=[waiting_runner]
+    )
+    assert blocked["status"] == "no_pending"
+
+    failed = store.complete_attempt(
+        run_id=first["run_id"],
+        lease_token_hash=hash_lease_token(first_token),
+        result={"terminal_status": "judge_error"},
+        terminal_cause="judge_error",
+        output_ref="",
+        output_hash="",
+        company_judgment_evidence=[],
+        completion_request_hash="sha256:" + "7" * 64,
+    )
+    assert failed["status"] == "failed"
+    assert failed["confirmation_attempt"] == 2
+
+    second, second_token, _, _ = claim(
+        store, round_id, waiting_runner, excluded=[waiting_runner]
+    )
+    assert second["status"] == "leased"
+    assert second["submission_id"] == participants[1]["submission_id"]
+    assert len(second["company_judgment_cache"]["misses"]) == 2
+    second_item = next(
+        item for item in items
+        if item["submission_id"] == second["submission_id"]
+    )
+    assert _complete(
+        store, second, second_token,
+        refs=second_item["company_judgment_refs"],
+        completion_marker="7",
+    )["status"] == "accepted"
+
+    retry_runner = hotkey("c7-validator-3")
+    retry, retry_token, _, _ = claim(
+        store, round_id, retry_runner, excluded=[retry_runner]
+    )
+    assert retry["status"] == "leased"
+    assert retry["submission_id"] == participants[0]["submission_id"]
+    assert len(retry["company_judgment_cache"]["hits"]) == 1
+    assert len(retry["company_judgment_cache"]["misses"]) == 1
+    retry_item = next(
+        item for item in items
+        if item["submission_id"] == retry["submission_id"]
+    )
+    assert _complete(
+        store, retry, retry_token,
+        refs=retry_item["company_judgment_refs"],
+        completion_marker="8",
+    )["company_judgments_reused"] == 1
+
+
 def test_incompatible_authority_gets_a_new_slot_and_cannot_overwrite(store):
     round_id = "arena-2026-09-11-c3"
     participants, items = _open(

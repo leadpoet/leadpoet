@@ -2433,7 +2433,7 @@ class ArenaService:
             values = [float(row["per_icp_score"]) for row in rows if row is not None]
             entry = {
                 "submission_id": submission_id,
-                score_key: verify.stage_score(values, len(wanted), company_quality=quality_policy.enabled(round_row.get("configuration_doc") or {})),
+                score_key: verify.stage_score(values, len(wanted)),
                 "is_king": bool(participant.get("is_king")),
             }
             if score_key == "final_score":

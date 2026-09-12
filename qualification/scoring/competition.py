@@ -433,12 +433,18 @@ def _effective_contact_input(
         contact_source_semantics,
     )
 
-    source_semantics = contact_source_semantics(source)
     attribution = contact.get("email_source") or {}
+    source_semantics = contact_source_semantics(
+        source,
+        broker_call_id=attribution.get("broker_call_id"),
+        record_id=attribution.get("record_id"),
+    )
     effective_source = {
         "provider": attribution.get("provider"),
         "tool": attribution.get("tool"),
     }
+    if attribution.get("broker_call_id"):
+        effective_source["broker_call_id"] = attribution["broker_call_id"]
     if attribution.get("record_id"):
         effective_source["record_id"] = attribution["record_id"]
     return {
@@ -554,9 +560,7 @@ def _verified_company_for_contact(
     ).strip()
     return {
         "company_name": str(
-            verified_receipt.get("observed_name")
-            or company.get("company_name")
-            or ""
+            company.get("company_name") or ""
         ),
         "company_website": (
             f"https://{observed_domain}" if observed_domain else ""
@@ -658,7 +662,7 @@ def apply_company_judgment_context(
     if len(companies) != len(raw_breakdowns):
         raise CompetitionScorerInputError("company judgments must cover every company")
     result = []
-    seen: dict[str, tuple[str, int]] = {}
+    seen_linkedin: dict[str, tuple[str, int]] = {}
     for index, (company, raw) in enumerate(zip(companies, raw_breakdowns)):
         if raw.get("bucket_skipped") is True:
             continue
@@ -669,12 +673,25 @@ def apply_company_judgment_context(
         aliases = list(company_identity_alias_keys(identity)) or [identity.key]
         fit = (company_fit_verified(row) and company_quality_identity_verified(receipt)
                and company_quality_receipt_matches_claim(receipt, claim) and not errors)
-        prior = next((seen[alias] for alias in aliases if alias in seen), None) if fit else None
-        duplicate = prior is not None
-        company_ready = bool(fit and has_verified_primary_intent(row.get("intent_signals_detail") or []) and not duplicate)
-        qualified = company_ready
+        company_ready = bool(
+            fit
+            and has_verified_primary_intent(row.get("intent_signals_detail") or [])
+        )
+        qualified = bool(company_ready)
         if contacts_required:
             qualified = qualified and row.get("contact_qualified") is True
+        linkedin_key = (
+            f"linkedin:{identity.verified_linkedin_slug}"
+            if fit and identity.verified_linkedin_slug
+            else ""
+        )
+        prior = (
+            seen_linkedin.get(linkedin_key)
+            if company_ready and linkedin_key
+            else None
+        )
+        duplicate = prior is not None
+        qualified = bool(qualified and not duplicate)
         row.update(
             company_index=index,
             company_identity_key=prior[0] if prior else identity.key,
@@ -689,15 +706,14 @@ def apply_company_judgment_context(
                 row[field] = 0.0
         if not qualified:
             row["final_score"] = 0.0
-        if contacts_required and not company_ready:
+        if contacts_required and (not company_ready or duplicate):
             row["verifier_gate_receipts"] = [
                 item for item in row.get("verifier_gate_receipts") or []
                 if not isinstance(item, Mapping) or item.get("gate") != "contact"
             ]
             _merge_contact_breakdown(row, _not_evaluated_contact(company))
-        if fit and not duplicate:
-            for alias in aliases:
-                seen[alias] = (identity.key, index)
+        if qualified and linkedin_key:
+            seen_linkedin[linkedin_key] = (identity.key, index)
         result.append(row)
     return result
 

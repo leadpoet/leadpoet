@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: PR195 scoring and verifier review
+
+On 2026-09-11 the user explicitly authorized deep review, narrow fixes, update
+and merge of PR195, and complete production validation using the overnight
+skills. This covers protected production and Supabase access, required
+credentials, exact committed migrations, pushes and safe merge, and canonical
+gateway/normal-validator restarts. Preserve company, intent and contact scoring,
+submission intake, frozen round contracts, sandbox isolation, accepted work,
+provider costs, retries, disclosure, promotion, rewards, weights and concurrent
+work. Do not restore retired Research Lab machinery or redesign the competition.
+This authority expires when PR195 and its affected live flows are verified.
+
 ## Scoped production authorization: PR194 validator participation
 
 On 2026-09-11 the user explicitly authorized review, narrow fixes, update and

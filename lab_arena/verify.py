@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -190,7 +189,8 @@ def per_icp_score(
     ``sum(final scores clamped to 0..100) / N - penalty / N``, floored at the
     policy floor, where the penalty is the Lab's false-positive counters over
     the breakdowns multiplied by the policy points. The evaluator's default
-    per-ICP mean is never used.
+    per-ICP mean is never used. Company-quality rounds also multiply by the
+    fraction of requested companies that qualify.
     """
 
     validated_policy = validate_scorer_policy(policy)
@@ -208,6 +208,15 @@ def per_icp_score(
         ],
         score_floor=validated_policy["fp_penalty_icp_floor"],
     )
+    if validated_policy.get("company_quality_policy") == "company_quality_v1":
+        # Reward completing this buyer request. Missing, rejected and duplicate
+        # companies cannot increase coverage by filling otherwise empty slots.
+        qualified = sum(
+            row.get("company_qualified") is True
+            and row.get("duplicate_company") is not True
+            for row in rows[:goal]
+        )
+        result["per_icp_score"] *= qualified / goal
     return dict(result)
 
 
@@ -280,7 +289,7 @@ def _require_position(value: Any) -> int:
     return value
 
 
-def stage_score(per_icp_scores: Sequence[float], denominator: int, *, company_quality: bool = False) -> float:
+def stage_score(per_icp_scores: Sequence[float], denominator: int) -> float:
     """Aggregate exactly ``denominator`` scores under the frozen round rule.
 
     Historical summation is exact (rational arithmetic over each score's shortest
@@ -293,21 +302,6 @@ def stage_score(per_icp_scores: Sequence[float], denominator: int, *, company_qu
     scores = _require_list(per_icp_scores, "per_icp_scores")
     if len(scores) != denominator:
         raise ArenaContractError("expected exactly %d per-ICP scores, got %d" % (denominator, len(scores)))
-    if company_quality:
-        # Policy v1 fixes both precision and rounding. Sorted input makes ties
-        # stable across validators, independent of arrival or list order.
-        with localcontext() as context:
-            context.prec = 50
-            values = sorted(Decimal(repr(_require_score(value, "per_icp_score"))) for value in scores)
-            if any(value < 0 or value > 100 for value in values):
-                raise ArenaContractError("company quality per-ICP scores must be within 0..100")
-            roots = [value.sqrt().quantize(Decimal("1e-40"), rounding=ROUND_HALF_EVEN) for value in values]
-            # Fixed decimal roots let PostgreSQL reproduce the same result.
-            # The remaining arithmetic fits exactly within 100 digits.
-            context.prec = 100
-            total_root = sum(roots, Decimal(0))
-            score = (total_root / Decimal(denominator)) ** 2
-            return float(score.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_EVEN))
     total = Fraction(0)
     for index, value in enumerate(scores):
         total += Fraction(repr(_require_score(value, "per_icp_scores[%d]" % index)))

@@ -73,38 +73,38 @@ shared cache as company rejections. Historical policy settings are unchanged.
 
 ## Coverage-weighted score
 
-Per-company and per-ICP scoring remain unchanged. For every stage selection,
-the main twenty-ICP comparison, and the five-ICP confirmation comparison:
+Per-company quality scoring remains unchanged. For each buyer request, multiply
+its existing score by the fraction of requested companies that qualify:
 
 ```text
-score = (sum(sqrt(per_icp_score)) / number_of_assigned_icps) ** 2
+request_score = existing_request_score * qualified_company_count / requested_company_count
 ```
 
-Missing model outputs occupy zero slots in the fixed denominator. Aggregate
-the main twenty directly from those twenty scores; do not average two
-already-aggregated stage totals. The policy uses Decimal precision 50, sorted
-inputs, roots rounded half-even to forty decimal places, exact subsequent
-arithmetic, and half-even rounding to twelve decimal places for stable comparisons.
-Infrastructure failures retain the existing incomplete-judging handling.
+The existing score already divides total company quality by the requested
+count. This additional completeness factor rewards delivery of the full request.
+Missing, rejected and duplicate companies do not count toward completeness.
+Adding invalid rows cannot improve the score. Five valid companies retain their
+existing score; an empty result scores zero. Infrastructure failures retain the
+existing retry and incomplete-scoring handling.
 
-| Five ICP scores | Historical mean | Quality score |
+| Companies returned for one five-company request | Historical score | Quality score |
 | --- | ---: | ---: |
-| 40, 40, 40, 40, 40 | 40 | 40 |
-| 100, 100, 10, 0, 0 | 42 | 21.459644256269 |
-| 40, 40, 40, 40, 0 | 32 | 25.6 |
+| Five valid companies at 35 points each | 35 | 35 |
+| Two valid companies at 100 points each | 40 | 16 |
+| Those two plus three invalid or duplicate companies | 40 before any existing penalty | At most 16 |
 
-This rewards useful performance across requests without adding a minimum-output
-eligibility gate. The existing one-point promotion margin and confirmation
-cohort remain unchanged. This changes score aggregation, not the existing
-champion lifecycle or reward rules.
+All comparisons across buyer requests retain the existing arithmetic mean.
+The one-point promotion margin, confirmation cohort, eligibility checks and
+reward rules remain unchanged. Existing rounds keep their frozen scoring policy.
 
 ## Activation and rollback
 
 1. Install existing migrations through 216, then
-   `scripts/20260911200103_lab_arena_company_judgments.sql`.
+   `scripts/217-lab-arena-company-judgments.sql`.
 2. Deploy matching gateway, validator and scorer code/image through the
    existing release process. The quality capability probe must pass.
-3. Set `LAB_ARENA_COMPANY_QUALITY_FROM` to an explicit future timestamp with
+3. Use `scripts/configure_lab_arena_production.py --company-quality-from`
+   to set `LAB_ARENA_COMPANY_QUALITY_FROM` to an explicit future timestamp with
    timezone, alongside a compatible `LAB_ARENA_INTEGRITY_FROM`. It applies to
    **submission-open time**, so the contract is announced before intake.
 4. Verify a new round publishes the quality marker and matching scorer policy;

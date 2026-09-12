@@ -33,18 +33,26 @@ def company(name="Acme", domain="acme.com", **updates):
     return {**row, "state": "CA", **updates}
 
 
-@pytest.mark.parametrize("state", ["CA", "ca", "California", " california "])
-@pytest.mark.parametrize("country", ["US", "USA", "United States", "United States of America", "U.S.", "America"])
+@pytest.mark.parametrize(
+    "state", ["CA", "ca", "California", " california ", "California (CA)"]
+)
+@pytest.mark.parametrize("country", ["US", "USA", "United States", "United States of America", "U.S.", "U.S.A", "America"])
 def test_us_claims_normalize_without_rejecting_variants(state, country):
     row, errors = normalize_company_claim(company(state=state, country=country))
     assert not errors
     assert (row["country"], row["state"]) == ("United States", "California")
 
 
-@pytest.mark.parametrize("state", ["dc", "D.C.", "District of Columbia", "Washington, DC"])
+@pytest.mark.parametrize("state", ["dc", "D.C.", "District of Columbia", "Washington, DC", "Washington, D.C."])
 def test_dc_is_accepted(state):
     row, errors = normalize_company_claim(company(state=state))
     assert not errors and row["state"] == "District of Columbia"
+
+
+def test_state_name_and_code_must_agree():
+    _row, errors = normalize_company_claim(company(state="California (NY)"))
+
+    assert errors == ("us_headquarters_state_required_or_invalid",)
 
 
 @pytest.mark.parametrize("url", [
@@ -101,6 +109,58 @@ def test_verified_linkedin_dedup_rebinds_raw_judgment_without_poisoning_it():
     assert alone[0]["final_score"] == 60 and alone[0]["company_qualified"]
 
 
+def test_distinct_verified_linkedin_entities_survive_weak_alias_collision():
+    rows = [
+        company(
+            "Shared Inc",
+            "platform.example",
+            company_linkedin="https://linkedin.com/company/shared-one",
+        ),
+        company(
+            "Shared LLC",
+            "platform.example",
+            company_linkedin="https://linkedin.com/company/shared-two",
+        ),
+    ]
+    raw = [
+        _positive_breakdown("Shared Inc", "platform.example", "shared-one"),
+        _positive_breakdown("Shared LLC", "platform.example", "shared-two"),
+    ]
+
+    result = apply_company_judgment_context(rows, raw)
+
+    assert [row["final_score"] for row in result] == [60, 60]
+    assert [row["duplicate_company"] for row in result] == [False, False]
+
+
+def test_first_failed_intent_does_not_block_one_later_verified_duplicate():
+    rows = [company(), company()]
+    failed = _positive_breakdown("Acme", "acme.com", "acme")
+    failed["intent_signals_detail"][0]["after_decay"] = 0
+    failed["final_score"] = 0
+    valid = _positive_breakdown("Acme", "acme.com", "acme")
+
+    result = apply_company_judgment_context(rows, [failed, valid])
+
+    assert [row["final_score"] for row in result] == [0, 60]
+    assert [row["company_qualified"] for row in result] == [False, True]
+    assert not any(row["duplicate_company"] for row in result)
+
+
+def test_only_one_successful_exact_verified_linkedin_identity_gets_credit():
+    rows = [company(), company(), company()]
+    failed = _positive_breakdown("Acme", "acme.com", "acme")
+    failed["intent_signals_detail"][0]["after_decay"] = 0
+    failed["final_score"] = 0
+    valid = _positive_breakdown("Acme", "acme.com", "acme")
+
+    result = apply_company_judgment_context(rows, [failed, valid, deepcopy(valid)])
+
+    assert [row["final_score"] for row in result] == [0, 60, 0]
+    assert [row["duplicate_company"] for row in result] == [False, False, True]
+    assert result[2]["duplicate_of_index"] == 1
+
+
 def test_effective_quality_input_keeps_state_but_ignores_unused_prose():
     base = company()
     changed = deepcopy(base)
@@ -112,21 +172,31 @@ def test_effective_quality_input_keeps_state_but_ignores_unused_prose():
     assert effective_competition_input([base], _icp(), company_quality=True) == effective_competition_input([changed], _icp(), company_quality=True)
 
 
-def test_coverage_formula_reverses_lucky_specialist_and_preserves_historical_round():
+def test_request_completeness_rewards_five_decent_companies_over_two_excellent():
+    legacy = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2")
+    quality = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2", company_quality=True)
+    icp = {**_icp(), "max_companies": 5}
+    def rows(values):
+        return [{"final_score": value, "company_qualified": True, "duplicate_company": False} for value in values]
+    sparse, complete = rows([100, 100]), rows([35] * 5)
+    assert verify.per_icp_score(icp, sparse, legacy)["per_icp_score"] == 40
+    assert verify.per_icp_score(icp, complete, legacy)["per_icp_score"] == 35
+    assert verify.per_icp_score(icp, sparse, quality)["per_icp_score"] == 16
+    assert verify.per_icp_score(icp, complete, quality)["per_icp_score"] == 35
+    for invalid in ({"final_score": 0, "company_qualified": False},
+                    {"final_score": 0, "company_qualified": True, "duplicate_company": True}):
+        assert verify.per_icp_score(icp, sparse + [invalid] * 3, quality)["per_icp_score"] <= 16
+    assert verify.per_icp_score(icp, [], quality)["per_icp_score"] == 0
+    assert verify.per_icp_score({**icp, "max_companies": 2}, sparse, quality)["per_icp_score"] == 100
+
+
+def test_cross_request_aggregation_keeps_existing_arithmetic_mean():
     scores = [100, 100, 10, 0, 0]
     assert verify.stage_score(scores, 5) == 42
-    assert verify.stage_score(scores, 5, company_quality=True) == pytest.approx(21.459644256269)
-    assert verify.stage_score([40] * 5, 5, company_quality=True) == 40
-    assert verify.stage_score([40] * 4 + [0], 5, company_quality=True) == 25.6
-    assert verify.stage_score([0] * 5, 5, company_quality=True) == 0
-    assert verify.stage_score([100] * 5, 5, company_quality=True) == 100
-    assert len({verify.stage_score(list(p), 5, company_quality=True) for p in permutations(scores)}) == 1
-
-
-def test_main_twenty_icps_are_aggregated_directly():
-    scores = [100] * 10 + [0] * 10
-    assert verify.stage_score(scores, 20, company_quality=True) == 25
-    assert (verify.stage_score(scores[:10], 10, company_quality=True) + verify.stage_score(scores[10:], 10, company_quality=True)) / 2 == 50
+    assert len({verify.stage_score(list(p), 5) for p in permutations(scores)}) == 1
+    main_scores = [100] * 10 + [0] * 10
+    assert verify.stage_score(main_scores, 20) == 50
+    assert (verify.stage_score(main_scores[:10], 10) + verify.stage_score(main_scores[10:], 10)) / 2 == 50
 
 
 def test_quality_policy_cannot_cache_an_operator_capped_unjudged_company():
@@ -140,10 +210,10 @@ def test_quality_policy_cannot_cache_an_operator_capped_unjudged_company():
     assert contracts.validate_scorer_policy(policy)["max_scored_companies"] == 1
 
 
-@pytest.mark.parametrize("scores", [[100, 100, float("nan"), 0, 0], [100, 100, float("inf"), 0, 0], [100, 100, -1, 0, 0]])
-def test_bad_scores_cannot_enter_coverage_formula(scores):
+@pytest.mark.parametrize("scores", [[100, 100, float("nan"), 0, 0], [100, 100, float("inf"), 0, 0]])
+def test_bad_scores_cannot_enter_stage_mean(scores):
     with pytest.raises(contracts.ArenaContractError):
-        verify.stage_score(scores, 5, company_quality=True)
+        verify.stage_score(scores, 5)
 
 
 def test_judgment_worker_reuses_identical_misses_and_rebinds_indexes():
@@ -204,3 +274,89 @@ def test_context_clears_contact_credit_when_primary_signal_does_not_qualify():
     assert not result["contact_qualified"]
     assert result["contact_verification"]["decision"] == "not_evaluated"
     contact_policy.validate_contact_breakdown(result)
+
+
+def test_verified_contact_binding_keeps_multiword_claim_name():
+    from qualification.scoring.competition import _verified_company_for_contact
+    from qualification.scoring.contact_verification import (
+        _company_identifiers,
+        _company_matches,
+    )
+
+    claim = company(
+        "Acme Technologies",
+        company_linkedin="https://linkedin.com/company/acme-technologies",
+    )
+    bound = _verified_company_for_contact(
+        claim,
+        {
+            "observed_name": "acmetechnologies",
+            "observed_domain": "acme.com",
+            "observed_linkedin_slug": "acme-technologies",
+        },
+    )
+
+    assert bound["company_name"] == "Acme Technologies"
+    assert _company_matches(
+        _company_identifiers(bound),
+        {"name": "acme technologies", "domain": "", "linkedin_slug": ""},
+    )
+
+
+def test_first_failed_contact_does_not_block_one_later_verified_duplicate():
+    from tests.test_arena_contact_scoring import _contact, _contact_result
+    from qualification.scoring.competition import _merge_contact_breakdown
+
+    rows = [company(contact=_contact()), company(contact=_contact(slug="grace"))]
+    failed = _positive_breakdown("Acme", "acme.com", "acme")
+    valid = _positive_breakdown("Acme", "acme.com", "acme")
+    _merge_contact_breakdown(failed, _contact_result(qualified=False))
+    _merge_contact_breakdown(
+        valid, _contact_result(qualified=True, email_status="valid")
+    )
+
+    result = apply_company_judgment_context(
+        rows, [failed, valid], contacts_required=True
+    )
+
+    assert [row["final_score"] for row in result] == [0, 60]
+    assert [row["company_qualified"] for row in result] == [False, True]
+    assert not any(row["duplicate_company"] for row in result)
+
+
+def test_contact_duplicate_context_survives_generic_quality_revalidation():
+    from tests.test_arena_contact_scoring import _contact, _contact_result
+    from qualification.scoring.competition import _merge_contact_breakdown
+
+    rows = [company(contact=_contact()), company(contact=_contact(slug="grace"))]
+    raw = [
+        _positive_breakdown("Acme", "acme.com", "acme"),
+        _positive_breakdown("Acme", "acme.com", "acme"),
+    ]
+    for breakdown in raw:
+        contact_result = _contact_result(qualified=True, email_status="valid")
+        contact_result["contact_verification"]["subchecks"] = {
+            key: {"status": "pass"}
+            for key in (
+                "claim", "identity", "source", "company", "role", "location",
+                "email_attribution", "email_verification",
+            )
+        }
+        _merge_contact_breakdown(
+            breakdown, contact_result
+        )
+
+    contextual = apply_company_judgment_context(
+        rows, raw, contacts_required=True
+    )
+
+    assert contextual[1]["duplicate_company"] is True
+    assert contextual[1]["contact_qualified"] is False
+    assert scoring.validate_breakdowns_for_item(
+        contextual,
+        icp=_icp(),
+        companies=rows,
+        integrity_policy=True,
+        contacts_required=True,
+        company_quality=True,
+    ) == contextual

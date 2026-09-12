@@ -267,23 +267,23 @@ def _validate_benchmark_disclosure_from(value: str) -> str:
     return normalized
 
 
-def _validate_contacts_from(value: str) -> str:
+def _validate_contacts_from(value: str, *, label: str = "contact") -> str:
     """Validate the optional timezone-aware contact activation timestamp."""
     if not isinstance(value, str):
-        raise ConfigurationError("contact activation timestamp must be an ISO timestamp")
+        raise ConfigurationError(f"{label} activation timestamp must be an ISO timestamp")
     if value == "":
         return value
     if any(ch in value for ch in "\r\n\x00"):
-        raise ConfigurationError("contact activation timestamp contains a forbidden character")
+        raise ConfigurationError(f"{label} activation timestamp contains a forbidden character")
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
         raise ConfigurationError(
-            "contact activation timestamp must be a valid ISO timestamp"
+            f"{label} activation timestamp must be a valid ISO timestamp"
         ) from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ConfigurationError("contact activation timestamp must include a timezone")
+        raise ConfigurationError(f"{label} activation timestamp must include a timezone")
     return normalized
 
 
@@ -443,26 +443,31 @@ if request["role"] == "benchmark_disclosure_only":
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             fail("benchmark_disclosure_timestamp_invalid")
     updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"] = value
-if request["role"] == "contacts_from_only":
+if request["role"] in ("contacts_from_only", "company_quality_from_only"):
+    activation_key = (
+        "LAB_ARENA_CONTACTS_FROM" if request["role"] == "contacts_from_only"
+        else "LAB_ARENA_COMPANY_QUALITY_FROM"
+    )
+    activation_error = request["role"][:-5]
     if (
-        set(updates) != {"LAB_ARENA_CONTACTS_FROM"}
+        set(updates) != {activation_key}
         or request.get("aliases")
         or request.get("service_key")
     ):
-        fail("contacts_from_scope_invalid")
-    value = updates["LAB_ARENA_CONTACTS_FROM"]
+        fail(activation_error + "_scope_invalid")
+    value = updates[activation_key]
     if not isinstance(value, str) or any(ch in value for ch in "\r\n\x00"):
-        fail("contacts_from_timestamp_invalid")
+        fail(activation_error + "_timestamp_invalid")
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     if value:
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError:
-            fail("contacts_from_timestamp_invalid")
+            fail(activation_error + "_timestamp_invalid")
         if parsed.tzinfo is None or parsed.utcoffset() is None:
-            fail("contacts_from_timestamp_invalid")
-    updates["LAB_ARENA_CONTACTS_FROM"] = value
+            fail(activation_error + "_timestamp_invalid")
+    updates[activation_key] = value
 if request["role"] == "contacts_generation_only":
     if (
         set(updates) != {"LAB_ARENA_CONTACTS_GENERATION_ENABLED"}
@@ -693,6 +698,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
     scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
     scope.add_argument("--contacts-from", default=None, metavar="TIMESTAMP", help="set or clear the future contact activation timestamp")
+    scope.add_argument("--company-quality-from", default=None, metavar="TIMESTAMP", help="set or clear company quality activation for future submission periods")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
@@ -725,6 +731,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         _validate_benchmark_disclosure_from(args.benchmark_disclosure_from)
     if getattr(args, "contacts_from", None) is not None:
         _validate_contacts_from(args.contacts_from)
+    if getattr(args, "company_quality_from", None) is not None:
+        _validate_contacts_from(args.company_quality_from, label="company quality")
     if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
     narrow_scope = (
@@ -735,6 +743,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         or args.validator_credential_kms_guard
         or args.benchmark_disclosure_from is not None
         or getattr(args, "contacts_from", None) is not None
+        or getattr(args, "company_quality_from", None) is not None
         or getattr(args, "contacts_generation", None) is not None
     )
     if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
@@ -794,12 +803,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _ssh(args.gateway_host, args.ssh_key, request)
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
-        if args.contacts_from is not None:
+        if args.contacts_from is not None or args.company_quality_from is not None:
+            quality_activation = args.company_quality_from is not None
             request = {
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
-                "apply": args.apply, "role": "contacts_from_only", "aliases": {},
+                "apply": args.apply,
+                "role": "company_quality_from_only" if quality_activation else "contacts_from_only",
+                "aliases": {},
                 "updates": {
-                    "LAB_ARENA_CONTACTS_FROM": _validate_contacts_from(args.contacts_from)
+                    ("LAB_ARENA_COMPANY_QUALITY_FROM" if quality_activation else "LAB_ARENA_CONTACTS_FROM"):
+                    _validate_contacts_from(
+                        args.company_quality_from if quality_activation else args.contacts_from,
+                        label="company quality" if quality_activation else "contact",
+                    )
                 },
             }
             result = _ssh(args.gateway_host, args.ssh_key, request)

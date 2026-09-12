@@ -717,13 +717,20 @@ def _extract_emails(profile: Mapping[str, Any]) -> set[str]:
     return emails
 
 
-def contact_source_semantics(source: Any) -> Any:
+def contact_source_semantics(
+    source: Any,
+    *,
+    broker_call_id: Any = None,
+    record_id: Any = None,
+) -> Any:
     """Project only source facts that can change a contact verdict.
 
     Deepline job IDs, billing fields, profile photos, follower counts, and
     timestamps do not affect verification and therefore do not split cache
-    entries. Candidate order is retained because the verifier selects the
-    first profile matching the claimed LinkedIn URL.
+    entries. Source identity is retained only when the submitted attribution
+    makes it part of source-reference verification. Candidate order is
+    retained because the verifier selects the first profile matching the
+    claimed LinkedIn URL.
     """
     if not isinstance(source, Mapping):
         return None
@@ -766,7 +773,7 @@ def contact_source_semantics(source: Any) -> Any:
     else:
         response_semantics = {"state": "malformed"}
     source_input = source.get("input") if isinstance(source.get("input"), Mapping) else {}
-    return {
+    projected = {
         "provider": source.get("provider"),
         "tool": source.get("tool"),
         "input": {
@@ -776,6 +783,21 @@ def contact_source_semantics(source: Any) -> Any:
         },
         "response": response_semantics,
     }
+    raw_identity = source.get("call_identity")
+    identity = raw_identity if isinstance(raw_identity, Mapping) else {}
+    reference_identity = {}
+    if _text(broker_call_id):
+        reference_identity["broker_call_id"] = _text(
+            identity.get("broker_call_id")
+            or identity.get("call_id")
+            or identity.get("id")
+            or (raw_identity if isinstance(raw_identity, str) else "")
+        )
+    if _text(record_id):
+        reference_identity["record_id"] = _text(identity.get("record_id"))
+    if reference_identity:
+        projected["reference_identity"] = reference_identity
+    return projected
 
 
 def _normalized_email_status(value: Any) -> str:

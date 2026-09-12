@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from lab_arena import contracts, icp_disclosure, source_disclosure, verify, quality_policy
+from lab_arena import contracts, icp_disclosure, source_disclosure, verify
 
 
 PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/pydantic-harness/tree/lab"
@@ -330,7 +330,6 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
             result[submission_id] = verify.stage_score(
                 [float(run["per_icp_score"]) for run in runs if run is not None],
                 len(positions),
-                company_quality=quality_policy.enabled(row.get("configuration_doc") or {}),
             )
     return result
 

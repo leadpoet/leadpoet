@@ -231,6 +231,33 @@ def test_contact_source_semantics_change_but_transport_metadata_does_not():
     assert _refs(semantic)[0]["cache_key"] != original
 
 
+def test_contact_key_binds_claimed_and_actual_broker_call_identity():
+    document = _input(contacts=True)
+    contact = document["companies"][0]["contact"]
+    contact["email_source"]["broker_call_id"] = "provider-call-1"
+    source = document["contact_source_evidence"].pop("profile-ada")
+    document["contact_source_evidence"]["provider-call-1"] = source
+    original = _refs(document)[0]["cache_key"]
+
+    changed_actual = copy.deepcopy(document)
+    changed_actual["contact_source_evidence"]["provider-call-1"][
+        "call_identity"
+    ] = "provider-call-2"
+    assert _refs(changed_actual)[0]["cache_key"] != original
+
+    changed_claim = copy.deepcopy(document)
+    changed_claim["companies"][0]["contact"]["email_source"][
+        "broker_call_id"
+    ] = "provider-call-2"
+    changed_claim["contact_source_evidence"]["provider-call-2"] = (
+        changed_claim["contact_source_evidence"].pop("provider-call-1")
+    )
+    changed_claim["contact_source_evidence"]["provider-call-2"][
+        "call_identity"
+    ] = "provider-call-2"
+    assert _refs(changed_claim)[0]["cache_key"] != original
+
+
 def test_raw_cache_rejects_context_and_provider_failures_but_keeps_negatives():
     negative = _raw(0.0)
     negative["failure_reason"] = "company fit mismatch"
@@ -241,6 +268,18 @@ def test_raw_cache_rejects_context_and_provider_failures_but_keeps_negatives():
     assert not company_judgments.raw_judgment_is_cacheable({
         **negative, "failure_reason": "provider timeout",
     })
+    unavailable = copy.deepcopy(negative)
+    unavailable["verifier_gate_receipts"] = [{
+        "gate": "contact",
+        "decision": "unavailable",
+        "failure_class": "contact_provider_error",
+    }]
+    assert not company_judgments.raw_judgment_is_cacheable(unavailable)
+    intent_outage = copy.deepcopy(negative)
+    intent_outage["intent_signals_detail"] = [{
+        "judge_verdict": {"decision": "rejected_verifier_error"},
+    }]
+    assert not company_judgments.raw_judgment_is_cacheable(intent_outage)
 
 
 def test_raw_cache_rejects_positive_fit_with_incomplete_verified_identity():
@@ -308,6 +347,41 @@ def test_lease_refuses_an_incompatible_or_inconsistent_hit():
     lease["misses"][0] = {**lease["misses"][0], "cache_key": hit["cache_key"]}
     with pytest.raises(company_judgments.CompanyJudgmentError, match="inconsistent"):
         company_judgments.validate_lease_context(lease)
+
+
+def test_accepted_hits_do_not_invoke_the_scorer_or_create_new_judgments():
+    document = _input()
+    refs = _refs(document)
+    hits = []
+    for ref in refs:
+        evidence = _evidence(ref)
+        hits.append({
+            **_miss(ref),
+            "evidence_hash": contracts.document_hash(evidence),
+            "evidence_doc": evidence,
+        })
+    lease = {
+        "schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+        "hits": hits,
+        "misses": [],
+    }
+
+    def scorer(*args, **kwargs):
+        raise AssertionError("accepted cache hits must not call the scorer")
+
+    scorer.company_quality = True
+    scorer.integrity_policy = True
+    scorer.contacts_required = False
+    breakdowns, new_judgments = scoring.score_quality_work_item(
+        {"scored_run_id": document["scored_run_id"]},
+        icp=document["icp"],
+        companies=document["companies"],
+        scorer=scorer,
+        cache_context=lease,
+    )
+
+    assert len(breakdowns) == 5
+    assert new_judgments == []
 
 
 def test_scorer_entrypoint_dispatches_quality_cache_and_returns_new_rows(

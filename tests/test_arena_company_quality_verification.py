@@ -305,6 +305,18 @@ def test_verified_linkedin_property_rejects_lookalike_hostname():
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://linkedin.com/company/acme/../contoso/posts",
+        "https://linkedin.com/company/acme/%2e%2e/contoso/posts",
+        "https://linkedin.com/company/acme/%252e%252e/contoso/posts",
+    ],
+)
+def test_verified_linkedin_property_rejects_dot_segment_aliases(url):
+    assert not _url_on_verified_company_identity(url, _quality_receipt())
+
+
 def test_historical_supported_high_unclear_decision_is_unchanged():
     verdict = _verdict("https://acme.com/news/product", entity="unclear")["answer"]
 
@@ -535,6 +547,36 @@ def test_us_hq_state_variants_match(submitted_state, observed_state):
         company=_company(state=submitted_state),
         company_quality=True,
     ) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    "requested", ["DC", "D.C.", "District of Columbia", "Washington, DC"]
+)
+def test_dc_icp_geography_requires_dc_headquarters(requested):
+    icp = _icp(country=requested, geography=requested)
+    dc_verdict = {
+        "observed_hq_country": "United States",
+        "observed_hq_state": "District of Columbia",
+        "geography_matches": True,
+    }
+    california_verdict = {
+        "observed_hq_country": "United States",
+        "observed_hq_state": "California",
+        "geography_matches": False,
+    }
+
+    assert _decision_from_observed_geography(
+        dc_verdict,
+        icp,
+        company=_company(state="DC"),
+        company_quality=True,
+    ) == COMPANY_FIT_MATCH
+    assert _decision_from_observed_geography(
+        california_verdict,
+        icp,
+        company=_company(state="California"),
+        company_quality=True,
+    ) == COMPANY_FIT_MISMATCH
 
 
 @pytest.mark.parametrize(

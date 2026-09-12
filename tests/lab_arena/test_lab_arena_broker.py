@@ -788,7 +788,10 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
     retained = json.dumps(store.calls)
     assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert diagnostic == {"reason": "transport_failure"}
+    assert diagnostic == {
+        "reason": "transport_failure",
+        "call_succeeded": False,
+    }
     assert exception_messages == ["ReadTimeout"]
     assert secret not in caplog.text and secret not in retained
     assert echoed_header not in caplog.text and echoed_header not in retained
@@ -1216,6 +1219,7 @@ def test_openrouter_http_200_error_status_is_normalized_and_replayed_without_a_s
     assert [sent["method"] for sent in transport.sent].count("POST") == 1
     assert store.log.count("settle") == 1
     assert "provider_cost" not in store.calls[first.call["call_identity"]]["terminal"]
+    assert store.calls[first.call["call_identity"]]["terminal"]["call_succeeded"] is False
 
 
 def test_openrouter_documented_string_rate_limit_code_is_normalized():
@@ -1293,6 +1297,7 @@ def test_openrouter_error_with_known_usage_settles_the_exact_charge():
     assert result.status == 400
     assert result.call["actual_microusd"] == 10
     assert store.calls[result.call["call_identity"]]["actual"] == 10
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is False
 
 
 def _insured_openrouter_error():
@@ -1715,6 +1720,7 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
     assert first.status == 502 and first.call["outcome"] == "uncertain"
     assert diagnostic == {
         "reason": "missing_provider_cost",
+        "call_succeeded": False,
         "provider_status": 0,
         "body_bytes": 0,
         "body_is_mapping": False,
@@ -1805,7 +1811,8 @@ def test_non_openrouter_transport_failure_ignores_generation_identity():
 
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
-        "reason": "transport_failure"
+        "reason": "transport_failure",
+        "call_succeeded": False,
     }
 
 
@@ -1899,6 +1906,34 @@ def test_openrouter_http_200_normal_completion_is_unchanged():
     assert result.status == 200 and json.loads(result.body) == payload
     assert result.call["actual_microusd"] < result.call["reserved_microusd"]
     assert store.log == ["reserve", "dispatch", "settle"]
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is True
+
+
+def test_openrouter_completion_text_that_describes_an_error_is_still_successful():
+    payload = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": '{"error":{"code":502}}',
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {"cost": "0.000001"},
+    }
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 200
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is True
 
 
 @pytest.mark.parametrize("payload", [
@@ -1915,6 +1950,7 @@ def test_missing_malformed_or_wrong_model_usage_marks_the_call_uncertain(payload
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
+        "call_succeeded": isinstance(payload.get("choices"), list),
         "provider_status": 200,
         "body_bytes": len(json.dumps(payload).encode("utf-8")),
         "body_is_mapping": True,
@@ -2036,8 +2072,9 @@ def test_transport_failure_after_send_marks_uncertain_and_keeps_full_reservation
 
 
 def test_successful_deepline_reply_without_billing_is_uncertain():
+    body = b'{"job_id":"job-empty","status":"completed","results":[]}'
     broker, store, _transport = make_broker(
-        transport=FakeTransport([(200, b'{"results":[]}')])
+        transport=FakeTransport([(200, body)])
     )
     result = broker.execute(
         CONTEXT,
@@ -2049,11 +2086,15 @@ def test_successful_deepline_reply_without_billing_is_uncertain():
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
+        "call_succeeded": True,
         "provider_status": 200,
-        "body_bytes": len(b'{"results":[]}'),
+        "body_bytes": len(body),
         "body_is_mapping": True,
         "usage_present": False,
         "billing_present": False,
+        "top_level_job_status": "completed",
+        "deepline_job_id": "job-empty",
+        "deepline_operation": "exa_search",
     }
 
 
@@ -2078,6 +2119,7 @@ def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
     )
     assert result.status == 422 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 0
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is False
     assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
     assert store.log == ["reserve", "dispatch", "settle"]
     assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
@@ -2362,7 +2404,8 @@ def test_deepline_error_without_exact_final_charge_remains_uncertain(envelope):
 def test_missing_cost_diagnostics_never_store_arbitrary_job_status(status):
     body = json.dumps({"status": status}).encode()
     diagnostic = br._missing_provider_cost_call_doc(
-        br.ProviderResponse(200, {}, body), {"status": status}
+        br.ProviderResponse(200, {}, body), {"status": status},
+        call_succeeded=False,
     )
     assert diagnostic["provider_status"] == 200
     assert "top_level_job_status" not in diagnostic
@@ -2464,6 +2507,7 @@ def test_real_deepline_free_company_search_malformed_billing_does_not_fall_back(
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
+        "call_succeeded": True,
         "provider_status": 200,
         "body_bytes": len(raw),
         "body_is_mapping": True,
@@ -2593,7 +2637,7 @@ def test_deepline_completed_native_billing_is_scoped_to_one_grouped_request():
 
 
 @pytest.mark.parametrize(
-    ("provider_status", "envelope"),
+    ("provider_status", "envelope", "expected_call_succeeded"),
     [
         (
             200,
@@ -2602,6 +2646,7 @@ def test_deepline_completed_native_billing_is_scoped_to_one_grouped_request():
                 "result": [],
                 "billing": {"credits_charged": 0.56},
             },
+            False,
         ),
         (
             200,
@@ -2611,6 +2656,7 @@ def test_deepline_completed_native_billing_is_scoped_to_one_grouped_request():
                 "result": [],
                 "billing": {"credits_charged": 0.56},
             },
+            False,
         ),
         (
             201,
@@ -2620,11 +2666,12 @@ def test_deepline_completed_native_billing_is_scoped_to_one_grouped_request():
                 "result": [],
                 "billing": {"credits_charged": 0.56},
             },
+            True,
         ),
     ],
 )
 def test_deepline_native_billing_requires_http_200_completed_job(
-    provider_status, envelope
+    provider_status, envelope, expected_call_succeeded
 ):
     broker, store, _transport = make_broker(
         transport=FakeTransport(
@@ -2643,6 +2690,10 @@ def test_deepline_native_billing_requires_http_200_completed_job(
     )
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+    assert (
+        store.calls[result.call["call_identity"]]["uncertain_doc"]["call_succeeded"]
+        is expected_call_succeeded
+    )
 
 
 def test_deepline_shared_history_cost_never_settles_one_request():
@@ -3437,6 +3488,7 @@ def test_fault_injection_points_produce_single_accounting_results():
     first = broker.execute(CONTEXT, **identity_args)
     second = broker.execute(CONTEXT, **identity_args)
     assert second.status == first.status and second.body == first.body and second.call["idempotent"] is True
+    assert store.calls[first.call["call_identity"]]["terminal"]["call_succeeded"] is True
     assert [sent["method"] for sent in transport.sent].count("POST") == 1
     assert store.log.count("settle") == 1
     # Stage closed between reservation and dispatch: the marker fails and nothing is sent.
@@ -3450,6 +3502,43 @@ def test_fault_injection_points_produce_single_accounting_results():
     store.mark_dispatched = closing
     result = broker.execute(CONTEXT, **identity_args)
     assert result.status == 409 and json.loads(result.body) == {"error": {"code": "lease_stale"}} and transport.sent == []
+
+
+def test_cancelled_settlement_uses_the_store_authoritative_failed_delivery():
+    class CancelledStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            call = self.calls[kwargs["call_identity"]]
+            self.log.append("settle")
+            call["kind"] = "uncertain"
+            call["uncertain_doc"] = {
+                "reason": "round_cancelled",
+                "call_succeeded": False,
+            }
+            return {"status": "stale"}
+
+    store = CancelledStore()
+    broker, _store, transport = make_broker(
+        store=store,
+        transport=FakeTransport([(200, {"results": []})]),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "cancel"}},
+        action_sequence=12,
+        timeout_ms=1000,
+    )
+
+    persisted = store.calls[result.call["call_identity"]]
+    assert result.status == 409
+    assert json.loads(result.body) == {"error": {"code": "lease_stale"}}
+    assert persisted["uncertain_doc"] == {
+        "reason": "round_cancelled",
+        "call_succeeded": False,
+    }
+    assert "terminal" not in persisted
+    assert [sent["method"] for sent in transport.sent] == ["POST"]
 
 
 def test_two_broker_instances_cause_at_most_one_dispatch_per_identity():
@@ -3566,6 +3655,7 @@ def test_a_reply_the_sanitizer_refuses_after_dispatch_settles_as_uncertain_not_d
     assert store.log[-1] == "uncertain" and "settle" not in store.log[-1:]  # the reservation is consumed, the head is terminal
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "settle_failure",
+        "call_succeeded": False,
         "failure_stage": "response_adaptation",
         "error_class": "OperationResponseError",
     }
@@ -3586,6 +3676,7 @@ def test_a_store_that_rejects_the_settlement_leaves_the_call_uncertain():
     assert result.status == 502 and result.call["outcome"] == "uncertain" and store.log[-1] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "settle_failure",
+        "call_succeeded": False,
         "failure_stage": "settlement",
         "error_class": "ArenaContractError",
     }
@@ -3624,6 +3715,7 @@ def test_response_adaptation_failure_retains_only_safe_class_and_stage(monkeypat
     assert result.status == 502 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 0
     assert store.calls[result.call["call_identity"]]["actual"] == 0
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is False
     assert secret not in json.dumps(result.to_document())
 
 
@@ -3644,3 +3736,4 @@ def test_known_raw_cost_survives_response_sanitization_failure(monkeypatch):
         "unit_name": "usd",
         "operation": "openrouter.chat",
     }
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is False

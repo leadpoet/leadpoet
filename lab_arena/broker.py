@@ -333,6 +333,7 @@ def _missing_provider_cost_call_doc(
     response: ProviderResponse,
     document: Any,
     *,
+    call_succeeded: bool,
     deepline_request_id: Optional[str] = None,
     deepline_operation: Optional[str] = None,
     openrouter_generation_id: Optional[str] = None,
@@ -348,6 +349,7 @@ def _missing_provider_cost_call_doc(
     body_bytes = len(response.body) if isinstance(response.body, bytes) else 0
     diagnostics: Dict[str, Any] = {
         "reason": "missing_provider_cost",
+        "call_succeeded": bool(call_succeeded),
         "provider_status": provider_status,
         "body_bytes": body_bytes,
         "body_is_mapping": is_mapping,
@@ -847,10 +849,16 @@ def _validated_response_url(value: Any, *, secret: str = "") -> str:
 
 def _terminal_response_document(
     status: int, headers: Mapping[str, str], body: bytes,
-    *, provider_cost: Optional[Mapping[str, Any]] = None,
+    *, call_succeeded: bool,
+    provider_cost: Optional[Mapping[str, Any]] = None,
     account_failure_evidence: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    document = {"status": int(status), "headers": dict(headers), "body_b64": base64.b64encode(bytes(body)).decode("ascii")}
+    document = {
+        "status": int(status),
+        "headers": dict(headers),
+        "body_b64": base64.b64encode(bytes(body)).decode("ascii"),
+        "call_succeeded": bool(call_succeeded),
+    }
     if provider_cost is not None:
         document["provider_cost"] = dict(provider_cost)
     if account_failure_evidence is not None:
@@ -879,7 +887,11 @@ def _decode_terminal(
     secret: str = "",
 ) -> Tuple[int, Dict[str, str], bytes]:
     required = {"status", "headers", "body_b64"}
-    allowed = required | {"provider_cost", "account_failure_evidence"}
+    allowed = required | {
+        "call_succeeded",
+        "provider_cost",
+        "account_failure_evidence",
+    }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
     provider_cost = document.get("provider_cost")
@@ -890,6 +902,9 @@ def _decode_terminal(
             {"basis", "units", "unit_name", "operation", "request_id"},
         )
     ):
+        raise BrokerError("broker_unavailable")
+    call_succeeded = document.get("call_succeeded")
+    if call_succeeded is not None and not isinstance(call_succeeded, bool):
         raise BrokerError("broker_unavailable")
     _validated_account_failure_evidence(
         document.get("account_failure_evidence")
@@ -1018,6 +1033,40 @@ def _openrouter_effective_response(response: ProviderResponse) -> ProviderRespon
     if len(set(statuses)) != 1:
         raise operations.OperationResponseError("invalid_response")
     return ProviderResponse(statuses[0], response.headers, response.body)
+
+
+def _provider_call_succeeded(
+    provider: str,
+    response: ProviderResponse,
+    document: Any,
+) -> bool:
+    """Classify only a valid terminal provider API success.
+
+    Provider text is opaque. Error-looking text selected by a model is still a
+    successful completion; only documented protocol fields affect this flag.
+    """
+
+    if response.internal_provenance is not None or not 200 <= response.status < 300:
+        return False
+    if provider == "openrouter":
+        if not isinstance(document, Mapping):
+            return False
+        choices = document.get("choices")
+        return isinstance(choices, list) and all(
+            isinstance(choice, Mapping)
+            and isinstance(choice.get("finish_reason"), str)
+            and choice.get("finish_reason") != "error"
+            for choice in choices
+        )
+    if provider == "deepline":
+        return (
+            isinstance(document, Mapping)
+            and _deepline_job_request_id(document) is not None
+            and document.get("status") == "completed"
+            and document.get("error") is None
+            and document.get("tool_error") is None
+        )
+    return True
 
 
 def _miner_credential_failure(
@@ -1841,7 +1890,10 @@ class Broker:
                         )
             except ProviderTransportError as exc:
                 # Outcome unknown after send: consume the full reservation.
-                uncertain_doc: Dict[str, Any] = {"reason": "transport_failure"}
+                uncertain_doc: Dict[str, Any] = {
+                    "reason": "transport_failure",
+                    "call_succeeded": False,
+                }
                 if (
                     effective_operation.provider == "openrouter"
                     and exc.openrouter_generation_id is not None
@@ -1862,6 +1914,7 @@ class Broker:
                     uncertain_doc = _missing_provider_cost_call_doc(
                         ProviderResponse(0, {}, b""),
                         None,
+                        call_succeeded=False,
                         openrouter_generation_id=exc.openrouter_generation_id,
                         credential_fingerprint=openrouter_credential_fingerprint,
                     )
@@ -1934,9 +1987,15 @@ class Broker:
         )
         failure_stage = "response_adaptation"
         adapted_response_url = ""
+        call_succeeded = False
         try:
             if effective_operation.provider == "openrouter":
                 response = _openrouter_effective_response(response)
+            call_succeeded = _provider_call_succeeded(
+                effective_operation.provider,
+                response,
+                raw_document,
+            )
             miner_credential_failure = (
                 funding_source == "miner_key"
                 and _miner_credential_failure(
@@ -1953,45 +2012,6 @@ class Broker:
                 and response.status not in (400, 401, 402, 403, 404, 422, 429)
                 and raw_actual is None
             )
-            if missing_deepline_cost or missing_openrouter_cost:
-                account_failure_evidence = None
-                if (
-                    champion_credential_retry
-                    and miner_credential_failure
-                ):
-                    account_failure_evidence = {
-                        "error_class": "account_credential_failure",
-                        "provider_status": int(response.status),
-                        "base_call_identity": base_call_identity,
-                        "provider_attempt": provider_attempt,
-                        "action_sequence": action_sequence,
-                    }
-                uncertain_doc = _missing_provider_cost_call_doc(
-                    response,
-                    raw_document,
-                    deepline_request_id=deepline_request_id,
-                    deepline_operation=deepline_operation,
-                    openrouter_generation_id=openrouter_generation_id,
-                    credential_fingerprint=openrouter_credential_fingerprint,
-                )
-                if account_failure_evidence is not None:
-                    uncertain_doc["account_failure_evidence"] = (
-                        account_failure_evidence
-                    )
-                result = self._store.mark_uncertain(
-                    run_id=context.run_id,
-                    lease_token_hash=context.lease_token_hash,
-                    call_identity=call_identity,
-                    call_doc=uncertain_doc,
-                    lease_ttl_seconds=self._lease_ttl_seconds,
-                )
-                summary.update({"outcome": "uncertain", "actual_microusd": amount, "provider_status": int(response.status)})
-                if (
-                    (missing_deepline_cost or missing_openrouter_cost)
-                    and miner_credential_failure
-                ):
-                    return _error_result("miner_credentials_unavailable", summary)
-                return _error_result("provider_unavailable", summary)
             if miner_credential_failure:
                 failure_stage = "response_sanitization"
                 refused = _error_result("miner_credentials_unavailable", summary)
@@ -2020,6 +2040,46 @@ class Broker:
                     sanitized_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = (
                         _validated_response_url(adapted_response_url)
                     )
+            if missing_deepline_cost or missing_openrouter_cost:
+                account_failure_evidence = None
+                if champion_credential_retry and miner_credential_failure:
+                    account_failure_evidence = {
+                        "error_class": "account_credential_failure",
+                        "provider_status": int(response.status),
+                        "base_call_identity": base_call_identity,
+                        "provider_attempt": provider_attempt,
+                        "action_sequence": action_sequence,
+                    }
+                uncertain_doc = _missing_provider_cost_call_doc(
+                    response,
+                    raw_document,
+                    call_succeeded=call_succeeded,
+                    deepline_request_id=deepline_request_id,
+                    deepline_operation=deepline_operation,
+                    openrouter_generation_id=openrouter_generation_id,
+                    credential_fingerprint=openrouter_credential_fingerprint,
+                )
+                if account_failure_evidence is not None:
+                    uncertain_doc["account_failure_evidence"] = (
+                        account_failure_evidence
+                    )
+                self._store.mark_uncertain(
+                    run_id=context.run_id,
+                    lease_token_hash=context.lease_token_hash,
+                    call_identity=call_identity,
+                    call_doc=uncertain_doc,
+                    lease_ttl_seconds=self._lease_ttl_seconds,
+                )
+                summary.update(
+                    {
+                        "outcome": "uncertain",
+                        "actual_microusd": amount,
+                        "provider_status": int(response.status),
+                    }
+                )
+                if miner_credential_failure:
+                    return _error_result("miner_credentials_unavailable", summary)
+                return _error_result("provider_unavailable", summary)
             failure_stage = "cost_accounting"
             if effective_operation.provider == "openrouter":
                 actual = 0 if raw_actual is None else raw_actual
@@ -2032,6 +2092,7 @@ class Broker:
             failure_stage = "terminal_response"
             terminal = _terminal_response_document(
                 sanitized_status, sanitized_headers, sanitized_body,
+                call_succeeded=call_succeeded,
                 provider_cost=cost_record,
                 account_failure_evidence=(
                     {
@@ -2065,6 +2126,7 @@ class Broker:
                 refused = _error_result("provider_unavailable", summary)
                 terminal = _terminal_response_document(
                     refused.status, refused.headers, refused.body,
+                    call_succeeded=False,
                     provider_cost=cost_record,
                 )
                 try:
@@ -2094,6 +2156,7 @@ class Broker:
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
                     call_doc={
                         "reason": "settle_failure",
+                        "call_succeeded": False,
                         "failure_stage": failure_stage,
                         "error_class": _safe_exception_class(exc),
                     },

@@ -1363,7 +1363,12 @@ class Broker:
                     if (
                         openrouter_native_cost is None
                         and openrouter_readback_cost is None
-                        and not openrouter_generation_present
+                        # A valid tracking id does not invalidate the stricter
+                        # error-envelope proof after exact readback is absent.
+                        and (
+                            not openrouter_generation_present
+                            or openrouter_generation_id is not None
+                        )
                     ):
                         openrouter_insured_cost = (
                             provider_costs.openrouter_insured_error_cost(

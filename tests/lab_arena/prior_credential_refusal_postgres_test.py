@@ -14,22 +14,24 @@ from tests.lab_arena.lab_arena_pg_harness import (
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     claim,
+    complete,
     open_round,
     sha,
 )
 
 
-MIGRATION = "214-lab-arena-prior-credential-refusal.sql"
+PRIOR_CREDENTIAL_MIGRATION = "214-lab-arena-prior-credential-refusal.sql"
+MIGRATION = "218-lab-arena-cross-provider-credential-refusal.sql"
 
 
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(
-        DEFAULT_MIGRATIONS + (MIGRATION,)
+        DEFAULT_MIGRATIONS + (PRIOR_CREDENTIAL_MIGRATION, MIGRATION)
     )
 
 
-def test_only_matching_unknown_cost_credential_refusal_marks_later_budget_refusal(
+def test_proven_credential_refusal_marks_later_shared_budget_refusal(
     database,
 ):
     psycopg2, dsn = database
@@ -139,12 +141,89 @@ def test_only_matching_unknown_cost_credential_refusal_marks_later_budget_refusa
         call_doc={},
     )
     assert unrelated["status"] == "refused"
-    assert unrelated["reason"] == "provider_cost_uncertain"
-    assert unrelated["prior_miner_credential_refusal"] is False
+    assert unrelated["reason"] == "money_cap"
+    assert unrelated["prior_miner_credential_refusal"] is True
 
     migration = Path(__file__).resolve().parents[2] / "scripts" / MIGRATION
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(migration.read_text(encoding="utf-8"))
+
+
+def test_cross_provider_retry_keeps_proven_miner_credential_failure(database):
+    psycopg2, dsn = database
+    store = ArenaStore(PsycopgTransport(lambda: psycopg2.connect(**dsn)))
+    round_id = "arena-2026-09-11-xretry"
+    runners, _participants = open_round(
+        store,
+        round_id,
+        participants=1,
+        runners=1,
+        prefix="cross-provider-retry",
+        quotas={"deepline": 30, "scrapingdog": 30, "openrouter": 30},
+        execution_cap_microusd=50_000_000,
+    )
+    first, first_token, _, _ = claim(
+        store, round_id, runners[0], parallelism=1, ceiling=1
+    )
+    deepline_identity = contracts.provider_call_identity(
+        attempt=1,
+        assignment_id=first["assignment_id"],
+        icp_position=first["icp_position"],
+        action_sequence=0,
+        operation_id="deepline.execute",
+        request_hash=sha("deepline-credential-refusal"),
+    )
+    first_lease_hash = hash_lease_token(first_token)
+    assert store.reserve_call(
+        run_id=first["run_id"],
+        lease_token_hash=first_lease_hash,
+        call_identity=deepline_identity,
+        operation_id="deepline.execute",
+        provider="deepline",
+        funding_source="miner_key",
+        amount_microusd=0,
+        call_doc={"reserve_remaining_budget": True, "tool": "exa_search"},
+    )["status"] == "reserved"
+    assert store.mark_dispatched(
+        run_id=first["run_id"],
+        lease_token_hash=first_lease_hash,
+        call_identity=deepline_identity,
+    )["status"] == "dispatched"
+    assert store.mark_uncertain(
+        run_id=first["run_id"],
+        lease_token_hash=first_lease_hash,
+        call_identity=deepline_identity,
+        call_doc={"reason": "missing_provider_cost", "provider_status": 402},
+    )["status"] == "uncertain"
+    failed = complete(store, first["run_id"], first_lease_hash, "provider_error")
+    assert failed["confirmation_attempt"] == 2
+
+    retry, retry_token, _, _ = claim(
+        store, round_id, runners[0], parallelism=1, ceiling=1
+    )
+    assert retry["assignment_id"] == first["assignment_id"]
+    assert retry["attempt"] == 2
+    openrouter_identity = contracts.provider_call_identity(
+        attempt=2,
+        assignment_id=retry["assignment_id"],
+        icp_position=retry["icp_position"],
+        action_sequence=0,
+        operation_id="openrouter.chat",
+        request_hash=sha("openrouter-shared-budget-refusal"),
+    )
+    refused = store.reserve_call(
+        run_id=retry["run_id"],
+        lease_token_hash=hash_lease_token(retry_token),
+        call_identity=openrouter_identity,
+        operation_id="openrouter.chat",
+        provider="openrouter",
+        funding_source="miner_key",
+        amount_microusd=1,
+        call_doc={},
+    )
+    assert refused["status"] == "refused"
+    assert refused["reason"] == "money_cap"
+    assert refused["prior_miner_credential_refusal"] is True
 
 
 def test_unknown_provider_cost_is_distinct_from_a_settled_cap(database):

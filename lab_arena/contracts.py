@@ -1087,6 +1087,15 @@ REWARD_BASIS_FIELDS = (
     F("king_outcome", "str", choices=KING_OUTCOMES),
     F("king_start_epoch", "int", minimum=0),
     F("reward_constants", "object", fields=REWARD_CONSTANTS_FIELDS),
+    # Historical bases omit this field and retain their original full share.
+    # New bases sign either the full factor or the one-time account-fallback
+    # factor; no other multiplier is valid.
+    F(
+        "champion_reward_factor_ppm",
+        "int",
+        required=False,
+        choices=(500_000, 1_000_000),
+    ),
     F("reward_basis_hash", "sha256", required=False),
     F("signature", "object", required=False),
 )

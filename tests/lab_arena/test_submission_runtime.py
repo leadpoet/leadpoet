@@ -10,8 +10,10 @@ from test_lab_arena_broker import CONTEXT
 
 
 class Store:
-    def __init__(self, row):
+    def __init__(self, row, funding=None):
         self.row = row
+        self.funding = funding
+        self.fallbacks = []
 
     def get_submission(self, submission_id):
         return self.row if submission_id == self.row["submission_id"] else None
@@ -21,6 +23,32 @@ class Store:
 
     def get_submission_credential(self, submission_id, miner_hotkey, provider):
         return {"submission_id": submission_id, "miner_hotkey": miner_hotkey, "provider": provider, "ciphertext_b64": "encrypted"}
+
+    def provider_funding(self, run_id, provider):
+        del run_id, provider
+        if self.funding is not None:
+            return dict(self.funding)
+        baseline = self.row["submission_id"].startswith("baseline-")
+        return {
+            "status": "available",
+            "funding_source": "host" if baseline else "miner_key",
+            "champion_funding": False,
+            "credential_submission_id": (
+                None if baseline else self.row["submission_id"]
+            ),
+            "credential_miner_hotkey": (
+                None if baseline else self.row["miner_hotkey"]
+            ),
+            "restart_required": False,
+        }
+
+    def mark_champion_provider_fallback(
+        self, run_id, lease_token_hash, provider, evidence
+    ):
+        self.fallbacks.append(
+            (run_id, lease_token_hash, provider, dict(evidence))
+        )
+        return {"status": "marked", "funding_source": "host"}
 
 
 class Credentials:
@@ -41,7 +69,15 @@ def resolver(*, baseline=False, is_king=False, credentials=True):
     }
     context = replace(CONTEXT, submission_id=row["submission_id"], miner_hotkey=row["miner_hotkey"])
     vault = Credentials() if credentials else None
-    keys = SubmissionProviderKeys(store=Store(row), credentials=vault, organizer_keys={"openrouter": "host-runtime-key"})
+    keys = SubmissionProviderKeys(
+        store=Store(row),
+        credentials=vault,
+        organizer_keys={
+            "openrouter": "host-runtime-key",
+            "deepline": "host-runtime-key",
+            "scrapingdog": "host-runtime-key",
+        },
+    )
     return keys, context, vault
 
 
@@ -81,6 +117,48 @@ def test_missing_miner_credentials_cannot_fall_back_to_host():
     keys, context, _ = resolver(credentials=False)
     with pytest.raises(BrokerError, match="miner_credentials_unavailable"):
         keys.credential_for(context, "openrouter")
+
+
+def test_daily_baseline_execution_uses_retained_champion_owner_credentials():
+    keys, context, vault = resolver(baseline=True)
+    keys._store.funding = {
+        "status": "available",
+        "funding_source": "miner_key",
+        "champion_funding": True,
+        "credential_submission_id": "prior-winning-submission",
+        "credential_miner_hotkey": "5" + "c" * 47,
+        "restart_required": False,
+    }
+
+    assert keys.provider_funding_source_for(context, "deepline") == "miner_key"
+    assert keys.retry_miner_credential_for(context) is True
+    assert keys.credential_for(context, "deepline") == "miner-runtime-key"
+    assert vault.calls == [("prior-winning-submission", "deepline")]
+
+
+def test_daily_baseline_score_keeps_host_funding_snapshot():
+    keys, context, vault = resolver(baseline=True)
+    context = replace(context, kind="score")
+
+    assert keys.provider_funding_source_for(context, "scrapingdog") == "host"
+    assert keys.retry_miner_credential_for(context) is False
+    assert keys.credential_for(context, "scrapingdog") == "host-runtime-key"
+    assert not vault.calls
+
+
+def test_optional_champion_provider_is_not_read_until_requested():
+    keys, context, vault = resolver(baseline=True)
+    keys._store.funding = {
+        "status": "available",
+        "funding_source": "miner_key",
+        "champion_funding": True,
+        "credential_submission_id": "prior-winning-submission",
+        "credential_miner_hotkey": "5" + "c" * 47,
+        "restart_required": False,
+    }
+
+    assert keys.credential_for(context, "openrouter") == "miner-runtime-key"
+    assert vault.calls == [("prior-winning-submission", "openrouter")]
 
 
 def test_cross_miner_identity_is_rejected():

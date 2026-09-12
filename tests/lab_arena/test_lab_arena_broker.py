@@ -48,7 +48,17 @@ class FakeLedgerStore:
         self.log: List[str] = []
 
     def _view(self, call):
-        return {"status": {"reservation": "reserved", "dispatch": "dispatched", "settlement": "settled", "uncertain": "uncertain", "recovery": "recovered", "refusal": "refused"}[call["kind"]], "idempotent": True, "call_identity": call["identity"], "amount_microusd": call["amount"], "terminal_response": call.get("terminal"), "reason": call.get("reason")}
+        return {
+            "status": {"reservation": "reserved", "dispatch": "dispatched", "settlement": "settled", "uncertain": "uncertain", "recovery": "recovered", "refusal": "refused"}[call["kind"]],
+            "idempotent": True,
+            "call_identity": call["identity"],
+            "amount_microusd": call["amount"],
+            "terminal_response": call.get("terminal"),
+            "reason": call.get("reason"),
+            "account_failure_evidence": (
+                call.get("uncertain_doc", {}).get("account_failure_evidence")
+            ),
+        }
 
     def _consumed(self, provider):
         return sum(1 for c in self.calls.values() if c.get("provider") == provider and c["kind"] in ("reservation", "dispatch", "settlement", "uncertain"))
@@ -83,7 +93,13 @@ class FakeLedgerStore:
                 self.calls[call_identity] = {"kind": "refusal", "identity": call_identity, "amount": 0, "reason": reason}
                 return {"status": "refused", "idempotent": False, "reason": reason, "call_identity": call_identity}
             self.openrouter_capacity -= amount_microusd
-            self.calls[call_identity] = {"kind": "reservation", "identity": call_identity, "amount": amount_microusd, "provider": provider}
+            self.calls[call_identity] = {
+                "kind": "reservation",
+                "identity": call_identity,
+                "amount": amount_microusd,
+                "provider": provider,
+                "call_doc": dict(call_doc),
+            }
             self.calls[call_identity]["funding_source"] = funding_source
             self.calls[call_identity]["reserve_remaining"] = reserve_remaining
             return {"status": "reserved", "idempotent": False, "call_identity": call_identity, "amount_microusd": amount_microusd}
@@ -254,6 +270,369 @@ def make_broker(store=None, transport=None, **kwargs):
         **kwargs,
     )
     return broker, store, transport
+
+
+def test_champion_account_failure_retries_four_provider_attempts_then_marks_fallback():
+    marked = []
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [(429, {"error": {"code": 429}}) for _ in range(4)]
+        ),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context.run_id, provider, dict(evidence)))
+            or {"status": "marked"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=7,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 402
+    assert result.call["provider_fallback_required"] is True
+    assert result.call["provider_fallback_marked"] is True
+    assert result.call["champion_credential_attempts"] == 4
+    assert len(transport.sent) == 4
+    assert len(store.calls) == 4
+    base_identities = {
+        call["call_doc"]["base_call_identity"]
+        for call in store.calls.values()
+    }
+    assert len(base_identities) == 1
+    assert {
+        call["call_doc"]["provider_attempt"]
+        for call in store.calls.values()
+    } == {1, 2, 3, 4}
+    assert all(
+        call["call_doc"]["action_sequence"] == 7
+        for call in store.calls.values()
+    )
+    assert all(
+        call["terminal"]["account_failure_evidence"]["provider_status"]
+        == 429
+        for call in store.calls.values()
+    )
+    assert marked == [
+        (
+            CONTEXT.run_id,
+            "scrapingdog",
+            {
+                "error_class": "account_credential_failure",
+                "provider_status": 429,
+                "action_sequence": 7,
+                "provider_attempts": 4,
+                "base_call_identity": result.call["base_call_identity"],
+            },
+        )
+    ]
+
+
+def test_champion_provider_outage_does_not_retry_or_mark_fallback():
+    marked = []
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(503, {"error": {"code": 503}})]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context, provider, evidence))
+            or {"status": "marked"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert len(transport.sent) == 1
+    assert len(store.calls) == 1
+    assert marked == []
+
+
+def test_champion_openrouter_upstream_429_does_not_fallback_account():
+    marked = []
+    payload = {
+        "error": {
+            "code": 429,
+            "message": "upstream temporarily rate-limited",
+            "metadata": {"provider_name": "upstream-provider"},
+        }
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(429, payload)]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context, provider, evidence))
+            or {"status": "marked"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=7,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["provider_status"] == 429
+    assert len(transport.sent) == len(store.calls) == 1
+    assert marked == []
+
+
+@pytest.mark.parametrize("provider_status", [401, 402, 429])
+def test_champion_openrouter_zero_cost_account_failure_latches(
+    provider_status,
+):
+    marked = []
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [
+                (
+                    provider_status,
+                    {"error": {"code": provider_status}},
+                )
+                for _ in range(4)
+            ]
+        ),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context.run_id, provider, dict(evidence)))
+            or {"status": "marked"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=10,
+        timeout_ms=5000,
+    )
+
+    assert result.call["provider_fallback_required"] is True
+    assert result.call["provider_fallback_marked"] is True
+    assert len(transport.sent) == 4
+    assert len(store.calls) == 4
+    assert {
+        call["kind"] for call in store.calls.values()
+    } == {"settlement"}
+    assert all(
+        call["terminal"]["account_failure_evidence"][
+            "provider_status"
+        ]
+        == provider_status
+        for call in store.calls.values()
+    )
+    assert all(call["actual"] == 0 for call in store.calls.values())
+    assert marked == [
+        (
+            CONTEXT.run_id,
+            "openrouter",
+            {
+                "error_class": "account_credential_failure",
+                "provider_status": provider_status,
+                "action_sequence": 10,
+                "provider_attempts": 4,
+                "base_call_identity": result.call["base_call_identity"],
+            },
+        )
+    ]
+
+
+def test_champion_retry_resumes_after_settled_account_failure_replay():
+    store = FakeLedgerStore()
+    first, _store, first_transport = make_broker(
+        store=store,
+        transport=FakeTransport([(401, {"error": {"code": 401}})]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+    )
+    first_result = first._execute_once(
+        CONTEXT,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=8,
+        timeout_ms=5000,
+        provider_attempt=1,
+        champion_credential_retry=True,
+    )
+    assert first_result.call["error_code"] == "miner_credentials_unavailable"
+    assert len(first_transport.sent) == 1
+
+    marked = []
+    resumed, _store, resumed_transport = make_broker(
+        store=store,
+        transport=FakeTransport(
+            [(401, {"error": {"code": 401}}) for _ in range(3)]
+        ),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context.run_id, provider, dict(evidence)))
+            or {"status": "marked"}
+        ),
+    )
+    result = resumed.execute(
+        CONTEXT,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=8,
+        timeout_ms=5000,
+    )
+
+    assert result.call["provider_fallback_marked"] is True
+    assert len(resumed_transport.sent) == 3
+    assert marked[0][2]["provider_status"] == 401
+
+
+def test_champion_retry_recognizes_durable_uncertain_account_evidence():
+    store = FakeLedgerStore()
+    broker, _store, transport = make_broker(
+        store=store,
+        transport=FakeTransport([(401, {"error": {"code": 401}})]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+    )
+    first = broker._execute_once(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "acme"}},
+        action_sequence=9,
+        timeout_ms=5000,
+        provider_attempt=1,
+        champion_credential_retry=True,
+    )
+    replay = broker._execute_once(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "acme"}},
+        action_sequence=9,
+        timeout_ms=5000,
+        provider_attempt=1,
+        champion_credential_retry=True,
+    )
+
+    assert first.call["error_code"] == "miner_credentials_unavailable"
+    assert replay.call["error_code"] == "miner_credentials_unavailable"
+    assert replay.call["provider_status"] == 401
+    assert replay.call["outcome"] == "uncertain"
+    assert len(transport.sent) == 1
+
+
+def test_missing_optional_champion_credential_marks_fallback_without_dispatch():
+    marked = []
+
+    def missing(_context, provider):
+        assert provider == "scrapingdog"
+        raise br.BrokerError("miner_credentials_unavailable")
+
+    broker, store, transport = make_broker(
+        credential_for=missing,
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context.run_id, provider, dict(evidence)))
+            or {"status": "marked"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=3,
+        timeout_ms=5000,
+    )
+
+    assert result.call["provider_fallback_required"] is True
+    assert result.call["champion_credential_attempts"] == 4
+    assert transport.sent == []
+    assert store.calls == {}
+    assert marked[0][2]["provider_status"] is None
+    assert marked[0][2]["base_call_identity"] is None
+
+
+def test_latched_champion_fallback_aborts_old_run_without_provider_probe():
+    marked = []
+    broker, store, transport = make_broker(
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        provider_restart_required_for=lambda _context, _provider: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context.run_id, provider, dict(evidence)))
+            or {"status": "existing"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.call["provider_fallback_required"] is True
+    assert result.call["provider_fallback_marked"] is True
+    assert transport.sent == []
+    assert store.calls == {}
+    assert marked[0][1] == "openrouter"
+
+
+def test_fallback_race_at_reservation_marks_run_before_returning():
+    class FallbackRaceStore(FakeLedgerStore):
+        def reserve_call(self, **_kwargs):
+            return {"status": "champion_restart_required"}
+
+    marked = []
+    broker, store, transport = make_broker(
+        store=FallbackRaceStore(),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        provider_restart_required_for=lambda _context, _provider: False,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context.run_id, provider, dict(evidence)))
+            or {"status": "existing"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=10,
+        timeout_ms=5000,
+    )
+
+    assert result.call["provider_fallback_required"] is True
+    assert result.call["provider_fallback_marked"] is True
+    assert result.call["outcome"] == "not_dispatched"
+    assert transport.sent == []
+    assert store.calls == {}
+    assert marked[0][1] == "openrouter"
 
 
 def deepline_history_entry(
@@ -719,6 +1098,26 @@ def test_openrouter_http_200_error_status_is_normalized_and_replayed_without_a_s
     assert [sent["method"] for sent in transport.sent].count("POST") == 1
     assert store.log.count("settle") == 1
     assert "provider_cost" not in store.calls[first.call["call_identity"]]["terminal"]
+
+
+def test_openrouter_documented_string_rate_limit_code_is_normalized():
+    payload = {"error": {"code": "rate_limit_exceeded", "message": "limited"}}
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert result.call["provider_status"] == 429
+    assert result.call["error_code"] == "provider_unavailable"
+    assert store.log == ["reserve", "dispatch", "settle"]
 
 
 @pytest.mark.parametrize("provider_status", [500, 503, 599])

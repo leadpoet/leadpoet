@@ -450,6 +450,16 @@ def build_service_from_environment(mode: str):
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
             credential_for=submission_keys.credential_for,
             funding_source_for=submission_keys.funding_source_for,
+            provider_funding_source_for=(
+                submission_keys.provider_funding_source_for
+            ),
+            retry_miner_credential_for=(
+                submission_keys.retry_miner_credential_for
+            ),
+            mark_provider_fallback=submission_keys.mark_provider_fallback,
+            provider_restart_required_for=(
+                submission_keys.provider_restart_required_for
+            ),
         )
 
     def daily_icp_source(*, set_id: int, active_at: datetime) -> Mapping[str, Any]:

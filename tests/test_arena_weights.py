@@ -17,7 +17,12 @@ from validator_tee.enclave.arena_weight_signer import ArenaWeightSigner, ArenaWe
 HOTKEYS = ["5" + ("A" * 47), "5" + ("B" * 47), "5" + ("C" * 47)]
 
 
-def _signed_state(epoch=100, winner=HOTKEYS[2], valid_until_block=1100):
+def _signed_state(
+    epoch=100,
+    winner=HOTKEYS[2],
+    valid_until_block=1100,
+    champion_reward_factor_ppm=1_000_000,
+):
     key = ec.generate_private_key(ec.SECP256R1())
     der = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
     key_hash = public_key_hash(der)
@@ -26,11 +31,9 @@ def _signed_state(epoch=100, winner=HOTKEYS[2], valid_until_block=1100):
         finalized_epoch=epoch - 1, king_outcome="crowned", king_hotkey=winner,
         previous_king_start_epoch=None,
         reward_constants=reward_constants_document(pool_percent=5),
+        champion_reward_factor_ppm=champion_reward_factor_ppm,
     )
-    basis_hash = sha256_json({name: basis[name] for name in (
-        "schema_version", "round_id", "published_at", "effective_reward_epoch",
-        "king_hotkey", "king_outcome", "king_start_epoch", "reward_constants",
-    )})
+    basis_hash = basis["reward_basis_hash"]
     basis["reward_basis_hash"] = basis_hash
     basis["signature"] = {
         "algorithm": "ECDSA_SHA_256", "public_key_hash": key_hash,
@@ -66,6 +69,22 @@ def test_signed_state_derives_exact_finalized_uid_vector():
     assert normalize_to_u16_with_uids([0, 2], float_weights) == (
         result["sparse_uids"], result["sparse_weights_u16"]
     )
+
+
+def test_signed_fallback_factor_halves_champion_share_and_tampering_fails():
+    state, der, key_hash = _signed_state(champion_reward_factor_ppm=500_000)
+    assert arena_weights.verify_accepted_weight_state_signature(
+        state, public_key_der=der, expected_public_key_hash=key_hash
+    ) == state["state_hash"]
+    result = arena_weights.derive_arena_weights(state, HOTKEYS)
+    assert result["champion_share_ppb"] == 25_000_000
+    assert result["burned_residual_ppb"] == 975_000_000
+
+    state["reward_basis"]["champion_reward_factor_ppm"] = 1_000_000
+    with pytest.raises(ValueError, match="reward_basis_hash"):
+        arena_weights.verify_accepted_weight_state_signature(
+            state, public_key_der=der, expected_public_key_hash=key_hash
+        )
 
 
 @pytest.mark.parametrize("mutation,error", [

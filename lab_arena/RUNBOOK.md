@@ -96,7 +96,34 @@ public baseline:
 - `LAB_ARENA_SCRAPINGDOG_API_KEY`
 - `LAB_ARENA_DEEPLINE_API_KEY`
 
-The host keys are used for baseline traffic. A competing model's
+Before a miner wins the live competition, the host keys fund the baseline.
+After promotion, daily baseline execution uses the winning submission's stored
+keys. The owner is frozen from the completed promotion in the same competition
+mode and chain. Later organizer edits to the baseline source do not change that
+owner. Baseline judging continues to use the organizer's keys.
+
+An account-related rejection gets the initial attempt plus three retries. The
+broker records each attempt, then permanently selects the corresponding host key
+for that provider within the daily round. The affected ICP starts again with a
+fresh run; previous accepted ICPs remain unchanged. A key is optional until the
+model requests that provider. Provider outages and network failures keep the
+normal recovery path. The next daily round tries the miner keys again.
+
+Fallback halves the signed champion reward factor once, relative to the current
+configured weekly share. Repeated failed days stay at one half. Every baseline
+execution and its judgment must succeed without fallback to clear an existing
+penalty. A new competition winner starts at the full factor. Partial success or
+an older round cannot restore a reduced factor.
+
+Provider costs remain in the existing ledger. An unknown miner charge from a
+confirmed account rejection remains uncertain. Once that provider's fallback
+is durable, its retired reservation no longer blocks replacement execution
+under the existing execution cap. Settled costs and unrelated uncertain charges
+still count against that cap. A retry blocked by this reservation is recorded as
+an admission refusal, not as another upstream dispatch. Apply migration
+`227-lab-arena-champion-funding.sql` before deploying this behavior.
+
+A competing model's
 OpenRouter runtime key and Deepline key are submitted separately, encrypted in
 the gateway vault, and attached to that submission's execution and judge calls. An
 optional miner Scrapingdog key is encrypted in the same vault and used only when

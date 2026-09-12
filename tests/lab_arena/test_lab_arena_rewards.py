@@ -23,6 +23,7 @@ def _basis(
     king_hotkey: str = ALICE,
     previous_start: int | None = None,
     round_id: str = "arena-2026-09-02",
+    champion_reward_factor_ppm: int = rewards.FULL_CHAMPION_REWARD_FACTOR_PPM,
 ) -> dict:
     return rewards.reward_basis_document(
         round_id=round_id,
@@ -31,6 +32,7 @@ def _basis(
         king_outcome=outcome,
         king_hotkey="" if outcome == "no_king" else king_hotkey,
         previous_king_start_epoch=previous_start,
+        champion_reward_factor_ppm=champion_reward_factor_ppm,
     )
 
 
@@ -79,6 +81,58 @@ def test_king_pool_share_percent_is_the_closed_schedule():
 def test_five_exact_weekly_shares():
     for week, expected in enumerate(EXACT_WEEKLY_SHARES):
         assert rewards.champion_share_for_week(week) == expected
+
+
+def test_account_fallback_halves_each_configured_week_once_and_full_restores():
+    for week, configured in enumerate(EXACT_WEEKLY_SHARES):
+        epoch = 1000 + 140 * week
+        fallback = _basis(
+            outcome="crowned" if week == 0 else "defended",
+            finalized_epoch=epoch - 1,
+            previous_start=None if week == 0 else 1000,
+            champion_reward_factor_ppm=(
+                rewards.FALLBACK_CHAMPION_REWARD_FACTOR_PPM
+            ),
+        )
+        assert _values(fallback, epoch)["champion_share"] == configured * 0.5
+
+    first_fallback = _basis(
+        outcome="crowned",
+        finalized_epoch=999,
+        champion_reward_factor_ppm=rewards.FALLBACK_CHAMPION_REWARD_FACTOR_PPM,
+    )
+    repeated_fallback = _basis(
+        outcome="defended",
+        finalized_epoch=1019,
+        previous_start=1000,
+        champion_reward_factor_ppm=rewards.FALLBACK_CHAMPION_REWARD_FACTOR_PPM,
+    )
+    restored = _basis(
+        outcome="defended",
+        finalized_epoch=1039,
+        previous_start=1000,
+        champion_reward_factor_ppm=rewards.FULL_CHAMPION_REWARD_FACTOR_PPM,
+    )
+    assert _values(first_fallback, 1000)["champion_share"] == 0.125
+    assert _values(repeated_fallback, 1020)["champion_share"] == 0.125
+    assert _values(restored, 1040)["champion_share"] == 0.25
+
+
+def test_reward_factor_is_closed_and_historical_absence_means_full_share():
+    historical = _basis(outcome="crowned", finalized_epoch=999)
+    historical.pop("champion_reward_factor_ppm")
+    historical.pop("reward_basis_hash")
+    historical["reward_basis_hash"] = contracts.document_hash(historical)
+    assert _values(historical, 1000)["champion_share"] == 0.25
+    contracts.validate_reward_basis(historical)
+
+    for invalid in (True, 0, 499_999, 750_000, 1_000_001):
+        with pytest.raises(ValueError, match="champion_reward_factor_ppm"):
+            _basis(
+                outcome="crowned",
+                finalized_epoch=999,
+                champion_reward_factor_ppm=invalid,
+            )
 
 
 def test_champion_values_yield_exact_shares_across_the_schedule():

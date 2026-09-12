@@ -50,6 +50,15 @@ class _Store:
     def get_round(self, round_id):
         return self.rounds.get(round_id)
 
+    def freeze_champion_funding(self, round_id):
+        row = self.rounds[round_id]
+        status = "existing" if row.get("champion_funding_frozen") else "frozen"
+        row["champion_funding_frozen"] = True
+        row.setdefault("champion_submission_id", None)
+        row.setdefault("champion_hotkey", None)
+        row.setdefault("champion_fallback_providers", [])
+        return {"status": status}
+
     def pending_promotions(
         self, *, pinned_round_id=None, network_name=None, netuid=None, **_kwargs
     ):

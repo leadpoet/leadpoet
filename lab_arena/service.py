@@ -585,6 +585,16 @@ class ArenaService:
             raise ServiceError(
                 "validator_scoring_authority_schema_unavailable", 500
             ) from exc
+        champion_funding_schema = getattr(
+            self._store, "champion_funding_schema", None
+        )
+        if callable(champion_funding_schema):
+            try:
+                champion_funding_schema()
+            except ArenaStoreError as exc:
+                raise ServiceError(
+                    "champion_funding_schema_unavailable", 500
+                ) from exc
         # Every service function must exist and be granted: a missing round is the
         # expected structured failure; a permission or undefined-function error is not.
         for function, params in (
@@ -1487,6 +1497,17 @@ class ArenaService:
 
     def freeze_participants(self, round_id: str) -> List[Dict[str, Any]]:
         round_row = self._round(round_id)
+        # The daily baseline source is service-owned, but its execution funding
+        # belongs to the miner whose completed promotion established the
+        # champion. Freeze that identity before any baseline submission or run
+        # can be created. The RPC is idempotent, so recovery keeps the same
+        # original submission even if repository ownership changes later.
+        funding = self._store.freeze_champion_funding(round_id)
+        if funding.get("status") not in ("frozen", "existing"):
+            raise ServiceError("champion_funding_freeze_failed", 503)
+        round_row = self._round(round_id)
+        if round_row.get("champion_funding_frozen") is not True:
+            raise ServiceError("champion_funding_freeze_failed", 503)
         participants: List[Dict[str, Any]] = []
         frozen = self._store.list_submissions(round_id, status="frozen")
         accepted = self._store.list_submissions(round_id, status="accepted")
@@ -2928,6 +2949,54 @@ class ArenaService:
             default=None,
         )
 
+    def _baseline_fully_succeeded(self, row: Mapping[str, Any]) -> bool:
+        """Whether all twenty baseline executions and judgments succeeded."""
+
+        baseline_ids = {
+            str(participant.get("submission_id") or "")
+            for participant in row.get("participants") or []
+            if participant.get("is_king")
+        }
+        if len(baseline_ids) != 1 or "" in baseline_ids:
+            return False
+        baseline_id = next(iter(baseline_ids))
+        expected = {
+            (stage, position)
+            for stage in (1, 2)
+            for position in contracts.stage_positions(stage)
+        }
+        accepted_executions: Dict[Tuple[int, int], Mapping[str, Any]] = {}
+        for run in self._store.list_runs(
+            str(row["round_id"]), kind="execute"
+        ):
+            if (
+                str(run.get("submission_id") or "") != baseline_id
+                or run.get("status") != "accepted"
+                or run.get("per_icp_score") is None
+            ):
+                continue
+            key = (int(run.get("stage") or 0), int(run.get("icp_position") or 0))
+            if key not in expected:
+                continue
+            current = accepted_executions.get(key)
+            if current is None or int(run.get("attempt") or 0) > int(
+                current.get("attempt") or 0
+            ):
+                accepted_executions[key] = run
+        if set(accepted_executions) != expected:
+            return False
+        accepted_scored_run_ids = {
+            str(run.get("scored_run_id") or "")
+            for run in self._store.list_runs(
+                str(row["round_id"]), kind="score"
+            )
+            if run.get("status") == "accepted"
+        }
+        return all(
+            str(run.get("run_id") or "") in accepted_scored_run_ids
+            for run in accepted_executions.values()
+        )
+
     def activate_reward(self, round_id: str) -> Dict[str, Any]:
         """Sign and atomically activate one already-published live result."""
 
@@ -2991,6 +3060,39 @@ class ArenaService:
             if previous is not None and king_outcome == "defended"
             else None
         )
+        champion_reward_factor_ppm = rewards.FULL_CHAMPION_REWARD_FACTOR_PPM
+        fallback_providers = row.get("champion_fallback_providers") or []
+        if (
+            not isinstance(fallback_providers, (list, tuple))
+            or any(provider not in contracts.PROVIDERS for provider in fallback_providers)
+            or len(set(fallback_providers)) != len(fallback_providers)
+        ):
+            raise ServiceError("champion_funding_state_invalid", 500)
+        # A fresh winner always proves a full-share result, including when the
+        # hotkey happens to match the incumbent. Without a fresh winner, start
+        # from the prior signed factor. This preserves a half-share penalty over
+        # failed or legacy days instead of repeatedly halving or silently
+        # restoring it. A complete miner-funded baseline restores the full
+        # factor; any organizer-account fallback latches the fixed half factor.
+        if not daily_hotkey and previous is not None:
+            champion_reward_factor_ppm = int(
+                previous.get(
+                    "champion_reward_factor_ppm",
+                    rewards.FULL_CHAMPION_REWARD_FACTOR_PPM,
+                )
+            )
+            snapshot_matches = (
+                row.get("champion_funding_frozen") is True
+                and str(row.get("champion_hotkey") or "") == king_hotkey
+            )
+            if snapshot_matches and fallback_providers:
+                champion_reward_factor_ppm = (
+                    rewards.FALLBACK_CHAMPION_REWARD_FACTOR_PPM
+                )
+            elif snapshot_matches and self._baseline_fully_succeeded(row):
+                champion_reward_factor_ppm = (
+                    rewards.FULL_CHAMPION_REWARD_FACTOR_PPM
+                )
         basis = self._sign(
             rewards.reward_basis_document(
                 round_id=round_id,
@@ -3000,6 +3102,7 @@ class ArenaService:
                 king_outcome=king_outcome,
                 previous_king_start_epoch=previous_start,
                 reward_constants=configuration["reward_constants"],
+                champion_reward_factor_ppm=champion_reward_factor_ppm,
             ),
             "reward_basis_hash",
         )
@@ -3376,18 +3479,32 @@ class ArenaService:
             raise ServiceError("run_runner_mismatch", 403)
         kind = str(run.get("kind") or "execute")
         terminal_status = run_result["terminal_status"]
+        champion_restart_required = (
+            kind == "execute" and run.get("champion_restart_required") is True
+        )
+        if champion_restart_required:
+            # The broker has durably retired a credential for this ICP. Ignore
+            # partial output even if the model swallowed its provider error.
+            terminal_status = "provider_error"
+            run_result = dict(run_result, terminal_status=terminal_status)
         if kind == "score" and terminal_status not in contracts.SCORE_TERMINAL_CAUSES:
             raise ServiceError("run_result_cause_kind_mismatch", 400)
         if kind == "execute" and terminal_status in ("judge_error", "judge_timeout"):
             raise ServiceError("run_result_cause_kind_mismatch", 400)
         lease_token = self._lease_token_for_run(validated, run)
-        if run.get("status") not in ("accepted", "failed"):
+        if (
+            run.get("status") not in ("accepted", "failed")
+            and not champion_restart_required
+        ):
             billing = self._reconcile_openrouter_cost(round_id, run_id=run_id)
             if billing["status"] not in ("none", "settled"):
                 # Reuse the runner's existing bounded accounting-open retry
                 # window. The same signed completion is preserved while the
                 # exact generation GET catches up; no new model attempt starts.
                 return {"status": "accounting_open", "open_calls": 1}
+        # A retired champion credential must release the ICP immediately. Its
+        # uncertain ledger entry stays eligible for the background exact-cost
+        # reconciler after this attempt becomes failed.
         output_ref = ""
         judgment_evidence = None
         judgment_evidence_hash = ""

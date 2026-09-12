@@ -2377,7 +2377,7 @@
       "symbol": "champion_uid_for_hotkey"
     },
     {
-      "ast_sha256": "sha256:b84338d026ad965eb2ee02b4407cb86526c70a874a1aabb1036d1c1443d01718",
+      "ast_sha256": "sha256:d7944ddf6b7aa49b3ff2495b31e1b9384cd6b5a6a299b48cd4dae3b94e1a6cd9",
       "path": "leadpoet_canonical/lab_arena_rewards.py",
       "symbol": "champion_values"
     },
@@ -2412,7 +2412,7 @@
       "symbol": "signing_key_hash_from_environment"
     },
     {
-      "ast_sha256": "sha256:4ab33d17ecaf00cf051175e216c2f604fb20f72848f30bbc75367f8c937d765a",
+      "ast_sha256": "sha256:31b2805e01ec22f280c887f31ca512bcb47067f8baf5e51302347c994e13b200",
       "path": "leadpoet_canonical/lab_arena_rewards.py",
       "symbol": "validate_reward_basis"
     },

@@ -5,12 +5,12 @@ It is pure: no I/O, no environment, no chain state. ``verify_reward_basis_signat
 dependency (``cryptography``), imported lazily, so importing this module needs
 the standard library alone.
 
-Every constant the arithmetic needs comes from the signed basis itself
-(``reward_constants``): the pool percent of total emissions, the weekly king
-shares, the epochs per reward week, and the eligibility window. The Arena
-fixes them per round and signs them, so a change (5%, 50%) is one Arena
-setting and reaches validators through the next published basis; this
-module only bounds them.
+Every value the arithmetic needs comes from the signed basis itself: the pool
+percent of total emissions, weekly king shares, epochs per reward week,
+eligibility window, and the per-round champion reward factor. Historical
+bases omit the factor and retain the original full share. The Arena fixes the
+values per round and signs them, so a change reaches validators through the
+next published basis; this module only bounds them.
 
 Written in Python 3.7 syntax (``typing`` generics, ``# type:`` comments, no
 walrus, no PEP 604 unions) because the validator enclave image copies it.
@@ -38,6 +38,12 @@ PAYING_KING_OUTCOMES = ("crowned", "defended")
 SIGNING_KEY_HASH_ENV = "LAB_ARENA_SIGNING_PUBLIC_KEY_HASH"
 REWARDS_ENABLED_ENV = "LAB_ARENA_REWARDS_ENABLED"
 MAX_WEEK_SHARES = 12
+FULL_CHAMPION_REWARD_FACTOR_PPM = 1_000_000
+FALLBACK_CHAMPION_REWARD_FACTOR_PPM = 500_000
+CHAMPION_REWARD_FACTORS_PPM = (
+    FALLBACK_CHAMPION_REWARD_FACTOR_PPM,
+    FULL_CHAMPION_REWARD_FACTOR_PPM,
+)
 
 _HASH_PREFIX = "sha256:"
 _BASIS_BODY_FIELDS = (
@@ -50,6 +56,7 @@ _BASIS_BODY_FIELDS = (
     "king_start_epoch",
     "reward_constants",
 )
+_OPTIONAL_BASIS_BODY_FIELDS = ("champion_reward_factor_ppm",)
 _CONSTANT_FIELDS = (
     "pool_percent",
     "pool_basis",
@@ -165,12 +172,26 @@ def _basis_fields(basis: Any) -> Dict[str, Any]:
             raise LabArenaRewardError("no_king outcome cannot name a king")
     elif not hotkey:
         raise LabArenaRewardError("%s outcome requires a king hotkey" % outcome)
+    factor = basis.get(
+        "champion_reward_factor_ppm", FULL_CHAMPION_REWARD_FACTOR_PPM
+    )
+    factor = _require_int(
+        factor,
+        "champion_reward_factor_ppm",
+        FALLBACK_CHAMPION_REWARD_FACTOR_PPM,
+        FULL_CHAMPION_REWARD_FACTOR_PPM,
+    )
+    if factor not in CHAMPION_REWARD_FACTORS_PPM:
+        raise LabArenaRewardError(
+            "champion_reward_factor_ppm must be 500000 or 1000000"
+        )
     return {
         "king_outcome": outcome,
         "effective_reward_epoch": effective,
         "king_start_epoch": start,
         "king_hotkey": hotkey,
         "reward_constants": validate_reward_constants(basis.get("reward_constants")),
+        "champion_reward_factor_ppm": factor,
     }
 
 
@@ -185,7 +206,11 @@ def validate_reward_basis(document: Any) -> Dict[str, Any]:
 
     if not isinstance(document, Mapping):
         raise LabArenaRewardError("reward basis must be an object")
-    allowed = set(_BASIS_BODY_FIELDS) | {"reward_basis_hash", "signature"}
+    allowed = (
+        set(_BASIS_BODY_FIELDS)
+        | set(_OPTIONAL_BASIS_BODY_FIELDS)
+        | {"reward_basis_hash", "signature"}
+    )
     if set(document) - allowed or not set(_BASIS_BODY_FIELDS) <= set(document):
         raise LabArenaRewardError("reward basis fields are invalid")
     if document["schema_version"] != REWARD_BASIS_SCHEMA_VERSION:
@@ -194,7 +219,11 @@ def validate_reward_basis(document: Any) -> Dict[str, Any]:
         if not isinstance(document[name], str) or not document[name]:
             raise LabArenaRewardError("%s must be a non-empty string" % name)
     _basis_fields(document)
-    body = {key: document[key] for key in _BASIS_BODY_FIELDS}
+    body = {
+        key: document[key]
+        for key in _BASIS_BODY_FIELDS + _OPTIONAL_BASIS_BODY_FIELDS
+        if key in document
+    }
     if "reward_basis_hash" in document and document["reward_basis_hash"] != sha256_json(body):
         raise LabArenaRewardError("reward_basis_hash does not match the reward basis body")
     if "signature" in document:
@@ -401,7 +430,8 @@ def champion_uid_matches(metagraph_hotkeys: Sequence[str], champion_uid: Any, ki
 def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]) -> Dict[str, Any]:
     """The champion triple for one weight epoch from the governing basis.
 
-    ``champion_share`` is the week's share of total emissions.
+    ``champion_share`` is the week's configured share of total emissions times
+    the signed full or account-fallback factor.
     ``champion_share`` and ``effective_champion_share`` are always equal
     (13.1: the Arena never burns a gap). Both are ``0.0`` and ``champion_uid``
     is ``None`` whenever the epoch is ineligible or the king hotkey is not
@@ -424,7 +454,16 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
         if uid is not None:
             if week_index is None:
                 raise LabArenaRewardError("eligible basis without a king start epoch")
-            share = champion_share_for_week(week_index, fields["reward_constants"])
+            configured_share = _exact(
+                champion_share_for_week(week_index, fields["reward_constants"])
+            )
+            share = float(
+                configured_share
+                * Fraction(
+                    fields["champion_reward_factor_ppm"],
+                    FULL_CHAMPION_REWARD_FACTOR_PPM,
+                )
+            )
     return {
         "champion_share": share,
         "effective_champion_share": share,

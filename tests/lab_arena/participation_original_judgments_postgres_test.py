@@ -47,6 +47,22 @@ def _participation(store: ArenaStore, run_id: str):
     return store.get_run(run_id)["participation_accepted_at"]
 
 
+def _has_recent_participation(database, runner_hotkey: str) -> bool:
+    """Exercise the SQL-only rollout with the pre-enforcement application."""
+    psycopg2, dsn = database
+    with psycopg2.connect(**dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL ROLE lab_arena_service")
+            cursor.execute(
+                "SELECT public.lab_arena_has_recent_participation_v1(%s, %s, %s)",
+                ("finney", 71, runner_hotkey),
+            )
+            result = cursor.fetchone()[0]
+    assert set(result) == {"eligible"}
+    assert type(result["eligible"]) is bool
+    return result["eligible"]
+
+
 def test_only_original_company_judgment_work_earns_participation(
     store, database
 ):
@@ -77,7 +93,7 @@ def test_only_original_company_judgment_work_earns_participation(
     assert source_result["status"] == "accepted"
     source_at = _participation(store, source["run_id"])
     assert source_at is not None
-    assert store.has_recent_participation("finney", 71, source_runner)
+    assert _has_recent_participation(database, source_runner)
 
     cache_runner = hotkey("original-judgment-cache-reuser")
     cached, cached_token, _, _ = claim(
@@ -94,7 +110,7 @@ def test_only_original_company_judgment_work_earns_participation(
     )
     assert cached_result["status"] == "accepted"
     assert _participation(store, cached["run_id"]) is None
-    assert not store.has_recent_participation("finney", 71, cache_runner)
+    assert not _has_recent_participation(database, cache_runner)
 
     mixed_runner = hotkey("original-judgment-mixed")
     mixed, mixed_token, _, _ = claim(
@@ -112,7 +128,7 @@ def test_only_original_company_judgment_work_earns_participation(
     assert mixed_result["status"] == "accepted"
     mixed_at = _participation(store, mixed["run_id"])
     assert mixed_at is not None
-    assert store.has_recent_participation("finney", 71, mixed_runner)
+    assert _has_recent_participation(database, mixed_runner)
 
     failed_runner = hotkey("original-judgment-failure")
     failed, failed_token, _, _ = claim(

@@ -22,6 +22,9 @@ from tests.lab_arena.lab_arena_pg_harness import (
     POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
 )
+from tests.lab_arena.participation_original_judgments_postgres_test import (
+    _has_recent_participation,
+)
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete, hotkey, sha
 
 
@@ -531,7 +534,7 @@ def test_participation_evidence_survives_recovery_and_replay(database):
             "participation_accepted_at"
         ]
         assert preserved_at is not None
-        assert store.has_recent_participation("finney", 71, RUNNER)
+        assert _has_recent_participation(database, RUNNER)
 
         with connection.cursor() as cursor:
             cursor.execute(
@@ -558,7 +561,7 @@ def test_participation_evidence_survives_recovery_and_replay(database):
         assert store.get_run(preserved_run_id)[
             "participation_accepted_at"
         ] == preserved_at
-        assert store.has_recent_participation("finney", 71, RUNNER)
+        assert _has_recent_participation(database, RUNNER)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*) FROM public.lab_arena_runs "
@@ -569,7 +572,7 @@ def test_participation_evidence_survives_recovery_and_replay(database):
         assert store.get_run(TARGET_RUN)["participation_accepted_at"] is None
 
         recovered_runner = hotkey("220-fresh-participation-runner")
-        assert not store.has_recent_participation("finney", 71, recovered_runner)
+        assert not _has_recent_participation(database, recovered_runner)
         recovered, recovered_token, _, _ = claim(
             store, ROUND_ID, recovered_runner, parallelism=100, ceiling=100
         )
@@ -592,8 +595,8 @@ def test_participation_evidence_survives_recovery_and_replay(database):
         ]
         assert recovered_at is not None
         assert store.get_run(recovered["run_id"])["runner_hotkey"] == recovered_runner
-        assert store.has_recent_participation("finney", 71, recovered_runner)
-        assert store.has_recent_participation("finney", 71, RUNNER)
+        assert _has_recent_participation(database, recovered_runner)
+        assert _has_recent_participation(database, RUNNER)
 
         replay = complete(
             store,

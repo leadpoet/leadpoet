@@ -151,7 +151,10 @@ def test_completion_uses_existing_accounting_open_retry_before_new_attempt(monke
 
 
 def test_fresh_testnet_bootstrap_installs_reconciliation_prerequisite_and_rpc():
-    assert validate_miner_testnet.MIGRATIONS[-2:] == (
+    prerequisite = validate_miner_testnet.MIGRATIONS.index(
+        "scripts/223-lab-arena-cancelled-call-late-settlement.sql"
+    )
+    assert validate_miner_testnet.MIGRATIONS[prerequisite:prerequisite + 2] == (
         "scripts/223-lab-arena-cancelled-call-late-settlement.sql",
         "scripts/225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
     )

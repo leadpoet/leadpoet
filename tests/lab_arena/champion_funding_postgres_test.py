@@ -13,6 +13,9 @@ from tests.lab_arena.lab_arena_pg_harness import (
     POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
 )
+from tests.lab_arena.participation_original_judgments_postgres_test import (
+    _has_recent_participation,
+)
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     claim,
     commit_round,
@@ -473,6 +476,153 @@ def test_uncertain_auth_liability_allows_host_fallback_without_erasing_cost(
     uncertain = [row for row in old_heads if row["entry_kind"] == "uncertain"]
     assert len(uncertain) == 1
     assert uncertain[0]["amount_microusd"] == 5_000_000
+
+
+def test_fallback_retry_participation_is_owned_and_immutable(database):
+    store, _connect, round_id, _champion, failed_runner, run, token = (
+        _seed_champion_run(database, "participation")
+    )
+    base_identity = None
+    for provider_attempt in range(1, 5):
+        recorded = _account_call(
+            store,
+            run,
+            token,
+            provider="openrouter",
+            action_sequence=3,
+            provider_attempt=provider_attempt,
+            provider_status=401,
+        )
+        assert recorded["status"] == "recorded"
+        base_identity = recorded["base_call_identity"]
+    assert store.mark_champion_provider_fallback(
+        run["run_id"],
+        hash_lease_token(token),
+        "openrouter",
+        {
+            "error_class": "account_credential_failure",
+            "provider_status": 401,
+            "base_call_identity": base_identity,
+            "provider_attempts": 4,
+            "action_sequence": 3,
+        },
+    )["status"] == "marked"
+
+    forced_failure = store.complete_attempt(
+        run_id=run["run_id"],
+        lease_token_hash=hash_lease_token(token),
+        result={"terminal_status": "accepted"},
+        terminal_cause="accepted",
+        output_ref="arena/forged-fallback-acceptance.json",
+    )
+    assert forced_failure["status"] == "failed"
+    failed_row = store.get_run(run["run_id"])
+    assert failed_row["status"] == "failed"
+    assert failed_row["participation_accepted_at"] is None
+    assert not _has_recent_participation(database, failed_runner)
+
+    accepted_runner = hotkey("champion-participation-retry-runner")
+    retry, retry_token, _, _ = claim(store, round_id, accepted_runner)
+    assert retry["assignment_id"] == run["assignment_id"]
+    assert retry["attempt"] == 2
+    retry_row = store.get_run(retry["run_id"])
+    assert retry_row["runner_hotkey"] == accepted_runner
+    assert retry_row["participation_accepted_at"] is None
+    assert store.provider_funding(retry["run_id"], "openrouter")[
+        "funding_source"
+    ] == "host"
+    assert not _has_recent_participation(database, accepted_runner)
+
+    generation_id = "gen-champion-participation"
+    credential_fingerprint = "sha256:" + "f" * 64
+    request_hash = sha("champion-participation-host-call")
+    call_identity = contracts.provider_call_identity(
+        attempt=retry["attempt"],
+        assignment_id=retry["assignment_id"],
+        icp_position=retry["icp_position"],
+        action_sequence=4,
+        operation_id="openrouter.chat",
+        request_hash=request_hash,
+    )
+    retry_token_hash = hash_lease_token(retry_token)
+    assert store.reserve_call(
+        run_id=retry["run_id"],
+        lease_token_hash=retry_token_hash,
+        call_identity=call_identity,
+        operation_id="openrouter.chat",
+        provider="openrouter",
+        funding_source="host",
+        amount_microusd=500_000,
+        call_doc={"model": "fixture", "request_hash": request_hash},
+    )["status"] == "reserved"
+    assert store.mark_dispatched(
+        run_id=retry["run_id"],
+        lease_token_hash=retry_token_hash,
+        call_identity=call_identity,
+    )["status"] == "dispatched"
+    assert store.mark_uncertain(
+        run_id=retry["run_id"],
+        lease_token_hash=retry_token_hash,
+        call_identity=call_identity,
+        call_doc={
+            "reason": "missing_provider_cost",
+            "provider_status": 502,
+            "openrouter_generation_id": generation_id,
+            "credential_fingerprint": credential_fingerprint,
+        },
+    )["status"] == "uncertain"
+
+    completion = {
+        "run_id": retry["run_id"],
+        "lease_token_hash": retry_token_hash,
+        "result": {"terminal_status": "accepted"},
+        "terminal_cause": "accepted",
+        "output_ref": "arena/champion-participation-retry.json",
+    }
+    assert store.complete_attempt(**completion)["status"] == "accepted"
+    accepted_row = store.get_run(retry["run_id"])
+    accepted_at = accepted_row["participation_accepted_at"]
+    assert accepted_at is not None
+    assert accepted_row["runner_hotkey"] == accepted_runner
+    assert _has_recent_participation(database, accepted_runner)
+    assert not _has_recent_participation(database, failed_runner)
+
+    replayed_completion = store.complete_attempt(**completion)
+    assert replayed_completion["status"] == "accepted"
+    assert replayed_completion["idempotent"] is True
+    assert store.get_run(retry["run_id"]) == accepted_row
+
+    candidates = store.list_openrouter_cost_reconciliations(
+        round_id, run_id=retry["run_id"]
+    )
+    assert len(candidates) == 1
+    reconciliation = {
+        "round_id": round_id,
+        "run_id": retry["run_id"],
+        "call_identity": call_identity,
+        "uncertain_entry_id": candidates[0]["uncertain_entry_id"],
+        "generation_id": generation_id,
+        "credential_fingerprint": credential_fingerprint,
+        "actual_microusd": 123,
+        "cost_units": "0.000123",
+    }
+    settled = store.reconcile_openrouter_cost(**reconciliation)
+    assert settled["status"] == "settled"
+    assert settled["idempotent"] is False
+    assert store.get_run(retry["run_id"]) == accepted_row
+
+    replayed_settlement = store.reconcile_openrouter_cost(**reconciliation)
+    assert replayed_settlement["status"] == "settled"
+    assert replayed_settlement["idempotent"] is True
+    final_row = store.get_run(retry["run_id"])
+    assert final_row == accepted_row
+    assert final_row["participation_accepted_at"] == accepted_at
+    settlements = [
+        entry
+        for entry in store.list_ledger(call_identity=call_identity)
+        if entry["entry_kind"] == "settlement"
+    ]
+    assert len(settlements) == 1
 
 
 def test_host_network_uncertainty_is_not_excluded_after_fallback(database):

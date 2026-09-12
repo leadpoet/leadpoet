@@ -22,6 +22,7 @@ def _signed_state(
     winner=HOTKEYS[2],
     valid_until_block=1100,
     champion_reward_factor_ppm=1_000_000,
+    include_champion_reward_factor=True,
 ):
     key = ec.generate_private_key(ec.SECP256R1())
     der = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -33,6 +34,10 @@ def _signed_state(
         reward_constants=reward_constants_document(pool_percent=5),
         champion_reward_factor_ppm=champion_reward_factor_ppm,
     )
+    if not include_champion_reward_factor:
+        basis.pop("champion_reward_factor_ppm")
+        basis.pop("reward_basis_hash")
+        basis["reward_basis_hash"] = sha256_json(basis)
     basis_hash = basis["reward_basis_hash"]
     basis["reward_basis_hash"] = basis_hash
     basis["signature"] = {
@@ -85,6 +90,64 @@ def test_signed_fallback_factor_halves_champion_share_and_tampering_fails():
         arena_weights.verify_accepted_weight_state_signature(
             state, public_key_der=der, expected_public_key_hash=key_hash
         )
+
+
+def test_historical_signed_state_without_reward_factor_verifies_and_recovers():
+    state, der, key_hash = _signed_state(
+        include_champion_reward_factor=False
+    )
+    assert "champion_reward_factor_ppm" not in state["reward_basis"]
+    assert arena_weights.verify_accepted_weight_state_signature(
+        state,
+        public_key_der=der,
+        expected_public_key_hash=key_hash,
+    ) == state["state_hash"]
+    derived = arena_weights.derive_arena_weights(state, HOTKEYS)
+    assert derived["champion_share_ppb"] == 50_000_000
+    assert derived["burned_residual_ppb"] == 950_000_000
+
+    chain = _ArenaChain(state)
+    signer_kwargs = {
+        "validator_hotkey": HOTKEYS[0],
+        "hotkey_public_key_hex": "3" * 64,
+        "chain_profile": _chain_profile(),
+        "chain_source": chain,
+        "drand_backend": _Drand(),
+        "verify_sr25519": lambda signature, _payload: signature == b"x" * 64,
+        "arena_public_key_der": der,
+        "arena_public_key_hash": key_hash,
+        "network": "finney",
+        "netuid": 71,
+        "burn_hotkey": HOTKEYS[0],
+        "state_source": _StateSource(state),
+    }
+    signer = ArenaWeightSigner(
+        **signer_kwargs,
+        sign_sr25519=lambda _payload: b"x" * 64,
+    )
+    request = {
+        "accepted_state": state,
+        "nonce": 7,
+        "era_current": 1000,
+        "runtime_block_hash": "2" * 64,
+        "block_hash": "2" * 64,
+    }
+    signed = signer.prepare(request)
+
+    restarted = ArenaWeightSigner(
+        **signer_kwargs,
+        sign_sr25519=lambda _payload: (_ for _ in ()).throw(
+            AssertionError("recovery must not sign again")
+        ),
+    )
+    recovered = restarted.recover(
+        {
+            "accepted_state": state,
+            "recovery_record": signed["recovery_record"],
+        }
+    )
+    assert recovered["state_hash"] == state["state_hash"]
+    assert recovered["extrinsic_hex"] == signed["extrinsic_hex"]
 
 
 @pytest.mark.parametrize("mutation,error", [

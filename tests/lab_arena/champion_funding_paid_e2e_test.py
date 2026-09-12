@@ -89,6 +89,7 @@ MANAGEMENT_ENV = "LAB_ARENA_PAID_OPENROUTER_MANAGEMENT_KEY"
 KMS_KEY_ENV = "LAB_ARENA_PAID_KMS_KEY_ID"
 DEFAULT_AGENT_MODEL = "perplexity/sonar-pro"
 CHILD_LIMIT_USD = 100
+CHILD_CONTROL_PROPAGATION_SECONDS = 75
 SOURCE_ARCHIVE_ENV = "LAB_ARENA_PAID_SOURCE_ARCHIVE"
 ICP_FILE_ENV = "LAB_ARENA_PAID_ICP_FILE"
 MODEL_DEPS_ENV = "LAB_ARENA_PAID_MODEL_DEPS"
@@ -193,6 +194,16 @@ class DiagnosticProviderTransport:
             return None
         return _safe_hash(str(code).encode("utf-8"))
 
+    @staticmethod
+    def _credit_limit_error(body: bytes) -> bool:
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return False
+        error = document.get("error") if isinstance(document, Mapping) else None
+        message = str(error.get("message") or "").lower() if isinstance(error, Mapping) else ""
+        return any(term in message for term in ("credit", "balance", "limit exceeded", "spend"))
+
     def send(
         self,
         *,
@@ -274,6 +285,7 @@ class DiagnosticProviderTransport:
             classification=classification,
             response_hash=_safe_hash(response.body),
             provider_error_code_hash=self._error_code_hash(response.body),
+            credit_limit_error=self._credit_limit_error(response.body),
             provider_reported_actual_microusd=actual_microusd,
             terminal_marker=_safe_enum(
                 response.internal_provenance or "provider_response",
@@ -356,12 +368,20 @@ class OpenRouterChildKey:
         self.key_hash = key_hash
         return runtime_key
 
-    def configure(self, *, disabled: bool, limit: int) -> None:
+    def configure(self, *, disabled: bool, limit: float) -> dict[str, Any]:
         if not self.key_hash:
             raise AssertionError("child key was not created")
         self._request(
             "PATCH", "/" + self.key_hash, {"disabled": disabled, "limit": limit}
         )
+        # Paid controls, not Arena retry policy: live requests can still use
+        # the old key limit after 30 seconds. The 75-second control sequence
+        # was verified against credit failure, disable, and restoration.
+        for elapsed in range(0, CHILD_CONTROL_PROPAGATION_SECONDS, 25):
+            time.sleep(min(25, CHILD_CONTROL_PROPAGATION_SECONDS - elapsed))
+        usage = self.usage()
+        assert usage["disabled"] is disabled and usage["limit"] == limit
+        return usage
 
     def usage(self) -> dict[str, Any]:
         """Return only safe billing fields for this exact child key."""
@@ -1658,15 +1678,34 @@ def test_paid_champion_funding_fallback_and_restoration(
                 for row in before_restart if row["icp_position"] < 8
             }
             evidence.add("first_eight_accepted", round_id=harness.round_id, output_hashes=stable)
-            child.configure(disabled=False, limit=0)
-            evidence.add("child_key_limited", key_hash=child.key_hash, limit_usd=0)
+            # A positive cap below recorded usage gives a real exhausted
+            # balance; a zero cap was still accepted by the live provider.
+            prior_usage = child.usage()["usage"]
+            assert prior_usage > 0
+            exhausted_limit = prior_usage / 2
+            limited_usage = child.configure(disabled=False, limit=exhausted_limit)
+            assert limited_usage["usage"] > exhausted_limit
+            assert limited_usage["limit_remaining"] == 0
+            evidence.add(
+                "child_key_limited", key_hash=child.key_hash,
+                limit_usd=exhausted_limit, usage_usd=limited_usage["usage"],
+                control_propagation_seconds=CHILD_CONTROL_PROPAGATION_SECONDS,
+            )
+            credit_failure_checkpoint = len(evidence.document["checkpoints"])
             assert runner.run_once(max_claims=1) == 1
         finally:
             runner.close()
             harness.clock.now = scheduled
-        proof_402 = _fallback_evidence(harness, limited["round_id"], "openrouter")
-        assert proof_402["provider_statuses"] == [402]
-        evidence.add("fallback_402_latched", **proof_402)
+        proof_credit = _fallback_evidence(harness, limited["round_id"], "openrouter")
+        assert proof_credit["provider_statuses"] in ([402], [403])
+        credit_errors = [
+            item for item in evidence.document["checkpoints"][credit_failure_checkpoint:]
+            if item.get("event") == "provider_http_receipt"
+            and item.get("provider") == "openrouter"
+            and item.get("classification") == "account_credential_failure"
+        ]
+        assert len(credit_errors) == 4 and all(item["credit_limit_error"] for item in credit_errors)
+        evidence.add("fallback_credit_latched", credit_limit_error_responses=4, **proof_credit)
         harness.service = harness.build_service()
         limited = _finish_interrupted_stage_one(harness)
         _assert_round_complete(harness, limited)

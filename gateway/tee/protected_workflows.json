@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "d53063636a5f34e555b511eb98c8afdd561c312c",
+  "baseline_commit": "d2139739a2279ff2845221caac5c55d5251dcaf3",
   "entries": [
     {
       "ast_sha256": "sha256:de08a5c8644e61d0fe92fdf6ca08f443e90b1e5395bb968d3be609bc45ef351c",
@@ -2507,7 +2507,7 @@
       "symbol": "_has_explicitly_unproven_fit_dimensions"
     },
     {
-      "ast_sha256": "sha256:fb156e8855fe3111b6318c24a5c5feb0616ead03fd1eabbda500514d8b0405be",
+      "ast_sha256": "sha256:9e5672d7e548496136cd848f9c881c99dbf5106b1e6b16f121fb5842d93a79cc",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8fd624adbb2df6220e0b11e52ab8d591d4d28a928efa3d2732f475079095b66b",
-  "protected_source_commit": "d53063636a5f34e555b511eb98c8afdd561c312c",
+  "manifest_hash": "sha256:97cb0e7c8a9df15856f511fe23809654a3f3a6376ccc404128d82c39e2d5a462",
+  "protected_source_commit": "d2139739a2279ff2845221caac5c55d5251dcaf3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

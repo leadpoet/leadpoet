@@ -1667,6 +1667,10 @@ def test_systemic_verifier_reason_survives_runner_completion_and_cancellation(
         saved_environment = dict(os.environ)
         try:
             with monkeypatch.context() as patch:
+                # Each production judge starts in a fresh process. Earlier
+                # unit tests may leave inert provider keys in this process.
+                for name in scoring.CREDENTIAL_ENV_NAMES:
+                    patch.delenv(name, raising=False)
                 patch.setattr(scoring, "lab_scorer", fixed_scorer)
                 patch.setattr(quality_policy, "scorer_enabled", lambda _policy: False)
                 output = scorer_entrypoint.score_input(document)
@@ -1770,6 +1774,10 @@ def test_exhausted_company_evidence_continues_remaining_companies_and_round(
         saved_environment = dict(os.environ)
         try:
             with monkeypatch.context() as patch:
+                # Each production judge starts in a fresh process. Earlier
+                # unit tests may leave inert provider keys in this process.
+                for name in scoring.CREDENTIAL_ENV_NAMES:
+                    patch.delenv(name, raising=False)
                 patch.setattr(scoring, "lab_scorer", local_scorer)
                 patch.setattr(quality_policy, "scorer_enabled", lambda _policy: False)
                 output = scorer_entrypoint.score_input(document)

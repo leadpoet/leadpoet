@@ -27,6 +27,13 @@ returned website and company identity before using its fields. The listed
 This lookup uses the existing provider quota and billed competition budget;
 it does not change the independent scoring rules.
 
+For employee size, the judge first fetches the company page bound to its
+verified homepage identity. If the page has no usable size evidence, it can
+make one independent `harvestapi_get_company` lookup. Only an exact website
+and LinkedIn match with a canonical `employeeCountRange` can supply the size.
+This structured source is recorded separately from web quotes and cannot be
+supplied by the submitted model. Existing retry, quota, and cost limits apply.
+
 For U.S. headquarters, `state` must identify the actual headquarters state,
 not the incorporation state or a branch office. Country aliases such as US,
 USA and United States normalize; full state names, USPS abbreviations,
@@ -34,8 +41,9 @@ case variations and D.C. are accepted. State is optional outside the U.S.
 The independent fit verifier checks the claimed country and U.S. state.
 
 Missing or malformed new fields give **that company** zero credit. Other
-valid companies in a parseable output remain eligible. Provider failures
-remain retryable infrastructure failures; they are not cached as rejections.
+valid companies in a parseable output remain eligible. Local evidence failures
+use the allowed retries, then fail only that company. Systemic scorer failures
+remain distinct from company-level evidence failures.
 Missing contact claims retain the existing contact-policy behavior.
 
 Signal verification accepts contextual attribution such as “we launched” on

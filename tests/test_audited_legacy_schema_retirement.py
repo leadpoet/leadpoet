@@ -145,6 +145,8 @@ def test_migration_has_exact_authorized_scope_and_bounded_guards() -> None:
     assert "source_row_fingerprint = '5331decb81b3e4a11e0ebcc3d78ae606'" in sql
     assert "source_add_marker_row_count = 152" in sql
     assert "WHERE jobid IN (8,15,47)" in sql
+    assert sql.count("routine.prosrc ~* closure_pattern") == 2
+    assert sql.count("FROM pg_catalog.pg_depend AS dependency") == 2
 
 
 def _find_pg_bindir() -> str | None:
@@ -223,6 +225,7 @@ def postgres_databases():
             "retire_success",
             "retire_new_rows",
             "retire_dependency",
+            "retire_sql_body_dependency",
             "retire_fk",
             "retire_missing_fence",
             "retire_routine_drift",
@@ -308,6 +311,14 @@ def _setup_sql(*, include_fence: bool = True) -> str:
     fence = _current_fence_sql() if include_fence else ""
     return f"""
 SET check_function_bodies = off;
+CREATE SCHEMA storage;
+CREATE FUNCTION storage.update_updated_at_column() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$;
 CREATE SCHEMA source_add_history;
 CREATE TABLE source_add_history.legacy_audit_rows (
     source_pk BIGINT PRIMARY KEY,
@@ -391,10 +402,11 @@ def test_verbatim_migration_removes_65_and_preserves_30_and_archive(
                     (SELECT count(*) FROM public.research_lab_provider_evidence_cache_v2),
                     (SELECT count(*) FROM source_add_history.legacy_audit_rows),
                     to_regclass('public.banned_hotkeys') IS NULL,
-                    to_regclass('public.research_trajectories') IS NULL
+                    to_regclass('public.research_trajectories') IS NULL,
+                    to_regprocedure('storage.update_updated_at_column()') IS NOT NULL
                 """
             )
-            assert cursor.fetchone() == (1, 1, 1, 1, True, True)
+            assert cursor.fetchone() == (1, 1, 1, 1, True, True, True)
     finally:
         connection.close()
 
@@ -423,6 +435,26 @@ def test_unknown_view_dependency_rolls_back(postgres_databases) -> None:
                 "SELECT id FROM public.execution_traces"
             )
         _assert_rollback(connection, "unexpected view depends")
+    finally:
+        connection.close()
+
+
+def test_parsed_sql_body_dependency_rolls_back(postgres_databases) -> None:
+    connection = _connect(postgres_databases["retire_sql_body_dependency"])
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(_setup_sql())
+            cursor.execute(
+                """
+                CREATE FUNCTION storage.unreviewed_sql_dependency()
+                RETURNS text
+                LANGUAGE SQL
+                BEGIN ATOMIC
+                    SELECT id FROM public.execution_traces LIMIT 1;
+                END
+                """
+            )
+        _assert_rollback(connection, "unexpected routine depends")
     finally:
         connection.close()
 

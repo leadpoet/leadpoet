@@ -630,7 +630,65 @@ BEGIN
      WHERE routine.prokind IN ('f', 'p')
        AND namespace.nspname <> 'information_schema'
        AND namespace.nspname !~ '^pg_'
-       AND pg_catalog.pg_get_functiondef(routine.oid) ~* closure_pattern
+       AND (
+           routine.prosrc ~* closure_pattern
+           OR EXISTS (
+               SELECT 1
+               FROM pg_catalog.pg_depend AS dependency
+               LEFT JOIN pg_catalog.pg_class AS referenced_relation
+                 ON dependency.refclassid = 'pg_catalog.pg_class'::REGCLASS
+                AND referenced_relation.oid = dependency.refobjid
+               LEFT JOIN pg_catalog.pg_namespace AS relation_namespace
+                 ON relation_namespace.oid = referenced_relation.relnamespace
+               LEFT JOIN pg_catalog.pg_proc AS referenced_routine
+                 ON dependency.refclassid = 'pg_catalog.pg_proc'::REGCLASS
+                AND referenced_routine.oid = dependency.refobjid
+               LEFT JOIN pg_catalog.pg_namespace AS routine_namespace
+                 ON routine_namespace.oid = referenced_routine.pronamespace
+               LEFT JOIN pg_catalog.pg_type AS referenced_type
+                 ON dependency.refclassid = 'pg_catalog.pg_type'::REGCLASS
+                AND referenced_type.oid = dependency.refobjid
+               LEFT JOIN pg_catalog.pg_class AS typed_relation
+                 ON typed_relation.oid = referenced_type.typrelid
+               LEFT JOIN pg_catalog.pg_namespace AS type_relation_namespace
+                 ON type_relation_namespace.oid = typed_relation.relnamespace
+               WHERE dependency.classid = 'pg_catalog.pg_proc'::REGCLASS
+                 AND dependency.objid = routine.oid
+                 AND (
+                     (
+                         relation_namespace.nspname = 'public'
+                         AND (
+                             EXISTS (
+                                 SELECT 1 FROM _retire_239_tables AS target
+                                 WHERE target.table_name = referenced_relation.relname
+                             )
+                             OR EXISTS (
+                                 SELECT 1 FROM _retire_239_views AS target
+                                 WHERE target.view_name = referenced_relation.relname
+                             )
+                         )
+                     )
+                     OR (
+                         routine_namespace.nspname = 'public'
+                         AND EXISTS (
+                             SELECT 1 FROM _retire_239_routines AS target
+                             WHERE target.routine_name = referenced_routine.proname
+                               AND target.identity_arguments =
+                                   pg_catalog.pg_get_function_identity_arguments(
+                                       referenced_routine.oid
+                                   )
+                         )
+                     )
+                     OR (
+                         type_relation_namespace.nspname = 'public'
+                         AND EXISTS (
+                             SELECT 1 FROM _retire_239_tables AS target
+                             WHERE target.table_name = typed_relation.relname
+                         )
+                     )
+                 )
+           )
+       )
        AND NOT (
            namespace.nspname = 'public'
            AND (
@@ -1316,7 +1374,65 @@ BEGIN
      WHERE routine.prokind IN ('f', 'p')
        AND namespace.nspname <> 'information_schema'
        AND namespace.nspname !~ '^pg_'
-       AND pg_catalog.pg_get_functiondef(routine.oid) ~* closure_pattern
+       AND (
+           routine.prosrc ~* closure_pattern
+           OR EXISTS (
+               SELECT 1
+               FROM pg_catalog.pg_depend AS dependency
+               LEFT JOIN pg_catalog.pg_class AS referenced_relation
+                 ON dependency.refclassid = 'pg_catalog.pg_class'::REGCLASS
+                AND referenced_relation.oid = dependency.refobjid
+               LEFT JOIN pg_catalog.pg_namespace AS relation_namespace
+                 ON relation_namespace.oid = referenced_relation.relnamespace
+               LEFT JOIN pg_catalog.pg_proc AS referenced_routine
+                 ON dependency.refclassid = 'pg_catalog.pg_proc'::REGCLASS
+                AND referenced_routine.oid = dependency.refobjid
+               LEFT JOIN pg_catalog.pg_namespace AS routine_namespace
+                 ON routine_namespace.oid = referenced_routine.pronamespace
+               LEFT JOIN pg_catalog.pg_type AS referenced_type
+                 ON dependency.refclassid = 'pg_catalog.pg_type'::REGCLASS
+                AND referenced_type.oid = dependency.refobjid
+               LEFT JOIN pg_catalog.pg_class AS typed_relation
+                 ON typed_relation.oid = referenced_type.typrelid
+               LEFT JOIN pg_catalog.pg_namespace AS type_relation_namespace
+                 ON type_relation_namespace.oid = typed_relation.relnamespace
+               WHERE dependency.classid = 'pg_catalog.pg_proc'::REGCLASS
+                 AND dependency.objid = routine.oid
+                 AND (
+                     (
+                         relation_namespace.nspname = 'public'
+                         AND (
+                             EXISTS (
+                                 SELECT 1 FROM _retire_239_tables AS target
+                                 WHERE target.table_name = referenced_relation.relname
+                             )
+                             OR EXISTS (
+                                 SELECT 1 FROM _retire_239_views AS target
+                                 WHERE target.view_name = referenced_relation.relname
+                             )
+                         )
+                     )
+                     OR (
+                         routine_namespace.nspname = 'public'
+                         AND EXISTS (
+                             SELECT 1 FROM _retire_239_routines AS target
+                             WHERE target.routine_name = referenced_routine.proname
+                               AND target.identity_arguments =
+                                   pg_catalog.pg_get_function_identity_arguments(
+                                       referenced_routine.oid
+                                   )
+                         )
+                     )
+                     OR (
+                         type_relation_namespace.nspname = 'public'
+                         AND EXISTS (
+                             SELECT 1 FROM _retire_239_tables AS target
+                             WHERE target.table_name = typed_relation.relname
+                         )
+                     )
+                 )
+           )
+       )
      LIMIT 1;
     IF unexpected IS NOT NULL THEN
         RAISE EXCEPTION 'remaining routine references migration 239 closure: %',

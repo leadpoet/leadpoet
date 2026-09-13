@@ -443,8 +443,7 @@ _STAGE_PROOF_PROSPECTIVE_EVENT_RE = re.compile(
     re.I,
 )
 _STAGE_PROOF_COMPLETED_EVENT_RE = re.compile(
-    r"\b(?:raised|closed|secured|completed|received|successful\s+raise|"
-    r"(?:latest|most\s+recent)\s+(?:funding\s+)?round\s+(?:was|is))\b",
+    r"\b(?:raised|closed|secured|completed|received)\b",
     re.I,
 )
 _CALENDAR_MAY_LEFT_RE = re.compile(r"\b(?:in|on|since|during|of)\s*$", re.I)

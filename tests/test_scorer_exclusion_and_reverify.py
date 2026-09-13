@@ -793,6 +793,26 @@ def test_stage_decision_requires_category_specific_proof(
         ("series c+", "The planned latest funding round was a Series D.", False),
         (
             "series c+",
+            "The latest funding round is Series D, which is expected to close next month.",
+            False,
+        ),
+        (
+            "series b",
+            "The most recent funding round is Series B and is planned for next quarter.",
+            False,
+        ),
+        (
+            "series a",
+            "The latest funding round was Series A but has not yet closed.",
+            False,
+        ),
+        (
+            "series c+",
+            "The successful raise of its Series D is expected to close next month.",
+            False,
+        ),
+        (
+            "series c+",
             "The successful raise of its $150 million Series D was cancelled.",
             False,
         ),

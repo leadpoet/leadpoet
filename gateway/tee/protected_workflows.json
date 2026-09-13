@@ -2,7 +2,7 @@
   "baseline_commit": "d61884e2a84d79b0acdbca1d968441b5eed7485e",
   "entries": [
     {
-      "ast_sha256": "sha256:ecd2d8f0416751f2d5bdb0a0366cc3f147da538af8c4e796f7ce44b0cb3e4ad2",
+      "ast_sha256": "sha256:eae142e09427d5ddea7b4b67947e6cb21cb278ca17326b670888c171eeeed222",
       "path": "gateway/main.py",
       "symbol": "lifespan"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:3c9c612c4a77e98c508c799f3cd135275a51a904607f950277eb629a1e62ae49",
-  "protected_source_commit": "d61884e2a84d79b0acdbca1d968441b5eed7485e",
+  "manifest_hash": "sha256:5cf0455f927031c1a979bf355934f1c0667a9e465e50468d1ed090b7bb6192bc",
+  "protected_source_commit": "4775101656233a6257f4b263124f93f28ee2f1ba",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

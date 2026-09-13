@@ -8,6 +8,8 @@
 -- later charge. This appends zero settlements; it never changes prior rows.
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
 LOCK TABLE public.lab_arena_ledger IN SHARE ROW EXCLUSIVE MODE;
 
 DO $reconcile_deepline_402$

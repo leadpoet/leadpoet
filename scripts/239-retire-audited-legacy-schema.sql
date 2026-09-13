@@ -715,6 +715,8 @@ BEGIN
       JOIN pg_catalog.pg_namespace AS namespace
         ON namespace.oid = relation.relnamespace
       JOIN pg_catalog.pg_proc AS routine ON routine.oid = trigger_row.tgfoid
+      JOIN pg_catalog.pg_namespace AS routine_namespace
+        ON routine_namespace.oid = routine.pronamespace
       JOIN _retire_239_routines AS retired
         ON retired.routine_name = routine.proname
        AND retired.identity_arguments =
@@ -723,6 +725,7 @@ BEGIN
         ON namespace.nspname = 'public'
        AND retired_table.table_name = relation.relname
      WHERE NOT trigger_row.tgisinternal
+       AND routine_namespace.nspname = 'public'
        AND retired_table.table_name IS NULL
      LIMIT 1;
     IF unexpected IS NOT NULL THEN

@@ -1815,9 +1815,11 @@ def _is_same_domain_unproven_web_identity(
                 "submitted_domain",
                 "observed_name",
                 "observed_domain",
-                "observed_linkedin_slug",
             )
         )
+        # A complete observation can still lack a usable LinkedIn identity.
+        # That proves insufficient evidence, never a matching company.
+        and isinstance(value.get("observed_linkedin_slug"), str)
         and value.get("submitted_domain") == value.get("observed_domain")
         and (
             (
@@ -2914,7 +2916,12 @@ async def _verify_company_fit(
             not failure_reason_code
             and dimensions["identity"] == COMPANY_FIT_UNAVAILABLE
         ):
-            failure_reason_code = identity_exception_reason
+            failure_reason_code = (
+                identity.details.get(VERIFIER_FAILURE_DETAIL_KEY, "")
+                if candidate_failure_class
+                == INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+                else ""
+            ) or identity_exception_reason
     return _complete_company_fit_result(
         decision,
         reason,

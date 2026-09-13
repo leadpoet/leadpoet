@@ -511,10 +511,12 @@ def _identity_result(
     reason: str,
     *,
     actual_final_url: str = "",
+    source_fetch_failed: bool = False,
 ) -> CompanyFitDecisionResult:
     details = {
         "identity": dict(receipt),
         "actual_final_url": str(actual_final_url or ""),
+        **({"failure_reason_code": "source_blocked"} if source_fetch_failed else {}),
     }
     if receipt["decision"] == "match":
         return company_fit_match(reason, details=details)
@@ -610,6 +612,12 @@ async def verify_company_exists(
                 if attempt + 1 >= _TRANSIENT_FETCH_ATTEMPTS:
                     raise
                 await asyncio.sleep(_TRANSIENT_FETCH_RETRY_DELAY_SECS)
+    except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+        return _identity_result(
+            submitted_identity,
+            f"website unreachable: {type(e).__name__}: {str(e)[:120]}",
+            source_fetch_failed=True,
+        )
     except aiohttp.ClientError as e:
         return _identity_result(
             submitted_identity,
@@ -628,6 +636,9 @@ async def verify_company_exists(
         return _identity_result(
             submitted_identity, f"website returned HTTP {status}",
             actual_final_url=observed_url,
+            # These are failures of this bounded page fetch. Account and
+            # quota refusals remain distinct from unavailable source evidence.
+            source_fetch_failed=status in {408, 425, 500, 502, 503, 504},
         )
 
     if require_https_transport and not _is_https_url(observed_url):

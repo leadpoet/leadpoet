@@ -1523,6 +1523,111 @@ def test_identity_insufficient_path_does_not_hide_malformed_evidence():
     )
 
 
+@pytest.mark.parametrize("observed_linkedin", ["", "https://linkedin.com/company/acme's"])
+def test_unproven_identity_without_usable_linkedin_is_company_failure(
+    monkeypatch, observed_linkedin,
+):
+    """The September 13 Lowe's shape is missing proof, not a broken judge."""
+    company = _company(linkedin="")
+    verdict = _verdict(observed_size=None, size_matches=None, employee_url="")
+    verdict.update(
+        observed_company_name="Acme Companies, Inc.",
+        observed_company_linkedin=observed_linkedin,
+        employee_size_evidence_quote="",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://linkedin.com/company/acme's",
+        stage_evidence_quote="Type Public Company.",
+    )
+    calls = []
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return dict(verdict), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, _icp().model_copy(update={"company_stage": "Public"}),
+        require_company_fit_dimensions=True,
+    ))
+    assert calls == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair"]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == "insufficient_fit_evidence"
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        {"verifier_gate_receipts": [result.receipt("company_fit")]}
+    )
+
+
+@pytest.mark.parametrize("broken_judge", [False, True])
+def test_homepage_failure_exhausts_only_company_unless_judge_is_broken(
+    monkeypatch, broken_judge,
+):
+    from lab_arena import scoring
+
+    company = _company(linkedin="")
+    verdict = _verdict(observed_size=None, size_matches=None, employee_url="")
+    verdict.update(
+        observed_company_name="Acme Companies, Inc.",
+        observed_company_linkedin="",
+        employee_size_evidence_quote="",
+    )
+    calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable(
+            "website returned HTTP 502",
+            details={"failure_reason_code": "source_blocked"},
+        )
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        if broken_judge and kwargs["telemetry_purpose"].endswith("schema_repair"):
+            kwargs["diagnostic"]["failure_reason"] = "malformed_response"
+            return None, "malformed response"
+        return dict(verdict), ""
+
+    async def scorer(companies, _icp_doc, _reference):
+        rows = []
+        for item in companies:
+            if item["company_name"] == "Other":
+                rows.append({"final_score": 77.0, "failure_reason": ""})
+            else:
+                result = await lead_scorer.score_company_competition_intent(
+                    company, _icp(), 0.0, 0.0, set(),
+                )
+                rows.append(result.model_dump(mode="json"))
+        return rows
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    kwargs = dict(
+        icp={"max_companies": 2, "employee_count": "11-50"},
+        companies=[
+            {"company_name": "Acme", "employee_count": "11-50"},
+            {"company_name": "Other", "employee_count": "11-50"},
+        ],
+        scorer=scorer,
+    )
+    if broken_judge:
+        with pytest.raises(scoring.ScoringError) as error:
+            scoring.score_work_item({"scored_run_id": "source-failure"}, **kwargs)
+        assert error.value.failure_reason == "malformed_response"
+    else:
+        rows = scoring.score_work_item({"scored_run_id": "source-failure"}, **kwargs)
+        assert [row["final_score"] for row in rows] == [0.0, 77.0]
+        assert rows[0]["verifier_gate_receipts"][0]["failure_class"] == (
+            "company_verification_exhausted"
+        )
+    assert len(calls) == 6  # two existing judge calls in each of three attempts
+
+
 def _complete_same_slug_name_alias_receipt(**updates):
     receipt = {
         "decision": "unavailable",

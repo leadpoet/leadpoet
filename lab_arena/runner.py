@@ -1750,7 +1750,9 @@ class AssignmentExecutor:
             elif provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
-                if scoring_run:
+                if scoring_run and failure_diagnostic is None:
+                    # A previous page-fetch failure must not replace the
+                    # trusted scorer's more specific terminal diagnostic.
                     failure_diagnostic = {
                         "stage": "provider_call",
                         "error_class": "provider_unavailable",

@@ -1,5 +1,21 @@
 # Agent Instructions
 
+## Scoped production authorization: complete September 13 Arena recovery
+
+On 2026-09-13 the user explicitly authorized fixing the local evidence/provider
+failure and unresolved cost reservations that stopped arena-2026-09-13 again.
+This covers protected production, provider and Supabase inspection, narrow
+proven fixes, tests, pushes to main, exact committed migrations, canonical
+gateway/normal-validator restarts, and recovery of the September 12 submissions
+through final competition publication. Keep working through further blockers
+until all eligible models finish and final results are published. Preserve
+completed executions and scores, submissions, archives, credential references,
+actual billing, spending limits, scoring rules, promotion, rewards, weights,
+September 14 intake and concurrent work. Use the overnight operational
+permissions without routine approval. Do not restore retired Research Lab,
+SOURCE_ADD, audit-validator or Nitro requirements. This authority expires only
+when the recovered round is published and the affected live paths are verified.
+
 ## Scoped production authorization: final twelve legacy tables
 
 On 2026-09-12 the user explicitly ordered removal of all twelve recommended

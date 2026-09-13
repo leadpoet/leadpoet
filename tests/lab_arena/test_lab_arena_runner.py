@@ -1715,10 +1715,27 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
     assert api.provider_frames[0]["operation_id"] == "openrouter.chat"
     if code == "provider_unavailable":
         assert validated["failure_diagnostic"] == {
-            "stage": "provider_call",
-            "error_class": "provider_unavailable",
-            "reason": "provider_error",
+            "stage": "scorer",
+            "error_class": "judge_error",
         }
+
+
+def test_previous_provider_failure_does_not_replace_scorer_reason(tmp_path):
+    from lab_arena import scoring
+
+    failure = scoring.build_scoring_failure(
+        "r1", "judge_error", reason="malformed_response",
+        detail="current judge response is malformed",
+    )
+    api = RefusingApi([scoring_lease()], code="provider_unavailable")
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=failure)))
+    assert runner_.run_once() == 1
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "judge_error"
+    assert result["failure_diagnostic"] == {
+        "stage": "scorer", "error_class": "judge_error", "reason": "malformed_response",
+    }
 
 
 @pytest.mark.parametrize("scoring_run", [False, True])

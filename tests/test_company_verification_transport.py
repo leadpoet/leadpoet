@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 from gateway.qualification.models import CompanyOutput
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
@@ -147,6 +151,20 @@ def test_homepage_name_is_a_match(monkeypatch):
         )
     )
     assert result.decision == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("status", [408, 425, 500, 502, 503, 504])
+def test_bounded_homepage_retrieval_failure_is_source_local(monkeypatch, status):
+    result = asyncio.run(_verify_with_response(monkeypatch, status, b"unavailable"))
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_reason_code"] == "source_blocked"
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 407, 429])
+def test_homepage_account_or_quota_error_is_not_source_local(monkeypatch, status):
+    result = asyncio.run(_verify_with_response(monkeypatch, status, b"refused"))
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "failure_reason_code" not in result.details
 
 
 def test_homepage_colon_title_is_a_match(monkeypatch):

@@ -557,6 +557,50 @@ def test_us_state_codes_do_not_cross_country_boundaries() -> None:
     assert result["contact_verification"]["reason"] == "contact_geography_mismatch"
 
 
+def test_identical_us_state_prefixes_are_unverified_outside_us() -> None:
+    company = _company()
+    company["contact"] = _contact(
+        location={"country": "CA", "region": "US-CA", "city": "Toronto"}
+    )
+    profile = _profile(country="Canada", region="US-CA", city="Toronto")
+    icp = _icp(
+        contact_geography={"countries": [], "regions": ["US-CA"], "cities": []}
+    )
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({}),
+    )
+
+    assert contact_verification._norm_region("US-CA", "Canada") == ""
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_geography_unverified"
+
+
+def test_unknown_explicit_us_state_code_is_unverified() -> None:
+    company = _company()
+    company["contact"] = _contact(
+        location={"country": "US", "region": "US-ZZ", "city": "Example City"}
+    )
+    profile = _profile(country="US", region="US-ZZ", city="Example City")
+    icp = _icp(
+        contact_geography={"countries": [], "regions": ["US-ZZ"], "cities": []}
+    )
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({}),
+    )
+
+    assert contact_verification._norm_region("US-ZZ", "US") == ""
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_geography_unverified"
+
+
 def test_bare_region_abbreviations_remain_literal_outside_us() -> None:
     for country in ("Canada", "United Kingdom"):
         assert contact_verification._norm_region("CA", country) == "ca"

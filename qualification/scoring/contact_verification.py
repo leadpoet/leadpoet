@@ -134,9 +134,15 @@ def _norm_region(value: Any, country: Any) -> str:
     if not isinstance(value, str):
         return ""
     text = value.strip()
-    if _norm_country(country) == "US":
-        explicit_us = re.fullmatch(r"US-([A-Za-z]{2})", text, re.IGNORECASE)
-        state = canonical_us_state(explicit_us.group(1) if explicit_us else text)
+    normalized_country = _norm_country(country)
+    explicit_us = re.fullmatch(r"US-([A-Za-z]{2})", text, re.IGNORECASE)
+    if explicit_us:
+        if normalized_country != "US":
+            return ""
+        state = canonical_us_state(explicit_us.group(1))
+        return _norm(state) if state else ""
+    if normalized_country == "US":
+        state = canonical_us_state(text)
         if state:
             return _norm(state)
     return _norm(text)

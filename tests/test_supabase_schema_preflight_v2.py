@@ -61,6 +61,7 @@ def _opener(
         "research_lab_attested_ancestry_activations_v2",
     }
     retired_rpcs = {
+        "research_lab_provider_persistence_batch_contract_v1",
         "leadpoet_production_parity_reader_contract_v1",
         "persist_research_lab_ancestry_checkpoint_v2",
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",

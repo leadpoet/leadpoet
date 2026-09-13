@@ -29,7 +29,6 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (CODE_REVIEW_MIGRATION, "lab_arena_finish_submission_review"),
     (SUCCESSFUL_CALL_COST_MIGRATION, "lab_arena_successful_call_cost_schema_v1"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "put_research_lab_provider_evidence_cache_v2"),
-    ("scripts/144-research-lab-provider-persistence-batches.sql", "research_lab_provider_persistence_batch_contract_v1"),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
     ("scripts/197-lab-arena-reward-chain-scope.sql", "lab_arena_schema_version_v1"),
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_publish_weight_state_v1"),

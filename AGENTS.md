@@ -1,5 +1,26 @@
 # Agent Instructions
 
+## Scoped production authorization: final twelve legacy tables
+
+On 2026-09-12 the user explicitly ordered removal of all twelve recommended
+legacy tables together: transparency_log, validation_evidence_private,
+company_information_table, early_access_emails, outreach_email_verifications,
+suppression_ledger, research_lab_public_loop_cards,
+research_lab_public_loop_card_events,
+research_lab_official_baseline_action_attempts_v1,
+research_lab_official_baseline_action_terminals_v1,
+research_lab_official_baseline_runs_v1, and
+research_lab_official_baseline_unit_closures_v1. This includes protected
+production inspection, preservation of any SOURCE_ADD history before deletion,
+removal of obsolete jobs and code/SQL dependencies, narrow tested changes,
+pushes and safe merges, exact committed migrations, canonical deployments,
+and live verification through the overnight operational helpers without
+another approval. Preserve current Arena, ICPs, baseline/rebenchmark, scoring,
+provider execution, dashboard/site, rewards, weights, and concurrent work.
+A running retired job is cleanup work, not a retention requirement. Do not
+start an overnight recovery goal. This authority expires when all twelve
+removals and production verification complete.
+
 ## Scoped production authorization: Arena validator pickup root cause
 
 On 2026-09-12 the user explicitly authorized tracing the complete miner

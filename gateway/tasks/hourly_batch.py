@@ -50,7 +50,7 @@ def build_arweave_checkpoint_log_event(
     header: Dict,
     compressed_size_bytes: int,
 ) -> Dict:
-    """Build the append-only transparency event for a successful Arweave upload."""
+    """Build the signed audit event for a successful Arweave upload."""
     import hashlib
     import uuid
 
@@ -328,7 +328,7 @@ async def hourly_batch_task(
             print(f"   Content URL: https://arweave.net/{tx_id}")
             print(f"   ViewBlock: https://viewblock.io/arweave/tx/{tx_id}")
             
-            # Step 6: Log checkpoint to transparency log
+            # Step 6: Log checkpoint to the transparency stream.
             print(f"\n📝 Logging checkpoint to transparency log...")
             checkpoint_log = build_arweave_checkpoint_log_event(
                 tx_id=tx_id,

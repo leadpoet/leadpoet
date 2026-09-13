@@ -8,14 +8,14 @@ CRITICAL DESIGN:
 1. ICPs are generated RANDOMLY but held CONSTANT until next reset
 2. ICPs are stored PRIVATELY in qualification_private_icp_sets
 3. Miners NEVER see the ICPs until evaluation time
-4. ICP hash is logged to transparency_log for verifiability
+4. ICP hash is included in the signed Arweave audit stream
 
 GENERATION PROCESS:
 1. Generate 20 ICPs — one per industry across 20 distinct industries
 2. Use LLM to create realistic, varied prompts
 3. Compute ICP set hash
 4. Store in database
-5. Log to transparency_log
+5. Buffer a signed audit event for Arweave
 6. Activate the new set
 
 COMPANY-MODE ONLY (May 2026+):
@@ -39,7 +39,6 @@ import logging
 import httpx
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
-from uuid import uuid4
 
 from research_lab.employee_buckets import (
     DEFAULT_EMPLOYEE_BUCKET_RADIUS,
@@ -1708,8 +1707,8 @@ def compute_icp_set_hash(icps: List[Dict[str, Any]]) -> str:
     """
     Compute SHA256 hash of ICP set for verifiability.
     
-    This hash is logged to transparency_log so external auditors
-    can verify the exact ICPs that were used.
+    This hash is included in the signed audit stream so external auditors can
+    verify the exact ICPs that were used.
     """
     # Sort by icp_id for deterministic ordering
     sorted_icps = sorted(icps, key=lambda x: x.get("icp_id", ""))
@@ -2008,31 +2007,30 @@ async def generate_and_activate_icp_set(
     if not activated:
         return None
     
-    # Log to transparency log (ONLY on production, not testnet)
-    BITTENSOR_NETWORK = os.environ.get("BITTENSOR_NETWORK", "finney")
-    if BITTENSOR_NETWORK == "test":
-        logger.info(f"TESTNET: Skipping ICP_SET_ACTIVATED log to protect transparency_log")
+    # Preserve the existing testnet guard. Production buffers the activation
+    # evidence in the enclave for the retained Arweave audit task.
+    bittensor_network = os.environ.get("BITTENSOR_NETWORK", "finney")
+    if bittensor_network == "test":
+        logger.info("TESTNET: Skipping ICP_SET_ACTIVATED audit event")
     else:
         try:
             from gateway.utils.logger import log_event
-            
-            await log_event({
-                "event_type": "ICP_SET_ACTIVATED",
-                "actor_hotkey": "system",
-                "nonce": str(uuid4()),
-                "ts": _rebenchmark_now().isoformat(),
-                "payload": {
+
+            await log_event(
+                "ICP_SET_ACTIVATED",
+                {
+                    "actor_hotkey": "system",
                     "set_id": set_id,
                     "icp_count": len(icps),
                     "icp_set_hash": icp_hash,
                     "industry_distribution": distribution,
                     "active_from": active_from.isoformat(),
-                    "active_until": active_until.isoformat()
-                }
-            })
-            logger.info(f"Logged ICP_SET_ACTIVATED to transparency log")
+                    "active_until": active_until.isoformat(),
+                },
+            )
+            logger.info("Buffered signed ICP_SET_ACTIVATED event")
         except Exception as e:
-            logger.warning(f"Failed to log ICP_SET_ACTIVATED: {e}")
+            logger.warning(f"Failed to buffer ICP_SET_ACTIVATED: {e}")
 
     return set_id
 

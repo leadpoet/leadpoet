@@ -60,3 +60,23 @@ def test_gateway_cannot_start_or_register_the_retired_lead_pipeline():
     assert "submit.router" not in routers
     assert "manifest.router" not in routers
     assert not any(isinstance(node, ast.Name) and node.id == "EpochMonitor" for node in ast.walk(tree))
+
+
+def test_gateway_does_not_start_retired_relational_audit_jobs():
+    tree = ast.parse((ROOT / "gateway/main.py").read_text())
+    imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    retired_modules = {
+        "gateway.tasks.anchor",
+        "gateway.tasks.checkpoints",
+    }
+    assert not retired_modules.intersection(
+        node.module for node in imports if node.module is not None
+    )
+
+    called_names = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "daily_anchor_task" not in called_names
+    assert "checkpoint_task" not in called_names

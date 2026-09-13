@@ -12,4 +12,4 @@ def test_gateway_startup_uses_tee_signing_without_legacy_pem_dependency() -> Non
     assert "Receipt integrity ENABLED (canonical hashes + TEE-signed audit events)" in source
     assert "initialize_enclave_event_signing()" in source
     assert "from gateway.tee.enclave_signer" not in source
-    assert "No transparency-signing private key exists in the parent process" in source
+    assert "No event-signing private key exists in the parent process" in source

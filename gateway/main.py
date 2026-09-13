@@ -64,21 +64,15 @@ _configure_sentry_context(
     runtime_sha=GITHUB_COMMIT,
     restart_invocation_id=os.environ.get("LEADPOET_RESTART_INVOCATION_ID"),
 )
-from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 # Import models
 from gateway.models.events import SubmissionRequestEvent, EventType
-from gateway.models.responses import PresignedURLResponse, ErrorResponse, HealthResponse
+from gateway.models.responses import PresignedURLResponse, HealthResponse
 
 # Import utilities
 from gateway.utils.signature import verify_wallet_signature, compute_payload_hash, construct_signed_message
 from gateway.utils.registry import is_registered_hotkey
-from gateway.utils.nonce import check_and_store_nonce_async, validate_nonce_format
 from gateway.utils.storage import generate_presigned_put_urls
-
-# Import Supabase
-from supabase import Client
-from gateway.db.client import create_http1_sync_client
 
 # Import API routers
 # NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
@@ -94,15 +88,8 @@ from gateway.api import metrics as metrics_api
 # Import background tasks
 # NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means
 # validators submit hash+values in one request. No separate reveal phase to monitor.
-from gateway.tasks.checkpoints import checkpoint_task
-from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
 from gateway.tasks.icp_generator import icp_rotation_task, ensure_icp_set_exists
-
-# Create Supabase client (shared across threadpool workers — must stay
-# HTTP/1-pinned; the default HTTP/2 HPACK encoder is not thread-safe)
-supabase: Client = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
 
 # ============================================================
 # Lifespan Context Manager (for background tasks)
@@ -135,7 +122,7 @@ async def lifespan(app: FastAPI):
         print(f"   Pubkey: {enclave_pubkey[:32]}...")
         print("✅ Event signing ENABLED (Nitro-held key + enclave hash chain)")
         print("✅ Receipt integrity ENABLED (canonical hashes + TEE-signed audit events)")
-        print("   No transparency-signing private key exists in the parent process")
+        print("   No event-signing private key exists in the parent process")
     except Exception as e:
         _capture_sentry_failure(
             "runtime.enclave_relay_unavailable",
@@ -281,8 +268,6 @@ async def lifespan(app: FastAPI):
 
     # Initialize all task handles before try block to prevent NameError in finally
     reveal_task = None
-    checkpoint_task_handle = None
-    anchor_task = None
     hourly_batch_task_handle = None
     rate_limiter_task = None
     icp_task = None
@@ -372,12 +357,6 @@ async def lifespan(app: FastAPI):
             # Start other background tasks
             # NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
             
-            checkpoint_task_handle = asyncio.create_task(checkpoint_task())
-            print("✅ Checkpoint task started")
-            
-            anchor_task = asyncio.create_task(daily_anchor_task())
-            print("✅ Anchor task started")
-            
             hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
             print("✅ Hourly Arweave batch task started")
             
@@ -415,8 +394,6 @@ async def lifespan(app: FastAPI):
         print("   🛑 Cancelling background tasks...")
         tasks = [
             reveal_task,
-            checkpoint_task_handle,
-            anchor_task,
             hourly_batch_task_handle,
             rate_limiter_task,
             icp_task,
@@ -767,6 +744,8 @@ async def _presign_urls_disabled_legacy(event: SubmissionRequestEvent):
     # ========================================
     # Step 5: Verify nonce format and freshness
     # ========================================
+    from gateway.utils.nonce import check_and_store_nonce_async, validate_nonce_format
+
     print("🔍 Step 5: Verifying nonce...")
     if not validate_nonce_format(event.nonce):
         raise HTTPException(

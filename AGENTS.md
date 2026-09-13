@@ -1,5 +1,22 @@
 # Agent Instructions
 
+## Scoped production authorization: fifteen historical evidence tables
+
+On 2026-09-13 the user authorized removal of the exact fifteen historical
+evidence tables listed in this task, including published_weight_bundles,
+only after SSH inspection of the gateway and normal validator confirms that
+current production workflows do not depend on them. This includes protected
+credential and database inspection, a verified private AWS archive that
+preserves SOURCE_ADD history, removal of obsolete dependent database objects,
+narrow tested source changes, pushes and safe merges, exact committed
+migrations through the existing overnight helper, and live verification.
+Preserve the private source_add_history archive, all SOURCE_ADD evidence,
+the fourteen current Arena/ICP/epoch tables, provider cache, active scoring
+recovery, rewards, weights, credentials, and concurrent work. Do not restart
+unrelated services or restore retired mechanisms. This scope expires when
+the fifteen removals and production verification are complete.
+
+
 ## Scoped production authorization: complete September 13 Arena recovery
 
 On 2026-09-13 the user explicitly authorized fixing the local evidence/provider

@@ -801,6 +801,13 @@ def test_stage_decision_requires_category_specific_proof(
         ("series a", "Formerly, it emerged from stealth with Series A financing.", False),
         ("series a", "It emerged from stealth with Series A financing, then closed Series B.", False),
         ("series b", "It emerged from stealth with $56 million in Series A financing.", False),
+        ("series a", "Typewriter Therapeutics Emerges from Stealth with $56 Million Series A Financing", True),
+        ("series a", "It never emerges from stealth with Series A financing.", False),
+        ("series a", "It emerges from stealth with planned Series A financing.", False),
+        ("series a", "It emerges from stealth with Series A financing that was cancelled.", False),
+        ("series a", "It emerges from stealth with Series A financing expected to close.", False),
+        ("series a", "Formerly, it emerges from stealth with Series A financing.", False),
+        ("series a", "It emerges from stealth with Series A financing, then closed Series B.", False),
         ("series c+", "The latest funding round was not a Series D.", False),
         ("series c+", "The planned latest funding round was a Series D.", False),
         (

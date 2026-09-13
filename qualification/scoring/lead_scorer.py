@@ -497,7 +497,7 @@ def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
             re.I,
         ),
         re.compile(
-            rf"\bemerged\s+from\s+stealth(?:\s+mode)?\s+with\b"
+            rf"\bemerge[ds]\s+from\s+stealth(?:\s+mode)?\s+with\b"
             rf".{{0,60}}\b{label}\s+(?:financing|funding)\b",
             re.I,
         ),

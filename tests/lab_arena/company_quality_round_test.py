@@ -12,10 +12,22 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import contracts, contact_policy, public_dashboard, quality_policy, runtime, scoring
+from lab_arena import (
+    company_judgments,
+    contracts,
+    contact_policy,
+    public_dashboard,
+    quality_policy,
+    runtime,
+    scoring,
+    verify,
+)
 from lab_arena.promotion import GitPromoter
 from lab_arena.service import ArenaService, RoundDefaults, ServiceConfig, ServiceError
-from qualification.scoring.competition import apply_company_judgment_context
+from qualification.scoring.competition import (
+    COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS,
+    apply_company_judgment_context,
+)
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 from tests.lab_arena.test_integrity_round import IntegrityHarness, MIGRATIONS
@@ -103,8 +115,14 @@ def database():
     )
 
 
-@pytest.mark.parametrize("with_contacts", [False, True])
-def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_path, with_contacts):
+@pytest.mark.parametrize(
+    "with_contacts", [False, True, "exhausted"]
+)
+def test_quality_round_publishes_coverage_winner_after_restart(
+    database, tmp_path, with_contacts
+):
+    exhausted_company = "Padded Company 3" if with_contacts == "exhausted" else ""
+    with_contacts = bool(with_contacts)
     psycopg2, dsn = database
     challengers = ["Broad", "Sparse", "Padded"]
     harness = QualityHarness(lambda: psycopg2.connect(**dsn), tmp_path, challengers=challengers, runners=["alpha", "beta"])
@@ -118,6 +136,7 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
     original = harness.sandbox.run_icp
     scoring_leases = []
     judged_companies = []
+    exhausted_attempts = []
 
     def run_icp(spec, **kwargs):
         document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
@@ -157,6 +176,13 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
         scoring_leases.append({
             "hits": [item["company_index"] for item in lease["hits"]],
             "misses": [item["company_index"] for item in lease["misses"]],
+            "hit_keys": [item["cache_key"] for item in lease["hits"]],
+            "miss_keys": [
+                item["cache_key"]
+                for item in lease["misses"]
+                if document["companies"][item["company_index"]]["company_name"]
+                == exhausted_company
+            ],
         })
         def judge(companies, buyer, _reference):
             c = companies[0]
@@ -182,6 +208,23 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
                 # qualified padding.
                 raw["intent_signals_detail"] = []
                 raw["failure_reason"] = "primary intent was not verified"
+            if exhausted_company and name == exhausted_company:
+                # This is the typed provider/source outcome produced by the
+                # real company verifier. The scoring seam should retry this
+                # one company three times, then cache a terminal zero.
+                raw["verifier_gate_receipts"][0].update(
+                    decision="unavailable",
+                    reason="source_blocked",
+                    failure_reason_code="source_blocked",
+                )
+                raw.update(
+                    final_score=0.0,
+                    intent_signal_raw=0.0,
+                    intent_signal_final=0.0,
+                    failure_reason="source_blocked",
+                    intent_signals_detail=[],
+                )
+                exhausted_attempts.append((document["scored_run_id"], name))
             judged_companies.append(name)
             return apply_company_judgment_context(companies, [raw], contacts_required=with_contacts)
         judge.company_quality = judge.integrity_policy = True
@@ -242,6 +285,69 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
     )
 
     harness.service = harness.build_service()
+    if exhausted_company:
+        # Rebuild one accepted scorer lease after the service restart as an
+        # all-hit lease. A scorer that is called here is a regression: the
+        # exhausted company judgment must be reusable from PostgreSQL.
+        replay_run = next(
+            run
+            for run in harness.service.store.list_runs(round_id, kind="score")
+            if run["submission_id"] == padded
+            and any(
+                ref["company_index"] == 3
+                for ref in (run.get("claim_response") or {})
+                .get("company_judgment_cache", {})
+                .get("misses", [])
+            )
+        )
+        replay_lease = (replay_run["claim_response"] or {})["company_judgment_cache"]
+        replay_refs = sorted(
+            replay_lease["hits"] + replay_lease["misses"],
+            key=lambda ref: ref["company_index"],
+        )
+        replay_hits = []
+        for ref in replay_refs:
+            evidence = harness.service.store.get_company_judgment(
+                ref["cache_key"], ref["authority_slot"]
+            )
+            assert evidence is not None
+            replay_hits.append({
+                **ref,
+                "evidence_hash": evidence["evidence_hash"],
+                "evidence_doc": evidence["evidence_doc"],
+            })
+        replay_context = {
+            "schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+            "hits": replay_hits,
+            "misses": [],
+        }
+        companies = json.loads(
+            harness.objects.get_bounded(
+                next(run for run in padded_main if run["run_id"] == replay_run["scored_run_id"])["output_ref"],
+                scoring.MAX_SCORING_OUTPUT_BYTES,
+            ).decode("utf-8")
+        )["companies"]
+
+        def forbidden_scorer(*_args, **_kwargs):
+            raise AssertionError("accepted company judgment cache miss after restart")
+
+        forbidden_scorer.company_quality = True
+        forbidden_scorer.integrity_policy = True
+        forbidden_scorer.contacts_required = with_contacts
+        full, new = scoring.score_quality_work_item(
+            {"scored_run_id": replay_run["scored_run_id"]},
+            icp=harness.service.evaluation_icps(round_id)[replay_run["icp_position"]],
+            companies=companies,
+            scorer=forbidden_scorer,
+            cache_context=replay_context,
+        )
+        assert new == []
+        assert full[3]["final_score"] == 0
+        assert full[3]["company_qualified"] is False
+        assert any(
+            receipt.get("failure_class") == COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
+            for receipt in full[3]["verifier_gate_receipts"]
+        )
     published = harness.advance_until("published", runners=2, max_steps=120)
     assert published["king_outcome"] == "crowned"
     ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
@@ -272,6 +378,58 @@ def test_quality_round_publishes_coverage_winner_after_restart(database, tmp_pat
     assert len({run["runner_hotkey"] for run in score_runs if run["status"] == "accepted"}) == 2
     assert any(item["hits"] for item in scoring_leases)
     assert judged_companies.count("Sparse Company 0") < 2 * contracts.BENCHMARK_ICP_COUNT
+
+    if exhausted_company:
+        attempts_by_run = {}
+        for scored_run_id, name in exhausted_attempts:
+            if name == exhausted_company:
+                attempts_by_run[scored_run_id] = attempts_by_run.get(scored_run_id, 0) + 1
+        assert attempts_by_run and set(attempts_by_run.values()) == {scoring.MAX_JUDGE_RETRIES}
+        exhausted_keys = {
+            key for lease in scoring_leases for key in lease["miss_keys"]
+        }
+        cache_hit_keys = {
+            key for lease in scoring_leases for key in lease["hit_keys"]
+        }
+        assert exhausted_keys and cache_hit_keys
+
+        failed_rows = [
+            run["qualification_doc"]["companies"][3]
+            for run in padded_main
+        ]
+        assert failed_rows
+        assert all(row["company_qualified"] is False for row in failed_rows)
+        persisted_judgments = [
+            harness.service.store.get_company_judgment(
+                ref["cache_key"], ref["authority_slot"]
+            )
+            for ref in replay_hits
+            if ref["company_index"] == 3
+        ]
+        assert any(persisted_judgments)
+        assert all(
+            judgment["evidence_doc"]["raw_judgment"]["final_score"] == 0
+            and any(
+                receipt["decision"] == "unavailable"
+                and receipt["reason"] == "source_blocked"
+                and receipt["failure_class"] == COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
+                for receipt in judgment["evidence_doc"]["raw_judgment"]["verifier_gate_receipts"]
+                if receipt["gate"] == "company_fit"
+            )
+            for judgment in persisted_judgments
+            if judgment is not None
+        )
+        round_config = harness.service.store.get_round(round_id)["configuration_doc"]
+        for run in persisted:
+            if run["submission_id"] != padded or run["icp_position"] >= contracts.BENCHMARK_ICP_COUNT:
+                continue
+            score = verify.per_icp_score(
+                harness.service.evaluation_icps(round_id)[run["icp_position"]],
+                run["qualification_doc"]["companies"],
+                round_config["scorer_policy"],
+            )
+            assert score["fp_gate_count"] == score["fp_unverified_primary_count"] == 0
+        fixtures.assert_canary_absent(harness, lambda: psycopg2.connect(**dsn))
 
     repository_root = tmp_path / "quality-promotion-repository"
     repository_root.mkdir()

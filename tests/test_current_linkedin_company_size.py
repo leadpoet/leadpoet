@@ -247,6 +247,32 @@ Senha
     assert pending == []
 
 
+def test_exact_noncanonical_profile_is_source_blocked(monkeypatch):
+    body = {
+        "statuses": [{
+            "id": "https://linkedin.com/company/acme",
+            "status": "error",
+            "error": {
+                "httpStatusCode": 409,
+                "tag": "CRAWL_NON_CANONICAL",
+            },
+        }],
+        "results": [],
+    }
+    calls, pending = _install_exa_bodies(monkeypatch, body)
+    diagnostic = {}
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
+        )
+    ) is None
+    assert diagnostic == {"failure_reason": "source_blocked"}
+    assert len(calls) == 1
+    assert pending == []
+
+
 @pytest.mark.parametrize(
     "wall",
     [

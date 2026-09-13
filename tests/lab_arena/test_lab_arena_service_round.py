@@ -1604,7 +1604,7 @@ def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(conne
     assert all(run["per_icp_score"] is None for run in execute_runs)
 
 
-def test_blocked_verifier_reason_survives_runner_completion_and_cancellation(
+def test_systemic_verifier_reason_survives_runner_completion_and_cancellation(
     connect, tmp_path, monkeypatch
 ):
     import os
@@ -1655,7 +1655,7 @@ def test_blocked_verifier_reason_survives_runner_completion_and_cancellation(
                             {
                                 "gate": "company_fit",
                                 "decision": "unavailable",
-                                "failure_reason_code": "source_blocked",
+                                "failure_reason_code": "provider_error",
                             }
                         ],
                     }
@@ -1667,13 +1667,17 @@ def test_blocked_verifier_reason_survives_runner_completion_and_cancellation(
         saved_environment = dict(os.environ)
         try:
             with monkeypatch.context() as patch:
+                # Each production judge starts in a fresh process. Earlier
+                # unit tests may leave inert provider keys in this process.
+                for name in scoring.CREDENTIAL_ENV_NAMES:
+                    patch.delenv(name, raising=False)
                 patch.setattr(scoring, "lab_scorer", fixed_scorer)
                 patch.setattr(quality_policy, "scorer_enabled", lambda _policy: False)
                 output = scorer_entrypoint.score_input(document)
         finally:
             os.environ.clear()
             os.environ.update(saved_environment)
-        assert output["reason"] == "source_blocked"
+        assert output["reason"] == "provider_error"
         return runtime.fake_result(
             exit_code=0,
             output_bytes=json.dumps(output).encode(),
@@ -1699,7 +1703,7 @@ def test_blocked_verifier_reason_survives_runner_completion_and_cancellation(
         )
         if run["status"] == "failed"
         and run["result_doc"].get("failure_diagnostic", {}).get("reason")
-        == "source_blocked"
+        == "provider_error"
     ]
     assert len(failed_runs) == contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
     assert scorer_calls == (
@@ -1712,7 +1716,119 @@ def test_blocked_verifier_reason_survives_runner_completion_and_cancellation(
         reopened_store.close()
     assert {
         run["result_doc"]["failure_diagnostic"]["reason"] for run in reloaded
-    } == {"source_blocked"}
+    } == {"provider_error"}
+
+
+def test_exhausted_company_evidence_continues_remaining_companies_and_round(
+    connect, tmp_path, monkeypatch
+):
+    """A source wall costs one company credit, not the other jobs or publication."""
+    import os
+    from collections import Counter
+
+    from lab_arena import quality_policy, scorer_entrypoint
+    from qualification.scoring.competition import count_penalizable_false_positives
+
+    harness = Harness(
+        connect, tmp_path,
+        challengers=["LocalFailure", "LocalPass"], runners=["alpha"],
+    )
+    participants = _start_round(harness, day=27, epoch=33427)
+    _run_stage_one_to_scoring(harness, participants, runners=1)
+    original_run_icp = harness.sandbox.run_icp
+    calls = Counter()
+    accepted_breakdowns = []
+
+    def run_icp(spec, **kwargs):
+        document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
+        companies = document.get("companies") or []
+        if not (
+            document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION
+            and companies
+            and companies[0]["company_name"].startswith("LocalFailure Company")
+            and document["icp"]["icp_id"].endswith("_001")
+        ):
+            return original_run_icp(spec, **kwargs)
+
+        def local_scorer(_policy, **_kwargs):
+            def score(batch, icp, reference):
+                rows = deterministic_scorer(batch, icp, reference)
+                scored, _ = verify.bucket_skip(icp, batch)
+                for row, index in zip(rows, scored):
+                    name = batch[index]["company_name"]
+                    calls[name] += 1
+                    if name == "LocalFailure Company 0":
+                        row.update(
+                            final_score=0.0,
+                            failure_reason="Company fit unavailable",
+                            verifier_gate_receipts=[{
+                                "gate": "company_fit",
+                                "decision": "unavailable",
+                                "failure_class": "employee_size_verification_failed",
+                                "failure_reason_code": "source_blocked",
+                            }],
+                        )
+                return rows
+            return score
+
+        saved_environment = dict(os.environ)
+        try:
+            with monkeypatch.context() as patch:
+                # Each production judge starts in a fresh process. Earlier
+                # unit tests may leave inert provider keys in this process.
+                for name in scoring.CREDENTIAL_ENV_NAMES:
+                    patch.delenv(name, raising=False)
+                patch.setattr(scoring, "lab_scorer", local_scorer)
+                patch.setattr(quality_policy, "scorer_enabled", lambda _policy: False)
+                output = scorer_entrypoint.score_input(document)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_environment)
+        assert "failure" not in output
+        accepted_breakdowns.extend(output["breakdowns"])
+        return runtime.fake_result(exit_code=0, output_bytes=json.dumps(output).encode())
+
+    monkeypatch.setattr(harness.sandbox, "run_icp", run_icp)
+    build_runner = harness.runner
+    monkeypatch.setattr(harness, "runner", lambda index, parallel=4: build_runner(index, parallel=1))
+    harness.advance_until("stage1_scored", runners=1)
+    assert calls["LocalFailure Company 0"] == scoring.MAX_JUDGE_RETRIES
+    assert all(calls[f"LocalFailure Company {index}"] == 1 for index in range(1, 5))
+    assert len(accepted_breakdowns) == 5
+    assert accepted_breakdowns[0]["final_score"] == 0.0
+    assert all(row["final_score"] > 0 for row in accepted_breakdowns[1:])
+    assert count_penalizable_false_positives(
+        accepted_breakdowns[:1], icp_has_intent_signals=True,
+    ) == (0, 0)
+
+    # Resume using a new service/store instance, as a gateway restart would.
+    harness.service = harness.build_service()
+    harness.advance_until("published", runners=1)
+    fresh_store = harness.make_store()
+    try:
+        row = fresh_store.get_round(harness.round_id)
+        executions = fresh_store.list_runs(harness.round_id, kind="execute")
+        judges = fresh_store.list_runs(harness.round_id, kind="score")
+    finally:
+        fresh_store.close()
+    assert row["status"] == "published" and row["cancel_reason"] is None
+    assert row["publication_doc"] is not None
+    assert len(row["publication_doc"]["final_ranking"]) == participants
+    assert len(executions) == participants * 20
+    assert all(run["per_icp_score"] is not None for run in executions)
+    assert all(run["status"] == "accepted" for run in judges)
+    assert all(run["attempt"] == 1 for run in judges)
+    failure_submission = next(
+        sub_id for sub_id, flavor in harness.flavors.items() if flavor == "LocalFailure"
+    )
+    affected = next(
+        run for run in executions
+        if run["submission_id"] == failure_submission and run["icp_position"] == 0
+    )
+    assert affected["per_icp_score"] > 0  # Four valid companies still contribute.
+    public = harness.service.public_results(harness.round_id, failure_submission)
+    assert public
+    assert_canary_absent(harness, connect)
 
 
 def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evidence(

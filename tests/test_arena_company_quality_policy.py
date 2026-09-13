@@ -109,6 +109,31 @@ def test_verified_linkedin_dedup_rebinds_raw_judgment_without_poisoning_it():
     assert alone[0]["final_score"] == 60 and alone[0]["company_qualified"]
 
 
+def test_terminal_intent_failure_stays_zero_after_quality_cache_reconstruction():
+    from lab_arena.company_judgments import raw_judgment_is_cacheable
+    from qualification.scoring.competition import (
+        count_penalizable_false_positives,
+    )
+
+    raw = raw_company_judgment(_positive_breakdown("Acme", "acme.com", "acme"))
+    assert raw["intent_signals_detail"]
+    raw["final_score"] = 0.0
+    raw["verifier_gate_receipts"].append({
+        "gate": "intent_verification",
+        "decision": "unavailable",
+        "failure_class": "company_verification_exhausted",
+    })
+
+    assert raw_judgment_is_cacheable(raw)
+    result = apply_company_judgment_context([company()], [raw])
+    assert result[0]["final_score"] == 0.0
+    assert result[0]["company_qualified"] is False
+    assert result[0]["duplicate_company"] is False
+    assert count_penalizable_false_positives(
+        result, icp_has_intent_signals=True
+    ) == (0, 0)
+
+
 def test_distinct_verified_linkedin_entities_survive_weak_alias_collision():
     rows = [
         company(

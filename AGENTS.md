@@ -21,6 +21,21 @@ A running retired job is cleanup work, not a retention requirement. Do not
 start an overnight recovery goal. This authority expires when all twelve
 removals and production verification complete.
 
+## Scoped production authorization: company verification failure isolation
+
+On 2026-09-13 the user explicitly authorized isolating exhausted company-level
+verification failures to that company and ICP, while allowing the remaining
+companies, submissions and round to finish. Only systemic scorer failures may
+stop the round. This includes protected production and Supabase inspection,
+narrow tested source changes, pushes to main, exact committed migrations if
+needed, canonical gateway/normal-validator restarts, and starting and monitoring
+the new day's public-baseline rebenchmark through the current Arena workflow.
+Use the overnight operational permissions without routine approval. Preserve
+identity, intent/contact verification, budgets, accepted results, publication,
+promotion, rewards, weights and concurrent work. Do not restore retired private
+Research Lab or Nitro workflows. This scope expires when the fix is live and
+the new rebenchmark has started and is progressing with company failures isolated.
+
 ## Scoped production authorization: Arena validator pickup root cause
 
 On 2026-09-12 the user explicitly authorized tracing the complete miner

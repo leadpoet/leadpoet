@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from lab_arena import contracts, scoring, verify
+from qualification.scoring import intent_verification_three_stage as intent_verifier
 
 ROUND = "arena-2026-09-02"
 
@@ -989,6 +990,15 @@ def test_duplicate_names_keep_terminal_company_indexes_isolated():
 
 def test_intent_source_content_exhaustion_is_company_local_but_timeout_is_systemic():
     def intent_failure(exa_stage):
+        projected = intent_verifier._project_contents_for_prompt({
+            "results": [],
+            "statuses": [{
+                "url": "https://source.example.com/evidence",
+                "source": "none",
+                "sd_stage": "all_tiers_exhausted:anti_bot_marker",
+                "exa_stage": exa_stage,
+            }],
+        })
         row = breakdown(0.0, "Intent verification unavailable")
         row["intent_signals_detail"] = [{
             "matched_icp_signal": 0,
@@ -998,11 +1008,7 @@ def test_intent_source_content_exhaustion_is_company_local_but_timeout_is_system
                 "pipeline_decision": "unavailable",
                 "rejection_reason": "evidence_fetch_failed",
                 "verification_trace": {
-                    "provider_attempts": [{
-                        "source": "none",
-                        "sd_stage": "all_tiers_exhausted:anti_bot_marker",
-                        "exa_stage": exa_stage,
-                    }],
+                    "provider_attempts": projected["statuses"],
                 },
             },
         }]
@@ -1059,6 +1065,27 @@ def test_intent_source_content_exhaustion_is_company_local_but_timeout_is_system
             icp=_ICPS[0],
             companies=[scored_company(0)],
             scorer=systemic_scorer,
+            max_retries=2,
+        )
+
+    mixed = intent_failure("exa_no_results")
+    mixed["intent_signals_detail"].append({
+        "matched_icp_signal": 0,
+        "after_decay": 0.0,
+        "judge_verdict": {
+            "decision": "rejected_verifier_error",
+            "pipeline_decision": "unavailable",
+            "failure_reason_code": "provider_error",
+            "rejection_reason": "stage3_llm_error",
+        },
+    })
+
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "run-intent-mixed-systemic"},
+            icp=_ICPS[0],
+            companies=[scored_company(0)],
+            scorer=lambda *_args: [mixed],
             max_retries=2,
         )
 

@@ -66,6 +66,17 @@ def _openrouter_parameters(prompt):
     }
 
 
+def _verified_identity():
+    return {
+        "decision": "match",
+        "observed_name": "example",
+        "observed_domain": "example.com",
+        "observed_linkedin_slug": "example",
+        "verified_legal_name_aliases": ["Example Technologies LLC"],
+        "evidence_source": "company_web_reverification",
+    }
+
+
 def test_conversion_sized_prompt_preserves_required_context_and_validates():
     body = _long_job_body()
     assert len(body) > 26_000
@@ -384,3 +395,118 @@ def test_integrity_bundle_and_exact_binding_preserve_prompt_bound(source_count):
     assert prompt.count("SOURCE-START") == source_count
     assert prompt.count("SOURCE-END Applications are closed") == source_count
     operations.validate_operation_request("openrouter.chat", _openrouter_parameters(prompt))
+
+
+@pytest.mark.parametrize(
+    ("source_count", "exact_ats"),
+    [(1, False), (2, False), (3, False), (1, True)],
+)
+def test_full_verifier_budgets_verified_identity_and_exact_ats_suffixes(
+    source_count, exact_ats
+):
+    urls = [
+        SOURCE_URL
+        if exact_ats
+        else f"https://example.com/evidence/{index}"
+        for index in range(source_count)
+    ]
+    body = (
+        "SOURCE-START Example enterprise account executive opening.\n"
+        + ("Responsibilities, qualifications, and company context. " * 1_200)
+        + "\nSOURCE-END Applications are open for this position."
+    )
+    evidence_bundle = [
+        {
+            "url": url,
+            "description": CLAIM,
+            "date": SIGNAL_DATE,
+            "snippet": "Example has an enterprise sales opening.",
+        }
+        for url in urls
+    ]
+    contents = {
+        "results": [
+            {
+                "url": url,
+                "title": "Enterprise Account Executive",
+                "text": body,
+                "meta": {"kind": "ashby_job"} if exact_ats else {},
+            }
+            for url in urls
+        ],
+        "statuses": [],
+    }
+    prompts = []
+
+    async def call_openrouter(_client, _model, prompt):
+        prompts.append(prompt)
+        operations.validate_operation_request(
+            "openrouter.chat", _openrouter_parameters(prompt)
+        )
+        if len(prompts) == 1:
+            return {
+                "answer": {
+                    "signal_evaluations": [{
+                        "signal_status": "unable_to_verify",
+                        "verification_mode": "source_grounded",
+                        "same_entity_check": "pass",
+                        "confidence": "medium",
+                    }]
+                },
+                "model": "perplexity/sonar",
+                "usage": {},
+            }
+        return {
+            "answer": {
+                "overall_verdict": "qualified",
+                "overall_confidence": "high",
+                "signal_evaluations": [{
+                    "signal_status": "supported",
+                    "verification_mode": "source_grounded",
+                    "same_entity_check": "pass",
+                    "confidence": "high",
+                    "evidence_urls_used": [urls[0]],
+                    "claim_matches_miner_date": "no_date_in_content",
+                    "supporting_quotes": [
+                        "Example enterprise account executive opening."
+                    ],
+                    "risk_notes": [],
+                    "unsupported_parts": [],
+                }],
+            },
+            "model": "perplexity/sonar-pro",
+            "usage": {},
+        }
+
+    with mock.patch.object(
+        intent, "_call_openrouter", call_openrouter
+    ), mock.patch.object(
+        intent, "_fetch_sd_then_exa", mock.AsyncMock(return_value=contents)
+    ):
+        result = asyncio.run(intent.verify_three_stage(
+            None,
+            company_name="Example",
+            company_linkedin="https://www.linkedin.com/company/example",
+            company_website="https://example.com",
+            source_url=urls[0],
+            miner_claim=CLAIM,
+            target_signal_text=TARGET_ICP_SIGNAL,
+            miner_signal_date=SIGNAL_DATE,
+            evidence_type="HIRING" if exact_ats else "PRODUCT_LAUNCH",
+            declared_source="job_board" if exact_ats else "news",
+            stage1_soft_reject=True,
+            integrity_policy=True,
+            verified_company_identity=_verified_identity(),
+            evidence_bundle=evidence_bundle,
+        ))
+
+    assert len(prompts) == 2
+    stage3_prompt = prompts[1]
+    assert len(stage3_prompt) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert "COMPANY IDENTITY ATTRIBUTION" in stage3_prompt
+    assert _common._SOURCE_OMISSION_MARKER.strip() in stage3_prompt
+    assert (
+        "MODEL-OWNED EXACT HIRING EMPLOYER BINDING" in stage3_prompt
+    ) is exact_ats
+    assert result["company_check"] is True
+    assert result["decision"] == "approve"

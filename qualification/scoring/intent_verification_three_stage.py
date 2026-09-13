@@ -2112,6 +2112,9 @@ def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
             "source": _safe_prompt_status_label(item.get("source")),
             "stage": _safe_prompt_status_label(item.get("stage")),
         }
+        for field in ("sd_stage", "exa_stage"):
+            if safe_stage := _safe_prompt_status_label(item.get(field)):
+                projected_status[field] = safe_stage
         target_absence = _canonical_target_absence_receipt(
             item.get("exa_target_absence")
         )
@@ -2226,29 +2229,16 @@ def _build_final_judge_prompt(
     row: Dict[str, Any],
     contents: Dict[str, Any],
     source_name: str = "SD/Exa Contents",
+    *,
+    verified_identity_context: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Stage 3 final-judge prompt — dispatcher (mirrors verification).
 
     Snapshot equality test: ``tests/test_prompt_refactor.py``.
     """
-    if row.get("_evidence_type") == "TECHSTACK":
-        prompt = _prompts_techstack.build_final_judge_prompt(
-            row, contents, source_name
-        )
-    elif row.get("_evidence_type") == "SOCIAL_POSTING":
-        prompt = _prompts_social.build_final_judge_prompt(
-            row, contents, source_name
-        )
-    elif row.get("_evidence_type") == "PODCAST_APPEARANCE":
-        prompt = _prompts_podcast.build_final_judge_prompt(
-            row, contents, source_name
-        )
-    else:
-        prompt = _prompts_default.build_final_judge_prompt(
-            row, contents, source_name
-        )
+    suffix = ""
     if row.get("_exact_hiring_employer_binding") is True:
-        prompt += (
+        suffix += (
             "\n\nMODEL-OWNED EXACT HIRING EMPLOYER BINDING:\n"
             "Deterministic checks established that the exact supplied URL is "
             "a successfully fetched single-posting ATS page whose strict "
@@ -2258,6 +2248,28 @@ def _build_final_judge_prompt(
             "body explicitly identifies a different employer. Evaluate role "
             "alignment, source grounding, open/closed state, freshness, and "
             "every other invariant normally."
+        )
+    if verified_identity_context:
+        suffix += _verified_company_identity_instructions(
+            row, verified_identity_context
+        )
+    prompt_row = {**row, "_final_judge_suffix": suffix}
+
+    if prompt_row.get("_evidence_type") == "TECHSTACK":
+        prompt = _prompts_techstack.build_final_judge_prompt(
+            prompt_row, contents, source_name
+        )
+    elif prompt_row.get("_evidence_type") == "SOCIAL_POSTING":
+        prompt = _prompts_social.build_final_judge_prompt(
+            prompt_row, contents, source_name
+        )
+    elif prompt_row.get("_evidence_type") == "PODCAST_APPEARANCE":
+        prompt = _prompts_podcast.build_final_judge_prompt(
+            prompt_row, contents, source_name
+        )
+    else:
+        prompt = _prompts_default.build_final_judge_prompt(
+            prompt_row, contents, source_name
         )
     return prompt
 
@@ -3812,11 +3824,11 @@ async def verify_three_stage(
             }
 
     # ── STAGE 3: sonar-pro final judge ─────────────────────────────
-    s3_prompt = _build_final_judge_prompt(row, contents)
-    if verified_identity_context:
-        s3_prompt += _verified_company_identity_instructions(
-            row, verified_identity_context
-        )
+    s3_prompt = _build_final_judge_prompt(
+        row,
+        contents,
+        verified_identity_context=verified_identity_context,
+    )
     s3_envelope = await _call_openrouter(
         client, stage3_model or STAGE3_MODEL, s3_prompt
     )

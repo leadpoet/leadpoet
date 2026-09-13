@@ -22,9 +22,10 @@ from typing import Any, Dict, Iterable, List
 MAX_SCRAPED_CHARS = 60_000
 
 # The Arena broker accepts at most 32,000 characters in one OpenRouter
-# message.  The verifier dispatcher can append a small, exact ATS-binding
-# instruction after this shared builder returns, so leave explicit room for
-# it.  Source text and overlong page-title metadata are the only lossy fields:
+# message. Leave headroom below that hard limit. The verifier dispatcher puts
+# its trusted final instructions in ``_final_judge_suffix`` so this builder can
+# budget them with the fixed prompt. Source text and overlong page-title
+# metadata are the only lossy fields:
 # identity, claim, date, requested ICP signal, exact URLs, and the decision
 # rules remain complete.
 FINAL_JUDGE_PROMPT_MAX_CHARS = 31_000
@@ -425,6 +426,9 @@ def build_final_judge_prompt(
         )
 
     def assemble(blocks: List[str]) -> str:
+        final_suffix = row.get("_final_judge_suffix")
+        if not isinstance(final_suffix, str):
+            final_suffix = ""
         integrity_block = (
             "\n\nBuyer freshness window: "
             f"{max(1, int(row.get('_buyer_max_age_days') or 365))} days.\n\n"
@@ -441,7 +445,7 @@ Today's date: {today_str}
 
 {FINAL_JUDGE_RULES_BLOCK}
 
-{MINER_DATE_CHECK_BLOCK}{integrity_block}{combined_block}"""
+{MINER_DATE_CHECK_BLOCK}{integrity_block}{combined_block}{final_suffix}"""
 
     results = list(contents.get("results") or [])
     if not results:

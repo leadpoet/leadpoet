@@ -285,11 +285,13 @@ def test_run_result_reward_basis_and_scoring_plan_contracts():
         failure_diagnostic={
             "stage": "scoring_output",
             "error_class": "scoring_output_invalid",
+            "reason": "malformed_response",
         },
     )
     assert c.validate_run_result(failed_result)["failure_diagnostic"] == {
         "stage": "scoring_output",
         "error_class": "scoring_output_invalid",
+        "reason": "malformed_response",
     }
     for unsafe in (
         {"stage": "scorer", "error_class": "api_key=do-not-store"},
@@ -297,6 +299,11 @@ def test_run_result_reward_basis_and_scoring_plan_contracts():
             "stage": "scorer",
             "error_class": "judge_error",
             "detail": "raw exception text",
+        },
+        {
+            "stage": "scorer",
+            "error_class": "judge_error",
+            "reason": "https://provider.example/?api_key=secret",
         },
     ):
         with pytest.raises(c.ArenaContractError):

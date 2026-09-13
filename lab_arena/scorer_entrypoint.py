@@ -69,7 +69,16 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
                     max_scored_companies=int(policy["max_scored_companies"]),
                 )
     except (scoring.ScoringError, ValueError) as exc:
-        return scoring.build_scoring_failure(scored_run_id, "judge_error", detail=str(exc))
+        return scoring.build_scoring_failure(
+            scored_run_id,
+            "judge_error",
+            detail=str(exc),
+            reason=(
+                exc.failure_reason
+                if isinstance(exc, scoring.ScoringError)
+                else ""
+            ),
+        )
     return scoring.build_scoring_output(
         scored_run_id,
         breakdowns,

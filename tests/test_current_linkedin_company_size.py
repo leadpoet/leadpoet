@@ -235,11 +235,14 @@ Senha
     }
     calls, pending = _install_exa_bodies(monkeypatch, body)
 
+    diagnostic = {}
     assert asyncio.run(
         linkedin_company_size.fetch_current_linkedin_company_size(
-            "https://linkedin.com/company/acme"
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
         )
     ) is None
+    assert diagnostic == {"failure_reason": "source_blocked"}
     assert len(calls) == 1
     assert pending == []
 
@@ -405,11 +408,14 @@ def test_http_200_blocked_page_is_retryable_fetch_failure(
     }
     calls, pending = _install_exa_bodies(monkeypatch, body)
 
+    diagnostic = {}
     assert asyncio.run(
         linkedin_company_size.fetch_current_linkedin_company_size(
-            "https://linkedin.com/company/acme"
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
         )
     ) is None
+    assert diagnostic == {"failure_reason": "source_blocked"}
     assert len(calls) == 1
     assert pending == []
 
@@ -511,6 +517,64 @@ def test_invalid_requested_profile_url_never_calls_exa(monkeypatch):
             "https://linkedin.com/in/acme"
         )
     ) is None
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_reason"),
+    [
+        ("http", "provider_error"),
+        ("timeout", "provider_error"),
+        ("invalid_json", "malformed_response"),
+        ("invalid_body", "malformed_response"),
+        ("unexpected", "unexpected_verifier_error"),
+    ],
+)
+def test_fetch_failure_diagnostic_is_a_fixed_reason_only(
+    monkeypatch, mode, expected_reason
+):
+    class Response:
+        status = 503 if mode == "http" else 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            if mode == "invalid_json":
+                raise ValueError("secret malformed payload")
+            if mode == "unexpected":
+                raise RuntimeError("secret unexpected payload")
+            return []
+
+    class Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            if mode == "timeout":
+                raise asyncio.TimeoutError("secret timeout detail")
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
+    diagnostic = {}
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
+        )
+    ) is None
+    assert diagnostic == {"failure_reason": expected_reason}
+    assert "secret" not in repr(diagnostic)
 
 
 @pytest.mark.parametrize(
@@ -656,14 +720,17 @@ def test_successful_exact_profile_without_company_size_is_insufficient(
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
 
+    diagnostic = {}
     assert asyncio.run(
         linkedin_company_size.fetch_current_linkedin_company_size(
-            "https://linkedin.com/company/acme"
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
         )
     ) == {
         "outcome": "insufficient_evidence",
         "url": "https://linkedin.com/company/acme",
     }
+    assert diagnostic == {}
 
 
 @pytest.mark.parametrize(
@@ -802,7 +869,7 @@ def test_current_profile_replaces_stale_linkedin_match_or_mismatch(
             size_matches=sonar_matches,
         ), ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return {
             "employee_count": current_size,
@@ -977,6 +1044,7 @@ Senha (+ de 6 caracteres)
     assert result.details["failure_class"] == (
         "employee_size_verification_failed"
     )
+    assert result.details["failure_reason_code"] == "source_blocked"
     assert original_verdict["observed_employee_count"] == "1"
     assert original_verdict["employee_size_matches"] is False
 
@@ -1000,7 +1068,7 @@ def test_actual_profile_failure_survives_an_unusable_repair(
     async def provider(**_kwargs):
         return verdicts.pop(0), ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return None
 
@@ -1193,7 +1261,10 @@ def test_same_domain_unproven_alias_preserves_homepage_failure_classification(
     )
 
 
-def test_resolved_web_identity_does_not_make_missing_stage_retryable(monkeypatch):
+@pytest.mark.parametrize("homepage_raises", [False, True])
+def test_resolved_web_identity_does_not_make_missing_stage_retryable(
+    monkeypatch, homepage_raises
+):
     company = _company()
     icp = _icp().model_copy(update={"company_stage": "Series A"})
     verdict = _verdict(observed_size="11-50", size_matches=True)
@@ -1210,13 +1281,15 @@ def test_resolved_web_identity_does_not_make_missing_stage_retryable(monkeypatch
         return company_fit_match("prechecks passed")
 
     async def homepage(*_args, **_kwargs):
+        if homepage_raises:
+            raise lead_scorer.aiohttp.ClientError("private transport detail")
         return company_fit_unavailable("website returned HTTP 502")
 
     async def provider(**kwargs):
         provider_calls.append(kwargs["telemetry_purpose"])
         return dict(verdict), ""
 
-    async def profile(url):
+    async def profile(url, **_kwargs):
         profile_fetches.append(url)
         return {
             "employee_count": "11-50",
@@ -1264,10 +1337,17 @@ def test_resolved_web_identity_does_not_make_missing_stage_retryable(monkeypatch
     assert receipt["company_fit_dimensions"]["stage"] == (
         COMPANY_FIT_UNAVAILABLE
     )
-    assert receipt["dimension_evidence"]["identity"][
+    homepage_reason = receipt["dimension_evidence"]["identity"][
         "homepage_identity_reason"
-    ] == "website returned HTTP 502"
+    ]
+    assert (
+        homepage_reason.startswith("company identity provider error:")
+        if homepage_raises
+        else homepage_reason == "website returned HTTP 502"
+    )
     assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert "failure_reason_code" not in receipt
+    assert "failure_reason_code" not in receipt["dimension_evidence"]["identity"]
     assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
 
 
@@ -1503,7 +1583,7 @@ def test_successful_profile_without_size_is_reused_as_insufficient(
             size_matches=size_matches,
         ), ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return {
             "outcome": "insufficient_evidence",
@@ -1545,7 +1625,7 @@ def test_repair_reuses_successful_refresh_and_non_linkedin_evidence_is_unchanged
     async def provider(**_kwargs):
         return verdicts.pop(0), ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return {
             "employee_count": "11-50",
@@ -1609,7 +1689,7 @@ def test_submitted_linkedin_url_alone_cannot_authorize_profile_fetch(monkeypatch
     async def provider(**_kwargs):
         return verdict, ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return {
             "employee_count": "11-50",
@@ -1639,7 +1719,7 @@ def test_wrong_homepage_linkedin_anchor_cannot_authorize_profile_fetch(monkeypat
     async def provider(**_kwargs):
         return _verdict(), ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return {
             "employee_count": "11-50",
@@ -1678,7 +1758,7 @@ def test_current_size_does_not_override_wrong_observed_company_identity(monkeypa
     async def provider(**_kwargs):
         return verdict, ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return {
             "employee_count": "11-50",
@@ -1710,7 +1790,7 @@ def test_complete_sonar_identity_can_bind_profile_without_homepage_anchor(monkey
     async def provider(**_kwargs):
         return _verdict(), ""
 
-    async def fetch(url):
+    async def fetch(url, **_kwargs):
         fetches.append(url)
         return {
             "employee_count": "11-50",

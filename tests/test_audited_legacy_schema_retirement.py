@@ -319,6 +319,13 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+CREATE TABLE storage.objects (
+    id TEXT PRIMARY KEY,
+    updated_at TIMESTAMPTZ
+);
+CREATE TRIGGER update_objects_updated_at
+BEFORE UPDATE ON storage.objects
+FOR EACH ROW EXECUTE FUNCTION storage.update_updated_at_column();
 CREATE SCHEMA source_add_history;
 CREATE TABLE source_add_history.legacy_audit_rows (
     source_pk BIGINT PRIMARY KEY,
@@ -403,10 +410,16 @@ def test_verbatim_migration_removes_65_and_preserves_30_and_archive(
                     (SELECT count(*) FROM source_add_history.legacy_audit_rows),
                     to_regclass('public.banned_hotkeys') IS NULL,
                     to_regclass('public.research_trajectories') IS NULL,
-                    to_regprocedure('storage.update_updated_at_column()') IS NOT NULL
+                    to_regprocedure('storage.update_updated_at_column()') IS NOT NULL,
+                    EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_trigger
+                        WHERE tgrelid = 'storage.objects'::regclass
+                          AND tgname = 'update_objects_updated_at'
+                          AND NOT tgisinternal
+                    )
                 """
             )
-            assert cursor.fetchone() == (1, 1, 1, 1, True, True, True)
+            assert cursor.fetchone() == (1, 1, 1, 1, True, True, True, True)
     finally:
         connection.close()
 

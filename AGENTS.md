@@ -1,5 +1,23 @@
 # Agent Instructions
 
+## Scoped production authorization: retire legacy lead and Research Lab data
+
+On 2026-09-12 the user explicitly authorized deletion of leads_private,
+miner_test_leads, leads_private_backup, test_leads_for_miners,
+research_lab_provider_outcome_checkpoints_v2, research_lab_provider_cost_events,
+research_lab_auto_research_loop_events, the remaining research_lab_scoring_*
+tables, ops_research_lab_event_monitor_state, and
+ops_research_lab_event_notifications. Retire their obsolete jobs, routines,
+views, triggers, constraints, policies, and code callers as needed; an old
+scheduled job or legacy caller is not a reason to keep this mechanism.
+This includes protected production inspection, narrow tested source changes,
+exact committed migrations, pushes and safe merges, canonical deployments
+when needed, and live verification through the overnight operational helpers
+without another approval. Preserve SOURCE_ADD history, actual current Arena,
+baseline/rebenchmark, scoring, site, rewards and weights, and concurrent work.
+Audit all remaining tables for actual Arena use and report further candidates.
+This scope expires after the requested removal and verification complete.
+
 ## Scoped production authorization: confirmed unused Supabase cleanup
 
 On 2026-09-12 the user explicitly authorized a full Supabase cleanup audit and

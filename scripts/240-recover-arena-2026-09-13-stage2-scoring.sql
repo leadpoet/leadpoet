@@ -32,6 +32,8 @@ DECLARE
   v_submission_hash TEXT;
   v_credential_hash TEXT;
   v_unrelated_hash TEXT;
+  v_plan_hash TEXT;
+  v_round_stable JSONB;
   v_configuration_stable JSONB;
   v_count INTEGER;
   v_costs JSONB;
@@ -138,6 +140,30 @@ BEGIN
                   OR (p->>'success_unresolved_calls')::BIGINT <> 0) THEN
     RAISE EXCEPTION 'arena 2026-09-13 cost reconciliation incomplete';
   END IF;
+  IF (
+    SELECT pg_catalog.count(*)
+    FROM (VALUES
+      (315826::BIGINT,'sub-caf0e1ef30c9712e6385afe24a75375e','arena-2026-09-13:sub-caf0e1ef30c9712e6385afe24a75375e:1:0:1',1::SMALLINT,'sha256:223335eda1ccf9fcf8b0d4d3a00f85d957cf896611b8c845fea331be83c8c14d'),
+      (331371,'sub-5dffdbaa2b96e8dc78160aea8f80a7b9','arena-2026-09-13:sub-5dffdbaa2b96e8dc78160aea8f80a7b9:2:12:1',2::SMALLINT,'sha256:6bc891aeb6faf7f07d1fe97e3f9cc12e3cac686211097473456b77613a524f2c'),
+      (331374,'sub-5dffdbaa2b96e8dc78160aea8f80a7b9','arena-2026-09-13:sub-5dffdbaa2b96e8dc78160aea8f80a7b9:2:12:1',2::SMALLINT,'sha256:bbeb448fa9f273c0b58b6a82ad8ae7d7154e20a8789d39b596f0f5dcce7bbb76'),
+      (331383,'sub-5dffdbaa2b96e8dc78160aea8f80a7b9','arena-2026-09-13:sub-5dffdbaa2b96e8dc78160aea8f80a7b9:2:12:1',2::SMALLINT,'sha256:070df2985bf72f35fdc6d01c93786769f6fb8f7d976294ddf1fc14fe756d3496'),
+      (331388,'sub-5dffdbaa2b96e8dc78160aea8f80a7b9','arena-2026-09-13:sub-5dffdbaa2b96e8dc78160aea8f80a7b9:2:12:1',2::SMALLINT,'sha256:231f8c7f751019140a87611f800b4cc1fc6256b440aad576ba3d31899310a7da'),
+      (331398,'sub-5dffdbaa2b96e8dc78160aea8f80a7b9','arena-2026-09-13:sub-5dffdbaa2b96e8dc78160aea8f80a7b9:2:12:1',2::SMALLINT,'sha256:83b62e720fd19d4bafa5bab2d2dd09345b591f28e576f4d87c7bab19198894f1'),
+      (331411,'sub-5dffdbaa2b96e8dc78160aea8f80a7b9','arena-2026-09-13:sub-5dffdbaa2b96e8dc78160aea8f80a7b9:2:12:1',2::SMALLINT,'sha256:bf2cd93f1511916c9c2c5967605d058d830c4797f0cdc055d60d29f339749fb1'),
+      (336996,'sub-5dffdbaa2b96e8dc78160aea8f80a7b9','arena-2026-09-13:sub-5dffdbaa2b96e8dc78160aea8f80a7b9:2:10:score:1',2::SMALLINT,'sha256:94484384d8b1dfcb5de6ec34755d9c55abb4ef2cf8fc826e624de541d5d29a93')
+    ) expected(uncertain_id,submission_id,run_id,stage,call_identity)
+    JOIN LATERAL public.lab_arena__ledger_head(expected.call_identity) head ON TRUE
+    WHERE head.entry_kind='settlement' AND head.amount_microusd=0
+      AND head.round_id=v_round_id
+      AND head.submission_id=expected.submission_id
+      AND head.run_id=expected.run_id AND head.stage=expected.stage
+      AND head.call_identity=expected.call_identity
+      AND head.provider='deepline' AND head.funding_source='miner_key'
+      AND head.entry_doc->>'deepline_402_history_reconciliation'='true'
+      AND (head.entry_doc->>'reconciled_uncertainty_entry_id')::BIGINT=expected.uncertain_id
+  ) <> 8 THEN
+    RAISE EXCEPTION 'arena 2026-09-13 exact cost reconciliation incomplete';
+  END IF;
 
   SELECT pg_catalog.md5(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY run_id))
     INTO v_old_runs_hash FROM public.lab_arena_runs x WHERE round_id=v_round_id;
@@ -155,6 +181,10 @@ BEGIN
     INTO v_credential_hash FROM public.lab_arena_submission_credentials x WHERE submission_id=ANY(v_participant_ids);
   SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY round_id),''))
     INTO v_unrelated_hash FROM public.lab_arena_rounds x WHERE round_id<>v_round_id;
+  v_plan_hash := pg_catalog.md5(v_round.stage2_scoring_plan_doc::TEXT);
+  v_round_stable := pg_catalog.to_jsonb(v_round)
+    - 'status' - 'status_generation' - 'stage_generation'
+    - 'cancel_reason' - 'configuration_doc' - 'updated_at';
   v_configuration_stable := v_round.configuration_doc-'scorer_image_digest'-'scorer_image_reference';
 
   WITH latest AS (
@@ -244,6 +274,11 @@ BEGIN
          FROM public.lab_arena_submission_credentials x WHERE submission_id=ANY(v_participant_ids)) IS DISTINCT FROM v_credential_hash
      OR (SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY round_id),''))
          FROM public.lab_arena_rounds x WHERE round_id<>v_round_id) IS DISTINCT FROM v_unrelated_hash
+     OR (SELECT pg_catalog.md5(stage2_scoring_plan_doc::TEXT)
+         FROM public.lab_arena_rounds WHERE round_id=v_round_id) IS DISTINCT FROM v_plan_hash
+     OR (SELECT pg_catalog.to_jsonb(x)-'status'-'status_generation'-'stage_generation'
+           -'cancel_reason'-'configuration_doc'-'updated_at'
+         FROM public.lab_arena_rounds x WHERE round_id=v_round_id) IS DISTINCT FROM v_round_stable
      OR (SELECT configuration_doc-'scorer_image_digest'-'scorer_image_reference'
          FROM public.lab_arena_rounds WHERE round_id=v_round_id) IS DISTINCT FROM v_configuration_stable THEN
     RAISE EXCEPTION 'arena 2026-09-13 stage2 recovery verification failed';

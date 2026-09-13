@@ -30,6 +30,24 @@ CAF = "sub-caf0e1ef30c9712e6385afe24a75375e"
 COST_TARGET = "sub-5dffdbaa2b96e8dc78160aea8f80a7b9"
 JUDGE_TARGET = "sub-6211e8d46819c34df3418ded36f788ef"
 PREFIX = f"{ROUND_ID}:score-recovery240:"
+RECONCILIATIONS = (
+    (315826, CAF, f"{ROUND_ID}:{CAF}:1:0:1", 1,
+     "sha256:223335eda1ccf9fcf8b0d4d3a00f85d957cf896611b8c845fea331be83c8c14d"),
+    (331371, COST_TARGET, f"{ROUND_ID}:{COST_TARGET}:2:12:1", 2,
+     "sha256:6bc891aeb6faf7f07d1fe97e3f9cc12e3cac686211097473456b77613a524f2c"),
+    (331374, COST_TARGET, f"{ROUND_ID}:{COST_TARGET}:2:12:1", 2,
+     "sha256:bbeb448fa9f273c0b58b6a82ad8ae7d7154e20a8789d39b596f0f5dcce7bbb76"),
+    (331383, COST_TARGET, f"{ROUND_ID}:{COST_TARGET}:2:12:1", 2,
+     "sha256:070df2985bf72f35fdc6d01c93786769f6fb8f7d976294ddf1fc14fe756d3496"),
+    (331388, COST_TARGET, f"{ROUND_ID}:{COST_TARGET}:2:12:1", 2,
+     "sha256:231f8c7f751019140a87611f800b4cc1fc6256b440aad576ba3d31899310a7da"),
+    (331398, COST_TARGET, f"{ROUND_ID}:{COST_TARGET}:2:12:1", 2,
+     "sha256:83b62e720fd19d4bafa5bab2d2dd09345b591f28e576f4d87c7bab19198894f1"),
+    (331411, COST_TARGET, f"{ROUND_ID}:{COST_TARGET}:2:12:1", 2,
+     "sha256:bf2cd93f1511916c9c2c5967605d058d830c4797f0cdc055d60d29f339749fb1"),
+    (336996, COST_TARGET, f"{ROUND_ID}:{COST_TARGET}:2:10:score:1", 2,
+     "sha256:94484384d8b1dfcb5de6ec34755d9c55abb4ef2cf8fc826e624de541d5d29a93"),
+)
 
 
 @pytest.fixture(scope="module")
@@ -45,7 +63,7 @@ def _migration() -> str:
     )
 
 
-def _prepare(database):
+def _prepare(database, *, reconciliation_count: int = 8):
     connection, store, transport = _seed(database)
     miners = {
         row["submission_id"]: row["miner_hotkey"]
@@ -122,6 +140,30 @@ def _prepare(database):
                     )
         cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER lab_arena_integrity_run_guard")
         cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER lab_arena_runs_terminal")
+        for uncertain_id, sid, run_id, stage, identity in RECONCILIATIONS[
+            :reconciliation_count
+        ]:
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,"
+                "round_id,submission_id,run_id,stage,call_identity,provider,"
+                "operation_id,funding_source,amount_microusd,entry_doc,"
+                "terminal_response) VALUES ('settlement',%s,%s,%s,%s,%s,%s,"
+                "'deepline','deepline.execute','miner_key',0,%s::jsonb,%s::jsonb)",
+                (
+                    miners[sid], ROUND_ID, sid, run_id, stage, identity,
+                    json.dumps({
+                        "deepline_402_history_reconciliation": True,
+                        "reconciled_uncertainty_entry_id": uncertain_id,
+                    }),
+                    json.dumps({
+                        "status": 502,
+                        "call_succeeded": False,
+                        "provider_cost": {"basis": "deepline_authenticated_history_no_charge",
+                                          "units": "0", "unit_name": "credits",
+                                          "operation": "deepline.execute"},
+                    }),
+                ),
+            )
         plan = {"schema_version": "leadpoet.lab_arena.scoring_plan.v1",
                 "round_id": ROUND_ID, "stage": 2,
                 "work_items": sorted(work_items, key=lambda x: x["scored_run_id"]),
@@ -199,6 +241,26 @@ def test_recovery_rejects_unreconciled_target_cost(database):
             with connection.cursor() as cursor:
                 cursor.execute(_migration())
         connection.rollback()
+    finally:
+        connection.close()
+        transport.close()
+
+
+def test_recovery_rejects_one_missing_exact_reconciliation(database):
+    connection, _store, transport = _prepare(database, reconciliation_count=7)
+    try:
+        before = None
+        with connection.cursor() as cursor:
+            before = _row_hash(cursor, "lab_arena_runs", "round_id=%s", (ROUND_ID,))
+        with pytest.raises(connection.Error, match="exact cost reconciliation incomplete"):
+            with connection.cursor() as cursor:
+                cursor.execute(_migration())
+        with connection.cursor() as cursor:
+            cursor.execute("ROLLBACK")
+            assert _row_hash(cursor, "lab_arena_runs", "round_id=%s", (ROUND_ID,)) == before
+            cursor.execute("SELECT count(*) FROM public.lab_arena_runs WHERE run_id LIKE %s",
+                           (PREFIX + "%",))
+            assert cursor.fetchone()[0] == 0
     finally:
         connection.close()
         transport.close()

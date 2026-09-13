@@ -789,6 +789,18 @@ def test_stage_decision_requires_category_specific_proof(
             "successful raise of its $150 million Series D",
             True,
         ),
+        (
+            "series a",
+            "today emerged from stealth with $56 million in Series A financing",
+            True,
+        ),
+        ("series a", "It never emerged from stealth with Series A financing.", False),
+        ("series a", "It emerged from stealth with plans for Series A financing.", False),
+        ("series a", "It emerged from stealth with Series A financing expected to close.", False),
+        ("series a", "It emerged from stealth with Series A financing that was cancelled.", False),
+        ("series a", "Formerly, it emerged from stealth with Series A financing.", False),
+        ("series a", "It emerged from stealth with Series A financing, then closed Series B.", False),
+        ("series b", "It emerged from stealth with $56 million in Series A financing.", False),
         ("series c+", "The latest funding round was not a Series D.", False),
         ("series c+", "The planned latest funding round was a Series D.", False),
         (
@@ -834,6 +846,62 @@ def test_series_stage_statements_require_current_completed_proof(
     expected,
 ):
     assert _stage_quote_supports_observation(observed, quote) is expected
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix", "expected"),
+    [
+        ("", "", True),
+        ("Not ", "", False),
+        ("", " of a minority stake", False),
+        ("", " that was cancelled", False),
+        ("", " planned for next month", False),
+        ("Formerly, ", "", False),
+        ("Previously, ", "", False),
+        ("Once, ", "", False),
+        ("", ", then sold its investment", False),
+    ],
+)
+def test_completed_private_equity_acquisition_keeps_control_guards(prefix, suffix, expected):
+    quote = (
+        prefix + "An affiliate of Peak Rock, a private equity firm, announced today that "
+        "it has completed the previously announced acquisition" + suffix
+    )
+    assert _stage_quote_supports_observation("private equity", quote) is expected
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "The private equity firm advised Acme after Acme completed the acquisition of Beta.",
+        "The private equity firm invested in Alpha while Acme completed the acquisition of Beta.",
+        "The private equity firm reported that public company Acme completed the acquisition of Beta.",
+        "An affiliate of Acme, an advisor to a private equity firm, announced that it has completed the acquisition.",
+        "An affiliate of Peak Rock, a private equity firm, announced that Acme has completed the acquisition.",
+        "An affiliate of Peak Rock, a private equity firm, announced that it has completed a review of the acquisition.",
+    ],
+)
+def test_completed_acquisition_must_belong_to_private_equity_affiliate(quote):
+    assert _stage_quote_supports_observation("private equity", quote) is False
+
+
+@pytest.mark.parametrize(
+    ("quote", "expected"),
+    [
+        ("As a listed company on the Dubai Financial Market (since 2005)", True),
+        ("Listed on the Dubai Financial Market", True),
+        ("A listed company on the London Stock Exchange", True),
+        ("Not a listed company on the Dubai Financial Market", False),
+        ("Formerly a listed company on the Dubai Financial Market", False),
+        ("Plans to be a listed company on the Dubai Financial Market", False),
+        ("A listed company on the Dubai Financial Market, then delisted", False),
+        ("A listed company on the Dubai Financial Market, then taken private", False),
+        ("A listed company on the Dubai business directory", False),
+        ("A listed company on the market", False),
+    ],
+)
+def test_exchange_listing_statement_preserves_current_public_stage_guards(quote, expected):
+    assert _stage_quote_supports_observation("public", quote) is expected
 
 
 @pytest.mark.parametrize(

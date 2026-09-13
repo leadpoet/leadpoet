@@ -496,6 +496,11 @@ def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
             rf"\bsuccessful\s+raise\b.{{0,60}}\b{label}\b",
             re.I,
         ),
+        re.compile(
+            rf"\bemerged\s+from\s+stealth(?:\s+mode)?\s+with\b"
+            rf".{{0,60}}\b{label}\s+(?:financing|funding)\b",
+            re.I,
+        ),
     )
 
 
@@ -529,9 +534,10 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:listed|traded)\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
+        r"\b(?:listed(?:\s+company)?|traded)\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
         r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|"
-        r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange)\b",
+        r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange|"
+        r"dubai\s+financial\s+market)\b",
         re.I,
     ),
     re.compile(
@@ -566,6 +572,13 @@ _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS = (
         rf"\b{_PRIVATE_EQUITY_LABEL}\b.{{0,100}}?\b(?:acquired|owns?|"
         r"majority[- ]owned|controls?|controlling\s+owner|took\s+.{0,30}\s+private|"
         r"majority\s+stake|controlling\s+stake)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:an?\s+)?affiliate\s+of\s+[^,;.!?\n]{1,100},\s+"
+        r"(?:(?:a|an|the|leading|global|middle[- ]market)\s+){0,5}"
+        rf"{_PRIVATE_EQUITY_LABEL}\s*,?\s+announced\s+(?:today\s+)?that\s+it\s+has\s+completed"
+        r"\s+(?:(?:the|its|an?)\s+)?(?:previously\s+announced\s+)?acquisition\b",
         re.I,
     ),
 )
@@ -641,9 +654,17 @@ def _has_affirmed_stage_proof(
                 )
             ):
                 continue
+            # A completed, previously announced acquisition is current proof;
+            # "previously" describes its announcement, not former ownership.
+            historical_proof = re.sub(
+                r"\b(completed\s+(?:(?:the|its|an?)\s+)?)previously\s+announced\s+(acquisition)\b",
+                r"\1\2",
+                match.group(0),
+                flags=re.I,
+            )
             if reject_historical and (
                 _STAGE_PROOF_HISTORICAL_RE.search(prefix)
-                or _STAGE_PROOF_HISTORICAL_RE.search(match.group(0))
+                or _STAGE_PROOF_HISTORICAL_RE.search(historical_proof)
             ):
                 continue
             if _STAGE_PROOF_FAILED_EVENT_RE.search(suffix):

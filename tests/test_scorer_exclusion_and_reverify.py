@@ -17,6 +17,7 @@ from qualification.scoring.lead_scorer import (
     _reverify_decision,
     _run_company_binary_fit_checks,
     _run_competition_binary_fit_checks,
+    _stage_quote_supports_observation,
     _verify_company_fit,
 )
 from qualification.scoring.competition import (
@@ -773,6 +774,46 @@ def test_stage_decision_requires_category_specific_proof(
     )
 
     assert result.details["dimension_decisions"]["stage"] == expected
+
+
+@pytest.mark.parametrize(
+    ("observed", "quote", "expected"),
+    [
+        (
+            "series c+",
+            "latest funding round was a Series D, which took place in November 2025",
+            True,
+        ),
+        (
+            "series c+",
+            "successful raise of its $150 million Series D",
+            True,
+        ),
+        ("series c+", "The latest funding round was not a Series D.", False),
+        ("series c+", "The planned latest funding round was a Series D.", False),
+        (
+            "series c+",
+            "The successful raise of its $150 million Series D was cancelled.",
+            False,
+        ),
+        (
+            "series c+",
+            "Formerly, the latest funding round was a Series D.",
+            False,
+        ),
+        (
+            "series b",
+            "The latest funding round was a Series B. Acme later completed a Series C.",
+            False,
+        ),
+    ],
+)
+def test_series_stage_statements_require_current_completed_proof(
+    observed,
+    quote,
+    expected,
+):
+    assert _stage_quote_supports_observation(observed, quote) is expected
 
 
 @pytest.mark.parametrize(

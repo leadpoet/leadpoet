@@ -443,7 +443,8 @@ _STAGE_PROOF_PROSPECTIVE_EVENT_RE = re.compile(
     re.I,
 )
 _STAGE_PROOF_COMPLETED_EVENT_RE = re.compile(
-    r"\b(?:raised|closed|secured|completed|received)\b",
+    r"\b(?:raised|closed|secured|completed|received|successful\s+raise|"
+    r"(?:latest|most\s+recent)\s+(?:funding\s+)?round\s+(?:was|is))\b",
     re.I,
 )
 _CALENDAR_MAY_LEFT_RE = re.compile(r"\b(?:in|on|since|during|of)\s*$", re.I)
@@ -483,6 +484,22 @@ def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
     )
 
 
+def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
+    """Match explicit completed-round statements without inferring from nouns."""
+
+    return (
+        re.compile(
+            rf"\b(?:latest|most\s+recent)\s+(?:funding\s+)?round\s+"
+            rf"(?:was|is)\b.{{0,30}}\b{label}\b",
+            re.I,
+        ),
+        re.compile(
+            rf"\bsuccessful\s+raise\b.{{0,60}}\b{label}\b",
+            re.I,
+        ),
+    )
+
+
 _VENTURE_STAGE_PROOF_PATTERNS = {
     "seed": (
         re.compile(
@@ -494,6 +511,11 @@ _VENTURE_STAGE_PROOF_PATTERNS = {
     "series a": _series_stage_proof_patterns(r"series\s+a"),
     "series b": _series_stage_proof_patterns(r"series\s+b"),
     "series c+": _series_stage_proof_patterns(r"series\s+[c-z]"),
+}
+_VENTURE_STAGE_STATEMENT_PATTERNS = {
+    "series a": _series_stage_statement_patterns(r"series\s+a"),
+    "series b": _series_stage_statement_patterns(r"series\s+b"),
+    "series c+": _series_stage_statement_patterns(r"series\s+[c-z]"),
 }
 _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+traded\b", re.I),
@@ -685,6 +707,11 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
         stage
         for stage, patterns in _VENTURE_STAGE_PROOF_PATTERNS.items()
         if _has_affirmed_stage_proof(text, patterns)
+        or _has_affirmed_stage_proof(
+            text,
+            _VENTURE_STAGE_STATEMENT_PATTERNS.get(stage, ()),
+            reject_historical=True,
+        )
     ]
     if not proven_venture_stages:
         return False

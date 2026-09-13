@@ -30,11 +30,18 @@ stop the round. This includes protected production and Supabase inspection,
 narrow tested source changes, pushes to main, exact committed migrations if
 needed, canonical gateway/normal-validator restarts, and starting and monitoring
 the new day's public-baseline rebenchmark through the current Arena workflow.
-Use the overnight operational permissions without routine approval. Preserve
-identity, intent/contact verification, budgets, accepted results, publication,
-promotion, rewards, weights and concurrent work. Do not restore retired private
-Research Lab or Nitro workflows. This scope expires when the fix is live and
-the new rebenchmark has started and is progressing with company failures isolated.
+Use the overnight operational permissions without routine approval. On the same
+date the user clarified that recovery targets the existing cancelled
+arena-2026-09-13 round for September 12 submissions. Resume its incomplete
+scoring with the fixed verifier through an exact committed recovery migration
+if required. Preserve its submissions, archives, credential references,
+assignments, completed outputs, scores and costs. Keep September 13 submissions
+in the separate September 14 round with its existing submission window.
+Preserve identity, intent/contact verification, budgets, publication, promotion,
+rewards, weights and concurrent work. Do not restore retired private Research
+Lab or Nitro workflows. This scope expires when the fix is live and the
+September 13 evaluation has resumed and is progressing with company failures
+isolated.
 
 ## Scoped production authorization: Arena validator pickup root cause
 

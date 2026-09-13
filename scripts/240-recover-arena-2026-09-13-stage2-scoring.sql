@@ -170,7 +170,7 @@ BEGIN
     INTO v_accepted_hash FROM public.lab_arena_runs x WHERE round_id=v_round_id AND status='accepted';
   SELECT pg_catalog.md5(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY run_id))
     INTO v_execute_hash FROM public.lab_arena_runs x WHERE round_id=v_round_id AND kind='execute';
-  SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY entry_id),''))
+  SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.md5(pg_catalog.to_jsonb(x)::TEXT),'|' ORDER BY entry_id),''))
     INTO v_ledger_hash FROM public.lab_arena_ledger x WHERE round_id=v_round_id;
   SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY cache_key),''))
     INTO v_cache_hash FROM public.lab_arena_judgment_cache x WHERE scope_doc->>'round_id'=v_round_id;
@@ -263,7 +263,7 @@ BEGIN
          FROM public.lab_arena_runs x WHERE round_id=v_round_id AND status='accepted') IS DISTINCT FROM v_accepted_hash
      OR (SELECT pg_catalog.md5(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY run_id))
          FROM public.lab_arena_runs x WHERE round_id=v_round_id AND kind='execute') IS DISTINCT FROM v_execute_hash
-     OR (SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY entry_id),''))
+     OR (SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.md5(pg_catalog.to_jsonb(x)::TEXT),'|' ORDER BY entry_id),''))
          FROM public.lab_arena_ledger x WHERE round_id=v_round_id) IS DISTINCT FROM v_ledger_hash
      OR (SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.to_jsonb(x)::TEXT,'|' ORDER BY cache_key),''))
          FROM public.lab_arena_judgment_cache x WHERE scope_doc->>'round_id'=v_round_id) IS DISTINCT FROM v_cache_hash

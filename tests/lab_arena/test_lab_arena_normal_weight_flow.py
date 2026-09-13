@@ -1,4 +1,4 @@
-"""One executable proof from Arena scoring through three normal-validator outcomes."""
+"""One executable proof from Arena scoring through normal-validator outcomes."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from lab_arena.local_weight_signer import LocalArenaWeightSigner
 from lab_arena.store import ArenaStoreError
 from lab_arena.promotion import GitPromoter
 from lab_arena.validator import (
-    ArenaParticipationRequired,
     ArenaPublicApi,
     ArenaWeightOrchestrator,
     ArenaWeightPaths,
@@ -451,7 +450,7 @@ def _public_api(key, clock):
     ((30, 32000, 32001, False), (31, 32002, 32004, True)),
     ids=("new-scoring-basis", "no-new-miner-or-scoring"),
 )
-def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
+def test_scoring_reward_normal_validators_restart_and_chain_readback(
     integrated_database, tmp_path, monkeypatch,
     round_day, round_epoch, reward_epoch, uses_prior_basis,
 ):
@@ -474,12 +473,16 @@ def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
     if not uses_prior_basis:
         with TestClient(create_app(harness.service)) as http, monkeypatch.context() as patcher:
             patcher.setattr(urllib.request, "urlopen", _test_client_urlopen(http))
-            with pytest.raises(
-                ArenaParticipationRequired, match="validator_participation_required"
-            ):
-                _public_api(working_key, harness.clock).accepted_weight_state(
-                    reward_epoch
-                )
+            patcher.setattr(
+                harness.service.store,
+                "has_recent_participation",
+                lambda *_: (_ for _ in ()).throw(
+                    AssertionError("weight access queried participation")
+                ),
+            )
+            assert _public_api(working_key, harness.clock).accepted_weight_state(
+                reward_epoch
+            ) is None
     participants = _start_round(harness, day=round_day, epoch=round_epoch)
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.advance_until("published", runners=2)
@@ -493,8 +496,7 @@ def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
     harness.service.config.accepted_burn_hotkey = burn
     harness.chain.accepted_weight_epoch_scope = lambda: {"genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03", "epoch": reward_epoch, "valid_from_block": 100, "valid_until_block": 459}
     harness.chain.epoch = reward_epoch
-    # A fresh gateway process must recover participation from PostgreSQL. Its
-    # second signed read must then recover the accepted state from PostgreSQL.
+    # A fresh gateway process must recover the accepted state from PostgreSQL.
     restarted_gateway = harness.build_service()
     restarted_gateway.config.accepted_burn_hotkey = burn
     with TestClient(create_app(restarted_gateway)) as http, monkeypatch.context() as patcher:
@@ -515,12 +517,47 @@ def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
         )
     harness.clock.now = datetime.now(timezone.utc)
 
-    # The same high-stake validator now receives the real signed state after
-    # running accepted jobs through the normal execution/scoring flow.
+    expired_key = Keypair.create_from_uri("//svc-runner-beta")
+    assert restarted_gateway.store.has_recent_participation(
+        "finney", 71, working_key.ss58_address
+    )
+    assert not restarted_gateway.store.has_recent_participation(
+        "finney", 71, expired_key.ss58_address
+    )
+
+    # The high-stake validator receives the signed state after its accepted
+    # jobs. Weight access is separate from the scoring participation record.
     with TestClient(create_app(restarted_gateway)) as http:
-        allowed = http.post("/arena/v1/weight-state", json=_weight_request(working_key, epoch=reward_epoch))
+        allowed = http.post(
+            "/arena/v1/weight-state",
+            json=_weight_request(working_key, epoch=reward_epoch),
+        )
         assert allowed.status_code == 200 and allowed.json()["state"] == state
         assert allowed.headers["cache-control"] == "no-store"
+
+    # Build a historical accepted-job record without changing the production
+    # clock. The participation trigger is disabled only for this fixture write.
+    with connect() as db, db.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_runs DISABLE TRIGGER "
+            "lab_arena_runs_participation"
+        )
+        cursor.execute(
+            "UPDATE public.lab_arena_runs SET participation_accepted_at = "
+            "clock_timestamp() - interval '25 hours' "
+            "WHERE runner_hotkey = %s AND participation_accepted_at IS NOT NULL",
+            (working_key.ss58_address,),
+        )
+        assert cursor.rowcount > 0
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_runs ENABLE TRIGGER "
+            "lab_arena_runs_participation"
+        )
+    restarted_gateway = harness.build_service()
+    restarted_gateway.config.accepted_burn_hotkey = burn
+    assert not restarted_gateway.store.has_recent_participation(
+        "finney", 71, working_key.ss58_address
+    )
 
     profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
     outcomes, vectors = [], []
@@ -618,10 +655,12 @@ def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
             "/arena/v1/rounds/%s" % harness.round_id
         ).json()
         assert "reward_basis" not in public_round
+    no_work_key = Keypair.create_from_uri("//ArenaNormalValidatorNoWork")
     signing_cases = (
-        ("accepted-high-stake", working_key, 100_000),
+        ("expired-accepted-work", working_key, 100_000),
+        ("no-accepted-work", no_work_key, 100_000),
+        ("exact-threshold-no-work", expired_key, 75_000),
         ("below-threshold", Keypair.create_from_uri("//ArenaNormalValidator0"), 1),
-        ("exact-threshold", Keypair.create_from_uri("//ArenaNormalValidator1"), 75_000),
     )
     with TestClient(create_app(restarted_gateway)) as http, monkeypatch.context() as patcher:
         patcher.setattr(urllib.request, "urlopen", _test_client_urlopen(http))
@@ -635,10 +674,9 @@ def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
                     restarted_gateway._benchmark_validator_uid(
                         harness.chain.metagraph(), key.ss58_address
                     )
-            if key.ss58_address != working_key.ss58_address:
-                assert not restarted_gateway.store.has_recent_participation(
-                    "finney", 71, key.ss58_address
-                )
+            assert not restarted_gateway.store.has_recent_participation(
+                "finney", 71, key.ss58_address
+            )
             api = _public_api(key, harness.clock)
             assert api.accepted_weight_state(reward_epoch) == state
             hotkeys = [burn]
@@ -695,9 +733,9 @@ def test_scoring_reward_three_normal_validators_restart_and_chain_readback(
             source.revealed = True
             assert restarted.run_once(reward_epoch) == "finalized"
             outcomes.append(outcome_path.read_bytes())
-    assert len(harness.service.public_chain_outcomes(reward_epoch)["outcomes"]) == 3
-    assert len(set(outcomes)) == 3
-    assert vectors[0] == vectors[1] == vectors[2]
+    assert len(harness.service.public_chain_outcomes(reward_epoch)["outcomes"]) == 4
+    assert len(set(outcomes)) == 4
+    assert all(vector == vectors[0] for vector in vectors)
     first_report = harness.service.public_chain_outcomes(reward_epoch)["outcomes"][0]
     assert first_report["finalized_block_hash"] == "4" * 64
     assert first_report["extrinsic_hash"].startswith("0x")

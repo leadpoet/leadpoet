@@ -67,10 +67,9 @@ The gate must prove:
 - Delayed outcome reports and older epoch recovery do not change rewards or
   prevent the current epoch from progressing.
 - Scoring setup/cycle failures and claim denials do not stop the weight loop.
-  Above 75,000 effective stake, new weight state requires an original accepted
-  job within 24 hours; no idle exemption applies. Score jobs made entirely from
-  company-judgment cache hits earn no credit. Denial pauses new signing;
-  signed recovery and pending reveals remain available. New
+  Weight access must not depend on recent accepted work at any stake level,
+  including empty queues and unavailable participation records. Signed recovery
+  and pending reveals remain available. New
   mainnet execute/score claims use the shared gateway scoring rule: registration, a
   validator permit, and effective stake >=75,000, regardless of activity or
   runner lists. Testnet retains its active-or-permitted policy without the
@@ -78,10 +77,9 @@ The gate must prove:
   Capacity counts eligible planned runners with the same shared rule.
 - Weight-state and signed reward-basis retrieval require fresh, scope-bound
   local-hotkey authentication plus finalized subnet registration and a validator
-  permit on every network. The participation gate uses that same finalized
-  snapshot, applies strictly above 75,000, and checks the database before every
-  delivery, including already-published state. Missing chain/database data
-  fails closed. Exactly 75,000 and below retain permit-based access.
+  permit on every network. Access uses that same finalized snapshot and remains
+  permit-based below, at, and above 75,000. Missing chain or accepted-state data
+  fails closed; participation data is not a weight dependency.
   Unauthenticated, forged, wrong-scope, stale, unregistered, and non-permitted
   requests are denied before state lookup/publication. Public round responses
   must not expose the signed reward basis as an alternate route. Mainnet roles

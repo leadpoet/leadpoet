@@ -29,8 +29,8 @@ The Arena minimum applies when issuing a lease. A stake decrease alone does not
 reject an already-issued job's source/image access, provider calls, or result.
 Existing identity and lease protections still apply. Below-threshold claims
 for new work return `403 runner_stake_below_minimum`; the runner idles and keeps weights
-running. At or below 75,000, no benchmark work is required to retrieve the signed
-weight state. Above 75,000, the recent accepted-work rule below applies.
+running. No recent benchmark work is required to retrieve the signed weight
+state, regardless of stake.
 Subnet registration and a validator permit are required for retrieval at every
 stake level. Existing signed transactions recover independently of new work.
 An exact signed-request retry can recover its already-issued lease after a
@@ -63,9 +63,8 @@ credentials are separate and remain in the gateway broker.
 
 Weights start independently, before scoring setup. An empty queue, missing
 runsc, scoring setup error, or scoring-loop error causes scoring to wait/retry,
-without stopping the weight loop. Above 75,000 effective stake, new weight
-preparation still requires accepted work within the last 24 hours. Scoring
-works again when its dependency recovers.
+without stopping the weight loop. New weight preparation does not depend on
+recent scoring work. Scoring works again when its dependency recovers.
 Known host failures include a safe reason and the configured local path in
 logs. Provider exception text and runtime subprocess output are not logged.
 `scoring loop resumed` means polling recovered; an accepted completion is still
@@ -77,13 +76,10 @@ The validator signs its weight-state request with its own local hotkey. The
 gateway verifies the request signature, freshness, action, epoch, and chain
 scope, then checks registration and the validator permit in its finalized
 metagraph. Anonymous requests and hotkeys without permits cannot retrieve the
-signed weight state, which includes its signed reward basis. Below-threshold
-permitted validators, including exactly 75,000 effective stake, can retrieve
-this state without recent work. Validators above 75,000 need an original
-accepted execute or score job in the same network/subnet within the last 24
-hours. The database records acceptance time once. Claims, failures, replays,
-cached results, and diagnostic commands do not extend it. There is no idle
-exemption. The old public reward-basis routes are removed, and public round
+signed weight state, which includes its signed reward basis. All permitted
+validators can retrieve this state without recent work, at any stake level.
+Weight access does not query Arena participation records. The old public
+reward-basis routes are removed, and public round
 responses no longer include the signed reward basis. The signing public key
 and normal public competition results
 remain public; this access rule does not make revealed on-chain weights private.
@@ -95,19 +91,14 @@ from finalized UID ownership and signs the time-locked commitment with its own
 local hotkey. The existing runtime, nonce, mortal transaction, and exact
 transaction checks still apply.
 
-When recent participation is missing, the gateway returns
-`403 validator_participation_required` and the validator reports
-`blocked_on_participation`. Its scoring loop continues; after an accepted job,
-the next weight poll resumes automatically. Database or finalized-chain failures
-return a retryable `503`, never a participation exemption. One accepted job
-allows multiple weight epochs during the 24-hour window. The gateway publishes
+The gateway publishes
 each epoch's state from the governing reward basis, even when no new model has
 been scored. A missing, invalid, conflicting, or expired accepted state stops that
 submission. It never becomes an invented burn-only state.
 
 Signed bytes are persisted before broadcast. Restarts and uncertain results
 reuse those exact bytes. A fresh attempt requires proof of expiry, absence of
-inclusion, an unchanged nonce, and a successful participation-gated state read. Earlier reveals and report retries do not
+inclusion, an unchanged nonce, and a successful authenticated state read. Earlier reveals and report retries do not
 block the current epoch. Success requires finalized commitment/reveal readback,
 `LastUpdate`, the exact revealed vector, and unchanged rewarded UID ownership.
 Commitment inclusion alone is not success.
@@ -388,28 +379,12 @@ Report controlled tests, deployment readiness, and live finalized outcomes
 separately. Do not claim Yuma or Rizzo is working solely because the primary is
 working; each operator must run the updated process with their own wallet.
 
-## Participation rollout
+## Removing the recent-work weight gate
 
-Apply `scripts/216-lab-arena-validator-participation.sql` after the
-existing Arena migrations through 215. It is additive and can run while the
-previous gateway version is live. Let it collect original acceptance timestamps
-for 24 hours before activating this gateway change. Do not backfill from
-`updated_at` or historical results: those are not trustworthy completion times.
-The gateway schema preflight requires the new column and lookup RPC.
-
-Before activating participation enforcement, also apply
-`scripts/221-lab-arena-participation-original-judgments.sql` after migration 217.
-It excludes score jobs made entirely from accepted company-judgment cache hits.
-A score job that supplies at least one new judgment can still count. Existing
-acceptance timestamps and scoring results are not rewritten.
-The existing gateway schema preflight requires this migration before restart.
-
-Ensure validators can claim enough jobs before activation. This minimum-work
-policy keeps the existing scheduler; it does not guarantee a job to every
-validator. With no accepted job for 24 hours, access stops even on an empty
-queue. Applying the migration and new gateway together immediately blocks
-above-threshold validators until they complete a fresh job.
-
-The rule controls gateway delivery. It does not prevent operators sharing
-weights or submitting directly through a custom chain client. Miner rewards,
-weight vectors, existing wallets, and saved signed transactions are unchanged.
+The gateway no longer uses the 24-hour participation lookup to authorize weight
+delivery. This correction needs no database migration or validator configuration
+change. Existing acceptance timestamps, lookup functions, and schema checks are
+retained without rewriting job or scoring data. Restart the gateway at the fixed
+commit; validators retry weight retrieval through their existing normal loop.
+Scoring eligibility, miner rewards, weight vectors, wallets, and saved signed
+transactions are unchanged.

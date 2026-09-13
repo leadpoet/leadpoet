@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: remove recent-work weight gate
+
+On 2026-09-12 the user explicitly authorized removal of the 24-hour Arena
+participation requirement from gateway weight delivery. This supersedes the
+PR194 weight-access policy below. It covers protected production inspection,
+narrow tested code changes, push to main, canonical gateway/normal-validator
+restarts, and live authenticated weight retrieval and finalized submission
+verification through the overnight skills. Preserve validator permits, job
+assignment, scoring eligibility, stakeweight, signed-state verification,
+commit/reveal, retries, recovery, submission data, and concurrent work. Do not
+change model assignment or restore legacy machinery. This scope expires after
+the rule is removed and live weight submission is verified.
+
 ## Scoped production authorization: successful-call competition cost
 
 On 2026-09-12 the user authorized the agreed successful-call cost eligibility

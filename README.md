@@ -189,11 +189,9 @@ reimbursements, legacy champion obligations, and SOURCE_ADD are retired.
 
 Registered validators with a permit and at least 75,000 effective subnet stake
 can receive new Arena scoring jobs. Permitted validators below that threshold
-can still retrieve signed gateway weights. Above 75,000 effective stake, the
-validator must have an original accepted execute or score job within the last
-24 hours to retrieve weight state. Exactly 75,000 remains exempt from this
-participation gate. Failed jobs, claims, diagnostic checks, and cached scoring
-results do not count. There is no exemption when the queue is empty.
+can still retrieve signed gateway weights. Recent Arena work is not required
+at any stake level. Validators can retrieve weights when no jobs are available
+or their scoring process is unavailable.
 Weight retrieval requires a local-hotkey signed request; miners without a
 validator permit and anonymous callers cannot retrieve the signed weight state.
 
@@ -202,7 +200,7 @@ returns scores through the competition API, and independently derives weights
 from the signed accepted reward state and finalized chain ownership. Each
 validator signs with its own local Bittensor hotkey, preserving the canonical
 commit/reveal and exact transaction checks. Scoring and weights use separate
-loops; participation denial pauses new weight preparation while jobs continue.
+loops; scoring failures do not stop weight submission.
 Already-signed transaction recovery and pending reveals continue. Chain outcomes are recorded separately. No Nitro enclave or KMS
 provisioning is required for validators, and there is no audit-validator role.
 

@@ -1,4 +1,4 @@
-"""Recent accepted work gates authenticated weight-state delivery."""
+"""Weight access remains permit-based, independent of recent Arena work."""
 
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -38,73 +38,52 @@ def weight_service(*, stake=100_000, eligible=False, network="finney"):
 @pytest.mark.parametrize("network", ["finney", "test"])
 @pytest.mark.parametrize("stake", [0, 74_999.99, 75_000, 75_000.01, 100_000])
 @pytest.mark.parametrize("eligible", [False, True])
-def test_threshold_checks_each_delivery_before_cached_state(network, stake, eligible):
+def test_permitted_validators_receive_state_without_recent_work(network, stake, eligible):
     service, _ = weight_service(stake=stake, eligible=eligible, network=network)
-    if stake > 75_000 and not eligible:
-        with pytest.raises(ServiceError) as caught:
-            service.handle_weight_state({})
-        assert (caught.value.status, caught.value.code) == (
-            403,
-            "validator_participation_required",
-        )
-        service.public_weight_state.assert_not_called()
-    else:
-        assert service.handle_weight_state({})["state"] == {"epoch": 123}
-    assert service.store.has_recent_participation.call_count == (
-        1 if stake > 75_000 else 0
-    )
+    assert service.handle_weight_state({})["state"] == {"epoch": 123}
+    service.store.has_recent_participation.assert_not_called()
     service.config.chain.metagraph.assert_called_once_with(finalized=True)
-    if stake > 75_000:
-        service.store.has_recent_participation.assert_called_once_with(
-            network, 71, "validator"
-        )
-        service.store.has_recent_participation.return_value = False
-        service.public_weight_state.reset_mock()
-        with pytest.raises(ServiceError, match="validator_participation_required"):
-            service.handle_weight_state({})
-        service.public_weight_state.assert_not_called()
+    service.store.has_recent_participation.return_value = False
+    assert service.handle_weight_state({})["state"] == {"epoch": 123}
+    service.store.has_recent_participation.assert_not_called()
 
 
 @pytest.mark.parametrize(
     "stake", [None, True, -1, float("nan"), float("inf"), "100000"]
 )
-def test_invalid_stake_never_exempts(stake):
+def test_weight_access_does_not_depend_on_scoring_stake_data(stake):
     service, _ = weight_service(stake=stake, eligible=True)
-    with pytest.raises(ServiceError) as caught:
-        service.handle_weight_state({})
-    assert (caught.value.status, caught.value.code) == (
-        503,
-        "validator_snapshot_unavailable",
-    )
+    assert service.handle_weight_state({})["lookup_ok"] is True
     service.store.has_recent_participation.assert_not_called()
-    service.public_weight_state.assert_not_called()
 
 
-def test_missing_stake_or_bad_length_never_exempts():
+def test_missing_stake_does_not_block_permitted_weight_access():
     service, snapshot = weight_service(eligible=True)
     del snapshot.S
-    with pytest.raises(ServiceError, match="validator_snapshot_unavailable"):
-        service.handle_weight_state({})
+    assert service.handle_weight_state({})["lookup_ok"] is True
     snapshot.stake = (100_000,)
     assert service.handle_weight_state({})["lookup_ok"] is True
     snapshot.stake = ()
-    with pytest.raises(ServiceError, match="validator_snapshot_unavailable"):
-        service.handle_weight_state({})
+    assert service.handle_weight_state({})["lookup_ok"] is True
 
 
-def test_database_failure_is_retryable_without_returning_state():
+def test_participation_database_failure_does_not_block_weight_state():
     service, _ = weight_service(eligible=True)
     service.store.has_recent_participation.side_effect = ArenaStoreError("private data")
-    with pytest.raises(ServiceError) as caught:
+    assert service.handle_weight_state({})["lookup_ok"] is True
+    service.store.has_recent_participation.assert_not_called()
+
+
+def test_chain_failure_still_blocks_weight_state():
+    service, _ = weight_service()
+    service.config.chain.metagraph.side_effect = RuntimeError("private data")
+    with pytest.raises(ServiceError, match="validator_snapshot_unavailable") as caught:
         service.handle_weight_state({})
-    assert (caught.value.status, caught.value.code) == (
-        503,
-        "validator_participation_unavailable",
-    )
+    assert caught.value.status == 503
     service.public_weight_state.assert_not_called()
 
 
-def test_permission_and_scope_checks_precede_participation():
+def test_permission_and_scope_checks_still_precede_state_delivery():
     service, snapshot = weight_service(eligible=True)
     snapshot.validator_permit = (False,)
     with pytest.raises(ServiceError, match="runner_validator_required"):

@@ -1467,6 +1467,7 @@ async def _refresh_linkedin_employee_size_observation(
     """Replace a LinkedIn size observation only after exact identity binding."""
 
     evidence_url = _dimension_web_evidence(verdict, "employee_size")["url"]
+    evidence_slug = ""
     if not is_linkedin_evidence_url(evidence_url):
         direct_decision = _decision_with_web_evidence(
             _decision_from_observed_employee_size(dict(verdict), icp),
@@ -1476,9 +1477,28 @@ async def _refresh_linkedin_employee_size_observation(
             # A fresh repair can replace an unusable LinkedIn citation with
             # complete direct evidence. Do not retain the earlier outcome.
             invocation_cache["refresh_outcome"] = "verified"
-        return dict(verdict)
+            return dict(verdict)
+        anchor_fields = (
+            "normalized_name",
+            "registrable_dns_domain",
+            "linkedin_company_slug",
+        )
+        if not all(
+            isinstance(verified_homepage_identity.get(field), str)
+            and str(verified_homepage_identity[field]).strip()
+            for field in anchor_fields
+        ):
+            return dict(verdict)
+        anchor_profile_url = (
+            "https://www.linkedin.com/company/"
+            + str(verified_homepage_identity["linkedin_company_slug"]).strip()
+        )
+        evidence_slug = linkedin_company_page_slug(anchor_profile_url)
+        if not evidence_slug:
+            return dict(verdict)
     unavailable = _without_employee_size_observation(verdict)
-    evidence_slug = linkedin_company_page_slug(evidence_url)
+    if not evidence_slug:
+        evidence_slug = linkedin_company_page_slug(evidence_url)
     if not evidence_slug:
         if invocation_cache.get("refresh_outcome") != "retryable_failure":
             invocation_cache["refresh_outcome"] = (

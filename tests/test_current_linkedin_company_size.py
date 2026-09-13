@@ -1928,6 +1928,89 @@ def test_repair_reuses_successful_refresh_and_non_linkedin_evidence_is_unchanged
     )
 
 
+@pytest.mark.parametrize(
+    "employee_url",
+    ["", "https://acme.example.com/about"],
+)
+def test_verified_homepage_anchor_supplies_missing_size_profile(
+    monkeypatch,
+    employee_url,
+):
+    fetches = []
+
+    async def provider(**_kwargs):
+        verdict = _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url=employee_url,
+        )
+        verdict["employee_size_evidence_quote"] = ""
+        return verdict, ""
+
+    async def fetch(url, **_kwargs):
+        fetches.append(url)
+        return {
+            "employee_count": "11-50",
+            "url": url,
+            "quote": "Company size 11-50 employees",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert result.details["provider_observations"]["observed_employee_count"] == (
+        "11-50"
+    )
+
+
+def test_submitted_profile_cannot_supply_missing_size_profile(monkeypatch):
+    fetches = []
+
+    async def provider(**_kwargs):
+        verdict = _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url="",
+        )
+        verdict["employee_size_evidence_quote"] = ""
+        return verdict, ""
+
+    async def fetch(url, **_kwargs):
+        fetches.append(url)
+        return {
+            "employee_count": "11-50",
+            "url": url,
+            "quote": "Company size 11-50 employees",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert fetches == []
+
+
 def test_submitted_linkedin_url_alone_cannot_authorize_profile_fetch(monkeypatch):
     verdict = _verdict()
     verdict["observed_company_linkedin"] = ""

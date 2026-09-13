@@ -81,6 +81,30 @@ def breakdown(score: float, reason: str = "") -> dict:
     return row
 
 
+def test_failure_reason_projection_drops_arbitrary_values_without_failing():
+    expected = scoring.build_scoring_failure("run-reason", "judge_error")
+    assert scoring.build_scoring_failure(
+        "run-reason",
+        "judge_error",
+        reason="https://provider.example/?api_key=secret",
+    ) == expected
+    for unsafe in (None, [], {}, "api_key=secret"):
+        assert scoring.validate_scoring_output_document(
+            {**expected, "reason": unsafe}
+        ) == expected
+
+
+def test_successful_scoring_artifact_shape_is_unchanged():
+    expected = {
+        "schema_version": scoring.SCORING_OUTPUT_SCHEMA_VERSION,
+        "scored_run_id": "run-success",
+        "breakdowns": [{"final_score": 71.0, "failure_reason": ""}],
+    }
+    assert scoring.build_scoring_output(
+        "run-success", expected["breakdowns"]
+    ) == expected
+
+
 def fake_scorer(counter, delay=0.0, fail_first=0):
     calls = {"n": 0}
 
@@ -792,19 +816,29 @@ def test_retry_keeps_retained_results_across_batch_exception():
 def test_retry_exhaustion_never_fabricates_zero_for_unresolved_company():
     companies = [scored_company(0), scored_company(1)]
     unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    unavailable["verifier_gate_receipts"] = [
+        {
+            "gate": "company_fit",
+            "decision": "unavailable",
+            "failure_reason_code": "source_blocked",
+        }
+    ]
     calls = []
 
     def scorer(batch, icp, is_reference_model):
         calls.append([row["company_name"] for row in batch])
         return [breakdown(91.0), unavailable] if len(calls) == 1 else [unavailable]
 
-    with pytest.raises(scoring.ScoringError, match="infrastructure failure"):
+    with pytest.raises(
+        scoring.ScoringError, match="infrastructure failure"
+    ) as raised:
         scoring.score_work_item(
             {"scored_run_id": "run-unresolved-exhausted"},
             icp=_ICPS[0],
             companies=companies,
             scorer=scorer,
         )
+    assert raised.value.failure_reason == "source_blocked"
     assert calls == [
         ["Scored Co 0", "Scored Co 1"],
         ["Scored Co 1"],

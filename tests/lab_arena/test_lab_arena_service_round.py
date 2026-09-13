@@ -1604,6 +1604,115 @@ def test_persistent_stage_one_judge_failure_cancels_without_partial_scores(conne
     assert all(run["per_icp_score"] is None for run in execute_runs)
 
 
+def test_blocked_verifier_reason_survives_runner_completion_and_cancellation(
+    connect, tmp_path, monkeypatch
+):
+    import os
+
+    from lab_arena import quality_policy, scorer_entrypoint
+
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["BlockedReason", "BlockedReasonPass"],
+        runners=["alpha"],
+    )
+    participants = _start_round(harness, day=24, epoch=30424)
+    _run_stage_one_to_scoring(harness, participants, runners=1)
+    original_run_icp = harness.sandbox.run_icp
+    scorer_calls = 0
+
+    def run_icp(spec, **kwargs):
+        nonlocal scorer_calls
+        document = json.loads(
+            (spec.input_dir / runtime.INPUT_FILE_NAME).read_text()
+        )
+        companies = list(document.get("companies") or [])
+        blocked = (
+            document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION
+            and companies
+            and str(companies[0].get("company_name") or "").startswith(
+                "BlockedReason Company"
+            )
+            and int(str(document["icp"]["icp_id"]).rsplit("_", 1)[-1]) == 1
+        )
+        if not blocked:
+            return original_run_icp(spec, **kwargs)
+
+        def fixed_scorer(_policy, **_kwargs):
+            def score(batch, icp, _is_reference_model):
+                nonlocal scorer_calls
+                scorer_calls += 1
+                scored, _ = verify.bucket_skip(icp, batch)
+                return [
+                    {
+                        "final_score": 0.0,
+                        "failure_reason": "Company fit unavailable",
+                        "intent_signals_detail": [],
+                        "verifier_gate_receipts": [
+                            {
+                                "gate": "company_fit",
+                                "decision": "unavailable",
+                                "failure_reason_code": "source_blocked",
+                            }
+                        ],
+                    }
+                    for _ in scored
+                ]
+
+            return score
+
+        saved_environment = dict(os.environ)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(scoring, "lab_scorer", fixed_scorer)
+                patch.setattr(quality_policy, "scorer_enabled", lambda _policy: False)
+                output = scorer_entrypoint.score_input(document)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_environment)
+        assert output["reason"] == "source_blocked"
+        return runtime.fake_result(
+            exit_code=0,
+            output_bytes=json.dumps(output).encode(),
+        )
+
+    monkeypatch.setattr(harness.sandbox, "run_icp", run_icp)
+    build_runner = harness.runner
+    monkeypatch.setattr(
+        harness,
+        "runner",
+        lambda index, parallel=4: build_runner(index, parallel=1),
+    )
+    harness.run_stage_with_runners(1)
+    cancelled = harness.service.advance_round(harness.round_id)
+
+    assert cancelled["status"] == "cancelled"
+    round_row = harness.service.store.get_round(harness.round_id)
+    assert round_row["publication_doc"] is None
+    failed_runs = [
+        run
+        for run in harness.service.store.list_runs(
+            harness.round_id, stage=1, kind="score"
+        )
+        if run["status"] == "failed"
+        and run["result_doc"].get("failure_diagnostic", {}).get("reason")
+        == "source_blocked"
+    ]
+    assert len(failed_runs) == contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+    assert scorer_calls == (
+        contracts.MAX_ATTEMPTS_PER_ASSIGNMENT * scoring.MAX_JUDGE_RETRIES
+    )
+    reopened_store = harness.make_store()
+    try:
+        reloaded = [reopened_store.get_run(run["run_id"]) for run in failed_runs]
+    finally:
+        reopened_store.close()
+    assert {
+        run["result_doc"]["failure_diagnostic"]["reason"] for run in reloaded
+    } == {"source_blocked"}
+
+
 def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evidence(
     connect, tmp_path
 ):
@@ -1697,10 +1806,18 @@ def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evi
     second, second_token = claim_for(failing, 1)
     assert second["assignment_id"] == first["assignment_id"]
     assert int(second["attempt"]) == contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+    decisive_failure_result = {
+        "terminal_status": "judge_error",
+        "failure_diagnostic": {
+            "stage": "scorer",
+            "error_class": "judge_error",
+            "reason": "source_blocked",
+        },
+    }
     assert store.complete_attempt(
         run_id=second["run_id"],
         lease_token_hash=hash_lease_token(second_token),
-        result={"terminal_status": "judge_error"},
+        result=decisive_failure_result,
         terminal_cause="judge_error",
         output_ref="",
     )["status"] == "failed"
@@ -1731,6 +1848,14 @@ def test_exhausted_judge_failure_stops_pending_scoring_and_retains_completed_evi
         lease_token_hash=hash_lease_token(post_cancel_token),
     )
     assert post_cancel == {"status": "stage_closed", "round_status": "cancelled"}
+
+    reopened_store = harness.make_store()
+    try:
+        persisted_failure = reopened_store.get_run(second["run_id"])
+    finally:
+        reopened_store.close()
+    assert persisted_failure["status"] == "failed"
+    assert persisted_failure["result_doc"] == decisive_failure_result
 
     accepted_after = store.get_run(accepted["run_id"])
     assert accepted_after["status"] == "accepted"

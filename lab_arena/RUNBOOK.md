@@ -150,6 +150,14 @@ own credential or budget failure retains its existing ineligibility rule.
 Malformed accepted scoring artifacts also cancel the round before scores are
 recorded; they are not company-verification failures.
 
+Failed judge runs can include `result_doc.failure_diagnostic.reason`: one of
+`source_blocked`, `malformed_response`, `provider_error`,
+`unexpected_verifier_error`, or `unknown`. This field contains no provider
+payload, URL, or exception text and does not affect scoring or retries. A reason
+saved with a failed completion remains available through `ArenaStore.get_run`
+after round cancellation and restart. Cancellation does not invent reasons for
+unfinished jobs or backfill historical failures.
+
 ### Provider costs
 
 The model's twenty-ICP sourcing allowance is $50 across all three providers,

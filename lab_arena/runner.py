@@ -1573,6 +1573,13 @@ class AssignmentExecutor:
                             failure_diagnostic = {
                                 "stage": "scorer",
                                 "error_class": terminal,
+                                **(
+                                    {"reason": output_document["reason"]}
+                                    if scoring._validated_failure_reason(
+                                        output_document.get("reason")
+                                    )
+                                    else {}
+                                ),
                             }
                             failure_detail = output_document.get("detail", "")
                             output_document = None
@@ -1624,6 +1631,7 @@ class AssignmentExecutor:
                     failure_diagnostic = {
                         "stage": "provider_call",
                         "error_class": "provider_unavailable",
+                        "reason": "provider_error",
                     }
                     failure_detail = ""
         except AgentDependencyError:

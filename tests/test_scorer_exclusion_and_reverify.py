@@ -1420,6 +1420,69 @@ def test_industry_prompt_keeps_requested_value_in_an_inert_data_boundary(
     assert '"not publicly traded" proves no stage' in prompt
 
 
+@pytest.mark.parametrize(
+    ("body", "expected_verdict", "expected_diagnostic"),
+    [
+        (
+            {"error": "provider unavailable"},
+            None,
+            {"failure_reason": "provider_error"},
+        ),
+        (
+            {
+                "error": "unused metadata",
+                "choices": [{"message": {"content": '{"reason":"usable"}'}}],
+            },
+            {"reason": "usable"},
+            {},
+        ),
+    ],
+)
+def test_reverify_http_200_error_metadata_preserves_existing_usable_choices(
+    monkeypatch, body, expected_verdict, expected_diagnostic
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            return body
+
+    class Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(scorer.aiohttp, "ClientSession", Session)
+    diagnostic = {}
+    verdict, _error = asyncio.run(
+        scorer._request_company_reverify_json(
+            key="test-key",
+            prompt="test",
+            telemetry_purpose="test",
+            diagnostic=diagnostic,
+        )
+    )
+
+    assert verdict == expected_verdict
+    assert diagnostic == expected_diagnostic
+
+
 def test_grounded_supplier_role_resolves_taxonomy_disagreement():
     company = _company().model_copy(
         update={"industry": "Lending and Investments"}
@@ -1851,7 +1914,7 @@ def test_homepage_unavailable_can_be_rescued_by_complete_web_receipt(monkeypatch
         return company_fit_match()
 
     async def homepage(*_args, **_kwargs):
-        return company_fit_unavailable("homepage lacks LinkedIn binding")
+        raise scorer.aiohttp.ClientError("private transport detail")
 
     async def web(*_args, **_kwargs):
         return company_fit_match(
@@ -1902,6 +1965,8 @@ def test_homepage_unavailable_can_be_rescued_by_complete_web_receipt(monkeypatch
     identity = result.details["dimension_evidence"]["identity"]
     assert identity["homepage_identity_decision"] == COMPANY_FIT_UNAVAILABLE
     assert identity["web_identity_decision"] == COMPANY_FIT_MATCH
+    assert "failure_reason_code" not in result.details
+    assert "failure_reason_code" not in identity
 
 
 @pytest.mark.parametrize(
@@ -2010,14 +2075,28 @@ def test_stale_homepage_linkedin_alias_requires_complete_web_rebinding(
     assert result.decision == expected
 
 
-def test_homepage_unavailable_remains_unavailable_without_complete_web_receipt(monkeypatch):
+@pytest.mark.parametrize(
+    ("exception_kind", "expected_reason"),
+    [
+        ("client", "provider_error"),
+        ("timeout", "provider_error"),
+        ("unexpected", "unexpected_verifier_error"),
+    ],
+)
+def test_homepage_exception_reason_survives_only_an_unavailable_final_result(
+    monkeypatch, exception_kind, expected_reason
+):
     import qualification.scoring.lead_scorer as scorer
 
     async def prechecks(*_args, **_kwargs):
         return company_fit_match()
 
     async def homepage(*_args, **_kwargs):
-        return company_fit_unavailable("homepage lacks LinkedIn binding")
+        if exception_kind == "client":
+            raise scorer.aiohttp.ClientError("private transport detail")
+        if exception_kind == "timeout":
+            raise TimeoutError("private timeout detail")
+        raise RuntimeError("private unexpected detail")
 
     async def web(*_args, **_kwargs):
         return company_fit_unavailable("web provider unavailable")
@@ -2039,6 +2118,8 @@ def test_homepage_unavailable_remains_unavailable_without_complete_web_receipt(m
     identity = result.details["dimension_evidence"]["identity"]
     assert identity["homepage_identity_decision"] == COMPANY_FIT_UNAVAILABLE
     assert identity["web_identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_reason_code"] == expected_reason
+    assert "private" not in result.details["failure_reason_code"]
 
 
 def test_public_and_research_lab_use_the_same_shared_verifier(monkeypatch):

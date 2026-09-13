@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -120,6 +121,19 @@ CurrentLinkedInCompanySizeResult = Union[
     CurrentLinkedInCompanySizeEvidence,
     CurrentLinkedInCompanySizeInsufficientEvidence,
 ]
+
+VERIFIER_FAILURE_REASON_KEY = "failure_reason"
+SOURCE_BLOCKED_FAILURE_REASON = "source_blocked"
+MALFORMED_RESPONSE_FAILURE_REASON = "malformed_response"
+PROVIDER_ERROR_FAILURE_REASON = "provider_error"
+UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON = "unexpected_verifier_error"
+
+
+def _set_failure_reason(diagnostic: Optional[dict[str, str]], reason: str) -> None:
+    """Set one fixed diagnostic code without retaining provider data."""
+
+    if diagnostic is not None:
+        diagnostic[VERIFIER_FAILURE_REASON_KEY] = reason
 
 
 def linkedin_company_page_slug(value: Any) -> str:
@@ -247,6 +261,8 @@ def extract_linkedin_company_size(text: Any) -> Optional[dict[str, str]]:
 
 async def fetch_current_linkedin_company_size(
     profile_url: str,
+    *,
+    diagnostic: Optional[dict[str, str]] = None,
 ) -> Optional[CurrentLinkedInCompanySizeResult]:
     """Return exact size proof, explicit no-size content, or retryable failure.
 
@@ -259,6 +275,7 @@ async def fetch_current_linkedin_company_size(
     requested_slug = linkedin_company_page_slug(profile_url)
     key = str(os.environ.get("EXA_API_KEY") or "").strip()
     if not requested_slug or not key:
+        _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
         return None
     payload = {
         "ids": [profile_url],
@@ -279,21 +296,43 @@ async def fetch_current_linkedin_company_size(
                         "current_linkedin_size_unavailable status=%s",
                         response.status,
                     )
+                    _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
                     return None
-                body = await response.json()
+                try:
+                    body = await response.json()
+                except (aiohttp.ContentTypeError, ValueError) as exc:
+                    logger.warning(
+                        "current_linkedin_size_unavailable error=%s",
+                        type(exc).__name__,
+                    )
+                    _set_failure_reason(
+                        diagnostic, MALFORMED_RESPONSE_FAILURE_REASON
+                    )
+                    return None
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        logger.warning(
+            "current_linkedin_size_unavailable error=%s",
+            type(exc).__name__,
+        )
+        _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "current_linkedin_size_unavailable error=%s",
             type(exc).__name__,
         )
+        _set_failure_reason(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
+        return None
+    if not isinstance(body, Mapping):
+        _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         return None
     if (
-        not isinstance(body, Mapping)
-        or body.get("error")
+        body.get("error")
         or body.get("errors")
         or str(body.get("status") or "").casefold()
         in {"error", "failed", "failure"}
     ):
+        _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
         return None
     statuses = body.get("statuses")
     results = body.get("results")
@@ -331,26 +370,43 @@ async def fetch_current_linkedin_company_size(
             for item in statuses
         )
     ):
+        if isinstance(statuses, list) and any(
+            isinstance(item, Mapping)
+            and str(item.get("status") or "").casefold() == "error"
+            for item in statuses
+        ):
+            _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
+        else:
+            _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         return None
     result = results[0] if isinstance(results, list) and len(results) == 1 else None
     if (
         not isinstance(result, Mapping)
-        or result.get("error")
+    ):
+        _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
+        return None
+    if (
+        result.get("error")
         or result.get("errors")
         or str(result.get("status") or "").casefold()
         in {"error", "failed", "failure"}
     ):
+        _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
         return None
     returned_url = result.get("url")
     returned_slug = linkedin_company_page_slug(returned_url)
     if not isinstance(returned_url, str) or not returned_slug:
+        _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         return None
     if returned_slug != requested_slug:
+        _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         return None
     text = result.get("text")
     if not isinstance(text, str):
+        _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         return None
     if _is_linkedin_access_wall(text):
+        _set_failure_reason(diagnostic, SOURCE_BLOCKED_FAILURE_REASON)
         return None
     extracted = extract_linkedin_company_size(text)
     if extracted is None:

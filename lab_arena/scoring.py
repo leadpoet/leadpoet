@@ -48,10 +48,30 @@ POLICY_ENV_BINDINGS = {
 }
 CREDENTIAL_ENV_NAMES = ("OPENROUTER_API_KEY", "QUALIFICATION_OPENROUTER_API_KEY", "SCRAPINGDOG_API_KEY", "EXA_API_KEY")
 MAX_JUDGE_RETRIES = 3
+FAILURE_REASON_CODES = frozenset(
+    {
+        "source_blocked",
+        "malformed_response",
+        "provider_error",
+        "unexpected_verifier_error",
+        "unknown",
+    }
+)
+FAILURE_REASON_DETAIL_KEY = "failure_reason_code"
+
+
+def _validated_failure_reason(value: Any) -> str:
+    """Project arbitrary diagnostic input onto the fixed public enum."""
+
+    return value if isinstance(value, str) and value in FAILURE_REASON_CODES else ""
 
 
 class ScoringError(RuntimeError):
     """Scoring infrastructure failed; the round cancels if the window closes."""
+
+    def __init__(self, message: str, *, failure_reason: str = "") -> None:
+        super().__init__(message)
+        self.failure_reason = _validated_failure_reason(failure_reason)
 
 
 class ScorerPolicyConflict(ScoringError):
@@ -246,6 +266,24 @@ def _run_scorer(scorer: Scorer, companies: Sequence[Mapping[str, Any]], icp: Map
     return [dict(item) for item in result]
 
 
+def _retryable_breakdown_failure_reason(breakdown: Mapping[str, Any]) -> str:
+    """Return only a fixed verifier reason from one retryable breakdown."""
+
+    receipts = breakdown.get("verifier_gate_receipts")
+    if isinstance(receipts, Sequence) and not isinstance(
+        receipts, (str, bytes, bytearray)
+    ):
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping):
+                continue
+            reason = _validated_failure_reason(
+                receipt.get(FAILURE_REASON_DETAIL_KEY)
+            )
+            if reason and reason != "unknown":
+                return reason
+    return "unknown"
+
+
 def _has_unique_scored_company_names(
     companies: Sequence[Mapping[str, Any]], scored_indexes: Sequence[int],
 ) -> bool:
@@ -295,6 +333,7 @@ def score_work_item(
     retained: List[Optional[Dict[str, Any]]] = [None] * len(scored_indexes)
     unresolved = list(range(len(scored_indexes)))
     last_error: Optional[BaseException] = None
+    last_failure_reason = ""
     for attempt in range(max(1, int(max_retries))):
         if retain_terminal and attempt > 0:
             invoked_positions = list(unresolved)
@@ -308,6 +347,9 @@ def score_work_item(
             breakdowns = _run_scorer(scorer, invoked_companies, icp)
         except Exception as exc:  # judge/provider failure: retry unresolved input
             last_error = exc
+            last_failure_reason = _validated_failure_reason(
+                getattr(exc, "failure_reason", "")
+            ) or "unknown"
             continue
         if len(breakdowns) != len(invoked_positions):
             raise ScoringError(
@@ -323,7 +365,14 @@ def score_work_item(
         ]
         if not retain_terminal:
             if failed:
-                last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
+                last_failure_reason = _retryable_breakdown_failure_reason(
+                    failed[0]
+                )
+                last_error = ScoringError(
+                    "judge reported an infrastructure failure: %s"
+                    % str(failed[0].get("failure_reason") or "")[:200],
+                    failure_reason=last_failure_reason,
+                )
                 continue
             return breakdowns
         for relative_index, (position, breakdown) in enumerate(zip(invoked_positions, breakdowns)):
@@ -373,9 +422,22 @@ def score_work_item(
                         verified_indexes.add(index)
             return result
         if failed:
-            last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
+            last_failure_reason = _retryable_breakdown_failure_reason(failed[0])
+            last_error = ScoringError(
+                "judge reported an infrastructure failure: %s"
+                % str(failed[0].get("failure_reason") or "")[:200],
+                failure_reason=last_failure_reason,
+            )
             continue
-    raise ScoringError("run %s could not be scored: %s: %s" % (item.get("scored_run_id"), type(last_error).__name__ if last_error else "unknown", str(last_error or "")[:240]))
+    raise ScoringError(
+        "run %s could not be scored: %s: %s"
+        % (
+            item.get("scored_run_id"),
+            type(last_error).__name__ if last_error else "unknown",
+            str(last_error or "")[:240],
+        ),
+        failure_reason=last_failure_reason,
+    )
 
 
 def score_quality_work_item(
@@ -564,7 +626,13 @@ def build_scoring_output(scored_run_id: str, breakdowns: Sequence[Mapping[str, A
 MAX_FAILURE_DETAIL_CHARS = 300
 
 
-def build_scoring_failure(scored_run_id: str, failure: str, detail: str = "") -> Dict[str, Any]:
+def build_scoring_failure(
+    scored_run_id: str,
+    failure: str,
+    detail: str = "",
+    *,
+    reason: str = "",
+) -> Dict[str, Any]:
     """A failure document; ``detail`` is a bounded operator-facing reason, never a payload."""
 
     if failure not in SCORING_FAILURES:
@@ -573,6 +641,9 @@ def build_scoring_failure(scored_run_id: str, failure: str, detail: str = "") ->
     text = str(detail or "").strip()
     if text:
         document["detail"] = text[:MAX_FAILURE_DETAIL_CHARS]
+    safe_reason = _validated_failure_reason(reason)
+    if safe_reason:
+        document["reason"] = safe_reason
     return document
 
 
@@ -598,14 +669,17 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
     scored_run_id = _require_run_id(document.get("scored_run_id"))
     keys = set(document)
     if "failure" in document:
-        if keys - {"detail"} != {"schema_version", "scored_run_id", "failure"} or document["failure"] not in SCORING_FAILURES:
+        if keys - {"detail", "reason"} != {"schema_version", "scored_run_id", "failure"} or document["failure"] not in SCORING_FAILURES:
             raise ScoringError("scoring failure document is invalid")
         detail = document.get("detail", "")
         if not isinstance(detail, str) or len(detail) > MAX_FAILURE_DETAIL_CHARS:
             raise ScoringError("scoring failure detail is invalid")
+        reason = _validated_failure_reason(document.get("reason"))
         failure_document = {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": scored_run_id, "failure": document["failure"]}
         if detail:
             failure_document["detail"] = detail
+        if reason:
+            failure_document["reason"] = reason
         return failure_document
     if keys - {"company_judgments"} != {"schema_version", "scored_run_id", "breakdowns"} or not isinstance(document["breakdowns"], list):
         raise ScoringError("scoring output document is invalid")

@@ -1471,7 +1471,12 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
         '{"api_key":"opaque-deepline-value","OPENAI_API_KEY":"opaque-env-value",'
         '"password":"opaque-password","private_key":"opaque-private-key"}'
     )
-    output = scoring.build_scoring_failure("r1", "judge_error", detail)
+    output = scoring.build_scoring_failure(
+        "r1",
+        "judge_error",
+        detail,
+        reason="source_blocked",
+    )
     api = FakeApi([scoring_lease(run_id="r9")])
     sandbox = BridgingRuntime(output=output, calls=0)
     (tmp_path / "work").mkdir()
@@ -1514,6 +1519,7 @@ def test_judge_failure_logs_only_bounded_sanitized_detail(tmp_path, capsys):
     assert api.completions[0]["body"]["result"]["failure_diagnostic"] == {
         "stage": "scorer",
         "error_class": "judge_error",
+        "reason": "source_blocked",
     }
 
 
@@ -1707,6 +1713,12 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
     validated = contracts.validate_run_result(api.completions[0]["body"]["result"])
     assert validated["terminal_status"] == "judge_error"
     assert api.provider_frames[0]["operation_id"] == "openrouter.chat"
+    if code == "provider_unavailable":
+        assert validated["failure_diagnostic"] == {
+            "stage": "provider_call",
+            "error_class": "provider_unavailable",
+            "reason": "provider_error",
+        }
 
 
 @pytest.mark.parametrize("scoring_run", [False, True])

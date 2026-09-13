@@ -84,9 +84,34 @@ def test_entrypoint_reports_failures_as_documents_never_crashes(tmp_path, monkey
     monkeypatch.setattr(scoring, "MAX_JUDGE_RETRIES", 1)
     document, _ = scoring_input(tmp_path)
     result = entry.score_input(document)
-    assert {k: v for k, v in result.items() if k != "detail"} == {"schema_version": scoring.SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": document["scored_run_id"], "failure": expected}
+    assert {k: v for k, v in result.items() if k not in {"detail", "reason"}} == {"schema_version": scoring.SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": document["scored_run_id"], "failure": expected}
     assert result["detail"] and len(result["detail"]) <= scoring.MAX_FAILURE_DETAIL_CHARS  # a bounded operator-facing reason
+    assert result["reason"] == "unknown"
     assert scoring.validate_scoring_output_document(result) == result
+
+
+def test_entrypoint_carries_only_allowlisted_failure_reason(tmp_path, monkeypatch):
+    def failing_scorer(_policy):
+        def score(_companies, _icp, _is_reference_model):
+            raise scoring.ScoringError(
+                "secret verifier exception https://provider.example/path",
+                failure_reason="unexpected_verifier_error",
+            )
+
+        return score
+
+    monkeypatch.setattr(scoring, "lab_scorer", failing_scorer)
+    monkeypatch.setattr(scoring, "MAX_JUDGE_RETRIES", 1)
+    result = entry.score_input(scoring_input(tmp_path)[0])
+
+    assert result["reason"] == "unexpected_verifier_error"
+    assert set(result) == {
+        "schema_version",
+        "scored_run_id",
+        "failure",
+        "detail",
+        "reason",
+    }
 
 
 def test_entrypoint_rejects_a_foreign_input_schema(tmp_path):

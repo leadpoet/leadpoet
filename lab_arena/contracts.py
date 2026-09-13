@@ -1095,6 +1095,18 @@ RUN_RESULT_FIELDS = (
                     "provider_unavailable",
                 ),
             ),
+            F(
+                "reason",
+                "str",
+                required=False,
+                choices=(
+                    "source_blocked",
+                    "malformed_response",
+                    "provider_error",
+                    "unexpected_verifier_error",
+                    "unknown",
+                ),
+            ),
         ),
     ),
 )

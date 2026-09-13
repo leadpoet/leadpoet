@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: confirmed unused Supabase cleanup
+
+On 2026-09-12 the user explicitly authorized a full Supabase cleanup audit and
+removal of objects confirmed unused by every active production flow. This
+includes protected gateway credentials, read-only source/state/log inspection,
+narrow tested cleanup migrations, pushes and safe merges, exact committed
+migration application, and live verification through the overnight operational
+procedures without another approval. Preserve `source_add` and all surviving
+SOURCE_ADD historical evidence, active Arena, baseline/rebenchmark, scoring,
+gateway/validator, dashboard/site, rewards and weights, and concurrent work.
+Keep uncertain objects. Do not restart unrelated services or start overnight
+recovery goals. This scope expires when cleanup and verification complete.
+
 ## Scoped production authorization: remove recent-work weight gate
 
 On 2026-09-12 the user explicitly authorized removal of the 24-hour Arena

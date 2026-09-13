@@ -162,6 +162,7 @@ def test_table_is_closed_and_every_operation_uses_host_credentials():
 
 def test_deepline_path_field_is_closed_and_rendered_into_the_outbound_path():
     contact_payloads = {
+        "harvestapi_get_company": {"url": "https://www.linkedin.com/company/example/"},
         "harvestapi_get_profile": {"url": "https://www.linkedin.com/in/jane-doe/", "findEmail": "true"},
         "zerobounce_validate": {"email": "jane@example.com"},
         "bounceban_verify_single": {"email": "jane@example.com"},
@@ -185,6 +186,29 @@ def test_deepline_path_field_is_closed_and_rendered_into_the_outbound_path():
     with pytest.raises(ops.OperationRequestError) as excinfo:
         ops.match_request("POST", D_EXECUTE, b'{"tool": "exa_contents", "payload": {}}', {})
     assert excinfo.value.code == "invalid_body"  # the body may not restate the path field
+
+
+@pytest.mark.parametrize("payload", [
+    {"url": "https://www.linkedin.com/company/example/"},
+    {"universalName": "example"},
+    {"search": "example.com"},
+])
+def test_company_profile_is_a_bounded_single_record_read(payload):
+    operation, normalized = ops.match_request(
+        "POST", "https://code.deepline.com/api/v2/integrations/harvestapi_get_company/execute",
+        json.dumps({"payload": payload}).encode(), {},
+    )
+    assert operation == "deepline.execute"
+    assert normalized == {"tool": "harvestapi_get_company", "payload": payload}
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"url": ""}, {"url": "x", "search": "y"},
+    {"search": ["example.com"]}, {"search": "x" * 2049},
+    {"url": "https://www.linkedin.com/company/example/", "webhook": "https://callback.example"},
+])
+def test_company_profile_rejects_unbounded_or_callback_inputs(payload):
+    reject("deepline.execute", {"tool": "harvestapi_get_company", "payload": payload}, "invalid_field")
 
 
 def test_operations_are_immutable():

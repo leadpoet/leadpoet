@@ -835,6 +835,8 @@ def test_deepline_per_call_billing_settles_and_person_entities_are_dropped():
     call = result.call
     assert call["reserved_microusd"] == 10_000_000 and call["actual_microusd"] == 2_000 and call["outcome"] == "settled"
     assert call["cost_basis"] == "deepline_billing_credits_charged_x_0.10_usd"
+
+
     assert store.calls[call["call_identity"]]["actual"] == 2_000
     terminal = store.calls[call["call_identity"]]["terminal"]
     assert terminal["provider_cost"] == {
@@ -850,6 +852,32 @@ def test_deepline_per_call_billing_settles_and_person_entities_are_dropped():
     assert store.calls[call["call_identity"]]["terminal"]["provider_cost"] == terminal["provider_cost"]
     assert len(transport.sent) == 1
     assert json.loads(transport.sent[0]["body"])["operation"] == "exa_contents"
+
+
+def test_company_profile_uses_existing_billing_and_budget_controls():
+    company = {"name": "Example", "website": "https://example.com",
+               "linkedinUrl": "https://www.linkedin.com/company/example/",
+               "employeeCountRange": {"start": 2, "end": 10}, "employeeCount": 6}
+    envelope = {"job_id": "company-profile-1", "status": "completed",
+                "result": {"data": {"status": 200, "element": company}},
+                "billing": {"credits_charged": 0.03, "cost_usd": 0.003}}
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    parameters = {"tool": "harvestapi_get_company", "payload": {"url": company["linkedinUrl"]}}
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters=parameters,
+                            action_sequence=0, timeout_ms=5000)
+    assert result.status == 200
+    assert json.loads(result.body)["result"]["data"]["element"] == company
+    assert result.call["actual_microusd"] == 3000
+    assert result.call["outcome"] == "settled"
+    assert store.openrouter_capacity == 10_000_000 - 3000
+    assert json.loads(transport.sent[0]["body"])["provider"] == "harvestapi"
+    repeated = broker.execute(CONTEXT, operation_id="deepline.execute", parameters=parameters,
+                              action_sequence=0, timeout_ms=5000)
+    assert repeated.body == result.body and len(transport.sent) == 1
+    store.per_icp_quota = 1
+    refused = broker.execute(CONTEXT, operation_id="deepline.execute", parameters=parameters,
+                             action_sequence=1, timeout_ms=5000)
+    assert refused.status == 402 and len(transport.sent) == 1
 
 
 def test_scrapingdog_credential_goes_in_the_query_and_never_in_the_model_response():

@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: zero-score public baseline repair
+
+On 2026-09-13 the user authorized investigation and repair of the zero-score
+public Pydantic baseline, including comparison with Tyche. Existing overnight
+authority covers protected provider and production inspection, narrow tested
+harness and gateway fixes, pushes, canonical restarts where required, and live
+validation. Promote the repaired public baseline only after real provider and
+scorer checks. Preserve published September 13 results, miner submissions,
+September 14 intake, scoring rules, identity checks, cost limits, rewards,
+weights, sandbox protections, and concurrent work. Do not restore retired
+Research Lab machinery. This scope ends after repair and live verification.
+
 ## Scoped production authorization: fifteen historical evidence tables
 
 On 2026-09-13 the user authorized removal of the exact fifteen historical

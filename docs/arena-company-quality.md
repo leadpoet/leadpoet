@@ -20,6 +20,13 @@ URL. Personal profiles, arbitrary paths, nonstandard ports, and lookalike
 hosts do not qualify. If LinkedIn cannot be fetched, the company website and
 independent evidence can establish the match. A URL alone is not proof.
 
+Agents can also use Deepline `harvestapi_get_company` for one current company
+profile, with exactly one of `url`, `universalName`, or `search`. Check the
+returned website and company identity before using its fields. The listed
+`employeeCountRange` is distinct from the associated-profile `employeeCount`.
+This lookup uses the existing provider quota and billed competition budget;
+it does not change the independent scoring rules.
+
 For U.S. headquarters, `state` must identify the actual headquarters state,
 not the incorporation state or a branch office. Country aliases such as US,
 USA and United States normalize; full state names, USPS abbreviations,

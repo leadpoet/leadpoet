@@ -472,6 +472,7 @@ DEEPLINE_TOOLS = (
     "firecrawl_scrape",
     "free_simple_company_search",
     "generic_http_request",
+    "harvestapi_get_company",
     "harvestapi_get_profile",
     "harvestapi_search_leads",
     "zerobounce_validate",
@@ -496,6 +497,7 @@ DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
     "firecrawl_scrape": "firecrawl",
     "free_simple_company_search": "deepline_native",
     "generic_http_request": "generic_http",
+    "harvestapi_get_company": "harvestapi",
     "harvestapi_get_profile": "harvestapi",
     "harvestapi_search_leads": "harvestapi",
     "zerobounce_validate": "zerobounce",
@@ -1393,6 +1395,7 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
         # These additions are read-only single-record operations. In particular,
         # no caller-controlled webhook URL is needed for synchronous judging.
         contact_fields = {
+            "harvestapi_get_company": {"url", "universalName", "search"},
             "zerobounce_validate": {"email", "ip_address"},
             "bounceban_verify_single": {"email", "mode", "disable_catchall_verify"},
             "bounceban_get_single_status": {"id"},
@@ -1404,7 +1407,10 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
             if any(not isinstance(value, str) or not value or len(value) > 2048 for value in payload.values()):
                 raise OperationRequestError("invalid_field", "$.payload")
             required = "id" if tool == "bounceban_get_single_status" else "email"
-            if tool == "harvestapi_get_profile":
+            if tool == "harvestapi_get_company":
+                if len(payload) != 1:
+                    raise OperationRequestError("invalid_field", "$.payload")
+            elif tool == "harvestapi_get_profile":
                 if not any(payload.get(key) for key in ("url", "publicIdentifier", "profileId")):
                     raise OperationRequestError("invalid_field", "$.payload")
             elif not payload.get(required):

@@ -485,6 +485,7 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
     )
     assert applied == policy["scoring_adapter_version"]
     assert environ["RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE"] == "0" and environ["OPENROUTER_API_KEY"] == credentials["OPENROUTER_API_KEY"]
+    assert environ["DEEPLINE_API_KEY"] == credentials["DEEPLINE_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):
         scoring.apply_policy_to_environment(policy, environ={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "25"}, credentials=credentials)
     with pytest.raises(scoring.ScorerPolicyConflict):

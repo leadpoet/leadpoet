@@ -108,8 +108,11 @@ from qualification.scoring.linkedin_company_size import (
     UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
     fetch_current_linkedin_company_size,
+    fetch_structured_linkedin_company_size,
     is_linkedin_evidence_url,
     linkedin_company_page_slug,
+    STRUCTURED_PROFILE_PROVIDER,
+    STRUCTURED_PROFILE_SOURCE_FIELD,
 )
 
 # Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
@@ -1448,12 +1451,48 @@ def _without_employee_size_observation(verdict: Mapping[str, Any]) -> dict[str, 
         employee_size_evidence_url="",
         employee_size_evidence_quote="",
     )
+    projected.pop("employee_size_structured_evidence", None)
+    projected.pop("structured_employee_size_evidence", None)
     nested = verdict.get("dimension_evidence")
     if isinstance(nested, Mapping):
         nested_copy = dict(nested)
         nested_copy["employee_size"] = {"url": "", "quote": ""}
         projected["dimension_evidence"] = nested_copy
     return projected
+
+
+def _structured_employee_size_decision(
+    evidence: Any,
+    icp: ICPPrompt,
+) -> str:
+    """Score only the private server-derived structured evidence shape."""
+
+    if not isinstance(evidence, Mapping) or set(evidence) != {
+        "employee_count",
+        "provider",
+        "source_field",
+        "url",
+        "website",
+    }:
+        return COMPANY_FIT_UNAVAILABLE
+    employee_count = evidence.get("employee_count")
+    if (
+        evidence.get("provider") != STRUCTURED_PROFILE_PROVIDER
+        or evidence.get("source_field") != STRUCTURED_PROFILE_SOURCE_FIELD
+        or not isinstance(employee_count, str)
+        or employee_count not in LINKEDIN_EMPLOYEE_BUCKETS
+        or not linkedin_company_page_slug(evidence.get("url"))
+        or not _valid_web_evidence_url(evidence.get("website"))
+    ):
+        return COMPANY_FIT_UNAVAILABLE
+    targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
+    if not targets_verified:
+        return COMPANY_FIT_UNAVAILABLE
+    return (
+        COMPANY_FIT_MATCH
+        if employee_count in targets
+        else COMPANY_FIT_MISMATCH
+    )
 
 
 async def _refresh_linkedin_employee_size_observation(
@@ -1568,21 +1607,71 @@ async def _refresh_linkedin_employee_size_observation(
             )
         return unavailable
     current = invocation_cache.get("evidence")
+    current_employee_count = (
+        current.get("employee_count") if isinstance(current, Mapping) else None
+    )
+    current_source_url = current.get("url") if isinstance(current, Mapping) else None
+    current_quote = current.get("quote") if isinstance(current, Mapping) else None
+    current_web_evidence_usable = bool(
+        isinstance(current_employee_count, str)
+        and _normalize_linkedin_employee_bucket(current_employee_count)
+        == current_employee_count
+        and isinstance(current_source_url, str)
+        and current_source_url
+        and isinstance(current_quote, str)
+        and current_quote
+    )
+    anchor_domain = str(
+        verified_homepage_identity.get("registrable_dns_domain") or ""
+    ).strip()
+    anchor_name = str(
+        verified_homepage_identity.get("normalized_name") or ""
+    ).strip()
+    anchor_slug = str(
+        verified_homepage_identity.get("linkedin_company_slug") or ""
+    ).strip().casefold()
+    if (
+        not current_web_evidence_usable
+        and not invocation_cache.get("structured_attempted")
+        and anchor_name
+        and anchor_domain
+        and anchor_slug == evidence_slug
+    ):
+        invocation_cache["structured_attempted"] = True
+        structured_diagnostic: dict[str, str] = {}
+        invocation_cache["structured_evidence"] = (
+            await fetch_structured_linkedin_company_size(
+                anchor_domain,
+                profile_url,
+                diagnostic=structured_diagnostic,
+            )
+        )
+        if structured_diagnostic.get(VERIFIER_FAILURE_REASON_KEY):
+            invocation_cache["structured_failure"] = True
+            invocation_cache["refresh_outcome"] = "retryable_failure"
+            invocation_cache[VERIFIER_FAILURE_DETAIL_KEY] = (
+                structured_diagnostic[VERIFIER_FAILURE_REASON_KEY]
+            )
+    if _structured_employee_size_decision(
+        invocation_cache.get("structured_evidence"),
+        icp,
+    ) in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}:
+        invocation_cache["refresh_outcome"] = "verified"
+        invocation_cache.pop(VERIFIER_FAILURE_DETAIL_KEY, None)
+        return unavailable
     if not isinstance(current, Mapping):
         return unavailable
-    if (
-        current.get("outcome")
-        == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
-    ):
+    if current.get("outcome") == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE:
         # The identity-bound current profile controls this dimension even when
         # the separate model observation was malformed or incomplete.
-        invocation_cache["refresh_outcome"] = (
-            CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
-        )
+        if not invocation_cache.get("structured_failure"):
+            invocation_cache["refresh_outcome"] = (
+                CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+            )
         return unavailable
-    employee_count = current.get("employee_count")
-    source_url = current.get("url")
-    quote = current.get("quote")
+    employee_count = current_employee_count
+    source_url = current_source_url
+    quote = current_quote
     targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
     if (
         not targets_verified
@@ -1618,6 +1707,7 @@ def _reverify_decision(
     icp: Optional[ICPPrompt] = None,
     company: Optional[CompanyOutput] = None,
     verified_homepage_identity: Optional[Mapping[str, str]] = None,
+    structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
     company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
     """Classify web proof as a match, conflict, or unavailable outcome.
@@ -1681,8 +1771,16 @@ def _reverify_decision(
         return company_fit_unavailable(reason, details=details)
 
     industry_evidence = _dimension_web_evidence(verdict, "industry")
+    structured_employee_size_decision = _structured_employee_size_decision(
+        structured_employee_size_evidence,
+        icp,
+    )
     dimensions = {
-        "employee_size": _decision_from_observed_employee_size(verdict, icp),
+        "employee_size": (
+            structured_employee_size_decision
+            if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
+            else _decision_from_observed_employee_size(verdict, icp)
+        ),
         "industry": _industry_evidence_decision(
             verdict.get("observed_industry"),
             verdict.get("observed_subindustry"),
@@ -1707,8 +1805,15 @@ def _reverify_decision(
         for dimension in active_dimensions
     }
     evidence["industry"] = industry_evidence
+    if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE:
+        evidence["employee_size"] = dict(structured_employee_size_evidence or {})
     if strict_web_proof:
         for dimension in active_dimensions:
+            if (
+                dimension == "employee_size"
+                and structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
+            ):
+                continue
             dimensions[dimension] = _decision_with_web_evidence(
                 dimensions[dimension], evidence[dimension]
             )
@@ -2332,6 +2437,9 @@ async def _llm_reverify_company(
         icp=icp if require_company_fit_dimensions else None,
         company=company,
         verified_homepage_identity=verified_identity,
+        structured_employee_size_evidence=current_profile_cache.get(
+            "structured_evidence"
+        ),
         company_quality=company_quality,
     )
     incomplete = _incomplete_company_reverify_dimensions(
@@ -2435,6 +2543,9 @@ async def _llm_reverify_company(
         icp=icp if require_company_fit_dimensions else None,
         company=company,
         verified_homepage_identity=verified_identity,
+        structured_employee_size_evidence=current_profile_cache.get(
+            "structured_evidence"
+        ),
         company_quality=company_quality,
     )
     repaired_incomplete = _incomplete_company_reverify_dimensions(
@@ -2828,9 +2939,18 @@ async def _verify_company_fit(
             if isinstance(raw_web_evidence, Mapping)
             else {}
         )
+        structured_employee_proof = (
+            dimension == "employee_size"
+            and _structured_employee_size_decision(web_evidence, icp)
+            == observed_decision
+            and observed_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
+        )
         if dimension in active_web_dimensions and (
-            not _valid_web_evidence_url(web_evidence.get("url"))
-            or not str(web_evidence.get("quote") or "").strip()
+            not structured_employee_proof
+            and (
+                not _valid_web_evidence_url(web_evidence.get("url"))
+                or not str(web_evidence.get("quote") or "").strip()
+            )
         ):
             observed_decision = COMPANY_FIT_UNAVAILABLE
         decision = _combine_submitted_and_observed(

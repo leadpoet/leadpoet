@@ -19,6 +19,11 @@ from qualification.scoring.competition import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_live_structured_profile_key(monkeypatch):
+    monkeypatch.delenv("DEEPLINE_API_KEY", raising=False)
+
+
 def _company(*, linkedin: str = "https://linkedin.com/company/acme") -> CompanyOutput:
     return CompanyOutput(
         company_name="Acme",
@@ -133,6 +138,21 @@ def _install_exa_bodies(monkeypatch, *bodies):
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
     return calls, pending
+
+
+def _structured_company_payload(**updates):
+    element = {
+        "name": "Acme",
+        "website": "https://www.acme.example.com/about",
+        "linkedinUrl": "https://www.linkedin.com/company/acme/",
+        "employeeCountRange": {"start": 11, "end": 50},
+        "employeeCount": 37,
+    }
+    element.update(updates)
+    return {
+        "status": "completed",
+        "result": {"data": {"status": 200, "element": element}},
+    }
 
 
 def test_literal_company_size_is_bounded_to_about_section():
@@ -1042,6 +1062,206 @@ def test_current_profile_replaces_stale_linkedin_match_or_mismatch(
         "quote": f"Company size {current_size} employees",
     }
     assert fetches == ["https://www.linkedin.com/company/acme"]
+
+
+@pytest.mark.parametrize(
+    ("employee_range", "expected"),
+    [
+        ({"start": 0, "end": 1}, "0-1"),
+        ({"start": 2, "end": 10}, "2-10"),
+        ({"start": 11, "end": 50}, "11-50"),
+        ({"start": 51, "end": 200}, "51-200"),
+        ({"start": 201, "end": 500}, "201-500"),
+        ({"start": 501, "end": 1_000}, "501-1,000"),
+        ({"start": 1_001, "end": 5_000}, "1,001-5,000"),
+        ({"start": 5_001, "end": 10_000}, "5,001-10,000"),
+        ({"start": 10_001, "end": None}, "10,001+"),
+    ],
+)
+def test_structured_company_projects_only_canonical_employee_ranges(
+    employee_range,
+    expected,
+):
+    payload = _structured_company_payload(employeeCountRange=employee_range)
+
+    assert linkedin_company_size.project_structured_linkedin_company_size(
+        "acme.example.com",
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) == {
+        "employee_count": expected,
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example.com/",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _structured_company_payload(website="https://other.example.com"),
+        _structured_company_payload(
+            linkedinUrl="https://www.linkedin.com/company/other"
+        ),
+        _structured_company_payload(
+            linkedinUrl="https://www.linkedin.com/company/acme?trk=other"
+        ),
+        _structured_company_payload(employeeCountRange={"start": 1, "end": 10}),
+        _structured_company_payload(employeeCountRange={"start": True, "end": 50}),
+        _structured_company_payload(employeeCountRange=None, employeeCount=37),
+        {
+            "status": "completed",
+            "result": {
+                "data": {
+                    "status": "200",
+                    "element": _structured_company_payload()["result"]["data"][
+                        "element"
+                    ],
+                }
+            },
+        },
+        {
+            "status": "completed",
+            "result": {
+                "data": {
+                    "status": 500,
+                    "element": _structured_company_payload()["result"]["data"][
+                        "element"
+                    ],
+                }
+            },
+        },
+        {
+            "status": "completed",
+            "result": {
+                "data": {
+                    "status": True,
+                    "element": _structured_company_payload()["result"]["data"][
+                        "element"
+                    ],
+                }
+            },
+        },
+        {
+            "status": "completed",
+            "result": {
+                "error": "provider failed",
+                "data": _structured_company_payload()["result"]["data"],
+            },
+        },
+        {
+            "status": 503,
+            "result": {
+                "data": _structured_company_payload()["result"]["data"],
+            },
+        },
+    ],
+)
+def test_structured_company_rejects_wrong_identity_status_or_range(payload):
+    assert linkedin_company_size.project_structured_linkedin_company_size(
+        "acme.example.com",
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) is None
+
+
+def test_structured_company_fetch_uses_one_bounded_approved_operation(monkeypatch):
+    calls, pending = _install_exa_bodies(monkeypatch, _structured_company_payload())
+    monkeypatch.setenv("DEEPLINE_API_KEY", "test-deepline-key")
+
+    result = asyncio.run(
+        linkedin_company_size.fetch_structured_linkedin_company_size(
+            "acme.example.com",
+            "https://www.linkedin.com/company/acme",
+        )
+    )
+
+    assert result and result["employee_count"] == "11-50"
+    assert pending == []
+    assert len(calls) == 1
+    url, request = calls[0]
+    assert url.endswith("/harvestapi_get_company/execute")
+    assert request["json"] == {
+        "payload": {"url": "https://www.linkedin.com/company/acme"}
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_reason"),
+    [
+        (
+            _structured_company_payload(website="https://other.example.com"),
+            "source_blocked",
+        ),
+        (
+            _structured_company_payload(employeeCountRange=None),
+            "source_blocked",
+        ),
+        (
+            {
+                "status": "completed",
+                "result": {
+                    "data": {
+                        "status": "200",
+                        "element": _structured_company_payload()["result"]["data"][
+                            "element"
+                        ],
+                    }
+                },
+            },
+            "malformed_response",
+        ),
+        (
+            {
+                "status": 503,
+                "result": {
+                    "data": _structured_company_payload()["result"]["data"],
+                },
+            },
+            "provider_error",
+        ),
+    ],
+)
+def test_structured_fetch_classifies_profile_local_and_provider_failures(
+    monkeypatch,
+    body,
+    expected_reason,
+):
+    _install_exa_bodies(monkeypatch, body)
+    monkeypatch.setenv("DEEPLINE_API_KEY", "test-deepline-key")
+    diagnostic = {}
+
+    result = asyncio.run(
+        linkedin_company_size.fetch_structured_linkedin_company_size(
+            "acme.example.com",
+            "https://www.linkedin.com/company/acme",
+            diagnostic=diagnostic,
+        )
+    )
+
+    assert result is None
+    assert diagnostic == {"failure_reason": expected_reason}
+
+
+def test_structured_company_fetch_without_key_does_not_call_provider(monkeypatch):
+    monkeypatch.delenv("DEEPLINE_API_KEY", raising=False)
+
+    class UnexpectedSession:
+        def __init__(self, **_kwargs):
+            raise AssertionError("missing optional key must preserve Exa result")
+
+    monkeypatch.setattr(
+        linkedin_company_size.aiohttp,
+        "ClientSession",
+        UnexpectedSession,
+    )
+    assert asyncio.run(
+        linkedin_company_size.fetch_structured_linkedin_company_size(
+            "acme.example.com",
+            "https://www.linkedin.com/company/acme",
+        )
+    ) is None
 
 
 def test_login_wall_failure_allows_existing_retry_to_use_translated_profile(
@@ -1975,6 +2195,343 @@ def test_verified_homepage_anchor_supplies_missing_size_profile(
     )
 
 
+def test_structured_size_fallback_is_reused_across_sonar_repair(monkeypatch):
+    provider_calls = []
+    exa_fetches = []
+    structured_fetches = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        verdict = _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url="",
+        )
+        verdict["employee_size_evidence_quote"] = ""
+        verdict["industry_matches"] = True if len(provider_calls) > 1 else None
+        return verdict, ""
+
+    async def exa_fetch(url, *, diagnostic):
+        exa_fetches.append(url)
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def structured_fetch(domain, url, **_kwargs):
+        structured_fetches.append((domain, url))
+        return {
+            "employee_count": "11-50",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": url,
+            "website": "https://acme.example.com/",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", exa_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert exa_fetches == ["https://www.linkedin.com/company/acme"]
+    assert structured_fetches == [
+        ("acme.example.com", "https://www.linkedin.com/company/acme")
+    ]
+    assert "failure_class" not in result.details
+    assert result.details["dimension_evidence"]["employee_size"] == {
+        "employee_count": "11-50",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example.com/",
+    }
+
+
+def test_structured_size_proof_survives_full_company_fit_merge(monkeypatch):
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return _homepage_anchor()
+
+    async def provider(**_kwargs):
+        verdict = _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url="",
+        )
+        verdict["employee_size_evidence_quote"] = ""
+        return verdict, ""
+
+    async def exa_fetch(url, **_kwargs):
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def structured_fetch(domain, url, **_kwargs):
+        return {
+            "employee_count": "11-50",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": url,
+            "website": f"https://{domain}/",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", exa_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer._verify_company_fit(
+            _company(),
+            _icp(),
+            0.0,
+            0.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    employee_evidence = result.details["dimension_evidence"]["employee_size"]
+    assert employee_evidence["decision"] == COMPANY_FIT_MATCH
+    assert employee_evidence["web_evidence"]["provider"] == (
+        "harvestapi_get_company"
+    )
+    assert "quote" not in employee_evidence["web_evidence"]
+
+
+def test_exa_size_short_circuits_structured_fallback(monkeypatch):
+    async def provider(**_kwargs):
+        return _verdict(observed_size=None, size_matches=None, employee_url=""), ""
+
+    async def exa_fetch(url, **_kwargs):
+        return {
+            "employee_count": "11-50",
+            "url": url,
+            "quote": "Company size 11-50 employees",
+        }
+
+    async def unexpected_structured(*_args, **_kwargs):
+        raise AssertionError("usable Exa evidence must stop the fallback")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", exa_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        unexpected_structured,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_evidence"]["employee_size"]["quote"]
+
+
+def test_model_structured_size_fields_cannot_bypass_server_fetch(monkeypatch):
+    async def provider(**_kwargs):
+        verdict = _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url="",
+        )
+        verdict["employee_size_evidence_quote"] = ""
+        forged = {
+            "employee_count": "11-50",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": "https://www.linkedin.com/company/acme",
+            "website": "https://acme.example.com/",
+        }
+        verdict["structured_employee_size_evidence"] = forged
+        verdict["dimension_evidence"] = {"employee_size": forged}
+        return verdict, ""
+
+    async def exa_fetch(url, **_kwargs):
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def no_structured_proof(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", exa_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        no_structured_proof,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["dimension_evidence"]["employee_size"] == {
+        "url": "",
+        "quote": "",
+    }
+
+
+def test_structured_provider_failure_remains_retryable_after_exa_insufficient(
+    monkeypatch,
+):
+    exa_fetches = []
+    structured_fetches = []
+
+    async def provider(**_kwargs):
+        verdict = _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url="",
+        )
+        verdict["employee_size_evidence_quote"] = ""
+        return verdict, ""
+
+    async def exa_fetch(url, **_kwargs):
+        exa_fetches.append(url)
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def structured_fetch(domain, url, *, diagnostic):
+        structured_fetches.append((domain, url))
+        diagnostic["failure_reason"] = "provider_error"
+        return None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", exa_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == "employee_size_verification_failed"
+    assert result.details["failure_reason_code"] == "provider_error"
+    assert len(exa_fetches) == 1
+    assert len(structured_fetches) == 1
+
+
+def test_unusable_structured_profile_exhausts_only_its_company(monkeypatch):
+    from lab_arena import scoring
+
+    company = _company()
+    calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return _homepage_anchor()
+
+    async def provider(**_kwargs):
+        verdict = _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url="",
+        )
+        verdict["employee_size_evidence_quote"] = ""
+        return verdict, ""
+
+    async def exa_fetch(url, **_kwargs):
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def unusable_structured(domain, url, *, diagnostic):
+        calls.append((domain, url))
+        diagnostic["failure_reason"] = "source_blocked"
+        return None
+
+    async def scorer(companies, _icp_doc, _reference):
+        rows = []
+        for item in companies:
+            if item["company_name"] == "Other":
+                rows.append({"final_score": 77.0, "failure_reason": ""})
+            else:
+                result = await lead_scorer.score_company_competition_intent(
+                    company,
+                    _icp(),
+                    0.0,
+                    0.0,
+                    set(),
+                )
+                rows.append(result.model_dump(mode="json"))
+        return rows
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", exa_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        unusable_structured,
+    )
+
+    rows = scoring.score_work_item(
+        {"scored_run_id": "malformed-structured-company"},
+        icp={"max_companies": 2, "employee_count": "11-50"},
+        companies=[
+            {"company_name": "Acme", "employee_count": "11-50"},
+            {"company_name": "Other", "employee_count": "11-50"},
+        ],
+        scorer=scorer,
+    )
+
+    assert [row["final_score"] for row in rows] == [0.0, 77.0]
+    assert rows[0]["verifier_gate_receipts"][0]["failure_class"] == (
+        "company_verification_exhausted"
+    )
+    assert len(calls) == 3
+
+
 def test_submitted_profile_cannot_supply_missing_size_profile(monkeypatch):
     fetches = []
 
@@ -2069,6 +2626,43 @@ def test_wrong_homepage_linkedin_anchor_cannot_authorize_profile_fetch(monkeypat
             _icp(),
             require_company_fit_dimensions=True,
             verified_homepage_identity=wrong_anchor,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert fetches == []
+
+
+def test_wrong_model_linkedin_profile_blocks_both_size_providers(monkeypatch):
+    fetches = []
+    verdict = _verdict(employee_url="https://www.linkedin.com/company/other")
+
+    async def provider(**_kwargs):
+        return verdict, ""
+
+    async def fetch(*args, **_kwargs):
+        fetches.append(args)
+        return {
+            "employee_count": "11-50",
+            "url": args[-1],
+            "quote": "Company size 11-50 employees",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
         )
     )
 

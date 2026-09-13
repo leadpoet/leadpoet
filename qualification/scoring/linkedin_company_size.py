@@ -22,6 +22,9 @@ PROFILE_TIMEOUT_SECONDS = 30.0
 # Exa defaults live crawls to 10 seconds.  Keep this below the outer request
 # timeout while giving the exact fresh-profile fetch more time to complete.
 PROFILE_LIVECRAWL_TIMEOUT_MILLISECONDS = 20_000
+STRUCTURED_PROFILE_TIMEOUT_SECONDS = 30.0
+STRUCTURED_PROFILE_PROVIDER = "harvestapi_get_company"
+STRUCTURED_PROFILE_SOURCE_FIELD = "employeeCountRange"
 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
     "insufficient_evidence"
 ] = "insufficient_evidence"
@@ -122,6 +125,14 @@ CurrentLinkedInCompanySizeResult = Union[
     CurrentLinkedInCompanySizeInsufficientEvidence,
 ]
 
+
+class StructuredLinkedInCompanySizeEvidence(TypedDict):
+    employee_count: str
+    provider: str
+    source_field: str
+    url: str
+    website: str
+
 VERIFIER_FAILURE_REASON_KEY = "failure_reason"
 SOURCE_BLOCKED_FAILURE_REASON = "source_blocked"
 MALFORMED_RESPONSE_FAILURE_REASON = "malformed_response"
@@ -171,6 +182,226 @@ def is_linkedin_evidence_url(value: Any) -> bool:
         and (port is None or 1 <= port <= 65535)
         and (host == "linkedin.com" or host.endswith(".linkedin.com"))
     )
+
+
+def _canonical_company_domain(value: Any) -> str:
+    """Return one normalized exact website host for identity comparison."""
+
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    raw = value.strip()
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = str(parsed.hostname or "").casefold().rstrip(".").removeprefix("www.")
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 80, 443}
+        or "." not in host
+    ):
+        return ""
+    return host
+
+
+def _strict_linkedin_company_profile_url(value: Any) -> str:
+    """Return one canonical HTTPS LinkedIn company URL, or an empty string."""
+
+    slug = linkedin_company_page_slug(value)
+    if not slug or not isinstance(value, str) or value != value.strip():
+        return ""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = str(parsed.hostname or "").casefold().rstrip(".")
+    if (
+        parsed.scheme.casefold() != "https"
+        or host not in {"linkedin.com", "www.linkedin.com"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return f"https://www.linkedin.com/company/{slug}"
+
+
+def _structured_company_elements(value: Any) -> list[Mapping[str, Any]]:
+    current = value
+    for _ in range(8):
+        if not isinstance(current, Mapping):
+            return []
+        element = current.get("element")
+        if isinstance(element, Mapping):
+            if type(current.get("status")) is not int or current["status"] != 200:
+                return []
+            return [element]
+        elements = current.get("elements")
+        if isinstance(elements, list):
+            if type(current.get("status")) is not int or current["status"] != 200:
+                return []
+            return [item for item in elements[:10] if isinstance(item, Mapping)]
+        for key in ("toolResponse", "rawV2", "raw", "result", "data", "output"):
+            child = current.get(key)
+            if isinstance(child, Mapping) and child is not current:
+                current = child
+                break
+        else:
+            return []
+    return []
+
+
+def _structured_provider_reported_error(value: Any, *, depth: int = 0) -> bool:
+    if not isinstance(value, Mapping) or depth > 5:
+        return False
+    if value.get("error") not in (None, "", False, [], {}):
+        return True
+    if value.get("errors") not in (None, "", False, [], {}):
+        return True
+    status = value.get("status")
+    if type(status) is int and status >= 400:
+        return True
+    if str(status or "").casefold() in {
+        "error",
+        "failed",
+        "failure",
+    }:
+        return True
+    return any(
+        _structured_provider_reported_error(value.get(key), depth=depth + 1)
+        for key in ("toolResponse", "rawV2", "raw", "result", "data", "output")
+    )
+
+
+def _canonical_employee_range(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    start = value.get("start")
+    end = value.get("end")
+    if (
+        isinstance(start, bool)
+        or isinstance(end, bool)
+        or not isinstance(start, int)
+        or (end is not None and not isinstance(end, int))
+    ):
+        return ""
+    return {
+        (0, 1): "0-1",
+        (2, 10): "2-10",
+        (11, 50): "11-50",
+        (51, 200): "51-200",
+        (201, 500): "201-500",
+        (501, 1_000): "501-1,000",
+        (1_001, 5_000): "1,001-5,000",
+        (5_001, 10_000): "5,001-10,000",
+        (10_001, None): "10,001+",
+    }.get((start, end), "")
+
+
+def project_structured_linkedin_company_size(
+    requested_domain: str,
+    requested_profile_url: str,
+    payload: Any,
+) -> Optional[StructuredLinkedInCompanySizeEvidence]:
+    """Project only an exact-identity canonical structured employee range."""
+
+    domain = _canonical_company_domain(requested_domain)
+    profile_url = _strict_linkedin_company_profile_url(requested_profile_url)
+    requested_slug = linkedin_company_page_slug(profile_url)
+    if not domain or not requested_slug or _structured_provider_reported_error(payload):
+        return None
+    for element in _structured_company_elements(payload):
+        if _canonical_company_domain(element.get("website")) != domain:
+            continue
+        returned_profile = _strict_linkedin_company_profile_url(
+            element.get("linkedinUrl") or element.get("linkedin_url")
+        )
+        if linkedin_company_page_slug(returned_profile) != requested_slug:
+            continue
+        employee_count = _canonical_employee_range(element.get("employeeCountRange"))
+        if not employee_count:
+            continue
+        return {
+            "employee_count": employee_count,
+            "provider": STRUCTURED_PROFILE_PROVIDER,
+            "source_field": STRUCTURED_PROFILE_SOURCE_FIELD,
+            "url": profile_url,
+            "website": f"https://{domain}/",
+        }
+    return None
+
+
+async def fetch_structured_linkedin_company_size(
+    requested_domain: str,
+    profile_url: str,
+    *,
+    diagnostic: Optional[dict[str, str]] = None,
+) -> Optional[StructuredLinkedInCompanySizeEvidence]:
+    """Fetch one bounded structured profile when a Deepline key is available."""
+
+    key = str(os.environ.get("DEEPLINE_API_KEY") or "").strip()
+    canonical_profile = _strict_linkedin_company_profile_url(profile_url)
+    domain = _canonical_company_domain(requested_domain)
+    if not key:
+        return None
+    if not canonical_profile or not domain:
+        _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
+        return None
+    try:
+        timeout = aiohttp.ClientTimeout(total=STRUCTURED_PROFILE_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                "https://code.deepline.com/api/v2/integrations/"
+                "harvestapi_get_company/execute",
+                json={"payload": {"url": canonical_profile}},
+                headers={
+                    "Authorization": "Bearer " + key,
+                    "Content-Type": "application/json",
+                },
+            ) as response:
+                if response.status != 200:
+                    _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
+                    return None
+                try:
+                    body = await response.json()
+                except (aiohttp.ContentTypeError, ValueError):
+                    _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
+                    return None
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
+        return None
+    except Exception:  # noqa: BLE001
+        _set_failure_reason(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
+        return None
+    if _structured_provider_reported_error(body):
+        _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
+        return None
+    if not _structured_company_elements(body):
+        _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
+        return None
+    evidence = project_structured_linkedin_company_size(
+        domain,
+        canonical_profile,
+        body,
+    )
+    if evidence is None:
+        # A valid one-company reply that lacks the requested exact identity or
+        # canonical range is local to this profile. Arena may retry it, then
+        # isolate only this company instead of cancelling the scoring item.
+        _set_failure_reason(diagnostic, SOURCE_BLOCKED_FAILURE_REASON)
+    return evidence
 
 
 def _is_linkedin_access_wall(text: str) -> bool:

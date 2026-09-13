@@ -2125,6 +2125,60 @@ def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
     assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
 
 
+def test_deepline_payment_refusal_releases_dynamic_reservation_as_zero():
+    envelope = {
+        "error": {"code": "payment_required", "message": "credit limit"},
+        "billing": None,
+    }
+    store = FakeLedgerStore(openrouter_capacity=73_321_638)
+    broker, store, transport = make_broker(
+        store=store, transport=FakeTransport([(402, envelope)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["outcome"] == "settled"
+    assert result.call["reserved_microusd"] == 73_321_638
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_payment_required_error_zero"
+    assert store.openrouter_capacity == 73_321_638
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
+def test_deepline_payment_refusal_with_unknown_billing_remains_uncertain():
+    envelope = {
+        "error": {"code": "payment_required"},
+        "billing": {"credits_charged": "unknown"},
+    }
+    store = FakeLedgerStore(openrouter_capacity=73_321_638)
+    broker, store, _transport = make_broker(
+        store=store, transport=FakeTransport([(402, envelope)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 502
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == 73_321_638
+    assert store.openrouter_capacity == 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
 @pytest.mark.parametrize("provider_status", [422, 502, 503])
 def test_deepline_error_native_billing_settles_known_positive_charge(
     provider_status,

@@ -6,12 +6,44 @@ from lab_arena.provider_costs import (
     deepline_billing_history_cost,
     deepline_cost,
     deepline_free_completed_cost,
+    deepline_payment_refusal_cost,
     deepline_reservation_cost,
     openrouter_cost,
     openrouter_generation_cost,
     openrouter_insured_error_cost,
     scrapingdog_cost,
 )
+
+
+def test_deepline_payment_refusal_with_explicit_null_billing_is_zero():
+    cost = deepline_payment_refusal_cost(
+        402,
+        {"error": {"code": "payment_required"}, "billing": None},
+    )
+    assert cost is not None
+    assert cost.microusd == 0
+    assert cost.price_basis == "deepline_payment_required_error_zero"
+
+
+@pytest.mark.parametrize(
+    "status,response",
+    [
+        (200, {"error": {"code": "payment_required"}, "billing": None}),
+        (402, {"error": {"code": "payment_required"}}),
+        (402, {"error": {}, "billing": None}),
+        (402, {"error": "payment_required", "billing": None}),
+        (402, {"error": {"code": "payment_required"}, "billing": {}}),
+        (
+            402,
+            {
+                "error": {"code": "payment_required"},
+                "billing": {"credits_charged": "invalid"},
+            },
+        ),
+    ],
+)
+def test_deepline_payment_refusal_zero_proof_fails_closed(status, response):
+    assert deepline_payment_refusal_cost(status, response) is None
 
 
 def test_deepline_history_exact_terminal_match_ignores_absent_pagination_fields():

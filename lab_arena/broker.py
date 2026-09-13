@@ -1852,6 +1852,12 @@ class Broker:
                     deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
                         effective_normalized, response.status, raw_document
                     )
+                    if deepline_known_free_cost is None:
+                        deepline_known_free_cost = (
+                            provider_costs.deepline_payment_refusal_cost(
+                                response.status, raw_document
+                            )
+                        )
                     request_id = _deepline_job_request_id(raw_document)
                     deepline_request_id = request_id
                     if request_id is not None and (

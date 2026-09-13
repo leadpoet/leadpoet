@@ -333,6 +333,34 @@ def deepline_free_completed_cost(
     )
 
 
+def deepline_payment_refusal_cost(
+    response_status: Any, response_json: Any
+) -> Optional[ProviderCost]:
+    """Prove that a Deepline payment refusal did not create a charge.
+
+    Deepline returns HTTP 402 before it dispatches the requested tool.  Accept
+    that zero-cost result only when the authenticated response is a structured
+    error and its billing field is explicitly null.  A missing, malformed, or
+    non-null billing value remains unresolved so reported charge metadata can
+    never be erased by this fallback.
+    """
+
+    if (
+        response_status != 402
+        or not isinstance(response_json, Mapping)
+        or response_json.get("billing", object()) is not None
+        or not isinstance(response_json.get("error"), Mapping)
+        or not response_json["error"]
+    ):
+        return None
+    return ProviderCost(
+        microusd=0,
+        units=Decimal("0"),
+        unit_name="credits",
+        price_basis="deepline_payment_required_error_zero",
+    )
+
+
 def deepline_reservation_cost(parameters: Mapping[str, Any]) -> Optional[ProviderCost]:
     """Return a published fixed-call estimate; None means dynamically priced."""
 
@@ -491,6 +519,7 @@ __all__ = [
     "deepline_billing_history_cost",
     "deepline_cost",
     "deepline_free_completed_cost",
+    "deepline_payment_refusal_cost",
     "deepline_reservation_cost",
     "openrouter_cost",
     "openrouter_generation_cost",

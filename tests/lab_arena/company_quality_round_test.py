@@ -97,6 +97,8 @@ def database():
             "223-lab-arena-cancelled-call-late-settlement.sql",
             "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
             "227-lab-arena-champion-funding.sql",
+            "229-lab-arena-successful-call-cost-eligibility.sql",
+            "230-lab-arena-successful-call-cost-permissions.sql",
         )
     )
 

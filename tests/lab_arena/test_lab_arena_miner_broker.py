@@ -71,7 +71,10 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     assert result.call["actual_microusd"] == 2000
     assert ledger.calls[result.call["call_identity"]]["provider"] == "deepline"
     terminal = ledger.calls[result.call["call_identity"]]["terminal"]
-    assert set(terminal) == {"status", "headers", "body_b64", "provider_cost"}
+    assert set(terminal) == {
+        "status", "headers", "body_b64", "call_succeeded", "provider_cost",
+    }
+    assert terminal["call_succeeded"] is True
     assert terminal["provider_cost"] == {
         "basis": "deepline_billing_credits_charged_x_0.10_usd",
         "units": "0.02",

@@ -15,10 +15,19 @@ from lab_arena.provider_costs import (
 )
 
 
-def test_deepline_payment_refusal_with_explicit_null_billing_is_zero():
+def test_deepline_insufficient_credit_refusal_is_zero():
     cost = deepline_payment_refusal_cost(
         402,
-        {"error": {"code": "payment_required"}, "billing": None},
+        {
+            "code": "INSUFFICIENT_CREDITS",
+            "error": "Insufficient credits",
+            "billing": {
+                "kind": "insufficient_credits",
+                "required_credits": 5,
+                "balance_credits": 4.14,
+                "needed_credits": 0.86,
+            },
+        },
     )
     assert cost is not None
     assert cost.microusd == 0
@@ -30,6 +39,8 @@ def test_deepline_payment_refusal_with_explicit_null_billing_is_zero():
     [
         (200, {"error": {"code": "payment_required"}, "billing": None}),
         (402, {"error": {"code": "payment_required"}}),
+        (402, {"code": "INSUFFICIENT_CREDITS", "error": "x", "billing": None}),
+        (402, {"code": "INSUFFICIENT_CREDITS", "error": "x", "billing": {"kind": "insufficient_credits", "required_credits": 5, "balance_credits": 4.14, "needed_credits": 1}}),
         (402, {"error": {}, "billing": None}),
         (402, {"error": "payment_required", "billing": None}),
         (402, {"error": {"code": "payment_required"}, "billing": {}}),

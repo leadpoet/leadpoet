@@ -2127,8 +2127,14 @@ def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
 
 def test_deepline_payment_refusal_releases_dynamic_reservation_as_zero():
     envelope = {
-        "error": {"code": "payment_required", "message": "credit limit"},
-        "billing": None,
+        "code": "INSUFFICIENT_CREDITS",
+        "error": "Insufficient credits",
+        "billing": {
+            "kind": "insufficient_credits",
+            "required_credits": 5,
+            "balance_credits": 4.14,
+            "needed_credits": 0.86,
+        },
     }
     store = FakeLedgerStore(openrouter_capacity=73_321_638)
     broker, store, transport = make_broker(

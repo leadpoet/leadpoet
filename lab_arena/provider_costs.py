@@ -339,18 +339,32 @@ def deepline_payment_refusal_cost(
     """Prove that a Deepline payment refusal did not create a charge.
 
     Deepline returns HTTP 402 before it dispatches the requested tool.  Accept
-    that zero-cost result only when the authenticated response is a structured
-    error and its billing field is explicitly null.  A missing, malformed, or
-    non-null billing value remains unresolved so reported charge metadata can
-    never be erased by this fallback.
+    that zero-cost result only for its observed insufficient-credit envelope:
+    the required amount exceeds the balance and ``needed_credits`` is the exact
+    difference.  A missing or malformed field remains unresolved so reported
+    charge metadata can never be erased by this fallback.
     """
 
     if (
         response_status != 402
         or not isinstance(response_json, Mapping)
-        or response_json.get("billing", object()) is not None
-        or not isinstance(response_json.get("error"), Mapping)
-        or not response_json["error"]
+        or response_json.get("code") != "INSUFFICIENT_CREDITS"
+        or not isinstance(response_json.get("error"), str)
+        or not response_json["error"].strip()
+    ):
+        return None
+    billing = response_json.get("billing")
+    if not isinstance(billing, Mapping) or billing.get("kind") != "insufficient_credits":
+        return None
+    required = _decimal(billing.get("required_credits"))
+    balance = _decimal(billing.get("balance_credits"))
+    needed = _decimal(billing.get("needed_credits"))
+    if (
+        required is None
+        or balance is None
+        or needed is None
+        or required <= balance
+        or needed != required - balance
     ):
         return None
     return ProviderCost(

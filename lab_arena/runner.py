@@ -116,10 +116,52 @@ _JUDGE_FAILURE_CLASSES = frozenset(
         "provider_unavailable",
     }
 )
+_PICKUP_PHASES = frozenset({"round_discovery", "claim"})
+_PICKUP_FAILURE_REASONS = frozenset({"request_failed", "claim_denied"})
+_IDLE_CLAIM_STATUSES = frozenset({"no_pending", "no_open_round", "stage_closed"})
+_KNOWN_CLAIM_DENIAL_CODES = frozenset(
+    {
+        "arena_store_unavailable",
+        "declared_parallelism_invalid",
+        "hotkey_banned",
+        "round_ended",
+        "round_mode_mismatch",
+        "round_network_mismatch",
+        "round_scope_mismatch",
+        "round_unknown",
+        "runner_benchmark_eligibility_unavailable",
+        "runner_hotkey_unregistered",
+        "runner_stake_below_minimum",
+        "runner_validator_authority_unavailable",
+        "runner_validator_required",
+        "signature_invalid",
+    }
+)
+
+
+def _bounded_http_status(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 100 <= value <= 599 else None
+
+
+def _known_claim_denial_code(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value in _KNOWN_CLAIM_DENIAL_CODES else None
 
 
 class RunnerError(RuntimeError):
     """A runner-side failure; the attempt fails closed."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        http_status: Optional[int] = None,
+        denial_code: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = _bounded_http_status(http_status)
+        self.denial_code = _known_claim_denial_code(denial_code)
 
 
 class AgentDependencyError(RunnerError):
@@ -163,6 +205,40 @@ def _log_judge_failure(
         file=sys.stderr,
         flush=True,
     )
+
+
+def _log_pickup_failure(
+    *,
+    phase: str,
+    reason: str,
+    http_status: Any = None,
+    denial_code: Any = None,
+) -> None:
+    """Log only fixed, bounded pickup diagnostics; never log request data."""
+
+    safe_phase = phase if phase in _PICKUP_PHASES else "unknown"
+    safe_reason = reason if reason in _PICKUP_FAILURE_REASONS else "unknown"
+    safe_http_status = _bounded_http_status(http_status)
+    safe_denial_code = _known_claim_denial_code(denial_code)
+    try:
+        print(
+            "Lab Arena pickup failure: "
+            f"phase={safe_phase} reason={safe_reason} "
+            f"http_status={safe_http_status if safe_http_status is not None else '-'} "
+            f"denial_code={safe_denial_code or '-'}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except OSError:
+        pass
+
+
+class _HttpResponseDocument(dict):
+    """A wire-compatible response mapping with local-only HTTP diagnostics."""
+
+    def __init__(self, payload: Mapping[str, Any], http_status: int) -> None:
+        super().__init__(payload)
+        self.http_status = _bounded_http_status(http_status)
 
 
 class SignatureFn(Protocol):
@@ -269,6 +345,7 @@ class HttpArenaApiClient:
         *,
         headers: Optional[Mapping[str, str]] = None,
         timeout_seconds: float = API_TIMEOUT_SECONDS,
+        preserve_http_status: bool = False,
     ) -> Dict[str, Any]:
         try:
             response = self._client.post(
@@ -278,21 +355,57 @@ class HttpArenaApiClient:
                 timeout=httpx.Timeout(float(timeout_seconds)),
             )
         except httpx.HTTPError as exc:
-            raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
+            response = getattr(exc, "response", None)
+            raise RunnerError(
+                "Arena API transport failure: %s" % type(exc).__name__,
+                http_status=getattr(response, "status_code", None),
+            ) from exc
         if response.status_code >= 500:
-            raise RunnerError("Arena API failed: HTTP %d" % response.status_code)
+            failure_payload = None
+            failure_body = getattr(response, "content", None)
+            if (
+                preserve_http_status
+                and isinstance(failure_body, bytes)
+                and len(failure_body) <= 4096
+            ):
+                try:
+                    failure_payload = response.json()
+                except (RecursionError, ValueError):
+                    pass
+            denial_code = (
+                _known_claim_denial_code(failure_payload.get("code"))
+                if isinstance(failure_payload, Mapping)
+                else None
+            )
+            raise RunnerError(
+                "Arena API failed: HTTP %d" % response.status_code,
+                http_status=response.status_code,
+                denial_code=denial_code,
+            )
         try:
             payload = response.json()
         except ValueError as exc:
-            raise RunnerError("Arena API returned non-JSON") from exc
+            raise RunnerError(
+                "Arena API returned non-JSON",
+                http_status=response.status_code,
+            ) from exc
         if not isinstance(payload, dict):
-            raise RunnerError("Arena API returned a non-object")
+            raise RunnerError(
+                "Arena API returned a non-object",
+                http_status=response.status_code,
+            )
         if response.status_code >= 400 and "status" not in payload:
             payload = {"status": "rejected", "http_status": response.status_code, "detail": payload.get("detail")}
+        if preserve_http_status:
+            return _HttpResponseDocument(payload, response.status_code)
         return payload
 
     def claim(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
-        return self._post("/arena/v1/runs/claim", envelope)
+        return self._post(
+            "/arena/v1/runs/claim",
+            envelope,
+            preserve_http_status=True,
+        )
 
     def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]:
         requested_timeout = frame.get("timeout_ms")
@@ -430,12 +543,22 @@ class HttpArenaApiClient:
         try:
             response = self._client.get(self._base_url + path)
         except httpx.HTTPError as exc:
-            raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
+            response = getattr(exc, "response", None)
+            raise RunnerError(
+                "Arena API transport failure: %s" % type(exc).__name__,
+                http_status=getattr(response, "status_code", None),
+            ) from exc
         if response.status_code != 200:
-            raise RunnerError("%s is unavailable: HTTP %d" % (what, response.status_code))
+            raise RunnerError(
+                "%s is unavailable: HTTP %d" % (what, response.status_code),
+                http_status=response.status_code,
+            )
         payload = response.json()
         if not isinstance(payload, dict):
-            raise RunnerError("Arena API returned a non-object")
+            raise RunnerError(
+                "Arena API returned a non-object",
+                http_status=response.status_code,
+            )
         return payload
 
     def close(self) -> None:
@@ -1871,7 +1994,13 @@ class Runner:
         if not self._pinned:
             try:
                 self.refresh_round()
-            except RunnerError:
+            except RunnerError as exc:
+                _log_pickup_failure(
+                    phase="round_discovery",
+                    reason="request_failed",
+                    http_status=exc.http_status,
+                    denial_code=exc.denial_code,
+                )
                 return 0  # the Arena or the round is unavailable: poll again later
         taken = 0
         futures = set()
@@ -1893,11 +2022,28 @@ class Runner:
                     continue
                 try:
                     response = self.claim_one(round_id)
-                except RunnerError:
+                except RunnerError as exc:
                     self._slots.release()
+                    _log_pickup_failure(
+                        phase="claim",
+                        reason="request_failed",
+                        http_status=exc.http_status,
+                        denial_code=exc.denial_code,
+                    )
                     break
                 if response.get("status") != "leased":
                     self._slots.release()
+                    response_status = response.get("status")
+                    if not (
+                        isinstance(response_status, str)
+                        and response_status in _IDLE_CLAIM_STATUSES
+                    ):
+                        _log_pickup_failure(
+                            phase="claim",
+                            reason="claim_denied",
+                            http_status=getattr(response, "http_status", None),
+                            denial_code=response.get("code"),
+                        )
                     break
                 taken += 1
                 futures.add(self._pool.submit(self._run_lease, response))

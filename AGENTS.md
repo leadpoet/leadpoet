@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: Arena validator pickup root cause
+
+On 2026-09-12 the user explicitly authorized tracing the complete miner
+submission, persistence, eligibility, queue, normal-validator pickup and scoring
+handoff for Yuma and Rizzo. This includes protected production and Supabase
+inspection, required credentials, narrow fixes for proven defects, focused
+end-to-end tests, pushes, exact committed migrations if needed, canonical
+gateway/normal-validator restarts and live pickup verification. Preserve frozen
+round timing, miner models and credential references, accepted results, costs,
+scoring rules, stake policy, independent weight access and concurrent work.
+Do not fabricate competition work, force named-validator assignments, or restore
+retired Research Lab or Nitro paths. This scope expires after the root cause
+and any required fix are verified.
+
 ## Scoped production authorization: confirmed unused Supabase cleanup
 
 On 2026-09-12 the user explicitly authorized a full Supabase cleanup audit and

@@ -7,7 +7,12 @@ sidecar loopback/private address directly.
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import os
+import re
+import time
+from collections import OrderedDict
 from typing import Mapping
 
 import httpx
@@ -29,6 +34,94 @@ _FORWARDED_RESPONSE_HEADERS = (
     "cache-control",
     "x-content-type-options",
 )
+
+_HANDOFF_ROUTES = {"v1/current": "current", "v1/runs/claim": "claim", "v1/weight-state": "weights"}
+_HANDOFF_STATUSES = {"leased", "no_pending", "no_free_slot", "paused", "stage_closed", "cache_busy", "request_id_reused", "rejected"}
+_AUTHENTICATED_CLAIM_DENIALS = {
+    "hotkey_banned", "round_ended", "runner_hotkey_unregistered",
+    "runner_validator_required", "runner_stake_below_minimum",
+    "runner_benchmark_eligibility_unavailable", "declared_parallelism_invalid",
+}
+_HANDOFF_LAST_LOGGED: OrderedDict = OrderedDict()
+_HANDOFF_LOG_WINDOW = 0.0
+_HANDOFF_LOG_COUNT = 0
+
+
+def _handoff_log_due(key: tuple) -> bool:
+    """Bound repeated observations, storage and public traffic amplification."""
+    global _HANDOFF_LOG_WINDOW, _HANDOFF_LOG_COUNT
+    now = time.monotonic()
+    if now - _HANDOFF_LOG_WINDOW >= 60:
+        _HANDOFF_LOG_WINDOW, _HANDOFF_LOG_COUNT = now, 0
+    # Up to 120 observations per minute, regardless of supplied peers or agents.
+    if _HANDOFF_LOG_COUNT >= 120 or now - _HANDOFF_LAST_LOGGED.get(key, float("-inf")) < 30:
+        return False
+    _HANDOFF_LAST_LOGGED[key] = now
+    _HANDOFF_LAST_LOGGED.move_to_end(key)
+    if len(_HANDOFF_LAST_LOGGED) > 256:
+        _HANDOFF_LAST_LOGGED.popitem(last=False)
+    _HANDOFF_LOG_COUNT += 1
+    return True
+
+
+def _log_handoff(request: Request, path: str, body: bytes, upstream: httpx.Response | None) -> None:
+    # Observation must never change the original response or retry behavior.
+    try:
+        _log_handoff_impl(request, path, body, upstream)
+    except Exception:
+        pass
+
+
+def _log_handoff_impl(request: Request, path: str, body: bytes, upstream: httpx.Response | None) -> None:
+    """Correlate polling with verified actors, never with signed/private bodies.
+
+    This is observation only. The sidecar remains the sole authorization source.
+    A peer address is transport evidence, not a validator identity.
+    """
+    route = _HANDOFF_ROUTES.get(path)
+    if route is None or request.method != ("GET" if route == "current" else "POST"):
+        return
+    http_status = upstream.status_code if upstream is not None else 503
+    status, code, hotkey = "upstream_unavailable", "-", "-"
+    if upstream is not None:
+        status = "ok" if http_status == 200 else "http_error"
+        if (route == "claim" or http_status != 200) and len(upstream.content) <= 65_536:
+            try:
+                # Successful claims can contain private ICPs. Read only the
+                # response classification; no content is formatted into logs.
+                value = upstream.json()
+            except (ValueError, UnicodeError, RecursionError):
+                value = None
+            if isinstance(value, dict):
+                value_status, value_code = value.get("status"), value.get("code")
+                if isinstance(value_status, str) and value_status in _HANDOFF_STATUSES:
+                    status = value_status
+                if isinstance(value_code, str) and value_code in _AUTHENTICATED_CLAIM_DENIALS:
+                    code = value_code
+        verified = http_status == 200 or (
+            route == "claim" and code in _AUTHENTICATED_CLAIM_DENIALS
+        )
+        if route != "current" and verified and len(body) <= 4096:
+            try:
+                envelope = json.loads(body)
+            except (ValueError, UnicodeError, RecursionError):
+                envelope = None
+            candidate = envelope.get("hotkey") if isinstance(envelope, dict) else None
+            if isinstance(candidate, str) and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{46,48}", candidate):
+                hotkey = candidate
+    try:
+        peer = str(ipaddress.ip_address(request.client.host)) if request.client else "-"
+    except ValueError:
+        peer = "-"
+    agent = request.headers.get("user-agent", "")
+    agent_class = next((name for name in ("python-httpx", "Python-urllib", "python-requests") if agent.startswith(name + "/")), "other")
+    if not _handoff_log_due((route, http_status, status, code, hotkey, peer, agent_class)):
+        return
+    print(
+        "arena_handoff observed_at=%d route=%s http_status=%s status=%s code=%s hotkey=%s peer=%s client=%s"
+        % (int(time.time()), route, http_status, status, code, hotkey, peer, agent_class),
+        flush=True,
+    )
 
 
 def _arena_enabled() -> bool:
@@ -204,7 +297,11 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
             **({"testnet": True} if testnet else {}),
         )
     except httpx.HTTPError as exc:
+        if not testnet:
+            _log_handoff(request, arena_path, body, None)
         raise HTTPException(status_code=503, detail="agent competition is unavailable") from exc
+    if not testnet:
+        _log_handoff(request, arena_path, body, upstream)
     response_headers = {
         name: upstream.headers[name]
         for name in _FORWARDED_RESPONSE_HEADERS

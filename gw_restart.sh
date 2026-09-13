@@ -351,7 +351,7 @@ start_lab_arena_service() {
     setsid "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
       --environment-file "$GATEWAY_ENV_FILE" \
       --host 127.0.0.1 --port 8792 \
-      > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
+      >> "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
       9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   pid="$!"
   if ! "$GATEWAY_PYTHON_BIN" "$GATEWAY_CONTROLLER_PROCESS_HELPER" record \
@@ -3294,7 +3294,7 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u PREPARED_GATEWAY_SHA \
   -u LAB_ARENA_RESTART_GUARD_GENERATION \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
-  > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
+  >> "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
   9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
 
 GATEWAY_LAUNCHER_PID="$!"

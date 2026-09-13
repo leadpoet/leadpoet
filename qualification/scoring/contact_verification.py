@@ -23,6 +23,7 @@ from leadpoet_verifier.identity.normalization import (
     NormalizationError,
     normalize_url,
 )
+from qualification.company_quality import canonical_us_state
 
 
 DEEPLINE_EXECUTE_URL = "https://code.deepline.com/api/v2/integrations/{tool}/execute"
@@ -125,6 +126,20 @@ def _norm_country(value: Any) -> str:
     except (TypeError, ValueError):
         normalized = _norm(value)
         return _COUNTRY_ALIASES.get(normalized, normalized)
+
+
+def _norm_region(value: Any, country: Any) -> str:
+    """Normalize US state names/codes only when the location is in the US."""
+
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if _norm_country(country) == "US":
+        explicit_us = re.fullmatch(r"US-([A-Za-z]{2})", text, re.IGNORECASE)
+        state = canonical_us_state(explicit_us.group(1) if explicit_us else text)
+        if state:
+            return _norm(state)
+    return _norm(text)
 
 
 def _canonical_linkedin(value: Any) -> str:
@@ -641,24 +656,26 @@ async def _role_matches(
 def _profile_location(profile: Mapping[str, Any]) -> dict[str, str]:
     location = profile.get("location") if isinstance(profile.get("location"), Mapping) else {}
     parsed = location.get("parsed") if isinstance(location.get("parsed"), Mapping) else {}
+    country = _norm_country(
+        profile.get("country")
+        or profile.get("countryName")
+        or location.get("country")
+        or location.get("countryName")
+        or location.get("countryCode")
+        or parsed.get("country")
+        or parsed.get("countryFull")
+        or parsed.get("countryCode")
+    )
     return {
-        "country": _norm_country(
-            profile.get("country")
-            or profile.get("countryName")
-            or location.get("country")
-            or location.get("countryName")
-            or location.get("countryCode")
-            or parsed.get("country")
-            or parsed.get("countryFull")
-            or parsed.get("countryCode")
-        ),
-        "region": _norm(
+        "country": country,
+        "region": _norm_region(
             profile.get("region")
             or profile.get("state")
             or location.get("region")
             or location.get("state")
             or parsed.get("state")
-            or parsed.get("regionCode")
+            or parsed.get("regionCode"),
+            country,
         ),
         "city": _norm(profile.get("city") or location.get("city") or parsed.get("city")),
     }
@@ -673,7 +690,11 @@ def _location_check(claim: Mapping[str, Any], profile: Mapping[str, Any], icp: A
     if observed["country"] != country:
         return "fail", "contact_location_mismatch"
     for part in ("region", "city"):
-        expected = _norm(claimed.get(part))
+        expected = (
+            _norm_region(claimed.get(part), country)
+            if part == "region"
+            else _norm(claimed.get(part))
+        )
         if expected:
             if not observed[part]:
                 return "unknown", "contact_location_unverified"
@@ -691,8 +712,17 @@ def _location_check(claim: Mapping[str, Any], profile: Mapping[str, Any], icp: A
     for part, allowed in constraints.items():
         if not allowed:
             continue
-        normalize = _norm_country if part == "country" else _norm
-        allowed_values = {normalize(item) for item in allowed if _text(item)}
+        if part == "country":
+            normalize = _norm_country
+        elif part == "region":
+            normalize = lambda item: _norm_region(item, observed["country"])
+        else:
+            normalize = _norm
+        allowed_values = {
+            normalize(item)
+            for item in allowed
+            if isinstance(item, str) and _text(item)
+        }
         value = observed[part]
         if value and value not in allowed_values:
             return "fail", "contact_geography_mismatch"

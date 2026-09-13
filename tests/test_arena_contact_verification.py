@@ -468,6 +468,131 @@ def test_country_names_and_iso_codes_use_the_shared_normalizer() -> None:
     assert result["contact_qualified"] is True
 
 
+def test_us_state_code_constraint_matches_verified_state_name() -> None:
+    company = _company()
+    company["contact"] = _contact(
+        location={"country": "US", "region": "New York", "city": "New York City"}
+    )
+    profile = _profile(
+        country="United States", region="New York", city="New York City"
+    )
+    icp = _icp(
+        contact_geography={
+            "countries": [],
+            "regions": ["US-NY", "US-NJ", "US-MA", "US-CT"],
+            "cities": [],
+        }
+    )
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({"zerobounce_validate": [_zero("valid")]}),
+    )
+
+    assert result["contact_qualified"] is True
+    assert result["contact_verification"]["reason"] == "contact_verified"
+
+
+def test_us_state_code_claim_matches_verified_state_name() -> None:
+    company = _company()
+    company["contact"] = _contact(
+        location={"country": "US", "region": "US-NY", "city": "New York City"}
+    )
+    profile = _profile(
+        country="United States", region="New York", city="New York City"
+    )
+    icp = _icp(contact_geography={"countries": ["US"], "regions": [], "cities": []})
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({"zerobounce_validate": [_zero("valid")]}),
+    )
+
+    assert result["contact_qualified"] is True
+
+
+def test_us_state_code_constraint_rejects_neighboring_state() -> None:
+    company = _company()
+    company["contact"] = _contact(
+        location={"country": "US", "region": "New Jersey", "city": "Newark"}
+    )
+    profile = _profile(country="United States", region="New Jersey", city="Newark")
+    icp = _icp(
+        contact_geography={"countries": [], "regions": ["US-NY"], "cities": []}
+    )
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({}),
+    )
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_geography_mismatch"
+
+
+def test_us_state_codes_do_not_cross_country_boundaries() -> None:
+    company = _company()
+    company["contact"] = _contact(
+        location={"country": "CA", "region": "California", "city": "Toronto"}
+    )
+    profile = _profile(country="Canada", region="California", city="Toronto")
+    icp = _icp(
+        contact_geography={"countries": [], "regions": ["US-CA"], "cities": []}
+    )
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({}),
+    )
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_geography_mismatch"
+
+
+def test_bare_region_abbreviations_remain_literal_outside_us() -> None:
+    for country in ("Canada", "United Kingdom"):
+        assert contact_verification._norm_region("CA", country) == "ca"
+        assert contact_verification._norm_region("CA", country) != (
+            contact_verification._norm_region("California", country)
+        )
+        profile = _profile(country=country, region="CA", city="Example City")
+        company = _company()
+        company["contact"] = _contact(
+            location={"country": country, "region": "CA", "city": "Example City"}
+        )
+        icp = _icp(
+            contact_geography={"countries": [], "regions": ["CA"], "cities": []}
+        )
+
+        result = _run(
+            company=company,
+            icp=icp,
+            source=_source(profile),
+            execute=ScriptedExecute({"zerobounce_validate": [_zero("valid")]}),
+        )
+
+        assert result["contact_qualified"] is True
+
+
+def test_non_text_region_constraint_does_not_match_provider_value() -> None:
+    icp = _icp(
+        contact_geography={"countries": [], "regions": [123], "cities": []}
+    )
+
+    result = _run(icp=icp, source=_source(_profile(region=123)), execute=ScriptedExecute({}))
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_location_unverified"
+
+
 def test_same_company_name_cannot_override_linkedin_contradiction() -> None:
     profile = _profile(
         currentPosition={

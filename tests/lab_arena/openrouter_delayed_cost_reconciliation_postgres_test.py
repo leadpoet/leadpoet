@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts
+from lab_arena import contracts, service as svc
 from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
     POSTGREST_MIGRATIONS,
@@ -63,6 +63,67 @@ def _round_and_run(store: ArenaStore, label: str):
     )
     run, token, _, _ = claim(store, round_id, runners[0])
     return round_id, participants[0]["submission_id"], run, hash_lease_token(token)
+
+
+def _round_run_and_token(store: ArenaStore, label: str):
+    round_id = "arena-2026-09-12-%s" % label
+    runners, participants = open_round(
+        store,
+        round_id,
+        participants=1,
+        runners=1,
+        prefix=label,
+        execution_cap_microusd=10_000_000,
+    )
+    run, token, _, _ = claim(store, round_id, runners[0])
+    return (
+        round_id,
+        participants[0]["submission_id"],
+        store.get_run(run["run_id"]),
+        token,
+    )
+
+
+def _completion_service(
+    store: ArenaStore, object_root: Path, round_id: str, run, lease_token: str
+):
+    result = {
+        "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 1.0,
+            "max_rss_bytes": 1,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "provider_call_count": 1,
+        },
+        "started_at": "2026-09-12T01:00:00Z",
+        "finished_at": "2026-09-12T01:00:01Z",
+        "terminal_status": "accepted",
+    }
+    body = {
+        "run_id": run["run_id"],
+        "lease_token": lease_token,
+        "result": result,
+        "output": {
+            "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+            "companies": [],
+        },
+    }
+    service = object.__new__(svc.ArenaService)
+    service._store = store
+    service._objects = svc.LocalObjectStore(object_root)
+    service._request_round = lambda *_args, **_kwargs: (
+        {"hotkey": run["runner_hotkey"], "body": body},
+        store.get_round(round_id),
+    )
+    service._require_validator_authority = lambda _hotkey: None
+    service._reconcile_openrouter_cost = lambda *_args, **_kwargs: (
+        (_ for _ in ()).throw(
+            AssertionError("completion must not perform eager provider reconciliation")
+        )
+    )
+    return service
 
 
 def _uncertain_call(
@@ -309,13 +370,14 @@ def test_reconciliation_is_atomic_idempotent_and_owner_bound(resources):
     assert len(_settlements(store, identity)) == 1
 
 
-def test_reconciliation_after_n_minus_one_acceptance_preserves_participation(
-    resources, database
+def test_service_accepts_terminal_uncertainty_and_reconciliation_preserves_result(
+    resources, database, tmp_path
 ):
     store, _connect = resources
-    round_id, _submission_id, run, token_hash = _round_and_run(
-        store, "accepted"
+    round_id, _submission_id, run, lease_token = _round_run_and_token(
+        store, "svcaccepted"
     )
+    token_hash = hash_lease_token(lease_token)
     runner = store.get_run(run["run_id"])["runner_hotkey"]
     fingerprint = "sha256:" + "f" * 64
     generation_id = "gen-accepted"
@@ -329,22 +391,19 @@ def test_reconciliation_after_n_minus_one_acceptance_preserves_participation(
         credential_fingerprint=fingerprint,
     )
 
-    # An N-1 service could complete after the uncertainty became terminal.
-    # Exercise that SQL RPC directly; the current service normally reconciles
-    # first and waits while provider cost remains unavailable.
-    completed = store.complete_attempt(
-        run_id=run["run_id"],
-        lease_token_hash=token_hash,
-        result={"terminal_status": "accepted"},
-        terminal_cause="accepted",
-        output_ref="arena/%s/accepted.json" % round_id,
-    )
+    service = _completion_service(store, tmp_path, round_id, run, lease_token)
+    completed = service.handle_complete({})
     assert completed["status"] == "accepted"
     accepted_before = store.get_run(run["run_id"])
     accepted_at = accepted_before["participation_accepted_at"]
     assert accepted_at is not None
     assert accepted_before["status"] == "accepted"
     assert accepted_before["runner_hotkey"] == runner
+    assert accepted_before["result_doc"]["terminal_status"] == "accepted"
+    assert accepted_before["output_ref"] == (
+        "arena/%s/outputs/%s.json" % (round_id, run["run_id"])
+    )
+    assert service._objects.get(accepted_before["output_ref"])
     assert _has_recent_participation(database, runner)
 
     candidates = store.list_openrouter_cost_reconciliations(
@@ -367,13 +426,66 @@ def test_reconciliation_after_n_minus_one_acceptance_preserves_participation(
     assert store.get_run(run["run_id"]) == accepted_before
     assert _has_recent_participation(database, runner)
 
-    replay = store.reconcile_openrouter_cost(**arguments)
-    assert replay["status"] == "settled" and replay["idempotent"] is True
+    reconciliation_replay = store.reconcile_openrouter_cost(**arguments)
+    assert (
+        reconciliation_replay["status"] == "settled"
+        and reconciliation_replay["idempotent"] is True
+    )
+    completion_replay = service.handle_complete({})
+    assert completion_replay["status"] == "accepted"
+    assert completion_replay["idempotent"] is True
     accepted_after = store.get_run(run["run_id"])
     assert accepted_after == accepted_before
     assert accepted_after["participation_accepted_at"] == accepted_at
     assert accepted_after["runner_hotkey"] == runner
     assert len(_settlements(store, identity)) == 1
+
+
+def test_service_leaves_true_inflight_call_leased_without_participation(
+    resources, database, tmp_path
+):
+    store, _connect = resources
+    round_id, _submission_id, run, lease_token = _round_run_and_token(
+        store, "svcinflight"
+    )
+    token_hash = hash_lease_token(lease_token)
+    runner = run["runner_hotkey"]
+    identity = contracts.provider_call_identity(
+        attempt=run["attempt"],
+        assignment_id=run["assignment_id"],
+        icp_position=run["icp_position"],
+        action_sequence=0,
+        operation_id="openrouter.chat",
+        request_hash=sha("service-inflight"),
+    )
+    assert store.reserve_call(
+        run_id=run["run_id"],
+        lease_token_hash=token_hash,
+        call_identity=identity,
+        operation_id="openrouter.chat",
+        provider="openrouter",
+        funding_source="miner_key",
+        amount_microusd=500_000,
+        call_doc={"model": "fixture"},
+    )["status"] == "reserved"
+    assert store.mark_dispatched(
+        run_id=run["run_id"],
+        lease_token_hash=token_hash,
+        call_identity=identity,
+    )["status"] == "dispatched"
+
+    service = _completion_service(store, tmp_path, round_id, run, lease_token)
+    completed = service.handle_complete({})
+
+    assert completed == {"status": "accounting_open", "open_calls": 1}
+    stored = store.get_run(run["run_id"])
+    assert stored["status"] == "leased"
+    assert not stored.get("result_doc")
+    assert not stored.get("output_ref")
+    assert stored["participation_accepted_at"] is None
+    assert not _has_recent_participation(database, runner)
+    output_ref = "arena/%s/outputs/%s.json" % (round_id, run["run_id"])
+    assert service._objects.get(output_ref)
 
 
 def test_list_cursor_skips_unavailable_first_item_and_wraps(resources):

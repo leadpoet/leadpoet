@@ -114,7 +114,7 @@ def test_advance_defers_exhaustion_while_exact_billing_run_lease_is_active():
     }
 
 
-def test_completion_uses_existing_accounting_open_retry_before_new_attempt(monkeypatch):
+def test_completion_delegates_accounting_gate_to_atomic_store_rpc(monkeypatch):
     service = object.__new__(svc.ArenaService)
     service._request_round = lambda _envelope, scope, hot: (
         {
@@ -127,6 +127,7 @@ def test_completion_uses_existing_accounting_open_retry_before_new_attempt(monke
         },
     )
     service._require_validator_authority = lambda _hotkey: None
+    completed = []
     service._store = SimpleNamespace(
         get_run=lambda _run_id: {
             "run_id": "run-1",
@@ -134,12 +135,16 @@ def test_completion_uses_existing_accounting_open_retry_before_new_attempt(monke
             "runner_hotkey": "runner",
             "kind": "score",
             "status": "leased",
-        }
+        },
+        complete_attempt=lambda **kwargs: completed.append(kwargs) or {
+            "status": "accounting_open",
+            "open_calls": 1,
+        },
     )
     service._lease_token_for_run = lambda _validated, _run: "lease"
-    service._reconcile_openrouter_cost = lambda _round_id, run_id: {
-        "status": "pending"
-    }
+    service._reconcile_openrouter_cost = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("completion must not perform eager provider reconciliation")
+    )
     monkeypatch.setattr(
         svc.contracts, "validate_run_result", lambda document: dict(document)
     )
@@ -148,6 +153,9 @@ def test_completion_uses_existing_accounting_open_retry_before_new_attempt(monke
         "status": "accounting_open",
         "open_calls": 1,
     }
+    assert len(completed) == 1
+    assert completed[0]["run_id"] == "run-1"
+    assert completed[0]["terminal_cause"] == "judge_error"
 
 
 def test_fresh_testnet_bootstrap_installs_reconciliation_prerequisite_and_rpc():

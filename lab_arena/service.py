@@ -3555,16 +3555,6 @@ class ArenaService:
         if kind == "execute" and terminal_status in ("judge_error", "judge_timeout"):
             raise ServiceError("run_result_cause_kind_mismatch", 400)
         lease_token = self._lease_token_for_run(validated, run)
-        if (
-            run.get("status") not in ("accepted", "failed")
-            and not champion_restart_required
-        ):
-            billing = self._reconcile_openrouter_cost(round_id, run_id=run_id)
-            if billing["status"] not in ("none", "settled"):
-                # Reuse the runner's existing bounded accounting-open retry
-                # window. The same signed completion is preserved while the
-                # exact generation GET catches up; no new model attempt starts.
-                return {"status": "accounting_open", "open_calls": 1}
         # A retired champion credential must release the ICP immediately. Its
         # uncertain ledger entry stays eligible for the background exact-cost
         # reconciler after this attempt becomes failed.

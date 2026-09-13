@@ -566,13 +566,10 @@ def test_champion_restart_completion_does_not_wait_for_delayed_openrouter_cost()
     assert completed[0]["output_ref"] == ""
 
     ordinary = _completion_service()
-    ordinary._reconcile_openrouter_cost = lambda *_args, **_kwargs: {
-        "status": "unavailable"
-    }
-    assert ordinary.handle_complete({}) == {
-        "status": "accounting_open",
-        "open_calls": 1,
-    }
+    ordinary._reconcile_openrouter_cost = lambda *_args, **_kwargs: pytest.fail(
+        "ordinary completion performed eager provider reconciliation"
+    )
+    assert ordinary.handle_complete({}) == {"status": "failed"}
 
 
 @pytest.mark.parametrize(

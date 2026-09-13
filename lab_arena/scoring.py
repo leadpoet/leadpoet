@@ -315,15 +315,17 @@ def score_work_item(
     For scored companies with unique, nonempty names, keep each company's
     first terminal breakdown and retry only unresolved companies. Duplicate or
     missing names keep whole-item retries because the scorer's duplicate gate
-    depends on batch order. Exhaustion raises ``ScoringError`` (the service
-    cancels if the window closes) and never creates a miner zero. The scorer
-    must return exactly one breakdown per company it scores under the
+    depends on batch order. Exhausted source-local verification becomes an
+    explicit company zero. Systemic exhaustion raises ``ScoringError``. The
+    scorer must return exactly one breakdown per company it scores under the
     bucket-skip rule the verifier recomputes; any other count is a scorer
     contract failure before any result is retained.
     """
 
     from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
         scorer_breakdown_has_retryable_infrastructure_failure,
+        terminal_company_verification_breakdown,
     )
 
     sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
@@ -334,7 +336,8 @@ def score_work_item(
     unresolved = list(range(len(scored_indexes)))
     last_error: Optional[BaseException] = None
     last_failure_reason = ""
-    for attempt in range(max(1, int(max_retries))):
+    attempts = max(1, int(max_retries))
+    for attempt in range(attempts):
         if retain_terminal and attempt > 0:
             invoked_positions = list(unresolved)
             invoked_companies = [
@@ -365,6 +368,21 @@ def score_work_item(
         ]
         if not retain_terminal:
             if failed:
+                if (
+                    attempt == attempts - 1
+                    and all(
+                        scorer_breakdown_has_company_local_verification_failure(row)
+                        for row in failed
+                    )
+                ):
+                    return [
+                        terminal_company_verification_breakdown(row)
+                        if scorer_breakdown_has_retryable_infrastructure_failure(
+                            row, integrity_policy=integrity_policy
+                        )
+                        else row
+                        for row in breakdowns
+                    ]
                 last_failure_reason = _retryable_breakdown_failure_reason(
                     failed[0]
                 )
@@ -383,10 +401,20 @@ def score_work_item(
                 if breakdown.get("company_index") != expected_index:
                     raise ScoringError("integrity breakdown company index mismatch")
                 breakdown = {**breakdown, "company_index": scored_indexes[position]}
-            if not scorer_breakdown_has_retryable_infrastructure_failure(
+            retryable = scorer_breakdown_has_retryable_infrastructure_failure(
                 breakdown, integrity_policy=integrity_policy
-            ):
+            )
+            if not retryable:
                 retained[position] = breakdown
+            elif (
+                attempt == attempts - 1
+                and scorer_breakdown_has_company_local_verification_failure(
+                    breakdown
+                )
+            ):
+                retained[position] = terminal_company_verification_breakdown(
+                    breakdown
+                )
         unresolved = [
             position for position, breakdown in enumerate(retained)
             if breakdown is None

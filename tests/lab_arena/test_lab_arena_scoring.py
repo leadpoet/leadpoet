@@ -813,7 +813,7 @@ def test_retry_keeps_retained_results_across_batch_exception():
     assert result == [first, recovered]
 
 
-def test_retry_exhaustion_never_fabricates_zero_for_unresolved_company():
+def test_retry_exhaustion_isolates_source_blocked_company_and_keeps_success():
     companies = [scored_company(0), scored_company(1)]
     unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
     unavailable["verifier_gate_receipts"] = [
@@ -829,21 +829,238 @@ def test_retry_exhaustion_never_fabricates_zero_for_unresolved_company():
         calls.append([row["company_name"] for row in batch])
         return [breakdown(91.0), unavailable] if len(calls) == 1 else [unavailable]
 
-    with pytest.raises(
-        scoring.ScoringError, match="infrastructure failure"
-    ) as raised:
-        scoring.score_work_item(
-            {"scored_run_id": "run-unresolved-exhausted"},
-            icp=_ICPS[0],
-            companies=companies,
-            scorer=scorer,
-        )
-    assert raised.value.failure_reason == "source_blocked"
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-unresolved-exhausted"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+    assert [row["final_score"] for row in result] == [91.0, 0.0]
+    assert result[1]["verifier_gate_receipts"][0]["failure_class"] == (
+        "company_verification_exhausted"
+    )
+    from lab_arena.company_judgments import raw_judgment_is_cacheable
+    from qualification.scoring.competition import (
+        count_penalizable_false_positives,
+        raw_company_judgment,
+        scorer_breakdown_is_terminal_company_verification_failure,
+    )
+
+    public = verify.redact_breakdown(result[1])
+    assert scorer_breakdown_is_terminal_company_verification_failure(public)
+    assert public["final_score"] == 0.0
+    assert count_penalizable_false_positives(
+        [public], icp_has_intent_signals=True
+    ) == (0, 0)
+    assert raw_judgment_is_cacheable(raw_company_judgment(result[1]))
     assert calls == [
         ["Scored Co 0", "Scored Co 1"],
         ["Scored Co 1"],
         ["Scored Co 1"],
     ]
+
+
+def test_source_blocked_does_not_mask_systemic_receipt_or_final_exception():
+    from qualification.scoring.competition import (
+        terminal_company_verification_breakdown,
+    )
+
+    local = breakdown(0.0, "Company fit unavailable")
+    local["verifier_gate_receipts"] = [{
+        "gate": "company_fit",
+        "decision": "unavailable",
+        "failure_reason_code": "source_blocked",
+    }]
+    mixed = {
+        **local,
+        "verifier_gate_receipts": [
+            *local["verifier_gate_receipts"],
+            {
+                "gate": "contact",
+                "decision": "unavailable",
+                "failure_reason_code": "provider_error",
+            },
+        ],
+    }
+    mixed_unknown = {
+        **local,
+        "verifier_gate_receipts": [
+            *local["verifier_gate_receipts"],
+            {"gate": "other_verifier", "decision": "unavailable"},
+        ],
+    }
+    terminal_mixed = terminal_company_verification_breakdown(local)
+    terminal_mixed["verifier_gate_receipts"].append(
+        {
+            "gate": "contact",
+            "decision": "unavailable",
+            "failure_reason_code": "provider_error",
+        }
+    )
+
+    for terminal in (
+        mixed,
+        mixed_unknown,
+        terminal_mixed,
+        RuntimeError("judge process failed"),
+    ):
+        calls = {"n": 0}
+
+        def scorer(_batch, _icp, _reference):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return [local]
+            if isinstance(terminal, BaseException):
+                raise terminal
+            return [terminal]
+
+        with pytest.raises(scoring.ScoringError):
+            scoring.score_work_item(
+                {"scored_run_id": "run-systemic-precedence"},
+                icp=_ICPS[0],
+                companies=[scored_company(0)],
+                scorer=scorer,
+            )
+        assert calls["n"] == 3
+
+
+def test_duplicate_names_keep_terminal_company_indexes_isolated():
+    companies = [
+        scored_company(0, name="Same Name"),
+        scored_company(1, name="Same Name"),
+    ]
+    calls = []
+
+    def scorer(batch, _icp, _reference):
+        calls.append([row["company_website"] for row in batch])
+        if len(calls) == 1:
+            failed = breakdown(0.0, "Company fit unavailable")
+            failed.update({
+                "company_index": 0,
+                "company_identity_key": "domain:scored0.example.com",
+                "company_identity_alias_keys": ["domain:scored0.example.com"],
+                "company_qualified": False,
+                "duplicate_company": False,
+                "verifier_gate_receipts": [{
+                    "gate": "company_fit",
+                    "decision": "unavailable",
+                    "failure_reason_code": "source_blocked",
+                }],
+            })
+            passed = breakdown(72.0)
+            passed.update({
+                "company_index": 1,
+                "company_identity_key": "domain:scored1.example.com",
+                "company_identity_alias_keys": ["domain:scored1.example.com"],
+                "company_qualified": True,
+                "duplicate_company": False,
+            })
+            return [failed, passed]
+        failed = breakdown(0.0, "Company fit unavailable")
+        failed.update({
+            "company_index": 0,
+            "company_identity_key": "domain:scored0.example.com",
+            "company_identity_alias_keys": ["domain:scored0.example.com"],
+            "company_qualified": False,
+            "duplicate_company": False,
+            "verifier_gate_receipts": [{
+                "gate": "company_fit",
+                "decision": "unavailable",
+                "failure_reason_code": "source_blocked",
+            }],
+        })
+        return [failed]
+
+    scorer.integrity_policy = True
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-duplicate-index-isolation"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+        max_retries=2,
+    )
+    assert [row["company_index"] for row in result] == [0, 1]
+    assert [row["final_score"] for row in result] == [0.0, 72.0]
+    assert calls == [
+        ["https://scored0.example.com", "https://scored1.example.com"],
+        ["https://scored0.example.com"],
+    ]
+
+
+def test_intent_source_content_exhaustion_is_company_local_but_timeout_is_systemic():
+    def intent_failure(exa_stage):
+        row = breakdown(0.0, "Intent verification unavailable")
+        row["intent_signals_detail"] = [{
+            "matched_icp_signal": 0,
+            "after_decay": 0.0,
+            "judge_verdict": {
+                "decision": "rejected_verifier_error",
+                "pipeline_decision": "unavailable",
+                "rejection_reason": "evidence_fetch_failed",
+                "verification_trace": {
+                    "provider_attempts": [{
+                        "source": "none",
+                        "sd_stage": "all_tiers_exhausted:anti_bot_marker",
+                        "exa_stage": exa_stage,
+                    }],
+                },
+            },
+        }]
+        return row
+
+    calls = {"n": 0}
+
+    def local_scorer(*_args):
+        calls["n"] += 1
+        return [intent_failure("exa_no_results")]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-intent-local"},
+        icp=_ICPS[0],
+        companies=[scored_company(0)],
+        scorer=local_scorer,
+        max_retries=2,
+    )
+    assert calls["n"] == 2
+    assert result[0]["verifier_gate_receipts"][-1] == {
+        "gate": "intent_verification",
+        "decision": "unavailable",
+        "failure_class": "company_verification_exhausted",
+    }
+
+    combined = intent_failure("exa_no_results")
+    combined["verifier_gate_receipts"] = [{
+        "gate": "company_fit",
+        "decision": "unavailable",
+        "failure_reason_code": "source_blocked",
+    }]
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_retryable_infrastructure_failure,
+        terminal_company_verification_breakdown,
+    )
+
+    combined_terminal = terminal_company_verification_breakdown(combined)
+    combined_public = verify.redact_breakdown(combined_terminal)
+    assert {
+        receipt.get("gate")
+        for receipt in combined_public["verifier_gate_receipts"]
+        if receipt.get("failure_class") == "company_verification_exhausted"
+    } == {"company_fit", "intent_verification"}
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(
+        combined_public, integrity_policy=True
+    )
+
+    def systemic_scorer(*_args):
+        return [intent_failure("exa_transient_exhausted")]
+
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "run-intent-systemic"},
+            icp=_ICPS[0],
+            companies=[scored_company(0)],
+            scorer=systemic_scorer,
+            max_retries=2,
+        )
 
 
 def test_judge_accepts_nonempty_score_with_unavailable_extra_evidence():

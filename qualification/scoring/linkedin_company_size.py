@@ -361,6 +361,19 @@ async def fetch_current_linkedin_company_size(
                 "outcome": CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
                 "url": str(status_item["id"]),
             }
+        if (
+            isinstance(status_item, Mapping)
+            and str(status_item.get("status") or "").casefold() == "error"
+            and status_error.get("httpStatusCode") == 409
+            and status_error.get("tag") == "CRAWL_NON_CANONICAL"
+            and status_slug == requested_slug
+            and results == []
+        ):
+            # Exa classified this exact profile as noncanonical. This is
+            # source-local, like an authentication wall, rather than evidence
+            # that the Exa account is unavailable.
+            _set_failure_reason(diagnostic, SOURCE_BLOCKED_FAILURE_REASON)
+            return None
     if statuses is not None and (
         not isinstance(statuses, list)
         or not statuses

@@ -49,10 +49,33 @@ _PENALIZABLE_FAILURE_MARKERS = (
 )
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
 _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS = "model_contract_incompatible"
+COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS = "company_verification_exhausted"
 _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
     "insufficient_fit_evidence",
     _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS,
+    COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS,
 })
+_SOURCE_LOCAL_FAILURE_REASON = "source_blocked"
+_SOURCE_LOCAL_INTENT_STAGE_MARKERS = (
+    "anti_bot_marker",
+    "body_too_short",
+    "html_empty_body",
+    "js_shell",
+    "non_textual",
+    "exa_no_results",
+    "exa_thin",
+)
+_SYSTEMIC_INTENT_STAGE_MARKERS = (
+    "no_sd_key",
+    "no_exa_key",
+    "client_deadline",
+    "transport_error",
+    "exception",
+    "exa_failed",
+    "exa_transient_exhausted",
+    "http_429",
+    "http_5",
+)
 
 
 class CompetitionScorerInputError(ValueError):
@@ -696,6 +719,7 @@ def apply_company_judgment_context(
         company_ready = bool(
             fit
             and has_verified_primary_intent(row.get("intent_signals_detail") or [])
+            and not scorer_breakdown_is_terminal_company_verification_failure(row)
         )
         qualified = bool(company_ready)
         if contacts_required:
@@ -979,10 +1003,220 @@ class CompetitionCompanyScorer:
         return breakdowns
 
 
+def _intent_detail_has_source_local_failure(detail: Any) -> bool:
+    """Recognize bounded source-content exhaustion without reading prose."""
+
+    if not isinstance(detail, Mapping):
+        return False
+    verdict = detail.get("judge_verdict")
+    if not isinstance(verdict, Mapping):
+        return False
+    if verdict.get("failure_reason_code") == _SOURCE_LOCAL_FAILURE_REASON:
+        return True
+    if (
+        verdict.get("decision") != "rejected_verifier_error"
+        or verdict.get("pipeline_decision") != "unavailable"
+        or verdict.get("rejection_reason") != "evidence_fetch_failed"
+        or verdict.get("error_class")
+    ):
+        return False
+    trace = verdict.get("verification_trace")
+    attempts = trace.get("provider_attempts") if isinstance(trace, Mapping) else None
+    if not isinstance(attempts, Sequence) or isinstance(attempts, (str, bytes)) or not attempts:
+        return False
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping):
+            return False
+        stages = [
+            str(value).casefold()
+            for key, value in attempt.items()
+            if (str(key) == "source" or str(key).endswith("stage"))
+            and isinstance(value, str)
+        ]
+        if any(
+            marker in stage
+            for stage in stages
+            for marker in _SYSTEMIC_INTENT_STAGE_MARKERS
+        ):
+            return False
+        if not any(
+            marker in stage
+            for stage in stages
+            for marker in _SOURCE_LOCAL_INTENT_STAGE_MARKERS
+        ):
+            return False
+    return True
+
+
+def scorer_breakdown_has_company_local_verification_failure(
+    breakdown: Mapping[str, Any],
+) -> bool:
+    """Return true only for a typed failure tied to one company's sources."""
+
+    if not isinstance(breakdown, Mapping):
+        return False
+    receipts = breakdown.get("verifier_gate_receipts")
+    terminal_gates: set[str] = set()
+    source_local = False
+    if isinstance(receipts, Sequence) and not isinstance(receipts, (str, bytes)):
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping):
+                continue
+            if receipt.get("decision") != "unavailable":
+                continue
+            failure_class = str(receipt.get("failure_class") or "")
+            if failure_class == COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS:
+                terminal_gates.add(str(receipt.get("gate") or ""))
+                source_local = True
+                continue
+            if (
+                receipt.get("gate") == "company_fit"
+                and receipt.get("failure_reason_code")
+                == _SOURCE_LOCAL_FAILURE_REASON
+            ):
+                source_local = True
+                continue
+            if failure_class in _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES:
+                continue
+            # An unavailable gate without explicit source-local evidence can
+            # be a shared provider or contract failure. Keep it systemic.
+            return False
+    details = breakdown.get("intent_signals_detail")
+    if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
+        for detail in details:
+            if not _intent_detail_is_unavailable(detail):
+                continue
+            verdict = detail.get("judge_verdict")
+            if not isinstance(verdict, Mapping):
+                return False
+            if (
+                verdict.get("error_class")
+                or verdict.get("failure_reason_code")
+                in {"malformed_response", "provider_error", "unexpected_verifier_error"}
+            ):
+                return False
+            trace = verdict.get("verification_trace")
+            attempts = (
+                trace.get("provider_attempts")
+                if isinstance(trace, Mapping)
+                else None
+            )
+            if isinstance(attempts, Sequence) and not isinstance(attempts, (str, bytes)):
+                stages = [
+                    str(value).casefold()
+                    for attempt in attempts
+                    if isinstance(attempt, Mapping)
+                    for key, value in attempt.items()
+                    if (str(key) == "source" or str(key).endswith("stage"))
+                    and isinstance(value, str)
+                ]
+                if any(
+                    marker in stage
+                    for stage in stages
+                    for marker in _SYSTEMIC_INTENT_STAGE_MARKERS
+                ):
+                    return False
+            if _intent_detail_has_source_local_failure(detail):
+                source_local = True
+                continue
+            # Public redaction removes source traces. The terminal intent gate
+            # is the retained typed decision for that exact unavailable detail.
+            if "intent_verification" not in terminal_gates:
+                return False
+    return source_local
+
+
+def scorer_breakdown_is_terminal_company_verification_failure(
+    breakdown: Mapping[str, Any],
+) -> bool:
+    receipts = breakdown.get("verifier_gate_receipts")
+    return bool(
+        isinstance(receipts, Sequence)
+        and not isinstance(receipts, (str, bytes))
+        and any(
+            isinstance(receipt, Mapping)
+            and receipt.get("failure_class")
+            == COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
+            for receipt in receipts
+        )
+    )
+
+
+def terminal_company_verification_breakdown(
+    breakdown: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Convert one exhausted source-local verification into a stable zero."""
+
+    if not scorer_breakdown_has_company_local_verification_failure(breakdown):
+        raise CompetitionScorerInputError(
+            "company verification failure is not source-local"
+        )
+    details = breakdown.get("intent_signals_detail")
+    has_local_intent = bool(
+        isinstance(details, Sequence)
+        and not isinstance(details, (str, bytes))
+        and any(
+            _intent_detail_is_unavailable(detail)
+            and _intent_detail_has_source_local_failure(detail)
+            for detail in details
+        )
+    )
+    result = json.loads(json.dumps(dict(breakdown), allow_nan=False))
+    receipts = result.get("verifier_gate_receipts")
+    if not isinstance(receipts, list):
+        receipts = []
+    marked = False
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        if receipt.get("failure_class") == COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS:
+            marked = True
+        elif (
+            receipt.get("gate") == "company_fit"
+            and receipt.get("decision") == "unavailable"
+            and receipt.get("failure_reason_code") == _SOURCE_LOCAL_FAILURE_REASON
+        ):
+            receipt["failure_class"] = COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
+            marked = True
+    has_terminal_intent = any(
+        isinstance(receipt, Mapping)
+        and receipt.get("gate") == "intent_verification"
+        and receipt.get("failure_class")
+        == COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
+        for receipt in receipts
+    )
+    if not marked or (has_local_intent and not has_terminal_intent):
+        receipts.append({
+            "gate": "intent_verification",
+            "decision": "unavailable",
+            "failure_class": COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS,
+        })
+    result["verifier_gate_receipts"] = receipts
+    for field, value in (
+        ("icp_fit", 0.0),
+        ("decision_maker", 0.0),
+        ("intent_signal_raw", 0.0),
+        ("time_decay_multiplier", 1.0),
+        ("intent_signal_final", 0.0),
+        ("cost_penalty", 0.0),
+        ("time_penalty", 0.0),
+        ("final_score", 0.0),
+    ):
+        result[field] = value
+    if "company_qualified" in result:
+        result["company_qualified"] = False
+    return result
+
+
 def scorer_breakdown_has_retryable_infrastructure_failure(
     breakdown: Mapping[str, Any], *, integrity_policy: bool = False
 ) -> bool:
     if not isinstance(breakdown, Mapping):
+        return False
+    if (
+        scorer_breakdown_is_terminal_company_verification_failure(breakdown)
+        and scorer_breakdown_has_company_local_verification_failure(breakdown)
+    ):
         return False
     receipts = breakdown.get("verifier_gate_receipts")
     if isinstance(receipts, Sequence) and not isinstance(receipts, (str, bytes)):
@@ -1111,7 +1345,14 @@ def count_penalizable_false_positives(
     gate_failures = 0
     unverified_primary = 0
     for row in breakdowns:
-        if not isinstance(row, Mapping) or scorer_breakdown_has_retryable_infrastructure_failure(row):
+        if (
+            not isinstance(row, Mapping)
+            or (
+                scorer_breakdown_is_terminal_company_verification_failure(row)
+                and scorer_breakdown_has_company_local_verification_failure(row)
+            )
+            or scorer_breakdown_has_retryable_infrastructure_failure(row)
+        ):
             continue
         if _structured_fit_mismatch(row):
             gate_failures += 1

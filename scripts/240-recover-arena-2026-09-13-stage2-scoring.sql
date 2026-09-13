@@ -19,9 +19,9 @@ DECLARE
   v_round_id CONSTANT TEXT := 'arena-2026-09-13';
   v_cost_submission CONSTANT TEXT := 'sub-5dffdbaa2b96e8dc78160aea8f80a7b9';
   v_run_prefix CONSTANT TEXT := 'arena-2026-09-13:score-recovery240:';
-  -- Deliberately invalid until the fixed scorer artifact is immutable.
-  v_new_digest CONSTANT TEXT := '__FIXED_SCORER_IMAGE_DIGEST__';
-  v_new_reference CONSTANT TEXT := '__FIXED_SCORER_IMAGE_REFERENCE__';
+  -- Fixed image built from main bad660b6216bcf6f9bb236a04bfa8e95c2a59654; 354 container tests passed.
+  v_new_digest CONSTANT TEXT := 'sha256:9321771386711b4f7d5235bf8840c0b13f432eb04861f187decb292810a38598';
+  v_new_reference CONSTANT TEXT := '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9321771386711b4f7d5235bf8840c0b13f432eb04861f187decb292810a38598';
   v_round public.lab_arena_rounds%ROWTYPE;
   v_participant_ids TEXT[];
   v_old_runs_hash TEXT;

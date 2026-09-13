@@ -23,8 +23,8 @@ from tests.lab_arena.lab_arena_pg_harness import (
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "scripts" / "240-recover-arena-2026-09-13-stage2-scoring.sql"
 OLD_DIGEST = "sha256:188fe7f79e0233c4213bd6262f0d47e07f83d14b3374ee502f7268433111ba4e"
-NEW_DIGEST = "sha256:" + "9" * 64
-NEW_REFERENCE = "registry.example/scorer@" + NEW_DIGEST
+NEW_DIGEST = "sha256:9321771386711b4f7d5235bf8840c0b13f432eb04861f187decb292810a38598"
+NEW_REFERENCE = "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@" + NEW_DIGEST
 BASELINE = "baseline-2026-09-13"
 CAF = "sub-caf0e1ef30c9712e6385afe24a75375e"
 COST_TARGET = "sub-5dffdbaa2b96e8dc78160aea8f80a7b9"
@@ -56,11 +56,7 @@ def database():
 
 
 def _migration() -> str:
-    return (
-        MIGRATION.read_text(encoding="utf-8")
-        .replace("__FIXED_SCORER_IMAGE_DIGEST__", NEW_DIGEST)
-        .replace("__FIXED_SCORER_IMAGE_REFERENCE__", NEW_REFERENCE)
-    )
+    return MIGRATION.read_text(encoding="utf-8")
 
 
 def _prepare(database, *, reconciliation_count: int = 8):

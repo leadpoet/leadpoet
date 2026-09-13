@@ -32,6 +32,9 @@ from tests.lab_arena.test_lab_arena_migration_postgres import claim, sha
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "scripts" / "235-recover-arena-2026-09-13-scoring-retry.sql"
+CLAIM_SERIALIZATION = (
+    ROOT / "scripts" / "236-lab-arena-score-submission-serialization.sql"
+)
 NEWLY_ACCEPTED = (
     (
         f"{ROUND_ID}:{ASPIRE_SUBMISSION}:1:1:score:recovery234",
@@ -82,6 +85,7 @@ def _prepare_second_cancellation(database):
     connection, store, transport = _seed(database)
     with connection.cursor() as cursor:
         cursor.execute(FIRST_RECOVERY.read_text(encoding="utf-8"))
+        cursor.execute(CLAIM_SERIALIZATION.read_text(encoding="utf-8"))
         cursor.execute(
             "ALTER TABLE public.lab_arena_runs DISABLE TRIGGER "
             "lab_arena_runs_terminal"

@@ -253,7 +253,7 @@ def test_fit_url_hints_are_public_prompt_safe_deduplicated_and_bounded():
 def test_reverify_prompt_carries_only_bounded_untrusted_url_hints(monkeypatch):
     prompts = []
 
-    async def request(*, key, prompt, telemetry_purpose):
+    async def request(*, key, prompt, telemetry_purpose, diagnostic=None):
         assert key == "test-key"
         assert telemetry_purpose == "lead_scorer_reverify"
         prompts.append(prompt)
@@ -306,7 +306,7 @@ def test_reverify_prompt_carries_only_bounded_untrusted_url_hints(monkeypatch):
 def test_reverify_prompt_anchors_only_verified_homepage_identity(monkeypatch):
     prompts = []
 
-    async def request(*, key, prompt, telemetry_purpose):
+    async def request(*, key, prompt, telemetry_purpose, diagnostic=None):
         assert key == "test-key"
         assert telemetry_purpose == "lead_scorer_reverify"
         prompts.append(prompt)
@@ -807,7 +807,7 @@ def test_homepage_domain_conflict_with_failed_size_fetch_remains_retryable(
         )
         return verdict, ""
 
-    async def failed_profile_fetch(url):
+    async def failed_profile_fetch(url, *, diagnostic=None):
         profile_calls.append(url)
         return None
 

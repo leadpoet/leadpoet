@@ -1617,7 +1617,9 @@ def test_blocked_verifier_reason_survives_runner_completion_and_cancellation(
         challengers=["BlockedReason", "BlockedReasonPass"],
         runners=["alpha"],
     )
-    participants = _start_round(harness, day=24, epoch=30424)
+    # The module database retains prior rounds; day 24 belongs to the late
+    # completion test above and is already closed to new submissions.
+    participants = _start_round(harness, day=25, epoch=30425)
     _run_stage_one_to_scoring(harness, participants, runners=1)
     original_run_icp = harness.sandbox.run_icp
     scorer_calls = 0

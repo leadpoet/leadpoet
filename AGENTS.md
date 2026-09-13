@@ -1,5 +1,24 @@
 # Agent Instructions
 
+## Scoped production authorization: audited sixty-five table cleanup
+
+On 2026-09-13 the user explicitly authorized cleanup of the exact 65 further
+retirement candidates in the completed 95-table production audit, after
+confirming current usage. The exact table allowlist is recorded in
+scripts/239-retire-audited-legacy-schema.sql. This includes protected production
+and credential inspection, removal of obsolete dashboard/admin callers and
+monitoring jobs, associated obsolete SQL objects,
+narrow tested source changes, pushes and safe merges, exact committed
+migrations through the existing overnight migration helper, canonical
+deployments when needed, and live verification without another approval.
+Preserve all 30 retained public tables, the private source_add_history archive,
+all SOURCE_ADD evidence, current Arena, ICP generation, baseline/rebenchmark,
+scoring, provider execution, credentials, dashboard competition, site, rewards,
+weights, and concurrent recovery work. Do not prune historical evidence or the
+provider cache in this task. Do not start an overnight recovery goal or restart
+unrelated services. This authority expires when the 65 removals and unaffected
+production flow verification are complete.
+
 ## Scoped production authorization: final twelve legacy tables
 
 On 2026-09-12 the user explicitly ordered removal of all twelve recommended

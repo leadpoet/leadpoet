@@ -169,10 +169,10 @@ def _prepare(database, *, reconciliation_count: int = 8):
         cursor.execute(
             "UPDATE public.lab_arena_rounds SET status='cancelled',cancel_reason='scoring_incomplete',"
             "status_generation=14,stage_generation=12,icp_set_date='2026-09-12',finalists=%s::jsonb,"
-            "stage2_scoring_plan_doc=%s::jsonb,configuration_doc=jsonb_set(jsonb_set("
-            "jsonb_set(configuration_doc,'{scorer_image_digest}',to_jsonb(%s::text),false),"
-            "'{scorer_image_reference}',to_jsonb(%s::text),false),"
-            "'{sourcing_cost_eligibility_policy}','\"successful_calls_v1\"'::jsonb,true) WHERE round_id=%s",
+            "stage2_scoring_plan_doc=%s::jsonb,configuration_doc=(jsonb_set(jsonb_set("
+            "configuration_doc,'{scorer_image_digest}',to_jsonb(%s::text),false),"
+            "'{scorer_image_reference}',to_jsonb(%s::text),false)"
+            "-'sourcing_cost_eligibility_policy') WHERE round_id=%s",
             (json.dumps(finalists), json.dumps(plan), OLD_DIGEST,
              "registry.example/scorer@" + OLD_DIGEST, ROUND_ID),
         )
@@ -254,6 +254,32 @@ def test_recovery_rejects_one_missing_exact_reconciliation(database):
         with connection.cursor() as cursor:
             cursor.execute("ROLLBACK")
             assert _row_hash(cursor, "lab_arena_runs", "round_id=%s", (ROUND_ID,)) == before
+            cursor.execute("SELECT count(*) FROM public.lab_arena_runs WHERE run_id LIKE %s",
+                           (PREFIX + "%",))
+            assert cursor.fetchone()[0] == 0
+    finally:
+        connection.close()
+        transport.close()
+
+
+def test_recovery_rejects_explicit_cost_policy_key(database):
+    connection, _store, transport = _prepare(database)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER "
+                           "lab_arena_rounds_write_once")
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET configuration_doc="
+                "configuration_doc||'{\"sourcing_cost_eligibility_policy\":null}'::jsonb "
+                "WHERE round_id=%s", (ROUND_ID,),
+            )
+            cursor.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER "
+                           "lab_arena_rounds_write_once")
+        with pytest.raises(connection.Error, match="stage2 recovery state differs"):
+            with connection.cursor() as cursor:
+                cursor.execute(_migration())
+        with connection.cursor() as cursor:
+            cursor.execute("ROLLBACK")
             cursor.execute("SELECT count(*) FROM public.lab_arena_runs WHERE run_id LIKE %s",
                            (PREFIX + "%",))
             assert cursor.fetchone()[0] == 0

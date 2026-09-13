@@ -79,8 +79,7 @@ BEGIN
      OR pg_catalog.jsonb_array_length(v_round.stage2_scoring_plan_doc->'work_items') <> 110
      OR pg_catalog.jsonb_array_length(v_round.stage2_scoring_plan_doc->'zero_rows') <> 10
      OR v_round.configuration_doc->>'integrity_policy' IS DISTINCT FROM 'arena_integrity_v1'
-     OR v_round.configuration_doc->>'sourcing_cost_eligibility_policy'
-        IS DISTINCT FROM 'successful_calls_v1'
+     OR v_round.configuration_doc ? 'sourcing_cost_eligibility_policy'
      OR v_round.configuration_doc->>'max_attempts_per_assignment' IS DISTINCT FROM '2'
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs WHERE round_id=v_round_id
                 AND status IN ('pending','leased','submitted'))
@@ -132,12 +131,12 @@ BEGIN
     RAISE EXCEPTION 'arena 2026-09-13 stage2 run counts differ';
   END IF;
 
-  -- Migration 241 must have resolved every target cost head. This checks the
-  -- resulting accounting contract rather than trusting a migration marker.
+  -- This historical round uses conservative cost eligibility. Migration 241
+  -- must leave no open or uncertain target cost alongside its exact heads.
   SELECT public.lab_arena_submission_costs(v_cost_submission) INTO v_costs;
   IF EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements(v_costs->'providers') p
                WHERE (p->>'inflight_calls')::BIGINT <> 0
-                  OR (p->>'success_unresolved_calls')::BIGINT <> 0) THEN
+                  OR (p->>'uncertain_calls')::BIGINT <> 0) THEN
     RAISE EXCEPTION 'arena 2026-09-13 cost reconciliation incomplete';
   END IF;
   IF (

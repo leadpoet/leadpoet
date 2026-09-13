@@ -581,6 +581,23 @@ def _selsym_homepage_identity():
     )
 
 
+def _install_unproven_size_fallbacks(monkeypatch):
+    async def insufficient_profile(url, **_kwargs):
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def no_structured_evidence(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer.fetch_current_linkedin_company_size",
+        insufficient_profile,
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer.fetch_structured_linkedin_company_size",
+        no_structured_evidence,
+    )
+
+
 def test_verified_homepage_same_name_domain_conflict_repairs_then_is_unproven(
     monkeypatch,
 ):
@@ -607,6 +624,7 @@ def test_verified_homepage_same_name_domain_conflict_repairs_then_is_unproven(
         "qualification.scoring.lead_scorer._request_company_reverify_json",
         request,
     )
+    _install_unproven_size_fallbacks(monkeypatch)
 
     result = asyncio.run(
         _verify_company_fit(
@@ -769,6 +787,7 @@ def test_verified_homepage_domain_conflict_repair_failure_remains_retryable(
         "qualification.scoring.lead_scorer._request_company_reverify_json",
         request,
     )
+    _install_unproven_size_fallbacks(monkeypatch)
 
     result = asyncio.run(
         _llm_reverify_company(

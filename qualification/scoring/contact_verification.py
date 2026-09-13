@@ -696,11 +696,14 @@ def _location_check(claim: Mapping[str, Any], profile: Mapping[str, Any], icp: A
     if observed["country"] != country:
         return "fail", "contact_location_mismatch"
     for part in ("region", "city"):
+        claimed_part = claimed.get(part)
         expected = (
-            _norm_region(claimed.get(part), country)
+            _norm_region(claimed_part, country)
             if part == "region"
-            else _norm(claimed.get(part))
+            else _norm(claimed_part)
         )
+        if part == "region" and _text(claimed_part) and not expected:
+            return "unknown", "contact_location_unverified"
         if expected:
             if not observed[part]:
                 return "unknown", "contact_location_unverified"

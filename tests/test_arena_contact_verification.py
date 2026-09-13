@@ -7,6 +7,8 @@ from collections import Counter
 from copy import deepcopy
 import json
 
+import pytest
+
 from qualification.scoring import contact_verification
 from qualification.scoring.contact_verification import verify_contact
 
@@ -576,7 +578,7 @@ def test_identical_us_state_prefixes_are_unverified_outside_us() -> None:
 
     assert contact_verification._norm_region("US-CA", "Canada") == ""
     assert result["contact_qualified"] is False
-    assert result["contact_verification"]["reason"] == "contact_geography_unverified"
+    assert result["contact_verification"]["reason"] == "contact_location_unverified"
 
 
 def test_unknown_explicit_us_state_code_is_unverified() -> None:
@@ -598,7 +600,41 @@ def test_unknown_explicit_us_state_code_is_unverified() -> None:
 
     assert contact_verification._norm_region("US-ZZ", "US") == ""
     assert result["contact_qualified"] is False
-    assert result["contact_verification"]["reason"] == "contact_geography_unverified"
+    assert result["contact_verification"]["reason"] == "contact_location_unverified"
+
+
+@pytest.mark.parametrize(
+    ("country", "claimed_region", "observed_region"),
+    [
+        ("Canada", "US-CA", "Ontario"),
+        ("US", "US-ZZ", "New York"),
+    ],
+)
+def test_malformed_claimed_us_region_cannot_be_ignored(
+    country: str,
+    claimed_region: str,
+    observed_region: str,
+) -> None:
+    company = _company()
+    company["contact"] = _contact(
+        location={"country": country, "region": claimed_region, "city": "Example City"}
+    )
+    profile = _profile(
+        country=country, region=observed_region, city="Example City"
+    )
+    icp = _icp(
+        contact_geography={"countries": [country], "regions": [], "cities": []}
+    )
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({}),
+    )
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_location_unverified"
 
 
 def test_bare_region_abbreviations_remain_literal_outside_us() -> None:

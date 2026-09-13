@@ -273,6 +273,122 @@ def test_exact_noncanonical_profile_is_source_blocked(monkeypatch):
     assert pending == []
 
 
+def test_exact_livecrawl_timeout_profile_is_source_blocked(monkeypatch):
+    body = {
+        "statuses": [{
+            "id": "https://linkedin.com/company/acme",
+            "status": "error",
+            "error": {
+                "httpStatusCode": 504,
+                "tag": "CRAWL_LIVECRAWL_TIMEOUT",
+            },
+        }],
+        "results": [],
+    }
+    calls, pending = _install_exa_bodies(monkeypatch, body)
+    diagnostic = {}
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
+        )
+    ) is None
+    assert diagnostic == {"failure_reason": "source_blocked"}
+    assert len(calls) == 1
+    assert pending == []
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        [{
+            "id": "https://linkedin.com/company/other",
+            "status": "error",
+            "error": {
+                "httpStatusCode": 504,
+                "tag": "CRAWL_LIVECRAWL_TIMEOUT",
+            },
+        }],
+        [
+            {
+                "id": "https://linkedin.com/company/acme",
+                "status": "error",
+                "error": {
+                    "httpStatusCode": 504,
+                    "tag": "CRAWL_LIVECRAWL_TIMEOUT",
+                },
+            },
+            {
+                "id": "https://linkedin.com/company/other",
+                "status": "success",
+            },
+        ],
+        [{
+            "id": "https://linkedin.com/company/acme",
+            "status": "error",
+            "error": {
+                "httpStatusCode": 504,
+                "tag": "CRAWL_OTHER",
+            },
+        }],
+    ],
+)
+def test_livecrawl_timeout_requires_one_exact_matching_profile(
+    monkeypatch, statuses
+):
+    calls, pending = _install_exa_bodies(
+        monkeypatch, {"statuses": statuses, "results": []}
+    )
+    diagnostic = {}
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
+        )
+    ) is None
+    assert diagnostic == {"failure_reason": "provider_error"}
+    assert len(calls) == 1
+    assert pending == []
+
+
+def test_outer_http_504_remains_provider_error(monkeypatch):
+    class Response:
+        status = 504
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
+    diagnostic = {}
+
+    assert asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme",
+            diagnostic=diagnostic,
+        )
+    ) is None
+    assert diagnostic == {"failure_reason": "provider_error"}
+
+
 @pytest.mark.parametrize(
     "wall",
     [

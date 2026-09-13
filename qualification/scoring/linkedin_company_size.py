@@ -374,6 +374,18 @@ async def fetch_current_linkedin_company_size(
             # that the Exa account is unavailable.
             _set_failure_reason(diagnostic, SOURCE_BLOCKED_FAILURE_REASON)
             return None
+        if (
+            isinstance(status_item, Mapping)
+            and str(status_item.get("status") or "").casefold() == "error"
+            and status_error.get("httpStatusCode") == 504
+            and status_error.get("tag") == "CRAWL_LIVECRAWL_TIMEOUT"
+            and status_slug == requested_slug
+            and results == []
+        ):
+            # Exa could not live-crawl this exact profile within its bounded
+            # source timeout. Other Exa or outer HTTP failures stay systemic.
+            _set_failure_reason(diagnostic, SOURCE_BLOCKED_FAILURE_REASON)
+            return None
     if statuses is not None and (
         not isinstance(statuses, list)
         or not statuses

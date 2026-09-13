@@ -476,7 +476,6 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
                         "api_key": api_key,
                         "url": transport_url,
                         "dynamic": "false",
-                        "custom_headers": "true",
                         **extra,
                     },
                 )
@@ -614,7 +613,6 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
                         "api_key": api_key,
                         "url": transport_url,
                         "dynamic": "false",
-                        "custom_headers": "true",
                         **extra,
                     },
                 )
@@ -747,7 +745,6 @@ async def _scrape_workday_cxs(source_url: str) -> Dict[str, Any]:
                         "api_key": api_key,
                         "url": transport_url,
                         "dynamic": "false",
-                        "custom_headers": "true",
                         **extra,
                     },
                 )

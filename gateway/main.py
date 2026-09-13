@@ -83,7 +83,7 @@ from gateway.db.client import create_http1_sync_client
 # Import API routers
 # NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
 # submit hash+values in one request to /validate. No separate reveal phase needed.
-from gateway.api import epoch, validate, manifest, submit, attest, attestation
+from gateway.api import epoch, attest, attestation
 from gateway.api.arena_proxy import router as arena_proxy_router
 from gateway.api.arena_proxy import testnet_router as arena_testnet_proxy_router
 from gateway.api import metrics as metrics_api
@@ -98,9 +98,6 @@ from gateway.tasks.checkpoints import checkpoint_task
 from gateway.tasks.anchor import daily_anchor_task
 from gateway.tasks.hourly_batch import start_hourly_batch_task
 from gateway.tasks.icp_generator import icp_rotation_task, ensure_icp_set_exists
-
-# Import epoch monitor (polling-based, like validator)
-from gateway.tasks.epoch_monitor import EpochMonitor
 
 # Create Supabase client (shared across threadpool workers — must stay
 # HTTP/1-pinned; the default HTTP/2 HPACK encoder is not thread-safe)
@@ -283,7 +280,6 @@ async def lifespan(app: FastAPI):
         raise
 
     # Initialize all task handles before try block to prevent NameError in finally
-    epoch_monitor_task = None
     reveal_task = None
     checkpoint_task_handle = None
     anchor_task = None
@@ -297,19 +293,6 @@ async def lifespan(app: FastAPI):
         # ════════════════════════════════════════════════════════════════
         # EPOCH MONITOR: Polling-based (like validator - proven stable)
         # ════════════════════════════════════════════════════════════════
-        print("="*80)
-        print("🔄 INITIALIZING EPOCH MONITOR")
-        print("="*80)
-        print(f"   Architecture: Polling (same as validator)")
-        print(f"   Benefits: Bulletproof - no WebSocket failures")
-        print("="*80 + "\n")
-        
-        # Create epoch monitor
-        from gateway.config import BITTENSOR_NETWORK
-        epoch_monitor = EpochMonitor(network=BITTENSOR_NETWORK)
-        print("✅ EpochMonitor created (replaces event-driven version)")
-        print("")
-        
         # ════════════════════════════════════════════════════════════════
         # DEPENDENCY INJECTION: Inject async_subtensor into modules
         # ════════════════════════════════════════════════════════════════
@@ -386,10 +369,6 @@ async def lifespan(app: FastAPI):
                 print("   → Only writes to: qualification_private_icp_sets")
 
         else:
-            # Start epoch monitor (polling loop - bulletproof)
-            epoch_monitor_task = asyncio.create_task(epoch_monitor.start())
-            print("✅ Epoch monitor started (polling mode)")
-            
             # Start other background tasks
             # NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
             
@@ -416,7 +395,6 @@ async def lifespan(app: FastAPI):
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
         print("   • Single AsyncSubtensor (no memory leaks)")
-        print("   • Polling-based epoch monitor (same as validator)")
         print("   • Bulletproof: No WebSocket = No WebSocket failures")
         print("   • Proven stable: Validator uses polling for months")
         print("   • Agent competition: operated by the independent Arena service")
@@ -436,7 +414,6 @@ async def lifespan(app: FastAPI):
         # Cancel all background tasks
         print("   🛑 Cancelling background tasks...")
         tasks = [
-            epoch_monitor_task,
             reveal_task,
             checkpoint_task_handle,
             anchor_task,
@@ -559,15 +536,8 @@ configure_gateway_otel(app)
 # ============================================================
 
 app.include_router(epoch.router)
-app.include_router(validate.router)  # Individual + Batch validation (IMMEDIATE REVEAL MODE)
 # NOTE: reveal.router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
-app.include_router(manifest.router)
-# Open-pool sourcing DISABLED (May 2026).  We still import submit.router so
-# that any internal references resolve, but we no longer register it on the
-# app, so POST /submit/ is gone from the public API.  The handler inside
-# submit.router also raises 410 Gone as defense-in-depth.  Re-enable by
-# uncommenting the include_router line below.
-# app.include_router(submit.router)
+# Legacy lead intake and validation are retired. Arena owns current work.
 app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
 app.include_router(metrics_api.router)

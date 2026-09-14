@@ -94,7 +94,9 @@ _PARKED_DOMAIN_PATTERNS = [
     r"\bnamecheap\b.*\bparked\b",
     r"\bhostgator\b.*\bdefault\b",
     r"\bunder construction\b",
-    r"\bcoming soon\b.*\bdomain\b",
+    # Keep these terms local. Minified product pages can mention a coming-soon
+    # feature and an unrelated email domain hundreds of kilobytes later.
+    r"\bcoming soon\b.{0,80}\bdomain\b",
     r"\bdefault web site page\b",
 ]
 _PARKED_DOMAIN_RE = re.compile("|".join(_PARKED_DOMAIN_PATTERNS), re.IGNORECASE)

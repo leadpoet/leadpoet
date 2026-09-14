@@ -812,6 +812,32 @@ def test_parked_homepage_is_a_mismatch(monkeypatch):
     assert result.decision == COMPANY_FIT_MISMATCH
 
 
+def test_short_coming_soon_domain_placeholder_is_a_mismatch(monkeypatch):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            b"Coming soon - this domain will launch shortly.",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+
+
+def test_distant_product_coming_soon_and_form_domain_are_not_parked(monkeypatch):
+    payload = (
+        b"<title>Example Company: global payments</title>"
+        b'<a href="https://www.linkedin.com/company/example-company">LinkedIn</a>'
+        b"<nav>POS Payments (Coming Soon) Billing</nav>"
+        + (b"product-platform-content " * 100)
+        + b"<form>Email domain not supported</form>"
+    )
+
+    result = asyncio.run(_verify_with_response(monkeypatch, 200, payload))
+
+    assert result.decision == COMPANY_FIT_MATCH
+
+
 def test_identity_normalizer_error_is_unavailable(monkeypatch):
     import asyncio
 

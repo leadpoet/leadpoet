@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "f50b9ac4e98d3d14413a922069fce67544141fac",
+  "baseline_commit": "cd872c457d29d5cd34af8db2776e36eda7bb573e",
   "entries": [
     {
       "ast_sha256": "sha256:eae142e09427d5ddea7b4b67947e6cb21cb278ca17326b670888c171eeeed222",
@@ -2492,7 +2492,7 @@
       "symbol": "validate_production_parity_boundary_v2"
     },
     {
-      "ast_sha256": "sha256:ee1dbc649fb16b2e6403e6071cfc3244cdd99034871f6da2631c7b6642d0e0ac",
+      "ast_sha256": "sha256:4190cf47754de704fdad897dd33716bcb478420f0161d618a8ca35624826f9cd",
       "path": "leadpoet_canonical/subtensor_events_v2.py",
       "symbol": "__module__"
     },
@@ -2797,7 +2797,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:1a53caf6118a671c68c729ff3e4db6095bddb04501b1b48024afa78feb261173",
-  "protected_source_commit": "f50b9ac4e98d3d14413a922069fce67544141fac",
+  "manifest_hash": "sha256:47732b4d9bd6741d07dd1f2df112257a504b2f925fe392389552c988dc1a3c4a",
+  "protected_source_commit": "cd872c457d29d5cd34af8db2776e36eda7bb573e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

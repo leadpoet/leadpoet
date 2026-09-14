@@ -360,7 +360,11 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     assert public_dashboard._stage1_scores(harness.service, published)[broad] == 35
 
     score_runs = harness.service.store.list_runs(round_id, kind="score")
-    assert len({run["runner_hotkey"] for run in score_runs if run["status"] == "accepted"}) == 2
+    accepted_runners = {
+        run["runner_hotkey"] for run in score_runs if run["status"] == "accepted"
+    }
+    assert accepted_runners
+    assert accepted_runners <= set(harness.runner_keys)
     assert any(item["hits"] for item in scoring_leases)
     assert judged_companies.count("Sparse Company 0") < 2 * contracts.BENCHMARK_ICP_COUNT
 

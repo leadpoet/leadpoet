@@ -3487,7 +3487,11 @@ async def verify_three_stage(
             allow_empty=True,
         )
         prompt_source_url = fetch_source_url
-        validate_candidate_prompt_text(miner_claim, "intent_signal.description")
+        validate_candidate_prompt_text(
+            miner_claim,
+            "intent_signal.description",
+            allow_layout_whitespace=True,
+        )
         bundle = []
         if evidence_bundle is not None:
             from qualification.scoring.arena_integrity import MAX_EVIDENCE_PER_CRITERION
@@ -3496,8 +3500,16 @@ async def verify_three_stage(
                 raise ValueError("invalid criterion evidence bundle")
             for evidence in evidence_bundle:
                 url = canonical_candidate_prompt_url(evidence["url"], "intent_signal.url")
-                description = validate_candidate_prompt_text(evidence["description"], "intent_signal.description")
-                snippet = validate_candidate_prompt_text(evidence["snippet"], "intent_signal.snippet")
+                description = validate_candidate_prompt_text(
+                    evidence["description"],
+                    "intent_signal.description",
+                    allow_layout_whitespace=True,
+                )
+                snippet = validate_candidate_prompt_text(
+                    evidence["snippet"],
+                    "intent_signal.snippet",
+                    allow_layout_whitespace=True,
+                )
                 signal_date = evidence.get("date")
                 if signal_date is not None and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(signal_date)) is None:
                     raise ValueError("intent signal date is invalid")

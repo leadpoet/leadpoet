@@ -205,7 +205,7 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
     assert source._selected_profile_specs == [455]
 
 
-@pytest.mark.parametrize("spec_version", [456, 457])
+@pytest.mark.parametrize("spec_version", [456, 457, 458])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

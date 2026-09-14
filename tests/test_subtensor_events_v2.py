@@ -26,6 +26,7 @@ FIXTURE_PATH = (
 CURRENT_RUNTIME_FIXTURES = {
     456: ROOT / "tests" / "fixtures" / "subtensor_events_spec456_block9066646.json",
     457: ROOT / "tests" / "fixtures" / "subtensor_events_spec457_block9067004.json",
+    458: ROOT / "tests" / "fixtures" / "subtensor_events_spec458_block9067366.json",
 }
 
 
@@ -155,6 +156,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0x5f5e661c30ef71a66ba754f32eaa4ebce89591da599eb3aeefa41e7edce6d2ac",
             209,
         ),
+        (
+            458,
+            "17ebfa2551978a1567da990ac9650e6f01802f578696c552a7c6f9f4b1391405",
+            "0x2fdb28e5c3fe4e79844b25dee09ed960e90004432ea2bd98079aba4c5530c51a",
+            287,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -220,7 +227,7 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
 
 def test_unknown_runtime_profile_fails_closed():
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
-        load_subtensor_events_profile_v2(spec_version=458)
+        load_subtensor_events_profile_v2(spec_version=459)
 
 
 @pytest.mark.parametrize(

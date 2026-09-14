@@ -443,11 +443,14 @@ if request["role"] == "benchmark_disclosure_only":
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             fail("benchmark_disclosure_timestamp_invalid")
     updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"] = value
-if request["role"] in ("contacts_from_only", "company_quality_from_only"):
-    activation_key = (
-        "LAB_ARENA_CONTACTS_FROM" if request["role"] == "contacts_from_only"
-        else "LAB_ARENA_COMPANY_QUALITY_FROM"
-    )
+if request["role"] in (
+    "contacts_from_only", "company_quality_from_only", "intent_details_from_only"
+):
+    activation_key = {
+        "contacts_from_only": "LAB_ARENA_CONTACTS_FROM",
+        "company_quality_from_only": "LAB_ARENA_COMPANY_QUALITY_FROM",
+        "intent_details_from_only": "LAB_ARENA_INTENT_DETAILS_FROM",
+    }[request["role"]]
     activation_error = request["role"][:-5]
     if (
         set(updates) != {activation_key}
@@ -699,6 +702,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
     scope.add_argument("--contacts-from", default=None, metavar="TIMESTAMP", help="set or clear the future contact activation timestamp")
     scope.add_argument("--company-quality-from", default=None, metavar="TIMESTAMP", help="set or clear company quality activation for future submission periods")
+    scope.add_argument("--intent-details-from", default=None, metavar="TIMESTAMP", help="set or clear intent details activation for future submission periods")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
@@ -733,6 +737,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         _validate_contacts_from(args.contacts_from)
     if getattr(args, "company_quality_from", None) is not None:
         _validate_contacts_from(args.company_quality_from, label="company quality")
+    if getattr(args, "intent_details_from", None) is not None:
+        _validate_contacts_from(args.intent_details_from, label="intent details")
     if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
     narrow_scope = (
@@ -744,6 +750,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         or args.benchmark_disclosure_from is not None
         or getattr(args, "contacts_from", None) is not None
         or getattr(args, "company_quality_from", None) is not None
+        or getattr(args, "intent_details_from", None) is not None
         or getattr(args, "contacts_generation", None) is not None
     )
     if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
@@ -803,18 +810,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _ssh(args.gateway_host, args.ssh_key, request)
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
-        if args.contacts_from is not None or args.company_quality_from is not None:
+        if (
+            args.contacts_from is not None
+            or args.company_quality_from is not None
+            or args.intent_details_from is not None
+        ):
             quality_activation = args.company_quality_from is not None
+            intent_details_activation = args.intent_details_from is not None
+            if intent_details_activation:
+                role = "intent_details_from_only"
+                key = "LAB_ARENA_INTENT_DETAILS_FROM"
+                value = args.intent_details_from
+                label = "intent details"
+            elif quality_activation:
+                role = "company_quality_from_only"
+                key = "LAB_ARENA_COMPANY_QUALITY_FROM"
+                value = args.company_quality_from
+                label = "company quality"
+            else:
+                role = "contacts_from_only"
+                key = "LAB_ARENA_CONTACTS_FROM"
+                value = args.contacts_from
+                label = "contact"
             request = {
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
                 "apply": args.apply,
-                "role": "company_quality_from_only" if quality_activation else "contacts_from_only",
+                "role": role,
                 "aliases": {},
                 "updates": {
-                    ("LAB_ARENA_COMPANY_QUALITY_FROM" if quality_activation else "LAB_ARENA_CONTACTS_FROM"):
+                    key:
                     _validate_contacts_from(
-                        args.company_quality_from if quality_activation else args.contacts_from,
-                        label="company quality" if quality_activation else "contact",
+                        value,
+                        label=label,
                     )
                 },
             }

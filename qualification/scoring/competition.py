@@ -272,7 +272,16 @@ def _normalized_company(
         company_input = dict(company)
         if contacts_required:
             company_input.pop("contact", None)
-        if company_quality:
+        simplified_intent = "intent_details" in company_input
+        if simplified_intent:
+            from qualification.competition_models import CompetitionCompanyV5
+            row = CompetitionCompanyV5.model_validate(company_input).model_dump(
+                mode="json"
+            )
+            if company_quality:
+                from qualification.company_quality import normalize_company_claim
+                row, _errors = normalize_company_claim(row)
+        elif company_quality:
             from qualification.competition_models import CompetitionCompanyV3
             from qualification.company_quality import normalize_company_claim
             row, _errors = normalize_company_claim(
@@ -292,7 +301,7 @@ def _normalized_company(
             "description": signal["description"],
             "url": signal["url"],
             "date": signal["date"],
-            "snippet": signal["snippet"],
+            "snippet": signal.get("snippet", ""),
             "matched_icp_signal": signal["matched_icp_signal"],
         }
         for signal in row["intent_signals"]
@@ -309,9 +318,21 @@ def _normalized_company(
         "company_stage": row["company_stage"],
         "country": row["country"],
         "state": row["state"],
-        "description": row["fit_summary"][:500],
-        "fit_evidence_urls": (fit_evidence_url_hints(row["fit_evidence_urls"])
-                              if integrity_policy else row["fit_evidence_urls"]),
+        "description": "" if simplified_intent else row["fit_summary"][:500],
+        "fit_evidence_urls": (
+            []
+            if simplified_intent
+            else (
+                fit_evidence_url_hints(row["fit_evidence_urls"])
+                if integrity_policy
+                else row["fit_evidence_urls"]
+            )
+        ),
+        **(
+            {"intent_details": row["intent_details"]}
+            if simplified_intent
+            else {}
+        ),
         "intent_signals": signals,
         "required_attribute": row.get("required_attribute"),
     }
@@ -368,6 +389,10 @@ def effective_competition_input(
             # the networked judge, and identity still affects their receipts.
             rows.append(normalized)
             continue
+        if effective.get("intent_details") is None:
+            # The optional internal bridge must not change historical cache
+            # identities for v1-v4 outputs.
+            effective.pop("intent_details", None)
         # The binary Arena fit verifier independently resolves these facts.
         # These fields are validated above but never read during its judging.
         for ignored in (("description", "required_attribute") if company_quality else ("state", "description", "required_attribute")):

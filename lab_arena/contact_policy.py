@@ -26,7 +26,10 @@ def integrity_adapter(version: str) -> bool:
 
 
 def output_schema(config: Mapping[str, Any]) -> str:
+    from lab_arena import intent_details_policy
     from lab_arena import quality_policy
+    if intent_details_policy.enabled(config):
+        return intent_details_policy.OUTPUT_SCHEMA
     if quality_policy.enabled(config):
         return quality_policy.output_schema(contacts_required=enabled(config))
     return OUTPUT_SCHEMA if enabled(config) else "leadpoet.lab_arena.output.v1"

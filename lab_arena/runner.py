@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from lab_arena import integrity, contact_policy, quality_policy
+from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
 from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
@@ -1601,6 +1601,16 @@ class AssignmentExecutor:
                         "company_quality_policy": quality_policy.POLICY,
                         "company_requirements": dict(input_document["company_requirements"]),
                     })
+                if intent_details_policy.enabled(lease):
+                    input_document["intent_details_policy"] = (
+                        intent_details_policy.POLICY
+                    )
+                    input_document["output_schema_version"] = (
+                        intent_details_policy.OUTPUT_SCHEMA
+                    )
+                    input_document["icp"]["intent_details_policy"] = (
+                        intent_details_policy.POLICY
+                    )
                 if lease.get("scrapingdog_configured") is True:
                     extra_environment["SCRAPINGDOG_API_KEY"] = operations.SCRAPINGDOG_RUNTIME_HANDLE
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")

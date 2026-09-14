@@ -3255,6 +3255,23 @@ async def score_company_competition_intent(
         return _zero_company_breakdown(f"LLM scoring error: {str(e)[:100]}")
 
     final_score = max(0.0, min(float(MAX_COMPETITION_INTENT_SCORE), intent_final))
+    if final_score > 0 and getattr(company, "intent_details", None) is not None:
+        from qualification.scoring.intent_details import review_intent_details
+
+        details_receipt = await review_intent_details(
+            company, icp, signal_results, company_fit.receipt("company_fit")
+        )
+        gate_receipts.append(details_receipt)
+        if details_receipt["decision"] != COMPANY_FIT_MATCH:
+            return _zero_company_breakdown(
+                (
+                    "Intent Details verification unavailable: review could not complete"
+                    if details_receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+                    else "Intent Details do not satisfy the grounded client paragraph contract"
+                ),
+                intent_signals_detail=signal_results,
+                verifier_gate_receipts=gate_receipts,
+            )
     role_tag = "reference" if is_reference_model else "miner"
     logger.info(
         f"Competition company scored [{role_tag}]: {final_score:.2f} "

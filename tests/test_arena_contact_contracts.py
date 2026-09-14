@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from lab_arena import contracts
+from lab_arena import contracts, intent_details_policy
 from lab_arena.output import OutputInvalid, output_document_from_bytes, validate_output_document
 from qualification.contact_models import validate_contact_claim
 
@@ -46,6 +46,21 @@ def _contact() -> dict:
             "broker_call_id": "call-123",
         },
     }
+
+
+def _v5_company(name: str = "Acme") -> dict:
+    row = _company(name)
+    row.pop("fit_summary")
+    row.pop("fit_evidence_urls")
+    signal = row["intent_signals"][0]
+    signal.pop("why_now")
+    signal.pop("snippet")
+    row["intent_details"] = (
+        "Acme is hiring platform engineers after announcing a new product, "
+        "which makes its infrastructure team likely to evaluate tools now."
+    )
+    row["contact"] = _contact()
+    return row
 
 
 def test_contact_claim_normalizes_identity_location_and_source() -> None:
@@ -141,3 +156,63 @@ def test_stored_read_infers_only_a_declared_known_version() -> None:
         )
     with pytest.raises(OutputInvalid):
         validate_output_document({"companies": [company]})
+
+
+def test_v5_replaces_fit_and_signal_prose_with_one_intent_paragraph() -> None:
+    company = _v5_company()
+    document = output_document_from_bytes(
+        json.dumps([company]).encode(),
+        expected_schema_version=intent_details_policy.OUTPUT_SCHEMA,
+    )
+
+    assert document["schema_version"] == intent_details_policy.OUTPUT_SCHEMA
+    assert document["companies"][0]["intent_details"] == company["intent_details"]
+    assert set(document["companies"][0]["intent_signals"][0]) == {
+        "matched_icp_signal", "description", "date", "url",
+    }
+    for removed in ("fit_summary", "fit_evidence_urls"):
+        changed = _v5_company()
+        changed[removed] = "old" if removed == "fit_summary" else []
+        with pytest.raises(OutputInvalid):
+            output_document_from_bytes(
+                json.dumps([changed]).encode(),
+                expected_schema_version=intent_details_policy.OUTPUT_SCHEMA,
+            )
+    for removed in ("why_now", "snippet"):
+        changed = _v5_company()
+        changed["intent_signals"][0][removed] = "old"
+        with pytest.raises(OutputInvalid):
+            output_document_from_bytes(
+                json.dumps([changed]).encode(),
+                expected_schema_version=intent_details_policy.OUTPUT_SCHEMA,
+            )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "First paragraph.\n\nSecond paragraph.", "- list item"],
+)
+def test_v5_requires_one_plain_intent_details_paragraph(value: str) -> None:
+    company = _v5_company()
+    company["intent_details"] = value
+    with pytest.raises(OutputInvalid):
+        output_document_from_bytes(
+            json.dumps([company]).encode(),
+            expected_schema_version=intent_details_policy.OUTPUT_SCHEMA,
+        )
+
+
+def test_v4_remains_strictly_unchanged_after_v5() -> None:
+    company = _company()
+    company["contact"] = _contact()
+    document = output_document_from_bytes(
+        json.dumps([company]).encode(),
+        expected_schema_version=contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION,
+    )
+    assert document["companies"][0]["fit_summary"] == company["fit_summary"]
+    company["intent_details"] = "New prose must not enter a frozen v4 round."
+    with pytest.raises(OutputInvalid):
+        output_document_from_bytes(
+            json.dumps([company]).encode(),
+            expected_schema_version=contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        )

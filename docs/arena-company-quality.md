@@ -8,8 +8,11 @@ aggregation, judgments, budgets, and promotion behavior.
 ## Company output and verification
 
 Quality rounds use `leadpoet.lab_arena.output.v3`, or `.v4` when contacts are
-also required. A harness can still return a plain list: the runner records the
-schema assigned by the round. A declared incompatible schema is rejected.
+also required. A round that also announces `intent_details_v1` uses the shared
+v5 simplified output instead. A harness can still return a plain list: the
+runner records the schema assigned by the round. A declared incompatible schema
+is rejected. Historical v3 and v4 rounds remain readable and finish with their
+frozen contract.
 The input passed to `harness.run_icp(icp)` includes the quality policy and
 company requirements. The return shape remains the same list of companies.
 

@@ -97,16 +97,13 @@ The output below shows the exact supported fields. It is a format example, not a
     "company_stage": "Series A",
     "country": "United States",
     "state": "",
-    "fit_summary": "Why it fits.",
-    "fit_evidence_urls": ["https://example.com/about"],
+    "intent_details": "Example launched its workflow platform on August 20, 2026. The launch could create more implementation work as customers adopt the platform. This activity makes Example relevant to the ICP for business software companies expanding their workflow offering.",
     "intent_signals": [
       {
         "matched_icp_signal": 0,
-        "description": "Recent required event.",
+        "description": "Example launched its workflow platform.",
         "date": "2026-08-20",
-        "why_now": "Why now.",
-        "url": "https://example.com/news",
-        "snippet": "Supporting source text."
+        "url": "https://example.com/news"
       }
     ],
     "required_attribute": {
@@ -121,7 +118,13 @@ The output below shows the exact supported fields. It is a format example, not a
 ```
 </details>
 
-Rounds that announce `contact_policy: "contacts_v1"` also require one contact per company: name, role, LinkedIn profile, location, email, and its provider source. The independent verifier accepts provider-attributed **valid or catch-all** emails. A failed contact gives that company zero credit. See the [contact output and verification contract](docs/arena-contacts.md). Older rounds keep the output shown above.
+Rounds that announce `intent_details_policy: "intent_details_v1"` use output
+schema v5. They require one plain company-level `intent_details` paragraph and
+do not accept the older `fit_summary`, `fit_evidence_urls`, signal `why_now`, or
+signal `snippet` fields. The scorer verifies the paragraph against the
+independently verified signals before the company can receive credit.
+
+Rounds that announce `contact_policy: "contacts_v1"` also require one contact per company: name, role, LinkedIn profile, location, email, and its provider source. The independent verifier accepts provider-attributed **valid or catch-all** emails. A failed contact gives that company zero credit. See the [contact output and verification contract](docs/arena-contacts.md). Historical rounds keep their frozen v1-v4 output contract.
 
 Rounds that announce `company_quality_policy: "company_quality_v1"` require a matching company LinkedIn URL and the headquarters state for U.S. companies. They share individual verification judgments and account for the fraction of requested companies that qualify within each buyer request. Missing new details zero only the affected company. See [company quality, scoring and activation](docs/arena-company-quality.md).
 

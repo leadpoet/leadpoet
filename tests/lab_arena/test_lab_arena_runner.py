@@ -27,7 +27,7 @@ import httpx
 from bittensor_wallet import Keypair
 
 from lab_arena import broker as br
-from lab_arena import contracts, operations, runner as rn, runtime, shim, source_bundle
+from lab_arena import contracts, intent_details_policy, operations, runner as rn, runtime, shim, source_bundle
 from lab_arena.output import OutputInvalid, output_document_from_bytes
 
 RUNNER = Keypair.create_from_uri("//Runner")
@@ -92,6 +92,21 @@ def valid_company(index: int) -> Dict[str, Any]:
     }
 
 
+def valid_v5_company(index: int) -> Dict[str, Any]:
+    row = valid_company(index)
+    row.pop("fit_summary")
+    row.pop("fit_evidence_urls")
+    signal = row["intent_signals"][0]
+    signal.pop("why_now")
+    signal.pop("snippet")
+    row["intent_details"] = (
+        "The company raised a new round and is expanding its platform team, "
+        "which makes the requested infrastructure purchase timely."
+    )
+    row["contact"] = None
+    return row
+
+
 class FakeApi:
     """In-process stand-in for the service's runner endpoints."""
 
@@ -153,9 +168,13 @@ class BridgingRuntime:
         self.calls = calls
         self.specs: List[runtime.SandboxSpec] = []
         self.entrypoint_snapshots: List[Dict[str, Any]] = []
+        self.input_documents: List[Dict[str, Any]] = []
 
     def run_icp(self, spec, **_):
         self.specs.append(spec)
+        self.input_documents.append(
+            json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
+        )
         if spec.agent_entrypoint_path is not None:
             details = os.lstat(spec.agent_entrypoint_path)
             self.entrypoint_snapshots.append(
@@ -224,6 +243,38 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     assert not spec.agent_entrypoint_path.exists()
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
+
+
+def test_v5_lease_announces_and_accepts_only_the_simplified_output(tmp_path):
+    run_lease = lease()
+    run_lease.update({
+        "integrity_policy": "arena_integrity_v1",
+        "intent_details_policy": intent_details_policy.POLICY,
+    })
+    api = FakeApi([run_lease])
+    sandbox = BridgingRuntime(
+        output={"companies": [valid_v5_company(1)]}, calls=0
+    )
+    (tmp_path / "work").mkdir()
+
+    rn.Runner(make_config(tmp_path, api, sandbox)).run_once()
+
+    document = sandbox.input_documents[0]
+    assert document["output_schema_version"] == intent_details_policy.OUTPUT_SCHEMA
+    assert document["icp"]["intent_details_policy"] == (
+        intent_details_policy.POLICY
+    )
+    completion = api.completions[0]["body"]
+    assert completion["result"]["terminal_status"] == "accepted"
+    assert completion["output"]["schema_version"] == (
+        intent_details_policy.OUTPUT_SCHEMA
+    )
+    assert completion["output"]["companies"][0]["intent_signals"][0] == {
+        "matched_icp_signal": 0,
+        "description": "Raised a round",
+        "date": "2026-08-01",
+        "url": "https://news.example.com/1",
+    }
 
 
 @pytest.mark.parametrize(

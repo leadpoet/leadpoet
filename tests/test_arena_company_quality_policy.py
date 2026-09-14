@@ -8,14 +8,14 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import contracts, contact_policy, quality_policy, scoring, verify
+from lab_arena import contracts, contact_policy, intent_details_policy, quality_policy, scoring, verify
 from lab_arena.output import OutputInvalid, validate_output_document
 from qualification.company_quality import canonical_company_linkedin, normalize_company_claim
 from qualification.competition_models import CompetitionCompanyV3, CompetitionCompanyV4
 from qualification.scoring import lead_scorer
 from qualification.scoring.competition import (
     CompetitionCompanyScorer, apply_company_judgment_context,
-    effective_competition_input, raw_company_judgment,
+    _normalized_company, effective_competition_input, raw_company_judgment,
 )
 from tests.test_arena_score_integrity import _icp, _positive_breakdown as _legacy_positive_breakdown, _public_company
 
@@ -81,6 +81,40 @@ def test_models_roundtrip_raw_new_claims_and_contacts():
         validate_output_document({"schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION, "companies": [company()]}, expected_schema_version=quality_policy.OUTPUT_SCHEMA)
     assert contact_policy.output_schema({"company_quality_policy": quality_policy.POLICY}) == quality_policy.OUTPUT_SCHEMA
     assert contact_policy.output_schema({"company_quality_policy": quality_policy.POLICY, "contact_policy": contact_policy.POLICY}) == quality_policy.CONTACT_OUTPUT_SCHEMA
+
+
+def test_intent_details_policy_selects_v5_without_enabling_other_gates():
+    marker = {"intent_details_policy": intent_details_policy.POLICY}
+    assert contact_policy.output_schema(marker) == intent_details_policy.OUTPUT_SCHEMA
+    assert not contact_policy.enabled(marker)
+    assert not quality_policy.enabled(marker)
+
+
+def test_v5_effective_input_uses_empty_legacy_evidence_and_hashes_narrative():
+    row = company()
+    row.pop("fit_summary")
+    row.pop("fit_evidence_urls")
+    row["intent_details"] = "Acme is hiring engineers for its new platform."
+    row["contact"] = None
+    row["intent_signals"][0].pop("why_now")
+    row["intent_signals"][0].pop("snippet")
+
+    bridge = _normalized_company(row, integrity_policy=True)
+    assert bridge["description"] == ""
+    assert bridge["fit_evidence_urls"] == []
+    assert bridge["intent_signals"][0]["snippet"] == ""
+    assert bridge["intent_details"] == row["intent_details"]
+    changed = deepcopy(row)
+    changed["intent_details"] = "Acme is hiring sales leaders for its new platform."
+    assert effective_competition_input([changed], _icp()) != (
+        effective_competition_input([row], _icp())
+    )
+
+
+def test_internal_intent_details_field_does_not_change_legacy_effective_input():
+    legacy = company()
+    effective = effective_competition_input([legacy], _icp())
+    assert "intent_details" not in effective["companies"][0]
 
 
 def test_invalid_required_fields_zero_only_the_affected_company(monkeypatch):

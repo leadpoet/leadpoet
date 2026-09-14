@@ -1,0 +1,180 @@
+"""The client paragraph is grounded in saved source evidence, not model prose."""
+
+import asyncio
+from copy import deepcopy
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from qualification.intent_details import validate_intent_details_text
+from qualification.scoring import intent_details, verification_helpers, lead_scorer
+from qualification.scoring.company_fit_decision import company_fit_match
+from qualification.scoring.competition import scorer_breakdown_has_retryable_infrastructure_failure
+
+
+PARAGRAPH = (
+    "Acme launched a reporting platform on September 1, 2026, which could expand "
+    "the workflows its customers manage. It also opened a Berlin office on "
+    "September 3, which may support regional delivery. Together, these activities "
+    "make Acme relevant to the ICP for reporting software companies expanding "
+    "their product and geographic reach."
+)
+
+
+def inputs():
+    signals = [
+        SimpleNamespace(matched_icp_signal=0, description="Acme launched its reporting platform.",
+                        date="2026-01-01", url="https://acme.example/platform"),
+        SimpleNamespace(matched_icp_signal=1, description="Acme opened a Berlin office.",
+                        date="2026-01-01", url="https://acme.example/berlin"),
+    ]
+    company = SimpleNamespace(company_name="Acme", company_website="https://acme.example/",
+                              intent_signals=signals, intent_details=PARAGRAPH)
+    icp = SimpleNamespace(prompt="Find reporting software companies with product and geographic expansion.",
+                          product_service="Reporting software", intent_signals=["Product launch", "New office"])
+    results = []
+    for index, (signal, quote, date) in enumerate(zip(signals, [
+        "Acme launched its reporting platform on September 1, 2026.",
+        "Acme opened its Berlin office on September 3, 2026.",
+    ], ["2026-09-01", "2026-09-03"])):
+        results.append({
+            "raw": 50.0, "after_decay": 50.0, "matched_icp_signal": index,
+            "evidence_urls": [signal.url],
+            "judge_verdict": {
+                "decision": "verified", "client_ready": True,
+                "authoritative_date": date, "authoritative_date_basis": "event",
+                "verification_trace": {"intent_verdict": {"signal_evaluations": [{
+                    "signal_status": "supported", "same_entity_check": "pass",
+                    "supporting_quotes": [quote], "evidence_urls_used": [signal.url],
+                }]}},
+            },
+        })
+    fit = {"gate": "company_fit", "decision": "match", "dimension_evidence": {
+        "industry": {"decision": "match", "web_evidence": {
+            "url": "https://acme.example/", "quote": "Acme provides reporting software."}}
+    }}
+    return company, icp, results, fit
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "One paragraph.\n\nAnother paragraph.",
+                                  "- A signal\n- Another signal", "```prose```", "x" * 2001,
+                                  "Hidden\u200bwords", "Bad\x00text"])
+def test_paragraph_shape_rejects_non_prose(value):
+    with pytest.raises(ValueError):
+        validate_intent_details_text(value)
+
+
+def test_paragraph_preserves_words_and_normalizes_line_wrapping():
+    assert validate_intent_details_text("  An event occurred.\nIts relevance is clear.  ") == (
+        "An event occurred. Its relevance is clear."
+    )
+    assert validate_intent_details_text(PARAGRAPH) == PARAGRAPH
+
+
+def test_review_uses_authoritative_dates_and_excludes_failed_signals():
+    company, icp, results, fit = inputs()
+    failed = deepcopy(results[1])
+    failed.update(after_decay=0, matched_icp_signal=2)
+    failed["judge_verdict"]["verification_trace"]["intent_verdict"]["signal_evaluations"][0]["supporting_quotes"] = ["UNVERIFIED CLAIM"]
+    result = intent_details.review_evidence(company, icp, results + [failed], fit)
+    assert len(result["verified_signals"]) == 2
+    assert [row["authoritative_date"] for row in result["verified_signals"]] == ["2026-09-01", "2026-09-03"]
+    assert "2026-01-01" not in json.dumps(result)
+    assert "UNVERIFIED CLAIM" not in json.dumps(result)
+    assert result["verified_company_evidence"]["industry"]["quote"] == "Acme provides reporting software."
+
+
+@pytest.mark.parametrize("missing", ["supporting_quotes", "same_entity_check"])
+def test_claims_cannot_replace_missing_source_support(missing):
+    company, icp, results, fit = inputs()
+    del results[0]["judge_verdict"]["verification_trace"]["intent_verdict"]["signal_evaluations"][0][missing]
+    with pytest.raises(ValueError, match="source quotes"):
+        intent_details.review_evidence(company, icp, results, fit)
+
+
+@pytest.mark.parametrize("failed_check", [None, *intent_details._CHECKS])
+def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
+    company, icp, results, fit = inputs()
+    checks = {name: name != failed_check for name in intent_details._CHECKS}
+
+    async def judge(prompt, **kwargs):
+        document = json.loads(prompt)
+        assert document["intent_details"] == PARAGRAPH
+        assert len(document["verified_signals"]) == 2
+        assert "untrusted JSON data" in kwargs["system_prompt"]
+        assert kwargs["max_retries"] == 0
+        assert kwargs["model"] == "gpt-4o-mini"
+        return json.dumps(checks)
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    result = asyncio.run(intent_details.review_intent_details(company, icp, results, fit))
+    assert result["decision"] == ("match" if failed_check is None else "mismatch")
+    assert result["checks"] == checks
+    assert result["input_hash"].startswith("sha256:")
+
+
+@pytest.mark.parametrize("response", ["{}", "not json", "[]", json.dumps({name: "true" for name in intent_details._CHECKS})])
+def test_malformed_review_is_retryable_not_a_terminal_zero(monkeypatch, response):
+    async def judge(*args, **kwargs):
+        return response
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
+    assert scorer_breakdown_has_retryable_infrastructure_failure({"verifier_gate_receipts": [receipt]})
+
+
+def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
+    async def judge(*args, **kwargs):
+        raise RuntimeError("private provider diagnostic")
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "provider_error"
+    assert "private provider diagnostic" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("decision", ["match", "mismatch", "unavailable"])
+def test_scorer_checks_paragraph_after_signals_and_preserves_arithmetic(monkeypatch, decision):
+    company, icp, results, fit = inputs()
+
+    async def verify_company(*args, **kwargs):
+        return company_fit_match("verified", details={"dimension_evidence": fit["dimension_evidence"]})
+
+    async def verify_signals(*args, **kwargs):
+        return 100.0, 100.0, 1.0, 100, False, results
+
+    async def review(*args):
+        assert args[2] is results
+        return {"gate": "intent_details", "decision": decision,
+                **({"failure_class": "intent_details_provider_unavailable"} if decision == "unavailable" else {})}
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", verify_company)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent_signal", verify_signals)
+    monkeypatch.setattr(intent_details, "review_intent_details", review)
+    result = asyncio.run(lead_scorer.score_company_competition_intent(
+        company, icp, 0, 0, set(), integrity_policy=True,
+    )).model_dump(mode="json")
+    assert result["final_score"] == (100.0 if decision == "match" else 0.0)
+    assert result["verifier_gate_receipts"][-1]["decision"] == decision
+    assert scorer_breakdown_has_retryable_infrastructure_failure(result, integrity_policy=True) == (decision == "unavailable")
+
+
+def test_unverified_primary_does_not_spend_on_prose(monkeypatch):
+    company, icp, results, fit = inputs()
+
+    async def verify_company(*args, **kwargs):
+        return company_fit_match("verified")
+
+    async def verify_signals(*args, **kwargs):
+        return 50.0, 0.0, 1.0, 100, False, results
+
+    async def review(*args):
+        raise AssertionError("should not review prose for an unqualified company")
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", verify_company)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent_signal", verify_signals)
+    monkeypatch.setattr(intent_details, "review_intent_details", review)
+    result = asyncio.run(lead_scorer.score_company_competition_intent(company, icp, 0, 0, set(), integrity_policy=True))
+    assert result.final_score == 0

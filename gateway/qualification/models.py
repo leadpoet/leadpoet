@@ -715,6 +715,11 @@ class CompanyOutput(BaseModel):
     # cannot be used as a prompt-injection lever (same pattern as
     # IntentSignal.description).
     description: str = Field("", max_length=500, description="Short company description / one-liner (optional)")
+    intent_details: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Company-level explanation of verified activity and ICP relevance for v5 Arena outputs",
+    )
     fit_evidence_urls: List[str] = Field(
         default_factory=list,
         description="Untrusted public URLs that may help independent company-fit discovery",
@@ -760,6 +765,15 @@ class CompanyOutput(BaseModel):
         if v:
             _scan_for_prompt_injection(v, "description")
         return v
+
+    @field_validator('intent_details')
+    @classmethod
+    def _validate_intent_details(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        from qualification.intent_details import validate_intent_details_text
+
+        return validate_intent_details_text(value)
 
 
 # =============================================================================

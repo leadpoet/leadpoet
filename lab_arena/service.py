@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import company_judgments, contact_policy, contact_evidence, integrity, icp_disclosure, judgment_cache, quality_policy
+from lab_arena import company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, quality_policy
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -302,6 +302,7 @@ class RoundDefaults:
     integrity_from: Optional[str] = None
     contacts_from: Optional[str] = None
     company_quality_from: Optional[str] = None
+    intent_details_from: Optional[str] = None
     benchmark_disclosure_from: Optional[str] = None
     min_submission_hours: int = 6
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
@@ -383,6 +384,22 @@ class ServiceConfig:
                     raise ValueError("company quality precedes integrity activation")
             except (ValueError, AttributeError) as exc:
                 raise ServiceError("company_quality_activation_invalid", 500) from exc
+        if self.defaults.intent_details_from is not None:
+            try:
+                activation = datetime.fromisoformat(
+                    self.defaults.intent_details_from.replace("Z", "+00:00")
+                )
+                if activation.tzinfo is None or self.defaults.integrity_from is None:
+                    raise ValueError(
+                        "intent details requires timezone and integrity activation"
+                    )
+                integrity_activation = datetime.fromisoformat(
+                    self.defaults.integrity_from.replace("Z", "+00:00")
+                )
+                if activation + timedelta(days=1) < integrity_activation:
+                    raise ValueError("intent details precedes integrity activation")
+            except (ValueError, AttributeError) as exc:
+                raise ServiceError("intent_details_activation_invalid", 500) from exc
         if self.defaults.benchmark_disclosure_from is not None:
             try:
                 icp_disclosure.parse_activation(
@@ -525,7 +542,11 @@ class ArenaService:
             policy_enabled = integrity.enabled(configuration)
             contacts_enabled = contact_policy.enabled(configuration)
             quality_enabled = quality_policy.enabled(configuration)
+            intent_details_enabled = intent_details_policy.enabled(configuration)
             scorer_quality = quality_policy.scorer_enabled(configuration.get("scorer_policy") or {})
+            scorer_intent_details = intent_details_policy.scorer_enabled(
+                configuration.get("scorer_policy") or {}
+            )
         except ValueError as exc:
             raise ServiceError("unsupported_integrity_policy", 409) from exc
         adapter = configuration.get("scorer_policy", {}).get("scoring_adapter_version")
@@ -533,6 +554,10 @@ class ArenaService:
             raise ServiceError("integrity_scorer_policy_mismatch", 409)
         if quality_enabled != scorer_quality or (quality_enabled and not policy_enabled):
             raise ServiceError("company_quality_scorer_policy_mismatch", 409)
+        if intent_details_enabled != scorer_intent_details or (
+            intent_details_enabled and not policy_enabled
+        ):
+            raise ServiceError("intent_details_scorer_policy_mismatch", 409)
         try:
             icp_disclosure.configured_policy(row)
         except icp_disclosure.IcpDisclosureError as exc:
@@ -826,6 +851,23 @@ class ArenaService:
             document["scorer_policy"] = scoring.build_scorer_policy(
                 scoring_adapter_version=document["scorer_policy"]["scoring_adapter_version"],
                 company_quality=True,
+            )
+        if (
+            defaults.intent_details_from is not None
+            and _parse_iso(document["schedule"]["submission_open"])
+            >= datetime.fromisoformat(
+                defaults.intent_details_from.replace("Z", "+00:00")
+            )
+        ):
+            if not integrity.enabled(document):
+                raise ServiceError("intent_details_policy_requires_integrity", 503)
+            document["intent_details_policy"] = intent_details_policy.POLICY
+            document["scorer_policy"] = scoring.build_scorer_policy(
+                scoring_adapter_version=document["scorer_policy"][
+                    "scoring_adapter_version"
+                ],
+                company_quality=quality_policy.enabled(document),
+                intent_details=True,
             )
         if (
             defaults.benchmark_disclosure_from is not None
@@ -3204,6 +3246,8 @@ class ArenaService:
             lease["contact_policy"] = contact_policy.POLICY
         if quality_policy.enabled(configuration):
             lease["company_quality_policy"] = quality_policy.POLICY
+        if intent_details_policy.enabled(configuration):
+            lease["intent_details_policy"] = intent_details_policy.POLICY
         lease.update({
             "image_digest": configuration["scorer_image_digest"],
             "image_reference": configuration["scorer_image_reference"],

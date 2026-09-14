@@ -96,6 +96,7 @@ def build_scorer_policy(
     provider_profile: str = "lab_arena",
     scoring_adapter_version: str = SCORING_ADAPTER_VERSION_V1,
     company_quality: bool = False,
+    intent_details: bool = False,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
@@ -104,6 +105,7 @@ def build_scorer_policy(
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
         **({"company_quality_policy": "company_quality_v1"} if company_quality else {}),
+        **({"intent_details_policy": "intent_details_v1"} if intent_details else {}),
         "fp_penalty_points": float(bindings["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"]),
         "fp_unverified_primary_penalty_points": float(bindings["RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY"]),
         "fp_penalty_icp_floor": 0.0,

@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import contracts, runtime, scoring, service as svc, verify
+from lab_arena import contracts, intent_details_policy, runtime, scoring, service as svc, verify
 from lab_arena.promotion import GitPromoter
 from lab_arena.contact_evidence import source_key
 from qualification.scoring.arena_integrity import (
@@ -67,6 +67,19 @@ class ContactHarness(IntegrityHarness):
             "set_id": int(kwargs["set_id"]),
             "icps": _contact_icps(daily_icps()),
         }
+        return service
+
+
+class IntentDetailsContactHarness(ContactHarness):
+    def objects_key(self):
+        return "intent-details-contact-round"
+
+    def build_service(self):
+        service = super().build_service()
+        service._config.defaults = replace(
+            service._config.defaults,
+            intent_details_from="2026-01-01T00:00:00Z",
+        )
         return service
 
 
@@ -169,7 +182,9 @@ async def _contact_result(company: dict, icp: dict, source: dict) -> dict:
     )
 
 
-def _install_contact_sandbox(harness: ContactHarness) -> None:
+def _install_contact_sandbox(
+    harness: ContactHarness, *, intent_details: bool = False
+) -> None:
     original = harness.sandbox.run_icp
 
     def run_icp(spec, **kwargs):
@@ -184,8 +199,28 @@ def _install_contact_sandbox(harness: ContactHarness) -> None:
             companies = output["companies"][:2]
             for index, company in enumerate(companies):
                 company["contact"] = _claim(company, valid_role=index == 0)
+                if intent_details:
+                    company.pop("fit_summary")
+                    company.pop("fit_evidence_urls")
+                    primary = company["intent_signals"][0]
+                    primary.pop("why_now")
+                    primary.pop("snippet")
+                    company["intent_signals"].append({
+                        **primary,
+                        "description": "Expanded the platform engineering team",
+                        "url": primary["url"] + "?evidence=team",
+                    })
+                    company["intent_details"] = (
+                        "The company raised funding and expanded its platform "
+                        "engineering team, so the requested infrastructure "
+                        "purchase is timely."
+                    )
             document = {
-                "schema_version": contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION,
+                "schema_version": (
+                    intent_details_policy.OUTPUT_SCHEMA
+                    if intent_details
+                    else contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION
+                ),
                 "companies": companies,
             }
             return runtime.fake_result(
@@ -196,6 +231,24 @@ def _install_contact_sandbox(harness: ContactHarness) -> None:
         icp = input_document["icp"]
         evidence = input_document.get("contact_source_evidence") or {}
         companies = input_document["companies"]
+        if intent_details:
+            scorer = scoring.lab_scorer(
+                input_document["scorer_policy"],
+                contact_source_evidence=evidence,
+            )
+            breakdowns = scoring.score_work_item(
+                {"scored_run_id": input_document["scored_run_id"]},
+                icp=icp,
+                companies=companies,
+                scorer=scorer,
+            )
+            output = scoring.build_scoring_output(
+                input_document["scored_run_id"], breakdowns
+            )
+            return runtime.fake_result(
+                exit_code=0,
+                output_bytes=json.dumps(output).encode("utf-8"),
+            )
         breakdowns = []
         for index, company in enumerate(companies):
             identity = canonical_company_identity(company)
@@ -234,6 +287,129 @@ def _install_contact_sandbox(harness: ContactHarness) -> None:
         )
 
     harness.sandbox.run_icp = run_icp
+
+
+def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
+    database, tmp_path, monkeypatch
+) -> None:
+    from qualification.scoring import (
+        contact_verification,
+        intent_details,
+        lead_scorer,
+        verification_helpers,
+    )
+    from qualification.scoring.company_fit_decision import company_fit_match
+
+    async def verify_company_fit(*_args, **_kwargs):
+        return company_fit_match("verified")
+
+    async def verify_signals(company, *_args, **_kwargs):
+        signal_results = []
+        for signal in company.intent_signals:
+            signal_results.append({
+                "raw": 50.0,
+                "after_decay": 50.0,
+                "matched_icp_signal": signal.matched_icp_signal,
+                "evidence_urls": [signal.url],
+                "judge_verdict": {
+                    "decision": "verified",
+                    "client_ready": True,
+                    "authoritative_date": str(signal.date),
+                    "authoritative_date_basis": "event",
+                    "verification_trace": {
+                        "intent_verdict": {
+                            "signal_evaluations": [{
+                                "signal_status": "supported",
+                                "same_entity_check": "pass",
+                                "supporting_quotes": [signal.description],
+                                "evidence_urls_used": [signal.url],
+                            }]
+                        }
+                    },
+                },
+            })
+        return 100.0, 100.0, 1.0, 100, False, signal_results
+
+    async def review_provider(*_args, **_kwargs):
+        return json.dumps({name: True for name in intent_details._CHECKS})
+
+    async def verify_contact_provider(
+        company, icp, *, source_evidence, classify_role
+    ):
+        del classify_role
+        return await _contact_result(company, icp, source_evidence)
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", verify_company_fit)
+    monkeypatch.setattr(
+        lead_scorer,
+        "score_company_competition_intent_signal",
+        verify_signals,
+    )
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", review_provider)
+    monkeypatch.setattr(
+        contact_verification, "verify_contact", verify_contact_provider
+    )
+
+    psycopg2, dsn = database
+    harness = IntentDetailsContactHarness(
+        lambda: psycopg2.connect(**dsn),
+        tmp_path,
+        challengers=["IntentWinner"],
+        runners=["alpha"],
+    )
+    _install_contact_sandbox(harness, intent_details=True)
+    harness.clock.now = datetime.now(timezone.utc)
+    round_id = "arena-2026-12-01-intentdetails"
+    configuration = harness.service.create_round(
+        harness.clock.now + timedelta(hours=12), round_id=round_id
+    )
+    harness.round_id = round_id
+    submission_id = harness.submit("IntentWinner", round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    harness.advance_until("scored", runners=1, max_steps=100)
+
+    persisted = harness.service.store.list_runs(
+        round_id, submission_id=submission_id, kind="execute"
+    )
+    assert len(persisted) == contracts.BENCHMARK_ICP_COUNT
+    assert all(run.get("qualification_doc") for run in persisted)
+    scored = harness.service.store.list_runs(
+        round_id, submission_id=submission_id, kind="score"
+    )
+    assert len(scored) == contracts.BENCHMARK_ICP_COUNT
+    for run in scored:
+        scoring_output = json.loads(
+            harness.objects.get_bounded(
+                run["output_ref"], scoring.MAX_SCORING_OUTPUT_BYTES
+            )
+        )
+        receipts = [
+            receipt
+            for row in scoring_output["breakdowns"]
+            for receipt in row["verifier_gate_receipts"]
+            if receipt.get("gate") == "intent_details"
+        ]
+        assert receipts
+        assert all(receipt["decision"] == "match" for receipt in receipts)
+
+    harness.service = harness.build_service()
+    published = harness.advance_until("published", runners=1, max_steps=100)
+    assert published["configuration_doc"]["intent_details_policy"] == (
+        intent_details_policy.POLICY
+    )
+    public = harness.service.public_results(round_id, submission_id)
+    assert len(public["outputs"]) == contracts.BENCHMARK_ICP_COUNT
+    for output in public["outputs"].values():
+        assert output["schema_version"] == intent_details_policy.OUTPUT_SCHEMA
+        for company in output["companies"]:
+            assert len(company["intent_signals"]) == 2
+            assert company["intent_details"].startswith("The company raised")
+            assert "fit_summary" not in company
+            assert "fit_evidence_urls" not in company
+            assert all(
+                "why_now" not in signal and "snippet" not in signal
+                for signal in company["intent_signals"]
+            )
 
 
 @pytest.mark.parametrize("delayed_disclosure", [False, True])

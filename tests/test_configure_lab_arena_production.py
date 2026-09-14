@@ -173,6 +173,16 @@ def test_contacts_scopes_are_mutually_exclusive():
         {"LAB_ARENA_COMPANY_QUALITY_FROM": ""},
     ),
     (
+        ["--intent-details-from", "2026-09-15T00:00:00Z"],
+        "intent_details_from_only",
+        {"LAB_ARENA_INTENT_DETAILS_FROM": "2026-09-15T00:00:00+00:00"},
+    ),
+    (
+        ["--intent-details-from", ""],
+        "intent_details_from_only",
+        {"LAB_ARENA_INTENT_DETAILS_FROM": ""},
+    ),
+    (
         ["--contacts-from", "2026-09-13T00:00:00Z"],
         "contacts_from_only",
         {"LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00+00:00"},
@@ -792,6 +802,26 @@ def test_remote_company_quality_activation_preserves_other_settings(tmp_path, va
     assert updated == {**initial, "LAB_ARENA_COMPANY_QUALITY_FROM": value.replace("Z", "+00:00")}
 
 
+@pytest.mark.parametrize("value", ["2026-09-15T00:00:00Z", ""])
+def test_remote_intent_details_activation_preserves_other_settings(tmp_path, value):
+    initial = {
+        "KEEP": "same",
+        "LAB_ARENA_CONTACTS_FROM": "2026-09-12T00:00:00Z",
+        "LAB_ARENA_MODE": "live",
+    }
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(initial), request_override={
+            "role": "intent_details_from_only",
+            "updates": {"LAB_ARENA_INTENT_DETAILS_FROM": value},
+            "aliases": {}, "service_key": "",
+        },
+    ))
+    assert updated == {
+        **initial,
+        "LAB_ARENA_INTENT_DETAILS_FROM": value.replace("Z", "+00:00"),
+    }
+
+
 @pytest.mark.parametrize("updates,expected", [
     ({"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00"}, "company_quality_from_timestamp_invalid"),
     ({"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00Z", "KEEP": "changed"}, "company_quality_from_scope_invalid"),
@@ -800,5 +830,17 @@ def test_remote_company_quality_activation_rejects_bad_scope_or_timestamp(tmp_pa
     result = _run_remote_with_fake_aws(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override={"role": "company_quality_from_only", "updates": updates, "aliases": {}, "service_key": ""},
+    )
+    assert result == {"ok": False, "code": expected}
+
+
+@pytest.mark.parametrize("updates,expected", [
+    ({"LAB_ARENA_INTENT_DETAILS_FROM": "2026-09-15T00:00:00"}, "intent_details_from_timestamp_invalid"),
+    ({"LAB_ARENA_INTENT_DETAILS_FROM": "2026-09-15T00:00:00Z", "KEEP": "changed"}, "intent_details_from_scope_invalid"),
+])
+def test_remote_intent_details_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
+    result = _run_remote_with_fake_aws(
+        tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
+        request_override={"role": "intent_details_from_only", "updates": updates, "aliases": {}, "service_key": ""},
     )
     assert result == {"ok": False, "code": expected}

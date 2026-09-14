@@ -9,10 +9,16 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from qualification.intent_details import (
+    INTENT_DETAILS_MAX_LENGTH,
+    validate_intent_details_text,
+)
+
 COMPETITION_OUTPUT_SCHEMA_V1 = "leadpoet.lab_arena.output.v1"
 COMPETITION_OUTPUT_SCHEMA_V2 = "leadpoet.lab_arena.output.v2"
 COMPETITION_OUTPUT_SCHEMA_V3 = "leadpoet.lab_arena.output.v3"
 COMPETITION_OUTPUT_SCHEMA_V4 = "leadpoet.lab_arena.output.v4"
+COMPETITION_OUTPUT_SCHEMA_V5 = "leadpoet.lab_arena.output.v5"
 
 
 def public_http_url(value: Any, *, allow_empty: bool = False) -> str:
@@ -155,6 +161,55 @@ class CompetitionCompanyV4(CompetitionCompanyV3):
     contact: Any = None
 
 
+class CompetitionIntentSignalV5(BaseModel):
+    """One independently verifiable signal in the simplified output."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    matched_icp_signal: int = Field(ge=0)
+    description: str = Field(min_length=1)
+    date: Optional[Date] = None
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return public_http_url(value)
+
+
+class CompetitionCompanyV5(BaseModel):
+    """Simplified company result for intent-details policy rounds."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    company_name: str = Field(min_length=1)
+    company_website: str
+    # Preserve raw row-level claims. The round's frozen quality and contact
+    # policies decide whether malformed values zero this company.
+    company_linkedin: Any = None
+    industry: str
+    employee_count: str
+    company_stage: str = ""
+    country: str
+    state: Any = None
+    intent_details: str = Field(
+        min_length=1, max_length=INTENT_DETAILS_MAX_LENGTH
+    )
+    intent_signals: list[CompetitionIntentSignalV5] = Field(min_length=1)
+    required_attribute: Optional[CompetitionRequiredAttribute] = None
+    contact: Any = None
+
+    @field_validator("company_website")
+    @classmethod
+    def validate_website(cls, value: str) -> str:
+        return public_http_url(value)
+
+    @field_validator("intent_details")
+    @classmethod
+    def validate_intent_details(cls, value: str) -> str:
+        return validate_intent_details_text(value)
+
+
 def validate_companies(
     values: Any,
     *,
@@ -175,6 +230,8 @@ def validate_companies(
         company_model = CompetitionCompanyV3
     elif schema_version == COMPETITION_OUTPUT_SCHEMA_V4:
         company_model = CompetitionCompanyV4
+    elif schema_version == COMPETITION_OUTPUT_SCHEMA_V5:
+        company_model = CompetitionCompanyV5
     else:
         raise ValueError("unsupported output schema version")
     rows: list[dict[str, Any]] = []

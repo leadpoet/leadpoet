@@ -1,5 +1,22 @@
 # Agent Instructions
 
+## Scoped production authorization: Arena Intent Details output
+
+On 2026-09-14 the user explicitly authorized simplifying the Arena output
+contract and adding one company-level client-ready Intent Details paragraph,
+using Tyche as the reference. Remove required company fit prose, fit lookup
+URLs, signal snippets, and per-signal why-now prose from the new contract.
+Preserve structured source-grounded signal verification, company/contact
+checks, scoring arithmetic, frozen rounds, accepted historical output,
+credentials, provider costs, budgets, rewards, weights, and concurrent work.
+This includes protected production and credential inspection, narrow tested
+Arena and baseline changes, pushes and safe merges, exact committed migrations
+if needed, canonical gateway/normal-validator restarts, and full model,
+validation, scoring, persistence and live output verification through the
+$overnight-rebenchmark-validation and $overnight-weight-recovery permissions.
+Do not restore retired services or start unrelated recovery loops. This scope
+ends after the new output contract and unaffected live flows are verified.
+
 ## Scoped production authorization: Arena submission license requirement
 
 On 2026-09-14 the user explicitly authorized a narrow requirement that every

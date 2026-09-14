@@ -103,7 +103,20 @@ change the policy of a round already committed.
 
 Tests cover the pictured score-inflation cases, permissive uncertain dates,
 valid independent evidence, ownership races, shared-judgment provenance,
-infrastructure retries, and saved full-round publication after restarts.
+infrastructure retries, and saved full-round publication after restarts. Rounds
+that announce `intent_details_policy: "intent_details_v1"` use output v5. They
+replace the fit prose, fit URL hints, signal `why_now`, and submitted snippets
+with one bounded company-level intent paragraph. The paragraph earns no
+additional points. It is a binary postcondition checked against the
+independently verified signals. A mismatch gives that company zero. A verifier
+outage retains the existing infrastructure retry behavior. Historical v1-v4
+outputs and cache identities remain unchanged.
+The writing rules follow [Tyche's Intent Details contract](https://github.com/gzaentz/tyche/blob/6bc90cc35a194ef5ed30ec77bb1c3f5df2602593/.agents/skills/lead-sourcing/references/output-contract.md):
+combine distinct supported activities into natural prose, retain supported
+dates, label commercial implications as conditional, and end with a clear ICP
+connection. Arena adds one bounded review using its existing pinned intent
+verification model. The review uses saved verifier quotes and authoritative
+dates; it neither searches for new facts nor rewrites the submitted paragraph.
 They use controlled provider results. An empirical false-negative rate still
 requires labeled real evidence; passing synthetic date cases does not measure
 that rate.

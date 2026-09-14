@@ -300,8 +300,8 @@ def test_request_completeness_rewards_five_decent_companies_over_two_excellent()
 
 def test_cross_request_aggregation_keeps_existing_arithmetic_mean():
     scores = [100, 100, 10, 0, 0]
-    assert verify.stage_score(scores, 5) == 42
-    assert len({verify.stage_score(list(p), 5) for p in permutations(scores)}) == 1
+    assert verify.stage_score(scores * 2, 10) == 42
+    assert len({verify.stage_score(list(p) * 2, 10) for p in permutations(scores)}) == 1
     main_scores = [100] * 10 + [0] * 10
     assert verify.stage_score(main_scores, 20) == 50
     assert (verify.stage_score(main_scores[:10], 10) + verify.stage_score(main_scores[10:], 10)) / 2 == 50

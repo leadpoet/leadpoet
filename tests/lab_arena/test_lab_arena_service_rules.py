@@ -11,7 +11,7 @@ import pytest
 
 from lab_arena import contracts, rewards, scoring, signing, source_bundle
 from lab_arena.output import validate_output_document
-from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
+from lab_arena.service import ArenaService, S3ObjectStore, ServiceError, _parse_iso
 from lab_arena.store import ArenaStoreError, hash_lease_token
 
 
@@ -30,6 +30,184 @@ def _schedule():
         "submission_open": "2026-09-02T00:00:00Z",
         "submission_cutoff": "2026-09-02T01:00:00Z",
     }
+
+
+@pytest.mark.parametrize(
+    ("value", "microsecond"),
+    [
+        ("2026-09-14T23:48:03Z", 0),
+        ("2026-09-14T23:48:03.1Z", 100_000),
+        ("2026-09-14T23:48:03.191883Z", 191_883),
+        ("2026-09-14T23:48:03.000001Z", 1),
+    ],
+)
+def test_parse_iso_accepts_utc_seconds_and_postgres_fractional_seconds(
+    value, microsecond
+):
+    parsed = _parse_iso(value)
+
+    assert parsed == datetime(2026, 9, 14, 23, 48, 3, microsecond, timezone.utc)
+    assert parsed.tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-09-14T23:48:03",
+        "2026-09-14T23:48:03+00:00",
+        "2026-09-14T23:48:03.1234567Z",
+        "2026-09-14 23:48:03.191883Z",
+    ],
+)
+def test_parse_iso_rejects_naive_offset_and_malformed_timestamps(value):
+    with pytest.raises(ValueError):
+        _parse_iso(value)
+
+
+def test_fractional_schedule_advances_completed_stage_one_to_stage_two():
+    round_id = "arena-2026-09-14"
+    row = {
+        "round_id": round_id,
+        "status": "stage1_scoring",
+        "configuration_doc": {
+            "schedule": {
+                "submission_cutoff": "2026-09-14T00:00:00Z",
+                "stage_1_scoring_close": "2026-09-14T23:48:03.191883Z",
+            }
+        },
+        "stage1_scoring_plan_doc": {
+            "schema_version": contracts.SCORING_PLAN_SCHEMA_VERSION,
+            "round_id": round_id,
+            "stage": 1,
+            "work_items": [{
+                "scored_run_id": "execute-1",
+                "icp_position": min(contracts.stage_positions(1)),
+                "submission_id": "submission-1",
+                "output_ref": "arena/output-1.json",
+            }],
+            "zero_rows": [],
+        },
+    }
+
+    class Store:
+        @staticmethod
+        def expire_leases(requested_round_id):
+            assert requested_round_id == round_id
+            return {"status": "ok"}
+
+        @staticmethod
+        def list_runs(requested_round_id, **filters):
+            assert requested_round_id == round_id
+            assert filters == {"stage": 1, "kind": "score"}
+            return [{"scored_run_id": "execute-1", "status": "accepted"}]
+
+        @staticmethod
+        def close_scoring(requested_round_id, stage):
+            assert (requested_round_id, stage) == (round_id, 1)
+            row["status"] = "stage1_judged"
+            return {"status": "closed", "round_status": row["status"]}
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._clock = lambda: datetime(2026, 9, 14, 17, 25, tzinfo=timezone.utc)
+    service._lock = threading.RLock()
+    service._round = lambda requested_round_id: row
+
+    def score_stage(requested_round_id, stage):
+        assert (requested_round_id, stage) == (round_id, 1)
+        row["status"] = "stage1_scored"
+        return {"status": "ok", "round_status": row["status"]}
+
+    def open_stage(requested_round_id, stage):
+        assert (requested_round_id, stage) == (round_id, 2)
+        row["status"] = "stage2"
+        return {"status": "ok", "round_status": row["status"]}
+
+    service.score_stage = score_stage
+    service.open_stage = open_stage
+
+    assert service._advance_round_locked(round_id)["round_status"] == "stage1_judged"
+    assert service._advance_round_locked(round_id)["round_status"] == "stage1_scored"
+    assert service._advance_round_locked(round_id)["round_status"] == "stage2"
+
+
+def test_fractional_final_scoring_and_publication_failure_boundaries():
+    round_id = "arena-2026-09-14"
+    final_scoring_close = datetime(
+        2026, 9, 15, 9, 18, 4, 191_883, tzinfo=timezone.utc
+    )
+    publication_deadline = final_scoring_close + timedelta(seconds=1)
+    row = {
+        "round_id": round_id,
+        "status": "stage2_scoring",
+        "configuration_doc": {
+            "schedule": {
+                "submission_cutoff": "2026-09-14T00:00:00Z",
+                "final_scoring_close": "2026-09-15T09:18:04.191883Z",
+                "publication_deadline": "2026-09-15T09:18:05.191883Z",
+            }
+        },
+        "stage2_scoring_plan_doc": {
+            "schema_version": contracts.SCORING_PLAN_SCHEMA_VERSION,
+            "round_id": round_id,
+            "stage": 2,
+            "work_items": [{
+                "scored_run_id": "execute-2",
+                "icp_position": min(contracts.stage_positions(2)),
+                "submission_id": "submission-2",
+                "output_ref": "arena/output-2.json",
+            }],
+            "zero_rows": [],
+        },
+    }
+
+    class Store:
+        cancelled = []
+
+        @staticmethod
+        def expire_leases(_round_id):
+            return {"status": "ok"}
+
+        @staticmethod
+        def list_runs(_round_id, **_filters):
+            return [{"scored_run_id": "execute-2", "status": "pending"}]
+
+        @staticmethod
+        def close_scoring(_round_id, stage):
+            assert stage == 2
+            row["status"] = "stage2_judged"
+            return {"status": "closed", "round_status": row["status"]}
+
+        @classmethod
+        def cancel_round(cls, requested_round_id, reason):
+            cls.cancelled.append((requested_round_id, reason))
+            row["status"] = "cancelled"
+            return {"status": "cancelled", "round_status": row["status"]}
+
+    now = [final_scoring_close]
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._clock = lambda: now[0]
+    service._lock = threading.RLock()
+    service._round = lambda requested_round_id: row
+
+    assert service._advance_round_locked(round_id)["round_status"] == "stage2_judged"
+
+    def score_stage(requested_round_id, stage):
+        assert (requested_round_id, stage) == (round_id, 2)
+        row["status"] = "scored"
+        return {"status": "ok", "round_status": row["status"]}
+
+    service.score_stage = score_stage
+    assert service._advance_round_locked(round_id)["round_status"] == "scored"
+
+    service.publish = lambda _round_id: (_ for _ in ()).throw(
+        ServiceError("publication_sanitizer_failed")
+    )
+    now[0] = publication_deadline + timedelta(hours=14)
+
+    assert service._advance_round_locked(round_id)["round_status"] == "cancelled"
+    assert Store.cancelled == [(round_id, "publication_sanitizer_failed")]
 
 
 def test_startup_requires_the_next_day_bank_date_column():

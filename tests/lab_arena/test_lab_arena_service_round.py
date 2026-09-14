@@ -784,6 +784,21 @@ def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
     )
     service = harness.service
     harness.chain.epoch = 24780
+    whole_second_schedule = service.build_schedule
+
+    def postgres_fractional_schedule(cutoff):
+        schedule = whole_second_schedule(cutoff)
+        for field in (
+            "stage_1_scoring_close",
+            "stage_2_start",
+            "stage_2_close",
+            "final_scoring_close",
+            "publication_deadline",
+        ):
+            schedule[field] = schedule[field].removesuffix("Z") + ".191883Z"
+        return schedule
+
+    service.build_schedule = postgres_fractional_schedule
     configuration = service.create_round(
         datetime.now(timezone.utc) + timedelta(hours=12),
         round_id="arena-2026-09-27-continuous",
@@ -791,6 +806,20 @@ def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
     harness.round_id = configuration["round_id"]
     challenger_id = harness.submit("Continuous", harness.round_id)
     schedule = harness.schedule()
+    assert all(
+        schedule[field].endswith(".191883Z")
+        for field in (
+            "stage_1_scoring_close",
+            "stage_2_start",
+            "stage_2_close",
+            "final_scoring_close",
+            "publication_deadline",
+        )
+    )
+    assert all(
+        "." not in schedule[field]
+        for field in ("submission_open", "submission_cutoff", "stage_1_start")
+    )
     cutoff = datetime.strptime(
         schedule["submission_cutoff"], "%Y-%m-%dT%H:%M:%SZ"
     ).replace(tzinfo=timezone.utc)
@@ -850,9 +879,9 @@ def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
     assert service.advance_round(harness.round_id)["round_status"] == "stage1_judged"
     assert service.advance_round(harness.round_id)["status"] == "ok"
     assert harness.status() == "stage1_scored"
-    assert harness.clock.now < datetime.strptime(
-        schedule["stage_2_start"], "%Y-%m-%dT%H:%M:%SZ"
-    ).replace(tzinfo=timezone.utc)
+    assert harness.clock.now < datetime.fromisoformat(
+        schedule["stage_2_start"].replace("Z", "+00:00")
+    )
 
     configuration_before_restart = service.store.get_round(harness.round_id)[
         "configuration_doc"
@@ -891,9 +920,9 @@ def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
         for participant in participants
     } == frozen_source_bytes
     harness.advance_until("published", runners=1)
-    assert harness.clock.now < datetime.strptime(
-        schedule["stage_2_start"], "%Y-%m-%dT%H:%M:%SZ"
-    ).replace(tzinfo=timezone.utc)
+    assert harness.clock.now < datetime.fromisoformat(
+        schedule["stage_2_start"].replace("Z", "+00:00")
+    )
 
     published = service.store.get_round(harness.round_id)
     assert published["configuration_doc"] == configuration_before_restart
@@ -915,6 +944,7 @@ def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
         assert len(public["scores"]["stage_1"] + public["scores"]["stage_2"]) == (
             contracts.BENCHMARK_ICP_COUNT
         )
+        assert float(public["submission_scores"]["final"]) > 0
     assert service.public_submission_code(challenger_id)["files"]
 
 

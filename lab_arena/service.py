@@ -415,7 +415,10 @@ def _iso(moment: datetime) -> str:
 
 
 def _parse_iso(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    timestamp_format = (
+        "%Y-%m-%dT%H:%M:%S.%fZ" if "." in value else "%Y-%m-%dT%H:%M:%SZ"
+    )
+    return datetime.strptime(value, timestamp_format).replace(tzinfo=timezone.utc)
 
 
 def round_id_for_cutoff(cutoff: datetime) -> str:

@@ -426,7 +426,9 @@ def test_company_verification_routed_page_fetch_uses_provider_deadline(
     assert 59.0 <= transport.sent[0]["timeout"] <= 60.0
     request = json.loads(transport.sent[0]["body"])
     assert request["operation"] == "firecrawl_scrape"
-    assert request["payload"]["timeout"] == 60_000
+    # Leave five seconds within the broker deadline to receive the response
+    # and settle the provider's billing record.
+    assert request["payload"]["timeout"] == 55_000
 
 
 def test_company_verification_retains_cross_domain_final_url_and_policy(

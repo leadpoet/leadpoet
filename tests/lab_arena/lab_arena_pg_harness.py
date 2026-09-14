@@ -100,6 +100,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "248-lab-arena-closed-scoring-reservation-admission.sql",
     "250-lab-arena-closed-scoring-billing-reconciliation.sql",
     "251-lab-arena-twenty-icp-promotion.sql",
+    "254-lab-arena-baseline-cost-eligibility.sql",
 )
 
 

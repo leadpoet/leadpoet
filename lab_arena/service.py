@@ -718,6 +718,22 @@ class ArenaService:
             or promotion.get("version") != 251
         ):
             raise ServiceError("integrity_schema_invalid", 503)
+        try:
+            baseline_cost = self._store._transport.rpc(
+                "lab_arena_baseline_cost_eligibility_schema_v1", {}
+            )
+        except ArenaStoreError as exc:
+            raise ServiceError(
+                "baseline_cost_eligibility_schema_unavailable", 503
+            ) from exc
+        if (
+            not isinstance(baseline_cost, Mapping)
+            or baseline_cost.get("schema_version")
+            != "leadpoet.lab_arena.baseline_cost_eligibility_schema.v1"
+            or baseline_cost.get("version") != 254
+            or baseline_cost.get("policy") != "zero_baseline_cost_ineligible_v1"
+        ):
+            raise ServiceError("baseline_cost_eligibility_schema_invalid", 503)
 
     def _require_contact_schema(self) -> None:
         try:
@@ -2767,22 +2783,33 @@ class ArenaService:
             )
             for entry in final_entries
         }
-        king_entry = next((e for e in final_entries if e["is_king"]), None)
-        if king_entry is None or king_entry["final_score"] is None:
+        stored_king_entry = next((e for e in final_entries if e["is_king"]), None)
+        if stored_king_entry is None or stored_king_entry["final_score"] is None:
             return self._store.cancel_round(
                 round_id, CANCEL_REASONS["scoring_incomplete"]
             )
+        effective_final_entries = [dict(entry) for entry in final_entries]
+        king_entry = next(entry for entry in effective_final_entries if entry["is_king"])
+        if (
+            integrity.enabled(round_row.get("configuration_doc") or {})
+            and eligibility[str(king_entry["submission_id"])]["eligibility_reason"]
+            in ("cost_per_company_exceeded", "execution_cap_exceeded")
+        ):
+            # Retain the accepted per-ICP scores in the run ledger, but apply
+            # the same final cost consequence to the baseline that challengers
+            # face. Other fail-closed cost states do not invent a zero score.
+            king_entry["final_score"] = 0.0
         decision = verify.king_decision(
             [
                 entry
-                for entry in final_entries
+                for entry in effective_final_entries
                 if not entry["is_king"]
                 and eligibility[str(entry["submission_id"])]["eligible"]
             ],
             king_entry,
         )
         published_at = _iso(self.now())
-        final_ranking = verify.final_ranking(final_entries)
+        final_ranking = verify.final_ranking(effective_final_entries)
         for row in final_ranking:
             row.update(eligibility[str(row["submission_id"])])
         publication = {

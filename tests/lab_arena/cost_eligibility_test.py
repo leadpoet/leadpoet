@@ -7,7 +7,7 @@ from typing import Optional, Set
 
 import pytest
 
-from lab_arena import contracts, public_dashboard
+from lab_arena import contracts, integrity, public_dashboard
 from lab_arena.service import ArenaService, RoundDefaults, ServiceError
 from lab_arena.store import ArenaStore, ArenaStoreError
 
@@ -16,6 +16,11 @@ ROUND_ID = "arena-2026-09-12"
 BASELINE_HOTKEY = "5" + "A" * 47
 HIGH_HOTKEY = "5" + "B" * 47
 LOW_HOTKEY = "5" + "C" * 47
+BASELINE_COST_SCHEMA = {
+    "schema_version": "leadpoet.lab_arena.baseline_cost_eligibility_schema.v1",
+    "version": 254,
+    "policy": "zero_baseline_cost_ineligible_v1",
+}
 
 
 def _company(domain: str, name: str) -> dict:
@@ -418,29 +423,40 @@ def test_new_policy_keeps_judge_inflight_safeguard():
     assert result["eligibility_reason"] == "provider_calls_inflight"
 
 
-@pytest.mark.parametrize(
-    ("high_amount", "high_uncertain", "high_reason"),
-    [
-        (10_000_001, False, "cost_per_company_exceeded"),
-        (10_000_000, True, "provider_cost_uncertain"),
-    ],
-)
-def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores(
-    high_amount, high_uncertain, high_reason
+def _publish_cost_case(
+    *,
+    baseline_score: float = 50.0,
+    high_score: float = 90.0,
+    low_score: float = 60.0,
+    baseline_amount: int = 10_000_000,
+    high_amount: int = 10_000_001,
+    low_amount: int = 10_000_000,
+    uncertain_submissions: Set[str] = frozenset(),
+    execution_cap: int = 50_000_000,
+    per_company_cap: int = 500_000,
+    integrity_enabled: bool = True,
 ):
     participants = [
         {"submission_id": "baseline", "miner_hotkey": BASELINE_HOTKEY, "is_king": True},
         {"submission_id": "high", "miner_hotkey": HIGH_HOTKEY, "is_king": False},
         {"submission_id": "low", "miner_hotkey": LOW_HOTKEY, "is_king": False},
     ]
-    runs = _runs("baseline", 50.0) + _runs("high", 90.0) + _runs("low", 60.0)
+    runs = (
+        _runs("baseline", baseline_score)
+        + _runs("high", high_score)
+        + _runs("low", low_score)
+    )
     objects = {
         run["output_ref"]: _output(
             [_company("%s-%d.example.com" % (run["submission_id"], run["icp_position"]), "Company")]
         )
         for run in runs
     }
-    amounts = {"baseline": 50_000_000, "high": high_amount, "low": 10_000_000}
+    amounts = {
+        "baseline": baseline_amount,
+        "high": high_amount,
+        "low": low_amount,
+    }
     writes = []
 
     class Store:
@@ -450,10 +466,18 @@ def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores(
 
         @staticmethod
         def submission_costs(submission_id):
-            row = _provider_row(
-                amounts[submission_id],
-                uncertain_calls=1 if submission_id == "high" and high_uncertain else 0,
+            amount = amounts[submission_id]
+            unresolved = submission_id in uncertain_submissions
+            row = _successful_row(
+                0 if unresolved else amount,
+                successful_microusd=0 if unresolved else amount,
+                successful_calls=0 if unresolved else 1,
+                uncertain_calls=1 if unresolved else 0,
+                success_unresolved_microusd=amount if unresolved else 0,
+                success_unresolved_calls=1 if unresolved else 0,
             )
+            if unresolved:
+                row["reserved_or_uncertain_microusd"] = amount
             return _costs(submission_id, row)
 
         @staticmethod
@@ -469,22 +493,44 @@ def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores(
         {"get_bounded": staticmethod(lambda ref, _limit: objects[ref])},
     )()
     service._clock = lambda: datetime(2026, 9, 12, tzinfo=timezone.utc)
+    if integrity_enabled:
+        service._qualified_company_count = lambda *_args, **_kwargs: 20
+    configuration = {
+        "execution_cap_microusd": execution_cap,
+        "cost_per_company_microusd": per_company_cap,
+        "sourcing_cost_eligibility_policy": contracts.SUCCESSFUL_CALLS_COST_POLICY,
+    }
+    if integrity_enabled:
+        configuration["integrity_policy"] = integrity.POLICY
     service._round = lambda _round_id: {
         "round_id": ROUND_ID,
         "status": "scored",
         "participants": participants,
         "finalists": ["high", "low"],
-        "configuration_doc": {
-            "execution_cap_microusd": 50_000_000,
-            "cost_per_company_microusd": 500_000,
-        },
+        "configuration_doc": configuration,
     }
 
     result = service.publish(ROUND_ID)
+    return result, writes[0][2]["publication_doc"], runs
+
+
+@pytest.mark.parametrize(
+    ("high_amount", "uncertain_submissions", "high_reason"),
+    [
+        (10_000_001, frozenset(), "cost_per_company_exceeded"),
+        (10_000_000, frozenset({"high"}), "provider_cost_uncertain"),
+    ],
+)
+def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_its_score(
+    high_amount, uncertain_submissions, high_reason
+):
+    result, publication, _runs_used = _publish_cost_case(
+        high_amount=high_amount,
+        uncertain_submissions=uncertain_submissions,
+    )
 
     assert result["king_outcome"] == "crowned"
     assert result["king_hotkey"] == LOW_HOTKEY
-    publication = writes[0][2]["publication_doc"]
     assert len(publication) == 8
     ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
     assert ranking["high"]["final_score"] == 90.0
@@ -492,7 +538,118 @@ def test_publish_excludes_only_cost_ineligible_challenger_and_keeps_raw_scores(
     assert ranking["high"]["eligibility_reason"] == high_reason
     assert ranking["low"]["eligible"] is True
     assert ranking["baseline"]["final_score"] == 50.0
+    assert ranking["baseline"]["eligible"] is True
+
+
+def test_cost_eligible_baseline_keeps_score_at_exact_allowance_boundary():
+    result, publication, runs = _publish_cost_case(
+        baseline_amount=10_000_000,
+        high_score=51.0,
+        high_amount=10_000_000,
+        low_score=0.0,
+    )
+
+    assert result["king_outcome"] == "crowned"
+    ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
+    assert ranking["baseline"]["final_score"] == 50.0
+    assert ranking["baseline"]["eligible"] is True
+    assert all(
+        run["per_icp_score"] == 50.0
+        for run in runs
+        if run["submission_id"] == "baseline"
+    )
+
+
+@pytest.mark.parametrize(
+    ("baseline_amount", "execution_cap", "per_company_cap", "reason"),
+    [
+        (10_000_001, 50_000_000, 500_000, "cost_per_company_exceeded"),
+        (50_000_001, 50_000_000, 3_000_000, "execution_cap_exceeded"),
+    ],
+)
+def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_can_win(
+    baseline_amount, execution_cap, per_company_cap, reason
+):
+    result, publication, runs = _publish_cost_case(
+        baseline_amount=baseline_amount,
+        execution_cap=execution_cap,
+        per_company_cap=per_company_cap,
+        high_score=1.0,
+        high_amount=0,
+        low_score=0.0,
+        low_amount=0,
+    )
+
+    assert result["king_outcome"] == "crowned"
+    assert result["king_hotkey"] == HIGH_HOTKEY
+    ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
+    assert ranking["baseline"]["final_score"] == 0.0
     assert ranking["baseline"]["eligible"] is False
+    assert ranking["baseline"]["eligibility_reason"] == reason
+    assert all(
+        run["per_icp_score"] == 50.0
+        for run in runs
+        if run["submission_id"] == "baseline"
+    )
+
+
+@pytest.mark.parametrize(
+    ("high_score", "high_amount", "expected_reason"),
+    [
+        (0.999, 0, "eligible"),
+        (90.0, 10_000_001, "cost_per_company_exceeded"),
+    ],
+)
+def test_zeroed_baseline_does_not_weaken_challenger_promotion_rules(
+    high_score, high_amount, expected_reason
+):
+    result, publication, _runs_used = _publish_cost_case(
+        baseline_amount=10_000_001,
+        high_score=high_score,
+        high_amount=high_amount,
+        low_score=0.0,
+        low_amount=0,
+    )
+
+    assert result["king_outcome"] == "no_king"
+    assert result["king_hotkey"] == ""
+    ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
+    assert ranking["baseline"]["final_score"] == 0.0
+    assert ranking["high"]["final_score"] == high_score
+    assert ranking["high"]["eligibility_reason"] == expected_reason
+
+
+def test_uncertain_baseline_cost_does_not_invent_a_zero_score():
+    result, publication, _runs_used = _publish_cost_case(
+        baseline_amount=10_000_000,
+        uncertain_submissions=frozenset({"baseline"}),
+        high_score=50.5,
+        high_amount=0,
+        low_score=0.0,
+        low_amount=0,
+    )
+
+    assert result["king_outcome"] == "no_king"
+    ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
+    assert ranking["baseline"]["final_score"] == 50.0
+    assert ranking["baseline"]["eligible"] is False
+    assert ranking["baseline"]["eligibility_reason"] == "provider_cost_uncertain"
+
+
+def test_non_integrity_round_keeps_its_frozen_baseline_score_policy():
+    result, publication, _runs_used = _publish_cost_case(
+        baseline_amount=10_000_001,
+        high_score=50.5,
+        high_amount=0,
+        low_score=0.0,
+        low_amount=0,
+        integrity_enabled=False,
+    )
+
+    assert result["king_outcome"] == "no_king"
+    ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
+    assert ranking["baseline"]["final_score"] == 50.0
+    assert ranking["baseline"]["eligibility_reason"] == "cost_per_company_exceeded"
 
 
 def test_historical_round_stays_eligible_without_cost_or_output_reads():
@@ -645,10 +802,15 @@ def test_commit_preflight_adopts_only_legacy_live_round_budget():
     assert shadow == {"mode": "shadow", "execution_cap_microusd": 123_000}
 
 
-def _startup_service(cost_rpc_result):
+def _startup_service(
+    cost_rpc_result,
+    *,
+    baseline_cost_schema=BASELINE_COST_SCHEMA,
+):
     class Transport:
         def __init__(self):
             self.cost_probe_seen = False
+            self.baseline_cost_schema_seen = False
 
         def rpc(self, function, params):
             if function == "lab_arena_schema_version_v1":
@@ -662,6 +824,23 @@ def _startup_service(cost_rpc_result):
                 if isinstance(cost_rpc_result, Exception):
                     raise cost_rpc_result
                 return cost_rpc_result
+            if function == "lab_arena_integrity_schema_v1":
+                return {
+                    "schema_version": "leadpoet.lab_arena.integrity_schema.v1",
+                    "version": 213,
+                }
+            if function == "lab_arena_twenty_icp_promotion_schema_v1":
+                return {
+                    "schema_version": (
+                        "leadpoet.lab_arena.twenty_icp_promotion_schema.v1"
+                    ),
+                    "version": 251,
+                }
+            if function == "lab_arena_baseline_cost_eligibility_schema_v1":
+                self.baseline_cost_schema_seen = True
+                if isinstance(baseline_cost_schema, Exception):
+                    raise baseline_cost_schema
+                return baseline_cost_schema
             raise ArenaStoreError("lab_arena_round_missing")
 
         @staticmethod
@@ -699,7 +878,10 @@ def _startup_service(cost_rpc_result):
     )
     service._objects = Objects()
     service._config = SimpleNamespace(
-        defaults=SimpleNamespace(contacts_from=None),
+        defaults=SimpleNamespace(
+            contacts_from=None,
+            integrity_from=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ),
         daily_icp_source=lambda **_kwargs: {"status": "unavailable"}
     )
     service._scorer_policy = {"scoring_adapter_version": "test"}
@@ -715,6 +897,41 @@ def test_startup_probes_cost_rpc_grant_and_missing_submission_path():
 
     assert service.startup_checks()["current_round"] is None
     assert transport.cost_probe_seen is True
+    assert transport.baseline_cost_schema_seen is True
+
+
+@pytest.mark.parametrize(
+    ("baseline_cost_schema", "expected_code"),
+    [
+        (
+            ArenaStoreError("function is unavailable"),
+            "baseline_cost_eligibility_schema_unavailable",
+        ),
+        (
+            {
+                "schema_version": (
+                    "leadpoet.lab_arena.baseline_cost_eligibility_schema.v1"
+                ),
+                "version": 254,
+                "policy": "wrong_policy",
+            },
+            "baseline_cost_eligibility_schema_invalid",
+        ),
+    ],
+)
+def test_startup_rejects_missing_or_wrong_baseline_cost_capability(
+    baseline_cost_schema, expected_code
+):
+    service, transport = _startup_service(
+        ArenaStoreError("lab_arena_submission_missing"),
+        baseline_cost_schema=baseline_cost_schema,
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        service.startup_checks()
+
+    assert caught.value.code == expected_code
+    assert transport.baseline_cost_schema_seen is True
 
 
 def test_startup_rejects_missing_validator_scoring_authority_schema():

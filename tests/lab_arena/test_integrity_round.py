@@ -30,7 +30,13 @@ def database():
 
 @pytest.fixture()
 def database_before_251():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS[:-1])
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS[
+            :CURRENT_SERVICE_MIGRATIONS.index(
+                "251-lab-arena-twenty-icp-promotion.sql"
+            )
+        ]
+    )
 
 
 @pytest.fixture()

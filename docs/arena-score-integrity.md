@@ -63,8 +63,11 @@ calls from failed execution attempts. Charged failed provider calls remain in
 actual spending and runtime budget accounting but do not enter this final
 successful-call allowance. Judge spend is reported separately. Calls still in
 flight, or unresolved charges for successful sourcing calls, prevent cost
-eligibility. A failed cost check leaves the quality score unchanged and prevents
-challenger promotion; the baseline remains the score reference.
+eligibility. An ineligible challenger keeps its quality score but cannot be
+promoted. If the baseline exceeds the final successful-sourcing allowance, its
+effective score is zero for that round. Its accepted per-ICP scores remain in
+the run ledger. Other unresolved or invalid baseline cost states do not invent
+a zero score.
 
 ## Inputs, admission, and repeated judgments
 
@@ -95,19 +98,24 @@ allows the next identical output to obtain a judgment with its own credentials.
 
 After all twenty ICPs have complete valid results, rank the baseline and
 eligible challengers by their twenty-ICP scores. The best eligible challenger
-becomes king only when its score is at least one point above the baseline.
+becomes king only when its score is at least one point above the baseline's
+effective score. An inefficient baseline therefore sets a zero threshold, but
+the normal one-point promotion margin still applies. If no eligible challenger
+reaches one point, no new king is selected and the existing champion remains.
 Qualification receipts, cost eligibility, deterministic tie ordering, and all
 other publication guards continue to apply. No extra ICP set or finalist-only
 stage can change or veto this result.
 
 ## Rollout and verification
 
-Apply repository migrations 211 through 214 and migration 251 in order, after
-their existing prerequisites. Migration 251 is the cutover dependency for the
-twenty-ICP runtime. Apply it immediately before the coordinated gateway and
-normal-validator restart. A confirmation-enabled older runtime cannot process
-new work after migration 251 removes its RPCs; rollback needs a separately
-reviewed schema migration. The scorer model and image remain unchanged.
+Apply repository migrations 211 through 214, 251, and 254 in order, after their
+existing prerequisites. Apply migration 254 before restarting the updated
+gateway; it prevents an older runtime from publishing a cost-ineligible
+baseline with its raw score. Published historical documents remain unchanged.
+Migration 251 remains the cutover dependency for the twenty-ICP runtime. A
+confirmation-enabled older runtime cannot process new work after migration 251
+removes its RPCs; rollback needs a separately reviewed schema migration. The
+scorer model and image remain unchanged.
 Migration 214 keeps
 a proven miner credential refusal distinct from an infrastructure failure when
 its uncertain provider charge blocks a later reservation. It retains the charge.

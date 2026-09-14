@@ -929,7 +929,9 @@ class ValidatorChainSourceV2:
             "runtime-code:%d" % (transition - 1),
         ), "reveal runtime code hash")
         event_profile = validate_subtensor_events_profile_v2(
-            load_subtensor_events_profile_v2(),
+            load_subtensor_events_profile_v2(
+                spec_version=int(runtime["spec_version"])
+            ),
             genesis_hash=str(chain_profile["genesis_hash"]),
             spec_version=int(runtime["spec_version"]),
             transaction_version=int(runtime["transaction_version"]),

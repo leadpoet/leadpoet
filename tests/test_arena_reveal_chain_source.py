@@ -90,12 +90,14 @@ class ArchiveFixture:
     def __init__(self, *, reveal_block: int = 105, event_success: bool = True,
                  recycle_uid: bool = False,
                  last_update_block: int = 100,
-                 inclusion_last_update_block: int = 100) -> None:
+                 inclusion_last_update_block: int = 100,
+                 runtime_spec_version: int = 455) -> None:
         self.reveal_block = reveal_block
         self.event_success = event_success
         self.recycle_uid = recycle_uid
         self.last_update_block = last_update_block
         self.inclusion_last_update_block = inclusion_last_update_block
+        self.runtime_spec_version = runtime_spec_version
         self.hashes = {
             block: hashlib.sha256(("block:%d" % block).encode()).hexdigest()
             for block in range(90, 131)
@@ -109,7 +111,10 @@ class ArchiveFixture:
         if method == "chain_getBlockHash":
             return "0x" + self.hashes[int(params[0])]
         if method == "state_getRuntimeVersion":
-            return {"specVersion": 452, "transactionVersion": 1}
+            return {
+                "specVersion": self.runtime_spec_version,
+                "transactionVersion": 1,
+            }
         if method == "state_getMetadata":
             return "0x0102"
         if method == "state_getStorageHash":
@@ -157,7 +162,13 @@ def _source(monkeypatch, fixture: ArchiveFixture, *, finalized_head: int = 130):
     # Metadata/profile decoding has its own production-fixture suite. These
     # tests retain the event-presence boundary while focusing on archive search.
     monkeypatch.setattr(module, "decode_runtime_metadata_commitment", lambda _: {})
-    monkeypatch.setattr(module, "load_subtensor_events_profile_v2", lambda: {})
+    selected_profile_specs = []
+
+    def load_profile(**kwargs):
+        selected_profile_specs.append(kwargs["spec_version"])
+        return {}
+
+    monkeypatch.setattr(module, "load_subtensor_events_profile_v2", load_profile)
     monkeypatch.setattr(module, "validate_subtensor_events_profile_v2", lambda *_, **__: {})
 
     def prove(events, **_kwargs):
@@ -166,6 +177,7 @@ def _source(monkeypatch, fixture: ArchiveFixture, *, finalized_head: int = 130):
         return {"event": "TimelockedWeightsRevealed"}
 
     monkeypatch.setattr(module, "prove_timelocked_weights_reveal_v2", prove)
+    source._selected_profile_specs = selected_profile_specs
     return source
 
 
@@ -185,10 +197,23 @@ def _prove(source):
 
 
 def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatch):
-    result = _prove(_source(monkeypatch, ArchiveFixture(), finalized_head=130))
+    source = _source(monkeypatch, ArchiveFixture(), finalized_head=130)
+    result = _prove(source)
     assert result["reveal_block"] == 105
     assert result["weights"] == WEIGHTS
     assert result["event_witness"] == {"event": "TimelockedWeightsRevealed"}
+    assert source._selected_profile_specs == [455]
+
+
+@pytest.mark.parametrize("spec_version", [456, 457])
+def test_historical_reveal_selects_observed_runtime_profile(
+    monkeypatch, spec_version
+):
+    source = _source(
+        monkeypatch, ArchiveFixture(runtime_spec_version=spec_version)
+    )
+    _prove(source)
+    assert source._selected_profile_specs == [spec_version]
 
 
 def test_removed_commit_without_successful_reveal_event_fails(monkeypatch):

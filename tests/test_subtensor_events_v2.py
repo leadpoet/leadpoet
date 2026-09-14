@@ -23,6 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = (
     ROOT / "tests" / "fixtures" / "subtensor_events_spec455_block9039648.json"
 )
+CURRENT_RUNTIME_FIXTURES = {
+    456: ROOT / "tests" / "fixtures" / "subtensor_events_spec456_block9066646.json",
+    457: ROOT / "tests" / "fixtures" / "subtensor_events_spec457_block9067004.json",
+}
 
 
 def _fixture():
@@ -134,6 +138,89 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
         "weights_set_event_index": 5,
         "timelocked_weights_revealed_event_index": 109,
     }
+
+
+@pytest.mark.parametrize(
+    ("spec_version", "metadata_sha256", "runtime_code_hash", "event_count"),
+    (
+        (
+            456,
+            "d0a9166665cd2c1935694bf819bc1c4ac860de51be32421ed7428ef64ff429c4",
+            "0xa3db833af5d9866819b38baa66907940ef996a9525a79c347fa9eb5751d75c4f",
+            240,
+        ),
+        (
+            457,
+            "be312b870f5244edd7d926e4854c35e6a07d9f143fa6ad13bc0a328698610388",
+            "0x5f5e661c30ef71a66ba754f32eaa4ebce89591da599eb3aeefa41e7edce6d2ac",
+            209,
+        ),
+    ),
+)
+def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
+    spec_version, metadata_sha256, runtime_code_hash, event_count
+):
+    fixture = json.loads(
+        CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8")
+    )
+    events_raw = bytes.fromhex(fixture["system_events"][2:])
+    event_count_raw = bytes.fromhex(fixture["system_event_count"][2:])
+    profile = load_subtensor_events_profile_v2(spec_version=spec_version)
+
+    assert profile["spec_version"] == spec_version
+    assert profile["transaction_version"] == 1
+    assert profile["metadata_raw_sha256"] == metadata_sha256
+    assert profile["runtime_code_storage_hash"] == runtime_code_hash
+    assert profile["measurement"]["block_hash"] == fixture["block_hash"]
+    assert profile["measurement"]["system_event_count"] == event_count
+    assert hashlib.sha256(events_raw).hexdigest() == (
+        profile["measurement"]["system_events_sha256"]
+    )
+    assert hashlib.sha256(event_count_raw).hexdigest() == (
+        profile["measurement"]["system_event_count_raw_sha256"]
+    )
+
+    validated = validate_subtensor_events_profile_v2(
+        profile,
+        genesis_hash=profile["genesis_hash"],
+        spec_version=spec_version,
+        transaction_version=1,
+        metadata_sha256=metadata_sha256,
+        runtime_code_hash=runtime_code_hash,
+    )
+    records = decode_system_events_v2(
+        events_raw, profile=validated, event_count_raw=event_count_raw
+    )
+    expected = fixture["expected"]
+    weights_record = records[expected["weights_set_record_index"]]
+    reveal_record = records[expected["reveal_record_index"]]
+    assert weights_record["record_index"] == expected["weights_set_record_index"]
+    assert weights_record["phase"] == "Initialization"
+    assert weights_record["runtime_event"] == "SubtensorModule"
+    assert weights_record["pallet_event"] == "WeightsSet"
+    assert weights_record["fields"] == [expected["netuid"], expected["uid"]]
+    assert weights_record["topics"] == []
+    assert reveal_record["record_index"] == expected["reveal_record_index"]
+    assert reveal_record["phase"] == "Initialization"
+    assert reveal_record["runtime_event"] == "SubtensorModule"
+    assert reveal_record["pallet_event"] == "TimelockedWeightsRevealed"
+    assert reveal_record["fields"] == [
+        expected["netuid"],
+        "0x" + expected["account_id_hex"],
+    ]
+    assert reveal_record["topics"] == []
+    proof = _proof(validated, fixture, events_raw, event_count_raw)
+    assert proof["event_count"] == event_count
+    assert proof["weights_set_record_index"] == expected["weights_set_record_index"]
+    assert proof["reveal_record_index"] == expected["reveal_record_index"]
+    assert proof["netuid"] == expected["netuid"]
+    assert proof["uid"] == expected["uid"]
+    assert proof["account_id_hex"] == expected["account_id_hex"]
+
+
+def test_unknown_runtime_profile_fails_closed():
+    with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
+        load_subtensor_events_profile_v2(spec_version=458)
 
 
 @pytest.mark.parametrize(

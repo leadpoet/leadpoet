@@ -17,6 +17,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 PROFILE_SCHEMA_VERSION = "leadpoet.subtensor_events_profile.v2"
 PROOF_SCHEMA_VERSION = "leadpoet.timelocked_weights_reveal_proof.v2"
 DEFAULT_PROFILE_PATH = Path(__file__).with_name("subtensor_events_profile_v2.json")
+DEFAULT_PROFILE_PATHS = {
+    455: DEFAULT_PROFILE_PATH,
+    456: Path(__file__).with_name("subtensor_events_profile_spec456_v2.json"),
+    457: Path(__file__).with_name("subtensor_events_profile_spec457_v2.json"),
+}
 SYSTEM_EVENTS_STORAGE_KEY = (
     "0x26aa394eea5630e07c48ae0c9558cef7" "80d41e5e16056765bc8461851072c9d7"
 )
@@ -587,15 +592,31 @@ def _validate_profile_structure(profile: Any) -> Dict[str, Any]:
     return normalized
 
 
-def load_subtensor_events_profile_v2(path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load and structurally validate the measured event profile."""
+def load_subtensor_events_profile_v2(
+    path: Optional[Path] = None, *, spec_version: Optional[int] = None
+) -> Dict[str, Any]:
+    """Load the exact measured profile for one observed runtime."""
 
-    profile_path = Path(path) if path is not None else DEFAULT_PROFILE_PATH
+    requested_spec = None
+    if path is None:
+        requested_spec = 455 if spec_version is None else _integer(
+            spec_version, "requested spec version"
+        )
+        profile_path = DEFAULT_PROFILE_PATHS.get(requested_spec)
+        if profile_path is None:
+            _fail("event profile for observed spec version is unavailable")
+    else:
+        profile_path = Path(path)
+        if spec_version is not None:
+            requested_spec = _integer(spec_version, "requested spec version")
     try:
         payload = profile_path.read_bytes()
     except OSError as exc:
         raise SubtensorEventsV2Error("event profile cannot be read") from exc
-    return _validate_profile_structure(_strict_json(payload))
+    profile = _validate_profile_structure(_strict_json(payload))
+    if requested_spec is not None and profile["spec_version"] != requested_spec:
+        _fail("requested spec version differs from event profile")
+    return profile
 
 
 def validate_subtensor_events_profile_v2(

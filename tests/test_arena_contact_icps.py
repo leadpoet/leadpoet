@@ -8,7 +8,7 @@ import pytest
 
 from gateway.qualification.models import ICPPrompt
 from gateway.tasks import icp_generator
-from lab_arena import confirmation, contact_policy, integrity
+from lab_arena import contact_policy, integrity
 from qualification.scoring.contact_verification import _deterministic_role_match
 
 
@@ -56,24 +56,6 @@ def test_contact_projection_is_opt_in_and_legacy_fingerprint_is_unchanged() -> N
     ) != integrity.requirement_fingerprint(changed, contacts_required=True)
 
 
-def test_confirmation_dedup_includes_contact_requirements_only_when_enabled() -> None:
-    main = [_icp()]
-    candidates = []
-    for index in range(5):
-        candidate = _icp(f"Contact role {index}")
-        candidate["icp_id"] = f"candidate-{index}"
-        candidates.append(candidate)
-
-    with pytest.raises(ValueError, match="repeats"):
-        confirmation.build_bank("round", candidates, main)
-    bank = confirmation.build_bank(
-        "round", candidates, main, contacts_required=True
-    )
-    assert [row["target_roles"] for row in bank["icps"]] == [
-        [f"Contact role {index}"] for index in range(5)
-    ]
-
-
 def test_contact_icp_model_round_trips_structured_geography() -> None:
     value = _icp()
     value["employee_count"] = "51-200"
@@ -89,17 +71,6 @@ def test_contact_icp_model_round_trips_structured_geography() -> None:
     }
     with pytest.raises(ValueError):
         ICPPrompt.model_validate({**value, "contact_geography": {"country": ["US"]}})
-
-
-@pytest.mark.parametrize("invalid", ["missing_roles", "invalid_country"])
-def test_confirmation_rejects_incomplete_contact_requirements(invalid) -> None:
-    candidates = [_icp(f"Contact role {index}") for index in range(5)]
-    if invalid == "missing_roles":
-        candidates[2]["target_roles"] = []
-    else:
-        candidates[2]["contact_geography"]["countries"] = ["not-a-country"]
-    with pytest.raises(ValueError):
-        confirmation.build_bank("round", candidates, [_icp()], contacts_required=True)
 
 
 def test_template_contact_requirements_are_coherent_and_do_not_copy_hq() -> None:

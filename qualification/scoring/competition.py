@@ -76,6 +76,10 @@ _SYSTEMIC_INTENT_STAGE_MARKERS = (
     "http_429",
     "http_5",
 )
+_EXA_TARGET_CRAWL_FAILURES = frozenset({
+    ("CRAWL_LIVECRAWL_TIMEOUT", 504),
+    ("CRAWL_UNKNOWN_ERROR", 500),
+})
 
 
 class CompetitionScorerInputError(ValueError):
@@ -1003,6 +1007,61 @@ class CompetitionCompanyScorer:
         return breakdowns
 
 
+def _confirmed_exa_target_crawl_failure(value: Any) -> bool:
+    """Validate the bounded two-attempt receipt retained by the verifier."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "id_matches_requested_url", "confirmed_attempts", "observations"
+    }:
+        return False
+    observations = value.get("observations")
+    return bool(
+        value.get("id_matches_requested_url") is True
+        and type(value.get("confirmed_attempts")) is int
+        and value.get("confirmed_attempts") == 2
+        and isinstance(observations, list)
+        and len(observations) == 2
+        and all(
+            isinstance(observation, Mapping)
+            and set(observation) == {"error_tag", "error_http_status"}
+            and isinstance(observation.get("error_tag"), str)
+            and type(observation.get("error_http_status")) is int
+            and (
+                observation.get("error_tag"),
+                observation.get("error_http_status"),
+            ) in _EXA_TARGET_CRAWL_FAILURES
+            for observation in observations
+        )
+    )
+
+
+def _intent_attempts_have_exact_target_crawl_exhaustion(attempts: Any) -> bool:
+    """Accept only known Exa successes plus exact repeated target failures."""
+
+    if not isinstance(attempts, Sequence) or isinstance(attempts, (str, bytes)):
+        return False
+    rows = list(attempts)
+    if not rows or any(not isinstance(row, Mapping) for row in rows):
+        return False
+    proven_failures = 0
+    for row in rows:
+        if not isinstance(row.get("url"), str) or not row.get("url"):
+            return False
+        if row.get("source") == "exa_fallback" and row.get("stage") == "exa_scraped":
+            continue
+        if not (
+            row.get("source") == "none"
+            and row.get("sd_stage") == "all_tiers_exhausted:http_502"
+            and row.get("exa_stage") == "exa_no_results"
+            and _confirmed_exa_target_crawl_failure(
+                row.get("exa_target_crawl_failure")
+            )
+        ):
+            return False
+        proven_failures += 1
+    return proven_failures > 0
+
+
 def _intent_detail_has_source_local_failure(detail: Any) -> bool:
     """Recognize bounded source-content exhaustion without reading prose."""
 
@@ -1024,6 +1083,8 @@ def _intent_detail_has_source_local_failure(detail: Any) -> bool:
     attempts = trace.get("provider_attempts") if isinstance(trace, Mapping) else None
     if not isinstance(attempts, Sequence) or isinstance(attempts, (str, bytes)) or not attempts:
         return False
+    if _intent_attempts_have_exact_target_crawl_exhaustion(attempts):
+        return True
     for attempt in attempts:
         if not isinstance(attempt, Mapping):
             return False
@@ -1101,6 +1162,12 @@ def scorer_breakdown_has_company_local_verification_failure(
                 if isinstance(trace, Mapping)
                 else None
             )
+            exact_target_crawl_exhaustion = (
+                verdict.get("decision") == "rejected_verifier_error"
+                and verdict.get("pipeline_decision") == "unavailable"
+                and verdict.get("rejection_reason") == "evidence_fetch_failed"
+                and _intent_attempts_have_exact_target_crawl_exhaustion(attempts)
+            )
             if isinstance(attempts, Sequence) and not isinstance(attempts, (str, bytes)):
                 stages = [
                     str(value).casefold()
@@ -1110,12 +1177,15 @@ def scorer_breakdown_has_company_local_verification_failure(
                     if (str(key) == "source" or str(key).endswith("stage"))
                     and isinstance(value, str)
                 ]
-                if any(
+                if not exact_target_crawl_exhaustion and any(
                     marker in stage
                     for stage in stages
                     for marker in _SYSTEMIC_INTENT_STAGE_MARKERS
                 ):
                     return False
+            if exact_target_crawl_exhaustion:
+                source_local = True
+                continue
             if _intent_detail_has_source_local_failure(detail):
                 source_local = True
                 continue

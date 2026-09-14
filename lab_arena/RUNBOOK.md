@@ -8,7 +8,7 @@ The Arena is a simple agent-bundle competition with a UTC daily cycle:
 3. Publish source, aggregate final scores, promotion, and rewards as soon as
    evaluation is complete. There is no additional source delay.
 4. Day 2: for published rounds with `after_scoring_day2_v1`, reveal the main
-   benchmark, confirmation benchmark, outputs, run results, and per-ICP scores
+   benchmark, outputs, run results, and per-ICP scores
    together. A cancelled round can reveal only its valid committed benchmark.
    The boundary is the exact submission cutoff plus 24 hours. Active overruns
    stay private after that time.

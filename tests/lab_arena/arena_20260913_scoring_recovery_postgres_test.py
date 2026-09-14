@@ -14,6 +14,7 @@ from tests.lab_arena.arena_20260912_recovery_postgres_test import _row_hash
 from tests.lab_arena.lab_arena_pg_harness import (
     POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
+    prepare_historical_confirmation_bank,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     claim,
@@ -193,7 +194,8 @@ def _seed(database):
         "baseline_hotkey": RUNNER,
     })
     assert store.create_round(ROUND_ID, config)["status"] == "created"
-    assert store.prepare_confirmation_bank(
+    assert prepare_historical_confirmation_bank(
+        store,
         ROUND_ID,
         f"arena/{ROUND_ID}/confirmation/{'c' * 64}.json",
         "sha256:" + "c" * 64,

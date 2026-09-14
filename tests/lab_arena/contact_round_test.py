@@ -25,7 +25,6 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
-from tests.lab_arena.test_integrity_policy import fresh_icps
 from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 
@@ -68,9 +67,6 @@ class ContactHarness(IntegrityHarness):
             "set_id": int(kwargs["set_id"]),
             "icps": _contact_icps(daily_icps()),
         }
-        service._config.confirmation_icp_source = (
-            lambda **_kwargs: _contact_icps(fresh_icps())
-        )
         return service
 
 
@@ -204,12 +200,7 @@ def _install_contact_sandbox(harness: ContactHarness) -> None:
         for index, company in enumerate(companies):
             identity = canonical_company_identity(company)
             flavor = str(company["company_name"]).split(" Company ", 1)[0]
-            base_score = (
-                60.0
-                if str(icp["icp_id"]).startswith("confirmation_")
-                and flavor != "PublicBaseline"
-                else 80.0 if flavor != "PublicBaseline" else 40.0
-            )
+            base_score = 80.0 if flavor != "PublicBaseline" else 40.0
             contact = asyncio.run(
                 _contact_result(company, icp, evidence[source_key(company)])
             )
@@ -298,7 +289,7 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         )
         if run.get("qualification_doc")
     ]
-    assert len(saved) == contracts.MAX_EVALUATION_ICP_COUNT
+    assert len(saved) == contracts.BENCHMARK_ICP_COUNT
     assert all(
         [row["contact_qualified"] for row in run["qualification_doc"]["companies"]]
         == [True, False]
@@ -344,8 +335,8 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         harness.clock.now = reveal_at
         public = harness.service.public_results(round_id, winner)
         assert len(harness.service.public_benchmark(round_id)["icps"]) == 20
-    assert len(public["outputs"]) == contracts.MAX_EVALUATION_ICP_COUNT
-    assert len(public["contact_verifications"]) == contracts.MAX_EVALUATION_ICP_COUNT
+    assert len(public["outputs"]) == contracts.BENCHMARK_ICP_COUNT
+    assert len(public["contact_verifications"]) == contracts.BENCHMARK_ICP_COUNT
     first_output = next(iter(public["outputs"].values()))
     assert first_output["schema_version"] == contracts.CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION
     assert first_output["companies"][0]["contact"]["email"].startswith("ada@")

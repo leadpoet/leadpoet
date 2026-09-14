@@ -1826,7 +1826,7 @@ def _check_runtime_image(image_reference: str, image_digest: str) -> None:
 
 # The round statuses in which assignments can be leased: both execution and
 # scoring windows in the two-stage competition.
-WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring", "stage3", "stage3_scoring")
+WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring")
 
 
 class Runner:

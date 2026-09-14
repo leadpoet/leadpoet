@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: remove five-ICP confirmation
+
+On 2026-09-14 the user explicitly authorized complete removal of the additional
+five-ICP confirmation stage introduced in PR190. Determine promotion from the
+standard twenty-ICP benchmark only. This includes protected production and
+Supabase inspection, narrow tested code and exact committed migrations, push to
+main, canonical gateway/normal-validator restarts, and end-to-end validation
+through the overnight operational permissions without routine approval. Preserve
+other scoring and promotion safeguards, accepted results, provider cost history,
+credentials, published rounds, rewards, weights, and concurrent work. Do not
+restore retired services or start unrelated overnight goals. This authority
+expires after removal and production verification are complete.
+
 ## Scoped production authorization: September 14 provider cost recovery
 
 On 2026-09-14 UTC the user explicitly authorized the narrow interrupted-provider

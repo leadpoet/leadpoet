@@ -96,16 +96,14 @@ def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(
     ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
     assert published["king_outcome"] == "crowned"
     for submission, original in original_rows.items():
-        assert ranking[submission]["main_score"] > 0
+        assert ranking[submission]["final_score"] > 0
         saved = harness.service.store.get_submission(submission)
         assert saved["owner_coldkey"] == shared_owner
         assert saved["source_ref"] == original["source_ref"]
         assert harness.objects.get(saved["source_ref"]) == original_source[submission]
         public = harness.service.public_results(harness.round_id, submission)
-        # Only selected finalists have a confirmation score; all twenty keep
-        # their main score and the twenty evaluated ICPs.
-        assert (public["submission_scores"]["final"] is not None) == ranking[submission]["confirmation_selected"]
-        assert len(public["outputs"]) >= 20
+        assert public["submission_scores"]["final"] is not None
+        assert len(public["outputs"]) == contracts.BENCHMARK_ICP_COUNT
         assert all(output["companies"] for output in public["outputs"].values())
     fixtures.assert_canary_absent(harness, connect)
 

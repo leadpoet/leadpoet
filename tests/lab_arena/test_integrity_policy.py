@@ -5,18 +5,8 @@ import json
 
 import pytest
 
-from lab_arena import confirmation, contracts, integrity, scoring, verify
+from lab_arena import contracts, integrity, scoring, verify
 from tests.lab_arena.icp_fixtures import daily_icps
-
-
-def fresh_icps():
-    rows = deepcopy(daily_icps()[:5])
-    for row in rows:
-        row["prompt"] += " with a newly opened regional headquarters"
-        row["intent_signal"] = "Opened a regional headquarters within six months"
-        row["intent_signals"] = [row["intent_signal"]]
-        row["intent_category"] = "EXPANSION"
-    return rows
 
 
 def test_icp_projection_removes_private_hints_and_keeps_buyer_requirements():
@@ -43,65 +33,7 @@ def test_unknown_policy_cannot_silently_fall_back(marker):
     assert not integrity.enabled({})
 
 
-def test_confirmation_bank_is_distinct_committed_and_contains_no_answers():
-    main = daily_icps()
-    bank = confirmation.build_bank("arena-2026-09-12", fresh_icps(), main)
-    raw = contracts.canonical_json(bank).encode()
-    assert confirmation.read_bank(raw, round_id=bank["round_id"], digest=contracts.hash_bytes(raw)) == bank
-    assert "verified_example_company" not in raw.decode()
-    assert len(bank["icps"]) == 5
-    assert len({row["icp_id"] for row in bank["icps"]}) == 5
-    with pytest.raises(ValueError, match="hash mismatch"):
-        confirmation.read_bank(raw + b" ", round_id=bank["round_id"], digest=contracts.hash_bytes(raw))
-    with pytest.raises(ValueError, match="repeats"):
-        confirmation.build_bank(bank["round_id"], main[:5], main)
-    paraphrased = deepcopy(main[:5])
-    for row in paraphrased:
-        row["prompt"] = "Different wording of the same structured request"
-    with pytest.raises(ValueError, match="repeats"):
-        confirmation.build_bank(bank["round_id"], paraphrased, main)
-    duplicate = fresh_icps()
-    duplicate[-1] = {**duplicate[0], "icp_id": "changed-id"}
-    with pytest.raises(ValueError, match="repeats"):
-        confirmation.build_bank(bank["round_id"], duplicate, main)
-
-
-def test_confirmation_cohort_is_fixed_top_three_eligible_main_improvements():
-    entries = [{"submission_id": "baseline", "is_king": True, "final_score": 60}]
-    entries += [{"submission_id": name, "is_king": False, "final_score": value}
-                for name, value in (("low", 60.99), ("edge", 61), ("a", 70), ("b", 70), ("best", 80), ("cost-fail", 99))]
-    eligibility = {row["submission_id"]: {"eligible": row["submission_id"] != "cost-fail"} for row in entries}
-    cohort = confirmation.select_cohort(entries, eligibility)
-    assert cohort["submission_ids"] == ["baseline", "best", "a", "b"]
-    assert cohort["required"] is True
-    edge = confirmation.select_cohort([entries[0], entries[2]], eligibility)
-    assert edge["submission_ids"] == ["baseline", "edge"]
-    none = confirmation.select_cohort(entries[:2], eligibility)
-    assert none["required"] is False
-    with pytest.raises(ValueError, match="baseline"):
-        confirmation.select_cohort(entries[1:], eligibility)
-
-
-def test_generation_draw_has_separate_identity_without_transmitting_main_bank(monkeypatch):
-    from gateway.tasks import icp_generator
-    requests = []
-    monkeypatch.setenv("LAB_ARENA_OPENROUTER_API_KEY", "organizer-test-key")
-    monkeypatch.setattr(icp_generator, "OPENROUTER_API_KEY", "")
-    async def generate(set_id, total_icps, *, generation_context, api_key):
-        assert api_key == "organizer-test-key"
-        requests.append((set_id, total_icps, generation_context))
-        return fresh_icps(), {}, "unused"
-    monkeypatch.setattr(icp_generator, "generate_icps_with_openrouter", generate)
-    for _ in range(2):
-        result = confirmation.fresh_confirmation_icps(round_id="arena-2026-09-12", evaluation_date="2026-09-12", main_icps=daily_icps())
-        assert len(result) == 5
-    assert requests[0][:2] == (20260912, 5)
-    assert requests[0][2] != requests[1][2]
-    assert "verified_example_company" not in requests[0][2]
-    assert daily_icps()[0]["prompt"] not in requests[0][2]
-
-
-def test_confirmation_generator_uses_explicit_key_without_legacy_alias(monkeypatch):
+def test_icp_generator_uses_explicit_key_without_legacy_alias(monkeypatch):
     from gateway.tasks import icp_generator
 
     monkeypatch.setattr(icp_generator, "OPENROUTER_API_KEY", "")
@@ -128,97 +60,6 @@ def test_confirmation_generator_uses_explicit_key_without_legacy_alias(monkeypat
         20260911, api_key="",
     )) is None
     assert len(calls) == 1
-
-
-def test_confirmation_generator_honors_small_complete_draw(monkeypatch):
-    from gateway.tasks import icp_generator
-
-    selected = list(icp_generator.INDUSTRY_DISTRIBUTION)[:5]
-    rows = []
-    for index, industry in enumerate(selected):
-        row = deepcopy(daily_icps()[index])
-        row.update({
-            "icp_id": f"icp_20260911_{index + 1:03d}",
-            "industry": industry,
-            "sub_industry": icp_generator.SUB_INDUSTRIES[industry][0],
-            "prompt": f"Find a distinct {industry} target with recent momentum",
-            "product_service": f"A private confirmation product for {industry} buyers",
-            "required_attribute": f"Provides a private confirmation service for {industry} buyers",
-            "verified_example_company": f"Example Company {index + 1}",
-        })
-        if index == len(selected) - 1:
-            row.update({"geography": "Canada", "country": "Canada"})
-        rows.append(row)
-
-    class FixedRandom:
-        def sample(self, population, count):
-            return list(population)[:count]
-
-    requests = []
-    response_rows = list(rows)
-
-    class Response:
-        status_code = 200
-
-        def json(self):
-            return {
-                "choices": [{
-                    "finish_reason": "stop",
-                    "message": {"content": json.dumps({"icps": response_rows})},
-                }]
-            }
-
-    class Client:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def post(self, url, *, headers, json):
-            requests.append(json)
-            return Response()
-
-    monkeypatch.setattr(icp_generator.random, "SystemRandom", FixedRandom)
-    monkeypatch.setattr(icp_generator.httpx, "AsyncClient", lambda **kwargs: Client())
-    generated = asyncio.run(icp_generator.generate_icps_with_openrouter(
-        20260911,
-        total_icps=5,
-        api_key="organizer-test-key",
-    ))
-
-    assert generated is not None
-    assert len(generated[0]) == 5
-    assert set(generated[1]) == set(selected)
-    bank = confirmation.build_bank("arena-2026-09-11", generated[0], daily_icps())
-    assert len(bank["icps"]) == contracts.CONFIRMATION_ICP_COUNT
-    request = requests[0]
-    assert request["max_tokens"] == icp_generator.OPENROUTER_MAX_COMPLETION_TOKENS == 8000
-    system_prompt = request["messages"][0]["content"]
-    user_prompt = request["messages"][1]["content"]
-    assert "Generate exactly 5 ICPs" in system_prompt
-    assert "Are there exactly 5 ICPs" in system_prompt
-    allowed_industries = system_prompt.split(
-        "ALLOWED INDUSTRIES (exactly one ICP per industry, in this order):\n", 1
-    )[1].split("\n", 1)[0]
-    assert allowed_industries == ", ".join(selected)
-    assert "Generate 5 ICPs" in user_prompt
-    assert "Generate 20 ICPs" not in user_prompt
-
-    response_rows.pop()
-    assert asyncio.run(icp_generator.generate_icps_with_openrouter(
-        20260911,
-        total_icps=5,
-        api_key="organizer-test-key",
-    )) is None
-
-    response_rows[:] = deepcopy(rows)
-    response_rows[-1]["industry"] = selected[0]
-    assert asyncio.run(icp_generator.generate_icps_with_openrouter(
-        20260911,
-        total_icps=5,
-        api_key="organizer-test-key",
-    )) is None
 
 
 def test_openrouter_truncated_json_log_does_not_disclose_content(monkeypatch, caplog):

@@ -169,8 +169,8 @@ def build_scoring_plan(
     means the stage should have cancelled and is refused here.
     """
 
-    if stage not in (1, 2, 3):
-        raise ArenaContractError("stage must be 1, 2 or 3")
+    if stage not in (1, 2):
+        raise ArenaContractError("stage must be 1 or 2")
     positions = contracts.stage_positions(stage)
     latest: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     accepted: Dict[Tuple[str, int], Mapping[str, Any]] = {}
@@ -201,7 +201,7 @@ def build_scoring_plan(
             continue
         cause = str(latest[key].get("terminal_cause") or "")
         if cause not in contracts.MODEL_CAUSED_TERMINAL_CAUSES:
-            # A confirmation attempt the window closed before it ran leaves the
+            # A retry that the window closed before it ran leaves the
             # earlier model-caused failure standing.
             confirmed = [run for run in runs if (str(run.get("submission_id")), int(run.get("icp_position") or 0)) == key and str(run.get("terminal_cause") or "") in contracts.MODEL_CAUSED_TERMINAL_CAUSES]
             if confirmed:

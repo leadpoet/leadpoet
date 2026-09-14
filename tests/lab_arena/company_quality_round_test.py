@@ -118,10 +118,8 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     if with_contacts:
         from tests.lab_arena.contact_round_test import _contact_icps
         source = harness.service.config.daily_icp_source
-        confirmation_source = harness.service.config.confirmation_icp_source
         harness.service.config.defaults = replace(harness.service.config.defaults, contacts_from="2026-01-01T00:00:00Z")
         harness.service.config.daily_icp_source = lambda **kwargs: {**source(**kwargs), "icps": _contact_icps(source(**kwargs)["icps"])}
-        harness.service.config.confirmation_icp_source = lambda **kwargs: _contact_icps(confirmation_source(**kwargs))
     original = harness.sandbox.run_icp
     scoring_leases = []
     judged_companies = []
@@ -347,7 +345,7 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     assert ranking[padded]["final_score"] is None
     assert published["publication_doc"]["final_ranking"][0]["submission_id"] == broad
     results = harness.service.public_results(round_id, broad)
-    assert len(results["outputs"]) == contracts.MAX_EVALUATION_ICP_COUNT
+    assert len(results["outputs"]) == contracts.BENCHMARK_ICP_COUNT
     assert all(len(output["companies"]) == 5 for output in results["outputs"].values())
     assert all(
         float(row["per_icp_score"]) == 35
@@ -356,7 +354,7 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     expected_schema = contact_policy.output_schema(published["configuration_doc"])
     assert all(output["schema_version"] == expected_schema for output in results["outputs"].values())
     if with_contacts:
-        assert len(results["contact_verifications"]) == contracts.MAX_EVALUATION_ICP_COUNT
+        assert len(results["contact_verifications"]) == contracts.BENCHMARK_ICP_COUNT
         assert all(
             [row["contact_qualified"] for row in rows] == [True] * 5
             for rows in results["contact_verifications"].values()

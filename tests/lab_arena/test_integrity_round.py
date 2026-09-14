@@ -1,12 +1,15 @@
 """Saved-result verification of integrity rounds on disposable PostgreSQL."""
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts, integrity, public_dashboard, service as svc, verify
+from lab_arena import contracts, integrity, service as svc, verify, weight_state
 from lab_arena.chain import MetagraphSnapshot
+from lab_arena.store import ArenaStoreError
+from leadpoet_canonical import arena_weights
 from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
@@ -14,7 +17,6 @@ from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     database_with_lab_arena_migration,
 )
-from tests.lab_arena.test_integrity_policy import fresh_icps
 
 MIGRATIONS = DEFAULT_MIGRATIONS + (
     "211-lab-arena-owner-admission.sql", "212-lab-arena-accepted-judgment-cache.sql", "213-lab-arena-score-integrity.sql", "214-lab-arena-prior-credential-refusal.sql",
@@ -24,6 +26,11 @@ MIGRATIONS = DEFAULT_MIGRATIONS + (
 @pytest.fixture()
 def database():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+
+
+@pytest.fixture()
+def database_before_248():
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS[:-1])
 
 
 @pytest.fixture()
@@ -73,7 +80,6 @@ class IntegrityHarness(fixtures.Harness):
     def build_service(self):
         service = super().build_service()
         service._config.defaults = replace(service._config.defaults, integrity_from="2026-01-01T00:00:00Z")
-        service._config.confirmation_icp_source = lambda **kwargs: fresh_icps()
         def metagraph(*, finalized=True):
             assert finalized
             hotkeys = tuple(key.ss58_address for key in fixtures.KEYS.values())
@@ -90,7 +96,7 @@ class IntegrityHarness(fixtures.Harness):
             status = self.status()
             if status == target:
                 return self.service.store.get_round(self.round_id)
-            if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring", "stage3", "stage3_scoring"):
+            if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring"):
                 self.run_stage_with_runners(runners)
             outcome = self.service.advance_round(self.round_id)
             assert outcome.get("status") not in ("cancelled", "terminal", "retry", "stale"), (status, outcome)
@@ -180,147 +186,249 @@ def test_unknown_provider_charge_defers_only_affected_submission_until_exact_set
     assert not any(run["terminal_cause"] == "credential_error" for run in final_runs)
 
 
-@pytest.mark.parametrize("case,main_score,confirmation_score,expected", [
-    ("regression", 80.0, 39.0, "no_king"),
-    ("confirmed", 80.0, 60.0, "crowned"),
-    ("belowmargin", 40.9, 60.0, "no_king"),
-])
-def test_confirmation_controls_winner_and_survives_service_restart(database, tmp_path, monkeypatch, case, main_score, confirmation_score, expected):
+def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
+    database, tmp_path, monkeypatch,
+):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = IntegrityHarness(connect, tmp_path, challengers=["Challenger"], runners=["alpha"])
+    harness = IntegrityHarness(
+        connect, tmp_path, challengers=["Challenger"], runners=["alpha"]
+    )
+
     def judge(companies, icp, reference):
         assert not reference and "verified_example_company" not in icp
+        assert not str(icp["icp_id"]).startswith("confirmation_")
         indexes, _ = verify.bucket_skip(icp, companies)
         rows = []
         for index in indexes:
             baseline = companies[index]["company_name"].startswith("PublicBaseline")
-            score = 40.0 if baseline else 40.5 if companies[index]["company_name"].startswith("NotSelected") else confirmation_score if icp["icp_id"].startswith("confirmation_") else main_score
+            score = 40.0 if baseline else 80.0
             rows.append({"final_score": score, "company_index": index,
                 "company_identity_key": canonical_company_identity(companies[index]).key,
-                "company_qualified": True, "duplicate_company": False,
+                "company_qualified": True,
+                "duplicate_company": False,
                 "verifier_gate_receipts": [{"gate": "company_fit", "decision": "match"}],
                 "intent_signals_detail": [], "failure_reason": ""})
         return rows
+
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
-    harness.chain.epoch = 25000 + int(confirmation_score)
+    harness.chain.epoch = 25_080
     harness.clock.now = datetime.now(timezone.utc)
-    round_id = "arena-2026-11-01-" + case
-    config = harness.service.create_round(datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id)
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults, rewards_enabled=True
+    )
+    round_id = "arena-2026-11-01-twentyicp"
+    config = harness.service.create_round(
+        datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id
+    )
     harness.round_id = round_id
     assert config["integrity_policy"] == integrity.POLICY
+    assert not {
+        "stage_3_start", "stage_3_close", "stage_3_scoring_close"
+    }.intersection(config["schedule"])
     challenger = harness.submit("Challenger", round_id)
-    not_selected = harness.submit("NotSelected", round_id) if case == "confirmed" else None
-    failed = harness.submit("Broken", round_id)
-    harness.broken.add(failed)
-    credential_failed = harness.submit("CredentialFail", round_id) if case == "belowmargin" else None
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
-    if credential_failed:
-        harness.advance_until("stage1_scoring")
-        credentials = harness.service.config.credential_manager
-        original_key = credentials.runtime_key
-        def key_after_revocation(row, provider):
-            return "miner-refused" if row["submission_id"] == credential_failed else original_key(row, provider)
-        monkeypatch.setattr(credentials, "runtime_key", key_after_revocation)
-        refused_posts = []
-        original_send = fixtures.FakeProviderTransport.send
-
-        def count_refused_posts(self, **kwargs):
-            if kwargs["method"] == "POST" and any(
-                "miner-refused" in str(value)
-                for value in kwargs["headers"].values()
-            ):
-                refused_posts.append(
-                    kwargs["headers"].get("x-deepline-request-id")
-                )
-            return original_send(self, **kwargs)
-
-        monkeypatch.setattr(
-            fixtures.FakeProviderTransport, "send", count_refused_posts
-        )
     harness.advance_until("scored")
-    before = harness.service.store.get_round(round_id)
-    bank_hash = before["confirmation_bank_hash"]
-    assert bank_hash and not harness.service.public_round(round_id).get("confirmation_submission_ids")
-    assert "confirmation_bank" not in harness.service.public_benchmark(round_id)
     harness.service = harness.build_service()
-    confirmation_required = main_score >= 41
-    harness.advance_until("stage3" if confirmation_required else "confirmed")
-    chosen = harness.service.store.get_round(round_id)
-    assert (challenger in chosen["confirmation_cohort"]["submission_ids"]) is confirmation_required
-    harness.service = harness.build_service()
-    published = harness.advance_until("published")
-    assert published["king_outcome"] == expected
-    assert published["confirmation_bank_hash"] == bank_hash
-    assert len(harness.service.store.list_runs(round_id, stage=3, kind="execute")) == (10 if confirmation_required else 0)
-    ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
-    visible = {item["submission_id"]: item for item in public_dashboard.submissions_snapshot(harness.service, round_id)["submissions"]}
-    if not_selected:
-        assert ranking[not_selected]["main_score"] == 40.5
-        assert ranking[not_selected]["confirmation_selected"] is False
-        assert visible[not_selected]["main_score"] == 40.5
-        assert visible[not_selected]["status"] == "scored"
-    assert visible[failed]["status"] == "scoring_failed"
-    assert ranking[challenger]["main_score"] == main_score
-    assert ranking[challenger]["final_score"] == (confirmation_score if confirmation_required else main_score)
-    assert ranking[challenger]["cost_summary"]["qualified_company_count"] == (125 if confirmation_required else 100)
-    assert ranking[failed]["main_score"] is None
-    assert ranking[failed]["eligible"] is False
-    if credential_failed:
-        credential_ledger = harness.service.store.list_ledger(
-            submission_id=credential_failed
-        )
-        # Stage 1 scoring and the later stage 2 execution have separate
-        # budgets. Each makes one request. Within each kind, the unknown
-        # charge holds the cap and later jobs take the existing no-dispatch
-        # credential-refusal path.
-        assert len(refused_posts) == 2
-        assert len(set(refused_posts)) == len(refused_posts)
-        runs_by_id = {
-            run["run_id"]: run
-            for run in harness.service.store.list_runs(round_id)
-        }
-        refused_kinds = {
-            runs_by_id[row["run_id"]]["kind"]
-            for row in credential_ledger
-            if row["entry_kind"] == "reservation"
-            and row["provider"] == "deepline"
-            and row["entry_doc"].get("deepline_request_id") in refused_posts
-        }
-        assert refused_kinds == {"execute", "score"}
-        scoring_uncertainties = [
-            row
-            for row in credential_ledger
-            if row["provider"] == "deepline"
-            and row["entry_kind"] == "uncertain"
-            and row["run_id"]
-            and ":score:" in row["run_id"]
-        ]
-        assert scoring_uncertainties
-        assert max(row["amount_microusd"] for row in scoring_uncertainties) == (
-            50_000_000
-        )
-        assert any(
-            row["entry_kind"] == "refusal"
-            and row["entry_doc"].get("prior_miner_credential_refusal") is True
-            for row in credential_ledger
-        )
-        assert credential_failed not in ranking
-        assert any(row["submission_id"] == credential_failed for row in published["publication_doc"]["participants"])
+    captured = {}
+    transition = harness.service.store.transition_round
+
+    def capture_transition(round_id, expected, next_status, patch):
+        captured["args"] = (round_id, expected, next_status, deepcopy(patch))
+        return {"status": "captured"}
+
+    monkeypatch.setattr(
+        harness.service.store, "transition_round", capture_transition
+    )
+    assert harness.service.publish(round_id)["status"] == "captured"
+    transition_args = captured["args"]
+    publication = transition_args[3]["publication_doc"]
+    challenger_row = next(
+        row for row in publication["final_ranking"]
+        if row["submission_id"] == challenger
+    )
+    adversarial = []
+    wrong_score = deepcopy(transition_args[3])
+    next(
+        row for row in wrong_score["publication_doc"]["final_ranking"]
+        if row["submission_id"] == challenger
+    )["final_score"] += 1
+    adversarial.append((wrong_score, "final_score_mismatch"))
+    missing_finalist = deepcopy(transition_args[3])
+    missing_finalist["publication_doc"]["final_ranking"] = [
+        row for row in missing_finalist["publication_doc"]["final_ranking"]
+        if row["submission_id"] != challenger
+    ]
+    adversarial.append((missing_finalist, "publication_ranking_incomplete"))
+    wrong_cost = deepcopy(transition_args[3])
+    next(
+        row for row in wrong_cost["publication_doc"]["final_ranking"]
+        if row["submission_id"] == challenger
+    )["cost_summary"]["qualified_company_count"] -= 1
+    adversarial.append((wrong_cost, "publication_cost_report_mismatch"))
+    wrong_winner = deepcopy(transition_args[3])
+    wrong_winner["publication_doc"]["king_decision"]["winner_submission_id"] = (
+        "forged-submission"
+    )
+    adversarial.append((wrong_winner, "publication_winner_invalid"))
+    for bad_patch, error in adversarial:
+        with pytest.raises(ArenaStoreError, match=error):
+            transition(round_id, "scored", "published", bad_patch)
+
+    monkeypatch.setattr(harness.service.store, "transition_round", transition)
+    accepted = transition(*transition_args)
+    assert accepted["status"] == "ok"
+    published = harness.service.store.get_round(round_id)
+    assert published["king_outcome"] == "crowned"
+    ranking = {
+        row["submission_id"]: row
+        for row in published["publication_doc"]["final_ranking"]
+    }
+    assert ranking[challenger]["final_score"] == 80.0
+    assert challenger_row["final_score"] == 80.0
+    assert ranking[challenger]["cost_summary"]["qualified_company_count"] == 100
+    assert published["confirmation_bank_ref"] is None
+    assert published["confirmation_bank_hash"] is None
+    assert published["confirmation_cohort"] is None
+    assert published["stage3_scoring_plan_doc"] is None
+    all_runs = harness.service.store.list_runs(round_id)
+    assert all(int(run["stage"]) in (1, 2) for run in all_runs)
+    assert all(int(run["icp_position"]) <= 19 for run in all_runs)
     public = harness.service.public_results(round_id, challenger)
-    assert len(public["scores"]["confirmation"]) == (5 if confirmation_required else 0)
-    bank = harness.service.public_benchmark(round_id)["confirmation_bank"]
-    assert contracts.document_hash(bank) == bank_hash
-    assert "verified_example_company" not in str(bank)
+    assert set(public["scores"]) == {"stage_1", "stage_2"}
+    assert len(public["outputs"]) == contracts.BENCHMARK_ICP_COUNT
     fixtures.assert_canary_absent(harness, connect)
-    if expected == "crowned":
-        # Publication must still permit the existing downstream baseline
-        # promotion writes. Exercise them against an isolated local git remote.
-        from lab_arena.promotion import GitPromoter
-        repository_root = tmp_path / "promotion-repository"
-        repository_root.mkdir()
-        remote = fixtures.promotion_repository(repository_root)
-        harness.service._config.baseline_promoter_factory = lambda: GitPromoter(str(remote), tmp_path / "promotion-objects")
-        harness.clock.now = datetime.fromisoformat(str(published["published_at"]).replace("Z", "+00:00"))
-        assert harness.service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
-        assert harness.service.store.get_round(round_id)["baseline_promoted_at"] is not None
+
+    from lab_arena.promotion import GitPromoter
+    repository_root = tmp_path / "promotion-repository"
+    repository_root.mkdir()
+    remote = fixtures.promotion_repository(repository_root)
+    harness.service._config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "promotion-objects"
+    )
+    harness.clock.now = datetime.fromisoformat(
+        str(published["published_at"]).replace("Z", "+00:00")
+    )
+    assert harness.service.promote_pending_baselines() == {
+        "status": "ok", "promoted": 1,
+    }
+    assert harness.service.activate_reward(round_id)["status"] == "activated"
+    rewarded = harness.service.store.get_round(round_id)
+    basis = rewarded["reward_basis_doc"]
+    burn_hotkey = fixtures.keypair("twenty-icp-burn").ss58_address
+    accepted = weight_state.build_accepted_weight_state(
+        harness.signer,
+        network="finney",
+        genesis_hash="1" * 64,
+        netuid=71,
+        epoch=int(basis["effective_reward_epoch"]),
+        valid_from_block=1,
+        valid_until_block=360,
+        reward_basis=basis,
+        burn_hotkey=burn_hotkey,
+        issued_at=basis["published_at"],
+    )
+    arena_weights.verify_accepted_weight_state_signature(
+        accepted,
+        public_key_der=harness.signer.public_key_der,
+        expected_public_key_hash=harness.signer.public_key_hash,
+    )
+    vector = arena_weights.derive_arena_weights(
+        accepted, [basis["king_hotkey"], burn_hotkey]
+    )
+    assert vector["champion_share_ppb"] > 0
+
+
+def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
+    database_before_248, tmp_path, monkeypatch,
+):
+    psycopg2, dsn = database_before_248
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = IntegrityHarness(
+        connect, tmp_path, challengers=["CutoverWinner"], runners=["alpha"]
+    )
+    def judge(companies, icp, reference):
+        indexes, _ = verify.bucket_skip(icp, companies)
+        return [{
+            "final_score": 40.0 if companies[index]["company_name"].startswith(
+                "PublicBaseline"
+            ) else 80.0,
+            "company_index": index,
+            "company_identity_key": canonical_company_identity(companies[index]).key,
+            "company_qualified": True,
+            "duplicate_company": False,
+            "verifier_gate_receipts": [{"gate": "company_fit", "decision": "match"}],
+            "intent_signals_detail": [],
+            "failure_reason": "",
+        } for index in indexes]
+
+    monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
+    harness.clock.now = datetime.now(timezone.utc)
+    harness.service._require_integrity_schema = lambda: None
+    round_id = "arena-2026-11-02-cutover"
+    config = harness.service.create_round(
+        harness.clock.now + timedelta(hours=12), round_id=round_id
+    )
+    harness.round_id = round_id
+    winner = harness.submit("CutoverWinner", round_id)
+    confirmation_ref = f"arena/{round_id}/confirmation/{'c' * 64}.json"
+    confirmation_hash = "sha256:" + "c" * 64
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_rounds "
+            "DISABLE TRIGGER lab_arena_rounds_write_once"
+        )
+        cursor.execute(
+            """UPDATE public.lab_arena_rounds
+               SET configuration_doc = jsonb_set(
+                     configuration_doc, '{schedule}',
+                     configuration_doc -> 'schedule' || jsonb_build_object(
+                       'stage_3_start', %s,
+                       'stage_3_close', %s,
+                       'stage_3_scoring_close', %s
+                     )
+                   ),
+                   confirmation_bank_ref = %s,
+                   confirmation_bank_hash = %s
+               WHERE round_id = %s""",
+            (
+                config["schedule"]["final_scoring_close"],
+                config["schedule"]["publication_deadline"],
+                config["schedule"]["publication_deadline"],
+                confirmation_ref,
+                confirmation_hash,
+                round_id,
+            ),
+        )
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_rounds "
+            "ENABLE TRIGGER lab_arena_rounds_write_once"
+        )
+        migration = Path(__file__).resolve().parents[2] / (
+            "scripts/248-lab-arena-twenty-icp-promotion.sql"
+        )
+        cursor.execute(migration.read_text(encoding="utf-8"))
+
+    harness.service = harness.build_service()
+    cutover = harness.service.store.get_round(round_id)
+    assert cutover["confirmation_bank_ref"] == confirmation_ref
+    assert cutover["confirmation_bank_hash"] == confirmation_hash
+    assert not {
+        "stage_3_start", "stage_3_close", "stage_3_scoring_close"
+    }.intersection(cutover["configuration_doc"]["schedule"])
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    published = harness.advance_until("published")
+    assert published["king_outcome"] == "crowned"
+    ranking = {
+        item["submission_id"]: item
+        for item in published["publication_doc"]["final_ranking"]
+    }
+    assert ranking[winner]["final_score"] > 0
+    assert published["confirmation_bank_ref"] == confirmation_ref
+    assert published["confirmation_bank_hash"] == confirmation_hash
+    assert published["confirmation_cohort"] is None
+    assert published["stage3_scoring_plan_doc"] is None
+    runs = harness.service.store.list_runs(round_id)
+    assert runs
+    assert all(run["stage"] in (1, 2) for run in runs)
+    assert max(run["icp_position"] for run in runs) == 19

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import company_judgments, contact_policy, contact_evidence, integrity, confirmation, icp_disclosure, judgment_cache, quality_policy
+from lab_arena import company_judgments, contact_policy, contact_evidence, integrity, icp_disclosure, judgment_cache, quality_policy
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -303,7 +303,6 @@ class RoundDefaults:
     contacts_from: Optional[str] = None
     company_quality_from: Optional[str] = None
     benchmark_disclosure_from: Optional[str] = None
-    confirmation_minutes: Tuple[int, int] = (60, 110)
     min_submission_hours: int = 6
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
     # Announced in every round configuration and carried by every reward basis,
@@ -350,7 +349,6 @@ class ServiceConfig:
     ] = None
     # Returns temporary access only for the scorer image frozen into a run's
     # round. Generic public registries do not configure this ECR-only path.
-    confirmation_icp_source: Optional[Callable[..., Sequence[Mapping[str, Any]]]] = None
     scorer_image_access: Optional[
         Callable[[str, str], Mapping[str, Any]]
     ] = None
@@ -677,9 +675,19 @@ class ArenaService:
     def _require_integrity_schema(self) -> None:
         try:
             result = self._store._transport.rpc("lab_arena_integrity_schema_v1", {})
+            promotion = self._store._transport.rpc(
+                "lab_arena_twenty_icp_promotion_schema_v1", {}
+            )
         except ArenaStoreError as exc:
             raise ServiceError("integrity_schema_unavailable", 503) from exc
         if not isinstance(result, Mapping) or result.get("schema_version") != "leadpoet.lab_arena.integrity_schema.v1" or result.get("version") != 213:
+            raise ServiceError("integrity_schema_invalid", 503)
+        if (
+            not isinstance(promotion, Mapping)
+            or promotion.get("schema_version")
+            != "leadpoet.lab_arena.twenty_icp_promotion_schema.v1"
+            or promotion.get("version") != 248
+        ):
             raise ServiceError("integrity_schema_invalid", 503)
 
     def _require_contact_schema(self) -> None:
@@ -796,18 +804,6 @@ class ArenaService:
             self._require_integrity_schema()
             document["integrity_policy"] = integrity.POLICY
             document["scorer_policy"] = scoring.build_scorer_policy(scoring_adapter_version=integrity.SCORING_ADAPTER)
-            execution_minutes, judging_minutes = defaults.confirmation_minutes
-            if execution_minutes <= 0 or judging_minutes <= 0:
-                raise ServiceError("confirmation_schedule_invalid", 500)
-            confirmation_start = _parse_iso(document["schedule"]["final_scoring_close"]) + timedelta(seconds=1)
-            confirmation_close = confirmation_start + timedelta(minutes=execution_minutes)
-            confirmation_scoring_close = confirmation_close + timedelta(minutes=judging_minutes)
-            document["schedule"].update({
-                "stage_3_start": _iso(confirmation_start),
-                "stage_3_close": _iso(confirmation_close),
-                "stage_3_scoring_close": _iso(confirmation_scoring_close),
-                "publication_deadline": _iso(confirmation_scoring_close + timedelta(seconds=1)),
-            })
         if (
             defaults.contacts_from is not None
             and _parse_iso(document["schedule"]["submission_open"])
@@ -1653,13 +1649,6 @@ class ArenaService:
                 "status": "cancelled",
                 "reason": CANCEL_REASONS["benchmark_invalid"],
             }
-        if integrity.enabled(round_row["configuration_doc"]):
-            try:
-                self._prepare_confirmation_bank(round_row, icps)
-            except (ValueError, TimeoutError, ArenaStoreError) as exc:
-                if started >= _parse_iso(schedule["benchmark_deadline"]):
-                    return self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
-                return {"status": "retry", "reason": "confirmation_bank_unavailable"}
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
@@ -1712,61 +1701,8 @@ class ArenaService:
             raise ServiceError("benchmark_data_invalid", 500)
         return icps
 
-    def _prepare_confirmation_bank(self, round_row: Mapping[str, Any], main_icps: Sequence[Mapping[str, Any]]) -> None:
-        round_id = str(round_row["round_id"])
-        current = self._round(round_id)
-        if current.get("confirmation_bank_hash"):
-            self.confirmation_bank(round_id)
-            return
-        provider = self._config.confirmation_icp_source or confirmation.fresh_confirmation_icps
-        evaluation_date = _parse_iso(round_row["configuration_doc"]["schedule"]["submission_cutoff"]).astimezone(timezone.utc).date().isoformat()
-        has_contacts = contact_policy.enabled(round_row["configuration_doc"])
-        generated = provider(round_id=round_id, evaluation_date=evaluation_date, main_icps=main_icps, **({"contacts_required": True} if has_contacts else {}))
-        bank = confirmation.build_bank(round_id, generated, main_icps, contacts_required=has_contacts)
-        payload = contracts.canonical_json(bank).encode("utf-8")
-        digest = contracts.hash_bytes(payload)
-        ref = "arena/%s/confirmation/%s.json" % (round_id, digest.split(":")[-1])
-        try:
-            self._objects.put(ref, payload)
-        except Exception:
-            # A lost write acknowledgement is safe only if exact bytes landed.
-            if self._objects.get_bounded(ref, MAX_OUTPUT_BYTES) != payload:
-                raise
-        try:
-            self._store.prepare_confirmation_bank(round_id, ref, digest)
-        except ArenaStoreError:
-            if not self._round(round_id).get("confirmation_bank_hash"):
-                raise
-        self.confirmation_bank(round_id)
-
-    def confirmation_bank(self, round_id: str) -> Dict[str, Any]:
-        row = self._round(round_id)
-        ref, digest = row.get("confirmation_bank_ref"), row.get("confirmation_bank_hash")
-        if not ref or not digest:
-            raise ServiceError("confirmation_bank_missing", 503)
-        try:
-            return confirmation.read_bank(self._objects.get_bounded(ref, MAX_OUTPUT_BYTES), round_id=round_id, digest=digest)
-        except (ValueError, TypeError) as exc:
-            raise ServiceError("confirmation_bank_invalid", 503) from exc
-
     def evaluation_icps(self, round_id: str) -> List[Dict[str, Any]]:
-        row = self._round(round_id)
-        main = self.benchmark_icps(round_id)
-        return main + self.confirmation_bank(round_id)["icps"] if integrity.enabled(row["configuration_doc"]) else main
-
-    def open_confirmation(self, round_id: str) -> Dict[str, Any]:
-        row = self._round(round_id)
-        if row["status"] != "scored" or not integrity.enabled(row["configuration_doc"]):
-            return {"status": "stale", "round_status": row["status"]}
-        self.confirmation_bank(round_id)
-        entries = self._score_entries_from_runs(row, range(contracts.BENCHMARK_ICP_COUNT), "final_score")
-        runs = self._store.list_runs(round_id, kind="execute")
-        eligibility = {entry["submission_id"]: self._submission_cost_eligibility(row, entry["submission_id"], runs, positions=range(contracts.BENCHMARK_ICP_COUNT)) for entry in entries}
-        try:
-            cohort = confirmation.select_cohort(entries, eligibility)
-        except ValueError:
-            return self._store.cancel_round(round_id, CANCEL_REASONS["scoring_incomplete"])
-        return self._store.open_confirmation(round_id, cohort)
+        return self.benchmark_icps(round_id)
 
     # -- stages (sections 2, 9) ----------------------------------------------
 
@@ -2450,7 +2386,7 @@ class ArenaService:
                 "ineligible_submissions": sorted(ineligible),
                 "finalists": finalists,
             }
-        transition = self._store.transition_round(round_id, "stage3_judged" if stage == 3 else "stage2_judged", "confirmed" if stage == 3 else "scored", {})
+        transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
         return {
             "status": transition.get("status"),
             "judge_executions": judge_executions,
@@ -2558,7 +2494,7 @@ class ArenaService:
         wanted = set(range(len(icps)) if positions is None else positions)
         selected = self._selected_accepted_execution_runs(runs, submission_id)
         judges = {}
-        for stage in (1, 2, 3):
+        for stage in (1, 2):
             if wanted.intersection(contracts.stage_positions(stage)):
                 judges.update(self._scoring_outputs(round_id, stage))
         total = 0
@@ -2716,7 +2652,7 @@ class ArenaService:
         if integrity.enabled(configuration):
             summary["qualified_company_count"] = qualified
             selected = self._selected_accepted_execution_runs(runs, submission_id)
-            if not any(position in selected for position in (positions if positions is not None else range(contracts.MAX_EVALUATION_ICP_COUNT))):
+            if not any(position in selected for position in (positions if positions is not None else range(contracts.BENCHMARK_ICP_COUNT))):
                 return {"cost_summary": summary, "eligible": False, "eligibility_reason": "stored_output_invalid"}
         if execution["inflight_calls"] or judge["inflight_calls"]:
             return {
@@ -2759,40 +2695,9 @@ class ArenaService:
 
     # -- publication and downstream reward activation -------------------------
 
-    def _confirmation_account_failures(self, round_row: Mapping[str, Any]) -> set[str]:
-        """Derive disqualifications from terminal judgments in the frozen plan.
-
-        Keep the original cohort. A missing judgment or infrastructure failure
-        cannot be treated as a withdrawal; the publication guard verifies the
-        same evidence independently in PostgreSQL.
-        """
-        if not (round_row.get("confirmation_cohort") or {}).get("required"):
-            return set()
-        chosen = self._scoring_outputs(str(round_row["round_id"]), 3)
-        failures: set[str] = set()
-        incomplete: set[str] = set()
-        for item in self._load_scoring_plan(round_row, 3)["work_items"]:
-            submission_id = str(item["submission_id"])
-            run = chosen.get(item["scored_run_id"]) or {}
-            if run.get("status") == "accepted":
-                continue
-            if run.get("status") == "failed" and run.get("terminal_cause") in (
-                "credential_error", "budget_exhausted",
-            ):
-                failures.add(submission_id)
-            else:
-                incomplete.add(submission_id)
-        baseline_ids = {
-            str(row["submission_id"])
-            for row in round_row.get("participants") or [] if row.get("is_king")
-        }
-        return failures - incomplete - baseline_ids
-
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
-        policy_enabled = integrity.enabled(round_row.get("configuration_doc") or {})
-        expected_status = "confirmed" if policy_enabled else "scored"
-        if round_row["status"] != expected_status:
+        if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
         stage1_ranking = verify.stage1_ranking(
             self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
@@ -2801,29 +2706,16 @@ class ArenaService:
         final_entries = self._score_entries_from_runs(
             round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
         )
-        main_scores = {entry["submission_id"]: entry["final_score"] for entry in final_entries}
-        cohort = round_row.get("confirmation_cohort") or {}
-        withdrawn = self._confirmation_account_failures(round_row) if policy_enabled else set()
-        if policy_enabled and cohort.get("required"):
-            confirmation_entries = {entry["submission_id"]: entry for entry in self._score_entries_from_runs(round_row, contracts.stage_positions(3), "final_score")}
-            for entry in final_entries:
-                entry["final_score"] = confirmation_entries.get(entry["submission_id"], {}).get("final_score")
         execution_runs = self._store.list_runs(round_id, kind="execute")
         eligibility = {
             str(entry["submission_id"]): self._submission_cost_eligibility(
                 round_row,
                 str(entry["submission_id"]),
                 execution_runs,
-                positions=(range(contracts.BENCHMARK_ICP_COUNT)
-                           if entry["submission_id"] in withdrawn else None),
+                positions=range(contracts.BENCHMARK_ICP_COUNT),
             )
             for entry in final_entries
         }
-        for submission_id in withdrawn:
-            if submission_id in eligibility:
-                eligibility[submission_id].update(
-                    eligible=False, eligibility_reason="confirmation_account_failure"
-                )
         king_entry = next((e for e in final_entries if e["is_king"]), None)
         if king_entry is None or king_entry["final_score"] is None:
             return self._store.cancel_round(
@@ -2842,9 +2734,6 @@ class ArenaService:
         final_ranking = verify.final_ranking(final_entries)
         for row in final_ranking:
             row.update(eligibility[str(row["submission_id"])])
-            if policy_enabled:
-                row["main_score"] = main_scores.get(row["submission_id"])
-                row["confirmation_selected"] = row["submission_id"] in cohort.get("submission_ids", [])
         publication = {
             "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
             "round_id": round_id,
@@ -2856,7 +2745,7 @@ class ArenaService:
             "published_at": published_at,
         }
         contracts.check_strict_document(publication, contracts.PUBLICATION_LIMITS)
-        transition = self._store.transition_round(round_id, expected_status, "published", {
+        transition = self._store.transition_round(round_id, "scored", "published", {
             "publication_doc": publication,
             "published_at": published_at,
         })
@@ -3907,18 +3796,18 @@ class ArenaService:
                 return self.commit_benchmark(round_id)
             if status == "committed":
                 return self.open_stage(round_id, 1)
-            if status in ("stage1", "stage2", "stage3"):
+            if status in ("stage1", "stage2"):
                 stage = int(status[-1])
                 self._store.expire_leases(round_id)
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
                     return self.close_stage(round_id, stage)
                 return {"status": "waiting", "round_status": status}
-            if status in ("stage1_closed", "stage2_closed", "stage3_closed"):
+            if status in ("stage1_closed", "stage2_closed"):
                 stage = int(status[5])
                 if not round_row.get("stage%d_scoring_plan_doc" % stage):
                     return self.commit_scoring_plan(round_id, stage)
                 return self.open_scoring(round_id, stage)
-            if status in ("stage1_scoring", "stage2_scoring", "stage3_scoring"):
+            if status in ("stage1_scoring", "stage2_scoring"):
                 stage = int(status[5])
                 self._store.expire_leases(round_id)
                 scoring_runs = self._store.list_runs(
@@ -3930,16 +3819,16 @@ class ArenaService:
                     return self._store.cancel_round(
                         round_id, CANCEL_REASONS["scoring_incomplete"]
                     )
-                window = schedule["stage_1_scoring_close" if stage == 1 else "stage_3_scoring_close" if stage == 3 else "final_scoring_close"]
+                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
                 if now >= _parse_iso(window) or all(
                     run["status"] in ("accepted", "failed")
                     for run in scoring_runs
                 ):
                     return self.close_scoring(round_id, stage)
                 return {"status": "waiting", "round_status": status}
-            if status in ("stage1_judged", "stage2_judged", "stage3_judged"):
+            if status in ("stage1_judged", "stage2_judged"):
                 stage = int(status[5])
-                window = schedule["stage_1_scoring_close" if stage == 1 else "stage_3_scoring_close" if stage == 3 else "final_scoring_close"]
+                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
                 try:
                     return self.score_stage(round_id, stage)
                 except scoring.ScoringError:
@@ -3948,9 +3837,7 @@ class ArenaService:
                     return {"status": "retry", "round_status": status}
             if status == "stage1_scored":
                 return self.open_stage(round_id, 2)
-            if status == "scored" and integrity.enabled(round_row["configuration_doc"]):
-                return self.open_confirmation(round_id)
-            if status in ("scored", "confirmed"):
+            if status == "scored":
                 try:
                     return self.publish(round_id)
                 except ServiceError as exc:
@@ -4215,9 +4102,6 @@ class ArenaService:
             view.update({"final_ranking": publication.get("final_ranking"), "king_decision": publication.get("king_decision")})
         if integrity.enabled(configuration):
             view["integrity_policy"] = integrity.POLICY
-            view["confirmation_bank_hash"] = row.get("confirmation_bank_hash")
-            if row["status"] == "published":
-                view["confirmation_submission_ids"] = (row.get("confirmation_cohort") or {}).get("submission_ids", [])
         return view
 
     def _public_icp_disclosure(self, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -4254,18 +4138,6 @@ class ArenaService:
             "private_icp_count": 0,
             "disclosure_policy": disclosure["disclosure_policy"],
         }
-        if integrity.enabled(row.get("configuration_doc") or {}):
-            result["confirmation_bank_hash"] = row.get("confirmation_bank_hash")
-            result["private_icp_count"] = contracts.CONFIRMATION_ICP_COUNT
-            if (
-                row["status"] == "published"
-                or icp_disclosure.configured_policy(row)
-                == icp_disclosure.DELAYED_DISCLOSURE_POLICY
-            ):
-                # The salted original document lets observers check the
-                # commitment without changing the main bank's reveal time.
-                result["confirmation_bank"] = self.confirmation_bank(round_id)
-                result["private_icp_count"] = 0
         return result
 
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
@@ -4289,12 +4161,6 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
-        if integrity.enabled(row.get("configuration_doc") or {}) and (
-            disclosure is not None
-            or icp_disclosure.configured_policy(row)
-            != icp_disclosure.DELAYED_DISCLOSURE_POLICY
-        ):
-            public_positions.update(contracts.stage_positions(3))
         runs = [
             run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")
             if run.get("icp_position") in public_positions
@@ -4319,11 +4185,6 @@ class ArenaService:
                 if int(run.get("stage") or 0) == 2 and run.get("per_icp_score") is not None
             ],
         }
-        if integrity.enabled(row.get("configuration_doc") or {}):
-            scores["confirmation"] = [
-                {"run_id": run["run_id"], "icp_position": run["icp_position"], "per_icp_score": run["per_icp_score"]}
-                for run in runs if int(run.get("stage") or 0) == 3 and run.get("per_icp_score") is not None
-            ]
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
         run_results = [run["result_doc"] for run in runs if run.get("result_doc")]
@@ -4350,7 +4211,7 @@ class ArenaService:
         }
         if contact_policy.enabled(row.get("configuration_doc") or {}):
             judgments = {}
-            for stage in (1, 2, 3):
+            for stage in (1, 2):
                 if public_positions.intersection(contracts.stage_positions(stage)):
                     judgments.update(self._scoring_outputs(round_id, stage))
             icps = self.evaluation_icps(round_id) if outputs else []

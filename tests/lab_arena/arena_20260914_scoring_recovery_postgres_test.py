@@ -136,11 +136,6 @@ def _prepare(database, *, reservation_amount: int = 49_945_650):
         }
     )
     assert store.create_round(ROUND_ID, config)["status"] == "created"
-    assert store.prepare_confirmation_bank(
-        ROUND_ID,
-        f"arena/{ROUND_ID}/confirmation/{'c' * 64}.json",
-        "sha256:" + "c" * 64,
-    )["status"] == "ok"
     participant_docs = []
     for submission_id, miner, is_king in PARTICIPANTS:
         owner = None if is_king else OwnerAdmission(

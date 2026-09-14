@@ -76,55 +76,30 @@ Lease-time exclusions include the submissions' frozen owners and remain bound
 to accepted evidence after ownership changes. A confirmed miner account failure
 allows the next identical output to obtain a judgment with its own credentials.
 
-## Confirmation before promotion
+## Promotion
 
-Before evaluation, commit a salted hash of five separately generated private
-ICPs. Keep duplicate checks local; the generator receives a distinct random
-draw identifier, not the main private bank. Exact structured requirement
-duplicates, including ID or prompt-only changes, cannot enter this bank.
-
-After the main twenty ICPs, freeze one cohort: the baseline plus up to three
-eligible challengers whose main score is at least one point above the baseline.
-Sort challengers by main score, then submission ID. Run their unchanged frozen
-sources on the same five confirmation ICPs. Do not substitute new candidates,
-pick the best repeated confirmation result, or retry a completed judgment.
-
-The highest eligible confirmation score can win only if it also beats the
-confirmation baseline by at least one point. Accepted main company qualifications
-stay fixed; final cost eligibility includes confirmation spend and qualified
-slots. When no challenger qualifies, skip execution and publish no new king.
-Infrastructure gaps cannot be converted into favorable zeros. The database
-guards the cohort, recorded scores, costs, and publication transition.
-
-A selected challenger whose terminal confirmation judgment records a credential
-or budget failure is disqualified with a null confirmation score and the reason
-`confirmation_account_failure`. It remains visible in the original cohort and
-ranking. Other original finalists can finish and win. Its main qualification
-slots and all actual execution/judge costs remain reported. Missing judgments,
-shared infrastructure failures, and baseline failures do not permit this exception.
-Both the service and database derive the exception from the frozen scoring plan
-and durable attempts, so it survives restarts without replacing candidates.
-
-Publish main and confirmation scores separately. Reveal the salted confirmation
-document and its results after publication so observers can check the original
-commitment. Preserve the main bank's existing disclosure schedule.
+After all twenty ICPs have complete valid results, rank the baseline and
+eligible challengers by their twenty-ICP scores. The best eligible challenger
+becomes king only when its score is at least one point above the baseline.
+Qualification receipts, cost eligibility, deterministic tie ordering, and all
+other publication guards continue to apply. No extra ICP set or finalist-only
+stage can change or veto this result.
 
 ## Rollout and verification
 
-Apply repository migrations 211 through 214 in order, after their existing
-prerequisites. Migration 210 is reserved by separate disclosure work; reconcile
-that work before release if it has merged. Deploy the matching gateway and
-judge image together through the existing release process. Migration 214 keeps
+Apply repository migrations 211 through 214 and migration 248 in order, after
+their existing prerequisites. Migration 248 is the cutover dependency for the
+twenty-ICP runtime. Apply it immediately before the coordinated gateway and
+normal-validator restart. A confirmation-enabled older runtime cannot process
+new work after migration 248 removes its RPCs; rollback needs a separately
+reviewed schema migration. The scorer model and image remain unchanged.
+Migration 214 keeps
 a proven miner credential refusal distinct from an infrastructure failure when
 its uncertain provider charge blocks a later reservation. It retains the charge.
-Confirmation generation uses the Arena organizer's OpenRouter credential.
-
 Set `LAB_ARENA_INTEGRITY_FROM` to an explicit UTC cutoff timestamp only after
 the matching schema and image are installed. It is unset by default. Startup
 and new-policy round creation check the integrity schema capability. Never
-change the policy of a round already committed. For rollback, stop admitting
-new integrity rounds and finish or explicitly cancel existing ones; do not
-downgrade their scoring rules.
+change the policy of a round already committed.
 
 Tests cover the pictured score-inflation cases, permissive uncertain dates,
 valid independent evidence, ownership races, shared-judgment provenance,

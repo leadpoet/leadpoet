@@ -97,7 +97,24 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "245-lab-arena-deepline-credential-deferral-bypass.sql",
     "246-lab-arena-interrupted-deepline-cost-reconciliation.sql",
     "247-lab-arena-deepline-native-billing-identities.sql",
+    "248-lab-arena-twenty-icp-promotion.sql",
 )
+
+
+def prepare_historical_confirmation_bank(store, round_id: str, ref: str, digest: str):
+    """Call the retired RPC only in tests pinned to a pre-248 schema."""
+    transport = store._transport
+    connection = transport._acquire()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT public.lab_arena_prepare_confirmation_bank(%s, %s, %s)",
+                (round_id, ref, digest),
+            )
+            row = cursor.fetchone()
+        return row[0]
+    finally:
+        transport._release(connection)
 
 _SHIM_SQL = """
 CREATE SCHEMA IF NOT EXISTS extensions;

@@ -13,6 +13,7 @@ from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
     POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
+    prepare_historical_confirmation_bank,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     _commit_plan,
@@ -92,7 +93,8 @@ def _open(
         config["contact_policy"] = "contacts_v1"
     assert store.create_round(round_id, config)["status"] == "created"
     confirmation_hash = "sha256:" + "f" * 64
-    assert store.prepare_confirmation_bank(
+    assert prepare_historical_confirmation_bank(
+        store,
         round_id,
         "arena/%s/confirmation/%s.json"
         % (round_id, confirmation_hash.removeprefix("sha256:")),

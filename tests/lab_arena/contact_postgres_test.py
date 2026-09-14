@@ -11,7 +11,10 @@ import pytest
 from lab_arena import contracts, scoring
 from lab_arena.owner_admission import OwnerAdmission
 from lab_arena.store import ArenaStore, PsycopgTransport
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import (
+    database_with_lab_arena_migration,
+    prepare_historical_confirmation_bank,
+)
 from tests.lab_arena.test_integrity_round import MIGRATIONS
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     commit_round,
@@ -62,7 +65,8 @@ def _open_run(store: ArenaStore, round_id: str, *, contacts: bool) -> str:
         "status"
     ] == "created"
     digest = "sha256:" + "a" * 64
-    assert store.prepare_confirmation_bank(
+    assert prepare_historical_confirmation_bank(
+        store,
         round_id,
         f"arena/{round_id}/confirmation/{digest.removeprefix('sha256:')}.json",
         digest,

@@ -112,7 +112,7 @@ existing retry and incomplete-scoring handling.
 | Those two plus three invalid or duplicate companies | 40 before any existing penalty | At most 16 |
 
 All comparisons across buyer requests retain the existing arithmetic mean.
-The one-point promotion margin, confirmation cohort, eligibility checks and
+The one-point promotion margin, eligibility checks and
 reward rules remain unchanged. Existing rounds keep their frozen scoring policy.
 
 ## Activation and rollback

@@ -68,6 +68,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_participation_schema_v1": (),
     "lab_arena_validator_scoring_authority_schema_v1": (),
     "lab_arena_integrity_schema_v1": (),
+    "lab_arena_twenty_icp_promotion_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
     "lab_arena_company_quality_schema_v1": (),
     "lab_arena_successful_call_cost_schema_v1": (),
@@ -86,8 +87,6 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
-    "lab_arena_prepare_confirmation_bank": (("p_round_id", "text"), ("p_ref", "text"), ("p_hash", "text")),
-    "lab_arena_open_confirmation": (("p_round_id", "text"), ("p_cohort", "jsonb")),
     "lab_arena_prepare_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_complete_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
@@ -1589,12 +1588,6 @@ class ArenaStore:
         if result["submission_id"] != str(submission_id):
             raise ArenaStoreError("submission_costs returned the wrong submission")
         return result
-
-    def prepare_confirmation_bank(self, round_id: str, ref: str, digest: str) -> Dict[str, Any]:
-        return self._transport.rpc("lab_arena_prepare_confirmation_bank", {"p_round_id": round_id, "p_ref": ref, "p_hash": digest})
-
-    def open_confirmation(self, round_id: str, cohort: Mapping[str, Any]) -> Dict[str, Any]:
-        return self._transport.rpc("lab_arena_open_confirmation", {"p_round_id": round_id, "p_cohort": dict(cohort)})
 
     def close(self) -> None:
         self._transport.close()

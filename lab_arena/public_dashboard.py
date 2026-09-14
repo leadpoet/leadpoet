@@ -447,9 +447,6 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
         )
         final = final_scores.get(submission_id) or {}
         final_score = _score(final.get("final_score"))
-        lifecycle_score = final_score
-        if lifecycle_score is None and final.get("confirmation_selected") is False:
-            lifecycle_score = _score(final.get("main_score"))
         projected = {
                 "submission_id": submission_id,
                 "miner_hotkey": str(submission.get("miner_hotkey") or ""),
@@ -458,7 +455,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                     raw_status=raw_status,
                     round_status=round_status,
                     is_champion=is_champion,
-                    final_score=lifecycle_score,
+                    final_score=final_score,
                 ),
                 "submitted_at": _submitted_at(submission),
                 "stage1_score": stage1_scores.get(submission_id),
@@ -481,9 +478,6 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                     ),
                 )
             )
-            if "main_score" in final:
-                projected["main_score"] = _score(final.get("main_score"))
-                projected["confirmation_selected"] = final.get("confirmation_selected") is True
         submissions.append(projected)
     return {"round_id": round_id, "submissions": submissions}
 

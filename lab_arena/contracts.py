@@ -25,9 +25,6 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 STAGE_1_ICP_COUNT = 10
 STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
-CONFIRMATION_ICP_COUNT = 5
-CONFIRMATION_FINALIST_COUNT = 3
-MAX_EVALUATION_ICP_COUNT = BENCHMARK_ICP_COUNT + CONFIRMATION_ICP_COUNT
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
 DEFAULT_MAX_CHALLENGERS = 20  # admitted challengers per daily round, excluding the baseline
@@ -72,9 +69,7 @@ def stage_positions(stage: int) -> Tuple[int, ...]:
         return tuple(range(STAGE_1_ICP_COUNT))
     if stage == 2:
         return tuple(range(STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT))
-    if stage == 3:
-        return tuple(range(BENCHMARK_ICP_COUNT, MAX_EVALUATION_ICP_COUNT))
-    raise ArenaContractError("stage must be 1, 2 or 3")
+    raise ArenaContractError("stage must be 1 or 2")
 
 # Signed request timestamp window (section 9.1).
 REQUEST_TIMESTAMP_WINDOW_SECONDS = 300
@@ -138,11 +133,6 @@ ROUND_STATUSES = (
     "stage2_scoring",
     "stage2_judged",
     "scored",
-    "stage3",
-    "stage3_closed",
-    "stage3_scoring",
-    "stage3_judged",
-    "confirmed",
     "published",
     "cancelled",
 )
@@ -158,12 +148,7 @@ ROUND_TRANSITIONS = {
     "stage2_closed": ("stage2_scoring", "cancelled"),
     "stage2_scoring": ("stage2_judged", "cancelled"),
     "stage2_judged": ("scored", "cancelled"),
-    "scored": ("stage3", "confirmed", "published", "cancelled"),
-    "stage3": ("stage3_closed", "cancelled"),
-    "stage3_closed": ("stage3_scoring", "cancelled"),
-    "stage3_scoring": ("stage3_judged", "cancelled"),
-    "stage3_judged": ("confirmed", "cancelled"),
-    "confirmed": ("published", "cancelled"),
+    "scored": ("published", "cancelled"),
     "published": (),
     "cancelled": (),
 }
@@ -759,14 +744,9 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     if has_contacts and not is_integrity:
         raise ArenaContractError("contact policy requires integrity policy")
     expected_adapter = contact_policy.SCORING_ADAPTER if has_contacts else integrity.SCORING_ADAPTER
-    confirmation_keys = {"stage_3_start", "stage_3_close", "stage_3_scoring_close"}
     if is_integrity:
-        if any(not config["schedule"].get(key) for key in confirmation_keys):
-            raise ArenaContractError("integrity policy requires confirmation schedule")
         if config["scorer_policy"].get("scoring_adapter_version") != expected_adapter:
             raise ArenaContractError("integrity policy requires matching scorer adapter")
-    elif confirmation_keys.intersection(config["schedule"]):
-        raise ArenaContractError("confirmation schedule requires integrity policy")
     elif contact_policy.integrity_adapter(config["scorer_policy"].get("scoring_adapter_version")):
         raise ArenaContractError("integrity scorer adapter requires matching round policy")
     if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
@@ -1007,7 +987,7 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
 # One work item per accepted run. Plain row identifiers link it to the output.
 SCORING_WORK_ITEM_FIELDS = (
     F("scored_run_id", "str", minimum=1, maximum=128),
-    F("icp_position", "int", minimum=0, maximum=MAX_EVALUATION_ICP_COUNT - 1),
+    F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
     F("submission_id", "str", minimum=1, maximum=64),
     F("output_ref", "str", minimum=1, maximum=512),
 )
@@ -1015,11 +995,11 @@ SCORING_WORK_ITEM_FIELDS = (
 SCORING_PLAN_FIELDS = (
     F("schema_version", "str", choices=(SCORING_PLAN_SCHEMA_VERSION,)),
     F("round_id", "str", minimum=6, maximum=64),
-    F("stage", "int", minimum=1, maximum=3),
+    F("stage", "int", minimum=1, maximum=2),
     F("work_items", "list[object]", fields=SCORING_WORK_ITEM_FIELDS, minimum=0, maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
     F("zero_rows", "list[object]", fields=(
         F("submission_id", "str", minimum=1, maximum=64),
-        F("icp_position", "int", minimum=0, maximum=MAX_EVALUATION_ICP_COUNT - 1),
+        F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
         F("cause", "str", choices=TERMINAL_CAUSES),
     ), minimum=0, maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
 )

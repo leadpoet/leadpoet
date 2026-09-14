@@ -43,13 +43,7 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
         rows = []
         for index in indexes:
             baseline = companies[index]["company_name"].startswith("PublicBaseline")
-            score = (
-                40.0
-                if baseline
-                else 60.0
-                if str(icp["icp_id"]).startswith("confirmation_")
-                else 80.0
-            )
+            score = 40.0 if baseline else 80.0
             rows.append(
                 {
                     "final_score": score,
@@ -95,19 +89,18 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
     harness.clock.advance_to(configuration["schedule"]["submission_cutoff"])
     published = harness.advance_until("published")
     assert published["king_outcome"] == "crowned"
-    assert len(harness.service.store.list_runs(round_id, stage=3, kind="execute")) == 10
+    assert not harness.service.store.list_runs(round_id, stage=3, kind="execute")
     publication = published["publication_doc"]
     ranking = next(
         row for row in publication["final_ranking"]
         if row["submission_id"] == winner
     )
-    assert ranking["main_score"] == 80.0
-    assert ranking["final_score"] == 60.0
+    assert ranking["final_score"] == 80.0
     assert harness.service.public_submission_code(winner)["files"]
 
     day_one_results = harness.service.public_results(round_id, winner)
     aggregate_scores = day_one_results["submission_scores"]
-    assert aggregate_scores == {"stage_1": 80.0, "final": 60.0}
+    assert aggregate_scores == {"stage_1": 80.0, "final": 80.0}
     assert day_one_results["public_icp_status"] == "pending"
     assert day_one_results["public_icp_count"] == 0
     assert day_one_results["outputs"] == {}
@@ -115,7 +108,6 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
     assert day_one_results["scores"] == {
         "stage_1": [],
         "stage_2": [],
-        "confirmation": [],
     }
     with pytest.raises(svc.ServiceError, match="benchmark_not_public") as hidden:
         harness.service.public_benchmark(round_id)
@@ -166,29 +158,20 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
         icp_disclosure.DELAYED_DISCLOSURE_POLICY
     )
     assert len(benchmark["icps"]) == contracts.BENCHMARK_ICP_COUNT
-    assert len(benchmark["confirmation_bank"]["icps"]) == (
-        contracts.CONFIRMATION_ICP_COUNT
-    )
-    assert contracts.document_hash(benchmark["confirmation_bank"]) == (
-        published["confirmation_bank_hash"]
-    )
     assert benchmark["private_icp_count"] == 0
 
     day_two_results = harness.service.public_results(round_id, winner)
     assert day_two_results["public_icp_status"] == "ready"
     assert day_two_results["public_icp_count"] == (
-        contracts.MAX_EVALUATION_ICP_COUNT
+        contracts.BENCHMARK_ICP_COUNT
     )
     assert day_two_results["submission_scores"] == aggregate_scores
-    assert len(day_two_results["outputs"]) == contracts.MAX_EVALUATION_ICP_COUNT
+    assert len(day_two_results["outputs"]) == contracts.BENCHMARK_ICP_COUNT
     assert len(day_two_results["run_results"]) == (
-        contracts.MAX_EVALUATION_ICP_COUNT
+        contracts.BENCHMARK_ICP_COUNT
     )
     assert len(day_two_results["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
     assert len(day_two_results["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
-    assert len(day_two_results["scores"]["confirmation"]) == (
-        contracts.CONFIRMATION_ICP_COUNT
-    )
 
     day_two_stored = harness.service.store.get_round(round_id)
     assert {

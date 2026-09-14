@@ -44,7 +44,7 @@ def test_legacy_round_keeps_its_existing_cutoff_disclosure_behavior():
     assert icp_disclosure.baseline_disclosure(row, [], CUTOFF) is not None
 
 
-@pytest.mark.parametrize("status", ["open", "committed", "scored", "confirmed"])
+@pytest.mark.parametrize("status", ["open", "committed", "scored"])
 def test_delayed_round_stays_private_after_time_boundary_until_terminal(status):
     assert icp_disclosure.baseline_disclosure(
         _row(status=status), [], PUBLIC_AT + timedelta(hours=12)
@@ -85,7 +85,6 @@ def test_delayed_cancelled_round_reveals_only_its_committed_benchmark():
             },
         }
     )
-    row["confirmation_bank_hash"] = "sha256:" + "2" * 64
     service = object.__new__(ArenaService)
     service._round = lambda _round_id: row
     service._store = SimpleNamespace(list_runs=lambda *_args, **_kwargs: [])
@@ -94,21 +93,12 @@ def test_delayed_cancelled_round_reveals_only_its_committed_benchmark():
         {"icp_id": "icp-%02d" % position}
         for position in range(contracts.BENCHMARK_ICP_COUNT)
     ]
-    service.confirmation_bank = lambda _round_id: {
-        "icps": [
-            {"icp_id": "confirmation-%02d" % position}
-            for position in range(contracts.CONFIRMATION_ICP_COUNT)
-        ]
-    }
 
     benchmark = service.public_benchmark(row["round_id"])
 
     assert len(benchmark["icps"]) == contracts.BENCHMARK_ICP_COUNT
     assert benchmark["public_at"] == "2026-09-14T00:00:00Z"
     assert benchmark["disclosure_policy"] == "after_scoring_day2_v1"
-    assert len(benchmark["confirmation_bank"]["icps"]) == (
-        contracts.CONFIRMATION_ICP_COUNT
-    )
     assert benchmark["private_icp_count"] == 0
 
 
@@ -218,65 +208,6 @@ def test_source_release_keeps_the_completed_evaluation_cutoff():
     assert source_disclosure.disclosure_status(
         submission, PUBLIC_AT, round_row=row
     )["available"] is False
-
-
-def test_confirmation_results_cannot_bypass_delayed_main_disclosure():
-    row = _row()
-    row["configuration_doc"].update(
-        {
-            "integrity_policy": integrity.POLICY,
-            "scorer_policy": {
-                "scoring_adapter_version": integrity.SCORING_ADAPTER
-            },
-        }
-    )
-    row["publication_doc"] = {
-        "participants": [
-            {
-                "submission_id": "submission-1",
-                "miner_hotkey": "5" + "A" * 47,
-                "is_baseline": False,
-            }
-        ],
-        "stage1_ranking": [],
-        "final_ranking": [],
-    }
-
-    class Store:
-        @staticmethod
-        def list_runs(_round_id, **_filters):
-            return [
-                {
-                    "run_id": "confirmation-run",
-                    "submission_id": "submission-1",
-                    "stage": 3,
-                    "kind": "execute",
-                    "icp_position": contracts.stage_positions(3)[0],
-                    "per_icp_score": 99.0,
-                    "output_ref": "private-output.json",
-                    "result_doc": {"private": "result"},
-                }
-            ]
-
-    service = object.__new__(ArenaService)
-    service._round = lambda _round_id: row
-    service._store = Store()
-    service._objects = SimpleNamespace(
-        get_bounded=lambda *_args: pytest.fail("private output was read")
-    )
-    service._clock = lambda: PUBLIC_AT - timedelta(microseconds=1)
-
-    result = service.public_results(row["round_id"], "submission-1")
-
-    assert result["outputs"] == {}
-    assert result["run_results"] == []
-    assert result["scores"] == {
-        "stage_1": [],
-        "stage_2": [],
-        "confirmation": [],
-    }
-    assert result["public_icp_status"] == "pending"
-    assert result["public_icp_count"] == 0
 
 
 class _RoundStore:

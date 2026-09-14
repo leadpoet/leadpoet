@@ -62,7 +62,7 @@ FIELD_KINDS = ("str", "int", "float", "bool", "list[str]", "list[object]", "obje
 FIELD_FORMATS = ("https_url", "iso_date", "domain", "model_id")
 
 OPENROUTER_MAX_OUTPUT_TOKENS = 4096
-OPENROUTER_MAX_MESSAGES = 64
+OPENROUTER_MAX_MESSAGES = 128
 OPENROUTER_MAX_CONTENT_CHARS = 32_000
 # Copied from gateway/research_lab/key_vault.py (section 3.1): the broker
 # injects this policy into every chat body; it is table data so its hash is

@@ -335,6 +335,104 @@ def test_httpx_sync_and_async(worker):
     assert worker.frames[1]["parameters"]["max_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
 
 
+def _finalization_transcript() -> list[dict]:
+    """Reproduce the 59 + assistant + four returns + marker failure shape."""
+
+    messages = [
+        {"role": "system", "content": "Research bounded Acme examples."},
+        {"role": "user", "content": "Find qualified Acme companies."},
+    ]
+    tool_index = 0
+    # The first fourteen turns hold 43 tool calls and therefore 59 messages.
+    # The last four-tool turn reaches 64 before the finalization marker.
+    for tool_count in [4, *([3] * 13), 4]:
+        calls = []
+        for _ in range(tool_count):
+            call_id = f"call-{tool_index}"
+            calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "arguments": '{"query":"Acme"}',
+                },
+            })
+            tool_index += 1
+        messages.append({"role": "assistant", "tool_calls": calls})
+        messages.extend(
+            {"role": "tool", "tool_call_id": call["id"], "content": "{}"}
+            for call in calls
+        )
+    assert len(messages) == 64 and tool_index == 47
+    messages.append({
+        "role": "user",
+        "content": "[research-budget-reserve] Submit the final structured output.",
+    })
+    return messages
+
+
+def test_65_message_finalization_crosses_shim_and_broker_and_settles(monkeypatch):
+    provider_payload = {
+        "id": "generation-test",
+        "model": "openai/gpt-4o-mini",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "complete"},
+        }],
+        "usage": {"prompt_tokens": 65, "completion_tokens": 1, "cost": "0.000001"},
+    }
+    provider_broker, store, transport = make_broker(
+        transport=FakeTransport([(200, provider_payload)])
+    )
+
+    class BrokerApi:
+        def provider(self, _run_id, _lease_token, frame):
+            return provider_broker.execute(
+                CONTEXT,
+                operation_id=frame["operation_id"],
+                parameters=frame["parameters"],
+                action_sequence=frame["action_sequence"],
+                timeout_ms=frame["timeout_ms"],
+            ).to_document()
+
+    directory = tempfile.mkdtemp(prefix="la-chat-budget-", dir="/tmp")
+    socket_path = Path(directory) / "worker.sock"
+    server = runner.WorkerSocketServer(
+        socket_path,
+        BrokerApi(),
+        runner.RunState(
+            lease={"run_id": CONTEXT.run_id}, lease_token="test-lease-token"
+        ),
+    )
+    server.start()
+    monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+    shim.install()
+    try:
+        response = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json={
+                "model": "openai/gpt-4o-mini",
+                "messages": _finalization_transcript(),
+                "max_tokens": 1,
+            },
+            timeout=5,
+        )
+    finally:
+        shim.uninstall()
+        server.stop()
+        shutil.rmtree(directory)
+
+    assert response.status_code == 200
+    assert len(transport.sent) == 1
+    assert len(json.loads(transport.sent[0]["body"])["messages"]) == 65
+    assert 0 < transport.sent[0]["timeout"] <= 5
+    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 60
+    assert store.log == ["reserve", "dispatch", "settle"]
+    call = next(iter(store.calls.values()))
+    assert call["kind"] == "settlement" and call["actual"] == 1
+
+
 def test_httpx_accepts_baseline_unix_socket_urls_for_closed_provider_operations(worker):
     transport = httpx.HTTPTransport(uds=worker.path)
     with httpx.Client(transport=transport) as client:

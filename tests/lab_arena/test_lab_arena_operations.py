@@ -553,7 +553,7 @@ def test_scrapingdog_google_field_rules():
         ({"tools": [{"type": "function", "function": "bad"}]}, "invalid_field"),
         ({"messages": [{"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "search"}}]}]}, "missing_field"),
         ({"messages": [{"role": "user", "content": "x" * 32_001}]}, "invalid_field"),
-        ({"messages": [{"role": "user", "content": "x"}] * 65}, "invalid_field"),
+        ({"messages": [{"role": "user", "content": "x"}] * 129}, "invalid_request"),
     ],
 )
 def test_openrouter_chat_rejections(extra, code):
@@ -574,6 +574,19 @@ def test_openrouter_chat_accepts_the_judge_request_shape():
     outbound = ops.build_outbound_request("openrouter.chat", ops.validate_operation_request("openrouter.chat", dict(base, provider={"zdr": True})))
     assert json.loads(outbound.body)["provider"] == {"data_collection": "deny", "allow_fallbacks": False, "zdr": True}
     ops.check_request_headers({"Content-Type": "application/json", "HTTP-Referer": "https://leadpoet.ai", "X-Title": "Leadpoet Qualification"})
+
+
+def test_openrouter_chat_accepts_65_and_128_messages():
+    base = {"model": "openai/gpt-4o-mini"}
+    for count in (65, ops.OPENROUTER_MAX_MESSAGES):
+        messages = [
+            {"role": "user", "content": "bounded research history"}
+            for _ in range(count)
+        ]
+        normalized = ops.validate_operation_request(
+            "openrouter.chat", {**base, "messages": messages}
+        )
+        assert len(normalized["messages"]) == count
 
 
 def test_openrouter_chat_accepts_common_agent_tool_and_reasoning_fields():

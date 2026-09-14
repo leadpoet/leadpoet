@@ -97,7 +97,7 @@ def _opener(
         },
         "lab_arena_deepline_cost_reconciliation_schema_v1": {
             "schema_version": "leadpoet.lab_arena.deepline_cost_reconciliation_schema.v1",
-            "version": 247,
+            "version": 248,
         },
     }
     def open_(request, timeout):
@@ -144,7 +144,7 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
     assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 221
     assert result["schema_capabilities"]["lab_arena_successful_call_cost_schema_v1"]["version"] == 230
-    assert result["schema_capabilities"]["lab_arena_deepline_cost_reconciliation_schema_v1"]["version"] == 247
+    assert result["schema_capabilities"]["lab_arena_deepline_cost_reconciliation_schema_v1"]["version"] == 248
 
 
 def test_code_review_preflight_uses_only_the_scoped_arena_role():

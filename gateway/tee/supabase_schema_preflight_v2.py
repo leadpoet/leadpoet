@@ -11,7 +11,7 @@ PARTICIPATION_MIGRATION = "scripts/216-lab-arena-validator-participation.sql"
 ORIGINAL_JUDGMENTS_MIGRATION = "scripts/221-lab-arena-participation-original-judgments.sql"
 SUCCESSFUL_CALL_COST_MIGRATION = "scripts/230-lab-arena-successful-call-cost-permissions.sql"
 DEEPLINE_RECONCILIATION_MIGRATION = "scripts/243-lab-arena-deepline-delayed-cost-reconciliation.sql"
-DEEPLINE_INTERRUPTION_MIGRATION = "scripts/247-lab-arena-deepline-native-billing-identities.sql"
+DEEPLINE_INTERRUPTION_MIGRATION = "scripts/248-lab-arena-closed-scoring-reservation-admission.sql"
 PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION, DEEPLINE_RECONCILIATION_MIGRATION, DEEPLINE_INTERRUPTION_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
@@ -63,7 +63,7 @@ SCHEMA_CAPABILITIES = (
     }),
     ("lab_arena_deepline_cost_reconciliation_schema_v1", {
         "schema_version": "leadpoet.lab_arena.deepline_cost_reconciliation_schema.v1",
-        "version": 247,
+        "version": 248,
     }),
 )
 POSTGRES_IDENTIFIER_MAX_BYTES = 63

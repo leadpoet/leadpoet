@@ -2279,6 +2279,16 @@ class Broker:
                     champion_credential_retry=champion_credential_retry,
                 )
             )
+            # A known miner-account refusal may finish later score jobs via
+            # the existing no-dispatch refusal path even while billing is
+            # unknown. Keep its call binding separate from cost evidence.
+            retain_account_failure_evidence = miner_credential_failure and (
+                champion_credential_retry
+                or (
+                    effective_operation.provider == "deepline"
+                    and response.status in (401, 402, 403)
+                )
+            )
             missing_deepline_cost = (
                 effective_operation.provider == "deepline" and raw_actual is None
             )
@@ -2317,7 +2327,7 @@ class Broker:
                     )
             if missing_deepline_cost or missing_openrouter_cost:
                 account_failure_evidence = None
-                if champion_credential_retry and miner_credential_failure:
+                if retain_account_failure_evidence:
                     account_failure_evidence = {
                         "error_class": "account_credential_failure",
                         "provider_status": int(response.status),
@@ -2378,8 +2388,7 @@ class Broker:
                         "provider_attempt": provider_attempt,
                         "action_sequence": action_sequence,
                     }
-                    if champion_credential_retry
-                    and miner_credential_failure
+                    if retain_account_failure_evidence
                     else None
                 ),
             )

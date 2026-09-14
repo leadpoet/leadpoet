@@ -95,6 +95,10 @@ def _opener(
             "version": 230,
             "policy": "successful_calls_v1",
         },
+        "lab_arena_deepline_cost_reconciliation_schema_v1": {
+            "schema_version": "leadpoet.lab_arena.deepline_cost_reconciliation_schema.v1",
+            "version": 246,
+        },
     }
     def open_(request, timeout):
         path = urlparse(request.full_url).path
@@ -109,6 +113,7 @@ def _opener(
             or path.endswith("/rpc/lab_arena_code_review_schema_v1")
             or path.endswith("/rpc/lab_arena_participation_schema_v1")
             or path.endswith("/rpc/lab_arena_successful_call_cost_schema_v1")
+            or path.endswith("/rpc/lab_arena_deepline_cost_reconciliation_schema_v1")
         )
         if enforce_role_separation and private_review and not arena_authority:
             raise HTTPError(request.full_url, 403, "private", {}, None)
@@ -139,6 +144,7 @@ def test_preflight_proves_arena_203_and_generic_scoring_schema_only():
     assert result["schema_capabilities"]["lab_arena_incentive_retirement_schema_v1"]["version"] == 203
     assert result["schema_capabilities"]["lab_arena_participation_schema_v1"]["version"] == 221
     assert result["schema_capabilities"]["lab_arena_successful_call_cost_schema_v1"]["version"] == 230
+    assert result["schema_capabilities"]["lab_arena_deepline_cost_reconciliation_schema_v1"]["version"] == 246
 
 
 def test_code_review_preflight_uses_only_the_scoped_arena_role():
@@ -188,6 +194,7 @@ def test_preflight_accepts_current_schema_without_retired_host_receipt_storage()
     "lab_arena_successful_call_cost_schema_v1",
     "lab_arena_list_deepline_cost_reconciliations_v1",
     "lab_arena_reconcile_deepline_cost_v1",
+    "lab_arena_deepline_cost_reconciliation_schema_v1",
     "lab_arena_runs",
 ])
 def test_preflight_still_requires_active_scoring_epoch_and_arena_dependencies(missing):
@@ -215,6 +222,19 @@ def test_preflight_rejects_wrong_successful_call_cost_capability():
             _environment(),
             opener=_opener(
                 bad_capability="lab_arena_successful_call_cost_schema_v1"
+            ),
+        )
+
+
+def test_preflight_rejects_incomplete_deepline_reconciliation_capability():
+    with pytest.raises(
+        SupabaseSchemaPreflightV2Error,
+        match="deepline_cost_reconciliation_schema_v1 capability differs",
+    ):
+        verify_required_supabase_v2_schema(
+            _environment(),
+            opener=_opener(
+                bad_capability="lab_arena_deepline_cost_reconciliation_schema_v1"
             ),
         )
 

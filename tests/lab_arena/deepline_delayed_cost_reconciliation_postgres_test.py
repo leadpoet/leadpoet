@@ -36,6 +36,10 @@ MIGRATION = (
     Path(__file__).resolve().parents[2]
     / "scripts/243-lab-arena-deepline-delayed-cost-reconciliation.sql"
 )
+DEFERRAL_BYPASS_MIGRATION = (
+    Path(__file__).resolve().parents[2]
+    / "scripts/245-lab-arena-deepline-credential-deferral-bypass.sql"
+)
 
 
 @pytest.fixture(scope="module")
@@ -112,6 +116,8 @@ def _uncertain_call(
     fingerprint: str | None = None,
     reason: str = "transport_failure",
     call_succeeded: bool = False,
+    credential_failure_status: int | None = None,
+    evidence_overrides: dict | None = None,
 ):
     fingerprint = fingerprint or "sha256:" + "a" * 64
     identity = contracts.provider_call_identity(
@@ -123,6 +129,16 @@ def _uncertain_call(
         request_hash=sha(label),
     )
     request_id = request_id or "ctx-tool-" + identity.removeprefix("sha256:")[:32]
+    account_failure_evidence = None
+    if credential_failure_status is not None:
+        account_failure_evidence = {
+            "error_class": "account_credential_failure",
+            "provider_status": credential_failure_status,
+            "base_call_identity": identity,
+            "provider_attempt": 1,
+            "action_sequence": 0,
+            **(evidence_overrides or {}),
+        }
     token_hash = hash_lease_token(token)
     assert store.reserve_call(
         run_id=run["run_id"],
@@ -134,6 +150,9 @@ def _uncertain_call(
         amount_microusd=amount,
         call_doc={
             "request_hash": sha(label),
+            "base_call_identity": identity,
+            "provider_attempt": 1,
+            "action_sequence": 0,
             "tool": operation,
             "deepline_request_id": request_id,
             "credential_fingerprint": fingerprint,
@@ -151,9 +170,19 @@ def _uncertain_call(
         call_doc={
             "reason": reason,
             "call_succeeded": call_succeeded,
+            **(
+                {"provider_status": credential_failure_status}
+                if credential_failure_status is not None
+                else {}
+            ),
             "deepline_request_id": request_id,
             "deepline_operation": operation,
             "credential_fingerprint": fingerprint,
+            **(
+                {"account_failure_evidence": account_failure_evidence}
+                if account_failure_evidence is not None
+                else {}
+            ),
         },
     )["status"] == "uncertain"
     return identity, request_id, operation, fingerprint
@@ -204,10 +233,16 @@ def test_functions_are_service_only_and_owned_by_arena_owner(resources):
         assert definition.count(
             "lab_arena_deepline_reconciliation_retry_deferral"
         ) == 1
+        assert definition.count(
+            "lab_arena_deepline_credential_deferral_bypass"
+        ) == 1
     with connect() as connection:
         connection.autocommit = True
         with connection.cursor() as cursor:
             cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(
+                DEFERRAL_BYPASS_MIGRATION.read_text(encoding="utf-8")
+            )
             cursor.execute(
                 "SELECT pg_get_functiondef("
                 "'public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)'::regprocedure)"
@@ -558,6 +593,99 @@ def test_fresh_uncertainty_defers_same_submission_then_settlement_unblocks(datab
         )
         assert released["status"] == "leased"
         assert released["run_id"] in {retry_id, same_submission_new_id}
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("provider_status", [401, 402, 403])
+def test_bound_credential_failure_bypasses_only_claim_deferral(
+    database, provider_status
+):
+    store = _store(database)
+    round_id = "arena-2026-09-14-auth%s" % provider_status
+    try:
+        runners, _participants = _open_scoring(
+            store, round_id, participants=1, runners=2
+        )
+        first, token, _, _ = claim(
+            store, round_id, runners[0], parallelism=8, ceiling=8,
+            excluded=[runners[0]],
+        )
+        identity, _request_id, _operation, _fingerprint = _uncertain_call(
+            store,
+            first,
+            token,
+            label="auth%s" % provider_status,
+            reason="missing_provider_cost",
+            credential_failure_status=provider_status,
+        )
+        assert complete(
+            store, first["run_id"], hash_lease_token(token), "credential_error"
+        )["status"] == "failed"
+
+        released, _released_token, _, _ = claim(
+            store, round_id, runners[1], parallelism=8, ceiling=8,
+            excluded=[runners[1]],
+        )
+        assert released["status"] == "leased"
+        assert released["submission_id"] == first["submission_id"]
+        ledger = store.list_ledger(call_identity=identity)
+        assert ledger[-1]["entry_kind"] == "uncertain"
+        assert ledger[-1]["amount_microusd"] == 2_000
+        assert _settlements(store, identity) == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "label,status,overrides",
+    [
+        ("missing", None, None),
+        ("rate", 429, None),
+        (
+            "identity",
+            401,
+            {"base_call_identity": "sha256:" + "f" * 64},
+        ),
+        ("attempt", 401, {"provider_attempt": 2}),
+        ("sequence", 401, {"action_sequence": 1}),
+    ],
+)
+def test_untrusted_credential_failure_evidence_cannot_release_deferral(
+    database, label, status, overrides
+):
+    store = _store(database)
+    round_id = "arena-2026-09-14-forged%s" % label
+    try:
+        runners, _participants = _open_scoring(
+            store, round_id, participants=1, runners=2
+        )
+        first, token, _, _ = claim(
+            store, round_id, runners[0], parallelism=8, ceiling=8,
+            excluded=[runners[0]],
+        )
+        identity, _request_id, _operation, _fingerprint = _uncertain_call(
+            store,
+            first,
+            token,
+            label="forged%s" % label,
+            reason="missing_provider_cost",
+            credential_failure_status=status,
+            evidence_overrides=overrides,
+        )
+        assert complete(
+            store, first["run_id"], hash_lease_token(token), "credential_error"
+        )["status"] == "failed"
+
+        blocked, _blocked_token, _, _ = claim(
+            store, round_id, runners[1], parallelism=8, ceiling=8,
+            excluded=[runners[1]],
+        )
+        assert blocked["status"] == "no_pending"
+        assert store.list_ledger(call_identity=identity)[-1]["entry_kind"] == (
+            "uncertain"
+        )
+        assert _settlements(store, identity) == []
     finally:
         store.close()
 

@@ -97,10 +97,12 @@ class IntegrityHarness(fixtures.Harness):
         raise AssertionError((target, self.status()))
 
 
-def test_unknown_provider_charge_cannot_turn_an_outage_into_miner_ineligibility(database, tmp_path, monkeypatch):
+def test_unknown_provider_charge_defers_only_affected_submission_until_exact_settlement(
+    database, tmp_path, monkeypatch
+):
     psycopg2, dsn = database
     harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
-        challengers=["Outage"], runners=["alpha"])
+        challengers=["Outage", "Healthy"], runners=["alpha"])
     def judge(companies, icp, reference):
         indexes, _ = verify.bucket_skip(icp, companies)
         return [{"final_score": 40.0, "company_index": index,
@@ -114,6 +116,7 @@ def test_unknown_provider_charge_cannot_turn_an_outage_into_miner_ineligibility(
     harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
     harness.round_id = round_id
     submission = harness.submit("Outage", round_id)
+    healthy_submission = harness.submit("Healthy", round_id)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     harness.advance_until("stage1_scoring")
     credentials = harness.service.config.credential_manager
@@ -122,19 +125,59 @@ def test_unknown_provider_charge_cannot_turn_an_outage_into_miner_ineligibility(
         "miner-outage" if row["submission_id"] == submission else original_key(row, provider))
     original_send = fixtures.FakeProviderTransport.send
 
+    outage_active = True
+
     def unavailable(self, **kwargs):
-        if any("miner-outage" in str(value) for value in kwargs["headers"].values()):
+        if outage_active and any(
+            "miner-outage" in str(value) for value in kwargs["headers"].values()
+        ):
             return fixtures.br.ProviderResponse(503, {"content-type": "application/json"}, b'{"error":"temporarily unavailable"}')
         return original_send(self, **kwargs)
 
     monkeypatch.setattr(fixtures.FakeProviderTransport, "send", unavailable)
     harness.run_stage_with_runners(1)
-    runs = [run for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
-        if run["submission_id"] == submission]
-    assert runs and {run["terminal_cause"] for run in runs} == {"judge_error"}
-    result = harness.service.advance_round(round_id)
-    assert result["status"] == "cancelled"
-    assert harness.service.store.get_round(round_id)["cancel_reason"] == "scoring_incomplete"
+    runs = [
+        run
+        for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
+        if run["submission_id"] == submission
+    ]
+    failed = [run for run in runs if run["terminal_cause"] == "judge_error"]
+    assert len(failed) == 1
+    assert any(run["status"] == "pending" for run in runs)
+    healthy_runs = [
+        run
+        for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
+        if run["submission_id"] == healthy_submission
+    ]
+    assert healthy_runs and all(run["status"] == "accepted" for run in healthy_runs)
+
+    candidates = harness.service.store.list_deepline_cost_reconciliations(
+        round_id, run_id=failed[0]["run_id"]
+    )
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    settled = harness.service.store.reconcile_deepline_cost(
+        round_id=round_id,
+        run_id=failed[0]["run_id"],
+        call_identity=candidate["call_identity"],
+        uncertain_entry_id=candidate["uncertain_entry_id"],
+        request_id=candidate["request_id"],
+        operation=candidate["operation"],
+        credential_fingerprint=candidate["credential_fingerprint"],
+        actual_microusd=2_000,
+        cost_units="0.02",
+    )
+    assert settled["status"] == "settled"
+    outage_active = False
+    monkeypatch.setattr(credentials, "runtime_key", original_key)
+    harness.advance_until("scored")
+    final_runs = [
+        run
+        for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
+        if run["submission_id"] == submission
+    ]
+    assert any(run["status"] == "accepted" for run in final_runs)
+    assert not any(run["terminal_cause"] == "credential_error" for run in final_runs)
 
 
 @pytest.mark.parametrize("case,main_score,confirmation_score,expected", [
@@ -179,6 +222,22 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
         def key_after_revocation(row, provider):
             return "miner-refused" if row["submission_id"] == credential_failed else original_key(row, provider)
         monkeypatch.setattr(credentials, "runtime_key", key_after_revocation)
+        refused_posts = []
+        original_send = fixtures.FakeProviderTransport.send
+
+        def count_refused_posts(self, **kwargs):
+            if kwargs["method"] == "POST" and any(
+                "miner-refused" in str(value)
+                for value in kwargs["headers"].values()
+            ):
+                refused_posts.append(
+                    kwargs["headers"].get("x-deepline-request-id")
+                )
+            return original_send(self, **kwargs)
+
+        monkeypatch.setattr(
+            fixtures.FakeProviderTransport, "send", count_refused_posts
+        )
     harness.advance_until("scored")
     before = harness.service.store.get_round(round_id)
     bank_hash = before["confirmation_bank_hash"]
@@ -208,6 +267,44 @@ def test_confirmation_controls_winner_and_survives_service_restart(database, tmp
     assert ranking[failed]["main_score"] is None
     assert ranking[failed]["eligible"] is False
     if credential_failed:
+        credential_ledger = harness.service.store.list_ledger(
+            submission_id=credential_failed
+        )
+        # Stage 1 scoring and the later stage 2 execution have separate
+        # budgets. Each makes one request. Within each kind, the unknown
+        # charge holds the cap and later jobs take the existing no-dispatch
+        # credential-refusal path.
+        assert len(refused_posts) == 2
+        assert len(set(refused_posts)) == len(refused_posts)
+        runs_by_id = {
+            run["run_id"]: run
+            for run in harness.service.store.list_runs(round_id)
+        }
+        refused_kinds = {
+            runs_by_id[row["run_id"]]["kind"]
+            for row in credential_ledger
+            if row["entry_kind"] == "reservation"
+            and row["provider"] == "deepline"
+            and row["entry_doc"].get("deepline_request_id") in refused_posts
+        }
+        assert refused_kinds == {"execute", "score"}
+        scoring_uncertainties = [
+            row
+            for row in credential_ledger
+            if row["provider"] == "deepline"
+            and row["entry_kind"] == "uncertain"
+            and row["run_id"]
+            and ":score:" in row["run_id"]
+        ]
+        assert scoring_uncertainties
+        assert max(row["amount_microusd"] for row in scoring_uncertainties) == (
+            50_000_000
+        )
+        assert any(
+            row["entry_kind"] == "refusal"
+            and row["entry_doc"].get("prior_miner_credential_refusal") is True
+            for row in credential_ledger
+        )
         assert credential_failed not in ranking
         assert any(row["submission_id"] == credential_failed for row in published["publication_doc"]["participants"])
     public = harness.service.public_results(round_id, challenger)

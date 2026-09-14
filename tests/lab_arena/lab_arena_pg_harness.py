@@ -94,6 +94,8 @@ POSTGREST_MIGRATIONS = DEFAULT_MIGRATIONS + (
 CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "236-lab-arena-score-submission-serialization.sql",
     "243-lab-arena-deepline-delayed-cost-reconciliation.sql",
+    "245-lab-arena-deepline-credential-deferral-bypass.sql",
+    "246-lab-arena-interrupted-deepline-cost-reconciliation.sql",
 )
 
 _SHIM_SQL = """

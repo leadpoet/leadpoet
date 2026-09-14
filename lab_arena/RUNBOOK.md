@@ -181,6 +181,16 @@ the same reservation. Other submissions remain claimable. The existing spending
 limits and round deadlines remain in force. An unresolved charge stays reserved
 and is never silently treated as zero.
 
+Migrations 245 and 246 also cover process loss before the error handler runs.
+An exact reservation and dispatch let the gateway reconcile a database-closed
+call after lease expiry, stage close, or cancellation. Only lease expiry defers
+live retries. A strictly bound miner-key 401, 402, or 403 lets later scores use
+the existing credential-refusal path. When the unknown charge blocks budget
+admission, that path needs no new paid request. The unknown charge remains
+reserved. Missing evidence, a general rate limit, and a
+provider outage do not gain that exception. The gateway release preflight
+requires migration 246's private schema capability.
+
 Reservations and settlement share the existing submission lock. Concurrent
 ICPs cannot each claim a fresh budget. Dynamically priced Deepline calls
 reserve the remaining allowance and run one at a time per submission. Their

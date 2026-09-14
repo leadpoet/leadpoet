@@ -542,6 +542,41 @@ def test_champion_retry_recognizes_durable_uncertain_account_evidence():
     assert len(transport.sent) == 1
 
 
+@pytest.mark.parametrize("provider_status", [401, 402, 403, 429, 503])
+@pytest.mark.parametrize("funding_source", ["miner_key", "host"])
+def test_ordinary_deepline_account_failure_retains_bound_evidence_only(
+    provider_status, funding_source,
+):
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(provider_status, {"error": "refused"})]),
+        provider_funding_source_for=lambda _context, _provider: funding_source,
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "acme"}},
+        action_sequence=9,
+        timeout_ms=5000,
+    )
+    call = next(iter(store.calls.values()))
+    assert call["kind"] == "uncertain"
+    assert len(transport.sent) == 1
+    evidence = call["uncertain_doc"].get("account_failure_evidence")
+    if funding_source == "miner_key" and provider_status in (401, 402, 403):
+        assert result.call["error_code"] == "miner_credentials_unavailable"
+        assert evidence == {
+            "error_class": "account_credential_failure",
+            "provider_status": provider_status,
+            "base_call_identity": call["call_doc"]["base_call_identity"],
+            "provider_attempt": call["call_doc"]["provider_attempt"],
+            "action_sequence": call["call_doc"]["action_sequence"],
+        }
+    else:
+        assert evidence is None
+    assert "account_failure_evidence" not in result.to_document()["call"]
+    assert call["uncertain_doc"]["call_succeeded"] is False
+
+
 def test_missing_optional_champion_credential_marks_fallback_without_dispatch():
     marked = []
 

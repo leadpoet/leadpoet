@@ -96,6 +96,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "243-lab-arena-deepline-delayed-cost-reconciliation.sql",
     "245-lab-arena-deepline-credential-deferral-bypass.sql",
     "246-lab-arena-interrupted-deepline-cost-reconciliation.sql",
+    "247-lab-arena-deepline-native-billing-identities.sql",
 )
 
 _SHIM_SQL = """

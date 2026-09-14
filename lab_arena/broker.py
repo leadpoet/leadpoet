@@ -27,7 +27,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote_to_bytes
+from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 import httpx
 
@@ -89,6 +89,9 @@ _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _DEEPLINE_REQUEST_ID_RE = re.compile(r"^ctx-tool-[0-9a-f]{32}$")
+_DEEPLINE_BILLING_REQUEST_ID_RE = re.compile(
+    r"^(?:ctx-tool-[0-9a-f]{32}|[a-z0-9]{3,8}::[a-z0-9]{1,16}-[0-9]{13}-[a-f0-9]{12,64})$"
+)
 _TRANSPORT_ERROR_CLASSES = frozenset({
     "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout",
     "WriteError", "WriteTimeout", "PoolTimeout", "RemoteProtocolError",
@@ -134,6 +137,7 @@ class ProviderTransportError(RuntimeError):
         message: str,
         *,
         openrouter_generation_id: Optional[str] = None,
+        deepline_job_id: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.openrouter_generation_id = (
@@ -142,6 +146,11 @@ class ProviderTransportError(RuntimeError):
             and _OPENROUTER_GENERATION_ID_RE.fullmatch(
                 openrouter_generation_id.strip()
             )
+            else None
+        )
+        self.deepline_job_id = (
+            deepline_job_id if isinstance(deepline_job_id, str)
+            and _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(deepline_job_id)
             else None
         )
 
@@ -508,6 +517,26 @@ class _ProviderHTTPLogFilter(logging.Filter):
 _PROVIDER_HTTP_LOG_FILTER = _ProviderHTTPLogFilter()
 
 
+def _deepline_response_header_request_id(headers: Mapping[str, str]) -> Optional[str]:
+    """Retain the provider's identity before reading a possibly broken body."""
+
+    explicit = headers.get("x-deepline-request-id")
+    vercel = headers.get("x-vercel-id", "")
+    # Public API responses prepend the edge region to the native job identity.
+    if vercel.count("::") == 2:
+        edge, vercel = vercel.split("::", 1)
+        if re.fullmatch(r"[a-z0-9]{3,8}", edge) is None:
+            return None
+    valid_vercel = vercel if _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(vercel) else None
+    if explicit is not None:
+        if not _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(explicit):
+            return None
+        if valid_vercel is not None and explicit != valid_vercel:
+            return None
+        return explicit
+    return valid_vercel
+
+
 class HttpxProviderTransport:
     """HTTPS to the constant provider hosts: HTTP/1.1, no redirects, bounded."""
 
@@ -543,11 +572,14 @@ class HttpxProviderTransport:
         ):
             raise ProviderTransportError("invalid response limit")
         openrouter_generation_id: Optional[str] = None
+        deepline_job_id: Optional[str] = None
         log_token = _PROVIDER_HTTP_IN_FLIGHT.set(True)
         try:
             with self._client.stream(method, url, headers=dict(headers), content=body, timeout=httpx.Timeout(float(timeout_seconds))) as response:
                 status = int(response.status_code)
                 response_headers = {k.lower(): v for k, v in response.headers.items()}
+                if urlsplit(url).hostname == "code.deepline.com":
+                    deepline_job_id = _deepline_response_header_request_id(response_headers)
                 _, openrouter_generation_id = _openrouter_generation_identity(
                     None, response_headers
                 )
@@ -562,6 +594,7 @@ class HttpxProviderTransport:
             raise ProviderTransportError(
                 type(exc).__name__,
                 openrouter_generation_id=openrouter_generation_id,
+                deepline_job_id=deepline_job_id,
             ) from exc
         finally:
             _PROVIDER_HTTP_IN_FLIGHT.reset(log_token)
@@ -688,7 +721,7 @@ def _deepline_ledger_readback(
     """Read exact request billing; never repeat a provider execution."""
 
     if (
-        _DEEPLINE_REQUEST_ID_RE.fullmatch(request_id) is None
+        _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(request_id) is None
         or isinstance(since_at, bool)
         or not isinstance(since_at, int)
         or since_at < 0
@@ -1427,8 +1460,11 @@ class Broker:
             or not isinstance(operation, str)
             or operation not in operations.DEEPLINE_TOOLS
             or not isinstance(request_id, str)
-            or _DEEPLINE_REQUEST_ID_RE.fullmatch(request_id) is None
-            or request_id != "ctx-tool-" + candidate["call_identity"][7:39]
+            or _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(request_id) is None
+            or (
+                request_id.startswith("ctx-tool-")
+                and request_id != "ctx-tool-" + candidate["call_identity"][7:39]
+            )
             or not isinstance(credential_fingerprint, str)
             or _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint) is None
             or isinstance(candidate.get("uncertain_entry_id"), bool)
@@ -1699,6 +1735,9 @@ class Broker:
                 round_id=getattr(context, "round_id", ""),
                 operation_id=operation_id,
                 parameters=normalized,
+                timeout_ms=min(
+                    max(1, int(timeout_ms)), operation.timeout_seconds * 1000
+                ),
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
@@ -1798,8 +1837,9 @@ class Broker:
                 "exa.search": "exa_search", "exa.contents": "exa_contents"
             }.get(effective_operation_id, "")
         if effective_operation.provider == "deepline":
-            # Chosen before dispatch so loss of the HTTP reply cannot erase the
-            # billing identity. Models cannot supply or override this header.
+            # Bind the local attempt before dispatch. The public API may use a
+            # different native billing id, retained from its response below.
+            # Models cannot supply or override this header.
             request_accounting["deepline_request_id"] = (
                 "ctx-tool-" + call_identity.removeprefix("sha256:")[:32]
             )
@@ -2167,6 +2207,12 @@ class Broker:
                     )
                     uncertain_doc["transport_failure"] = True
                 if effective_operation.provider == "deepline":
+                    if exc.deepline_job_id is not None and not _response_contains_credential(
+                        ProviderResponse(0, {"x-deepline-request-id": exc.deepline_job_id}, b""),
+                        secret,
+                    ):
+                        deepline_response_request_id = exc.deepline_job_id
+                        uncertain_doc["deepline_job_id"] = exc.deepline_job_id
                     uncertain_doc.update({
                         "deepline_request_id": deepline_request_id,
                         "deepline_operation": deepline_operation,
@@ -2179,7 +2225,7 @@ class Broker:
                     deepline_readback_cost = _deepline_ledger_readback(
                         transport=self._transport,
                         secret=secret,
-                        request_id=str(deepline_request_id),
+                        request_id=str(deepline_response_request_id or deepline_request_id),
                         operation=str(deepline_operation),
                         since_at=deepline_dispatch_since_at,
                         reconciliation_deadline=(

@@ -116,7 +116,7 @@ def test_schema_capability_is_service_only(database):
     assert capability == {
         "schema_version":
             "leadpoet.lab_arena.deepline_cost_reconciliation_schema.v1",
-        "version": 246,
+        "version": 247,
     }
     assert (service, anon, authenticated, service_role, helper) == (
         True, False, False, False, False

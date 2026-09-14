@@ -43,6 +43,17 @@ def test_routes_apply_only_to_miner_funded_scoring():
     ) is None
 
 
+@pytest.mark.parametrize("timeout_ms, upstream_ms", [(25_000, 20_000), (30_000, 25_000), (90_000, 60_000), (1_000, 500)])
+def test_scrape_timeout_leaves_time_to_receive_provider_receipt(timeout_ms, upstream_ms):
+    selected = compat.route_for(
+        kind="score", funding_source="miner_key", round_id="arena-2026-09-14",
+        operation_id="scrapingdog.scrape", parameters={"url": "https://example.com/"},
+        timeout_ms=timeout_ms,
+    )
+    assert selected.effective_parameters["payload"]["timeout"] == upstream_ms
+    assert upstream_ms < timeout_ms
+
+
 def test_firecrawl_route_requires_raw_html_and_exact_source_identity():
     requested_url = "https://example.com/about"
     selected = route(

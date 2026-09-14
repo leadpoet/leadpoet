@@ -141,11 +141,18 @@ def route_for(
     round_id: str,
     operation_id: str,
     parameters: Mapping[str, Any],
+    timeout_ms: Optional[int] = None,
 ) -> Optional[MinerScoreRoute]:
     """Return one exact Deepline route for an eligible scoring request."""
 
     if kind != "score" or funding_source != "miner_key":
         return None
+    # The upstream must finish before the broker stops reading its response.
+    # Otherwise a normal provider timeout loses the billing receipt as well.
+    upstream_timeout_ms = (
+        60_000 if timeout_ms is None
+        else min(60_000, max(1, timeout_ms - min(5_000, timeout_ms // 2)))
+    )
     requested = dict(parameters)
     if operation_id == "scrapingdog.scrape":
         ats_kind = _ats_api_kind(requested["url"])
@@ -159,7 +166,7 @@ def route_for(
                         "url": requested["url"],
                         "method": "GET",
                         "follow_redirects": False,
-                        "timeout_ms": 60_000,
+                        "timeout_ms": upstream_timeout_ms,
                     },
                 },
                 adapter="generic_ats_json:" + ats_kind,
@@ -170,7 +177,7 @@ def route_for(
             "formats": ["rawHtml"],
             "onlyMainContent": False,
             "maxAge": 0,
-            "timeout": 60_000,
+            "timeout": upstream_timeout_ms,
             "storeInCache": False,
         }
         return MinerScoreRoute(

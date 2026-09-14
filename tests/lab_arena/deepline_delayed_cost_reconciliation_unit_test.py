@@ -25,6 +25,7 @@ REQUEST_ID = "ctx-tool-" + CALL_IDENTITY.removeprefix("sha256:")[:32]
 SECRET = "deepline-secret"
 FINGERPRINT = br._credential_fingerprint(SECRET)
 RESERVATION_AT = "2026-09-14T00:43:55.521000Z"
+NATIVE_REQUEST_ID = "iad1::p4f7s-1789361973860-8634524a6f3a"
 
 
 def _candidate(**patch):
@@ -53,14 +54,14 @@ def _candidate(**patch):
     return candidate
 
 
-def _ledger_entry(*, credits=0.03):
+def _ledger_entry(*, credits=0.03, request_id=REQUEST_ID):
     return {
         "id": "ledger-row-1",
         "delta": -credits,
         "reason": "charge_settle",
         "provider": "firecrawl",
         "operation": "firecrawl_scrape",
-        "request_id": REQUEST_ID,
+        "request_id": request_id,
         "billing_stage": "posted",
         "charge_state": "posted",
         "billing_mode": "post_deduct",
@@ -68,8 +69,8 @@ def _ledger_entry(*, credits=0.03):
         "pricing_basis": "page",
         "charge_credits": credits,
         "metadata": {
-            "requestId": REQUEST_ID,
-            "chargeGroupId": REQUEST_ID,
+            "requestId": request_id,
+            "chargeGroupId": request_id,
             "operation": "firecrawl_scrape",
             "provider": "firecrawl",
             "billingStage": "posted",
@@ -78,8 +79,8 @@ def _ledger_entry(*, credits=0.03):
             "postedCredits": credits,
         },
         "billing_audit": {
-            "request_id": REQUEST_ID,
-            "charge_group_id": REQUEST_ID,
+            "request_id": request_id,
+            "charge_group_id": request_id,
             "operation": "firecrawl_scrape",
             "provider": "firecrawl",
             "billing_stage": "posted",
@@ -147,6 +148,8 @@ def test_transport_loss_uses_pre_dispatch_caller_id_and_exact_ledger_cost():
         action_sequence=0,
         timeout_ms=30_000,
     )
+    outbound = next(item for item in transport.sent if item["method"] == "POST")
+    assert json.loads(outbound["body"])["payload"]["timeout"] == 25_000
 
     assert [request["method"] for request in transport.sent] == ["POST", "GET"]
     assert result.status == 502

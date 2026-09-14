@@ -219,12 +219,15 @@ def _local_responder(
                 assert schema.get("strict") is True
                 declared = schema.get("schema") or {}
                 assert declared.get("additionalProperties") is False
-                assert set(declared.get("required") or []) == set(
-                    intent_details._CHECKS
-                )
+                assert set(declared.get("required") or []) == {
+                    *intent_details._CHECKS, "signal_coverage"
+                }
                 review_documents.append(json.loads(str(messages[-1]["content"])))
                 content = json.dumps(
-                    dict(review_checks) if review_checks is not None else {}
+                    {**dict(review_checks), "signal_coverage": [
+                        {"matched_icp_signal": index, "paragraph_quote": PARAGRAPH}
+                        for index in (0, 1)
+                    ]} if review_checks is not None else {}
                 )
             elif schema_name == "verification":
                 content = json.dumps(_stage3_reply(prompt))

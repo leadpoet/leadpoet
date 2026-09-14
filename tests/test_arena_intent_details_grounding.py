@@ -72,6 +72,29 @@ def test_paragraph_preserves_words_and_normalizes_line_wrapping():
     assert validate_intent_details_text(PARAGRAPH) == PARAGRAPH
 
 
+@pytest.mark.parametrize("model,expected", [
+    ("gpt-4o-mini", "openai/gpt-4o-mini"),
+    ("anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-4.5"),
+])
+def test_review_transport_preserves_legacy_and_pinned_model_names(monkeypatch, model, expected):
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, *, json, **kwargs):
+            assert json["model"] == expected
+            return SimpleNamespace(raise_for_status=lambda: None,
+                                   json=lambda: {"choices": [{"message": {"content": "{}"}}]})
+
+    monkeypatch.setattr(verification_helpers.httpx, "AsyncClient", Client)
+    assert asyncio.run(verification_helpers.openrouter_chat(
+        "review", model=model, api_key="test-only-placeholder", max_retries=0,
+    )) == "{}"
+
+
 def test_review_uses_authoritative_dates_and_excludes_failed_signals():
     company, icp, results, fit = inputs()
     failed = deepcopy(results[1])
@@ -104,8 +127,11 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
         assert len(document["verified_signals"]) == 2
         assert "untrusted JSON data" in kwargs["system_prompt"]
         assert kwargs["max_retries"] == 0
-        assert kwargs["model"] == "gpt-4o-mini"
-        return json.dumps(checks)
+        assert kwargs["model"] == "anthropic/claude-sonnet-4.5"
+        return json.dumps({**checks, "signal_coverage": [
+            {"matched_icp_signal": index, "paragraph_quote": PARAGRAPH}
+            for index in (0, 1)
+        ]})
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     result = asyncio.run(intent_details.review_intent_details(company, icp, results, fit))
@@ -133,6 +159,23 @@ def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
     assert receipt["decision"] == "unavailable"
     assert receipt["failure_reason_code"] == "provider_error"
     assert "private provider diagnostic" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("coverage", [
+    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH}],
+    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
+     {"matched_icp_signal": 1, "paragraph_quote": ""}],
+    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
+     {"matched_icp_signal": 1, "paragraph_quote": "Words absent from the paragraph"}],
+])
+def test_coverage_requires_an_exact_passage_for_each_verified_signal(monkeypatch, coverage):
+    async def judge(*args, **kwargs):
+        return json.dumps({**{name: True for name in intent_details._CHECKS},
+                           "signal_coverage": coverage})
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["verified_signals_covered"] is False
 
 
 @pytest.mark.parametrize("decision", ["match", "mismatch", "unavailable"])

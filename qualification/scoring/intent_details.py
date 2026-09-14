@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 from qualification.intent_details import validate_intent_details_text
 
 
-REVIEW_MODEL = "gpt-4o-mini"  # Existing pinned intent_verification model.
+REVIEW_MODEL = "anthropic/claude-sonnet-4.5"  # Existing pinned intent_signal_judge.
 REVIEW_TIMEOUT_SECONDS = 45
 _CHECKS = (
     "facts_supported", "verified_signals_covered", "relevance_grounded",
@@ -26,8 +26,20 @@ _RESPONSE_FORMAT = {
         "name": "arena_intent_details_review", "strict": True,
         "schema": {
             "type": "object", "additionalProperties": False,
-            "properties": {name: {"type": "boolean"} for name in _CHECKS},
-            "required": list(_CHECKS),
+            "properties": {
+                **{name: {"type": "boolean"} for name in _CHECKS},
+                "signal_coverage": {
+                    "type": "array", "items": {
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "matched_icp_signal": {"type": "integer"},
+                            "paragraph_quote": {"type": "string"},
+                        },
+                        "required": ["matched_icp_signal", "paragraph_quote"],
+                    },
+                },
+            },
+            "required": [*_CHECKS, "signal_coverage"],
         },
     },
 }
@@ -50,6 +62,13 @@ completed expansion. Do not accept facts drawn only from a submitted claim.
 Use authoritative_date_basis: publication dates must not become event dates.
 An unknown date must stay unknown; do not invent recency or urgency.
 For verified_signals_covered, require all distinct supported activities below.
+For EACH verified signal, return its matched_icp_signal and an EXACT contiguous
+quote from the submitted paragraph that states that specific activity in
+signal_coverage. Return an empty paragraph_quote if the activity is absent.
+Generic relevance, product expansion or growth language does not cover a
+distinct office opening, hire, funding or other event. Never quote the source
+evidence as if it appeared in the paragraph. Check coverage independently for
+each signal before deciding verified_signals_covered.
 For relevance_grounded, allow plausible commercial implications only as clearly
 conditional inference (may, could, suggests); reject invented purchases, budget,
 pain, deadlines, tools or buying intent stated as facts. product_service can be
@@ -57,8 +76,8 @@ the target company's own offering: connect activity to that offering and its
 operations, not an imagined seller or product. The final sentence must explain
 the ICP connection using these facts and conditional relevance, not just repeat
 filters or events. Require natural prose, not headings, bullet lists, field
-labels or internal scoring commentary. Return only the five requested Boolean
-checks. Assess each check independently; all must pass for acceptance.
+labels or internal scoring commentary. Return only the requested Boolean
+checks and signal_coverage. All checks and coverage must pass for acceptance.
 """
 
 
@@ -163,7 +182,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
 
     receipt: dict[str, Any] = {
         "gate": "intent_details", "contract_id": "intent-details:v1",
-        "model": "openai/" + REVIEW_MODEL,
+        "model": REVIEW_MODEL,
     }
     try:
         document = review_evidence(company, icp, signal_results, company_fit_receipt)
@@ -176,7 +195,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
         response = await asyncio.wait_for(
             openrouter_chat(prompt, model=REVIEW_MODEL, max_retries=0,
                             system_prompt=_SYSTEM, response_format=_RESPONSE_FORMAT,
-                            max_tokens=300),
+                            max_tokens=800),
             timeout=REVIEW_TIMEOUT_SECONDS,
         )
     except Exception:
@@ -185,10 +204,27 @@ missing review into an accepted paragraph or a terminal company mismatch.
                 "failure_reason_code": "provider_error"}
     try:
         checks = json.loads(response)
-        if not isinstance(checks, dict) or set(checks) != set(_CHECKS) or any(
+        if not isinstance(checks, dict) or set(checks) != {*_CHECKS, "signal_coverage"} or any(
             type(checks[name]) is not bool for name in _CHECKS
         ):
             raise ValueError("invalid Intent Details review")
+        coverage = checks.pop("signal_coverage")
+        if not isinstance(coverage, list) or any(
+            not isinstance(item, dict)
+            or set(item) != {"matched_icp_signal", "paragraph_quote"}
+            or type(item["matched_icp_signal"]) is not int
+            or not isinstance(item["paragraph_quote"], str)
+            for item in coverage
+        ):
+            raise ValueError("invalid signal coverage")
+        expected = {item["matched_icp_signal"] for item in document["verified_signals"]}
+        observed = {item["matched_icp_signal"] for item in coverage}
+        complete = len(coverage) == len(expected) and observed == expected and all(
+            item["paragraph_quote"].strip()
+            and item["paragraph_quote"] in document["intent_details"]
+            for item in coverage
+        )
+        checks["verified_signals_covered"] = checks["verified_signals_covered"] and bool(complete)
     except (TypeError, ValueError):
         return {**receipt, "decision": "unavailable", "failure_class": "intent_details_review_unavailable",
                 "failure_reason_code": "malformed_response"}

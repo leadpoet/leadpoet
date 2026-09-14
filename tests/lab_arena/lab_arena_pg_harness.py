@@ -177,7 +177,7 @@ def _local_database(migrations):
     started = False
     try:
         subprocess.run(
-            [str(bindir / "initdb"), "-D", str(datadir), "-U", "postgres", "--auth=trust"],
+            [str(bindir / "initdb"), "-D", str(datadir), "-U", "postgres", "--auth=trust", "--encoding=UTF8"],
             check=True, capture_output=True, text=True, env=env, timeout=120,
         )
         subprocess.run(

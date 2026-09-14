@@ -3692,7 +3692,7 @@ async def openrouter_chat(
         try:
             async with httpx.AsyncClient() as client:
                 payload: Dict[str, Any] = {
-                    "model": f"openai/{model}",
+                    "model": model if "/" in model else f"openai/{model}",
                     "messages": messages,
                     "temperature": 0.3,
                     "max_tokens": max_tokens,

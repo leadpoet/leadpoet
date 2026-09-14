@@ -80,6 +80,19 @@ class IntentDetailsContactHarness(ContactHarness):
             service._config.defaults,
             intent_details_from="2026-01-01T00:00:00Z",
         )
+        original_source = service._config.daily_icp_source
+
+        def two_signal_icps(**kwargs):
+            document = original_source(**kwargs)
+            for icp in document["icps"]:
+                bonus = "Expanded the platform engineering team"
+                icp["intent_signals"].append(bonus)
+                icp["bonus_intents"] = [{"intent_signal": bonus,
+                                         "intent_category": "HIRING",
+                                         "intent_max_age_days": 90}]
+            return document
+
+        service._config.daily_icp_source = two_signal_icps
         return service
 
 
@@ -207,13 +220,15 @@ def _install_contact_sandbox(
                     primary.pop("snippet")
                     company["intent_signals"].append({
                         **primary,
+                        "matched_icp_signal": 1,
                         "description": "Expanded the platform engineering team",
                         "url": primary["url"] + "?evidence=team",
                     })
                     company["intent_details"] = (
                         "The company raised funding and expanded its platform "
-                        "engineering team, so the requested infrastructure "
-                        "purchase is timely."
+                        "engineering team. These activities could increase its "
+                        "capacity to deliver business software, which aligns "
+                        "with the ICP’s operating-platform focus."
                     )
             document = {
                 "schema_version": (
@@ -330,8 +345,14 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
             })
         return 100.0, 100.0, 1.0, 100, False, signal_results
 
-    async def review_provider(*_args, **_kwargs):
-        return json.dumps({name: True for name in intent_details._CHECKS})
+    async def review_provider(prompt, **_kwargs):
+        document = json.loads(prompt)
+        return json.dumps({**{name: True for name in intent_details._CHECKS},
+                           "signal_coverage": [
+                               {"matched_icp_signal": signal["matched_icp_signal"],
+                                "paragraph_quote": document["intent_details"]}
+                               for signal in document["verified_signals"]
+                           ]})
 
     async def verify_contact_provider(
         company, icp, *, source_evidence, classify_role
@@ -403,6 +424,8 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
         assert output["schema_version"] == intent_details_policy.OUTPUT_SCHEMA
         for company in output["companies"]:
             assert len(company["intent_signals"]) == 2
+            assert [signal["matched_icp_signal"] for signal in company["intent_signals"]] == [0, 1]
+            assert "ICP’s" in company["intent_details"]
             assert company["intent_details"].startswith("The company raised")
             assert "fit_summary" not in company
             assert "fit_evidence_urls" not in company

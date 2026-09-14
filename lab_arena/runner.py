@@ -1473,8 +1473,8 @@ class RunnerConfig:
     # Waits between completion retries after a transport or server failure.
     completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
     # Execution and scoring sandboxes can end while their last provider request
-    # is still settling. This fixed 352-second retry-wait budget covers a
-    # 300-second broker call plus 52 seconds of completion grace. The retry
+    # is still settling. This fixed 652-second retry-wait budget covers a
+    # 600-second worker request plus 52 seconds of completion grace. The retry
     # waits and bounded API calls still end before the 20-minute lease expires.
     accounting_open_retry_seconds: Tuple[float, ...] = (
         2.0,
@@ -1483,6 +1483,11 @@ class RunnerConfig:
         20.0,
         30.0,
         45.0,
+        60.0,
+        60.0,
+        60.0,
+        60.0,
+        60.0,
         60.0,
         60.0,
         60.0,

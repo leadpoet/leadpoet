@@ -1979,7 +1979,7 @@ def test_accounting_open_retries_the_original_completion_until_accepted(
         BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
     )
     assert sum(config.accounting_open_retry_seconds) >= rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
-    assert sum(config.accounting_open_retry_seconds) == 352.0
+    assert sum(config.accounting_open_retry_seconds) == 652.0
     assert (
         sum(config.accounting_open_retry_seconds)
         + (len(config.accounting_open_retry_seconds) + 1) * rn.API_TIMEOUT_SECONDS
@@ -2015,7 +2015,7 @@ def test_accounting_open_retries_the_original_completion_until_accepted(
     ],
     ids=("execution", "score"),
 )
-def test_finished_nonempty_output_survives_a_300_second_accounting_settlement(
+def test_finished_nonempty_output_survives_a_600_second_accounting_settlement(
     tmp_path, monkeypatch, output
 ):
     now = [int(datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc).timestamp())]
@@ -2024,7 +2024,7 @@ def test_finished_nonempty_output_survives_a_300_second_accounting_settlement(
     class LateSettlementApi(FakeApi):
         def complete(self, envelope):
             self.completions.append(envelope)
-            if now[0] - start < 301:
+            if now[0] - start < 601:
                 return {"status": "accounting_open", "open_calls": 1}
             return {"status": "accepted"}
 
@@ -2042,15 +2042,14 @@ def test_finished_nonempty_output_survives_a_300_second_accounting_settlement(
     original = completion_envelope(output=output, timestamp=start)
 
     assert runner_._complete_with_retries(original) == {"status": "accepted"}
-    assert sum(sleeps) == 352.0
-    assert len(api.completions) == 11
+    assert sum(sleeps) == 652.0
+    assert len(api.completions) == 16
     assert all(item["request_id"] == original["request_id"] for item in api.completions)
     assert all(item["body"] == original["body"] for item in api.completions)
     assert all(item["body"]["output"] for item in api.completions)
-    assert [item["timestamp"] for item in api.completions] == [start] * 9 + [
-        start + 292,
-        start + 292,
-    ]
+    assert [item["timestamp"] for item in api.completions] == (
+        [start] * 9 + [start + 292] * 5 + [start + 592] * 2
+    )
     assert all(
         verify(item["hotkey"], item["signature"], contracts.signed_request_message(item))
         for item in api.completions
@@ -2083,7 +2082,7 @@ def test_completion_refreshes_a_future_or_past_signature_before_the_attempt(
 
 def test_accounting_open_default_retry_budget_is_fixed(tmp_path, monkeypatch):
     api = CompletionDocumentApi(
-        [], [{"status": "accounting_open", "open_calls": 1}] * 11
+        [], [{"status": "accounting_open", "open_calls": 1}] * 16
     )
     config = make_config(tmp_path, api, BridgingRuntime(calls=0))
     now = [int(config.clock().timestamp())]
@@ -2104,8 +2103,8 @@ def test_accounting_open_default_retry_budget_is_fixed(tmp_path, monkeypatch):
             )
         )
     assert sleeps == list(config.accounting_open_retry_seconds)
-    assert sum(sleeps) == 352.0
-    assert len(api.completion_attempts) == 11
+    assert sum(sleeps) == 652.0
+    assert len(api.completion_attempts) == 16
 
 
 @pytest.mark.parametrize("status", ("accepted", "failed", "stale", "rejected"))

@@ -566,7 +566,7 @@ _PUBLIC_TICKER_STAGE_PROOF_PATTERNS = (
     ),
 )
 _PUBLIC_NON_EQUITY_TICKER_CONTEXT_RE = re.compile(
-    r"\b(?:bond|debt)(?:[- ]only)?\b[^.!?;\n]{0,60}"
+    r"\b(?:bonds?|debt)(?:[- ]only)?\b[\s\S]{0,60}"
     r"\bticker(?:\s*/\s*isin)?\s*:",
     re.I,
 )

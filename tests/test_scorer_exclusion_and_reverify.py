@@ -945,9 +945,11 @@ def test_label_bound_ticker_first_is_public_stage_proof(quote):
         "Ticker: FISV(NASDAQ)/US3377381088",
         "Ticker or ISIN: FISV(NASDAQ)/US3377381088",
         "Bond Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
+        "Bonds Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
         "Company debt Ticker: XYZ28(NASDAQ)",
         "Debt-only Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
         "Company debt-only listing: Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
+        "Bond-only listing. Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
     ],
 )
 def test_label_bound_ticker_first_preserves_public_stage_guards(quote):

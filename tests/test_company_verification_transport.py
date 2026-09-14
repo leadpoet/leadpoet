@@ -7,6 +7,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
+    company_quality_receipt_matches_claim,
     evaluate_company_identity,
 )
 from qualification.scoring.company_verification import (
@@ -318,6 +319,155 @@ def test_homepage_identity_can_follow_large_bounded_style_prefix(monkeypatch):
     assert result.details["identity"]["verified_legal_name_aliases"] == [
         "Example Company Holdings, Inc."
     ]
+
+
+def _academy_company(
+    *,
+    name="Academy Sports + Outdoors",
+    website="https://www.academy.com/",
+    linkedin="https://www.linkedin.com/company/academy-sports-and-outdoors/",
+):
+    return CompanyOutput(
+        company_name=name,
+        company_website=website,
+        company_linkedin=linkedin,
+        industry="Commerce and Shopping",
+        sub_industry="Retail",
+        employee_count="10,001+",
+        company_stage="Public",
+        country="United States",
+        state="Texas",
+        intent_signals=[{
+            "description": "Academy opened new stores.",
+            "source": "company_website",
+            "url": "https://investors.academy.com/news/expansion",
+            "date": "2026-06-01",
+            "snippet": "Academy opened two stores and announced more openings.",
+        }],
+    )
+
+
+def test_verified_root_transport_binds_exact_web_identity_on_child_subdomain(
+    monkeypatch,
+):
+    response = _Response(
+        200,
+        b"<title>Academy Sports + Outdoors</title>",
+        "https://www.academy.com/",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+    homepage = asyncio.run(
+        verify_company_exists(
+            "Academy Sports + Outdoors",
+            "https://www.academy.com/",
+            company_linkedin=(
+                "https://www.linkedin.com/company/academy-sports-and-outdoors/"
+            ),
+            require_https_transport=True,
+        )
+    )
+
+    assert homepage.decision == COMPANY_FIT_UNAVAILABLE
+    assert homepage.details["verified_homepage_transport_domain"] == "academy.com"
+    receipt = _web_identity_receipt(
+        _academy_company(),
+        {
+            "observed_company_name": "Academy Sports + Outdoors",
+            "observed_company_website": "https://corporate.academy.com/",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/academy-sports-and-outdoors/"
+            ),
+        },
+        verified_homepage_transport_domain=(
+            homepage.details["verified_homepage_transport_domain"]
+        ),
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["observed_domain"] == "academy.com"
+    assert receipt["raw_observed_domain"] == "corporate.academy.com"
+    assert receipt["raw_observed_website"] == "https://corporate.academy.com/"
+    assert company_quality_receipt_matches_claim(
+        receipt,
+        _academy_company().model_dump(mode="json"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("company", "observed_name", "observed_website", "observed_linkedin", "transport"),
+    [
+        (
+            _academy_company(),
+            "Different Academy",
+            "https://corporate.academy.com/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.com",
+        ),
+        (
+            _academy_company(),
+            "Academy Sports + Outdoors",
+            "https://corporate.academy.com/",
+            "https://www.linkedin.com/company/different-academy/",
+            "academy.com",
+        ),
+        (
+            _academy_company(),
+            "Academy Sports + Outdoors",
+            "https://corporate.academy.example/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.com",
+        ),
+        (
+            _academy_company(),
+            "Academy Sports + Outdoors",
+            "https://corporate.academy.com.evil.test/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.com",
+        ),
+        (
+            _academy_company(website="https://investors.academy.com/"),
+            "Academy Sports + Outdoors",
+            "https://corporate.academy.com/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.com",
+        ),
+        (
+            _academy_company(website="https://academy.github.io/"),
+            "Academy Sports + Outdoors",
+            "https://corporate.academy.github.io/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.github.io",
+        ),
+        (
+            _academy_company(),
+            "Academy Sports + Outdoors",
+            "https://corporate.academy.com/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "",
+        ),
+    ],
+)
+def test_child_subdomain_bridge_keeps_identity_fail_closed(
+    company,
+    observed_name,
+    observed_website,
+    observed_linkedin,
+    transport,
+):
+    receipt = _web_identity_receipt(
+        company,
+        {
+            "observed_company_name": observed_name,
+            "observed_company_website": observed_website,
+            "observed_company_linkedin": observed_linkedin,
+        },
+        verified_homepage_transport_domain=transport,
+    )
+
+    assert receipt["decision"] != COMPANY_FIT_MATCH
 
 
 def test_homepage_identity_after_body_cap_remains_unavailable(monkeypatch):

@@ -1601,6 +1601,125 @@ def test_industry_prompt_keeps_requested_value_in_an_inert_data_boundary(
     assert '"not publicly traded" proves no stage' in prompt
 
 
+def test_company_fit_accepts_exact_identity_on_verified_root_child_subdomain(
+    monkeypatch,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    company = CompanyOutput(
+        company_name="Academy Sports + Outdoors",
+        company_website="https://www.academy.com/",
+        company_linkedin=(
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/"
+        ),
+        industry="Commerce and Shopping",
+        sub_industry="Retail",
+        employee_count="10,001+",
+        company_stage="Public",
+        country="United States",
+        state="Texas",
+        intent_signals=[{
+            "description": "Academy opened new stores.",
+            "source": "company_website",
+            "url": "https://investors.academy.com/news/expansion",
+            "date": "2026-06-01",
+            "snippet": "Academy opened two stores and announced more openings.",
+        }],
+    )
+    icp = ICPPrompt(
+        icp_id="retail",
+        prompt="retail",
+        industry="Commerce and Shopping",
+        sub_industry="Multi-brand retail and e-commerce",
+        employee_count=(
+            "201-500|501-1,000|1,001-5,000|5,001-10,000|10,001+"
+        ),
+        company_stage="Public",
+        geography="United States",
+        country="United States",
+        product_service="consumer retail",
+        required_attribute="active retail expansion",
+    )
+    verdict = {
+        "observed_company_name": "Academy Sports + Outdoors",
+        "observed_company_website": "https://corporate.academy.com/",
+        "observed_company_linkedin": (
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/"
+        ),
+        "observed_employee_count": "10,001+",
+        "employee_size_matches": True,
+        "employee_size_evidence_url": "https://corporate.academy.com/about",
+        "employee_size_evidence_quote": "Company size 10,001+ employees.",
+        "observed_industry": "Commerce and Shopping",
+        "observed_subindustry": "Retail",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_url": "https://corporate.academy.com/about",
+        "industry_evidence_quote": "Academy is a consumer retail company.",
+        "observed_hq_country": "United States",
+        "observed_hq_state": "Texas",
+        "geography_matches": True,
+        "geography_evidence_url": "https://corporate.academy.com/locations",
+        "geography_evidence_quote": "Corporate headquarters are in Katy, Texas.",
+        "observed_company_stage": "Public",
+        "stage_matches": True,
+        "stage_evidence_url": "https://investors.academy.com/financials",
+        "stage_evidence_quote": "Academy Sports + Outdoors (Nasdaq: ASO).",
+        "attribute_satisfied": True,
+        "required_attribute_evidence_url": (
+            "https://investors.academy.com/news/expansion"
+        ),
+        "required_attribute_evidence_quote": (
+            "Academy opened two new stores and announced nine more openings."
+        ),
+        "reason": "Independent company sources support every dimension.",
+    }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable(
+            "homepage identity evidence unavailable: LinkedIn company binding not found",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_UNAVAILABLE,
+                    "evidence_source": "company_homepage",
+                },
+                "actual_final_url": "https://www.academy.com/",
+                "verified_homepage_transport_domain": "academy.com",
+            },
+        )
+
+    async def provider(**_kwargs):
+        return copy.deepcopy(verdict), ""
+
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    result = asyncio.run(
+        _verify_company_fit(
+            company,
+            icp,
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+
+    # The identity false negative is repaired, but the saved weak Public-stage
+    # citation remains unavailable and still keeps this row at zero.
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    identity = result.details["dimension_evidence"]["identity"]
+    assert identity["homepage_identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert identity["web_identity_receipt"]["observed_domain"] == "academy.com"
+    assert identity["web_identity_receipt"]["raw_observed_domain"] == (
+        "corporate.academy.com"
+    )
+    assert result.details["company_fit_dimensions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+
+
 @pytest.mark.parametrize(
     ("body", "expected_verdict", "expected_diagnostic"),
     [

@@ -514,10 +514,20 @@ def _identity_result(
     *,
     actual_final_url: str = "",
     source_fetch_failed: bool = False,
+    verified_homepage_transport_domain: str = "",
 ) -> CompanyFitDecisionResult:
     details = {
         "identity": dict(receipt),
         "actual_final_url": str(actual_final_url or ""),
+        **(
+            {
+                "verified_homepage_transport_domain": (
+                    verified_homepage_transport_domain
+                )
+            }
+            if verified_homepage_transport_domain
+            else {}
+        ),
         **({"failure_reason_code": "source_blocked"} if source_fetch_failed else {}),
     }
     if receipt["decision"] == "match":
@@ -688,6 +698,7 @@ async def verify_company_exists(
             submitted_identity,
             "homepage identity evidence unavailable: company name metadata not found",
             actual_final_url=observed_url,
+            verified_homepage_transport_domain=domain,
         )
     observed_linkedins = _homepage_company_linkedin_urls(text)
     if not observed_linkedins:
@@ -695,6 +706,7 @@ async def verify_company_exists(
             submitted_identity,
             "homepage identity evidence unavailable: LinkedIn company binding not found",
             actual_final_url=observed_url,
+            verified_homepage_transport_domain=domain,
         )
     identity_receipts = [
         evaluate_company_identity(
@@ -753,6 +765,7 @@ async def verify_company_exists(
             "homepage identity evidence unavailable: page metadata and links "
             "do not prove the submitted identity",
             actual_final_url=observed_url,
+            verified_homepage_transport_domain=domain,
         )
     unavailable = next(
         (receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"),
@@ -763,9 +776,11 @@ async def verify_company_exists(
             unavailable,
             "homepage identity evidence unavailable: complete identity not proven",
             actual_final_url=observed_url,
+            verified_homepage_transport_domain=domain,
         )
     return _identity_result(
         submitted_identity,
         "homepage identity evidence unavailable: complete identity not proven",
         actual_final_url=observed_url,
+        verified_homepage_transport_domain=domain,
     )

@@ -100,6 +100,11 @@ from qualification.scoring.arena_integrity import (
 from qualification.scoring.competition import (
     intent_unavailability_requires_retry,
 )
+from leadpoet_verifier.identity.normalization import (
+    NormalizationError,
+    is_label_subdomain,
+    normalize_host,
+)
 from qualification.scoring.linkedin_company_size import (
     CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
     MALFORMED_RESPONSE_FAILURE_REASON,
@@ -1233,6 +1238,7 @@ def _web_identity_receipt(
     verdict: Mapping[str, Any],
     *,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    verified_homepage_transport_domain: str = "",
     company_quality: bool = False,
 ) -> dict[str, Any]:
     """Bind the independently observed web identity to the submitted company."""
@@ -1293,6 +1299,46 @@ def _web_identity_receipt(
                 evidence_source="company_homepage",
                 company_quality=company_quality,
             )
+    if (
+        receipt.get("decision") == COMPANY_FIT_MISMATCH
+        and receipt.get("reason_code") == "identity_mismatch"
+        and receipt.get("submitted_name") == receipt.get("observed_name")
+        and receipt.get("submitted_linkedin_slug")
+        and receipt.get("submitted_linkedin_slug")
+        == receipt.get("observed_linkedin_slug")
+        and isinstance(verified_homepage_transport_domain, str)
+        and verified_homepage_transport_domain
+        == receipt.get("submitted_domain")
+    ):
+        try:
+            submitted_domain = normalize_host(receipt["submitted_domain"])
+            observed_domain = normalize_host(receipt["observed_domain"])
+        except (NormalizationError, TypeError):
+            pass
+        else:
+            if (
+                not submitted_domain.is_private_suffix
+                and submitted_domain.ascii_host
+                == submitted_domain.registrable_domain
+                == verified_homepage_transport_domain
+                and observed_domain.registrable_domain
+                == submitted_domain.registrable_domain
+                and is_label_subdomain(
+                    observed_domain.ascii_host,
+                    submitted_domain.ascii_host,
+                )
+            ):
+                receipt.update(
+                    decision=COMPANY_FIT_MATCH,
+                    reason_code="verifier_accepted",
+                    raw_observed_domain=observed_domain.ascii_host,
+                    observed_domain=submitted_domain.ascii_host,
+                    verified_homepage_transport_domain=(
+                        verified_homepage_transport_domain
+                    ),
+                    raw_observed_website=observed_values["website"],
+                )
+                return receipt
     if (
         company_quality
         and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
@@ -1777,6 +1823,7 @@ def _reverify_decision(
     icp: Optional[ICPPrompt] = None,
     company: Optional[CompanyOutput] = None,
     verified_homepage_identity: Optional[Mapping[str, str]] = None,
+    verified_homepage_transport_domain: str = "",
     structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
     company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
@@ -1797,6 +1844,9 @@ def _reverify_decision(
             company,
             verdict,
             verified_homepage_identity=verified_homepage_identity,
+            verified_homepage_transport_domain=(
+                verified_homepage_transport_domain
+            ),
             company_quality=company_quality,
         )
         identity_decision = str(identity_receipt.get("decision") or "")
@@ -2418,6 +2468,20 @@ async def _llm_reverify_company(
     verified_identity = _verified_homepage_identity_anchor(
         verified_homepage_identity
     )
+    verified_transport_domain = str(
+        verified_identity.get("registrable_dns_domain") or ""
+    )
+    if verified_homepage_identity is not None:
+        details = (
+            verified_homepage_identity.details
+            if isinstance(verified_homepage_identity.details, Mapping)
+            else {}
+        )
+        candidate_transport_domain = details.get(
+            "verified_homepage_transport_domain"
+        )
+        if isinstance(candidate_transport_domain, str):
+            verified_transport_domain = candidate_transport_domain
     current_profile_cache: dict[str, Any] = {}
     verified_identity_context = ""
     if verified_identity:
@@ -2507,6 +2571,7 @@ async def _llm_reverify_company(
         icp=icp if require_company_fit_dimensions else None,
         company=company,
         verified_homepage_identity=verified_identity,
+        verified_homepage_transport_domain=verified_transport_domain,
         structured_employee_size_evidence=current_profile_cache.get(
             "structured_evidence"
         ),
@@ -2613,6 +2678,7 @@ async def _llm_reverify_company(
         icp=icp if require_company_fit_dimensions else None,
         company=company,
         verified_homepage_identity=verified_identity,
+        verified_homepage_transport_domain=verified_transport_domain,
         structured_employee_size_evidence=current_profile_cache.get(
             "structured_evidence"
         ),
@@ -2935,7 +3001,7 @@ async def _verify_company_fit(
         icp,
         require_company_fit_dimensions=True,
         verified_homepage_identity=(
-            identity if identity.decision == COMPANY_FIT_MATCH else None
+            identity
         ),
         company_quality=company_quality,
     )

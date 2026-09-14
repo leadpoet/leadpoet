@@ -37,7 +37,7 @@ setup(
     url="https://github.com/leadpoet/leadpoet",  
     author="Leadpoet",  
     author_email="hello@leadpoet.com",  
-    license="MIT",
+    license="AGPL-3.0-only",
     packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*', 'leadpoet_audit', 'leadpoet_audit.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*', 'leadpoet_verifier', 'leadpoet_verifier.*', 'research_lab', 'research_lab.*', 'leadpoet_observability', 'leadpoet_observability.*', 'lab_arena', 'lab_arena.*', 'validator_tee', 'validator_tee.enclave']) + ['leadpoet_canonical.config'],
     # Ship the existing public mapping as package data, without a second copy
     # in the source tree or a change to deployment's config/ path.
@@ -70,7 +70,7 @@ setup(
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
         "Topic :: Software Development :: Libraries :: Python Modules",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: GNU Affero General Public License v3",
         "Programming Language :: Python :: 3 :: Only",
         "Programming Language :: Python :: 3.11",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",

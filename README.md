@@ -213,4 +213,9 @@ execution. The normal `--check-only` command verifies wallet and chain readiness
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Copyright (c) 2025 Leadpoet.
+
+Licensed under the GNU Affero General Public License, version 3 only
+(`AGPL-3.0-only`). See [LICENSE](LICENSE).
+
+Inherited third-party code retains its original copyright and license notices.

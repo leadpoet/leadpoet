@@ -22,7 +22,7 @@ Usage:
     # $ leadpoet-audit report 100
 
 Author: LeadPoet Team
-License: MIT
+License: AGPL-3.0-only
 """
 
 __version__ = "1.0.0"

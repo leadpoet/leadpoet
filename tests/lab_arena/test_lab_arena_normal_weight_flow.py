@@ -31,7 +31,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
     LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
-    POSTGREST_MIGRATIONS,
+    CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
@@ -211,7 +211,7 @@ def integrated_database():
                 LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
                 LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
             )
-            for migration in POSTGREST_MIGRATIONS:
+            for migration in CURRENT_SERVICE_MIGRATIONS:
                 if migration not in applied_migrations:
                     cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute(

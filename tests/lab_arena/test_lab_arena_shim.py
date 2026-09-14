@@ -483,7 +483,14 @@ def test_company_verification_routed_failure_stays_explicit_and_bounded(
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.passed is False
     assert result.reason == "website returned HTTP 502"
-    assert len(transport.sent) == 1
+    # One paid request is followed only by bounded, read-only billing lookups.
+    assert [call["method"] for call in transport.sent] == ["POST", "GET", "GET", "GET"]
+    assert all(
+        call["url"].startswith(br.DEEPLINE_BILLING_LEDGER_URL + "?")
+        and call["body"] == b""
+        and 0 < call["timeout"] <= 5.0
+        for call in transport.sent[1:]
+    )
     assert 59.0 <= transport.sent[0]["timeout"] <= 60.0
     assert ledger.log == ["reserve", "dispatch", "uncertain"]
 

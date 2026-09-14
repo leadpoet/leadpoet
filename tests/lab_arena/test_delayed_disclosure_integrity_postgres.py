@@ -9,22 +9,16 @@ from lab_arena import contracts, icp_disclosure, integrity, service as svc, veri
 from lab_arena.promotion import GitPromoter
 from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
-from tests.lab_arena.test_integrity_round import IntegrityHarness, MIGRATIONS
+from tests.lab_arena.lab_arena_pg_harness import (
+    CURRENT_SERVICE_MIGRATIONS,
+    database_with_lab_arena_migration,
+)
+from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(
-        MIGRATIONS
-        + (
-            "223-lab-arena-cancelled-call-late-settlement.sql",
-            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
-            "227-lab-arena-champion-funding.sql",
-            "229-lab-arena-successful-call-cost-eligibility.sql",
-            "230-lab-arena-successful-call-cost-permissions.sql",
-        )
-    )
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
 def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(

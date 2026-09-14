@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from lab_arena import contracts, runner as rn, runtime, scoring
 from lab_arena.api import create_app
 from tests.lab_arena.lab_arena_pg_harness import (
-    POSTGREST_MIGRATIONS,
+    CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
@@ -29,7 +29,7 @@ from tests.lab_arena.test_lab_arena_service_round import (
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS)
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
 def _http_runner(

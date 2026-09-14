@@ -2308,29 +2308,33 @@ def test_a_validator_that_dies_mid_scoring_loses_its_lease_and_another_validator
     participants = _start_round(harness, day=12, epoch=30300)
     round_id = harness.round_id
     _run_stage_one_to_scoring(harness, participants, runners=2)
+    expected_abandoned = participants
 
     class DyingApi(InProcessApi):
-        """The validator process dies after judging: three scoring completions never reach the Arena, however often retried."""
+        """The validator process dies after judging once for each submission."""
 
         dead_runs: set = set()
 
         def complete(self, envelope):
             body = envelope["body"]
             scoring_result = (body.get("output") or {}).get("schema_version") == "leadpoet.lab_arena.scoring_output.v1"
-            if scoring_result and (body["run_id"] in DyingApi.dead_runs or len(DyingApi.dead_runs) < 3):
+            if scoring_result and (
+                body["run_id"] in DyingApi.dead_runs
+                or len(DyingApi.dead_runs) < expected_abandoned
+            ):
                 DyingApi.dead_runs.add(body["run_id"])
                 raise RuntimeError("validator died before completing")
             return super().complete(envelope)
 
     harness.api_factory = lambda: DyingApi(harness.service)
     dying = harness.runner(0)
-    dying.run_once()  # claims up to four scoring leases; three completions are lost with the process
+    dying.run_once()  # claims up to four scoring leases; one per submission is lost
     dying.close()
     harness.api_factory = None
-    assert dying.abandoned == 3
+    assert dying.abandoned == expected_abandoned
     score_runs = service.store.list_runs(round_id, stage=1, kind="score")
     open_runs = [run for run in score_runs if run["status"] not in ("pending", "accepted", "failed")]
-    assert len(open_runs) == 3 and all(run["runner_hotkey"] == harness.runner_keys[0] for run in open_runs), sorted((run["run_id"][-14:], run["status"], run["terminal_cause"], run["runner_hotkey"] == harness.runner_keys[0]) for run in score_runs)
+    assert len(open_runs) == expected_abandoned and all(run["runner_hotkey"] == harness.runner_keys[0] for run in open_runs), sorted((run["run_id"][-14:], run["status"], run["terminal_cause"], run["runner_hotkey"] == harness.runner_keys[0]) for run in score_runs)
     # Leases expire on the database clock: age the dead validator's leases past their TTL.
     with connect() as connection:
         with connection.cursor() as cursor:
@@ -2341,7 +2345,7 @@ def test_a_validator_that_dies_mid_scoring_loses_its_lease_and_another_validator
     runs = service.store.list_runs(round_id, stage=1, kind="score")
     expired = [run for run in runs if run["terminal_cause"] == "lease_expired"]
     retries = [run for run in runs if run["status"] == "pending" and run["attempt"] == 2]
-    assert len(expired) == 3 and len(retries) == 3 and {run["assignment_id"] for run in retries} == {run["assignment_id"] for run in expired}
+    assert len(expired) == expected_abandoned and len(retries) == expected_abandoned and {run["assignment_id"] for run in retries} == {run["assignment_id"] for run in expired}
     harness.advance_until("scored", runners=2)
     accepted = [run for run in service.store.list_runs(round_id, stage=1, kind="score") if run["status"] == "accepted"]
     assert len(accepted) == contracts.STAGE_1_ICP_COUNT * participants
@@ -2354,7 +2358,7 @@ def test_a_validator_that_dies_mid_scoring_loses_its_lease_and_another_validator
         for run in service.store.list_runs(round_id, stage=1, kind="execute")
         if run["run_id"] in retried_execution_ids
     ]
-    assert len(retried_execution_runs) == 3
+    assert len(retried_execution_runs) == expected_abandoned
     assert all(float(run["per_icp_score"]) > 0.0 for run in retried_execution_runs)
 
 

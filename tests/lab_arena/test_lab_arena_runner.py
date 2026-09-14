@@ -1182,6 +1182,7 @@ def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, tra
 
     elapsed = [0.0]
     monkeypatch.setattr(br, "time", SimpleNamespace(
+        time=lambda: elapsed[0],
         monotonic=lambda: elapsed[0],
         sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
     ))

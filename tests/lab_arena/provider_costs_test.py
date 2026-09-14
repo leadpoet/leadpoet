@@ -277,7 +277,11 @@ def test_deepline_history_matches_exact_charge_group_alias():
     assert has_more is False and next_offset is None
 
 
-def test_deepline_history_ignores_large_unrelated_group_before_exact_free_entry():
+@pytest.mark.parametrize(("charge_state", "credits", "expected_microusd"), [("free", 0, 0), ("posted", 0.2, 20_000)])
+@pytest.mark.parametrize("exact_first", [False, True])
+def test_deepline_history_accepts_exact_charge_beside_large_unrelated_group(
+    charge_state, credits, expected_microusd, exact_first
+):
     unrelated = {
         "request_id": "internal-unrelated",
         "operation": "exa_search",
@@ -292,17 +296,17 @@ def test_deepline_history_ignores_large_unrelated_group_before_exact_free_entry(
         "request_id": "wrapper-job",
         "operation": "exa_search",
         "provider": "exa",
-        "charge_state": "free",
-        "credits": 0,
+        "charge_state": charge_state,
+        "credits": credits,
     }
 
     state, cost, has_more, next_offset = deepline_billing_history_cost(
-        {"recent": {"entries": [unrelated, exact]}},
+        {"recent": {"entries": [exact, unrelated] if exact_first else [unrelated, exact]}},
         request_id="wrapper-job",
         operation="exa_search",
     )
 
-    assert state == "matched" and cost is not None and cost.microusd == 0
+    assert state == "matched" and cost is not None and cost.microusd == expected_microusd
     assert has_more is False and next_offset is None
 
 

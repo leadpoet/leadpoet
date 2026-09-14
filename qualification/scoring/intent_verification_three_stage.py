@@ -59,6 +59,7 @@ the caller in lead_scorer.py can swap between them via env flag.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -660,6 +661,9 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
             ):
                 history[-1] = (f"attempt_{attempt}", "posting_invalid")
                 continue
+            # Greenhouse returns HTML-escaped posting content. Decode its text
+            # before extraction and the existing job-body checks.
+            description = html.unescape(description)
             try:
                 from qualification.scoring.verification_helpers import (
                     extract_article_body,

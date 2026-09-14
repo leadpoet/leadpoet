@@ -479,9 +479,9 @@ class IntentSignal(BaseModel):
          phrases ("ignore previous instructions", ChatML control tokens,
          direct score steering, role-hijacking lines, etc.).  Any match
          raises a ``ValueError``, which causes the parent model to fail
-         validation. Length caps match the Arena output contract's
-         4,096-byte string boundary; Arena validates that byte boundary before
-         this shared model is constructed.
+         validation. This shared model accepts up to 4,096 characters; Arena
+         enforces its tighter 4,096-byte string boundary before constructing
+         the shared model.
 
       2. **LLM-call defenses** (in ``qualification/scoring/verification_helpers.py``
          and ``lead_scorer.py``): system/user message separation, neutral

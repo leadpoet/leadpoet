@@ -1625,6 +1625,80 @@ def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
     return dict(expected)
 
 
+_EXA_TARGET_CRAWL_FAILURES = {
+    ("CRAWL_LIVECRAWL_TIMEOUT", 504),
+    ("CRAWL_UNKNOWN_ERROR", 500),
+}
+
+
+def _exa_target_crawl_failure_receipt(
+    document: Mapping[str, Any], requested_url: str
+) -> Optional[Dict[str, Any]]:
+    """Bind one HTTP-200 Exa crawl failure to the exact requested URL."""
+
+    results = document.get("results")
+    statuses = document.get("statuses")
+    if (
+        not isinstance(requested_url, str)
+        or not requested_url
+        or not isinstance(results, list)
+        or results
+        or not isinstance(statuses, list)
+        or len(statuses) != 1
+    ):
+        return None
+    status = statuses[0]
+    if not isinstance(status, Mapping) or set(status) != {"id", "status", "error"}:
+        return None
+    error = status.get("error")
+    tag = error.get("tag") if isinstance(error, Mapping) else None
+    http_status = error.get("httpStatusCode") if isinstance(error, Mapping) else None
+    if (
+        status.get("id") != requested_url
+        or status.get("status") != "error"
+        or not isinstance(tag, str)
+        or type(http_status) is not int
+        or (tag, http_status) not in _EXA_TARGET_CRAWL_FAILURES
+    ):
+        return None
+    return {"error_tag": tag, "error_http_status": http_status}
+
+
+def _canonical_target_crawl_failure_receipt(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "id_matches_requested_url", "confirmed_attempts", "observations"
+    }:
+        return None
+    observations = value.get("observations")
+    if (
+        value.get("id_matches_requested_url") is not True
+        or type(value.get("confirmed_attempts")) is not int
+        or value.get("confirmed_attempts") != 2
+        or not isinstance(observations, list)
+        or len(observations) != 2
+    ):
+        return None
+    copied = []
+    for observation in observations:
+        if not isinstance(observation, Mapping) or set(observation) != {
+            "error_tag", "error_http_status"
+        }:
+            return None
+        pair = (observation.get("error_tag"), observation.get("error_http_status"))
+        if (
+            not isinstance(pair[0], str)
+            or type(pair[1]) is not int
+            or pair not in _EXA_TARGET_CRAWL_FAILURES
+        ):
+            return None
+        copied.append(dict(observation))
+    return {
+        "id_matches_requested_url": True,
+        "confirmed_attempts": 2,
+        "observations": copied,
+    }
+
+
 async def _scrape_exa(url: str) -> Dict[str, Any]:
     """Exa Contents API fallback for URLs Scrapingdog cannot crack."""
     api_key = os.environ.get("EXA_API_KEY")
@@ -1635,6 +1709,7 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                "maxAgeHours": 0}
     last_error = "not attempted"
     first_target_absence = None
+    first_target_crawl_failure = None
     async with httpx.AsyncClient() as cli:
         for attempt in range(2):
             try:
@@ -1647,6 +1722,7 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                     data = r.json()
                     results = data.get("results") or []
                     target_absence = None
+                    target_crawl_failure = None
                     if results:
                         result = results[0]
                         text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
@@ -1664,6 +1740,9 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                         terminal_stage = "exa_thin"
                     else:
                         target_absence = _exa_target_absence_receipt(data, url)
+                        target_crawl_failure = _exa_target_crawl_failure_receipt(
+                            data, url
+                        )
                         if target_absence is not None:
                             last_error = "target_not_found"
                             terminal_stage = "exa_target_not_found"
@@ -1678,6 +1757,7 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                     # receipt as a persistent source-absence observation.
                     if attempt == 0:
                         first_target_absence = target_absence
+                        first_target_crawl_failure = target_crawl_failure
                         await asyncio.sleep(0.25)
                         continue
                     failure = {
@@ -1699,6 +1779,18 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                             "stage": "exa_target_not_found_unconfirmed",
                             "error": "mixed_fetch_results",
                         })
+                    elif (
+                        target_crawl_failure is not None
+                        and first_target_crawl_failure is not None
+                    ):
+                        failure["target_crawl_failure"] = {
+                            "id_matches_requested_url": True,
+                            "confirmed_attempts": 2,
+                            "observations": [
+                                first_target_crawl_failure,
+                                target_crawl_failure,
+                            ],
+                        }
                     return failure
                 last_error = f"HTTP {r.status_code}"
                 # Retry only transient transport/rate-limit responses. A 4xx
@@ -2127,6 +2219,11 @@ def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
                 ),
                 "exa_target_absence": target_absence,
             })
+        target_crawl_failure = _canonical_target_crawl_failure_receipt(
+            item.get("exa_target_crawl_failure")
+        )
+        if target_crawl_failure is not None:
+            projected_status["exa_target_crawl_failure"] = target_crawl_failure
         statuses.append(projected_status)
     return {"results": results, "statuses": statuses}
 
@@ -2556,6 +2653,11 @@ async def _fetch_sd_then_exa(
             )
             if target_absence is not None:
                 status["exa_target_absence"] = target_absence
+            target_crawl_failure = _canonical_target_crawl_failure_receipt(
+                exa.get("target_crawl_failure")
+            )
+            if target_crawl_failure is not None:
+                status["exa_target_crawl_failure"] = target_crawl_failure
             statuses.append(status)
     return {"results": results, "statuses": statuses}
 

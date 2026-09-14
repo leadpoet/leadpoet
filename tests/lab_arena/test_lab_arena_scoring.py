@@ -862,6 +862,137 @@ def test_retry_exhaustion_isolates_source_blocked_company_and_keeps_success():
     ]
 
 
+def _exact_target_crawl_failure_breakdown(statuses):
+    row = breakdown(
+        0.0, "Intent verification unavailable: verifier provider error"
+    )
+    row["intent_signals_detail"] = [{
+        "matched_icp_signal": 0,
+        "after_decay": 0.0,
+        "judge_verdict": {
+            "decision": "rejected_verifier_error",
+            "pipeline_decision": "unavailable",
+            "rejection_reason": "evidence_fetch_failed",
+            "verification_trace": {"provider_attempts": statuses},
+        },
+    }]
+    return row
+
+
+def _exact_target_crawl_failure_status():
+    return {
+        "url": "https://failed.example/evidence",
+        "source": "none",
+        "stage": "",
+        "sd_stage": "all_tiers_exhausted:http_502",
+        "exa_stage": "exa_no_results",
+        "exa_target_crawl_failure": {
+            "id_matches_requested_url": True,
+            "confirmed_attempts": 2,
+            "observations": [
+                {"error_tag": "CRAWL_LIVECRAWL_TIMEOUT", "error_http_status": 504},
+                {"error_tag": "CRAWL_UNKNOWN_ERROR", "error_http_status": 500},
+            ],
+        },
+    }
+
+
+def test_exact_target_crawl_exhaustion_isolates_one_company_after_three_retries():
+    companies = [scored_company(0), scored_company(1), scored_company(2)]
+    unavailable = _exact_target_crawl_failure_breakdown([
+        {
+            "url": "https://healthy.example/evidence",
+            "source": "exa_fallback",
+            "stage": "exa_scraped",
+            "sd_stage": "all_tiers_exhausted:http_502",
+        },
+        _exact_target_crawl_failure_status(),
+    ])
+    calls = []
+
+    def scorer(batch, _icp, _is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        return (
+            [breakdown(91.0), breakdown(72.0), unavailable]
+            if len(calls) == 1
+            else [unavailable]
+        )
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-exact-target-crawl-exhaustion"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1", "Scored Co 2"],
+        ["Scored Co 2"],
+        ["Scored Co 2"],
+    ]
+    assert [row["final_score"] for row in result] == [91.0, 72.0, 0.0]
+    assert result[2]["verifier_gate_receipts"][-1] == {
+        "gate": "intent_verification",
+        "decision": "unavailable",
+        "failure_class": "company_verification_exhausted",
+    }
+    from qualification.scoring.competition import count_penalizable_false_positives
+    assert count_penalizable_false_positives(
+        result, icp_has_intent_signals=True
+    ) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"exa_target_crawl_failure": None},
+        {"sd_stage": "all_tiers_exhausted:http_429"},
+        {"exa_stage": "exa_transient_exhausted"},
+        {"source": "unknown"},
+    ],
+)
+def test_unproven_target_crawl_failure_remains_systemic(mutation):
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+    )
+
+    status = {**_exact_target_crawl_failure_status(), **mutation}
+    row = _exact_target_crawl_failure_breakdown([status])
+    assert not scorer_breakdown_has_company_local_verification_failure(row)
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "run-unproven-target-crawl-failure"},
+            icp=_ICPS[0],
+            companies=[scored_company(0)],
+            scorer=lambda *_args: [row],
+            max_retries=3,
+        )
+
+
+def test_exact_target_crawl_receipt_does_not_mask_stage3_llm_error():
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+    )
+
+    row = _exact_target_crawl_failure_breakdown([
+        _exact_target_crawl_failure_status()
+    ])
+    row["intent_signals_detail"][0]["judge_verdict"]["rejection_reason"] = (
+        "stage3_llm_error"
+    )
+
+    assert not scorer_breakdown_has_company_local_verification_failure(row)
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "run-target-crawl-with-llm-error"},
+            icp=_ICPS[0],
+            companies=[scored_company(0)],
+            scorer=lambda *_args: [row],
+            max_retries=3,
+        )
+
+
 def test_source_blocked_does_not_mask_systemic_receipt_or_final_exception():
     from qualification.scoring.competition import (
         terminal_company_verification_breakdown,

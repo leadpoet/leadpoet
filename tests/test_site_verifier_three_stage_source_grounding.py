@@ -10,8 +10,11 @@ import httpx
 from qualification.scoring.intent_verification_three_stage import (
     _apply_guardrails,
     _canonical_target_absence_receipt,
+    _canonical_target_crawl_failure_receipt,
     _exa_target_absence_receipt,
+    _exa_target_crawl_failure_receipt,
     _fetch_sd_then_exa,
+    _project_contents_for_prompt,
     _rescue_medium_with_corroboration,
     _scrape_exa,
     _scrape_sd_hardened,
@@ -317,6 +320,106 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 "confirmed_attempts": 2,
             },
         })
+
+    async def test_exa_preserves_two_exact_target_crawl_failures(self):
+        url = "https://news.example/acme-funding"
+        documents = [
+            {
+                "results": [],
+                "statuses": [{
+                    "id": url, "status": "error",
+                    "error": {
+                        "tag": "CRAWL_LIVECRAWL_TIMEOUT",
+                        "httpStatusCode": 504,
+                    },
+                }],
+            },
+            {
+                "results": [],
+                "statuses": [{
+                    "id": url, "status": "error",
+                    "error": {
+                        "tag": "CRAWL_UNKNOWN_ERROR",
+                        "httpStatusCode": 500,
+                    },
+                }],
+            },
+        ]
+        result, calls = await self._scrape_exa_outcomes(
+            url, [(200, document) for document in documents]
+        )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["stage"], "exa_no_results")
+        self.assertEqual(result["target_crawl_failure"], {
+            "id_matches_requested_url": True,
+            "confirmed_attempts": 2,
+            "observations": [
+                {"error_tag": "CRAWL_LIVECRAWL_TIMEOUT", "error_http_status": 504},
+                {"error_tag": "CRAWL_UNKNOWN_ERROR", "error_http_status": 500},
+            ],
+        })
+        projected = _project_contents_for_prompt({
+            "results": [],
+            "statuses": [{
+                "url": url,
+                "source": "none",
+                "sd_stage": "all_tiers_exhausted:http_502",
+                "exa_stage": "exa_no_results",
+                "exa_error": "private provider detail",
+                "exa_target_crawl_failure": result["target_crawl_failure"],
+            }],
+        })
+        self.assertEqual(
+            projected["statuses"][0]["exa_target_crawl_failure"],
+            result["target_crawl_failure"],
+        )
+        self.assertNotIn("exa_error", projected["statuses"][0])
+
+    async def test_exa_endpoint_500_has_no_target_crawl_failure_receipt(self):
+        result, calls = await self._scrape_exa_outcomes(
+            "https://news.example/acme-funding",
+            [(500, {}), (500, {})],
+        )
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["stage"], "exa_transient_exhausted")
+        self.assertNotIn("target_crawl_failure", result)
+
+    def test_exa_target_crawl_failure_receipt_is_strict(self):
+        url = "https://news.example/acme-funding"
+        exact = {
+            "results": [],
+            "statuses": [{
+                "id": url, "status": "error",
+                "error": {
+                    "tag": "CRAWL_LIVECRAWL_TIMEOUT",
+                    "httpStatusCode": 504,
+                },
+            }],
+        }
+        self.assertEqual(
+            _exa_target_crawl_failure_receipt(exact, url),
+            {"error_tag": "CRAWL_LIVECRAWL_TIMEOUT", "error_http_status": 504},
+        )
+        for document in (
+            {**exact, "statuses": [{**exact["statuses"][0], "id": url + "/other"}]},
+            {**exact, "statuses": [{**exact["statuses"][0], "error": {
+                "tag": "CRAWL_LIVECRAWL_TIMEOUT", "httpStatusCode": 429,
+            }}]},
+            {**exact, "statuses": [{**exact["statuses"][0], "error": {
+                "tag": ["CRAWL_LIVECRAWL_TIMEOUT"], "httpStatusCode": 504,
+            }}]},
+            {"results": [], "statuses": [{"status": "error"}]},
+        ):
+            self.assertIsNone(_exa_target_crawl_failure_receipt(document, url))
+        self.assertIsNone(_canonical_target_crawl_failure_receipt({
+            "id_matches_requested_url": True,
+            "confirmed_attempts": 2,
+            "observations": [{
+                "error_tag": "CRAWL_LIVECRAWL_TIMEOUT",
+                "error_http_status": 504,
+            }],
+        }))
 
     def test_exa_target_not_found_receipt_is_strict(self):
         url = "https://news.example/acme-funding"

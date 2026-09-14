@@ -44,12 +44,27 @@ Accepted judgments carry original company indexes, canonical identity keys,
 duplicate flags, and qualification flags. The persisted qualification receipt
 is immutable with its per-ICP score.
 
-The sourcing allowance is the smaller of the fixed execution cap and the
-per-company allowance multiplied by unique qualified company slots. Count
-qualification separately for each ICP. Ignored, duplicate, irrelevant, excess,
-or failed companies add no allowance. Actual execution spend across retries
-continues to count. Judge spend is reported separately. Inflight or uncertain
-provider charges do not establish eligibility.
+Baseline and miner submissions share the same $80 total sourcing budget during
+execution. The provider reservation path checks this budget across all ICPs,
+providers, and attempts. Retries do not reset spending. There is no separate
+per-ICP or per-company runtime spending cap. Provider charges above an estimate
+remain recorded in full; the budget guard refuses further paid calls when the
+remaining allowance is exhausted.
+
+Under the frozen `successful_calls_v1` policy, promotion cost eligibility is
+checked after scoring: successful sourcing spend must be at most the smaller
+of $80 and $0.80 multiplied by all verified, qualified company/contact pairs
+across the submission. Qualification is counted within each ICP and then
+summed. Ignored, duplicate, irrelevant, excess, or failed companies add no
+allowance. Historical rounds retain their frozen qualification and cost rules.
+
+Successful paid calls count even when they return no useful leads, including
+calls from failed execution attempts. Charged failed provider calls remain in
+actual spending and runtime budget accounting but do not enter this final
+successful-call allowance. Judge spend is reported separately. Calls still in
+flight, or unresolved charges for successful sourcing calls, prevent cost
+eligibility. A failed cost check leaves the quality score unchanged and prevents
+challenger promotion; the baseline remains the score reference.
 
 ## Inputs, admission, and repeated judgments
 

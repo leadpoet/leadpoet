@@ -26,6 +26,13 @@ def drive_once(service) -> str:
         activated = int(rewards.get("activated") or 0)
         if activated:
             parts.append("activated rewards %d" % activated)
+    try:
+        billing = service.reconcile_closed_provider_costs()
+    except Exception as exc:
+        parts.append("failed closed_provider_costs: %s" % type(exc).__name__)
+    else:
+        if billing.get("status") == "settled":
+            parts.append("reconciled closed provider cost")
     return "; ".join(parts) if parts else "idle"
 
 

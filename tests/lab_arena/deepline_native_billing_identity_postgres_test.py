@@ -48,7 +48,7 @@ def test_native_migration_is_repeatable_and_private(database):
 
 
 @pytest.mark.parametrize("native", [True, False])
-def test_exact_retained_receipt_settles_once_preserves_history_and_releases_retry(database, native):
+def test_exact_retained_receipt_settles_once_without_delaying_retry(database, native):
     store = _store(database)
     label = "nativeid" if native else "callerid"
     round_id = "arena-2026-09-14-" + label
@@ -85,9 +85,23 @@ def test_exact_retained_receipt_settles_once_preserves_history_and_releases_retr
         for request_id in wrong:
             assert _settle(store, {**candidate, "request_id": request_id}) == {"status": "stale"}
         assert store.list_ledger(call_identity=identity) == original
-        blocked, _, _, _ = claim(store, round_id, runners[1], parallelism=8, ceiling=8,
-                                 excluded=[runners[1]])
-        assert blocked["status"] == "no_pending"
+        retry, retry_token, _, _ = claim(
+            store, round_id, runners[1], parallelism=8, ceiling=8,
+            excluded=[runners[1]],
+        )
+        assert retry["status"] == "leased"
+        assert retry["submission_id"] == run["submission_id"]
+        assert complete(
+            store, retry["run_id"], hash_lease_token(retry_token), "accepted",
+            output_ref="arena/test/native-billing-retry.json",
+        )["status"] == "accepted"
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT md5(string_agg(to_jsonb(r)::text,'|' ORDER BY run_id)) "
+                "FROM public.lab_arena_runs r WHERE round_id=%s AND status='accepted'",
+                (round_id,),
+            )
+            accepted_before = cursor.fetchone()
         result = _settle(store, candidate)
         assert result == {"status": "settled", "idempotent": False,
                           "actual_microusd": 2_000, "released_microusd": 8_000,
@@ -102,8 +116,10 @@ def test_exact_retained_receipt_settles_once_preserves_history_and_releases_retr
             cursor.execute("SELECT md5(string_agg(to_jsonb(r)::text,'|' ORDER BY run_id)) "
                            "FROM public.lab_arena_runs r WHERE round_id=%s AND status='accepted'", (round_id,))
             assert cursor.fetchone() == accepted_before
-        released, _, _, _ = claim(store, round_id, runners[1], parallelism=8, ceiling=8,
-                                  excluded=[runners[1]])
-        assert released["status"] == "leased"
+        followup, _, _, _ = claim(
+            store, round_id, runners[1], parallelism=8, ceiling=8,
+            excluded=[runners[1]],
+        )
+        assert followup["status"] == "leased"
     finally:
         store.close()

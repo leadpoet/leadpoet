@@ -34,7 +34,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
 MIGRATIONS = CURRENT_SERVICE_MIGRATIONS
 MIGRATION = (
     Path(__file__).resolve().parents[2]
-    / "scripts/243-lab-arena-deepline-delayed-cost-reconciliation.sql"
+    / "scripts/248-lab-arena-closed-scoring-reservation-admission.sql"
 )
 DEFERRAL_BYPASS_MIGRATION = (
     Path(__file__).resolve().parents[2]
@@ -230,19 +230,13 @@ def test_functions_are_service_only_and_owned_by_arena_owner(resources):
             "'public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)'::regprocedure)"
         )
         definition = cursor.fetchone()[0]
-        assert definition.count(
-            "lab_arena_deepline_reconciliation_retry_deferral"
-        ) == 1
-        assert definition.count(
-            "lab_arena_deepline_credential_deferral_bypass"
-        ) == 1
+        assert "lab_arena_deepline_reconciliation_retry_deferral" not in definition
+        assert definition.count("lab_arena_closed_scoring_reservation_claim") == 1
     with connect() as connection:
         connection.autocommit = True
         with connection.cursor() as cursor:
             cursor.execute(MIGRATION.read_text(encoding="utf-8"))
-            cursor.execute(
-                DEFERRAL_BYPASS_MIGRATION.read_text(encoding="utf-8")
-            )
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
             cursor.execute(
                 "SELECT pg_get_functiondef("
                 "'public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)'::regprocedure)"
@@ -651,7 +645,7 @@ def test_bound_credential_failure_bypasses_only_claim_deferral(
         ("sequence", 401, {"action_sequence": 1}),
     ],
 )
-def test_untrusted_credential_failure_evidence_cannot_release_deferral(
+def test_untrusted_credential_failure_evidence_does_not_change_accounting(
     database, label, status, overrides
 ):
     store = _store(database)
@@ -677,11 +671,12 @@ def test_untrusted_credential_failure_evidence_cannot_release_deferral(
             store, first["run_id"], hash_lease_token(token), "credential_error"
         )["status"] == "failed"
 
-        blocked, _blocked_token, _, _ = claim(
+        retry, _retry_token, _, _ = claim(
             store, round_id, runners[1], parallelism=8, ceiling=8,
             excluded=[runners[1]],
         )
-        assert blocked["status"] == "no_pending"
+        assert retry["status"] == "leased"
+        assert retry["submission_id"] == first["submission_id"]
         assert store.list_ledger(call_identity=identity)[-1]["entry_kind"] == (
             "uncertain"
         )
@@ -690,7 +685,7 @@ def test_untrusted_credential_failure_evidence_cannot_release_deferral(
         store.close()
 
 
-def test_retry_deferral_does_not_expire_and_settlement_releases(
+def test_retry_claim_does_not_wait_for_delayed_settlement(
     database,
 ):
     store = _store(database)
@@ -719,11 +714,12 @@ def test_retry_deferral_does_not_expire_and_settlement_releases(
                 "AND status='pending' AND run_id<>%s",
                 (round_id, retry_id),
             )
-        blocked, _, _, _ = claim(
+        retry, retry_token, _, _ = claim(
             store, round_id, runners[1], parallelism=8, ceiling=8,
             excluded=[runners[1]],
         )
-        assert blocked["status"] == "no_pending"
+        assert retry["status"] == "leased"
+        assert retry["run_id"] == retry_id
         with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
             cursor.execute("SET LOCAL session_replication_role=replica")
             cursor.execute(
@@ -732,11 +728,10 @@ def test_retry_deferral_does_not_expire_and_settlement_releases(
                 "WHERE call_identity=%s AND entry_kind='uncertain'",
                 (identity,),
             )
-        still_blocked, _, _, _ = claim(
-            store, round_id, runners[1], parallelism=8, ceiling=8,
-            excluded=[runners[1]],
-        )
-        assert still_blocked["status"] == "no_pending"
+        assert complete(
+            store, retry["run_id"], hash_lease_token(retry_token),
+            "accepted", output_ref="arena/test/unblocked-before-settlement.json",
+        )["status"] == "accepted"
         assert _settlements(store, identity) == []
         assert store.list_ledger(call_identity=identity)[-1]["amount_microusd"] == 2_000
         candidate = store.list_deepline_cost_reconciliations(round_id)[0]
@@ -751,11 +746,10 @@ def test_retry_deferral_does_not_expire_and_settlement_releases(
             actual_microusd=2_000,
             cost_units="0.02",
         )["status"] == "settled"
-        retry, _retry_token, _, _ = claim(
+        exhausted, _, _, _ = claim(
             store, round_id, runners[1], parallelism=8, ceiling=8,
             excluded=[runners[1]],
         )
-        assert retry["status"] == "leased"
-        assert retry["run_id"] == retry_id
+        assert exhausted["status"] == "no_pending"
     finally:
         store.close()

@@ -27,6 +27,14 @@ Resume only unfinished scoring. Do not restore retired Research Lab, SOURCE_ADD,
 auditor or Nitro requirements. This authority ends after final publication and
 verification of the affected live flows.
 
+On 2026-09-14 the user renewed this recovery through verified publication of a
+valid positive final rebenchmark score. Resume only unfinished scoring and
+preserve all completed work. Do not introduce or manually enforce a new cap;
+leave the existing Arena company-budget mechanism in control. Repair proven
+provider, reservation, scoring, or model defects narrowly and continue through
+exact committed migrations, main pushes, canonical restarts and live validation.
+Do not fabricate scores or weaken scoring, identity, disclosure or reward rules.
+
 ## Scoped production authorization: zero-score public baseline repair
 
 On 2026-09-13 the user authorized investigation and repair of the zero-score

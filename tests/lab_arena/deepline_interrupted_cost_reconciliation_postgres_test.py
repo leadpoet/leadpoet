@@ -20,7 +20,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete, s
 
 MIGRATION = (
     Path(__file__).resolve().parents[2]
-    / "scripts/246-lab-arena-interrupted-deepline-cost-reconciliation.sql"
+    / "scripts/248-lab-arena-closed-scoring-reservation-admission.sql"
 )
 
 
@@ -116,7 +116,7 @@ def test_schema_capability_is_service_only(database):
     assert capability == {
         "schema_version":
             "leadpoet.lab_arena.deepline_cost_reconciliation_schema.v1",
-        "version": 247,
+        "version": 248,
     }
     assert (service, anon, authenticated, service_role, helper) == (
         True, False, False, False, False
@@ -139,15 +139,15 @@ def test_schema_capability_is_service_only(database):
         assert settlement.count(
             "lab_arena_deepline_interrupted_cost_reconciliation"
         ) == 1
+        assert "lab_arena_deepline_interrupted_retry_deferral" not in claim_definition
         assert claim_definition.count(
-            "lab_arena_deepline_interrupted_retry_deferral"
+            "lab_arena_closed_scoring_reservation_claim"
         ) == 1
-        assert "('worker_reported', 'lease_expired')" in claim_definition
     finally:
         connection.close()
 
 
-def test_lease_expiry_reconciles_exact_cost_and_releases_only_its_retry(database):
+def test_lease_expiry_reconciles_exact_cost_without_stalling_its_retry(database):
     store = _store(database)
     psycopg2, dsn = database
     round_id = "arena-2026-09-14-hardint"
@@ -214,11 +214,16 @@ def test_lease_expiry_reconciles_exact_cost_and_releases_only_its_retry(database
                 "AND submission_id<>%s AND status='pending'",
                 (round_id, first["submission_id"]),
             )
-        blocked, _, _, _ = claim(
+        retry, retry_token, _, _ = claim(
             store, round_id, runners[2], parallelism=8, ceiling=8,
             excluded=[runners[2]],
         )
-        assert blocked["status"] == "no_pending"
+        assert retry["status"] == "leased"
+        assert retry["run_id"] == retry_id
+        assert complete(
+            store, retry["run_id"], hash_lease_token(retry_token),
+            "accepted", output_ref="arena/test/retry-hard-interruption.json",
+        )["status"] == "accepted"
 
         first_settlement = _settle(store, candidate)
         assert first_settlement == {
@@ -233,12 +238,11 @@ def test_lease_expiry_reconciles_exact_cost_and_releases_only_its_retry(database
         assert settlement["entry_doc"]["reconciled_uncertainty_reason"] == (
             "lease_expired"
         )
-        released, _, _, _ = claim(
+        exhausted, _, _, _ = claim(
             store, round_id, runners[2], parallelism=8, ceiling=8,
             excluded=[runners[2]],
         )
-        assert released["status"] == "leased"
-        assert released["run_id"] == retry_id
+        assert exhausted["status"] == "no_pending"
     finally:
         store.close()
 

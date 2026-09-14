@@ -445,6 +445,7 @@ class ArenaService:
         self._brokers: Dict[str, broker_module.Broker] = {}
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
+        self._closed_deepline_reconciliation_after = 0
 
     # -- accessors -------------------------------------------------------------
 
@@ -3419,6 +3420,23 @@ class ArenaService:
             "run_status": str(candidate.get("run_status") or ""),
             "lease_expires_at": str(candidate.get("lease_expires_at") or ""),
         }
+
+    def reconcile_closed_provider_costs(self) -> Dict[str, Any]:
+        """Check one closed judge call; missing billing never blocks a round."""
+        network_name, netuid = self._chain_scope()
+        candidate = self._store.next_closed_deepline_reconciliation(
+            mode=self._config.mode, network_name=network_name, netuid=netuid,
+            round_id=self._pinned_round_id() or "",
+            after_entry_id=self._closed_deepline_reconciliation_after,
+        )
+        if candidate.get("status") == "none":
+            return {"status": "none"}
+        if candidate.get("status") != "ok":
+            raise ServiceError("closed_provider_cost_candidate_invalid", 500)
+        self._closed_deepline_reconciliation_after = int(candidate["uncertain_entry_id"])
+        return self._reconcile_deepline_cost(
+            str(candidate["round_id"]), run_id=str(candidate["run_id"]),
+        )
 
     def _reconcile_deepline_cost(
         self, round_id: str, *, run_id: str = ""

@@ -280,7 +280,7 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         row for row in published["publication_doc"]["final_ranking"]
         if row["submission_id"] == winner
     )
-    assert ranking["cost_summary"]["qualified_company_count"] == 25
+    assert ranking["cost_summary"]["qualified_company_count"] == 20
 
     saved = [
         run

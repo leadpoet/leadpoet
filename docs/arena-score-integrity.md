@@ -87,11 +87,11 @@ stage can change or veto this result.
 
 ## Rollout and verification
 
-Apply repository migrations 211 through 214 and migration 248 in order, after
-their existing prerequisites. Migration 248 is the cutover dependency for the
+Apply repository migrations 211 through 214 and migration 251 in order, after
+their existing prerequisites. Migration 251 is the cutover dependency for the
 twenty-ICP runtime. Apply it immediately before the coordinated gateway and
 normal-validator restart. A confirmation-enabled older runtime cannot process
-new work after migration 248 removes its RPCs; rollback needs a separately
+new work after migration 251 removes its RPCs; rollback needs a separately
 reviewed schema migration. The scorer model and image remain unchanged.
 Migration 214 keeps
 a proven miner credential refusal distinct from an infrastructure failure when

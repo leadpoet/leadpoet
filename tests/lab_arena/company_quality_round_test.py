@@ -338,11 +338,9 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     published = harness.advance_until("published", runners=2, max_steps=120)
     assert published["king_outcome"] == "crowned"
     ranking = {row["submission_id"]: row for row in published["publication_doc"]["final_ranking"]}
-    assert ranking[broad]["main_score"] == ranking[broad]["final_score"] == 35
-    assert ranking[sparse]["main_score"] == 16
-    assert ranking[sparse]["final_score"] is None
-    assert ranking[padded]["main_score"] == 16
-    assert ranking[padded]["final_score"] is None
+    assert ranking[broad]["final_score"] == 35
+    assert ranking[sparse]["final_score"] == 16
+    assert ranking[padded]["final_score"] == 16
     assert published["publication_doc"]["final_ranking"][0]["submission_id"] == broad
     results = harness.service.public_results(round_id, broad)
     assert len(results["outputs"]) == contracts.BENCHMARK_ICP_COUNT

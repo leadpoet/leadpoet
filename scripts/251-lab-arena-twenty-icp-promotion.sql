@@ -5,18 +5,21 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
-DO $requires_247$
+DO $requires_250$
 BEGIN
   IF pg_catalog.to_regprocedure(
        'public.lab_arena_deepline_cost_reconciliation_schema_v1()'
      ) IS NULL
      OR pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure(
        'public.lab_arena_deepline_cost_reconciliation_schema_v1()'
-     )) NOT LIKE '%''version'', 247%' THEN
-    RAISE EXCEPTION 'apply migration 247 before migration 248';
+     )) NOT LIKE '%''version'', 248%'
+     OR pg_catalog.to_regprocedure(
+       'public.lab_arena_next_closed_deepline_reconciliation_v1(text,text,integer,text,bigint)'
+     ) IS NULL THEN
+    RAISE EXCEPTION 'apply migrations 248 and 250 before migration 251';
   END IF;
 END;
-$requires_247$;
+$requires_250$;
 
 GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 
@@ -549,7 +552,6 @@ DECLARE
   v_round_participant JSONB;
   v_ranked_count INTEGER;
   v_persisted_count INTEGER;
-  v_selected BOOLEAN;
   v_allowed_failure BOOLEAN;
 BEGIN
   IF NEW.configuration_doc ->> 'integrity_policy'
@@ -631,10 +633,6 @@ BEGIN
       AND runs.kind = 'execute'
       AND runs.icp_position BETWEEN 0 AND 19
       AND runs.per_icp_score IS NOT NULL;
-    v_selected := COALESCE(
-      (v_round_participant ->> 'is_king')::BOOLEAN, FALSE
-    ) OR COALESCE(NEW.finalists, '[]'::JSONB)
-      @> pg_catalog.jsonb_build_array(v_submission_id);
     IF v_persisted_count = 20 THEN
       IF v_ranked_count <> 1 THEN
         RAISE EXCEPTION 'lab_arena_publication_ranking_incomplete'
@@ -649,12 +647,6 @@ BEGIN
     IF COALESCE((v_round_participant ->> 'is_king')::BOOLEAN, FALSE) THEN
       RAISE EXCEPTION 'lab_arena_publication_baseline_invalid'
         USING ERRCODE = '22023';
-    END IF;
-    -- A stage-one nonfinalist has no stage-two rows and is intentionally absent
-    -- from the final ranking. Only the baseline and frozen finalists require a
-    -- complete twenty-position result or durable account-failure evidence.
-    IF NOT v_selected THEN
-      CONTINUE;
     END IF;
     WITH latest AS (
       SELECT DISTINCT ON (runs.assignment_id)
@@ -868,7 +860,7 @@ AS $schema$
   SELECT pg_catalog.jsonb_build_object(
     'schema_version',
       'leadpoet.lab_arena.twenty_icp_promotion_schema.v1',
-    'version', 248
+    'version', 251
   );
 $schema$;
 ALTER FUNCTION public.lab_arena_twenty_icp_promotion_schema_v1()

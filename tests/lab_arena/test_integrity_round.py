@@ -29,7 +29,7 @@ def database():
 
 
 @pytest.fixture()
-def database_before_248():
+def database_before_251():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS[:-1])
 
 
@@ -103,7 +103,7 @@ class IntegrityHarness(fixtures.Harness):
         raise AssertionError((target, self.status()))
 
 
-def test_unknown_provider_charge_defers_only_affected_submission_until_exact_settlement(
+def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_work(
     database, tmp_path, monkeypatch
 ):
     psycopg2, dsn = database
@@ -148,8 +148,14 @@ def test_unknown_provider_charge_defers_only_affected_submission_until_exact_set
         if run["submission_id"] == submission
     ]
     failed = [run for run in runs if run["terminal_cause"] == "judge_error"]
-    assert len(failed) == 1
-    assert any(run["status"] == "pending" for run in runs)
+    assert len(failed) == contracts.STAGE_1_ICP_COUNT * 2
+    assert all(run["status"] == "failed" for run in failed)
+    assert {run["attempt"] for run in failed} == {1, 2}
+    assert {run["icp_position"] for run in failed} == set(
+        contracts.stage_positions(1)
+    )
+    assert not any(run["status"] == "pending" for run in runs)
+    assert not any(run["terminal_cause"] == "credential_error" for run in runs)
     healthy_runs = [
         run
         for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
@@ -162,6 +168,10 @@ def test_unknown_provider_charge_defers_only_affected_submission_until_exact_set
     )
     assert len(candidates) == 1
     candidate = candidates[0]
+    ledger_before = harness.service.store.list_ledger(
+        call_identity=candidate["call_identity"]
+    )
+    assert ledger_before[-1]["entry_kind"] == "uncertain"
     settled = harness.service.store.reconcile_deepline_cost(
         round_id=round_id,
         run_id=failed[0]["run_id"],
@@ -174,16 +184,18 @@ def test_unknown_provider_charge_defers_only_affected_submission_until_exact_set
         cost_units="0.02",
     )
     assert settled["status"] == "settled"
-    outage_active = False
-    monkeypatch.setattr(credentials, "runtime_key", original_key)
-    harness.advance_until("scored")
-    final_runs = [
-        run
-        for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
-        if run["submission_id"] == submission
-    ]
-    assert any(run["status"] == "accepted" for run in final_runs)
-    assert not any(run["terminal_cause"] == "credential_error" for run in final_runs)
+    ledger_after = harness.service.store.list_ledger(
+        call_identity=candidate["call_identity"]
+    )
+    assert ledger_after[:-1] == ledger_before
+    assert ledger_after[-1]["entry_kind"] == "settlement"
+    assert ledger_after[-1]["amount_microusd"] == 2_000
+    assert harness.service.store.list_deepline_cost_reconciliations(
+        round_id, run_id=failed[0]["run_id"]
+    ) == []
+    retained = harness.service.store.get_run(failed[0]["run_id"])
+    assert retained["status"] == "failed"
+    assert retained["terminal_cause"] == "judge_error"
 
 
 def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
@@ -340,9 +352,9 @@ def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
 
 
 def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
-    database_before_248, tmp_path, monkeypatch,
+    database_before_251, tmp_path, monkeypatch,
 ):
-    psycopg2, dsn = database_before_248
+    psycopg2, dsn = database_before_251
     connect = lambda: psycopg2.connect(**dsn)
     harness = IntegrityHarness(
         connect, tmp_path, challengers=["CutoverWinner"], runners=["alpha"]
@@ -405,7 +417,7 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
             "ENABLE TRIGGER lab_arena_rounds_write_once"
         )
         migration = Path(__file__).resolve().parents[2] / (
-            "scripts/248-lab-arena-twenty-icp-promotion.sql"
+            "scripts/251-lab-arena-twenty-icp-promotion.sql"
         )
         cursor.execute(migration.read_text(encoding="utf-8"))
 
@@ -432,3 +444,41 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
     assert runs
     assert all(run["stage"] in (1, 2) for run in runs)
     assert max(run["icp_position"] for run in runs) == 19
+
+    # Replaying the exact cutover after publication must retain all evidence.
+    with connect() as connection, connection.cursor() as cursor:
+        def evidence():
+            result = []
+            for table, key in (
+                ("lab_arena_rounds", "round_id"),
+                ("lab_arena_runs", "run_id"),
+                ("lab_arena_ledger", "entry_id"),
+            ):
+                cursor.execute(
+                    f"SELECT md5(COALESCE(string_agg(row_to_json(r)::text, '' "
+                    f"ORDER BY {key}), '')) FROM public.{table} r "
+                    "WHERE round_id = %s", (round_id,),
+                )
+                result.append(cursor.fetchone()[0])
+            return result
+
+        before = evidence()
+        cursor.execute(migration.read_text(encoding="utf-8"))
+        cursor.execute(migration.read_text(encoding="utf-8"))
+        assert evidence() == before
+        cursor.execute("SELECT public.lab_arena_twenty_icp_promotion_schema_v1()")
+        assert cursor.fetchone()[0]["version"] == 251
+        for signature in (
+            "public.lab_arena_prepare_confirmation_bank(text,text,text)",
+            "public.lab_arena_open_confirmation(text,jsonb)",
+            "public.lab_arena__confirmation_account_failure(text,text)",
+        ):
+            cursor.execute("SELECT to_regprocedure(%s)", (signature,))
+            assert cursor.fetchone()[0] is None
+        cursor.execute(
+            "SELECT has_function_privilege('lab_arena_service', "
+            "'public.lab_arena_twenty_icp_promotion_schema_v1()', 'EXECUTE'), "
+            "has_function_privilege('anon', "
+            "'public.lab_arena_twenty_icp_promotion_schema_v1()', 'EXECUTE')"
+        )
+        assert cursor.fetchone() == (True, False)

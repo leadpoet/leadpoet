@@ -687,7 +687,7 @@ class ArenaService:
             not isinstance(promotion, Mapping)
             or promotion.get("schema_version")
             != "leadpoet.lab_arena.twenty_icp_promotion_schema.v1"
-            or promotion.get("version") != 248
+            or promotion.get("version") != 251
         ):
             raise ServiceError("integrity_schema_invalid", 503)
 

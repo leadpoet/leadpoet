@@ -99,12 +99,12 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "247-lab-arena-deepline-native-billing-identities.sql",
     "248-lab-arena-closed-scoring-reservation-admission.sql",
     "250-lab-arena-closed-scoring-billing-reconciliation.sql",
-    "248-lab-arena-twenty-icp-promotion.sql",
+    "251-lab-arena-twenty-icp-promotion.sql",
 )
 
 
 def prepare_historical_confirmation_bank(store, round_id: str, ref: str, digest: str):
-    """Call the retired RPC only in tests pinned to a pre-248 schema."""
+    """Call the retired RPC only in tests pinned to a pre-251 schema."""
     transport = store._transport
     connection = transport._acquire()
     try:

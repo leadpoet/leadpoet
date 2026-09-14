@@ -157,7 +157,9 @@ sed -e "s|^WorkingDirectory=.*|WorkingDirectory=$CURRENT_LINK|" \
 sudo install -m 0644 "$ROLLBACK/candidate.unit" "$UNIT_PATH"
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE" >/dev/null
-sudo systemctl start "$SERVICE"
+if ! sudo systemctl start "$SERVICE"; then
+  echo "Initial Arena validator start failed; waiting for supervised systemd retries" >&2
+fi
 deadline=$((SECONDS + READY_TIMEOUT))
 stable_pid=""
 stable_since=$SECONDS

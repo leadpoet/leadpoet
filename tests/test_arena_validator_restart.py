@@ -74,7 +74,7 @@ def test_restart_uses_no_hardware_signer_or_manual_weight_call():
 def test_restart_requires_local_wallet_preflight_and_stable_supervision():
     text = SCRIPT.read_text()
     assert 'scripts/run_arena_validator.py --environment-file "$CANDIDATE_SERVICE_ENV" --check-only' in text
-    assert 'systemctl start "$SERVICE"' in text
+    assert 'if ! sudo systemctl start "$SERVICE"; then' in text
     assert 'systemctl show -p MainPID --value "$SERVICE"' in text
     assert 'stable_since=$SECONDS' in text
     assert '"$((SECONDS - stable_since))" -ge 10' in text
@@ -85,6 +85,8 @@ def test_restart_requires_local_wallet_preflight_and_stable_supervision():
     assert "User=root" in unit
     assert "arena-validator-service.env" in unit
     assert "PYTHONDONTWRITEBYTECODE=1" in unit
+    assert "Restart=on-failure" in unit
+    assert "RestartSec=15" in unit
     assert "EnvironmentFile=" not in unit
     assert "--enclave-cid" not in unit
 
@@ -305,6 +307,65 @@ printf '%s' "$ACTIVATED"
 """
     result = subprocess.run(["bash", "-c", program], text=True, capture_output=True, check=True)
     assert result.stdout == "1"
+
+
+def test_initial_start_failure_waits_for_supervised_retry():
+    text = SCRIPT.read_text()
+    start = text.index('if ! sudo systemctl start "$SERVICE"; then')
+    end = text.index('\necho "SUCCESS:', start)
+    startup = text[start:end]
+    program = f"""set -euo pipefail
+READY_TIMEOUT=20
+SERVICE=validator.service
+SECONDS=0
+ACTIVATED=0
+fail() {{ echo "$*" >&2; exit 1; }}
+sudo() {{
+  if [ "$1" = systemctl ] && [ "$2" = start ]; then return 1; fi
+  if [ "$1" = systemctl ] && [ "$2" = show ]; then
+    if [ "$SECONDS" -ge 4 ]; then echo 314; else echo 0; fi
+    return 0
+  fi
+  if [ "$1" = systemctl ] && [ "$2" = is-active ]; then
+    [ "$SECONDS" -ge 4 ]
+    return
+  fi
+  return 1
+}}
+sleep() {{ SECONDS=$((SECONDS + 2)); }}
+{startup}
+printf '%s' "$ACTIVATED"
+"""
+    result = subprocess.run(
+        ["bash", "-c", program], text=True, capture_output=True, check=True
+    )
+    assert result.stdout == "1"
+    assert "waiting for supervised systemd retries" in result.stderr
+
+
+def test_failed_start_and_exhausted_readiness_window_remains_fail_closed():
+    text = SCRIPT.read_text()
+    start = text.index('if ! sudo systemctl start "$SERVICE"; then')
+    end = text.index('\necho "SUCCESS:', start)
+    startup = text[start:end]
+    program = f"""set -euo pipefail
+READY_TIMEOUT=6
+SERVICE=validator.service
+SECONDS=0
+ACTIVATED=0
+fail() {{ echo "ERROR: $*" >&2; exit 1; }}
+sudo() {{
+  if [ "$1" = systemctl ] && [ "$2" = show ]; then echo 0; return 0; fi
+  return 1
+}}
+sleep() {{ SECONDS=$((SECONDS + 2)); }}
+{startup}
+"""
+    result = subprocess.run(
+        ["bash", "-c", program], text=True, capture_output=True
+    )
+    assert result.returncode != 0
+    assert "normal Arena validator did not remain ready" in result.stderr
 
 
 def test_generated_unit_uses_selected_python_for_both_commands(tmp_path):

@@ -77,7 +77,7 @@ DECLARE
   v_expected_submission_hash CONSTANT TEXT :=
     '939df0f1d86a931feb384115b81e3bed';
   v_expected_credential_hash CONSTANT TEXT :=
-    '864ed03fb55ac2e8ec3d6329f88596fa';
+    'e1834999a30b26c36f7759e9d8d8a628';
   v_expected_cache_hash CONSTANT TEXT :=
     '9488bb4df1ac2e0e4b2e66848dfeca16';
 

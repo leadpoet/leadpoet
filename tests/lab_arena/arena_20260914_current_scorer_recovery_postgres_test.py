@@ -80,6 +80,10 @@ def _migration_sql(cursor) -> str:
     """Substitute only frozen production constants for the disposable fixture."""
 
     sql = MIGRATION.read_text(encoding="utf-8").replace(FROZEN_DIGEST, NEW_DIGEST)
+    assert (
+        "v_expected_credential_hash CONSTANT TEXT :=\n"
+        "    'e1834999a30b26c36f7759e9d8d8a628';"
+    ) in sql
     cursor.execute(
         "SELECT md5(configuration_doc::text) FROM public.lab_arena_rounds "
         "WHERE round_id=%s",
@@ -115,7 +119,7 @@ def _migration_sql(cursor) -> str:
         "public.lab_arena_submission_credentials WHERE submission_id=ANY(%s)) row_value",
         (list(PARTICIPANT_IDS),),
     )
-    values["864ed03fb55ac2e8ec3d6329f88596fa"] = cursor.fetchone()[0]
+    values["e1834999a30b26c36f7759e9d8d8a628"] = cursor.fetchone()[0]
     cursor.execute(
         "SELECT md5(COALESCE(string_agg(md5(to_jsonb(row_value)::text),'|' "
         "ORDER BY cache_key),'')),count(*) FROM (SELECT * FROM "

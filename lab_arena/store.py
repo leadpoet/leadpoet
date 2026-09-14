@@ -142,6 +142,23 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_actual_microusd", "bigint"),
         ("p_cost_units", "text"),
     ),
+    "lab_arena_list_deepline_cost_reconciliations_v1": (
+        ("p_round_id", "text"),
+        ("p_run_id", "text"),
+        ("p_after_entry_id", "bigint"),
+        ("p_limit", "integer"),
+    ),
+    "lab_arena_reconcile_deepline_cost_v1": (
+        ("p_round_id", "text"),
+        ("p_run_id", "text"),
+        ("p_call_identity", "text"),
+        ("p_uncertain_entry_id", "bigint"),
+        ("p_request_id", "text"),
+        ("p_operation", "text"),
+        ("p_credential_fingerprint", "text"),
+        ("p_actual_microusd", "bigint"),
+        ("p_cost_units", "text"),
+    ),
     "lab_arena_complete_attempt": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_result", "jsonb"), ("p_terminal_cause", "text"), ("p_output_ref", "text")),
     "lab_arena_complete_attempt_v2": (
         ("p_run_id", "text"),
@@ -1307,6 +1324,64 @@ class ArenaStore:
                 },
             ),
             "reconcile_openrouter_cost",
+        )
+
+    def list_deepline_cost_reconciliations(
+        self,
+        round_id: str,
+        *,
+        run_id: str = "",
+        after_entry_id: int = 0,
+        limit: int = 1,
+    ) -> List[Dict[str, Any]]:
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_list_deepline_cost_reconciliations_v1",
+                {
+                    "p_round_id": str(round_id),
+                    "p_run_id": str(run_id),
+                    "p_after_entry_id": int(after_entry_id),
+                    "p_limit": int(limit),
+                },
+            ),
+            "list_deepline_cost_reconciliations",
+        )
+        if result.get("status") != "ok" or not isinstance(result.get("items"), list):
+            raise ArenaStoreError("deepline cost reconciliation list is malformed")
+        return [
+            _require_mapping(item, "deepline cost reconciliation item")
+            for item in result["items"]
+        ]
+
+    def reconcile_deepline_cost(
+        self,
+        *,
+        round_id: str,
+        run_id: str,
+        call_identity: str,
+        uncertain_entry_id: int,
+        request_id: str,
+        operation: str,
+        credential_fingerprint: str,
+        actual_microusd: int,
+        cost_units: str,
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_reconcile_deepline_cost_v1",
+                {
+                    "p_round_id": str(round_id),
+                    "p_run_id": str(run_id),
+                    "p_call_identity": str(call_identity),
+                    "p_uncertain_entry_id": int(uncertain_entry_id),
+                    "p_request_id": str(request_id),
+                    "p_operation": str(operation),
+                    "p_credential_fingerprint": str(credential_fingerprint),
+                    "p_actual_microusd": int(actual_microusd),
+                    "p_cost_units": str(cost_units),
+                },
+            ),
+            "reconcile_deepline_cost",
         )
 
     def complete_attempt(

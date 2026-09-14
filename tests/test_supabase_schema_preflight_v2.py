@@ -186,6 +186,8 @@ def test_preflight_accepts_current_schema_without_retired_host_receipt_storage()
     "lab_arena_has_recent_participation_v1",
     "lab_arena_participation_schema_v1",
     "lab_arena_successful_call_cost_schema_v1",
+    "lab_arena_list_deepline_cost_reconciliations_v1",
+    "lab_arena_reconcile_deepline_cost_v1",
     "lab_arena_runs",
 ])
 def test_preflight_still_requires_active_scoring_epoch_and_arena_dependencies(missing):

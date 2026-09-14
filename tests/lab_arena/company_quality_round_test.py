@@ -29,11 +29,12 @@ from qualification.scoring.competition import (
     apply_company_judgment_context,
 )
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
-from tests.lab_arena.test_integrity_round import IntegrityHarness, MIGRATIONS
+from tests.lab_arena.lab_arena_pg_harness import (
+    CURRENT_SERVICE_MIGRATIONS,
+    database_with_lab_arena_migration,
+)
+from tests.lab_arena.test_integrity_round import IntegrityHarness
 from tests.test_arena_company_quality_policy import _positive_breakdown
-
-QUALITY_MIGRATION = "217-lab-arena-company-judgments.sql"
 
 
 def config(defaults, store=None):
@@ -100,19 +101,7 @@ class QualityHarness(IntegrityHarness):
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(
-        MIGRATIONS
-        + (
-            "215-lab-arena-contacts.sql",
-            "216-lab-arena-validator-participation.sql",
-            QUALITY_MIGRATION,
-            "223-lab-arena-cancelled-call-late-settlement.sql",
-            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
-            "227-lab-arena-champion-funding.sql",
-            "229-lab-arena-successful-call-cost-eligibility.sql",
-            "230-lab-arena-successful-call-cost-permissions.sql",
-        )
-    )
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
 @pytest.mark.parametrize(

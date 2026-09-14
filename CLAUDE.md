@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: September 14 provider cost recovery
+
+On 2026-09-14 UTC the user explicitly authorized the narrow interrupted-provider
+cost fix and recovery of arena-2026-09-14 through final score publication. This
+covers protected production, provider and Supabase inspection, accurate cost
+reconciliation, tested source changes and exact committed migrations, pushes to
+main, canonical gateway/normal-validator restarts, and continued root-cause
+repair of blockers until the existing round completes. Preserve accepted
+executions and scores, submission state, credential references, existing ledger
+history, spending limits, scoring rules, rewards, weights and concurrent work.
+Resume only unfinished scoring. Do not restore retired Research Lab, SOURCE_ADD,
+auditor or Nitro requirements. This authority ends after final publication and
+verification of the affected live flows.
+
 ## Scoped production authorization: zero-score public baseline repair
 
 On 2026-09-13 the user authorized investigation and repair of the zero-score

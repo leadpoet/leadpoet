@@ -63,7 +63,7 @@ from tests.lab_arena.champion_funding_round_test import (
     _promote_first_winner,
 )
 from tests.lab_arena.lab_arena_pg_harness import (
-    POSTGREST_MIGRATIONS,
+    CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
@@ -905,7 +905,7 @@ class PaidHarness(Harness):
 
 @pytest.fixture
 def paid_champion_database():
-    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS)
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
 def _assert_round_complete(harness: PaidHarness, row: Mapping[str, Any]) -> None:

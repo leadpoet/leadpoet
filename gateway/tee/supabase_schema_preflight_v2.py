@@ -10,7 +10,8 @@ CODE_REVIEW_MIGRATION = "scripts/207-lab-arena-code-review.sql"
 PARTICIPATION_MIGRATION = "scripts/216-lab-arena-validator-participation.sql"
 ORIGINAL_JUDGMENTS_MIGRATION = "scripts/221-lab-arena-participation-original-judgments.sql"
 SUCCESSFUL_CALL_COST_MIGRATION = "scripts/230-lab-arena-successful-call-cost-permissions.sql"
-PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION})
+DEEPLINE_RECONCILIATION_MIGRATION = "scripts/243-lab-arena-deepline-delayed-cost-reconciliation.sql"
+PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION, DEEPLINE_RECONCILIATION_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
     (CODE_REVIEW_MIGRATION, "lab_arena_submissions", ("submission_id", "code_review_status", "code_review_doc")),
@@ -28,6 +29,8 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (CODE_REVIEW_MIGRATION, "lab_arena_begin_submission_review"),
     (CODE_REVIEW_MIGRATION, "lab_arena_finish_submission_review"),
     (SUCCESSFUL_CALL_COST_MIGRATION, "lab_arena_successful_call_cost_schema_v1"),
+    (DEEPLINE_RECONCILIATION_MIGRATION, "lab_arena_list_deepline_cost_reconciliations_v1"),
+    (DEEPLINE_RECONCILIATION_MIGRATION, "lab_arena_reconcile_deepline_cost_v1"),
     ("scripts/144-research-lab-provider-persistence-batches.sql", "put_research_lab_provider_evidence_cache_v2"),
     ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
     ("scripts/197-lab-arena-reward-chain-scope.sql", "lab_arena_schema_version_v1"),

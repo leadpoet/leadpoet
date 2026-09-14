@@ -91,6 +91,11 @@ POSTGREST_MIGRATIONS = DEFAULT_MIGRATIONS + (
     "230-lab-arena-successful-call-cost-permissions.sql",
 )
 
+CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
+    "236-lab-arena-score-submission-serialization.sql",
+    "243-lab-arena-deepline-delayed-cost-reconciliation.sql",
+)
+
 _SHIM_SQL = """
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;

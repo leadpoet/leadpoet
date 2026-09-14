@@ -9,7 +9,11 @@ from lab_arena import contracts, integrity, public_dashboard, service as svc, ve
 from lab_arena.chain import MetagraphSnapshot
 from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import (
+    CURRENT_SERVICE_MIGRATIONS,
+    DEFAULT_MIGRATIONS,
+    database_with_lab_arena_migration,
+)
 from tests.lab_arena.test_integrity_policy import fresh_icps
 
 MIGRATIONS = DEFAULT_MIGRATIONS + (
@@ -19,6 +23,11 @@ MIGRATIONS = DEFAULT_MIGRATIONS + (
 
 @pytest.fixture()
 def database():
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+
+
+@pytest.fixture()
+def historical_database():
     yield from database_with_lab_arena_migration(
         MIGRATIONS
         + (
@@ -31,8 +40,10 @@ def database():
     )
 
 
-def test_integrity_migration_replays_and_keeps_private_function_grants(database):
-    psycopg2, dsn = database
+def test_integrity_migration_replays_and_keeps_private_function_grants(
+    historical_database,
+):
+    psycopg2, dsn = historical_database
     migration = Path(__file__).resolve().parents[2] / "scripts" / "213-lab-arena-score-integrity.sql"
     with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
         cursor.execute(migration.read_text())

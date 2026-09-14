@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from lab_arena.provider_costs import (
+    deepline_billing_ledger_cost,
     deepline_billing_history_cost,
     deepline_cost,
     deepline_free_completed_cost,
@@ -13,6 +14,155 @@ from lab_arena.provider_costs import (
     openrouter_insured_error_cost,
     scrapingdog_cost,
 )
+
+
+def _deepline_ledger_entry(**patch):
+    entry = {
+        "id": "ledger-row-1",
+        "delta": -0.02,
+        "reason": "charge_settle",
+        "provider": "firecrawl",
+        "operation": "firecrawl_scrape",
+        "request_id": "ctx-tool-0123456789abcdef0123456789abcdef",
+        "billing_stage": "posted",
+        "charge_state": "posted",
+        "billing_mode": "post_deduct",
+        "pricing_model": "per_page",
+        "pricing_basis": "page",
+        "charge_credits": 0.02,
+        "metadata": {
+            "requestId": "ctx-tool-0123456789abcdef0123456789abcdef",
+            "chargeGroupId": "ctx-tool-0123456789abcdef0123456789abcdef",
+            "operation": "firecrawl_scrape",
+            "provider": "firecrawl",
+            "billingStage": "posted",
+            "billingMode": "post_deduct",
+            "pricingModel": "per_page",
+            "postedCredits": 0.02,
+        },
+        "billing_audit": {
+            "request_id": "ctx-tool-0123456789abcdef0123456789abcdef",
+            "charge_group_id": "ctx-tool-0123456789abcdef0123456789abcdef",
+            "operation": "firecrawl_scrape",
+            "provider": "firecrawl",
+            "billing_stage": "posted",
+            "charge_state": "posted",
+            "billing_mode": "post_deduct",
+            "pricing_model": "per_page",
+            "pricing_basis": "page",
+            "charge_credits": 0.02,
+        },
+    }
+    entry.update(patch)
+    return entry
+
+
+def test_deepline_billing_ledger_matches_one_exact_posted_charge():
+    state, cost, has_more, cursor = deepline_billing_ledger_cost(
+        {"entries": [_deepline_ledger_entry()], "has_more": False},
+        request_id="ctx-tool-0123456789abcdef0123456789abcdef",
+        operation="firecrawl_scrape",
+    )
+    assert state == "matched" and cost is not None
+    assert cost.microusd == 2_000 and cost.units == Decimal("0.02")
+    assert cost.price_basis == "deepline_billing_ledger_charge_credits_x_0.10_usd"
+    assert has_more is False and cursor is None
+
+
+def test_deepline_billing_ledger_returns_one_forward_cursor_for_absent_id():
+    assert deepline_billing_ledger_cost(
+        {"entries": [], "has_more": True, "next_cursor": "cursor-2"},
+        request_id="ctx-tool-0123456789abcdef0123456789abcdef",
+        operation="firecrawl_scrape",
+        current_cursor="cursor-1",
+    ) == ("pending", None, True, "cursor-2")
+
+
+@pytest.mark.parametrize(
+    "document,current_cursor",
+    [
+        ({"entries": [], "has_more": True}, None),
+        ({"entries": [], "has_more": True, "next_cursor": ""}, None),
+        ({"entries": [], "has_more": True, "next_cursor": "cursor-1"}, "cursor-1"),
+        ({"entries": [], "has_more": True, "next_cursor": "bad\nvalue"}, None),
+        ({"entries": [], "has_more": "yes", "next_cursor": "cursor-2"}, None),
+    ],
+)
+def test_deepline_billing_ledger_rejects_invalid_pagination(document, current_cursor):
+    assert deepline_billing_ledger_cost(
+        document,
+        request_id="ctx-tool-0123456789abcdef0123456789abcdef",
+        operation="firecrawl_scrape",
+        current_cursor=current_cursor,
+    ) == ("invalid", None, False, None)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda e: e.update(operation="exa_search"),
+        lambda e: e.update(delta=-0.01),
+        lambda e: e.update(delta=0.02),
+        lambda e: e.update(reason="other"),
+        lambda e: e.update(charge_state="pending"),
+        lambda e: e.update(billing_stage="pending"),
+        lambda e: e.update(metadata={**e["metadata"], "requestId": "other"}),
+        lambda e: e.update(metadata={**e["metadata"], "postedCredits": 0.01}),
+        lambda e: e.update(billing_audit={**e["billing_audit"], "charge_group_id": "other"}),
+        lambda e: e.update(billing_audit={**e["billing_audit"], "charge_credits": 0.01}),
+    ],
+)
+def test_deepline_billing_ledger_rejects_conflicting_or_nonterminal_charge(mutate):
+    entry = _deepline_ledger_entry()
+    mutate(entry)
+    assert deepline_billing_ledger_cost(
+        {"entries": [entry], "has_more": False},
+        request_id="ctx-tool-0123456789abcdef0123456789abcdef",
+        operation="firecrawl_scrape",
+    ) == ("invalid", None, False, None)
+
+
+def test_deepline_billing_ledger_rejects_duplicate_exact_request_rows():
+    entry = _deepline_ledger_entry()
+    assert deepline_billing_ledger_cost(
+        {"entries": [entry, dict(entry)], "has_more": False},
+        request_id="ctx-tool-0123456789abcdef0123456789abcdef",
+        operation="firecrawl_scrape",
+    ) == ("invalid", None, False, None)
+
+
+def test_deepline_billing_ledger_accepts_exact_free_zero_only():
+    entry = _deepline_ledger_entry(
+        delta=0,
+        reason="no_bill",
+        charge_state="free",
+        billing_stage="free",
+        billing_mode="no_bill",
+        charge_credits=0,
+    )
+    entry["metadata"].update(
+        billingStage="free", billingMode="no_bill", postedCredits=0
+    )
+    entry["billing_audit"].update(
+        billing_stage="free",
+        charge_state="free",
+        billing_mode="no_bill",
+        charge_credits=0,
+    )
+    state, cost, _, _ = deepline_billing_ledger_cost(
+        {"entries": [entry], "has_more": False},
+        request_id="ctx-tool-0123456789abcdef0123456789abcdef",
+        operation="firecrawl_scrape",
+    )
+    assert state == "matched" and cost is not None and cost.microusd == 0
+    for field, value in (("delta", -0.01), ("charge_credits", 0.01)):
+        changed = _deepline_ledger_entry(**{field: value})
+        changed["charge_state"] = "free"
+        assert deepline_billing_ledger_cost(
+            {"entries": [changed], "has_more": False},
+            request_id="ctx-tool-0123456789abcdef0123456789abcdef",
+            operation="firecrawl_scrape",
+        )[0] == "invalid"
 
 
 def test_deepline_insufficient_credit_refusal_is_zero():

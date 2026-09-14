@@ -446,6 +446,7 @@ class ArenaService:
         self._scorer_policy = scoring.build_scorer_policy()
         self._brokers: Dict[str, broker_module.Broker] = {}
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
+        self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
 
     # -- accessors -------------------------------------------------------------
 
@@ -2011,7 +2012,13 @@ class ArenaService:
                 continue
             if not attempts:
                 continue
-            latest = max(attempts, key=lambda run: int(run.get("attempt") or 0))
+            latest = max(
+                attempts,
+                key=lambda run: (
+                    int(run.get("stage_generation") or 0),
+                    int(run.get("attempt") or 0),
+                ),
+            )
             if (
                 int(latest.get("attempt") or 0)
                 >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
@@ -2031,7 +2038,18 @@ class ArenaService:
         chosen: Dict[str, Dict[str, Any]] = {}
         for run in self._store.list_runs(round_id, stage=stage, kind="score"):
             current = chosen.get(run["scored_run_id"])
-            if current is None or (run["status"] == "accepted" and current["status"] != "accepted") or (run["status"] == current["status"] and int(run["attempt"]) > int(current["attempt"])):
+            if (
+                current is None
+                or (run["status"] == "accepted" and current["status"] != "accepted")
+                or (
+                    run["status"] == current["status"]
+                    and (
+                        int(run.get("stage_generation") or 0), int(run["attempt"])
+                    ) > (
+                        int(current.get("stage_generation") or 0), int(current["attempt"])
+                    )
+                )
+            ):
                 chosen[run["scored_run_id"]] = run
         return chosen
 
@@ -3513,6 +3531,36 @@ class ArenaService:
             "lease_expires_at": str(candidate.get("lease_expires_at") or ""),
         }
 
+    def _reconcile_deepline_cost(
+        self, round_id: str, *, run_id: str = ""
+    ) -> Dict[str, Any]:
+        """Perform one bounded billing check without holding service locks."""
+
+        cursor_key = (round_id, run_id)
+        with self._lock:
+            after_entry_id = self._deepline_reconciliation_after.get(
+                cursor_key, 0
+            )
+        items = self._store.list_deepline_cost_reconciliations(
+            round_id,
+            run_id=run_id,
+            after_entry_id=after_entry_id,
+            limit=1,
+        )
+        if not items:
+            return {"status": "none"}
+        candidate = items[0]
+        with self._lock:
+            self._deepline_reconciliation_after[cursor_key] = int(
+                candidate.get("uncertain_entry_id") or 0
+            )
+        result = self._broker_for(round_id).reconcile_deepline_cost(candidate)
+        return {
+            "status": str(result.get("status") or "unavailable"),
+            "run_status": str(candidate.get("run_status") or ""),
+            "lease_expires_at": str(candidate.get("lease_expires_at") or ""),
+        }
+
     def handle_provider(self, run_id: str, lease_token: str, frame: Any) -> Dict[str, Any]:
         if not isinstance(frame, Mapping) or set(frame) != {"operation_id", "parameters", "timeout_ms", "action_sequence"}:
             raise ServiceError("frame_invalid", 400)
@@ -3805,6 +3853,9 @@ class ArenaService:
         try:
             row = self._round(round_id)
             if row["status"] not in ("open",) + TERMINAL_STATUSES:
+                # One bounded billing read outside service locks. Claims for
+                # other submissions stay available while this charge posts.
+                self._reconcile_deepline_cost(round_id)
                 billing = self._reconcile_openrouter_cost(round_id)
                 if (
                     billing["status"] not in ("none", "settled")

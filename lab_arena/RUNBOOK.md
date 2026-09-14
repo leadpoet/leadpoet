@@ -172,6 +172,15 @@ settle a valid completed response at zero. Other missing or ambiguous charges
 retain their reservation; they are not free. Billing-history reads are bounded
 and private. They never reach the model.
 
+Before dispatch, the broker records a deterministic Deepline billing request ID
+and the credential fingerprint. If the response is lost, it reads the provider's
+per-request billing ledger without repeating the paid request. Migration 243
+allows an exact later settlement. While billing remains unresolved, it defers
+pending scores only for the affected submission so retries are not consumed by
+the same reservation. Other submissions remain claimable. The existing spending
+limits and round deadlines remain in force. An unresolved charge stays reserved
+and is never silently treated as zero.
+
 Reservations and settlement share the existing submission lock. Concurrent
 ICPs cannot each claim a fresh budget. Dynamically priced Deepline calls
 reserve the remaining allowance and run one at a time per submission. Their

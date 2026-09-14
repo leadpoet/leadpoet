@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from typing import Any, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 
 MICROUSD_PER_USD = Decimal("1000000")
@@ -34,6 +35,8 @@ _DEEPLINE_CREDIT_FIELDS = (
 )
 _DEEPLINE_MAX_CHARGE_GROUP_IDS = 128
 _DEEPLINE_MAX_REQUEST_ID_LENGTH = 512
+_DEEPLINE_BILLING_LEDGER_MAX_ENTRIES = 5_000
+_DEEPLINE_BILLING_CURSOR_MAX_LENGTH = 4_096
 # Deepline's live tool descriptions reported billingMode=no_bill on 2026-09-10.
 _DEEPLINE_COMPLETED_NO_BILL_BASIS = {
     "free_simple_company_search": "deepline_free_simple_company_search_completed_zero",
@@ -118,8 +121,35 @@ def _decimal(value: Any) -> Optional[Decimal]:
     return amount
 
 
+def _signed_decimal(value: Any) -> Optional[Decimal]:
+    if isinstance(value, bool) or not isinstance(
+        value, (str, int, float, Decimal)
+    ):
+        return None
+    try:
+        amount = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return amount if amount.is_finite() else None
+
+
 def _microusd_ceiling(usd: Decimal) -> int:
     return int((usd * MICROUSD_PER_USD).to_integral_value(rounding=ROUND_CEILING))
+
+
+def _bounded_https_url(value: Any) -> bool:
+    if not isinstance(value, str) or not 8 <= len(value) <= 2_000:
+        return False
+    try:
+        parsed = urlsplit(value)
+        return (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except ValueError:
+        return False
 
 
 def scrapingdog_cost(operation_id: str, parameters: Mapping[str, Any]) -> ProviderCost:
@@ -280,6 +310,151 @@ def deepline_billing_history_cost(
             units=credits,
             unit_name="credits",
             price_basis="deepline_billing_history_credits_x_0.10_usd",
+        ),
+        False,
+        None,
+    )
+
+
+def deepline_billing_ledger_cost(
+    response_json: Any,
+    *,
+    request_id: str,
+    operation: str,
+    current_cursor: Optional[str] = None,
+) -> Tuple[str, Optional[ProviderCost], bool, Optional[str]]:
+    """Read one exact charge from Deepline's paginated billing ledger.
+
+    The ledger endpoint returns one row per request, unlike the recent-usage
+    summary that can combine several request ids. ``pending`` means this page
+    has no match. Its pagination fields tell the caller whether another
+    bounded page is available. Invalid, conflicting, or nonterminal evidence
+    never becomes a zero charge.
+    """
+
+    if (
+        not isinstance(response_json, Mapping)
+        or not isinstance(request_id, str)
+        or not request_id.strip()
+        or len(request_id) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
+        or not isinstance(operation, str)
+        or not operation.strip()
+        or len(operation) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
+        or (
+            current_cursor is not None
+            and (
+                not isinstance(current_cursor, str)
+                or not current_cursor
+                or len(current_cursor) > _DEEPLINE_BILLING_CURSOR_MAX_LENGTH
+            )
+        )
+    ):
+        return "invalid", None, False, None
+    entries = response_json.get("entries")
+    if (
+        not isinstance(entries, list)
+        or len(entries) > _DEEPLINE_BILLING_LEDGER_MAX_ENTRIES
+        or any(not isinstance(entry, Mapping) for entry in entries)
+    ):
+        return "invalid", None, False, None
+    matches = [entry for entry in entries if entry.get("request_id") == request_id]
+    if len(matches) > 1:
+        return "invalid", None, False, None
+    if not matches:
+        has_more = response_json.get("has_more")
+        if not isinstance(has_more, bool):
+            return "invalid", None, False, None
+        if not has_more:
+            return "pending", None, False, None
+        next_cursor = response_json.get("next_cursor")
+        if (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or len(next_cursor) > _DEEPLINE_BILLING_CURSOR_MAX_LENGTH
+            or any(
+                ord(character) < 0x21 or ord(character) > 0x7E
+                for character in next_cursor
+            )
+            or next_cursor == current_cursor
+        ):
+            return "invalid", None, False, None
+        return "pending", None, True, next_cursor
+
+    # The provider defines request_id as one logical billing identity. The
+    # post-deduct ledger has one terminal charge_settle row for that identity;
+    # usage summaries, in contrast, can group several identities together.
+    entry = matches[0]
+    metadata = entry.get("metadata")
+    audit = entry.get("billing_audit")
+    if not isinstance(metadata, Mapping) or not isinstance(audit, Mapping):
+        return "invalid", None, False, None
+    provider = entry.get("provider")
+    if (
+        entry.get("operation") != operation
+        or not isinstance(provider, str)
+        or not provider
+        or metadata.get("requestId") != request_id
+        or metadata.get("chargeGroupId") != request_id
+        or metadata.get("operation") != operation
+        or metadata.get("provider") != provider
+        or audit.get("request_id") != request_id
+        or audit.get("charge_group_id") != request_id
+        or audit.get("operation") != operation
+        or audit.get("provider") != provider
+    ):
+        return "invalid", None, False, None
+
+    reason = entry.get("reason")
+    charge_state = entry.get("charge_state")
+    billing_stage = entry.get("billing_stage")
+    billing_mode = entry.get("billing_mode")
+    pricing_model = entry.get("pricing_model")
+    pricing_basis = entry.get("pricing_basis")
+    if (
+        not isinstance(reason, str)
+        or not reason
+        or charge_state not in ("posted", "free")
+        or not isinstance(billing_stage, str)
+        or not billing_stage
+        or not isinstance(billing_mode, str)
+        or not billing_mode
+        or not isinstance(pricing_model, str)
+        or not pricing_model
+        or not isinstance(pricing_basis, str)
+        or not pricing_basis
+        or metadata.get("billingStage") != billing_stage
+        or metadata.get("billingMode") != billing_mode
+        or metadata.get("pricingModel") != pricing_model
+        or audit.get("billing_stage") != billing_stage
+        or audit.get("charge_state") != charge_state
+        or audit.get("billing_mode") != billing_mode
+        or audit.get("pricing_model") != pricing_model
+        or audit.get("pricing_basis") != pricing_basis
+    ):
+        return "invalid", None, False, None
+
+    credits = _decimal(entry.get("charge_credits"))
+    delta = _signed_decimal(entry.get("delta"))
+    metadata_credits = _decimal(metadata.get("postedCredits"))
+    audit_credits = _decimal(audit.get("charge_credits"))
+    if (
+        credits is None
+        or delta is None
+        or metadata_credits != credits
+        or audit_credits != credits
+        or delta != -credits
+        or (charge_state == "posted" and billing_stage != "posted")
+        or (charge_state == "posted" and reason != "charge_settle")
+        or (charge_state == "free" and credits != 0)
+    ):
+        return "invalid", None, False, None
+    return (
+        "matched",
+        ProviderCost(
+            microusd=_microusd_ceiling(credits * DEEPLINE_USD_PER_CREDIT),
+            units=credits,
+            unit_name="credits",
+            price_basis="deepline_billing_ledger_charge_credits_x_0.10_usd",
         ),
         False,
         None,

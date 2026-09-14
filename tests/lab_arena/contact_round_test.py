@@ -21,26 +21,17 @@ from qualification.scoring.arena_integrity import (
 from qualification.scoring.contact_verification import verify_contact
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.icp_fixtures import daily_icps
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import (
+    CURRENT_SERVICE_MIGRATIONS,
+    database_with_lab_arena_migration,
+)
 from tests.lab_arena.test_integrity_policy import fresh_icps
-from tests.lab_arena.test_integrity_round import IntegrityHarness, MIGRATIONS
-
-MIGRATION = "215-lab-arena-contacts.sql"
+from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(
-        MIGRATIONS
-        + (
-            MIGRATION,
-            "223-lab-arena-cancelled-call-late-settlement.sql",
-            "225-lab-arena-openrouter-delayed-cost-reconciliation.sql",
-            "227-lab-arena-champion-funding.sql",
-            "229-lab-arena-successful-call-cost-eligibility.sql",
-            "230-lab-arena-successful-call-cost-permissions.sql",
-        )
-    )
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
 def _contact_icps(rows: list[dict]) -> list[dict]:

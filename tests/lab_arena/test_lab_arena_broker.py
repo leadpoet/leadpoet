@@ -1840,6 +1840,10 @@ def test_non_openrouter_transport_failure_ignores_generation_identity():
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "transport_failure",
+        "credential_fingerprint": br._credential_fingerprint(DL_KEY),
+        "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
+        "deepline_operation": "exa_search",
+        "transport_error_class": "ReadTimeout",
         "call_succeeded": False,
     }
 
@@ -2096,7 +2100,7 @@ def test_transport_failure_after_send_marks_uncertain_and_keeps_full_reservation
     assert store.openrouter_capacity == 0
     # A later identical request neither re-sends nor releases the reservation.
     late = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
-    assert late.status == 409 and json.loads(late.body) == {"error": {"code": "call_uncertain"}} and len(transport.sent) == 1
+    assert late.status == 409 and json.loads(late.body) == {"error": {"code": "call_uncertain"}} and len([request for request in transport.sent if request["method"] == "POST"]) == 1
 
 
 def test_successful_deepline_reply_without_billing_is_uncertain():
@@ -2114,6 +2118,8 @@ def test_successful_deepline_reply_without_billing_is_uncertain():
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
+        "credential_fingerprint": br._credential_fingerprint(DL_KEY),
+        "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
         "call_succeeded": True,
         "provider_status": 200,
         "body_bytes": len(body),
@@ -2595,6 +2601,8 @@ def test_real_deepline_free_company_search_malformed_billing_does_not_fall_back(
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
+        "credential_fingerprint": br._credential_fingerprint(DL_KEY),
+        "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
         "call_succeeded": True,
         "provider_status": 200,
         "body_bytes": len(raw),

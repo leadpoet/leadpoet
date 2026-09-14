@@ -23,7 +23,7 @@ from lab_arena.promotion import GitPromoter
 from leadpoet_canonical import arena_weights
 from leadpoet_canonical.lab_arena_rewards import champion_values
 from tests.lab_arena.lab_arena_pg_harness import (
-    POSTGREST_MIGRATIONS,
+    CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
@@ -51,7 +51,7 @@ HOST_KEYS = {
 @pytest.fixture
 def champion_database():
     yield from database_with_lab_arena_migration(
-        POSTGREST_MIGRATIONS + ("227-lab-arena-champion-funding.sql",)
+        CURRENT_SERVICE_MIGRATIONS + ("227-lab-arena-champion-funding.sql",)
     )
 
 

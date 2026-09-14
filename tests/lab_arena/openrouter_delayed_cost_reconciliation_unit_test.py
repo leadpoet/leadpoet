@@ -97,6 +97,7 @@ def test_advance_defers_exhaustion_while_exact_billing_run_lease_is_active():
     service = object.__new__(svc.ArenaService)
     service._invalidate_hot_round = lambda: None
     service._round = lambda _round_id: {"status": "stage1_scoring"}
+    service._reconcile_deepline_cost = lambda _round_id: {"status": "none"}
     service._reconcile_openrouter_cost = lambda _round_id: {
         "status": "pending",
         "run_status": "leased",

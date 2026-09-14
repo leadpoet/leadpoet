@@ -37,6 +37,7 @@ from lab_arena.contracts import ArenaContractError
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
+DEEPLINE_BILLING_LEDGER_URL = "https://code.deepline.com/api/v2/billing/ledger"
 DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
 )
@@ -86,6 +87,13 @@ _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
+DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
+_DEEPLINE_REQUEST_ID_RE = re.compile(r"^ctx-tool-[0-9a-f]{32}$")
+_TRANSPORT_ERROR_CLASSES = frozenset({
+    "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout",
+    "WriteError", "WriteTimeout", "PoolTimeout", "RemoteProtocolError",
+    "LocalProtocolError", "ProxyError", "UnsupportedProtocol",
+})
 CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS = 4
 _OPENROUTER_GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 _CREDENTIAL_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -335,6 +343,7 @@ def _missing_provider_cost_call_doc(
     *,
     call_succeeded: bool,
     deepline_request_id: Optional[str] = None,
+    deepline_response_request_id: Optional[str] = None,
     deepline_operation: Optional[str] = None,
     openrouter_generation_id: Optional[str] = None,
     credential_fingerprint: Optional[str] = None,
@@ -362,10 +371,19 @@ def _missing_provider_cost_call_doc(
     if deepline_request_id is not None and deepline_operation is not None:
         diagnostics.update(
             {
-                "deepline_job_id": deepline_request_id,
+                "deepline_request_id": deepline_request_id,
                 "deepline_operation": deepline_operation,
             }
         )
+    if deepline_response_request_id is not None:
+        diagnostics["deepline_job_id"] = deepline_response_request_id
+    if (
+        deepline_request_id is not None
+        and credential_fingerprint is not None
+        and _DEEPLINE_REQUEST_ID_RE.fullmatch(deepline_request_id)
+        and _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint)
+    ):
+        diagnostics["credential_fingerprint"] = credential_fingerprint
     if (
         openrouter_generation_id is not None
         and credential_fingerprint is not None
@@ -658,6 +676,79 @@ def _deepline_billing_readback(
     return None
 
 
+def _deepline_ledger_readback(
+    *,
+    transport: ProviderTransport,
+    secret: str,
+    request_id: str,
+    operation: str,
+    since_at: int,
+    reconciliation_deadline: float,
+) -> Optional[provider_costs.ProviderCost]:
+    """Read exact request billing; never repeat a provider execution."""
+
+    if (
+        _DEEPLINE_REQUEST_ID_RE.fullmatch(request_id) is None
+        or isinstance(since_at, bool)
+        or not isinstance(since_at, int)
+        or since_at < 0
+    ):
+        return None
+    deadline = min(
+        reconciliation_deadline,
+        time.monotonic() + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
+    )
+    headers = {
+        "accept": "application/json",
+        "authorization": "Bearer " + secret,
+        "user-agent": "leadpoet-lab-arena-broker/1",
+    }
+    base_url = DEEPLINE_BILLING_LEDGER_URL + "?since_at=%d&limit=50" % since_at
+    cursor = None
+    seen_cursors = set()
+    for index in range(_DEEPLINE_BILLING_MAX_ATTEMPTS):
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        if index and cursor is None:
+            time.sleep(min(_DEEPLINE_BILLING_POLL_SECONDS, deadline - now))
+            now = time.monotonic()
+            if now >= deadline:
+                break
+        url = base_url if cursor is None else base_url + "&cursor=" + quote(cursor, safe="")
+        try:
+            response = transport.send(
+                method="GET", url=url, headers=headers, body=b"",
+                timeout_seconds=max(0.001, deadline - now),
+            )
+        except ProviderTransportError:
+            continue
+        if _response_contains_credential(response, secret):
+            return None
+        if response.status != 200:
+            continue
+        try:
+            document = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+        state, cost, has_more, next_cursor = provider_costs.deepline_billing_ledger_cost(
+            document, request_id=request_id, operation=operation, current_cursor=cursor,
+        )
+        if state == "invalid":
+            return None
+        if state == "matched":
+            return cost
+        if has_more:
+            if not next_cursor or next_cursor in seen_cursors:
+                return None
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        else:
+            cursor = None
+            seen_cursors.clear()
+    return None
+
+
 def _openrouter_generation_identity(
     document: Any, headers: Mapping[str, Any]
 ) -> Tuple[bool, Optional[str]]:
@@ -826,6 +917,8 @@ class CallStore(Protocol):
     def mark_uncertain(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def reconcile_openrouter_cost(self, **kwargs: Any) -> Dict[str, Any]: ...
+
+    def reconcile_deepline_cost(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
 
@@ -1290,6 +1383,129 @@ class Broker:
             cost_units=format(cost.units, "f"),
         )
 
+    def reconcile_deepline_cost(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        timeout_seconds: float = DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        """Settle one retained Deepline request without repeating its POST."""
+
+        required = {
+            "uncertain_entry_id",
+            "round_id",
+            "run_id",
+            "submission_id",
+            "miner_hotkey",
+            "assignment_id",
+            "stage",
+            "icp_position",
+            "attempt",
+            "kind",
+            "call_identity",
+            "request_id",
+            "credential_fingerprint",
+            "funding_source",
+            "run_status",
+            "lease_expires_at",
+            "uncertain_at",
+            "reservation_at",
+            "operation",
+        }
+        if not isinstance(candidate, Mapping) or set(candidate) != required:
+            return {"status": "invalid"}
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "invalid"}
+        operation = candidate.get("operation")
+        request_id = candidate.get("request_id")
+        credential_fingerprint = candidate.get("credential_fingerprint")
+        if (
+            not isinstance(candidate.get("call_identity"), str)
+            or _CREDENTIAL_FINGERPRINT_RE.fullmatch(candidate["call_identity"]) is None
+            or not isinstance(operation, str)
+            or operation not in operations.DEEPLINE_TOOLS
+            or not isinstance(request_id, str)
+            or _DEEPLINE_REQUEST_ID_RE.fullmatch(request_id) is None
+            or request_id != "ctx-tool-" + candidate["call_identity"][7:39]
+            or not isinstance(credential_fingerprint, str)
+            or _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint) is None
+            or isinstance(candidate.get("uncertain_entry_id"), bool)
+            or not isinstance(candidate.get("uncertain_entry_id"), int)
+            or int(candidate["uncertain_entry_id"]) < 1
+            or candidate.get("kind") not in ("execute", "score")
+            or candidate.get("funding_source") not in ("host", "miner_key")
+            or not 0 < timeout <= DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
+        ):
+            return {"status": "invalid"}
+        try:
+            context = RunContext(
+                run_id=str(candidate["run_id"]),
+                assignment_id=str(candidate["assignment_id"]),
+                icp_position=int(candidate["icp_position"]),
+                lease_token_hash="",
+                miner_hotkey=str(candidate["miner_hotkey"]),
+                submission_id=str(candidate["submission_id"]),
+                stage=int(candidate["stage"]),
+                kind=str(candidate["kind"]),
+                attempt=int(candidate["attempt"]),
+                round_id=str(candidate["round_id"]),
+            )
+            funding_source = (
+                self._provider_funding_source_for(context, "deepline")
+                if self._provider_funding_source_for
+                else self._funding_source_for(context)
+                if self._funding_source_for
+                else "host"
+            )
+            secret = (
+                self._credential_for(context, "deepline")
+                if self._credential_for
+                else self._key_for("deepline")
+            )
+            if (
+                not isinstance(secret, str)
+                or not secret
+                or funding_source != candidate["funding_source"]
+                or not hmac.compare_digest(
+                    _credential_fingerprint(secret), credential_fingerprint
+                )
+            ):
+                return {"status": "credential_mismatch"}
+            reservation_at = datetime.fromisoformat(
+                str(candidate["reservation_at"]).replace("Z", "+00:00")
+            )
+            if reservation_at.tzinfo is None:
+                return {"status": "invalid"}
+            cost = _deepline_ledger_readback(
+                transport=self._transport,
+                secret=secret,
+                request_id=request_id,
+                operation=operation,
+                since_at=max(0, int(reservation_at.timestamp() * 1000) - 1000),
+                reconciliation_deadline=time.monotonic() + timeout,
+            )
+        except (BrokerError, KeyError, TypeError, ValueError):
+            return {"status": "unavailable"}
+        finally:
+            if "secret" in locals():
+                secret = ""
+                del secret
+        if cost is None:
+            return {"status": "pending"}
+        return self._store.reconcile_deepline_cost(
+            round_id=str(candidate["round_id"]),
+            run_id=str(candidate["run_id"]),
+            call_identity=str(candidate["call_identity"]),
+            uncertain_entry_id=int(candidate["uncertain_entry_id"]),
+            request_id=request_id,
+            operation=operation,
+            credential_fingerprint=credential_fingerprint,
+            actual_microusd=cost.microusd,
+            cost_units=format(cost.units, "f"),
+        )
+
     # -- execution ------------------------------------------------------------
 
     def execute(
@@ -1505,10 +1721,14 @@ class Broker:
                     "provider_attempt": provider_attempt,
                 },
             )
-        openrouter_credential_fingerprint = (
+        provider_credential_fingerprint = (
             _credential_fingerprint(secret)
-            if effective_operation.provider == "openrouter"
+            if effective_operation.provider in ("openrouter", "deepline")
             else None
+        )
+        openrouter_credential_fingerprint = (
+            provider_credential_fingerprint
+            if effective_operation.provider == "openrouter" else None
         )
         max_output_tokens = 0
         reservation_cost: Optional[provider_costs.ProviderCost] = None
@@ -1577,7 +1797,19 @@ class Broker:
             request_accounting["tool"] = effective_normalized.get("tool") or {
                 "exa.search": "exa_search", "exa.contents": "exa_contents"
             }.get(effective_operation_id, "")
-        summary.update(request_accounting)
+        if effective_operation.provider == "deepline":
+            # Chosen before dispatch so loss of the HTTP reply cannot erase the
+            # billing identity. Models cannot supply or override this header.
+            request_accounting["deepline_request_id"] = (
+                "ctx-tool-" + call_identity.removeprefix("sha256:")[:32]
+            )
+            request_accounting["credential_fingerprint"] = (
+                provider_credential_fingerprint
+            )
+        summary.update({
+            key: value for key, value in request_accounting.items()
+            if key not in ("deepline_request_id", "credential_fingerprint")
+        })
         reservation_arguments = dict(
             run_id=context.run_id,
             lease_token_hash=context.lease_token_hash,
@@ -1760,8 +1992,10 @@ class Broker:
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
         deepline_native_cost: Optional[provider_costs.ProviderCost] = None
-        deepline_request_id: Optional[str] = None
-        deepline_operation: Optional[str] = None
+        deepline_dispatch_since_at = max(0, int(time.time() * 1000) - 1000)
+        deepline_response_request_id: Optional[str] = None
+        deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
+        deepline_operation: Optional[str] = request_accounting.get("tool")
         openrouter_native_cost: Optional[provider_costs.ProviderCost] = None
         openrouter_readback_cost: Optional[provider_costs.ProviderCost] = None
         openrouter_insured_cost: Optional[provider_costs.ProviderCost] = None
@@ -1769,6 +2003,8 @@ class Broker:
         openrouter_generation_id: Optional[str] = None
         try:
             url, headers = inject_credential(outbound, secret)
+            if deepline_request_id is not None:
+                headers["x-deepline-request-id"] = deepline_request_id
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 response = self._transport.send(
@@ -1858,9 +2094,14 @@ class Broker:
                                 response.status, raw_document
                             )
                         )
-                    request_id = _deepline_job_request_id(raw_document)
-                    deepline_request_id = request_id
-                    if request_id is not None and (
+                    response_request_id = _deepline_job_request_id(raw_document)
+                    request_id = response_request_id
+                    # Preserve the provider receipt identity for native billing.
+                    # The pre-dispatch ID remains on the immutable reservation
+                    # and is used if the transport loses that receipt.
+                    deepline_response_request_id = response_request_id
+
+                    if response_request_id is not None and (
                         (
                             response.status == 200
                             and raw_document.get("status") == "completed"
@@ -1925,12 +2166,40 @@ class Broker:
                         credential_fingerprint=openrouter_credential_fingerprint,
                     )
                     uncertain_doc["transport_failure"] = True
-                result = self._store.mark_uncertain(
-                    run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                    call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
+                if effective_operation.provider == "deepline":
+                    uncertain_doc.update({
+                        "deepline_request_id": deepline_request_id,
+                        "deepline_operation": deepline_operation,
+                        "credential_fingerprint": provider_credential_fingerprint,
+                        "transport_error_class": (
+                            str(exc) if str(exc) in _TRANSPORT_ERROR_CLASSES
+                            else "ProviderTransportError"
+                        ),
+                    })
+                    deepline_readback_cost = _deepline_ledger_readback(
+                        transport=self._transport,
+                        secret=secret,
+                        request_id=str(deepline_request_id),
+                        operation=str(deepline_operation),
+                        since_at=deepline_dispatch_since_at,
+                        reconciliation_deadline=(
+                            time.monotonic()
+                            + DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
+                        ),
+                    )
+                if deepline_readback_cost is None:
+                    self._store.mark_uncertain(
+                        run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
+                        call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
+                    )
+                    summary.update({"outcome": "uncertain", "actual_microusd": amount})
+                    return _error_result("provider_unavailable", summary)
+                # A billed request with a lost result is still a failed provider
+                # call. Settle its authenticated cost without repeating the POST.
+                response = ProviderResponse(
+                    502, {"content-type": "application/json"},
+                    operations.GENERIC_UNAVAILABLE_BODY,
                 )
-                summary.update({"outcome": "uncertain", "actual_microusd": amount})
-                return _error_result("provider_unavailable", summary)
         finally:
             secret = ""
             del secret
@@ -1979,7 +2248,7 @@ class Broker:
             raw_cost,
             operation=cost_operation,
             request_id=(
-                deepline_request_id
+                (deepline_response_request_id or deepline_request_id)
                 if effective_operation.provider == "deepline"
                 and (
                     raw_cost is deepline_native_cost
@@ -2061,9 +2330,10 @@ class Broker:
                     raw_document,
                     call_succeeded=call_succeeded,
                     deepline_request_id=deepline_request_id,
+                    deepline_response_request_id=deepline_response_request_id,
                     deepline_operation=deepline_operation,
                     openrouter_generation_id=openrouter_generation_id,
-                    credential_fingerprint=openrouter_credential_fingerprint,
+                    credential_fingerprint=provider_credential_fingerprint,
                 )
                 if account_failure_evidence is not None:
                     uncertain_doc["account_failure_evidence"] = (

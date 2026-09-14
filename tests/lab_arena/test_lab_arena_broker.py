@@ -2730,6 +2730,64 @@ def test_deepline_missing_native_billing_recovers_full_positive_history_charge()
     assert 0 < transport.sent[1]["timeout"] <= 30.0
 
 
+def test_deepline_large_unrelated_history_group_releases_dynamic_reservation():
+    job_id = "iad1::free-history-after-large-group"
+    envelope = {
+        "job_id": job_id,
+        "result": {"data": {"results": []}},
+        "status": "completed",
+    }
+    unrelated = deepline_history_entry(
+        "iad1::unrelated", "exa_search", 0.2
+    )
+    unrelated["metadata"] = {
+        "chargeGroupIds": ["unrelated-%d" % index for index in range(147)]
+    }
+    exact_free = deepline_history_entry(job_id, "exa_search", 0)
+    exact_free["charge_state"] = "free"
+    openrouter_response = {
+        "id": "gen-after-free",
+        "model": "openai/gpt-4o-mini",
+        "choices": [],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "cost": "0.000009"},
+    }
+    store = FakeLedgerStore(openrouter_capacity=20_000)
+    broker, store, transport = make_broker(
+        store=store,
+        transport=FakeTransport(
+            [
+                (200, json.dumps(envelope).encode()),
+                (200, deepline_history(unrelated, exact_free)),
+                (200, openrouter_response),
+            ]
+        ),
+    )
+
+    deepline_result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=30_000,
+    )
+    openrouter_result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=1,
+        timeout_ms=30_000,
+    )
+
+    assert deepline_result.status == 200
+    assert deepline_result.call["reserved_microusd"] == 20_000
+    assert deepline_result.call["actual_microusd"] == 0
+    assert deepline_result.call["outcome"] == "settled"
+    assert openrouter_result.status == 200
+    assert openrouter_result.call["outcome"] == "settled"
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET", "POST"]
+    assert store.log == ["reserve", "dispatch", "settle"] * 2
+
+
 def test_deepline_completed_native_billing_is_scoped_to_one_grouped_request():
     wrapper_job_id = "iad1::wrapper-job"
     envelope = {

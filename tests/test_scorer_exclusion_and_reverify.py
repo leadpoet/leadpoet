@@ -666,6 +666,13 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             "Public",
             "Public",
             True,
+            "Ticker/ISIN: FISV(NASDAQ)/US3377381088 · Type of Organization: Public",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Public",
+            "Public",
+            True,
             "Acme shares are publicly traded on Nasdaq and will be delisted next year.",
             COMPANY_FIT_MATCH,
         ),
@@ -909,6 +916,42 @@ def test_completed_acquisition_must_belong_to_private_equity_affiliate(quote):
 )
 def test_exchange_listing_statement_preserves_current_public_stage_guards(quote, expected):
     assert _stage_quote_supports_observation("public", quote) is expected
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Ticker/ISIN: FISV(NASDAQ)/US3377381088 · Type of Organization: Public",
+        "Ticker: GXO(NYSE)",
+        "Ticker : GXO (NYSE)",
+        "TICKER / ISIN: GXO(NYSE)/US36262G1013",
+    ],
+)
+def test_label_bound_ticker_first_is_public_stage_proof(quote):
+    assert _stage_quote_supports_observation("public", quote) is True
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Public",
+        "Type of Organization: Public",
+        "FISV(NASDAQ)",
+        "GXO(NYSE)",
+        "The planned listing has Ticker: FISV(NASDAQ).",
+        "Formerly, Ticker: FISV(NASDAQ).",
+        "Ticker: FISV(NASDAQ), delisted in 2024.",
+        "Ticker/ISIN: FISV(NASDAQ)",
+        "Ticker: FISV(NASDAQ)/US3377381088",
+        "Ticker or ISIN: FISV(NASDAQ)/US3377381088",
+        "Bond Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
+        "Company debt Ticker: XYZ28(NASDAQ)",
+        "Debt-only Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
+        "Company debt-only listing: Ticker/ISIN: XYZ28(NASDAQ)/US0000000002",
+    ],
+)
+def test_label_bound_ticker_first_preserves_public_stage_guards(quote):
+    assert _stage_quote_supports_observation("public", quote) is False
 
 
 @pytest.mark.parametrize(

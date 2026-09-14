@@ -554,6 +554,22 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
         re.I,
     ),
 )
+_PUBLIC_TICKER_STAGE_PROOF_PATTERNS = (
+    re.compile(
+        r"\b(?i:ticker)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*"
+        r"\((?i:nasdaq|nyse)\)(?!\s*/)",
+    ),
+    re.compile(
+        r"\b(?i:ticker)\s*/\s*(?i:isin)\s*:\s*"
+        r"[A-Z][A-Z0-9.-]{0,9}\s*\((?i:nasdaq|nyse)\)\s*/\s*"
+        r"[A-Z]{2}[A-Z0-9]{9}[0-9]\b",
+    ),
+)
+_PUBLIC_NON_EQUITY_TICKER_CONTEXT_RE = re.compile(
+    r"\b(?:bond|debt)(?:[- ]only)?\b[^.!?;\n]{0,60}"
+    r"\bticker(?:\s*/\s*isin)?\s*:",
+    re.I,
+)
 _PRIVATE_EQUITY_LABEL = (
     r"(?:private[- ]equity|private[- ]markets)(?:\s+(?:firm|fund|sponsor|"
     r"owner|group))?"
@@ -710,6 +726,13 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
         reject_historical=True,
         supersession_patterns=_PUBLIC_STAGE_SUPERSESSION_PATTERNS,
     )
+    if not public and not _PUBLIC_NON_EQUITY_TICKER_CONTEXT_RE.search(text):
+        public = _has_affirmed_stage_proof(
+            text,
+            _PUBLIC_TICKER_STAGE_PROOF_PATTERNS,
+            reject_historical=True,
+            supersession_patterns=_PUBLIC_STAGE_SUPERSESSION_PATTERNS,
+        )
     private_equity = _has_affirmed_stage_proof(
         text,
         _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS,

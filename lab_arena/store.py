@@ -1582,7 +1582,17 @@ class ArenaStore:
             filters["kind"] = kind
         return self._transport.select("lab_arena_runs", filters=filters, order="run_id")
 
-    def list_ledger(self, *, run_id: Optional[str] = None, call_identity: Optional[str] = None, miner_hotkey: Optional[str] = None, submission_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_ledger(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        call_identity: Optional[str] = None,
+        miner_hotkey: Optional[str] = None,
+        submission_id: Optional[str] = None,
+        provider: Optional[str] = None,
+        entry_kind: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {}
         if run_id:
             filters["run_id"] = run_id
@@ -1592,7 +1602,21 @@ class ArenaStore:
             filters["miner_hotkey"] = miner_hotkey
         if submission_id:
             filters["submission_id"] = submission_id
-        return self._transport.select("lab_arena_ledger", filters=filters or None, order="entry_id")
+        if provider:
+            filters["provider"] = provider
+        if entry_kind:
+            filters["entry_kind"] = entry_kind
+        if limit is not None and (
+            type(limit) is not int or not 1 <= limit <= 1_000
+        ):
+            raise ArenaStoreError("ledger limit must be from 1 through 1000")
+        arguments: Dict[str, Any] = {
+            "filters": filters or None,
+            "order": "entry_id",
+        }
+        if limit is not None:
+            arguments["limit"] = limit
+        return self._transport.select("lab_arena_ledger", **arguments)
 
     def submission_costs(self, submission_id: str) -> Dict[str, Any]:
         """Return strictly validated aggregate costs across every retry run."""

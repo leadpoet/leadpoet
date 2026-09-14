@@ -140,6 +140,39 @@ class ShapeTransport:
         pass
 
 
+def test_list_ledger_supports_bounded_exact_source_filters():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, request=request, json=[])
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport(
+            "https://project.example", anon_key="anon", service_jwt="a.b.c",
+            http_client=client,
+        )
+        assert ArenaStore(transport).list_ledger(
+            run_id="run-1",
+            provider="deepline",
+            entry_kind="settlement",
+            limit=31,
+        ) == []
+
+    assert len(requests) == 1
+    query = dict(requests[0].url.params.multi_items())
+    assert query == {
+        "select": "*", "run_id": "eq.run-1", "provider": "eq.deepline",
+        "entry_kind": "eq.settlement", "order": "entry_id.asc", "limit": "31",
+    }
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, "31", 1001])
+def test_list_ledger_rejects_unbounded_or_invalid_limits(limit):
+    with pytest.raises(ArenaStoreError, match="ledger limit"):
+        ArenaStore(ShapeTransport()).list_ledger(limit=limit)
+
+
 def test_simple_stage_and_completion_rpc_shapes():
     transport = ShapeTransport()
     store = ArenaStore(transport)

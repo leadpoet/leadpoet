@@ -97,6 +97,15 @@ source. A manifest generated from an uncommitted working tree is not sufficient.
 
 ## Deployment evidence
 
+Gateway scoring capacity follows the distinct configured proxy profiles that
+pass the existing transport preflight. Add or remove proxy entries in the
+protected environment, then use the canonical restart. Do not set
+`RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT` in the production secret: the restart
+derives its runtime value from the verified profiles. Duplicate URLs count
+once; failed profiles are excluded; an empty verified list blocks cutover.
+Check that the transition report and installed `scoring_proxy_*.json` files
+have the same count after a change.
+
 Code push and deployment are separate actions. Follow the authorized deployment
 scope. Before replacing a working process, run the normal validator's
 `--check-only` command and preserve its state directory.

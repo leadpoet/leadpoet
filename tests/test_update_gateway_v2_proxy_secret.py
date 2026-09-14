@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ def _production_environment() -> str:
         "# production-shaped gateway secret",
         "export UNRELATED_ONE='preserve me'",
         "UNRELATED_TWO=value-two",
+        "export RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT=malformed",
     ]
     lines.extend(
         "export RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_%d="
@@ -80,7 +82,7 @@ class FakeSecretsClient:
         }
 
 
-def test_updates_only_v2_proxy_and_capacity_values(tmp_path):
+def test_updates_only_v2_proxy_and_removes_stale_capacity(tmp_path):
     original = _production_environment()
     client = FakeSecretsClient(original)
     probes = []
@@ -104,17 +106,80 @@ def test_updates_only_v2_proxy_and_capacity_values(tmp_path):
     persisted = client.versions[client.current]
     assert "export UNRELATED_ONE='preserve me'\n" in persisted
     assert "UNRELATED_TWO=value-two\n" in persisted
-    assert original.splitlines()[3] in persisted
+    assert original.splitlines()[4] in persisted
     assert "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1=" not in persisted
     assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1=" in persisted
-    assert "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT=25" in persisted
+    assert "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT=" not in persisted
     assert result["worker_counts"] == {
-        "gateway_scoring": 25,
+        "gateway_scoring": 1,
     }
     backup_path = Path(result["backup_path"])
     assert backup_path.read_text(encoding="utf-8") == original
     assert backup_path.stat().st_mode & 0o777 == 0o600
     assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_receipt_counts_existing_distinct_v2_proxy_slots(tmp_path):
+    original = _production_environment() + "\n".join(
+        (
+            "export RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_2=https://second.example.com",
+            "export RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_4=https://second.example.com",
+            "export RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_7=https://seventh.example.com",
+        )
+    ) + "\n"
+    client = FakeSecretsClient(original)
+    probes = []
+
+    result = update_gateway_v2_proxy_secret(
+        secrets_client=client,
+        secret_id="gateway-secret",
+        backup_directory=tmp_path,
+        scoring_proxy="https://first.example.com",
+        proxy_fleet_probe=lambda fleets: probes.append(fleets) or fleets,
+    )
+
+    assert probes == [
+        {
+            "gateway_scoring": (
+                "https://first.example.com",
+                "https://second.example.com",
+                "https://seventh.example.com",
+            )
+        }
+    ]
+    assert result["worker_counts"] == {"gateway_scoring": 3}
+    persisted = client.versions[client.current]
+    assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_2=" in persisted
+    assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_4=" in persisted
+    assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_7=" in persisted
+    assert "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT=" not in persisted
+
+
+def test_json_update_preserves_unrelated_values_and_removes_stale_count(tmp_path):
+    original_values = {
+        "UNRELATED_LIST": [1, True, None],
+        "UNRELATED_TEXT": " preserve exactly ",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "15",
+        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": "https://old.example.com",
+    }
+    client = FakeSecretsClient(json.dumps(original_values, indent=2))
+
+    result = update_gateway_v2_proxy_secret(
+        secrets_client=client,
+        secret_id="gateway-secret",
+        backup_directory=tmp_path,
+        scoring_proxy="https://new.example.com",
+        proxy_fleet_probe=lambda fleets: fleets,
+    )
+
+    persisted = json.loads(client.versions[client.current])
+    assert persisted["UNRELATED_LIST"] == original_values["UNRELATED_LIST"]
+    assert persisted["UNRELATED_TEXT"] == original_values["UNRELATED_TEXT"]
+    assert "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT" not in persisted
+    assert persisted["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"] == (
+        "https://new.example.com"
+    )
+    assert result["worker_counts"] == {"gateway_scoring": 1}
 
 
 def test_live_proxy_failure_does_not_write_or_create_backup(tmp_path):

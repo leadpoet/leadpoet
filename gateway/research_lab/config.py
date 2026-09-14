@@ -16,27 +16,3 @@ SCORING_PROXY_PREFIXES = (
     *V2_SCORING_PROXY_PREFIXES,
     *LEGACY_SCORING_PROXY_PREFIXES,
 )
-
-MAX_WORKER_PROCESSES = 500
-
-
-
-
-
-
-
-
-
-
-
-
-def resolve_worker_process_count(
-    explicit_count: int,
-    fallback_count: int,
-    *,
-    minimum: int = 0,
-) -> int:
-    """Return one bounded scoring-worker count for sealing and startup."""
-
-    chosen = explicit_count if explicit_count > 0 else fallback_count
-    return max(minimum, min(int(chosen), MAX_WORKER_PROCESSES))

@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: retained Webshare proxies and dynamic capacity
+
+On 2026-09-14 the user explicitly authorized removing all retired Webshare
+proxy entries from the gateway and validator production secrets and caches,
+retaining only the ten supplied active endpoints in both environments, and
+making worker capacity derive automatically from the configured, verified
+proxy list. Remove fixed worker-count overrides; preserve authentication,
+transport verification, unrelated secrets, Arena output and scoring rules,
+accepted rounds, validator identity and durable weight state. This includes
+protected credential inspection, narrow tested code and configuration changes,
+pushes, canonical gateway/normal-validator restarts, and live verification
+through the overnight skills. Finish the pending Arena Intent Details release.
+This scope ends after the dynamic configuration and unaffected live flows
+are verified.
+
 ## Scoped production authorization: Arena Intent Details output
 
 On 2026-09-14 the user explicitly authorized simplifying the Arena output

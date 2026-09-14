@@ -24,7 +24,6 @@ from gateway.research_lab.config import (
     LEGACY_SCORING_PROXY_PREFIXES,
     SCORING_PROXY_PREFIXES,
     V2_SCORING_PROXY_PREFIXES,
-    resolve_worker_process_count,
 )
 from gateway.tee.artifact_vault_v2 import artifact_master_key_reference_hash
 from gateway.tee.host_memory_guard_v2 import cleanup_stale_vsock_probes
@@ -336,65 +335,9 @@ def _proxy_environment_names(
     return names
 
 
-def _worker_proxy_profile_values(
-    values: Sequence[str],
-    worker_count: int,
-) -> tuple[str, ...]:
-    """Return one sealed profile value for every required worker index."""
-
-    configured = tuple(str(value) for value in values)
-    required = int(worker_count)
-    if not configured or required <= len(configured):
-        return configured
-    return tuple(
-        configured[index % len(configured)]
-        for index in range(required)
-    )
-
-
 _SCORING_PROXY_CONFIGURATION = {
-    "legacy_prefixes": LEGACY_SCORING_PROXY_PREFIXES,
-    "process_count_environment": "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",
     "required_v2_environment": "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1",
 }
-
-
-def _validate_v2_proxy_migration_capacity(
-    environment: Mapping[str, str],
-    *,
-    proxy_source: str,
-    selected_profile_count: int,
-) -> None:
-    """Reject an implicit worker-capacity reduction during V2 migration."""
-
-    process_count_environment = str(
-        _SCORING_PROXY_CONFIGURATION["process_count_environment"]
-    )
-    if proxy_source != "v2_tls" or str(
-        environment.get(process_count_environment) or ""
-    ).strip():
-        return
-    legacy_profile_count = len(
-        _proxy_names(
-            environment,
-            _SCORING_PROXY_CONFIGURATION["legacy_prefixes"],
-        )
-    )
-    if legacy_profile_count <= selected_profile_count:
-        return
-    raise GatewayEnvelopePreparationV2Error(
-        "%s V2 proxy migration would reduce worker coverage from %d legacy "
-        "slots to %d selected proxy profile(s); set %s=%d explicitly and "
-        "configure %s with an authenticated HTTP CONNECT or HTTPS proxy"
-        % (
-            "gateway_scoring",
-            legacy_profile_count,
-            selected_profile_count,
-            process_count_environment,
-            legacy_profile_count,
-            _SCORING_PROXY_CONFIGURATION["required_v2_environment"],
-        )
-    )
 
 
 def _preferred_scoring_proxy_configuration(
@@ -437,29 +380,8 @@ def _validated_worker_proxy_configuration(
         raise GatewayEnvelopePreparationV2Error(
             "scoring proxy values are required for V2 sealing"
         )
-    raw_count = str(
-        environment.get("RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT") or "0"
-    ).strip()
-    try:
-        requested_count = int(raw_count)
-    except ValueError as exc:
-        raise GatewayEnvelopePreparationV2Error(
-            "scoring worker capacity is invalid"
-        ) from exc
-    scoring_count = resolve_worker_process_count(
-        requested_count, len(scoring_values), minimum=0
-    )
-    if not 1 <= scoring_count <= 500:
-        raise GatewayEnvelopePreparationV2Error(
-            "scoring worker capacity is invalid"
-        )
     configured_fleets = {"gateway_scoring": scoring_values}
     proxy_sources = {"gateway_scoring": scoring_source}
-    _validate_v2_proxy_migration_capacity(
-        environment,
-        proxy_source=scoring_source,
-        selected_profile_count=len(scoring_values),
-    )
     commitments: Dict[str, list[str]] = {}
     for role, values in configured_fleets.items():
         commitments[role] = []
@@ -470,14 +392,12 @@ def _validated_worker_proxy_configuration(
                 raise GatewayEnvelopePreparationV2Error(
                     "%s worker proxy %d from %s configuration is incompatible "
                     "with V2 provider transport; configure %s with authenticated "
-                    "HTTP CONNECT or HTTPS transport and set the intended worker capacity "
-                    "in %s (%s)"
+                    "HTTP CONNECT or HTTPS transport (%s)"
                     % (
                         role,
                         index + 1,
                         proxy_sources[role],
                         _SCORING_PROXY_CONFIGURATION["required_v2_environment"],
-                        _SCORING_PROXY_CONFIGURATION["process_count_environment"],
                         str(exc),
                     )
                 ) from exc
@@ -534,11 +454,13 @@ def _validated_worker_proxy_configuration(
             verified_fleets = selected_fleets
 
     profile_fleets = {
-        "gateway_scoring": _worker_proxy_profile_values(
-            verified_fleets["gateway_scoring"],
-            scoring_count,
-        ),
+        "gateway_scoring": verified_fleets["gateway_scoring"],
     }
+    scoring_count = len(profile_fleets["gateway_scoring"])
+    if not 1 <= scoring_count <= 500:
+        raise GatewayEnvelopePreparationV2Error(
+            "verified scoring worker capacity is invalid"
+        )
     for role, values in profile_fleets.items():
         commitments[role] = [
             credential_value_hash(value)

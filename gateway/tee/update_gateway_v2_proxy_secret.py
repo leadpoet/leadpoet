@@ -13,9 +13,7 @@ import shlex
 from typing import Any, Callable, Mapping
 import uuid
 
-from gateway.research_lab.config import (
-    LEGACY_SCORING_PROXY_PREFIXES,
-)
+from gateway.research_lab.config import V2_SCORING_PROXY_PREFIXES
 from gateway.tee.provider_broker_v2 import _validated_tls_proxy_url
 from gateway.tee.proxy_transport_preflight_v2 import (
     verify_worker_proxy_fleets_v2,
@@ -29,42 +27,20 @@ DEFAULT_BACKUP_DIRECTORY = Path(
 _TARGET_ENVIRONMENT = {
     "gateway_scoring": {
         "proxy": "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1",
-        "count": "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",
-        "legacy_prefixes": LEGACY_SCORING_PROXY_PREFIXES,
     },
 }
-_TARGET_NAMES = frozenset(
-    str(configuration[field])
-    for configuration in _TARGET_ENVIRONMENT.values()
-    for field in ("proxy", "count")
+_STALE_COUNT_ENVIRONMENT = frozenset(
+    {"RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"}
 )
+_TARGET_NAMES = frozenset(
+    str(configuration["proxy"])
+    for configuration in _TARGET_ENVIRONMENT.values()
+) | _STALE_COUNT_ENVIRONMENT
 _ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class GatewayV2ProxySecretUpdateError(RuntimeError):
     """The production secret could not be migrated without losing state."""
-
-
-def _configured_proxies(
-    environment: Mapping[str, str], prefixes: tuple[str, ...]
-) -> tuple[str, ...]:
-    """Read legacy proxy slots without importing the retired worker supervisor."""
-
-    proxies: list[str] = []
-    seen: set[str] = set()
-    for index in range(1, 501):
-        for prefix in prefixes:
-            value = str(environment.get(f"{prefix}_{index}", "")).strip()
-            if value and value not in seen:
-                proxies.append(value)
-                seen.add(value)
-                break
-    for prefix in prefixes:
-        value = str(environment.get(prefix, "")).strip()
-        if value and value not in seen:
-            proxies.append(value)
-            seen.add(value)
-    return tuple(proxies)
 
 
 def _parse_shell_environment(raw: str) -> dict[str, str]:
@@ -106,6 +82,31 @@ def _parse_environment(raw: str) -> tuple[dict[str, str], str]:
     return {str(name): str(value) for name, value in decoded.items()}, "json"
 
 
+def _resulting_scoring_proxies(
+    environment: Mapping[str, str],
+    scoring_proxy: str,
+) -> tuple[str, ...]:
+    prospective = dict(environment)
+    prospective[
+        str(_TARGET_ENVIRONMENT["gateway_scoring"]["proxy"])
+    ] = scoring_proxy
+    proxies = []
+    seen = set()
+    for index in range(1, 501):
+        for prefix in V2_SCORING_PROXY_PREFIXES:
+            value = str(prospective.get(f"{prefix}_{index}") or "").strip()
+            if value and value not in seen:
+                proxies.append(value)
+                seen.add(value)
+                break
+    for prefix in V2_SCORING_PROXY_PREFIXES:
+        value = str(prospective.get(prefix) or "").strip()
+        if value and value not in seen:
+            proxies.append(value)
+            seen.add(value)
+    return tuple(proxies)
+
+
 def _render_updated_environment(
     raw: str,
     *,
@@ -114,6 +115,8 @@ def _render_updated_environment(
 ) -> str:
     if document_format == "json":
         decoded = json.loads(raw)
+        for name in _TARGET_NAMES:
+            decoded.pop(name, None)
         decoded.update(values)
         return json.dumps(decoded, sort_keys=True, separators=(",", ":"))
 
@@ -133,57 +136,64 @@ def _render_updated_environment(
     return "\n".join(kept_lines).rstrip() + "\n"
 
 
-def _worker_count(
-    environment: Mapping[str, str],
-    *,
-    count_environment: str,
-    legacy_prefixes: tuple[str, ...],
-) -> int:
-    raw_count = str(environment.get(count_environment) or "").strip()
-    if raw_count:
-        if not raw_count.isdigit() or not 1 <= int(raw_count) <= 500:
-            raise GatewayV2ProxySecretUpdateError(
-                "%s must be an integer from 1 through 500"
-                % count_environment
-            )
-        return int(raw_count)
-    legacy_count = len(_configured_proxies(environment, legacy_prefixes))
-    if not 1 <= legacy_count <= 500:
-        raise GatewayV2ProxySecretUpdateError(
-            "%s is absent and no legacy worker capacity can be preserved"
-            % count_environment
-        )
-    return legacy_count
-
-
 def _validated_proxy_values(
     *,
-    scoring_proxy: str,
-    proxy_fleet_probe: Callable[..., None],
-) -> dict[str, str]:
+    scoring_proxies: tuple[str, ...],
+    proxy_fleet_probe: Callable[..., Any],
+) -> dict[str, tuple[str, ...]]:
     values = {
-        "gateway_scoring": str(scoring_proxy or "").strip(),
+        "gateway_scoring": tuple(
+            str(proxy or "").strip() for proxy in scoring_proxies
+        ),
     }
-    for role, value in values.items():
-        try:
-            _validated_tls_proxy_url(value)
-        except Exception as exc:
-            raise GatewayV2ProxySecretUpdateError(
-                "%s proxy must be a complete HTTP CONNECT or HTTPS proxy URL"
-                % role
-            ) from exc
+    for role, role_values in values.items():
+        for value in role_values:
+            try:
+                _validated_tls_proxy_url(value)
+            except Exception as exc:
+                raise GatewayV2ProxySecretUpdateError(
+                    "%s proxy must be a complete HTTP CONNECT or HTTPS proxy URL"
+                    % role
+                ) from exc
     try:
-        proxy_fleet_probe(
-            {
-                role: (value,)
-                for role, value in values.items()
-            }
-        )
+        probe_result = proxy_fleet_probe(values)
     except Exception as exc:
         raise GatewayV2ProxySecretUpdateError(
             "V2 worker proxy live CONNECT validation failed"
         ) from exc
-    return values
+    if probe_result is None:
+        return values
+    if (
+        not isinstance(probe_result, Mapping)
+        or set(probe_result) != set(values)
+    ):
+        raise GatewayV2ProxySecretUpdateError(
+            "V2 worker proxy live CONNECT validation returned invalid profiles"
+    )
+    selected_fleets = {}
+    for role, configured_values in values.items():
+        raw_values = probe_result.get(role)
+        if isinstance(raw_values, (str, bytes)):
+            raw_values = ()
+        try:
+            selected_values = tuple(str(value) for value in raw_values or ())
+        except TypeError as exc:
+            raise GatewayV2ProxySecretUpdateError(
+                "V2 worker proxy live CONNECT validation returned invalid profiles"
+            ) from exc
+        configured_iterator = iter(configured_values)
+        if not selected_values or not all(
+            any(
+                configured_value == selected_value
+                for configured_value in configured_iterator
+            )
+            for selected_value in selected_values
+        ):
+            raise GatewayV2ProxySecretUpdateError(
+                "V2 worker proxy live CONNECT validation returned invalid profiles"
+            )
+        selected_fleets[role] = selected_values
+    return selected_fleets
 
 
 def _write_backup(
@@ -263,22 +273,24 @@ def update_gateway_v2_proxy_secret(
         )
     initial_secret = _secret_string(initial_response)
     environment, document_format = _parse_environment(initial_secret)
+    normalized_scoring_proxy = str(scoring_proxy or "").strip()
     proxies = _validated_proxy_values(
-        scoring_proxy=scoring_proxy,
+        scoring_proxies=_resulting_scoring_proxies(
+            environment,
+            normalized_scoring_proxy,
+        ),
         proxy_fleet_probe=proxy_fleet_probe,
     )
+    if normalized_scoring_proxy not in proxies["gateway_scoring"]:
+        raise GatewayV2ProxySecretUpdateError(
+            "V2 worker proxy live CONNECT validation rejected the new proxy"
+        )
 
     target_values: dict[str, str] = {}
     worker_counts: dict[str, int] = {}
     for role, configuration in _TARGET_ENVIRONMENT.items():
-        count = _worker_count(
-            environment,
-            count_environment=str(configuration["count"]),
-            legacy_prefixes=configuration["legacy_prefixes"],
-        )
-        worker_counts[role] = count
-        target_values[str(configuration["proxy"])] = proxies[role]
-        target_values[str(configuration["count"])] = str(count)
+        worker_counts[role] = len(proxies[role])
+        target_values[str(configuration["proxy"])] = normalized_scoring_proxy
 
     candidate_secret = _render_updated_environment(
         initial_secret,
@@ -303,7 +315,7 @@ def update_gateway_v2_proxy_secret(
     if any(
         candidate_environment.get(name) != value
         for name, value in target_values.items()
-    ):
+    ) or any(name in candidate_environment for name in _STALE_COUNT_ENVIRONMENT):
         raise GatewayV2ProxySecretUpdateError(
             "candidate gateway secret did not preserve the validated proxy state"
         )

@@ -79,6 +79,23 @@ def _legacy_scoring_environment(count: int = 3) -> dict[str, str]:
     return environment
 
 
+def _v2_scoring_environment(count: int) -> dict[str, str]:
+    environment = {
+        name: value
+        for name, value in _environment().items()
+        if "V2_SCORING_HTTPS_PROXY" not in name
+    }
+    environment.update(
+        {
+            "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_%d" % index: (
+                "https://scoring-%d.example.com" % index
+            )
+            for index in range(1, count + 1)
+        }
+    )
+    return environment
+
+
 def test_prepares_boot_and_scoring_envelopes_without_autoresearch_fleet(
     tmp_path,
 ):
@@ -192,7 +209,7 @@ def test_legacy_scoring_fleet_is_sealed_and_probed(tmp_path):
     ]
 
 
-def test_scoring_capacity_and_quarantine_are_preserved(tmp_path):
+def test_scoring_capacity_follows_verified_profiles(tmp_path):
     environment = _legacy_scoring_environment(25)
     failed = environment["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_3"]
 
@@ -212,29 +229,108 @@ def test_scoring_capacity_and_quarantine_are_preserved(tmp_path):
         proxy_fleet_probe=verified_fleets,
     )
 
-    assert result["scoring_worker_count"] == 25
+    assert result["scoring_worker_count"] == 24
     assert result["worker_proxy_profile_counts"] == {
         "gateway_scoring": {
             "configured": 25,
             "verified": 24,
             "quarantined": 1,
-            "sealed_worker_slots": 25,
+            "sealed_worker_slots": 24,
         }
     }
-    assert len(tuple((tmp_path / "v2").glob("scoring_proxy_*.json"))) == 25
+    assert len(tuple((tmp_path / "v2").glob("scoring_proxy_*.json"))) == 24
 
 
-def test_v2_proxy_migration_requires_explicit_scoring_capacity(tmp_path):
+@pytest.mark.parametrize("proxy_count", (1, 7, 15))
+def test_scoring_capacity_follows_distinct_configured_proxies(
+    tmp_path,
+    proxy_count,
+):
+    environment = _v2_scoring_environment(proxy_count)
+    environment["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"] = "10"
+
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=tmp_path / "v2",
+        kms_client=KMS(),
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+
+    assert result["scoring_worker_count"] == proxy_count
+    assert result["required_count_environment"] == {
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": str(proxy_count)
+    }
+    assert len(
+        tuple((tmp_path / "v2").glob("scoring_proxy_*.json"))
+    ) == proxy_count
+
+
+@pytest.mark.parametrize("stale_override", ("15", "malformed"))
+def test_v2_precedence_ignores_stale_worker_override(
+    tmp_path,
+    stale_override,
+):
     environment = _legacy_scoring_environment(25)
     environment[
         "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"
     ] = "https://scoring-v2.example.com:443"
+    environment["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"] = stale_override
+
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=tmp_path / "v2",
+        kms_client=KMS(),
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+
+    assert result["worker_proxy_source"] == {"gateway_scoring": "v2_tls"}
+    assert result["scoring_worker_count"] == 1
+    assert len(tuple((tmp_path / "v2").glob("scoring_proxy_*.json"))) == 1
+
+
+def test_duplicate_and_missing_indexed_proxy_slots_are_compacted(tmp_path):
+    environment = _v2_scoring_environment(1)
+    first = environment.pop("RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1")
+    environment["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_2"] = first
+    environment["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_7"] = first
+    environment[
+        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_15"
+    ] = "https://scoring-15.example.com"
+
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=tmp_path / "v2",
+        kms_client=KMS(),
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+
+    assert result["scoring_worker_count"] == 2
+    assert result["worker_proxy_profile_counts"]["gateway_scoring"] == {
+        "configured": 2,
+        "verified": 2,
+        "quarantined": 0,
+        "sealed_worker_slots": 2,
+    }
+    assert sorted(
+        path.name for path in (tmp_path / "v2").glob("scoring_proxy_*.json")
+    ) == ["scoring_proxy_00.json", "scoring_proxy_01.json"]
+
+
+def test_missing_scoring_proxy_fails_closed_before_kms(tmp_path):
+    environment = {
+        name: value
+        for name, value in _environment().items()
+        if "V2_SCORING_HTTPS_PROXY" not in name
+    }
     kms = KMS()
 
-    with pytest.raises(
-        Exception,
-        match="gateway_scoring V2 proxy migration would reduce worker coverage",
-    ):
+    with pytest.raises(Exception, match="scoring proxy values are required"):
         prepare_gateway_envelopes_v2(
             environment=environment,
             kms_key_id="alias/gateway-v2",
@@ -247,24 +343,24 @@ def test_v2_proxy_migration_requires_explicit_scoring_capacity(tmp_path):
     assert kms.requests == []
 
 
-def test_one_scoring_proxy_can_fill_explicit_capacity(tmp_path):
-    environment = _legacy_scoring_environment(25)
+def test_scoring_proxy_capacity_above_bound_fails_before_kms(tmp_path):
+    environment = _v2_scoring_environment(500)
     environment[
-        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"
-    ] = "https://scoring-v2.example.com:443"
-    environment["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"] = "25"
+        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY"
+    ] = "https://scoring-unindexed.example.com"
+    kms = KMS()
 
-    result = prepare_gateway_envelopes_v2(
-        environment=environment,
-        kms_key_id="alias/gateway-v2",
-        deploy_commit="1" * 40,
-        output_dir=tmp_path / "v2",
-        kms_client=KMS(),
-        proxy_fleet_probe=_skip_proxy_probe,
-    )
+    with pytest.raises(Exception, match="verified scoring worker capacity is invalid"):
+        prepare_gateway_envelopes_v2(
+            environment=environment,
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            output_dir=tmp_path / "v2",
+            kms_client=kms,
+            proxy_fleet_probe=_skip_proxy_probe,
+        )
 
-    assert result["scoring_worker_count"] == 25
-    assert len(tuple((tmp_path / "v2").glob("scoring_proxy_*.json"))) == 25
+    assert kms.requests == []
 
 
 def test_invalid_or_unverified_scoring_proxy_fails_before_kms(tmp_path):
@@ -375,6 +471,43 @@ def test_install_preserves_artifact_master_key_across_release(tmp_path):
     assert json.loads(
         (destination / "artifact_master_key.json").read_text()
     ) == first_envelope
+
+
+def test_install_removes_stale_proxy_slots_when_fleet_shrinks(tmp_path):
+    destination = tmp_path / "v2"
+    kms = KMS()
+    first = install_gateway_envelopes_v2(
+        environment=_v2_scoring_environment(7),
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+    second = install_gateway_envelopes_v2(
+        environment=_v2_scoring_environment(3),
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="2" * 40,
+        install_dir=destination,
+        kms_client=kms,
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+
+    assert first["scoring_worker_count"] == 7
+    assert second["scoring_worker_count"] == 3
+    assert sorted(
+        path.name for path in destination.glob("scoring_proxy_*.json")
+    ) == [
+        "scoring_proxy_00.json",
+        "scoring_proxy_01.json",
+        "scoring_proxy_02.json",
+    ]
+    report = json.loads(
+        (destination / "gateway-v2-env-transition.json").read_text()
+    )
+    assert report["required_count_environment"] == {
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "3"
+    }
 
 
 @pytest.mark.parametrize("kind", ("invalid", "symlink"))

@@ -293,6 +293,7 @@ def test_unplanned_validator_discovers_and_completes_scoring_while_primary_is_fu
 
     harness.sandbox.run_icp = run_icp
 
+    primary_capacity = 1
     with TestClient(create_app(harness.service)) as http:
         primary = _http_runner(
             harness,
@@ -300,11 +301,11 @@ def test_unplanned_validator_discovers_and_completes_scoring_while_primary_is_fu
             tmp_path,
             key_label="svc-runner-alpha",
             round_id=working_round_id,
-            parallelism=contracts.RUNNER_SLOT_CEILING,
+            parallelism=primary_capacity,
         )
         try:
             primary_leases = [
-                primary.claim_one() for _ in range(contracts.RUNNER_SLOT_CEILING)
+                primary.claim_one() for _ in range(primary_capacity)
             ]
             assert {lease["status"] for lease in primary_leases} == {"leased"}
             assert {lease["kind"] for lease in primary_leases} == {"score"}
@@ -316,7 +317,7 @@ def test_unplanned_validator_discovers_and_completes_scoring_while_primary_is_fu
                 run["status"] == "leased"
                 and run["runner_hotkey"] == harness.runner_keys[0]
                 for run in before
-            ) == contracts.RUNNER_SLOT_CEILING
+            ) == primary_capacity
             assert sum(run["status"] == "pending" for run in before) > 0
             assert not any(
                 run["runner_hotkey"] == external_key.ss58_address
@@ -374,7 +375,7 @@ def test_unplanned_validator_discovers_and_completes_scoring_while_primary_is_fu
         run["status"] == "leased"
         and run["runner_hotkey"] == harness.runner_keys[0]
         for run in after
-    ) == contracts.RUNNER_SLOT_CEILING
+    ) == primary_capacity
     assert sum(run["status"] == "pending" for run in after) > 0
     assert sum(
         run["status"] == "accepted"

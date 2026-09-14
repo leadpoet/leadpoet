@@ -39,6 +39,26 @@ class MinerSubmissionError(RuntimeError):
             lambda match: "\\x%02x" % ord(match.group(0)),
             detail,
         )
+        guidance = {
+            "source_license_missing": (
+                "add LICENSE beside harness.py using %s"
+                % source_bundle.REQUIRED_LICENSE_REFERENCE
+            ),
+            "source_license_invalid": (
+                "replace the license beside harness.py with %s"
+                % source_bundle.REQUIRED_LICENSE_REFERENCE
+            ),
+            "submission_rejected:source_license_missing": (
+                "add LICENSE beside harness.py using %s"
+                % source_bundle.REQUIRED_LICENSE_REFERENCE
+            ),
+            "submission_rejected:source_license_invalid": (
+                "replace the license beside harness.py with %s"
+                % source_bundle.REQUIRED_LICENSE_REFERENCE
+            ),
+        }.get(self.code)
+        if guidance:
+            detail = guidance
         detail = detail[:240]
         return self.code if not detail else "%s (%s)" % (self.code, detail)
 
@@ -145,7 +165,9 @@ def validate_agent_source(
     """Validate the bounded source shape and Python syntax without importing it."""
 
     try:
-        source = source_bundle.validate_source_directory(source_dir)
+        source = source_bundle.validate_source_directory(
+            source_dir, require_license=True
+        )
         files = source_bundle._source_files(source)
         secret_names = tuple(
             value for value in forbidden_values or () if isinstance(value, str) and value
@@ -185,6 +207,8 @@ _SAFE_ADMISSION_ERRORS = frozenset({
     "credential_kms_unavailable", "submission_credentials_missing",
     "submission_superseded", "submission_rejected:source_checksum_mismatch",
     "submission_rejected:source_contains_credentials",
+    "submission_rejected:source_license_missing",
+    "submission_rejected:source_license_invalid",
     "submission_rejected:capacity.round_full",
     "submission_rejected:openrouter_api_key_invalid",
     "submission_rejected:openrouter_api_key_no_credit",
@@ -331,6 +355,7 @@ def submit_agent_source(
             source_bundle.validate_source_archive(
                 archive_bytes,
                 forbidden_values=submission_credentials.values(),
+                require_license=True,
             )
         except source_bundle.SourceBundleError as exc:
             raise MinerSubmissionError(exc.code, exc.path or "") from exc
@@ -420,6 +445,10 @@ def run_interactive_submission(
     output_fn("")
     output_fn("MODEL SUBMISSION")
     output_fn("Your source must contain harness.py with synchronous run_icp(icp).")
+    output_fn(
+        "Your source must contain LICENSE beside harness.py with the complete AGPL-3.0 text from %s."
+        % source_bundle.REQUIRED_LICENSE_REFERENCE
+    )
     output_fn("Do not put API keys in your source; credentials are sent separately.")
     output_fn("The OpenRouter API key and Deepline API key pay for model execution and scoring.")
     output_fn("A Scrapingdog API key is optional and pays only when your model uses Scrapingdog.")

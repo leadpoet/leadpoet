@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: Arena submission license requirement
+
+On 2026-09-14 the user explicitly authorized a narrow requirement that every
+new Arena model submission include the AGPL-3.0 license text used by Tyche.
+This includes protected production inspection and credential access, focused
+source and test changes, end-to-end compliant and non-compliant submission
+tests, push to main, and canonical gateway/normal-validator deployment and
+verification through the overnight operational permissions. Reject missing or
+incorrect licenses clearly before scoring. Preserve existing accepted models,
+active rounds, scores, credentials, provider costs, submission ownership,
+rewards, weights, and concurrent work. Do not restore retired services or add
+unrelated production changes. This authority ends after live enforcement and
+end-to-end verification are complete.
+
 ## Scoped production authorization: remove five-ICP confirmation
 
 On 2026-09-14 the user explicitly authorized complete removal of the additional

@@ -422,16 +422,35 @@ class InProcessApi:
             raise
 
 
-def flavor_source_archive(flavor: str) -> bytes:
+def flavor_source_archive(
+    flavor: str,
+    *,
+    include_license: bool = True,
+    license_contents: bytes | None = None,
+) -> bytes:
     """Build one small source archive whose bytes identify the fake behavior."""
 
     raw = io.BytesIO()
     with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
         with tarfile.open(fileobj=compressed, mode="w") as archive:
-            for name, data in (
+            members = [
                 ("harness.py", b"def run_icp(icp):\n    return []\n"),
                 ("flavor.txt", flavor.encode("utf-8")),
-            ):
+            ]
+            if include_license:
+                members.append(
+                    (
+                        "LICENSE",
+                        license_contents
+                        if license_contents is not None
+                        else Path(__file__)
+                        .resolve()
+                        .parents[2]
+                        .joinpath("LICENSE")
+                        .read_bytes(),
+                    )
+                )
+            for name, data in members:
                 info = tarfile.TarInfo(name)
                 info.size = len(data)
                 archive.addfile(info, io.BytesIO(data))
@@ -2392,6 +2411,105 @@ def test_a_validator_that_dies_mid_scoring_loses_its_lease_and_another_validator
     assert all(float(run["per_icp_score"]) > 0.0 for run in retried_execution_runs)
 
 
+@pytest.mark.parametrize(
+    "include_license,license_contents,rejection_rule",
+    (
+        (False, None, "source_license_missing"),
+        (True, b"MIT License\n", "source_license_invalid"),
+    ),
+)
+def test_http_finalize_durably_rejects_noncompliant_license_before_credentials_or_review(
+    connect, tmp_path, include_license, license_contents, rejection_rule
+):
+    """The signed HTTP admission path enforces the source license boundary."""
+
+    from fastapi.testclient import TestClient
+
+    from lab_arena.api import create_app
+
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness.clock.now = datetime.now(timezone.utc)
+    configuration = harness.service.create_round(
+        datetime.now(timezone.utc) + timedelta(hours=12),
+        round_id="arena-2026-10-13-license",
+    )
+    harness.round_id = configuration["round_id"]
+    miner = keypair("svc-miner-License-Missing")
+    payload = flavor_source_archive(
+        rejection_rule,
+        include_license=include_license,
+        license_contents=license_contents,
+    )
+    facts = source_bundle.validate_source_archive(payload)
+
+    presign = contracts.build_signed_request(
+        scope=contracts.SCOPE_SUBMISSION_PRESIGN,
+        round_id=harness.round_id,
+        hotkey=miner.ss58_address,
+        body={
+            "source_size_bytes": facts["source_size_bytes"],
+            "consent": {"public_rerun": True},
+        },
+        timestamp=int(harness.clock().timestamp()),
+        sign_message=lambda message: miner.sign(message.encode()).hex(),
+    )
+    with TestClient(create_app(harness.service)) as http:
+        presigned = http.post(
+            "/arena/v1/submissions/presign",
+            content=json.dumps(presign),
+            headers={"content-type": "application/json"},
+        )
+        assert presigned.status_code == 200
+        target = presigned.json()
+        harness.objects.put(target["source_ref"], payload)
+        finalize = contracts.build_signed_request(
+            scope=contracts.SCOPE_SUBMISSION_FINALIZE,
+            round_id=harness.round_id,
+            hotkey=miner.ss58_address,
+            body={
+                "submission_id": target["submission_id"],
+                "source_ref": target["source_ref"],
+                "source_size_bytes": facts["source_size_bytes"],
+                "credentials": {
+                    "openrouter_api_key": CANARY_OPENROUTER_KEY,
+                    "openrouter_management_key": CANARY_OPENROUTER_MANAGEMENT_KEY,
+                    "deepline_api_key": CANARY_DEEPLINE_KEY,
+                },
+            },
+            timestamp=int(harness.clock().timestamp()),
+            sign_message=lambda message: miner.sign(message.encode()).hex(),
+        )
+        rejected = http.post(
+            "/arena/v1/submissions/%s/finalize" % target["submission_id"],
+            content=json.dumps(finalize),
+            headers={"content-type": "application/json"},
+        )
+        assert rejected.status_code == 400
+        assert rejected.json() == {
+            "status": "rejected",
+            "code": "submission_rejected:%s" % rejection_rule,
+            "detail": (
+                "Include the complete AGPL-3.0 license in LICENSE beside "
+                "harness.py. Required text: %s"
+                % source_bundle.REQUIRED_LICENSE_REFERENCE
+            ),
+        }
+        persisted = http.get(
+            "/arena/v1/submissions/%s" % target["submission_id"]
+        )
+
+    status = persisted.json()
+    assert persisted.status_code == 200
+    assert status["status"] == "rejected"
+    assert status["rejection_rule"] == rejection_rule
+    assert status["code_review"]["status"] == "pending"
+    assert harness.review_transport.review_requests == []
+    for provider in ("openrouter", "deepline", "scrapingdog"):
+        assert harness.service.store.get_submission_credential(
+            target["submission_id"], miner.ss58_address, provider
+        ) is None
+
+
 def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkeypatch):
     """A real runner API client completes the current two-stage competition."""
 
@@ -2423,7 +2541,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
 
     miner = keypair("svc-miner-Http-A")
     payload = flavor_source_archive("Http-A")
-    facts = source_bundle.validate_source_archive(payload)
+    facts = source_bundle.validate_source_archive(payload, require_license=True)
     envelope = contracts.build_signed_request(
         scope=contracts.SCOPE_SUBMISSION_PRESIGN,
         round_id=harness.round_id,

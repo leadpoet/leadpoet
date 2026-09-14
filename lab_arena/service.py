@@ -1222,6 +1222,7 @@ class ArenaService:
         row: Mapping[str, Any],
         *,
         forbidden_values: Sequence[str] = (),
+        require_license: bool = False,
     ) -> None:
         expected_size = int(row.get("source_size_bytes") or 0)
         source_ref = str(row.get("source_ref") or "")
@@ -1242,7 +1243,9 @@ class ArenaService:
                 raise ServiceError("submission_rejected:source_checksum_mismatch", 400)
         try:
             source_bundle.validate_source_archive(
-                payload, forbidden_values=forbidden_values
+                payload,
+                forbidden_values=forbidden_values,
+                require_license=require_license,
             )
         except source_bundle.SourceBundleError as exc:
             path = exc.path or ""
@@ -1301,7 +1304,9 @@ class ArenaService:
         self._enforce_submission_request_limit(validated["hotkey"])
         try:
             self._validate_uploaded_source(
-                row, forbidden_values=tuple(body["credentials"].values())
+                row,
+                forbidden_values=tuple(body["credentials"].values()),
+                require_license=True,
             )
         except ServiceError as exc:
             if exc.code.startswith("submission_rejected:"):

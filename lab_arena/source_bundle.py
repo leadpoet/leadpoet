@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import gzip
+import hashlib
 import io
 import os
 import re
@@ -19,6 +20,17 @@ MAX_SOURCE_UNPACKED_BYTES = 50 * 1024 * 1024
 MAX_SOURCE_FILES = 1_000
 MAX_SOURCE_PATH_BYTES = 255
 MAX_HARNESS_BYTES = 1 * 1024 * 1024
+MAX_LICENSE_BYTES = 128 * 1024
+REQUIRED_LICENSE_REFERENCE = (
+    "https://github.com/gzaentz/tyche/blob/main/LICENSE"
+)
+REQUIRED_LICENSE_NAMES = ("LICENSE", "LICENSE.txt", "LICENSE.md")
+# SHA-256 of the complete Tyche/root AGPL-3.0 license after the narrow
+# normalization in _normalized_license_text. Keep the source reference beside
+# the fingerprint so this admission rule can be audited without a network call.
+REQUIRED_LICENSE_SHA256 = (
+    "2cd0fb7883a3b3553dedbb0bad171646d46f51e2642951aae7c59cb5cec86c46"
+)
 IGNORED_DIRECTORY_NAMES = frozenset({".git", ".pytest_cache", ".venv", "__pycache__", "node_modules"})
 ALLOWED_ENV_TEMPLATE_NAMES = frozenset(
     {".env.example", ".env.sample", ".env.template"}
@@ -50,7 +62,41 @@ def validate_harness_source(source: str) -> None:
     del tree
 
 
-def validate_source_directory(source_dir: str | Path) -> Path:
+def _normalized_license_text(contents: bytes) -> bytes:
+    """Normalize formatting without weakening the full-license comparison."""
+
+    try:
+        text = contents.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SourceBundleError("source_license_invalid") from exc
+    text = text.replace("http://fsf.org/", "https://fsf.org/")
+    text = text.replace(
+        "http://www.gnu.org/licenses/", "https://www.gnu.org/licenses/"
+    )
+    return " ".join(text.split()).encode("utf-8")
+
+
+def _validate_required_license(candidates: Iterable[bytes | None]) -> None:
+    found = False
+    for contents in candidates:
+        found = True
+        if contents is None:
+            continue
+        try:
+            normalized = _normalized_license_text(contents)
+        except SourceBundleError:
+            continue
+        digest = hashlib.sha256(normalized).hexdigest()
+        if digest == REQUIRED_LICENSE_SHA256:
+            return
+    raise SourceBundleError(
+        "source_license_invalid" if found else "source_license_missing"
+    )
+
+
+def validate_source_directory(
+    source_dir: str | Path, *, require_license: bool = False
+) -> Path:
     """Validate the local source boundary without following links."""
 
     source = Path(source_dir).expanduser().resolve()
@@ -69,6 +115,28 @@ def validate_source_directory(source_dir: str | Path) -> Path:
         validate_harness_source(raw.decode("utf-8"))
     except UnicodeDecodeError as exc:
         raise SourceBundleError("harness_invalid") from exc
+    if require_license:
+        licenses: List[bytes | None] = []
+        for name in REQUIRED_LICENSE_NAMES:
+            candidate = source / name
+            if not candidate.exists() and not candidate.is_symlink():
+                continue
+            try:
+                invalid_entry = (
+                    candidate.is_symlink()
+                    or not candidate.is_file()
+                    or candidate.stat().st_size > MAX_LICENSE_BYTES
+                )
+            except OSError:
+                invalid_entry = True
+            if invalid_entry:
+                licenses.append(None)
+                continue
+            try:
+                licenses.append(candidate.read_bytes())
+            except OSError:
+                licenses.append(None)
+        _validate_required_license(licenses)
     return source
 
 
@@ -213,10 +281,13 @@ def _read_member_for_validation(
 def _safe_members(
     archive: tarfile.TarFile,
     forbidden_values: Tuple[bytes, ...] = (),
+    *,
+    require_license: bool = False,
 ) -> Tuple[bytes, str]:
     names = set()
     file_names = set()
     harnesses: Dict[str, bytes] = {}
+    licenses: Dict[str, bytes | None] = {}
     total = 0
     count = 0
     for member in archive:
@@ -245,24 +316,47 @@ def _safe_members(
             raise SourceBundleError("source_unpacked_too_large")
         file_names.add(member.name)
         is_harness = path.name == "harness.py" and len(path.parts) <= 2
+        is_license = (
+            require_license
+            and path.name in REQUIRED_LICENSE_NAMES
+            and len(path.parts) <= 2
+        )
         if is_harness and member.size > MAX_HARNESS_BYTES:
             raise SourceBundleError("harness_too_large")
-        if not is_harness and not forbidden_values:
+        if not is_harness and not is_license and not forbidden_values:
             continue
+        collect = is_harness or (is_license and member.size <= MAX_LICENSE_BYTES)
         contents = _read_member_for_validation(
             archive,
             member,
-            collect=is_harness,
+            collect=collect,
             forbidden_values=forbidden_values,
         )
         if is_harness:
             harnesses[member.name] = contents
+        if is_license:
+            licenses[member.name] = (
+                contents if member.size <= MAX_LICENSE_BYTES else None
+            )
     if "harness.py" in file_names:
+        if require_license:
+            _validate_required_license(
+                licenses.get(name)
+                for name in REQUIRED_LICENSE_NAMES
+                if name in licenses
+            )
         return harnesses["harness.py"], "harness.py"
     roots = {PurePosixPath(name).parts[0] for name in file_names}
     if len(roots) == 1:
         wrapped = next(iter(roots)) + "/harness.py"
         if wrapped in file_names:
+            if require_license:
+                parent = wrapped.rsplit("/", 1)[0]
+                _validate_required_license(
+                    licenses.get(parent + "/" + name)
+                    for name in REQUIRED_LICENSE_NAMES
+                    if parent + "/" + name in licenses
+                )
             return harnesses[wrapped], wrapped
     raise SourceBundleError("harness_file_missing")
 
@@ -271,6 +365,7 @@ def validate_source_archive(
     data: bytes,
     *,
     forbidden_values: Iterable[str | bytes] = (),
+    require_license: bool = False,
 ) -> Dict[str, Any]:
     """Validate bounded archive structure and the final callable without extraction."""
 
@@ -282,7 +377,9 @@ def validate_source_archive(
         # Stream members so a small compressed archive cannot force an
         # unbounded expanded member list into memory.
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r|gz") as archive:
-            harness, harness_name = _safe_members(archive, forbidden)
+            harness, harness_name = _safe_members(
+                archive, forbidden, require_license=require_license
+            )
     except SourceBundleError:
         raise
     except (OSError, EOFError, tarfile.TarError, zlib.error) as exc:

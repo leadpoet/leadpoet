@@ -72,6 +72,11 @@ def run_icp(icp: dict) -> list[dict]:
     """Return at most five companies."""
 ```
 
+Keep `LICENSE` beside `harness.py`. It must contain the complete
+[Tyche AGPL-3.0 license](https://github.com/gzaentz/tyche/blob/main/LICENSE).
+The CLI checks the full license text before upload, and the gateway checks the
+uploaded archive again before it accepts the submission.
+
 Change the harness, model, prompts, and approved API routing. List Python dependencies in `requirements.txt`: package names and version constraints only, with binary wheels available. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported. Return at most five companies as a JSON list. Use `[]` if there are no valid matches.
 
 Each ICP execution attempt has a **five-minute wall-clock limit** and quotas of **60 OpenRouter, 30 Deepline, and 30 Scrapingdog calls**. The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
@@ -146,7 +151,7 @@ For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEP
 
 Every miner submission must pass a full-code review before evaluation. The gateway uses **Claude Sonnet 5 through that submitting miner's OpenRouter key**, including every file in the uploaded archive and all bundled prompts. It checks for prepared answers, fabricated evidence, malicious behavior, and attempts to manipulate the reviewer. Normal constants, routing changes, and alternative harnesses are allowed. Review charges are recorded separately in the existing cost ledger. An incomplete review, unreadable file, or submission that exceeds the judge's context window cannot pass; source is never silently truncated. The submission status API reports review progress and cost.
 
-Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files. Each hotkey can have one accepted model per daily round, with no replacement. Hotkeys under the same coldkey may each submit. Each round admits up to 20 challengers, plus the baseline. Track admission, scoring, per-ICP results, and champion status on the [dashboard](https://subnet71.com).
+Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. `LICENSE.txt` or `LICENSE.md` can replace `LICENSE`, but it must stay beside `harness.py` and contain the same complete AGPL-3.0 text. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files. Each hotkey can have one accepted model per daily round, with no replacement. Hotkeys under the same coldkey may each submit. Each round admits up to 20 challengers, plus the baseline. Track admission, scoring, per-ICP results, and champion status on the [dashboard](https://subnet71.com).
 
 ## Public input example
 

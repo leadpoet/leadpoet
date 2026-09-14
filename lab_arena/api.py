@@ -12,7 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from lab_arena import contracts
+from lab_arena import contracts, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
@@ -94,6 +94,15 @@ def create_app(service: ArenaService) -> FastAPI:
         content = {"status": "rejected", "code": exc.code}
         if exc.code == "submission_rejected:source_contains_credentials" and exc.source_path:
             content["source_path"] = exc.source_path
+        if exc.code in {
+            "submission_rejected:source_license_missing",
+            "submission_rejected:source_license_invalid",
+        }:
+            content["detail"] = (
+                "Include the complete AGPL-3.0 license in LICENSE beside "
+                "harness.py. Required text: %s"
+                % source_bundle.REQUIRED_LICENSE_REFERENCE
+            )
         return JSONResponse(status_code=exc.status, content=content)
 
     @app.exception_handler(ArenaContractError)

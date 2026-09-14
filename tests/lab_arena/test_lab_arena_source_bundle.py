@@ -3,10 +3,14 @@ from __future__ import annotations
 import gzip
 import io
 import tarfile
+from pathlib import Path
 
 import pytest
 
 from lab_arena import source_bundle
+
+
+CANONICAL_LICENSE = Path(__file__).resolve().parents[2].joinpath("LICENSE").read_bytes()
 
 
 def _archive_members(members):
@@ -56,6 +60,65 @@ def test_archive_validation_accepts_one_github_wrapper_directory():
             archive.addfile(info, io.BytesIO(data))
     facts = source_bundle.validate_source_archive(raw.getvalue())
     assert facts["source_root"] == "pydantic-harness-main"
+
+
+@pytest.mark.parametrize("license_name", source_bundle.REQUIRED_LICENSE_NAMES)
+def test_submission_archive_requires_the_complete_agpl_license(license_name):
+    payload = _archive_members(
+        (
+            ("harness.py", b"def run_icp(icp): return []\n"),
+            (license_name, CANONICAL_LICENSE),
+        )
+    )
+
+    facts = source_bundle.validate_source_archive(payload, require_license=True)
+    assert facts["source_root"] == ""
+
+    invalid = _archive_members(
+        (
+            ("harness.py", b"def run_icp(icp): return []\n"),
+            (license_name, b"AGPL-3.0\n"),
+        )
+    )
+    with pytest.raises(source_bundle.SourceBundleError) as caught:
+        source_bundle.validate_source_archive(invalid, require_license=True)
+    assert caught.value.code == "source_license_invalid"
+
+
+def test_submission_archive_accepts_wrapper_license_with_normalized_whitespace():
+    normalized_variant = (
+        CANONICAL_LICENSE.replace(b"https://fsf.org/", b"http://fsf.org/")
+        .replace(
+            b"https://www.gnu.org/licenses/",
+            b"http://www.gnu.org/licenses/",
+        )
+        .replace(b"\n", b"  \r\n")
+    )
+    payload = _archive_members(
+        (
+            ("agent-main/harness.py", b"def run_icp(icp): return []\n"),
+            ("agent-main/LICENSE", normalized_variant),
+        )
+    )
+
+    facts = source_bundle.validate_source_archive(payload, require_license=True)
+    assert facts["source_root"] == "agent-main"
+
+
+def test_license_rule_is_opt_in_for_historical_archive_validation_and_extraction(tmp_path):
+    payload = _archive_members(
+        (("harness.py", b"def run_icp(icp): return []\n"),)
+    )
+
+    source_bundle.validate_source_archive(payload)
+    target = tmp_path / "source"
+    target.mkdir()
+    source_bundle.extract_source_archive(payload, target)
+    assert (target / "harness.py").is_file()
+
+    with pytest.raises(source_bundle.SourceBundleError) as caught:
+        source_bundle.validate_source_archive(payload, require_license=True)
+    assert caught.value.code == "source_license_missing"
 
 
 @pytest.mark.parametrize("name", [

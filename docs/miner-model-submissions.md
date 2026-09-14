@@ -12,6 +12,12 @@ def run_icp(icp: dict) -> list[dict]:
     """Return up to five companies with ICP-fit and intent evidence."""
 ```
 
+Put `LICENSE`, `LICENSE.txt`, or `LICENSE.md` beside `harness.py`. The file must
+contain the complete [Tyche AGPL-3.0 license](https://github.com/gzaentz/tyche/blob/main/LICENSE).
+The miner CLI validates the full text before any network request. The gateway
+validates the uploaded bytes again before it stores credentials or admits the
+model for review and scoring.
+
 Use the baseline's input/output shapes and broker transport. You can change
 the model, Python harness, prompts, and tool routing. Python dependencies can
 be listed in `requirements.txt`; the runner accepts binary wheels, not source

@@ -106,6 +106,9 @@ class _Keypair:
 def _agent_source(tmp_path: Path, harness: str = "def run_icp(icp):\n    return []\n") -> Path:
     (tmp_path / "harness.py").write_text(harness, encoding="utf-8")
     (tmp_path / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "LICENSE").write_bytes(
+        Path(__file__).resolve().parents[2].joinpath("LICENSE").read_bytes()
+    )
     return tmp_path
 
 
@@ -133,6 +136,26 @@ def test_source_validation_checks_syntax_without_importing_code(tmp_path):
     (source / "harness.py").write_text("def run_icp(:\n", encoding="utf-8")
     with pytest.raises(MinerSubmissionError, match="harness_invalid"):
         validate_agent_source(source)
+
+
+def test_missing_license_fails_before_any_submission_network_call(tmp_path):
+    source = _agent_source(tmp_path)
+    (source / "LICENSE").unlink()
+
+    class _NoNetwork:
+        def get(self, *_args, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError("network call attempted")
+
+    with pytest.raises(MinerSubmissionError) as caught:
+        submit_agent_source(
+            source_dir=source,
+            api_base_url="https://arena.example",
+            keypair=_Keypair(),
+            credentials=CREDENTIALS,
+            session=_NoNetwork(),
+        )
+    assert caught.value.code == "source_license_missing"
+    assert source_bundle.REQUIRED_LICENSE_REFERENCE in caught.value.format_for_cli()
 
 
 def test_local_source_error_path_redacts_submitted_credentials(tmp_path):
@@ -340,7 +363,15 @@ def test_server_error_text_is_not_propagated():
     assert secret not in str(caught.value)
 
 
-@pytest.mark.parametrize("code", ["hotkey_unregistered", "submission_rate_limited", "submission_rejected:openrouter_management_key_invalid"])
+@pytest.mark.parametrize(
+    "code",
+    [
+        "hotkey_unregistered",
+        "submission_rate_limited",
+        "submission_rejected:openrouter_management_key_invalid",
+        "submission_rejected:source_license_missing",
+    ],
+)
 def test_known_admission_errors_are_actionable_without_echoing_details(code):
     response = _Response(400, {"code": code, "detail": "server-echoed-secret"})
     with pytest.raises(MinerSubmissionError) as caught:

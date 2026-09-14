@@ -67,6 +67,12 @@ PARTICIPANTS = (
     ("sub-dd76cafd44732cb230a476ab031b24ad", "5FqcBT8JJ2Sr4KHWkpJG4nza9QtwGMSWXucQXeotVUEeM7VX", False),
 )
 PARTICIPANT_IDS = tuple(sorted(item[0] for item in PARTICIPANTS))
+OPTIONAL_SCRAPINGDOG_SUBMISSIONS = (
+    TARGET_SUBMISSION,
+    "sub-287f56f3e3718776a6aa10e4c130e154",
+    "sub-804245a7d75aa38aa4c74a59e07b51d2",
+    "sub-dd76cafd44732cb230a476ab031b24ad",
+)
 
 
 @pytest.fixture(scope="module")
@@ -152,11 +158,14 @@ def _prepare(database, *, reservation_amount: int = 49_945_650):
                 ROUND_ID, submission_id, "uploading", "accepted", {"is_king": True}
             )["status"] == "ok"
         else:
+            credentials = encrypted_runtime_credentials(submission_id)
+            if submission_id in OPTIONAL_SCRAPINGDOG_SUBMISSIONS:
+                credentials["scrapingdog"] = "c2NyYXBpbmdkb2ctY2lwaGVydGV4dA=="
             assert store.accept_submission_with_credentials(
                 ROUND_ID,
                 submission_id,
                 miner,
-                encrypted_runtime_credentials(submission_id),
+                credentials,
             )["status"] == "ok"
             pass_code_review(store, submission_id, miner)
         assert store.update_submission(
@@ -165,15 +174,6 @@ def _prepare(database, *, reservation_amount: int = 49_945_650):
         participant_docs.append(
             {"submission_id": submission_id, "miner_hotkey": miner, "is_king": is_king}
         )
-    baseline_credentials = encrypted_runtime_credentials("baseline-2026-09-14")
-    with connection.cursor() as cursor:
-        for provider, ciphertext_b64 in baseline_credentials.items():
-            cursor.execute(
-                "INSERT INTO public.lab_arena_submission_credentials "
-                "(submission_id,miner_hotkey,provider,ciphertext) VALUES "
-                "('baseline-2026-09-14',%s,%s,decode(%s,'base64'))",
-                (BASELINE_HOTKEY, provider, ciphertext_b64),
-            )
     assert store.transition_round(
         ROUND_ID,
         "open",
@@ -357,6 +357,17 @@ def test_recovery_is_append_only_claimable_retryable_and_replay_safe(database):
                 "submission_id=ANY(%s)",
                 (list(PARTICIPANT_IDS),),
             )
+            cursor.execute(
+                "SELECT count(*),"
+                "count(*) FILTER (WHERE provider='openrouter'),"
+                "count(*) FILTER (WHERE provider='deepline'),"
+                "count(*) FILTER (WHERE provider='scrapingdog'),"
+                "count(*) FILTER (WHERE submission_id='baseline-2026-09-14') "
+                "FROM public.lab_arena_submission_credentials "
+                "WHERE submission_id=ANY(%s)",
+                (list(PARTICIPANT_IDS),),
+            )
+            assert cursor.fetchone() == (28, 12, 12, 4, 0)
             old_unrelated = _row_hash(cursor, "lab_arena_rounds", "round_id=%s", (UNRELATED_ROUND_ID,))
             cursor.execute(MIGRATION.read_text(encoding="utf-8"))
             assert _row_hash(

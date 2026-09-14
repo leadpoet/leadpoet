@@ -287,7 +287,7 @@ BEGIN
          WHERE round_id = v_round_id AND status = 'frozen') <> 13
      OR (SELECT pg_catalog.count(*)
          FROM public.lab_arena_submission_credentials
-         WHERE submission_id = ANY(v_participant_ids)) <> 26
+         WHERE submission_id = ANY(v_participant_ids)) <> 28
      OR v_round.configuration_doc #>> '{schedule,submission_open}'
         IS DISTINCT FROM '2026-09-13T00:00:00Z'
      OR v_round.configuration_doc #>> '{schedule,submission_cutoff}'

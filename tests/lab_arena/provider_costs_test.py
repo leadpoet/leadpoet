@@ -277,6 +277,63 @@ def test_deepline_history_matches_exact_charge_group_alias():
     assert has_more is False and next_offset is None
 
 
+@pytest.mark.parametrize(("charge_state", "credits", "expected_microusd"), [("free", 0, 0), ("posted", 0.2, 20_000)])
+@pytest.mark.parametrize("exact_first", [False, True])
+def test_deepline_history_accepts_exact_charge_beside_large_unrelated_group(
+    charge_state, credits, expected_microusd, exact_first
+):
+    unrelated = {
+        "request_id": "internal-unrelated",
+        "operation": "exa_search",
+        "provider": "exa",
+        "charge_state": "posted",
+        "credits": 0.2,
+        "metadata": {
+            "chargeGroupIds": ["unrelated-%d" % index for index in range(147)]
+        },
+    }
+    exact = {
+        "request_id": "wrapper-job",
+        "operation": "exa_search",
+        "provider": "exa",
+        "charge_state": charge_state,
+        "credits": credits,
+    }
+
+    state, cost, has_more, next_offset = deepline_billing_history_cost(
+        {"recent": {"entries": [exact, unrelated] if exact_first else [unrelated, exact]}},
+        request_id="wrapper-job",
+        operation="exa_search",
+    )
+
+    assert state == "matched" and cost is not None and cost.microusd == expected_microusd
+    assert has_more is False and next_offset is None
+
+
+def test_deepline_history_rejects_target_inside_large_aggregate_group():
+    charge_group_ids = ["unrelated-%d" % index for index in range(147)]
+    charge_group_ids[146] = "wrapper-job"
+
+    assert deepline_billing_history_cost(
+        {
+            "recent": {
+                "entries": [
+                    {
+                        "request_id": "internal-job",
+                        "operation": "exa_search",
+                        "provider": "exa",
+                        "charge_state": "posted",
+                        "credits": 0.2,
+                        "metadata": {"chargeGroupIds": charge_group_ids},
+                    }
+                ]
+            }
+        },
+        request_id="wrapper-job",
+        operation="exa_search",
+    ) == ("invalid", None, False, None)
+
+
 @pytest.mark.parametrize(
     "charge_group_ids",
     [

@@ -33,7 +33,6 @@ _DEEPLINE_CREDIT_FIELDS = (
     "credits_used",
     "credits",
 )
-_DEEPLINE_MAX_CHARGE_GROUP_IDS = 128
 _DEEPLINE_MAX_REQUEST_ID_LENGTH = 512
 _DEEPLINE_BILLING_LEDGER_MAX_ENTRIES = 5_000
 _DEEPLINE_BILLING_CURSOR_MAX_LENGTH = 4_096
@@ -226,7 +225,6 @@ def deepline_billing_history_cost(
             charge_group_ids = metadata["chargeGroupIds"]
             if (
                 not isinstance(charge_group_ids, list)
-                or len(charge_group_ids) > _DEEPLINE_MAX_CHARGE_GROUP_IDS
                 or any(
                     not isinstance(value, str)
                     or not value.strip()

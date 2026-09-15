@@ -35,9 +35,16 @@ class _Content:
 
 
 class _Response:
-    def __init__(self, status: int, payload: bytes, url: str = "") -> None:
+    def __init__(
+        self,
+        status: int,
+        payload: bytes,
+        url: str = "",
+        content_type: str = "text/html",
+    ) -> None:
         self.status = status
         self.content = _Content(payload)
+        self.headers = {"Content-Type": content_type}
         if url:
             self.url = url
 
@@ -63,10 +70,14 @@ class _Session:
 
 
 def _stream_reader():
+    from qualification.scoring.company_verification import _MAX_BYTES
+
     loop = asyncio.get_running_loop()
     protocol = BaseProtocol(loop)
     protocol.connection_made(Mock(spec=asyncio.Transport))
-    return aiohttp.StreamReader(protocol, limit=2**16)
+    # This in-memory fixture has no socket parser to pause. Real HTTP tests
+    # cover backpressure with the client's normal stream buffer limits.
+    return aiohttp.StreamReader(protocol, limit=_MAX_BYTES)
 
 
 def test_default_http_company_url_upgrades_to_https():
@@ -137,8 +148,9 @@ async def _verify_with_response(
     final_url: str = "",
     require_https_transport: bool = False,
     content=None,
+    content_type: str = "text/html",
 ):
-    response = _Response(status, payload, final_url)
+    response = _Response(status, payload, final_url, content_type)
     if content is not None:
         response.content = content
     monkeypatch.setattr(
@@ -236,6 +248,203 @@ def test_homepage_name_is_a_match(monkeypatch):
         )
     )
     assert result.decision == COMPANY_FIT_MATCH
+
+
+def _copyright_identity_html(*, meta: str = "") -> str:
+    return (
+        f"<html><head>{meta}</head><body><footer>"
+        "© 2026 Example Company Ltd. All rights reserved "
+        '<a href="https://www.linkedin.com/company/example-company">'
+        "LinkedIn</a></footer></body></html>"
+    )
+
+
+def test_homepage_honors_declared_windows_1252_charset(monkeypatch):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html().encode("cp1252"),
+            content_type="text/html; charset=windows-1252",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert _verified_homepage_identity_anchor(result) == {
+        "normalized_name": "example",
+        "registrable_dns_domain": "example.co.uk",
+        "linkedin_company_slug": "example-company",
+    }
+
+
+def test_homepage_honors_early_meta_charset(monkeypatch):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html(
+                meta='<meta charset="windows-1252">'
+            ).encode("cp1252"),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+
+
+def test_homepage_meta_utf16_declaration_keeps_utf8_html(monkeypatch):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html(meta='<meta charset="utf-16">').encode("utf-8"),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+
+
+def test_homepage_bom_precedes_conflicting_header_and_meta_charset(monkeypatch):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html(
+                meta='<meta charset="windows-1252">'
+            ).encode("utf-16"),
+            content_type="text/html; charset=windows-1252",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+
+
+def test_homepage_http_charset_precedes_conflicting_meta_charset(monkeypatch):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html(meta='<meta charset="utf-8">').encode(
+                "cp1252"
+            ),
+            content_type="text/html; charset=windows-1252",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("charset", ["x-not-a-codec", "base64_codec", "utf-16"])
+def test_homepage_invalid_non_text_or_undecodable_charset_falls_back_to_utf8(
+    monkeypatch, charset
+):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html().encode("cp1252"),
+            content_type=f"text/html; charset={charset}",
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "company name metadata not found" in result.reason
+
+
+def test_homepage_skips_invalid_meta_before_valid_declaration(monkeypatch):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html(
+                meta=(
+                    '<meta charset="base64_codec">'
+                    '<meta charset="windows-1252">'
+                )
+            ).encode("cp1252"),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    ("meta", "expected"),
+    [
+        (
+            '<meta charset="windows-1252" charset="utf-8">',
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            '<meta charset="utf-8" charset="windows-1252">',
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+    ],
+)
+def test_homepage_meta_duplicate_attribute_uses_first_value(
+    monkeypatch, meta, expected
+):
+    result = asyncio.run(
+        _verify_with_response(
+            monkeypatch,
+            200,
+            _copyright_identity_html(meta=meta).encode("cp1252"),
+        )
+    )
+
+    assert result.decision == expected
+
+
+@pytest.mark.parametrize("header_name", ["content-type", "cOnTeNt-TyPe"])
+def test_homepage_honors_case_insensitive_shim_content_type_header(
+    monkeypatch, header_name
+):
+    from lab_arena.shim import _AiohttpResponse
+
+    response = _AiohttpResponse(
+        request_url="https://www.example.co.uk",
+        response_url="https://www.example.co.uk",
+        status=200,
+        headers={header_name: "text/html; charset=windows-1252"},
+        body=_copyright_identity_html().encode("cp1252"),
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification._registrable_domain",
+        lambda _url: "example.co.uk",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+
+    result = asyncio.run(
+        verify_company_exists(
+            "Example Company",
+            "https://www.example.co.uk",
+            company_linkedin=(
+                "https://www.linkedin.com/company/example-company"
+            ),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        '<!-- <meta charset="windows-1252"> -->',
+        '<script>const fake = \'<meta charset="windows-1252">\';</script>',
+        " " * 1024 + '<meta charset="windows-1252">',
+    ],
+)
+def test_homepage_ignores_fake_or_late_meta_charset(monkeypatch, prefix):
+    html = _copyright_identity_html(meta=prefix)
+    result = asyncio.run(
+        _verify_with_response(monkeypatch, 200, html.encode("cp1252"))
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "company name metadata not found" in result.reason
 
 
 @pytest.mark.parametrize("status", [408, 425, 500, 502, 503, 504])

@@ -33,6 +33,7 @@ Public API:
 from __future__ import annotations
 
 import asyncio
+import codecs
 from html.parser import HTMLParser
 import json
 import logging
@@ -67,6 +68,36 @@ _TRANSIENT_FETCH_ATTEMPTS = 2
 _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 _MAX_ORGANIZATION_LEGAL_NAME_ALIASES = 3
 _MAX_ORGANIZATION_NAME_LENGTH = 200
+_HTML_ENCODING_SNIFF_BYTES = 1024
+
+# Python also exposes binary transforms as codecs. This explicit text-codec
+# subset prevents an untrusted HTTP or HTML label from selecting one of them.
+_SAFE_HTML_CODECS = frozenset({
+    "ascii",
+    "big5",
+    "cp866",
+    "cp874",
+    *(f"cp125{index}" for index in range(9)),
+    "euc_jp",
+    "euc_kr",
+    "gb18030",
+    "gbk",
+    *(f"iso8859-{index}" for index in (*range(1, 12), *range(13, 17))),
+    "iso2022_jp",
+    "koi8-r",
+    "koi8-u",
+    "mac-cyrillic",
+    "mac-roman",
+    "shift_jis",
+    "utf-8",
+    "utf-16",
+    "utf-16-be",
+    "utf-16-le",
+})
+_CHARSET_PARAMETER_RE = re.compile(
+    r"(?:^|;)\s*charset\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^;\s]*))",
+    re.IGNORECASE,
+)
 
 # Headers that look like a real browser.  Some company sites refuse
 # default ``python-aiohttp/...`` user agents with 403, which would
@@ -139,6 +170,96 @@ def _upgrade_plain_http_company_url(company_website: str) -> str:
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return urlunsplit(("https", host, parsed.path, parsed.query, parsed.fragment))
+
+
+def _charset_parameter(value: object) -> str:
+    """Return one declared charset label from a Content-Type value."""
+
+    match = _CHARSET_PARAMETER_RE.search(str(value or ""))
+    if match is None:
+        return ""
+    return next((item.strip() for item in match.groups() if item), "")
+
+
+class _EarlyMetaCharsetParser(HTMLParser):
+    """Read the first real HTML charset declaration from the bounded prefix."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.charset = ""
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if self.charset or tag.casefold() != "meta":
+            return
+        attributes = {}
+        for key, value in attrs:
+            # HTML tokenization keeps the first duplicate attribute.
+            attributes.setdefault(
+                str(key or "").casefold(), str(value or "").strip()
+            )
+        direct = attributes.get("charset", "")
+        candidate = direct
+        if (
+            not candidate
+            and attributes.get("http-equiv", "").casefold() == "content-type"
+        ):
+            candidate = _charset_parameter(attributes.get("content", ""))
+        # An invalid declaration does not hide a later valid declaration.
+        self.charset = _safe_html_codec(candidate)
+        if self.charset.startswith("utf-16"):
+            # HTML meta declarations cannot select UTF-16; only BOM/HTTP can.
+            self.charset = "utf-8"
+
+
+def _early_meta_charset(raw: bytes) -> str:
+    parser = _EarlyMetaCharsetParser()
+    try:
+        # HTML encoding labels are ASCII. Latin-1 preserves every source byte
+        # while HTMLParser excludes declarations in comments and script data.
+        parser.feed(raw[:_HTML_ENCODING_SNIFF_BYTES].decode("latin-1"))
+        parser.close()
+    except (AssertionError, ValueError):
+        return ""
+    return parser.charset
+
+
+def _safe_html_codec(label: str) -> str:
+    try:
+        canonical = codecs.lookup(str(label or "").strip()).name
+    except (LookupError, TypeError, ValueError):
+        return ""
+    return canonical if canonical in _SAFE_HTML_CODECS else ""
+
+
+def _decode_homepage_html(raw: bytes, content_type: object = "") -> str:
+    """Decode bounded homepage bytes without probabilistic encoding guesses."""
+
+    value = bytes(raw)
+    for marker, encoding in (
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF16_BE, "utf-16"),
+        (codecs.BOM_UTF16_LE, "utf-16"),
+    ):
+        if value.startswith(marker):
+            return value.decode(encoding, errors="replace")
+
+    encoding = _safe_html_codec(_charset_parameter(content_type))
+    if not encoding:
+        encoding = _safe_html_codec(_early_meta_charset(value))
+    try:
+        return value.decode(encoding or "utf-8", errors="replace")
+    except UnicodeError:
+        return value.decode("utf-8", errors="replace")
+
+
+def _content_type_header(headers: object) -> object:
+    if not hasattr(headers, "items"):
+        return ""
+    for name, value in headers.items():
+        if str(name).casefold() == "content-type":
+            return value
+    return ""
+
 
 def _registrable_domain(url: str) -> str:
     """Extract the PSL-aware registrable domain from an HTTP(S) URL.
@@ -620,10 +741,9 @@ async def verify_company_exists(
                             if not chunk:
                                 break
                             raw.extend(chunk)
-                        try:
-                            text = raw.decode("utf-8", errors="replace")
-                        except Exception:
-                            text = ""
+                        headers = getattr(resp, "headers", {})
+                        content_type = _content_type_header(headers)
+                        text = _decode_homepage_html(raw, content_type)
                 break
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
                 if attempt + 1 >= _TRANSIENT_FETCH_ATTEMPTS:

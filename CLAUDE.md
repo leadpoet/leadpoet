@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: scorer response audit and deployment
+
+On 2026-09-14 the user authorized a broader audit for scorer response-handling
+bugs following the confirmed partial homepage read. Reproduce each defect
+before making a narrow fix, run relevant regression and release checks, push
+to main, and deploy with the canonical gateway and normal-validator restart
+controllers. This includes protected read-only production inspection, publishing
+the exact scorer image, updating only its configured image reference, and live
+verification of the installed scorer. Preserve scoring policy, cost limits,
+retries, credentials, published results, validator journals, and concurrent
+work. Do not rescore frozen rounds or restore retired services. This authority
+expires when the verified fixes are deployed and live checks pass.
+
 ## Scoped production authorization: proxy-backed parallel ICP execution
 
 On 2026-09-14 the user explicitly authorized implementing and proving dynamic

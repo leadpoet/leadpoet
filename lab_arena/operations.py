@@ -1066,6 +1066,49 @@ _OPERATION_LIST = (
         credential=_OPENROUTER_CREDENTIAL,
         outbound_headers=OPENROUTER_OUTBOUND_HEADERS,
     ),
+    Operation(
+        operation_id="openrouter.responses",
+        provider="openrouter",
+        method="POST",
+        host="openrouter.ai",
+        path="/api/v1/responses",
+        parameter_location="body",
+        request_fields={
+            "model": FieldSpec("str", required=True, min_length=3, max_length=128, format="model_id"),
+            # Union members are checked below; only local tools and text are allowed.
+            "input": FieldSpec("any", required=True),
+            "instructions": FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
+            "tools": FieldSpec("any"),
+            "tool_choice": FieldSpec("str", choices=("auto", "none", "required")),
+            "parallel_tool_calls": FieldSpec("bool"),
+            "reasoning": FieldSpec("object", fields={
+                "effort": FieldSpec("str", choices=("none", "minimal", "low", "medium", "high", "xhigh")),
+                "summary": FieldSpec("str", choices=("auto", "concise", "detailed")),
+            }),
+            "text": FieldSpec("object", fields={
+                "verbosity": FieldSpec("str", choices=("low", "medium", "high")),
+                "format": FieldSpec("object", fields={
+                    "type": FieldSpec("str", required=True, choices=("text", "json_schema")),
+                    "name": FieldSpec("str", max_length=128),
+                    "schema": FieldSpec("object"),
+                    "strict": FieldSpec("bool"),
+                }),
+            }),
+            "include": FieldSpec("list[str]", max_length=1, item=FieldSpec("str", choices=("reasoning.encrypted_content",))),
+            "max_output_tokens": FieldSpec("int", minimum=1, maximum=OPENROUTER_MAX_OUTPUT_TOKENS),
+            "prompt_cache_key": FieldSpec("str", max_length=256),
+        },
+        fixed_params={"stream": False, "store": False, "provider": dict(OPENROUTER_STRICT_PROVIDER_POLICY)},
+        defaults={"max_output_tokens": OPENROUTER_MAX_OUTPUT_TOKENS},
+        timeout_seconds=120,
+        max_request_bytes=1_000_000,
+        max_response_bytes=1_048_576,
+        cost_rule={"kind": "openrouter_price_table", "max_output_tokens": OPENROUTER_MAX_OUTPUT_TOKENS},
+        response_sanitizer="json",
+        funding_source="host",
+        credential=_OPENROUTER_CREDENTIAL,
+        outbound_headers=OPENROUTER_OUTBOUND_HEADERS,
+    ),
 )
 
 OPERATIONS: Mapping[str, Operation] = MappingProxyType(
@@ -1389,6 +1432,8 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
     for name, default in operation.defaults.items():
         if name not in normalized:
             normalized[name] = _deep_copy_json(default)
+    if operation_id == "openrouter.responses":
+        _validate_responses(normalized)
     if operation_id == "deepline.execute":
         tool = normalized.get("tool")
         payload = normalized.get("payload")
@@ -1419,6 +1464,70 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
     if len(encoded) > operation.max_request_bytes:
         raise OperationRequestError("request_too_large")
     return normalized
+
+
+def _validate_responses(parameters: Mapping[str, Any]) -> None:
+    """Stateless text and local tool history; no hosted tools or remote inputs."""
+
+    text = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
+    identifier = FieldSpec("str", required=True, min_length=1, max_length=256)
+    status = FieldSpec("str", choices=("in_progress", "completed", "incomplete"))
+    item_fields = {
+        "message": {"role": FieldSpec("str", required=True, choices=("system", "developer", "user", "assistant")), "content": FieldSpec("any", required=True), "status": status},
+        "function_call": {"call_id": identifier, "name": identifier, "arguments": dataclasses.replace(text, required=True), "status": status},
+        "function_call_output": {"call_id": identifier, "output": dataclasses.replace(text, required=True), "status": status},
+        "custom_tool_call": {"call_id": identifier, "name": identifier, "input": dataclasses.replace(text, required=True), "status": status},
+        "custom_tool_call_output": {"call_id": identifier, "output": dataclasses.replace(text, required=True)},
+        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": text, "content": FieldSpec("any"), "status": status},
+    }
+
+    def content_parts(value: Any, *, reasoning: bool = False) -> None:
+        if isinstance(value, str) and not reasoning:
+            _validate_field(text, value, "$.input.content")
+            return
+        if not isinstance(value, list) or len(value) > OPENROUTER_MAX_MESSAGES:
+            raise OperationRequestError("invalid_field", "$.input.content")
+        for part in value:
+            _validate_object({
+                "type": FieldSpec("str", required=True, choices=(("summary_text", "reasoning_text") if reasoning else ("input_text", "output_text"))),
+                "text": dataclasses.replace(text, required=True),
+                "annotations": FieldSpec("list[object]", max_length=0, fields={}),
+            }, part, "$.input.content")
+
+    value = parameters["input"]
+    if isinstance(value, str):
+        _validate_field(text, value, "$.input")
+    elif isinstance(value, list) and 1 <= len(value) <= OPENROUTER_MAX_MESSAGES:
+        for item in value:
+            kind = item.get("type", "message") if isinstance(item, dict) else None
+            if kind not in item_fields:
+                raise OperationRequestError("invalid_field", "$.input.type")
+            _validate_object(dict(item_fields[kind], type=FieldSpec("str", choices=(kind,)), id=dataclasses.replace(identifier, required=False)), item, "$.input")
+            if kind == "message":
+                content_parts(item["content"])
+            elif kind == "reasoning":
+                for name in ("summary", "content"):
+                    if item.get(name) is not None:
+                        content_parts(item[name], reasoning=True)
+    else:
+        raise OperationRequestError("invalid_field", "$.input")
+    tools = parameters.get("tools", [])
+    if not isinstance(tools, list) or len(tools) > 64:
+        raise OperationRequestError("invalid_field", "$.tools")
+    for tool in tools:
+        kind = tool.get("type") if isinstance(tool, dict) else None
+        fields = {"type": FieldSpec("str", required=True, choices=("function", "custom")), "name": identifier, "description": text}
+        if kind == "function":
+            fields.update(parameters=FieldSpec("object"), strict=FieldSpec("bool"))
+        elif kind == "custom":
+            fields["format"] = FieldSpec("object", fields={
+                "type": FieldSpec("str", required=True, choices=("text", "grammar")),
+                "syntax": FieldSpec("str", choices=("lark", "regex")),
+                "definition": text,
+            })
+        else:
+            raise OperationRequestError("invalid_field", "$.tools.type")
+        _validate_object(fields, tool, "$.tools")
 
 
 # ---------------------------------------------------------------------------

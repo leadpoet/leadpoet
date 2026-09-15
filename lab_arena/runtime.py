@@ -56,6 +56,7 @@ SANDBOX_AGENT_SOURCE_DIR = SANDBOX_AGENT_DIR + "/source"
 SANDBOX_AGENT_DEPENDENCY_DIR = SANDBOX_AGENT_DIR + "/deps"
 SANDBOX_AGENT_ENTRYPOINT_PATH = SANDBOX_AGENT_DIR + "/entrypoint.py"
 SANDBOX_AGENT_CHECKPOINT_PATH = SANDBOX_AGENT_DIR + "/lab_arena_checkpoint.py"
+SANDBOX_AGENT_CODEX_PATH = SANDBOX_AGENT_DIR + "/lab_arena_codex.py"
 SANDBOX_WEB_BRIDGE_PATH = SANDBOX_AGENT_DIR + "/web_egress_bridge.py"
 SANDBOX_WEB_SOCKET_NAME = "web.sock"
 SANDBOX_INPUT_DIR = "/input"
@@ -167,6 +168,7 @@ class SandboxSpec:
     dependency_dir: Optional[Path] = None
     agent_entrypoint_path: Optional[Path] = None
     checkpoint_module_path: Optional[Path] = None
+    codex_module_path: Optional[Path] = None
     # Only newly opted-in execute leases receive this credential-free bridge.
     # runsc still has no external network; AF_INET permits its private loopback.
     web_bridge_path: Optional[Path] = None
@@ -217,6 +219,11 @@ class SandboxSpec:
             if not value.is_absolute():
                 raise SandboxSpecError("%s must be absolute" % name)
             object.__setattr__(self, name, value)
+        if self.codex_module_path is not None:
+            value = Path(self.codex_module_path)
+            if not value.is_absolute() or self.source_dir is None or self.web_bridge_path is None:
+                raise SandboxSpecError("Codex requires an execute source and private loopback")
+            object.__setattr__(self, "codex_module_path", value)
         if self.checkpoint_module_path is not None:
             checkpoint_path = Path(self.checkpoint_module_path)
             if not checkpoint_path.is_absolute() or self.source_dir is None:
@@ -383,6 +390,13 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
             "destination": SANDBOX_WEB_BRIDGE_PATH,
             "type": "bind",
             "source": str(spec.web_bridge_path),
+            "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
+        })
+    if spec.codex_module_path is not None:
+        mounts.append({
+            "destination": SANDBOX_AGENT_CODEX_PATH,
+            "type": "bind",
+            "source": str(spec.codex_module_path),
             "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
         })
     if spec.checkpoint_module_path is not None:

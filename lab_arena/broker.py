@@ -317,13 +317,14 @@ def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, 
 def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
     """The OpenRouter body the broker hashes and sends: the output cap is always explicit."""
 
-    requested = parameters.get("max_tokens")
+    token_field = "max_output_tokens" if "input" in parameters else "max_tokens"
+    requested = parameters.get(token_field)
     cap = operations.OPENROUTER_MAX_OUTPUT_TOKENS
     max_tokens = cap if requested is None else min(int(requested), cap)
     if max_tokens < 1:
         raise BrokerError("invalid_request")
     normalized = dict(parameters)
-    normalized["max_tokens"] = max_tokens
+    normalized[token_field] = max_tokens
     return normalized
 
 
@@ -1228,6 +1229,12 @@ def _provider_call_succeeded(
     if provider == "openrouter":
         if not isinstance(document, Mapping):
             return False
+        if document.get("object") == "response":
+            return (
+                document.get("status") == "completed"
+                and document.get("error") is None
+                and isinstance(document.get("output"), list)
+            )
         choices = document.get("choices")
         return isinstance(choices, list) and all(
             isinstance(choice, Mapping)
@@ -1363,7 +1370,7 @@ class Broker:
         if model not in self._price_table["models"]:
             raise BrokerError("model_not_allowed")
         normalized = openrouter_normalized(parameters)
-        return normalized, int(normalized["max_tokens"])
+        return normalized, int(normalized.get("max_output_tokens", normalized.get("max_tokens")))
 
     def reconcile_openrouter_cost(
         self,

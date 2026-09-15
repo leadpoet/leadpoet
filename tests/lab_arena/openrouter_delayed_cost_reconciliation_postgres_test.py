@@ -136,20 +136,21 @@ def _uncertain_call(
     amount: int = 500_000,
     generation_id: str | None = None,
     credential_fingerprint: str | None = None,
+    operation_id: str = "openrouter.chat",
 ):
     identity = contracts.provider_call_identity(
         attempt=run["attempt"],
         assignment_id=run["assignment_id"],
         icp_position=run["icp_position"],
         action_sequence=sequence,
-        operation_id="openrouter.chat",
+        operation_id=operation_id,
         request_hash=sha(label),
     )
     assert store.reserve_call(
         run_id=run["run_id"],
         lease_token_hash=token_hash,
         call_identity=identity,
-        operation_id="openrouter.chat",
+        operation_id=operation_id,
         provider="openrouter",
         funding_source="miner_key",
         amount_microusd=amount,

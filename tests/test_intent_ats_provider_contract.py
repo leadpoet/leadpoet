@@ -285,6 +285,34 @@ async def test_greenhouse_decodes_encoded_job_heading_before_body_gate(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("date_fields", "expected"),
+    [
+        ({
+            "first_published": "2026-08-20T15:28:09-04:00",
+            "updated_at": "2026-09-12T09:00:00-04:00",
+        }, "2026-08-20"),
+        ({"updated_at": "2026-09-12T09:00:00-04:00"}, ""),
+        ({
+            "first_published": "August 20, 2026",
+            "updated_at": "2026-09-12T09:00:00-04:00",
+        }, ""),
+    ],
+)
+async def test_greenhouse_publication_date_uses_only_first_published(
+    monkeypatch, date_fields, expected
+):
+    client = _GreenhouseClient({**_greenhouse_payload(), **date_fields})
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-runtime-handle")
+    monkeypatch.setattr(intent.httpx, "AsyncClient", lambda **_kwargs: client)
+
+    fetched = await intent._fetch_sd_then_exa([GREENHOUSE_URL])
+
+    assert fetched["results"][0]["source_publication_date"] == expected
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_encoded_greenhouse_job_reaches_stage3(monkeypatch):
     result, prompts, client = await _run_greenhouse_verification(
         monkeypatch, _encoded_greenhouse_payload(), "supported"

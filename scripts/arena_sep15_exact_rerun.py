@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exact operator steps for the authorized Sep15 baseline rerun.
 
-Use only after migrations 256/257 and the tested Tyche lab branch are live.
+Use Sep15 steps after migrations 256/257 and the tested Tyche lab branch are
+live. Adopt Sep16 only after migration 259 replaces the installed 257 RPC.
 The normal Arena driver handles claims, attempts, stage close, scores, and
 publication. This script only captures the new baseline source, prepares the
 same published round, opens its baseline-only scoring, and adopts the already

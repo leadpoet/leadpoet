@@ -18,10 +18,8 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
 )
 
-MIGRATIONS = CURRENT_SERVICE_MIGRATIONS + (
-    "256-arena-2026-09-15-baseline-rerun.sql",
-    "257-arena-2026-09-16-open-round-45m-adoption.sql",
-)
+# 256/257 are now part of CURRENT_SERVICE_MIGRATIONS.
+MIGRATIONS = CURRENT_SERVICE_MIGRATIONS
 ROUND = "arena-2026-09-15"
 BASELINE = "baseline-2026-09-15"
 BASIS_HASH = "sha256:502cd6a5234e5680cfdd761a49b5d825d2064ff3fb063fc8fe7d7f1755e96a18"

@@ -455,7 +455,7 @@ def test_psycopg_parameterizes_round_mode_and_status_before_limit():
     transport.close()
 
 
-def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
+def test_round_store_pushes_mode_and_scope_filters_into_activated_basis_read():
     calls = []
 
     class Transport:
@@ -486,12 +486,33 @@ def test_round_store_pushes_mode_and_status_filters_into_the_bounded_read():
     assert active["status_in"] == ("open", "committed")
     assert active["limit"] == 20 and active["offset"] == 20
     assert rewards["filters"] == {
-        "status": "published",
         "configuration_doc->>mode": "live",
         "arena_network_name": "test",
         "arena_netuid": 401,
     }
     assert rewards["limit"] == 200
+
+
+def test_reward_basis_read_keeps_activated_basis_during_same_round_replay():
+    rows = [
+        {"round_id": "replayed", "status": "stage1", "rewards_enabled": True,
+         "reward_activated_at": "2026-09-15T02:52:49Z",
+         "reward_basis_doc": {"king_outcome": "no_king"},
+         "signing_key_doc": {"public_key_hash": "signed"}},
+        {"round_id": "unsigned", "status": "published", "rewards_enabled": True,
+         "reward_activated_at": None, "reward_basis_doc": None,
+         "signing_key_doc": None},
+    ]
+
+    class Transport:
+        @staticmethod
+        def select(_table, **kwargs):
+            offset = kwargs.get("offset", 0)
+            limit = kwargs["limit"]
+            return rows[offset:offset + limit]
+
+    basis = ArenaStore(Transport()).published_reward_bases(mode="live", limit=2)
+    assert [row["round_id"] for row in basis] == ["replayed"]
 
 
 def test_round_store_requires_the_network_filter_pair():

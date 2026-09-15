@@ -53,6 +53,16 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_prepare_sep15_baseline_rerun_v1": (
+        ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
+        ("p_source_commit", "text"), ("p_bank_sha256", "text"),
+        ("p_forward_schedule", "jsonb"),
+    ),
+    "lab_arena_open_sep15_baseline_scoring_v1": (
+        ("p_round_id", "text"), ("p_stage", "smallint"),
+        ("p_work_items", "jsonb"),
+    ),
+    "lab_arena_adopt_sep16_open_config_v1": (("p_capacity_doc", "jsonb"),),
     "lab_arena_next_closed_deepline_reconciliation_v1": (
         ("p_mode", "text"), ("p_network_name", "text"),
         ("p_netuid", "integer"), ("p_round_id", "text"),
@@ -999,21 +1009,38 @@ class ArenaStore:
     ) -> List[Dict[str, Any]]:
         if (network_name is None) != (netuid is None):
             raise ArenaStoreError("round network filters must be supplied together")
-        filters: Dict[str, Any] = {"status": "published"}
+        # Activation is a separate signed commitment. A competition replay can
+        # reopen its round while the activated basis still governs weights.
+        filters: Dict[str, Any] = {}
         if mode is not None:
             filters[ROUND_MODE_FILTER] = mode
         if network_name is not None:
             filters[ROUND_NETWORK_COLUMN] = str(network_name)
             filters[ROUND_NETUID_COLUMN] = int(netuid)
-        rows = self._transport.select(
-            "lab_arena_rounds",
-            filters=filters,
-            order="effective_reward_epoch",
-            descending=True,
-            limit=limit,
-            columns="round_id,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,reward_activated_at,published_at,configuration_doc",
-        )
-        return [row for row in rows if row.get("reward_activated_at") and row.get("reward_basis_doc")]
+        activated: List[Dict[str, Any]] = []
+        offset = 0
+        page_size = min(max(int(limit), 1), 200)
+        while len(activated) < limit:
+            rows = self._transport.select(
+                "lab_arena_rounds",
+                filters=filters or None,
+                order="effective_reward_epoch",
+                descending=True,
+                limit=page_size,
+                offset=offset,
+                columns="round_id,status,arena_network_name,arena_netuid,rewards_enabled,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc,reward_activated_at,published_at,configuration_doc",
+            )
+            activated.extend(
+                row for row in rows
+                if row.get("reward_activated_at")
+                and row.get("reward_basis_doc")
+                and row.get("signing_key_doc")
+                and row.get("rewards_enabled") is True
+            )
+            if len(rows) < page_size:
+                break
+            offset += page_size
+        return activated[:limit]
 
     # -- submissions ------------------------------------------------------
 

@@ -253,14 +253,13 @@ def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
         assert live_id not in {
             row["round_id"] for row in store.list_rounds(status="open", limit=20)
         }
-        # Without the database mode predicate, the newer shadow rows consume
-        # the whole page. The live reward basis must still be returned.
-        assert live_published_id not in {
+        # Reward reads select activated, reward-enabled bases across statuses.
+        # Disabled shadow publications cannot displace the live commitment.
+        assert live_published_id in {
             row["round_id"] for row in store.published_reward_bases(limit=20)
         }
         shadow_bases = store.published_reward_bases(mode="shadow", limit=20)
-        assert len(shadow_bases) == 20
-        assert {row["round_id"] for row in shadow_bases} <= set(shadow_published_ids)
+        assert shadow_bases == []
         live_bases = store.published_reward_bases(mode="live", limit=20)
         assert {row["round_id"] for row in live_bases} == {live_published_id}
     finally:

@@ -205,6 +205,26 @@ def test_measured_sep16_rpc_preserves_completed_admissions_and_rejects_bad_state
             rejected(lambda: None, "capacity proof invalid",
                      dict(proof, parallel_twenty_icp_execution="true"))
 
+            for required_old in (
+                "integrity_policy", "max_challengers",
+                "max_attempts_per_assignment", "scoring_wall_clock_seconds",
+                "runner_hotkeys",
+            ):
+                corrupted_old = dict(config)
+                corrupted_old.pop(required_old)
+                corrupted_proposed = dict(proof["configuration_doc"])
+                corrupted_proposed.pop(required_old)
+                corrupted_proof = dict(proof, configuration_doc=corrupted_proposed)
+
+                def corrupt_round():
+                    cursor.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER USER")
+                    cursor.execute(
+                        "UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb "
+                        "WHERE round_id=%s", (json.dumps(corrupted_old), ROUND),
+                    )
+
+                rejected(corrupt_round, "open-only state differs", corrupted_proof)
+
             def missing_settlement():
                 cursor.execute("ALTER TABLE public.lab_arena_ledger DISABLE TRIGGER USER")
                 cursor.execute(

@@ -95,18 +95,41 @@ BEGIN
   IF v_round.status <> 'open'
      OR v_round.status_generation <> 0
      OR v_round.stage_generation <> 0
-     OR v_round.configuration_doc ->> 'mode' <> 'live'
+     OR v_round.configuration_doc ->> 'mode' IS DISTINCT FROM 'live'
      OR NOT v_round.rewards_enabled
-     OR v_round.configuration_doc ->> 'round_id' <> v_round.round_id
-     OR v_round.configuration_doc ->> 'integrity_policy' <> 'arena_integrity_v1'
-     OR v_round.configuration_doc ->> 'contact_policy' <> 'contacts_v1'
-     OR v_round.configuration_doc ->> 'intent_details_policy' <> 'intent_details_v1'
+     OR v_round.configuration_doc ->> 'round_id'
+          IS DISTINCT FROM v_round.round_id
+     OR v_round.configuration_doc ->> 'integrity_policy'
+          IS DISTINCT FROM 'arena_integrity_v1'
+     OR v_round.configuration_doc ->> 'contact_policy'
+          IS DISTINCT FROM 'contacts_v1'
+     OR v_round.configuration_doc ->> 'intent_details_policy'
+          IS DISTINCT FROM 'intent_details_v1'
      OR v_round.configuration_doc ? 'parallel_twenty_icp_execution'
      OR v_round.configuration_doc ? 'checkpoint_deadline_policy'
-     OR (v_round.configuration_doc ->> 'icp_wall_clock_seconds')::INTEGER <> 300
-     OR (v_round.configuration_doc ->> 'lease_ttl_seconds')::INTEGER <> 1200
-     OR (v_round.configuration_doc ->> 'runner_slot_ceiling')::INTEGER <> 8
-     OR (v_round.configuration_doc ->> 'max_challengers')::INTEGER <> 20
+     OR (v_round.configuration_doc ->> 'icp_wall_clock_seconds')::INTEGER
+          IS DISTINCT FROM 300
+     OR (v_round.configuration_doc ->> 'lease_ttl_seconds')::INTEGER
+          IS DISTINCT FROM 1200
+     OR (v_round.configuration_doc ->> 'runner_slot_ceiling')::INTEGER
+          IS DISTINCT FROM 8
+     OR (v_round.configuration_doc ->> 'max_challengers')::INTEGER
+          IS DISTINCT FROM 20
+     OR (v_round.configuration_doc ->> 'stage_1_icp_count')::INTEGER
+          IS DISTINCT FROM 10
+     OR (v_round.configuration_doc ->> 'stage_2_icp_count')::INTEGER
+          IS DISTINCT FROM 10
+     OR (v_round.configuration_doc ->> 'max_attempts_per_assignment')::INTEGER
+          IS DISTINCT FROM 2
+     OR (v_round.configuration_doc ->> 'scoring_wall_clock_seconds')::INTEGER
+          IS DISTINCT FROM 900
+     OR pg_catalog.jsonb_typeof(v_round.configuration_doc -> 'runner_hotkeys')
+          IS DISTINCT FROM 'array'
+     OR pg_catalog.jsonb_array_length(
+          v_round.configuration_doc -> 'runner_hotkeys'
+        ) IS DISTINCT FROM 1
+     OR pg_catalog.jsonb_typeof(v_round.configuration_doc -> 'schedule')
+          IS DISTINCT FROM 'object'
      OR v_round.participants IS NOT NULL
      OR v_round.benchmark_ref IS NOT NULL
      OR v_round.evaluation_date IS NOT NULL
@@ -221,8 +244,8 @@ BEGIN
   v_attempts := (v_new_config ->> 'max_attempts_per_assignment')::INTEGER;
   v_scoring_wave_seconds :=
     (v_new_config ->> 'scoring_wall_clock_seconds')::INTEGER + 60;
-  IF v_slots NOT BETWEEN 1 AND 20 OR v_attempts <> 2
-     OR v_scoring_wave_seconds <= 60
+  IF v_slots NOT BETWEEN 1 AND 20 OR v_attempts IS DISTINCT FROM 2
+     OR COALESCE(v_scoring_wave_seconds, 0) <= 60
      OR NOT COALESCE(
        (v_new_config #>> '{schedule,submission_open}')::TIMESTAMPTZ
          < (v_new_config #>> '{schedule,submission_cutoff}')::TIMESTAMPTZ

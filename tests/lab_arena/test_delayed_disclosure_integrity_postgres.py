@@ -63,7 +63,7 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
         return rows
 
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
-    cutoff = harness.clock.now + timedelta(hours=12)
+    cutoff = harness.clock.now + timedelta(minutes=30)
     round_id = "arena-2026-11-02-delayint"
     configuration = harness.service.create_round(cutoff, round_id=round_id)
     harness.round_id = round_id

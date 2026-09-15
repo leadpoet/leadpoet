@@ -89,6 +89,15 @@ jobs:
             research_lab \
             validator_models
 
+      - name: Verify native Codex protocol and broker boundaries
+        run: |
+          python scripts/install_arena_codex.py --destination "$RUNNER_TEMP/arena-codex"
+          ARENA_TEST_CODEX_BINARY="$RUNNER_TEMP/arena-codex/bin/codex" \
+            python -m pytest -q \
+              tests/lab_arena/codex_runtime_test.py \
+              tests/lab_arena/codex_protocol_validation_test.py \
+              tests/lab_arena/codex_runtime_limits_test.py
+
       - name: Exercise Arena signer under Python 3.7
         run: |
           python validator_tee/scripts/stage_runtime_artifacts_v2.py \
@@ -174,3 +183,13 @@ jobs:
             BUILD_ID=${{ github.run_id }}
             GITHUB_SHA=${{ github.sha }}
             GITHUB_REF_NAME=${{ github.ref_name }}
+
+      - name: Build Arena Codex runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: lab_arena/judge/Dockerfile
+          push: false
+          tags: leadpoet-arena-judge:${{ github.sha }}
+          build-args: |
+            LEADPOET_BUILD_COMMIT=${{ github.sha }}

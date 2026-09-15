@@ -13,7 +13,7 @@ from tests.postgres_migration_harness import SCRIPTS
 def old_round(connect, tmp_path, suffix, count, *, cap=16, changed_schedule=None):
     harness = Harness(connect, tmp_path, challengers=[], runners=["capacity"])
     harness.clock.now = datetime.now(timezone.utc)
-    cutoff = (harness.clock.now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = harness.clock.now + timedelta(minutes=30)
     harness.service.config.defaults.stage_minutes = {
         "benchmark": 30, "stage_1": 240, "stage_1_scoring": 360,
         "stage_2": 180, "final_scoring": 240,
@@ -93,7 +93,7 @@ def test_parallel_finalizations_cannot_overbook_or_store_rejected_credentials(co
     harness.service = harness.build_service()
     harness.clock.now = datetime.now(timezone.utc)
     config = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id="arena-2099-01-01-parallel"
+        harness.clock.now + timedelta(minutes=30), round_id="arena-2099-01-01-parallel"
     )
     barrier = Barrier(3)
     manager = harness.service.config.credential_manager

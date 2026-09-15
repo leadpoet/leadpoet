@@ -911,6 +911,12 @@ def _startup_service(
             "version": 230,
             "policy": "successful_calls_v1",
         },
+        submission_replacement_schema=lambda: {
+            "schema_version": "leadpoet.lab_arena.submission_replacement_schema.v1",
+            "version": 258,
+            "replacement_freeze_seconds": 3600,
+            "max_replacement_attempts": 1,
+        },
         _transport=transport,
     )
     service._objects = Objects()

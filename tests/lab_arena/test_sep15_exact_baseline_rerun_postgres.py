@@ -26,6 +26,7 @@ ROUND = "arena-2026-09-15"
 BASELINE = "baseline-2026-09-15"
 BASIS_HASH = "sha256:502cd6a5234e5680cfdd761a49b5d825d2064ff3fb063fc8fe7d7f1755e96a18"
 BANK_HASH = "4e11123c9098bbba977fdae9e531419a6dea40cf76dacde1c4c83a82df0a95c2"
+FIXTURE_CLOCK = datetime(2026, 9, 15, 18, tzinfo=timezone.utc)
 
 
 @pytest.fixture(scope="module")
@@ -38,8 +39,7 @@ def connect():
         generator.close()
 
 
-def _schedule():
-    now = datetime.now(timezone.utc)
+def _schedule(now=FIXTURE_CLOCK):
 
     def future(hours=0, minutes=0):
         return (now + timedelta(hours=hours, minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -56,6 +56,29 @@ def _schedule():
         "final_scoring_close": future(hours=5),
         "publication_deadline": future(hours=5, minutes=1),
     }
+
+
+def _install_prepare_fixture_clock(connection, now=FIXTURE_CLOCK):
+    """Replay the Sep15 prepare window in disposable PostgreSQL only.
+
+    Read the installed procedure so its release authority, historical proof,
+    and fixed Sep16 publication cutoff remain exactly as migrated. Replace
+    only the current-time operand of the minimum stage-one window check.
+    """
+    signature = (
+        "public.lab_arena_prepare_sep15_baseline_rerun_v1("
+        "bigint,text,text,text,jsonb)"
+    )
+    needle = "pg_catalog.clock_timestamp() +"
+    replacement = "TIMESTAMPTZ '%s' +" % now.strftime("%Y-%m-%d %H:%M:%S+00")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_catalog.pg_get_functiondef(%s::pg_catalog.regprocedure)",
+            (signature,),
+        )
+        definition = cursor.fetchone()[0]
+        assert definition.count(needle) == 1
+        cursor.execute(definition.replace(needle, replacement))
 
 
 def _proof_company(icp, index, position):
@@ -359,6 +382,29 @@ def test_exact_sep15_prepare_archives_old_evidence_and_reuses_challengers(connec
                     ("a" * 64, "b" * 40, BANK_HASH, json.dumps(schedule)),
                 )
         connection.rollback()
+        # The historical release deadline must still reject a schedule that
+        # reaches Sep16, even under the disposable procedure's fixture clock.
+        expired_schedule = _schedule(FIXTURE_CLOCK + timedelta(hours=1))
+        _install_prepare_fixture_clock(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO public.lab_arena_sep15_rerun_release_authority "
+                "(round_id,source_ref,source_size_bytes,source_sha256,"
+                "source_commit,bank_sha256,verified_parallel_runner_slots,"
+                "forward_schedule) "
+                "VALUES (%s,%s,4096,%s,%s,%s,11,%s::jsonb)",
+                (ROUND,
+                 "arena/arena-2026-09-15/sources/baseline-2026-09-15-rerun256.tar.gz",
+                 "a" * 64, "b" * 40, BANK_HASH, json.dumps(expired_schedule)),
+            )
+            with pytest.raises(Exception, match="sep15 forward schedule invalid"):
+                cursor.execute(
+                    "SELECT public.lab_arena_prepare_sep15_baseline_rerun_v1("
+                    "4096,%s,%s,%s,%s::jsonb)",
+                    ("a" * 64, "b" * 40, BANK_HASH,
+                     json.dumps(expired_schedule)),
+                )
+        connection.rollback()
         with connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO public.lab_arena_sep15_rerun_release_authority "
@@ -379,6 +425,7 @@ def test_exact_sep15_prepare_archives_old_evidence_and_reuses_challengers(connec
                     ("a" * 64, "b" * 40, "0" * 64, json.dumps(schedule)),
                 )
         connection.rollback()
+        _install_prepare_fixture_clock(connection)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT public.lab_arena_prepare_sep15_baseline_rerun_v1("
@@ -595,10 +642,12 @@ def test_exact_rerun_replays_both_stages_and_publishes_positive_cost_gated_resul
     harness = Harness(connect, tmp_path, challengers=[], runners=["sep15-proof"])
     objects = harness.objects
     service_instance = harness.service
+    harness.clock.now = FIXTURE_CLOCK
     icps = daily_icps()
     try:
         schedule, hotkeys, ids = _seed_observed_sep15(connection, objects)
         old_reward = service_instance.store.get_round(ROUND)
+        _install_prepare_fixture_clock(connection)
         with connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO public.lab_arena_sep15_rerun_release_authority "

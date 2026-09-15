@@ -125,7 +125,7 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
     round_id = "arena-2026-11-01-outage"
     harness.clock.now = datetime.now(timezone.utc)
-    harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
+    harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=round_id)
     harness.round_id = round_id
     submission = harness.submit("Outage", round_id)
     healthy_submission = harness.submit("Healthy", round_id)
@@ -237,7 +237,7 @@ def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
     )
     round_id = "arena-2026-11-01-twentyicp"
     config = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id
+        datetime.now(timezone.utc) + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     assert config["integrity_policy"] == integrity.POLICY
@@ -385,7 +385,7 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
     harness.service._require_integrity_schema = lambda: None
     round_id = "arena-2026-11-02-cutover"
     config = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     winner = harness.submit("CutoverWinner", round_id)

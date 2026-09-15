@@ -82,7 +82,7 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     # The operator's first command (--check-only) parses PostgREST error bodies for the function probes.
     checks = service.startup_checks()
     assert checks["database_identity"]["current_user"] == "lab_arena_service" and checks["current_round"] is None
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
     configuration = service.create_round(cutoff, round_id="arena-2026-09-03-rest")
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id

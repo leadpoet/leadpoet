@@ -139,7 +139,7 @@ def _build_pinned_service(round_id: str):
 
 
 def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
-    from lab_arena import contracts
+    from lab_arena import contracts, icp_disclosure
     from lab_arena.service import DEFAULT_BASELINE_SOURCE_URL
 
     configuration = row.get("configuration_doc") or {}
@@ -154,6 +154,9 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
         "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
         "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
         "parallel_twenty_icp_execution": True,
+        "benchmark_disclosure_policy": (
+            icp_disclosure.DELAYED_DISCLOSURE_POLICY
+        ),
         "baseline_hotkey": defaults.baseline_hotkey,
         "baseline_source_url": DEFAULT_BASELINE_SOURCE_URL,
         "scorer_image_digest": defaults.scorer_image_digest,
@@ -403,18 +406,123 @@ def _ledger_funding(service: Any, runs: list[Mapping[str, Any]]) -> dict[str, An
     }
 
 
+def _durable_output_counts(
+    service: Any, row: Mapping[str, Any], runs: list[Mapping[str, Any]]
+) -> dict[str, dict[str, int]]:
+    """Read and validate accepted private objects without disclosing their data."""
+
+    from lab_arena import contact_policy, contracts, integrity, scoring
+    from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
+
+    configuration = row.get("configuration_doc") or {}
+    accepted_identity = tuple(
+        sorted(
+            (
+                str(run.get("kind") or ""),
+                str(run.get("run_id") or ""),
+                str(run.get("output_ref") or ""),
+                str(run.get("output_hash") or ""),
+                str(run.get("scored_run_id") or ""),
+            )
+            for run in runs
+            if run.get("kind") in ("execute", "score")
+            and run.get("status") == "accepted"
+        )
+    )
+    cached = getattr(service, "_parallel_verification_durable_cache", None)
+    if cached is not None and cached[0] == accepted_identity:
+        return cached[1]
+    counts = {
+        "execute": {
+            "accepted_count": 0,
+            "verified_count": 0,
+            "stored_hash_count": 0,
+            "invalid_count": 0,
+        },
+        "score": {
+            "accepted_count": 0,
+            "verified_count": 0,
+            "stored_hash_count": 0,
+            "invalid_count": 0,
+        },
+    }
+    for run in runs:
+        kind = str(run.get("kind") or "")
+        if kind not in counts or run.get("status") != "accepted":
+            continue
+        counts[kind]["accepted_count"] += 1
+        try:
+            output_ref = run.get("output_ref")
+            if not isinstance(output_ref, str) or not output_ref:
+                raise ValueError("accepted output reference is missing")
+            maximum = (
+                MAX_OUTPUT_BYTES
+                if kind == "execute"
+                else scoring.MAX_SCORING_OUTPUT_BYTES
+            )
+            raw = service._objects.get_bounded(output_ref, maximum)
+            document = json.loads(raw.decode("utf-8"))
+            stored_hash = run.get("output_hash")
+            if isinstance(stored_hash, str) and stored_hash:
+                counts[kind]["stored_hash_count"] += 1
+                if contracts.document_hash(document) != stored_hash:
+                    raise ValueError("accepted output hash does not match")
+            if kind == "execute":
+                validate_output_document(
+                    document,
+                    expected_schema_version=contact_policy.output_schema(configuration),
+                    require_intent_dates=not integrity.enabled(configuration),
+                )
+            else:
+                validated = scoring.validate_scoring_output_document(document)
+                if (
+                    "failure" in validated
+                    or validated.get("scored_run_id") != run.get("scored_run_id")
+                ):
+                    raise ValueError("accepted score object does not match its run")
+        except Exception:
+            counts[kind]["invalid_count"] += 1
+        else:
+            counts[kind]["verified_count"] += 1
+    service._parallel_verification_durable_cache = (accepted_identity, counts)
+    return counts
+
+
 def _evidence(service: Any, round_id: str) -> dict[str, Any]:
-    from lab_arena import contracts
+    from lab_arena import contact_policy, contracts, icp_disclosure
 
     row = service.store.get_round(round_id)
     if row is None:
         raise VerificationError("round does not exist")
     _validate_frozen_round(service, row)
+    configuration = row.get("configuration_doc") or {}
     participants = list(row.get("participants") or [])
     runs = service.store.list_runs(round_id) if participants else []
     execution = _run_counts(runs, "execute")
     scoring_runs = _run_counts(runs, "score")
     execution_timing = _execution_timing(runs)
+    durable_outputs = (
+        _durable_output_counts(service, row, runs)
+        if row.get("status") in TERMINAL_STATUSES
+        else None
+    )
+    disclosure_metadata = icp_disclosure.disclosure_metadata(row)
+    disclosure = icp_disclosure.baseline_disclosure(
+        row, runs, now=service.now()
+    )
+    disclosure_evidence = {
+        "status": "ready" if disclosure is not None else "pending",
+        "public_at": (
+            disclosure_metadata.get("public_at")
+            if disclosure_metadata is not None
+            else None
+        ),
+        "policy": (
+            disclosure_metadata.get("disclosure_policy")
+            if disclosure_metadata is not None
+            else None
+        ),
+    }
     costs = []
     for participant in participants:
         aggregate = service.store.submission_costs(participant["submission_id"])
@@ -455,10 +563,23 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
         public = service.public_results(round_id, participants[0]["submission_id"])
         public_outputs = {
             "output_count": len(public.get("outputs") or {}),
+            "run_result_count": len(public.get("run_results") or []),
+            "stage_1_score_count": len(
+                (public.get("scores") or {}).get("stage_1") or []
+            ),
+            "stage_2_score_count": len(
+                (public.get("scores") or {}).get("stage_2") or []
+            ),
             "scored_positions": sorted(
                 int(score["icp_position"])
                 for score in (public.get("scores") or {}).get("stage_1", [])
                 + (public.get("scores") or {}).get("stage_2", [])
+            ),
+            "public_icp_status": public.get("public_icp_status"),
+            "public_icp_count": public.get("public_icp_count"),
+            "contact_verifications_present": "contact_verifications" in public,
+            "contact_verification_count": len(
+                public.get("contact_verifications") or {}
             ),
             "submission_scores": public.get("submission_scores"),
         }
@@ -514,12 +635,42 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             errors.append("ledger_funding_source")
         if int(ledger_funding["entry_count"] or 0) < 1:
             errors.append("paid_ledger_empty")
-        if (
+        if disclosure_metadata is None:
+            errors.append("disclosure_metadata")
+        for kind in ("execute", "score"):
+            durable = (durable_outputs or {}).get(kind) or {}
+            if (
+                durable.get("accepted_count") != expected_assignments
+                or durable.get("verified_count") != expected_assignments
+                or durable.get("invalid_count") != 0
+            ):
+                errors.append("durable_" + kind + "_outputs")
+        if disclosure is not None:
+            if (
+                public_outputs is None
+                or public_outputs["public_icp_status"] != "ready"
+                or public_outputs["public_icp_count"]
+                != contracts.BENCHMARK_ICP_COUNT
+                or public_outputs["output_count"] != contracts.BENCHMARK_ICP_COUNT
+                or public_outputs["scored_positions"] != expected_positions
+            ):
+                errors.append("public_outputs")
+        elif (
             public_outputs is None
-            or public_outputs["output_count"] != contracts.BENCHMARK_ICP_COUNT
-            or public_outputs["scored_positions"] != expected_positions
+            or public_outputs["public_icp_status"] != "pending"
+            or public_outputs["public_icp_count"] != 0
+            or public_outputs["output_count"] != 0
+            or public_outputs["run_result_count"] != 0
+            or public_outputs["stage_1_score_count"] != 0
+            or public_outputs["stage_2_score_count"] != 0
+            or public_outputs["scored_positions"]
+            or public_outputs["contact_verification_count"] != 0
+            or (
+                contact_policy.enabled(configuration)
+                and not public_outputs["contact_verifications_present"]
+            )
         ):
-            errors.append("public_outputs")
+            errors.append("public_outputs_pending_contract")
         if len(costs) == 1 and len(final_results) == 1:
             raw = costs[0]["totals"]
             published_cost = final_results[0].get("cost_summary") or {}
@@ -547,7 +698,6 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
         else:
             errors.append("cost_aggregate")
 
-    configuration = row.get("configuration_doc") or {}
     return {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "observed_at": _utc_now().isoformat().replace("+00:00", "Z"),
@@ -573,6 +723,8 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
         "execution": execution,
         "execution_timing": execution_timing,
         "scoring": scoring_runs,
+        "durable_outputs": durable_outputs,
+        "disclosure": disclosure_evidence,
         "ledger": costs,
         "ledger_funding": ledger_funding,
         "final_ranking": final_results,

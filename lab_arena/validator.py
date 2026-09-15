@@ -583,6 +583,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wallet.hotkey", dest="hotkey_name", default=os.environ.get("LAB_ARENA_HOTKEY", "default"))
     parser.add_argument("--wallet.path", dest="wallet_path", default=os.environ.get("LAB_ARENA_WALLET_PATH", "~/.bittensor/wallets"))
     parser.add_argument("--arena-api-base-url", dest="api_base_url", default=os.environ.get("LAB_ARENA_API_BASE_URL", ""))
+    parser.add_argument("--round-id", default=os.environ.get("LAB_ARENA_ROUND_ID", ""), help="pin one round for scoring; unset follows every running Arena round across days")
     parser.add_argument("--arena-work-dir", dest="work_dir", default=os.environ.get("LAB_ARENA_RUNNER_WORK_DIR", "/var/lib/lab-arena/runner"))
     parser.add_argument("--arena-runsc-path", dest="runsc_path", default=os.environ.get("LAB_ARENA_RUNSC_PATH", "/usr/local/bin/runsc"))
     parser.add_argument("--arena-poll-seconds", dest="poll_seconds", type=int)

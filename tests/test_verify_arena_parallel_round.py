@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts
+from lab_arena import contact_policy, contracts, icp_disclosure, scoring
 from lab_arena.service import DEFAULT_BASELINE_SOURCE_URL
 from scripts import verify_arena_parallel_round as verification
 
@@ -29,6 +31,12 @@ def _configuration():
         "scorer_image_digest": "sha256:" + "a" * 64,
         "scorer_image_reference": "registry.example/scorer@sha256:" + "a" * 64,
         "runner_hotkeys": ["runner-hotkey"],
+        "benchmark_disclosure_policy": icp_disclosure.DELAYED_DISCLOSURE_POLICY,
+        "contact_policy": contact_policy.POLICY,
+        "schedule": {
+            "submission_open": "2026-09-14T00:00:00Z",
+            "submission_cutoff": "2026-09-15T00:00:00Z",
+        },
     }
 
 
@@ -60,6 +68,9 @@ class Store:
             "stage_generation": 6,
             "champion_funding_frozen": True,
             "champion_submission_id": None,
+            "icp_set_date": "2026-09-14",
+            "evaluation_date": "2026-09-15",
+            "benchmark_ref": "arena/benchmarks/2026-09-14.json",
             "configuration_doc": _configuration(),
             "participants": [
                 {
@@ -112,6 +123,9 @@ class Store:
                         "status": "accepted",
                         "runner_hotkey": "runner-hotkey",
                         "output_ref": "arena/output/%s/%d.json" % (kind, position),
+                        "scored_run_id": (
+                            "execute-%d-run" % position if kind == "score" else None
+                        ),
                         "per_icp_score": 77.5 if kind == "execute" else None,
                         "result_doc": {
                             "terminal_status": "accepted",
@@ -160,6 +174,24 @@ class Store:
 class Service:
     def __init__(self):
         self.store = Store()
+        self.current_time = datetime(2026, 9, 16, tzinfo=timezone.utc)
+        self.object_get_calls = 0
+        self._objects = SimpleNamespace(get_bounded=self._get_bounded)
+        self.object_documents = {}
+        for run in self.store.runs:
+            if run["kind"] == "execute":
+                document = {
+                    "schema_version": contact_policy.OUTPUT_SCHEMA,
+                    "companies": [],
+                }
+            else:
+                document = {
+                    "schema_version": scoring.SCORING_OUTPUT_SCHEMA_VERSION,
+                    "scored_run_id": run["scored_run_id"],
+                    "breakdowns": [],
+                }
+                run["output_hash"] = contracts.document_hash(document)
+            self.object_documents[run["output_ref"]] = json.dumps(document).encode()
         self.config = SimpleNamespace(
             mode="shadow",
             pinned_round_id=ROUND_ID,
@@ -177,10 +209,34 @@ class Service:
         )
         self.calls = []
 
+    def now(self):
+        return self.current_time
+
+    def _get_bounded(self, ref, max_bytes):
+        self.object_get_calls += 1
+        value = self.object_documents[ref]
+        if len(value) > max_bytes:
+            raise ValueError("object is too large")
+        return value
+
     def public_results(self, round_id, submission_id):
         assert (round_id, submission_id) == (ROUND_ID, SUBMISSION_ID)
+        disclosed = icp_disclosure.baseline_disclosure(
+            self.store.row, self.store.runs, now=self.now()
+        )
+        if disclosed is None:
+            return {
+                "outputs": {},
+                "run_results": [],
+                "scores": {"stage_1": [], "stage_2": []},
+                "public_icp_status": "pending",
+                "public_icp_count": 0,
+                "contact_verifications": {},
+                "submission_scores": {"stage_1": 76.0, "final": 77.5},
+            }
         return {
             "outputs": {"run-%d" % position: {"companies": []} for position in range(20)},
+            "run_results": [{} for _position in range(20)],
             "scores": {
                 "stage_1": [
                     {"icp_position": position} for position in range(10)
@@ -189,6 +245,9 @@ class Service:
                     {"icp_position": position} for position in range(10, 20)
                 ],
             },
+            "public_icp_status": "ready",
+            "public_icp_count": 20,
+            "contact_verifications": {},
             "submission_scores": {"stage_1": 76.0, "final": 77.5},
         }
 
@@ -224,6 +283,25 @@ def test_published_evidence_requires_all_twenty_unique_outputs_scores_and_costs(
         "second_batch_started_after_first_finished": True,
     }
     assert document["public_result"]["output_count"] == 20
+    assert document["durable_outputs"] == {
+        "execute": {
+            "accepted_count": 20,
+            "verified_count": 20,
+            "stored_hash_count": 0,
+            "invalid_count": 0,
+        },
+        "score": {
+            "accepted_count": 20,
+            "verified_count": 20,
+            "stored_hash_count": 20,
+            "invalid_count": 0,
+        },
+    }
+    assert document["disclosure"] == {
+        "status": "ready",
+        "public_at": "2026-09-16T00:00:00Z",
+        "policy": icp_disclosure.DELAYED_DISCLOSURE_POLICY,
+    }
     assert document["ledger_funding"] == {
         "entry_count": 40,
         "sources": ["host"],
@@ -250,6 +328,95 @@ def test_published_evidence_requires_all_twenty_unique_outputs_scores_and_costs(
     incomplete = verification._evidence(service, ROUND_ID)
     assert incomplete["proof"]["complete"] is False
     assert "execute_accepted_uniqueness" in incomplete["proof"]["errors"]
+
+
+def test_pre_disclosure_evidence_requires_pending_public_projection_and_private_objects():
+    service = Service()
+    service.current_time = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["proof"] == {"complete": True, "errors": []}
+    assert document["disclosure"] == {
+        "status": "pending",
+        "public_at": "2026-09-16T00:00:00Z",
+        "policy": icp_disclosure.DELAYED_DISCLOSURE_POLICY,
+    }
+    assert document["public_result"] == {
+        "output_count": 0,
+        "run_result_count": 0,
+        "stage_1_score_count": 0,
+        "stage_2_score_count": 0,
+        "scored_positions": [],
+        "public_icp_status": "pending",
+        "public_icp_count": 0,
+        "contact_verifications_present": True,
+        "contact_verification_count": 0,
+        "submission_scores": {"stage_1": 76.0, "final": 77.5},
+    }
+    assert document["durable_outputs"]["execute"]["verified_count"] == 20
+    assert document["durable_outputs"]["score"]["verified_count"] == 20
+
+    original = service.public_results
+
+    def leaking_public_results(round_id, submission_id):
+        result = original(round_id, submission_id)
+        result["outputs"] = {"private-run": {"companies": []}}
+        return result
+
+    service.public_results = leaking_public_results
+    leaked = verification._evidence(service, ROUND_ID)
+    assert "public_outputs_pending_contract" in leaked["proof"]["errors"]
+
+    def leaking_score_results(round_id, submission_id):
+        result = original(round_id, submission_id)
+        result["scores"]["stage_1"] = [{"icp_position": 0}]
+        return result
+
+    service.public_results = leaking_score_results
+    leaked = verification._evidence(service, ROUND_ID)
+    assert "public_outputs_pending_contract" in leaked["proof"]["errors"]
+
+    def leaking_contact_results(round_id, submission_id):
+        result = original(round_id, submission_id)
+        result["contact_verifications"] = {"private-run": [{}]}
+        return result
+
+    service.public_results = leaking_contact_results
+    leaked = verification._evidence(service, ROUND_ID)
+    assert "public_outputs_pending_contract" in leaked["proof"]["errors"]
+
+
+def test_durable_objects_are_read_only_at_terminal_state_and_cached_by_identity():
+    service = Service()
+    service.store.row["status"] = "scoring_2"
+
+    active = verification._evidence(service, ROUND_ID)
+
+    assert active["durable_outputs"] is None
+    assert service.object_get_calls == 0
+
+    service.store.row["status"] = "published"
+    verification._evidence(service, ROUND_ID)
+    assert service.object_get_calls == 40
+    verification._evidence(service, ROUND_ID)
+    assert service.object_get_calls == 40
+
+
+def test_published_evidence_rejects_an_invalid_durable_score_object():
+    service = Service()
+    score = next(run for run in service.store.runs if run["kind"] == "score")
+    score["output_hash"] = "sha256:" + "0" * 64
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["durable_outputs"]["score"] == {
+        "accepted_count": 20,
+        "verified_count": 19,
+        "stored_hash_count": 20,
+        "invalid_count": 1,
+    }
+    assert "durable_score_outputs" in document["proof"]["errors"]
 
 
 def test_published_evidence_rejects_early_second_batch_and_wrong_high_water():

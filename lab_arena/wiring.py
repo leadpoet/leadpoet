@@ -503,6 +503,9 @@ def build_service_from_environment(mode: str):
 def build_runner_from_environment(args, *, keypair=None):
     # Keep the CLI readiness check and real scoring setup on the same path.
     # This runs only inside the retryable scoring loop, never the weight loop.
+    round_id = str(getattr(args, "round_id", "") or "").strip() or None
+    if round_id is not None and contracts.ROUND_ID_RE.fullmatch(round_id) is None:
+        raise ServiceError("round_id_invalid", 400)
     prepare_scoring_host(Path(args.runsc_path), Path(args.work_dir))
     from lab_arena import runner as runner_module
     from lab_arena.proxy_workers import ProxyWorkerPool, preflight_proxy_workers, proxy_workers_from_environment
@@ -544,7 +547,6 @@ def build_runner_from_environment(args, *, keypair=None):
     source_cache = runner_module.SourceCache(
         Path(args.work_dir) / "sources", api.source
     )
-    round_id = str(getattr(args, "round_id", "") or "").strip() or None
     runner_config = runner_module.RunnerConfig(
         round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, source_cache=source_cache,
         work_dir=runs_work, max_parallel_runs=parallelism, proxy_worker_pool=proxy_pool,

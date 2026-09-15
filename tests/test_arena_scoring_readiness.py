@@ -465,3 +465,26 @@ def test_normal_runner_uses_the_same_checks_before_wallet_access(monkeypatch):
         wiring.build_runner_from_environment(args)
     assert failure.value.reason == "runsc_missing"
     assert calls == [(Path(args.runsc_path), Path(args.work_dir))]
+
+
+def test_invalid_round_pin_fails_in_retryable_scoring_setup_before_host_access(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    from lab_arena import wiring
+    from lab_arena.service import ServiceError
+
+    args = SimpleNamespace(
+        round_id="not/a/round",
+        runsc_path="/unused/runsc",
+        work_dir="/unused/runner",
+    )
+    monkeypatch.setattr(
+        wiring,
+        "prepare_scoring_host",
+        lambda *_args: pytest.fail("invalid pin reached scoring host setup"),
+    )
+
+    with pytest.raises(ServiceError) as failure:
+        wiring.build_runner_from_environment(args)
+    assert failure.value.code == "round_id_invalid"

@@ -144,6 +144,7 @@ def _clear_startup_environment(monkeypatch):
         "LAB_ARENA_CHAIN_ENDPOINT",
         "LAB_ARENA_ARCHIVE_ENDPOINT",
         "LAB_ARENA_API_BASE_URL",
+        "LAB_ARENA_ROUND_ID",
         "LAB_ARENA_SIGNING_KEY_HASH",
         "LAB_ARENA_BURN_HOTKEY",
         "LAB_ARENA_VALIDATOR_STATE_DIR",
@@ -433,3 +434,30 @@ def test_once_passes_resolved_api_to_runner_factory_and_keeps_state_default(
     assert runner_args.chain_endpoint == ""
     assert keypair.ss58_address == VALID_HOTKEY
     assert loop["orchestrator"].paths.root.as_posix() == "/var/lib/leadpoet/arena-validator"
+
+
+def test_round_pin_flows_from_environment_to_retryable_scoring_wiring(
+    monkeypatch, startup_harness
+):
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("LAB_ARENA_ROUND_ID", "arena-2026-09-16")
+    monkeypatch.setattr(
+        "lab_arena.wiring.build_runner_from_environment",
+        lambda args, *, keypair: startup_harness.captured["runner_args"].append(
+            (args, keypair)
+        ) or object(),
+    )
+
+    def run_one_cycle(**kwargs):
+        startup_harness.captured["loops"].append(kwargs)
+        kwargs["runner_factory"]()
+
+    monkeypatch.setattr(validator, "run_validator_loops", run_one_cycle)
+    assert validator.main(["--once"]) == 0
+    runner_args, _keypair = startup_harness.captured["runner_args"][-1]
+    assert runner_args.round_id == "arena-2026-09-16"
+
+    parsed = validator._parser().parse_args(
+        ["--round-id", "arena-2026-09-17"]
+    )
+    assert parsed.round_id == "arena-2026-09-17"

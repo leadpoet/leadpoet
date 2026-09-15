@@ -714,7 +714,7 @@ BEGIN
          AND late.entry_id > v_audit.old_challenger_ledger_max_entry_id
          AND (
            late.entry_kind <> 'settlement'
-           OR late.entry_doc ->> 'late_reconciliation' <> 'true'
+           OR late.entry_doc ->> 'late_reconciliation' IS DISTINCT FROM 'true'
            OR NOT EXISTS (
              SELECT 1 FROM public.lab_arena_ledger AS original
              WHERE original.entry_id <= v_audit.old_challenger_ledger_max_entry_id

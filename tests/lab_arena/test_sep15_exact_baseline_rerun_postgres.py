@@ -610,6 +610,25 @@ def test_exact_rerun_replays_both_stages_and_publishes_positive_cost_gated_resul
                 (ROUND, ids[2]),
             )
             uncertainty_id, call_identity = cursor.fetchone()
+            cursor.execute("SAVEPOINT missing_late_marker")
+            cursor.execute("ALTER TABLE public.lab_arena_ledger DISABLE TRIGGER USER")
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger "
+                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                "call_identity,provider,operation_id,amount_microusd,entry_doc,"
+                "terminal_response) VALUES ('settlement',%s,%s,%s,%s,1,%s,"
+                "'deepline','proof-uncertain',1,%s::jsonb,"
+                "'{\"call_succeeded\":false}'::jsonb)",
+                (hotkeys[2], ROUND, ids[2], "old-execute-2-0",
+                 call_identity, json.dumps({
+                     "reconciled_uncertainty_entry_id": uncertainty_id,
+                     "reconciled_uncertainty_reason": "worker_reported",
+                 })),
+            )
+            cursor.execute("ALTER TABLE public.lab_arena_ledger ENABLE TRIGGER USER")
+            cursor.execute("SELECT public.lab_arena_sep15_challenger_seals_valid_v1()")
+            assert cursor.fetchone()[0] is False
+            cursor.execute("ROLLBACK TO SAVEPOINT missing_late_marker")
             cursor.execute("ALTER TABLE public.lab_arena_ledger DISABLE TRIGGER USER")
             cursor.execute(
                 "INSERT INTO public.lab_arena_ledger "

@@ -2273,6 +2273,7 @@ class Broker:
                     # A lost body is still a failed model call; normal settlement
                     # records the known charge without replaying the paid GET.
                     scrapingdog_observed_success_status = exc.observed_status
+                    summary["provider_status"] = exc.observed_status
                     response = ProviderResponse(
                         502, {"content-type": "application/json"},
                         operations.GENERIC_UNAVAILABLE_BODY,
@@ -2424,6 +2425,11 @@ class Broker:
                     if openrouter_effective_response is not None
                     else _openrouter_effective_response(response)
                 )
+            provider_status_for_summary = (
+                scrapingdog_observed_success_status
+                if scrapingdog_observed_success_status is not None
+                else int(response.status)
+            )
             call_succeeded = _provider_call_succeeded(
                 effective_operation.provider,
                 response,
@@ -2550,7 +2556,7 @@ class Broker:
                     else None
                 ),
             )
-            payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=int(response.status), actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
+            payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
             settlement = dict(
                 run_id=context.run_id, lease_token_hash=context.lease_token_hash,
@@ -2651,14 +2657,14 @@ class Broker:
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
         if settle_status == "settled" and miner_credential_failure:
-            summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": int(response.status)})
+            summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": provider_status_for_summary})
             return _error_result("miner_credentials_unavailable", summary)
         if settle_status == "settled" and operations.provider_status_is_infrastructure(response.status):
             # An organizer account failure or upstream outage is infrastructure.
-            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": int(response.status), "response_hash": payload["response_hash"]})
+            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})
             return _error_result("provider_unavailable", summary)
         if settle_status == "settled":
-            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": int(response.status), "response_hash": payload["response_hash"]})
+            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})
             return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
         if settle_status == "stale":
             # The lease or stage ended while the request was in flight: the

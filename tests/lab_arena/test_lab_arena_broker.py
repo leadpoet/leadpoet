@@ -879,6 +879,8 @@ def test_scrapingdog_post_header_success_timeout_settles_known_charge(status):
     assert result.status == replay.status == 502
     assert result.body == operations.GENERIC_UNAVAILABLE_BODY
     assert result.call["outcome"] == "settled"
+    assert result.call["status"] == 502
+    assert result.call["provider_status"] == status
     assert result.call["actual_microusd"] == 250
     assert result.call["observed_provider_status"] == status
     assert result.call["transport_error_class"] == "ReadTimeout"
@@ -887,6 +889,8 @@ def test_scrapingdog_post_header_success_timeout_settles_known_charge(status):
     assert call["kind"] == "settlement" and call["actual"] == 250
     assert call["terminal"]["status"] == 502
     assert call["terminal"]["call_succeeded"] is False
+    assert replay.body == base64.b64decode(call["terminal"]["body_b64"])
+    assert replay.call["actual_microusd"] == 250
     assert call["terminal"]["provider_cost"] == {
         "basis": "scrapingdog_approved_operation_fallback",
         "units": "5", "unit_name": "credits",

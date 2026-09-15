@@ -405,6 +405,8 @@ def test_google_post_header_timeout_crosses_shim_worker_broker_and_ledger(
     assert frames[0]["operation_id"] == "scrapingdog.google"
     assert frames[0]["timeout_ms"] == 65_000
     assert store.log == ["reserve", "dispatch", "settle"]
+    assert server._state.calls[0]["provider_status"] == 200
+    assert server._state.calls[0]["status"] == 502
     call = next(iter(store.calls.values()))
     assert call["kind"] == "settlement" and call["actual"] == 250
     assert call["terminal"]["call_succeeded"] is False

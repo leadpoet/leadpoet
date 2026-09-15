@@ -45,7 +45,16 @@ def test_worker_loads_full_round_identity_and_skips_baseline_and_completed_revie
     ))
     service._store = SimpleNamespace(list_submissions=lambda _, status: [baseline, passed, pending] if status == "accepted" else [])
     service.active_rounds = lambda: [{"round_id": "arena-test"}]
-    service._round = lambda _: {"round_id": "arena-test", "configuration_doc": {"baseline_hotkey": "host"}}
+    service._round = lambda _: {
+        "round_id": "arena-test", "status": "open",
+        "configuration_doc": {
+            "baseline_hotkey": "host",
+            "schedule": {"submission_cutoff": (
+                datetime.now(timezone.utc) + timedelta(minutes=30)
+            ).isoformat()},
+        },
+    }
+    service._clock = lambda: datetime.now(timezone.utc)
     assert service.review_pending_submissions() == {"reviewed": 1}
     assert calls == ["pending"]
 

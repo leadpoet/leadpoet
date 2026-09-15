@@ -112,7 +112,7 @@ installs the native Codex package through `scripts/install_arena_codex.py`,
 checking a fixed SHA-512 before extracting regular files. Publish and select
 the image through the existing release process; a source checkout alone does
 not install the runtime in production. Apply
-`258-lab-arena-codex-cost-reconciliation.sql` before enabling the new runtime:
+`263-lab-arena-codex-cost-reconciliation.sql` before enabling the new runtime:
 it extends the two existing exact-generation recovery functions to Responses,
 preserving operation identity, permissions and ledger history. No round rerun
 is needed.
@@ -142,7 +142,9 @@ limits and a trusted-helper staging omission; the updated tests cover those
 regressions. The Deploy Checks workflow now installs the same checksum-pinned
 Linux package and runs native protocol checks before the full suite. Scripted
 responses exercise the worker, broker, cost ledger and local tool execution;
-they do not make paid model or research-provider calls.
+they do not make paid model or research-provider calls. The Docker smoke job
+also builds the Arena judge/execute image, including its pinned Codex installer
+and build-time version/import checks, without publishing it.
 
 For this update, local verification is limited to source review, Python
 compilation and diff checks, following the request not to run Leadpoet locally.

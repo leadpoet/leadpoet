@@ -64,7 +64,7 @@ def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(
     harness.chain.epoch = 49_000
     harness.clock.now = datetime.now(timezone.utc)
     harness.round_id = "arena-2098-01-03-capfull"
-    configuration = harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=harness.round_id)
+    configuration = harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=harness.round_id)
     assert configuration["max_challengers"] == 20
     assert configuration["integrity_policy"] == "arena_integrity_v1"
     assert configuration["contact_policy"] == "contacts_v1"
@@ -156,7 +156,7 @@ def test_shared_owner_validator_cannot_claim_sibling_submissions(
     harness.clock.now = datetime.now(timezone.utc)
     harness.round_id = "arena-2098-01-04-selfdeal"
     harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=harness.round_id
+        harness.clock.now + timedelta(minutes=30), round_id=harness.round_id
     )
     submitted = {
         flavor: harness.submit(flavor, harness.round_id) for flavor in flavors

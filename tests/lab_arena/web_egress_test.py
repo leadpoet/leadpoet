@@ -475,33 +475,46 @@ def test_unproven_shared_proxy_cleanup_blocks_new_connections_until_released(
             return None if self.allow_close else False
 
     stream = UnclosedProxyStream()
+    upstream_connections = []
+
+    def connect_upstream(_host, _port):
+        upstream_connections.append(1)
+        return stream
+
     server = web_egress.WebEgressServer(
         socket_root / "cleanup.sock",
         "http://proxy.example:6162",
         resolver=_resolver,
-        upstream_connector=lambda _host, _port: stream,
+        upstream_connector=connect_upstream,
     ).start()
-    bridge = LoopbackWebEgressBridge(server.path).start()
     raw_request = b"GET http://public.example/ HTTP/1.1\r\nHost: public.example\r\n\r\n"
     try:
-        first = socket.create_connection(("127.0.0.1", bridge.port), timeout=2)
-        first.sendall(raw_request)
-        assert _read_headers(first).startswith(b"HTTP/1.1 403 Forbidden")
-        first.close()
-
-        second = socket.create_connection(("127.0.0.1", bridge.port), timeout=2)
-        second.sendall(raw_request)
-        assert _read_headers(second).startswith(b"HTTP/1.1 503 Service Unavailable")
-        second.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as first:
+            first.settimeout(2)
+            first.connect(str(server.path))
+            first.sendall(raw_request)
+            assert _read_headers(first).startswith(b"HTTP/1.1 403 Forbidden")
         assert server.summary["pending_cleanup_count"] == 1
+        assert len(upstream_connections) == 1
+
+        # Admission is blocked before the server reads a request. Using the
+        # host socket directly avoids a bridge relay racing the immediate close.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second:
+            second.settimeout(2)
+            second.connect(str(server.path))
+            assert _read_headers(second).startswith(b"HTTP/1.1 503 Service Unavailable")
+        assert server.summary["pending_cleanup_count"] == 1
+        assert len(upstream_connections) == 1
 
         stream.allow_close = True
-        third = socket.create_connection(("127.0.0.1", bridge.port), timeout=2)
-        third.sendall(raw_request)
-        assert _read_headers(third).startswith(b"HTTP/1.1 403 Forbidden")
-        third.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as third:
+            third.settimeout(2)
+            third.connect(str(server.path))
+            third.sendall(raw_request)
+            assert _read_headers(third).startswith(b"HTTP/1.1 403 Forbidden")
+        assert len(upstream_connections) == 2
     finally:
-        bridge.stop()
+        stream.allow_close = True
         server.stop()
 
     assert server.summary["pending_cleanup_count"] == 0

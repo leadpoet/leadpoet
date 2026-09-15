@@ -470,7 +470,7 @@ def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_
     store.reserve_call.side_effect = lambda **request: {
         "status": "reserved", "amount_microusd": request["amount_microusd"]
     }
-    store.mark_dispatched.return_value = {"status": "dispatched"}
+    store.mark_dispatched.return_value = {"status": "dispatched", "idempotent": False}
     store.settle_call.return_value = {"status": "settled"}
     transport = Mock()
     transport.send.return_value = br.ProviderResponse(
@@ -514,6 +514,11 @@ def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_
     )
     assert broker_result.status == 502
     assert broker_result.call["error_code"] == "provider_unavailable"
+    assert broker_result.call["provider_status"] == 429
+    assert broker_result.call["outcome"] == "settled"
+    transport.send.assert_called_once()
+    assert store.settle_call.call_args.kwargs["actual_microusd"] == 0
+    store.mark_uncertain.assert_not_called()
 
     class ProviderFailureRuntime(BridgingRuntime):
         def run_icp(self, spec, **_):

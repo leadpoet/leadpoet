@@ -183,3 +183,13 @@ jobs:
             BUILD_ID=${{ github.run_id }}
             GITHUB_SHA=${{ github.sha }}
             GITHUB_REF_NAME=${{ github.ref_name }}
+
+      - name: Build Arena Codex runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: lab_arena/judge/Dockerfile
+          push: false
+          tags: leadpoet-arena-judge:${{ github.sha }}
+          build-args: |
+            LEADPOET_BUILD_COMMIT=${{ github.sha }}

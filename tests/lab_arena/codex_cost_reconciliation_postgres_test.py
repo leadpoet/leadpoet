@@ -10,7 +10,7 @@ from tests.lab_arena.openrouter_delayed_cost_reconciliation_postgres_test import
     test_reconciliation_functions_are_service_only,
 )
 
-MIGRATION = "258-lab-arena-codex-cost-reconciliation.sql"
+MIGRATION = "263-lab-arena-codex-cost-reconciliation.sql"
 
 
 @pytest.fixture(scope="module")

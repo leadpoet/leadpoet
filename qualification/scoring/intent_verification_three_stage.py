@@ -672,6 +672,10 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
                 description = extract_article_body(description)
             except Exception:
                 pass
+            # Publication can anchor freshness; a later posting edit cannot.
+            source_publication_date = _source_publication_date(
+                payload.get("first_published")
+            )
             exact_fields = [company_name, title]
             for field_name in ("first_published", "updated_at"):
                 value = payload.get(field_name)
@@ -697,6 +701,7 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
                 "ok": True,
                 "stage": f"sd:greenhouse_api:{attempt}",
                 "content": content,
+                "source_publication_date": source_publication_date,
                 "error": "",
                 "stage_history": history,
             }
@@ -2545,6 +2550,9 @@ async def _fetch_sd_then_exa(
                     "url": url,
                     "title": "",
                     "text": str(greenhouse["content"])[:max_chars],
+                    "source_publication_date": (
+                        greenhouse.get("source_publication_date") or ""
+                    ),
                     "meta": {"kind": "greenhouse_job"},
                 })
                 statuses.append({

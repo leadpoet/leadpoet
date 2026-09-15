@@ -354,6 +354,20 @@ def test_exact_sep15_prepare_archives_old_evidence_and_reuses_challengers(connec
                         judgment_group_miner_hotkeys=[hotkeys[0]],
                     )
                 items.append(item)
+            cursor.execute("SAVEPOINT challenger_ledger_drift")
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger "
+                "(entry_kind,miner_hotkey,round_id,submission_id,"
+                "run_id,amount_microusd) VALUES ('settlement',%s,%s,%s,%s,1)",
+                (hotkeys[1], ROUND, ids[1], "old-execute-1-0"),
+            )
+            with pytest.raises(Exception):
+                cursor.execute(
+                    "SELECT public.lab_arena_open_sep15_baseline_scoring_v1("
+                    "%s,1::smallint,%s::jsonb)",
+                    (ROUND, json.dumps(items)),
+                )
+            cursor.execute("ROLLBACK TO SAVEPOINT challenger_ledger_drift")
             cursor.execute(
                 "SELECT public.lab_arena_open_sep15_baseline_scoring_v1(%s,1::smallint,%s::jsonb)",
                 (ROUND, json.dumps(items)),

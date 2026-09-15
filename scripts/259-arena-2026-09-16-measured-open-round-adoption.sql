@@ -43,15 +43,21 @@ DECLARE
   v_supported INTEGER;
 BEGIN
   IF pg_catalog.jsonb_typeof(p_capacity_doc) IS DISTINCT FROM 'object'
-     OR p_capacity_doc ->> 'round_id' <> 'arena-2026-09-16'
-     OR p_capacity_doc ->> 'parallel_twenty_icp_execution' <> 'true'
-     OR p_capacity_doc ->> 'checkpoint_deadline_policy' <> 'atomic_checkpoint_45m_v1'
-     OR (p_capacity_doc ->> 'icp_wall_clock_seconds')::INTEGER <> 2700
-     OR (p_capacity_doc ->> 'runner_slot_ceiling')::INTEGER <> 20
+     OR p_capacity_doc ->> 'round_id' IS DISTINCT FROM 'arena-2026-09-16'
+     OR p_capacity_doc -> 'parallel_twenty_icp_execution'
+          IS DISTINCT FROM 'true'::JSONB
+     OR p_capacity_doc ->> 'checkpoint_deadline_policy'
+          IS DISTINCT FROM 'atomic_checkpoint_45m_v1'
+     OR (p_capacity_doc ->> 'icp_wall_clock_seconds')::INTEGER
+          IS DISTINCT FROM 2700
+     OR (p_capacity_doc ->> 'runner_slot_ceiling')::INTEGER
+          IS DISTINCT FROM 20
      OR COALESCE(
           (p_capacity_doc ->> 'verified_parallel_runner_slots')::INTEGER, 0
         ) NOT BETWEEN 1 AND 20
-     OR (p_capacity_doc ->> 'configured_challenger_capacity')::INTEGER < 1
+     OR COALESCE(
+          (p_capacity_doc ->> 'configured_challenger_capacity')::INTEGER, 0
+        ) < 1
      OR COALESCE(
           (p_capacity_doc ->> 'already_accepted_challengers')::INTEGER, -1
         ) < 0

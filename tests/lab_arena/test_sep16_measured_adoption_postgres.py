@@ -194,6 +194,17 @@ def test_measured_sep16_rpc_preserves_completed_admissions_and_rejects_bad_state
                 finally:
                     cursor.execute("ROLLBACK TO SAVEPOINT bad_adoption")
 
+            for required in (
+                "round_id", "parallel_twenty_icp_execution",
+                "checkpoint_deadline_policy", "icp_wall_clock_seconds",
+                "runner_slot_ceiling",
+            ):
+                missing = dict(proof)
+                missing.pop(required)
+                rejected(lambda: None, "capacity proof invalid", missing)
+            rejected(lambda: None, "capacity proof invalid",
+                     dict(proof, parallel_twenty_icp_execution="true"))
+
             def missing_settlement():
                 cursor.execute("ALTER TABLE public.lab_arena_ledger DISABLE TRIGGER USER")
                 cursor.execute(

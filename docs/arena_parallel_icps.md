@@ -44,15 +44,17 @@ proxy URLs, wallet processes, or local slot state.
 The slot formula is:
 
 ```text
-local execution slots = min(verified Webshare proxies + 1 native slot, 20)
+local execution slots = min(verified Webshare proxies + 1 native slot,
+                            memory-supported slots, 20)
 ```
 
 The native coordinator is slot 0. Webshare routes are slots 1 through N. All
 slots use the same validator hotkey. They are sandbox execution slots, not
 extra Bittensor validators or wallet workers.
 
-Nine proxies give ten slots, so one model's twenty ICPs run as two groups of
-ten. Nineteen proxies give twenty slots, so all twenty can run together. A
+With sufficient available memory, nine proxies give ten slots, so one model's
+twenty ICPs run as two groups of ten. Nineteen proxies give twenty slots, so
+all twenty can run together. A
 validator can configure more proxies, but one dataset cannot exceed the
 round's frozen limit of twenty. With validators of different sizes, each one
 declares its own smaller local capacity. A larger eligible validator can claim
@@ -88,6 +90,19 @@ The paid Scrapingdog, Deepline, and OpenRouter paths remain on the existing
 broker. More exit IPs can reduce IP-based public-site throttling. They do not
 increase account quotas, provider budgets, or paid API allowances.
 
+Paid calls also retain the broker's existing cost-admission rules. A Deepline
+call without an authoritative maximum price reserves the submission's remaining
+execution budget until its charge settles. Such calls serialize across that
+submission's ICPs and can cause other calls to return `budget_busy`. Proxy IPs
+cannot remove this limit. Observed charges and provider price estimates are
+not safe substitutes for an enforced maximum price.
+
+Two groups of ten reduce sandbox execution time when model work can proceed
+independently. They do not guarantee a complete benchmark in two single-ICP
+runtimes. Shared paid-provider admission, account quotas, model deadlines,
+scoring, settlement, and retries can add time. Live output quality must be
+checked as well as completed attempt counts.
+
 ## Round and host safeguards
 
 Only a round frozen with `parallel_twenty_icp_execution=true` uses the new
@@ -97,8 +112,11 @@ round-level decision.
 
 The readiness guard reserves 2 GiB for each active slot, 2 GiB for the host,
 and another 128 MiB for each slot. Twenty slots therefore require 44.5 GiB;
-plan for approximately 45 GiB. The readiness check stops scoring startup when
-the host cannot support the derived slot count.
+plan for approximately 45 GiB of available memory. Readiness derives the safe
+slot count from available host and cgroup memory. It reduces concurrent slots
+when memory is limited, retains all verified proxy profiles for slot rotation,
+and stops scoring startup if even one slot cannot fit. The weight loop remains
+independent.
 
 Deploy the gateway with the canonical `gw_restart.sh` controller and the
 validator with the exact-SHA `validator_restart.sh` procedure in the

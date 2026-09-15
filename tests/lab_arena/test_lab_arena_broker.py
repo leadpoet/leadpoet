@@ -809,8 +809,145 @@ def test_http_transport_absolute_deadline_cancels_before_response_headers(
     assert str(raised.value) == "ReadTimeout"
     assert raised.value.openrouter_generation_id is None
     assert raised.value.deepline_job_id is None
+    assert raised.value.observed_status is None
     assert handler_cancelled.is_set()
     assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("status", [200, 202, 429, 503])
+def test_http_transport_retains_only_bounded_status_after_headers(status):
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(
+            lambda _request: httpx.Response(
+                status, stream=_ReadTimeoutAfterHeaders()
+            )
+        )
+    )
+    try:
+        with pytest.raises(br.ProviderTransportError) as raised:
+            transport.send(
+                method="GET",
+                url="https://api.scrapingdog.com/google",
+                headers={}, body=b"", timeout_seconds=1,
+            )
+    finally:
+        transport.close()
+    assert raised.value.observed_status == status
+    assert str(raised.value) == "ReadTimeout"
+
+
+@pytest.mark.parametrize("invalid", [0, 99, 600, True, "200"])
+def test_transport_error_rejects_untrusted_or_invalid_status(invalid):
+    assert br.ProviderTransportError(
+        "ReadTimeout", observed_status=invalid
+    ).observed_status is None
+
+
+def _scrapingdog_timeout_transport(status):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if status is None:
+            raise httpx.ConnectTimeout("synthetic pre-header timeout")
+        return httpx.Response(status, stream=_ReadTimeoutAfterHeaders())
+
+    return br.HttpxProviderTransport(
+        client_factory=_async_client_factory(respond)
+    ), requests
+
+
+@pytest.mark.parametrize("status", [200, 202])
+def test_scrapingdog_post_header_success_timeout_settles_known_charge(status):
+    transport, requests = _scrapingdog_timeout_transport(status)
+    broker, store, _ = make_broker(transport=transport)
+    try:
+        result = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+        replay = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+    finally:
+        transport.close()
+
+    assert len(requests) == 1
+    assert result.status == replay.status == 502
+    assert result.body == operations.GENERIC_UNAVAILABLE_BODY
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 250
+    assert result.call["observed_provider_status"] == status
+    assert result.call["transport_error_class"] == "ReadTimeout"
+    assert store.log == ["reserve", "dispatch", "settle", "reserve"]
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "settlement" and call["actual"] == 250
+    assert call["terminal"]["status"] == 502
+    assert call["terminal"]["call_succeeded"] is False
+    assert call["terminal"]["provider_cost"] == {
+        "basis": "scrapingdog_approved_operation_fallback",
+        "units": "5", "unit_name": "credits",
+        "operation": "scrapingdog.google",
+    }
+
+
+@pytest.mark.parametrize("status", [None, 429, 503])
+def test_scrapingdog_without_observed_success_stays_uncertain(status):
+    transport, requests = _scrapingdog_timeout_transport(status)
+    broker, store, _ = make_broker(transport=transport)
+    try:
+        result = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+    finally:
+        transport.close()
+
+    assert len(requests) == 1
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "uncertain" and call["amount"] == 250
+    assert call["uncertain_doc"] == {
+        "reason": "transport_failure", "call_succeeded": False,
+        "transport_error_class": (
+            "ConnectTimeout" if status is None else "ReadTimeout"
+        ),
+        **({} if status is None else {"observed_provider_status": status}),
+    }
+
+
+def test_scrapingdog_known_charge_survives_settlement_failure():
+    class FailingSettlementStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            self.log.append("settle")
+            raise br.ArenaStoreError("synthetic settlement failure")
+
+    transport, requests = _scrapingdog_timeout_transport(200)
+    store = FailingSettlementStore()
+    broker, _, _ = make_broker(store=store, transport=transport)
+    try:
+        result = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+    finally:
+        transport.close()
+
+    assert len(requests) == 1
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    uncertain = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert uncertain["reason"] == "settle_failure"
+    assert uncertain["call_succeeded"] is False
+    assert uncertain["known_actual_microusd"] == 250
+    assert uncertain["provider_cost"]["operation"] == "scrapingdog.google"
+    assert uncertain["observed_provider_status"] == 200
+    assert uncertain["transport_error_class"] == "ReadTimeout"
+    assert store.log == ["reserve", "dispatch", "settle", "settle", "settle", "uncertain"]
 
 
 @pytest.mark.parametrize(
@@ -917,6 +1054,8 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
     assert diagnostic == {
         "reason": "transport_failure",
         "call_succeeded": False,
+        "transport_error_class": "ReadTimeout",
+        "observed_provider_status": 200,
     }
     assert exception_messages == ["ReadTimeout"]
     assert secret not in caplog.text and secret not in retained
@@ -1893,7 +2032,9 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
         "openrouter_generation_id": generation_id,
         "credential_fingerprint": br._credential_fingerprint(KEY),
         "transport_failure": True,
-    }
+        "transport_error_class": "ReadTimeout",
+        "observed_provider_status": 200,
+        }
     assert methods == ["POST"]
     assert stream.closed.is_set()
     assert KEY not in caplog.text

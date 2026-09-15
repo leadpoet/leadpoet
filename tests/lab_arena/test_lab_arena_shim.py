@@ -335,6 +335,81 @@ def test_httpx_sync_and_async(worker):
     assert worker.frames[1]["parameters"]["max_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
 
 
+def test_hosted_httpx_90_second_google_call_reaches_65_second_frame(worker):
+    with httpx.Client(timeout=90) as client:
+        response = client.get(
+            "https://api.scrapingdog.com/google", params={"query": "acme"}
+        )
+    assert response.status_code == 200
+    assert len(worker.frames) == 1
+    assert_frame_is_minimal(
+        worker.frames[0], worker.raw_frames[0], "scrapingdog.google"
+    )
+    assert operations.OPERATIONS["scrapingdog.google"].timeout_seconds == 65
+    assert worker.frames[0]["timeout_ms"] == 65_000
+
+
+def test_google_post_header_timeout_crosses_shim_worker_broker_and_ledger(
+    monkeypatch,
+):
+    class PostHeaderTimeoutTransport:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, **kwargs):
+            self.sent.append(kwargs)
+            raise br.ProviderTransportError(
+                "ReadTimeout", observed_status=200
+            )
+
+    provider_transport = PostHeaderTimeoutTransport()
+    provider_broker, store, _ = make_broker(transport=provider_transport)
+    frames = []
+
+    class BrokerApi:
+        def provider(self, _run_id, _lease_token, frame):
+            frames.append(dict(frame))
+            return provider_broker.execute(
+                CONTEXT,
+                operation_id=frame["operation_id"],
+                parameters=frame["parameters"],
+                action_sequence=frame["action_sequence"],
+                timeout_ms=frame["timeout_ms"],
+            ).to_document()
+
+    directory = tempfile.mkdtemp(prefix="la-google-timeout-", dir="/tmp")
+    socket_path = Path(directory) / "worker.sock"
+    server = runner.WorkerSocketServer(
+        socket_path, BrokerApi(),
+        runner.RunState(
+            lease={"run_id": CONTEXT.run_id}, lease_token="test-lease-token"
+        ),
+    )
+    server.start()
+    monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+    shim.install()
+    try:
+        with httpx.Client(timeout=90) as client:
+            response = client.get(
+                "https://api.scrapingdog.com/google",
+                params={"query": "acme"},
+            )
+    finally:
+        shim.uninstall()
+        server.stop()
+        shutil.rmtree(directory)
+
+    assert response.status_code == 502
+    assert response.json() == {"error": {"code": "provider_unavailable"}}
+    assert len(frames) == len(provider_transport.sent) == 1
+    assert frames[0]["operation_id"] == "scrapingdog.google"
+    assert frames[0]["timeout_ms"] == 65_000
+    assert store.log == ["reserve", "dispatch", "settle"]
+    call = next(iter(store.calls.values()))
+    assert call["kind"] == "settlement" and call["actual"] == 250
+    assert call["terminal"]["call_succeeded"] is False
+
+
 def _finalization_transcript() -> list[dict]:
     """Reproduce the 59 + assistant + four returns + marker failure shape."""
 

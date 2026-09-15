@@ -141,6 +141,7 @@ class ProviderTransportError(RuntimeError):
         *,
         openrouter_generation_id: Optional[str] = None,
         deepline_job_id: Optional[str] = None,
+        observed_status: Optional[int] = None,
     ) -> None:
         super().__init__(message)
         self.openrouter_generation_id = (
@@ -154,6 +155,13 @@ class ProviderTransportError(RuntimeError):
         self.deepline_job_id = (
             deepline_job_id if isinstance(deepline_job_id, str)
             and _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(deepline_job_id)
+            else None
+        )
+        self.observed_status = (
+            observed_status
+            if isinstance(observed_status, int)
+            and not isinstance(observed_status, bool)
+            and 100 <= observed_status <= 599
             else None
         )
 
@@ -642,12 +650,14 @@ class HttpxProviderTransport:
                 "ReadTimeout",
                 openrouter_generation_id=openrouter_generation_id,
                 deepline_job_id=deepline_job_id,
+                observed_status=status,
             ) from exc
         except httpx.HTTPError as exc:
             raise ProviderTransportError(
                 type(exc).__name__,
                 openrouter_generation_id=openrouter_generation_id,
                 deepline_job_id=deepline_job_id,
+                observed_status=status,
             ) from exc
         finally:
             _PROVIDER_HTTP_IN_FLIGHT.reset(log_token)
@@ -2095,6 +2105,7 @@ class Broker:
         openrouter_effective_response: Optional[ProviderResponse] = None
         openrouter_generation_present = False
         openrouter_generation_id: Optional[str] = None
+        scrapingdog_observed_success_status: Optional[int] = None
         try:
             url, headers = inject_credential(outbound, secret)
             if deepline_request_id is not None:
@@ -2244,7 +2255,30 @@ class Broker:
                             ),
                         )
             except ProviderTransportError as exc:
-                # Outcome unknown after send: consume the full reservation.
+                # A status read from the pinned transport is bounded evidence,
+                # even when the response body never completed.
+                transport_error_class = (
+                    str(exc) if str(exc) in _TRANSPORT_ERROR_CLASSES
+                    else "ProviderTransportError"
+                )
+                summary["transport_error_class"] = transport_error_class
+                if exc.observed_status is not None:
+                    summary["observed_provider_status"] = exc.observed_status
+                if (
+                    effective_operation.provider == "scrapingdog"
+                    and exc.observed_status is not None
+                    and 200 <= exc.observed_status < 300
+                ):
+                    # Scrapingdog has a fixed charge for an authenticated 2xx.
+                    # A lost body is still a failed model call; normal settlement
+                    # records the known charge without replaying the paid GET.
+                    scrapingdog_observed_success_status = exc.observed_status
+                    response = ProviderResponse(
+                        502, {"content-type": "application/json"},
+                        operations.GENERIC_UNAVAILABLE_BODY,
+                    )
+                # With no observed success, the charge remains unknown and the
+                # full reservation stays uncertain.
                 uncertain_doc: Dict[str, Any] = {
                     "reason": "transport_failure",
                     "call_succeeded": False,
@@ -2285,10 +2319,6 @@ class Broker:
                         "deepline_request_id": deepline_request_id,
                         "deepline_operation": deepline_operation,
                         "credential_fingerprint": provider_credential_fingerprint,
-                        "transport_error_class": (
-                            str(exc) if str(exc) in _TRANSPORT_ERROR_CLASSES
-                            else "ProviderTransportError"
-                        ),
                     })
                     deepline_readback_cost = _deepline_ledger_readback(
                         transport=self._transport,
@@ -2301,19 +2331,26 @@ class Broker:
                             + DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
                         ),
                     )
-                if deepline_readback_cost is None:
+                uncertain_doc["transport_error_class"] = transport_error_class
+                if exc.observed_status is not None:
+                    uncertain_doc["observed_provider_status"] = exc.observed_status
+                if (
+                    deepline_readback_cost is None
+                    and scrapingdog_observed_success_status is None
+                ):
                     self._store.mark_uncertain(
                         run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
                         call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
                     )
                     summary.update({"outcome": "uncertain", "actual_microusd": amount})
                     return _error_result("provider_unavailable", summary)
-                # A billed request with a lost result is still a failed provider
-                # call. Settle its authenticated cost without repeating the POST.
-                response = ProviderResponse(
-                    502, {"content-type": "application/json"},
-                    operations.GENERIC_UNAVAILABLE_BODY,
-                )
+                if deepline_readback_cost is not None:
+                    # A billed request with a lost result is still a failed
+                    # provider call. Do not repeat the paid request.
+                    response = ProviderResponse(
+                        502, {"content-type": "application/json"},
+                        operations.GENERIC_UNAVAILABLE_BODY,
+                    )
         finally:
             secret = ""
             del secret
@@ -2340,7 +2377,10 @@ class Broker:
                 or deepline_readback_cost
             )
             raw_actual = None if raw_cost is None else raw_cost.microusd
-        elif effective_operation.provider == "scrapingdog" and 200 <= response.status < 300:
+        elif effective_operation.provider == "scrapingdog" and (
+            200 <= response.status < 300
+            or scrapingdog_observed_success_status is not None
+        ):
             raw_cost = provider_costs.scrapingdog_cost(
                 effective_operation_id, effective_normalized
             )
@@ -2594,6 +2634,11 @@ class Broker:
                     uncertain_doc["known_actual_microusd"] = raw_actual
                 if cost_record is not None:
                     uncertain_doc["provider_cost"] = cost_record
+            if scrapingdog_observed_success_status is not None:
+                uncertain_doc.update({
+                    "observed_provider_status": scrapingdog_observed_success_status,
+                    "transport_error_class": summary["transport_error_class"],
+                })
             try:
                 self._store.mark_uncertain(
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,

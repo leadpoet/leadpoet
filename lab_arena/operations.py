@@ -560,7 +560,7 @@ _OPERATION_LIST = (
         },
         fixed_params={"results": 10},
         defaults={"country": "us"},
-        timeout_seconds=45,
+        timeout_seconds=65,
         max_request_bytes=4_096,
         max_response_bytes=1_048_576,
         cost_rule=CALL_QUOTA_COST_RULE,

@@ -1022,6 +1022,30 @@ def test_company_listing_name_syntax_does_not_admit_weak_or_superseded_proof(quo
     assert _stage_quote_supports_observation("public", quote) is False
 
 
+def test_company_listing_accepts_press_release_dateline():
+    quote = (
+        'PLANO, Texas, Aug. 25, 2026 /PRNewswire/ -- Alkami Technology, Inc. '
+        '(Nasdaq: ALKT) ("Alkami"), a digital sales and service platform provider '
+        'for financial institutions in the U.S., today announced...'
+    )
+    assert _stage_quote_supports_observation("public", quote) is True
+    assert _stage_quote_supports_observation("private equity", quote) is False
+
+
+@pytest.mark.parametrize("quote", [
+    "News -- Formerly Acme Corporation (NYSE: ACM).",
+    "Previously -- Acme Corporation (NYSE: ACM).",
+    "Not -- Acme Corporation (NYSE: ACM).",
+    "News -- Acme Corporation (NYSE: ACM), then taken private.",
+    "News -- Acme Corporation (NYSE: ACM), delisted in 2024.",
+    "News -- Acme Corporation (NYSE: ACM) listing is planned for next year.",
+    "News -- Acme Corporation bonds (NYSE: ACM).",
+    "News -- (NYSE: ACM).",
+])
+def test_dateline_boundary_preserves_stage_rejections(quote):
+    assert _stage_quote_supports_observation("public", quote) is False
+
+
 @pytest.mark.parametrize(
     "quote",
     [

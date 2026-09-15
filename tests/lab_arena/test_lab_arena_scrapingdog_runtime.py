@@ -164,13 +164,17 @@ def test_provider_transport_never_logs_key_at_debug_level(
     caplog.set_level(logging.DEBUG)
     for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.proxy"):
         caplog.set_level(logging.DEBUG, logger=name)
-    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
-        transport = HttpxProviderTransport(client=client)
-        if fails:
-            with pytest.raises(ProviderTransportError):
-                transport.send(method="GET", url=url, headers={}, body=b"", timeout_seconds=5)
-        else:
-            assert transport.send(method="GET", url=url, headers={}, body=b"", timeout_seconds=5).status == 200
+    transport = HttpxProviderTransport(
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(provider)
+        )
+    )
+    if fails:
+        with pytest.raises(ProviderTransportError):
+            transport.send(method="GET", url=url, headers={}, body=b"", timeout_seconds=5)
+    else:
+        assert transport.send(method="GET", url=url, headers={}, body=b"", timeout_seconds=5).status == 200
+    transport.close()
     logging.getLogger("httpx").info("unrelated HTTP diagnostic still visible")
     assert secret not in caplog.text
     assert "unrelated HTTP diagnostic still visible" in caplog.text

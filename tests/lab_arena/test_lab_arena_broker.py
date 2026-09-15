@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from urllib.parse import quote
@@ -708,15 +710,105 @@ def deepline_history(*entries, has_more=False, next_offset=None):
 def test_default_http_transport_does_not_inherit_proxy_environment():
     transport = br.HttpxProviderTransport()
     try:
-        assert transport._client._trust_env is False
+        client = transport._client_factory()
+        assert client._trust_env is False
+        asyncio.run(client.aclose())
     finally:
         transport.close()
 
 
-class _ReadTimeoutAfterHeaders(httpx.SyncByteStream):
-    def __iter__(self):
+def _async_client_factory(handler):
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+class _ReadTimeoutAfterHeaders(httpx.AsyncByteStream):
+    async def __aiter__(self):
         yield b'{"partial":'
         raise httpx.ReadTimeout("synthetic read timeout")
+
+
+class _TrickleUntilCancelled(httpx.AsyncByteStream):
+    def __init__(self):
+        self.closed = threading.Event()
+
+    async def __aiter__(self):
+        while True:
+            await asyncio.sleep(0.01)
+            yield b"x"
+
+    async def aclose(self):
+        self.closed.set()
+
+
+def test_http_transport_absolute_deadline_cancels_trickle_and_retains_header():
+    stream = _TrickleUntilCancelled()
+    requests = []
+
+    def respond(request):
+        requests.append(request.method)
+        return httpx.Response(
+            200,
+            headers={"X-Generation-Id": "gen-absolute-timeout"},
+            stream=stream,
+        )
+
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(respond)
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(br.ProviderTransportError) as raised:
+            transport.send(
+                method="POST",
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={},
+                body=b"{}",
+                timeout_seconds=0.06,
+            )
+    finally:
+        transport.close()
+
+    assert time.monotonic() - started < 0.5
+    assert requests == ["POST"]
+    assert str(raised.value) == "ReadTimeout"
+    assert raised.value.openrouter_generation_id == "gen-absolute-timeout"
+    assert stream.closed.is_set()
+
+
+def test_http_transport_absolute_deadline_cancels_before_response_headers(
+    caplog,
+):
+    secret = "synthetic-query-secret"
+    handler_cancelled = threading.Event()
+
+    async def never_returns_headers(_request):
+        try:
+            logging.getLogger("httpx").debug("request URL contained %s", secret)
+            await asyncio.sleep(10)
+        finally:
+            handler_cancelled.set()
+
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(never_returns_headers)
+    )
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(br.ProviderTransportError) as raised:
+            transport.send(
+                method="GET",
+                url="https://api.scrapingdog.com/search?api_key=" + secret,
+                headers={},
+                body=b"",
+                timeout_seconds=0.05,
+            )
+    finally:
+        transport.close()
+
+    assert str(raised.value) == "ReadTimeout"
+    assert raised.value.openrouter_generation_id is None
+    assert raised.value.deepline_job_id is None
+    assert handler_cancelled.is_set()
+    assert secret not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -738,8 +830,8 @@ class _ReadTimeoutAfterHeaders(httpx.SyncByteStream):
 def test_http_transport_retains_only_one_valid_generation_header_on_read_timeout(
     response_headers, expected_generation_id
 ):
-    client = httpx.Client(
-        transport=httpx.MockTransport(
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(
             lambda _request: httpx.Response(
                 200,
                 headers=response_headers,
@@ -747,7 +839,6 @@ def test_http_transport_retains_only_one_valid_generation_header_on_read_timeout
             )
         )
     )
-    transport = br.HttpxProviderTransport(client=client)
     try:
         with pytest.raises(br.ProviderTransportError) as raised:
             transport.send(
@@ -784,9 +875,7 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
         )
 
     inner = br.HttpxProviderTransport(
-        client=httpx.Client(
-            transport=httpx.MockTransport(timed_out_response)
-        )
+        client_factory=_async_client_factory(timed_out_response)
     )
     exception_messages = []
 
@@ -988,28 +1077,12 @@ def test_scrapingdog_credential_echo_is_blocked_before_return_or_persistence(pro
     ],
 )
 def test_http_transport_labels_synthetic_generic_response(status, chunks, expected_provenance):
-    class Response:
-        status_code = status
-        headers = {"content-type": "application/json"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def iter_bytes(self, chunk_size):
-            assert chunk_size == 64 * 1024
-            yield from chunks
-
-    class Client:
-        def stream(self, *args, **kwargs):
-            return Response()
-
-        def close(self):
-            pass
-
-    transport = br.HttpxProviderTransport(client=Client(), max_response_bytes=3)
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(
+            lambda _request: httpx.Response(status, content=b"".join(chunks))
+        ),
+        max_response_bytes=3,
+    )
     response = transport.send(
         method="POST", url="https://example.com/execute", headers={}, body=b"{}",
         timeout_seconds=1,
@@ -1020,36 +1093,13 @@ def test_http_transport_labels_synthetic_generic_response(status, chunks, expect
 
 
 def test_http_transport_per_call_limit_accepts_exact_boundary_only():
-    class Response:
-        status_code = 200
-        headers = {"content-type": "application/json"}
-
-        def __init__(self, body):
-            self.body = body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def iter_bytes(self, chunk_size):
-            assert chunk_size == 64 * 1024
-            yield self.body
-
-    class Client:
-        def __init__(self):
-            self.body = b""
-
-        def stream(self, *args, **kwargs):
-            return Response(self.body)
-
-        def close(self):
-            pass
-
-    client = Client()
-    transport = br.HttpxProviderTransport(client=client, max_response_bytes=3)
-    client.body = b"abcd"
+    body = [b"abcd"]
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(
+            lambda _request: httpx.Response(200, content=body[0])
+        ),
+        max_response_bytes=3,
+    )
     accepted = transport.send(
         method="POST",
         url="https://example.com/execute",
@@ -1059,7 +1109,7 @@ def test_http_transport_per_call_limit_accepts_exact_boundary_only():
         max_response_bytes=4,
     )
     assert accepted.status == 200 and accepted.body == b"abcd"
-    client.body = b"abcde"
+    body[0] = b"abcde"
     refused = transport.send(
         method="POST",
         url="https://example.com/execute",
@@ -1109,30 +1159,11 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(creden
     ).encode("utf-8")
     assert len(envelope) == 5_271_155
 
-    class Response:
-        status_code = 200
-        headers = {"content-type": "application/json"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def iter_bytes(self, chunk_size):
-            assert chunk_size == 64 * 1024
-            for offset in range(0, len(envelope), chunk_size):
-                yield envelope[offset:offset + chunk_size]
-
-    class Client:
-        def stream(self, *args, **kwargs):
-            return Response()
-
-        def close(self):
-            pass
-
     transport = br.HttpxProviderTransport(
-        client=Client(), max_response_bytes=4 * 1024 * 1024
+        client_factory=_async_client_factory(
+            lambda _request: httpx.Response(200, content=envelope)
+        ),
+        max_response_bytes=4 * 1024 * 1024,
     )
     scoring_context = br.RunContext(**{
         **CONTEXT.__dict__,
@@ -1752,6 +1783,7 @@ def test_delayed_exact_generation_settles_after_restart_without_second_post(
 def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog):
     generation_id = "gen-stream-timeout-recovery"
     methods = []
+    stream = _TrickleUntilCancelled()
 
     def timed_out_post(request):
         methods.append(request.method)
@@ -1760,11 +1792,11 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
         return httpx.Response(
             200,
             headers={"X-Generation-Id": generation_id},
-            stream=_ReadTimeoutAfterHeaders(),
+            stream=stream,
         )
 
     first_transport = br.HttpxProviderTransport(
-        client=httpx.Client(transport=httpx.MockTransport(timed_out_post))
+        client_factory=_async_client_factory(timed_out_post)
     )
     first_broker, store, _ = make_broker(transport=first_transport)
     caplog.set_level(logging.DEBUG)
@@ -1774,7 +1806,7 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
             operation_id="openrouter.chat",
             parameters=CHAT,
             action_sequence=0,
-            timeout_ms=30000,
+            timeout_ms=60,
         )
     finally:
         first_transport.close()
@@ -1794,8 +1826,19 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
         "transport_failure": True,
     }
     assert methods == ["POST"]
+    assert stream.closed.is_set()
     assert KEY not in caplog.text
     assert KEY not in json.dumps(store.calls)
+
+    replay = first_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=60,
+    )
+    assert replay.status == 409 and replay.call["outcome"] == "uncertain"
+    assert methods == ["POST"]
 
     candidate = {
         "uncertain_entry_id": 1,
@@ -1833,9 +1876,7 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
         )
 
     second_transport = br.HttpxProviderTransport(
-        client=httpx.Client(
-            transport=httpx.MockTransport(exact_generation_get)
-        )
+        client_factory=_async_client_factory(exact_generation_get)
     )
     restarted_broker, _same_store, _ = make_broker(
         store=store, transport=second_transport

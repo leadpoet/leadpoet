@@ -11,7 +11,8 @@ from tests.lab_arena.deepline_delayed_cost_reconciliation_unit_test import (
     _ledger_entry, _score_context,
 )
 from tests.lab_arena.test_lab_arena_broker import (
-    DL_KEY, FakeLedgerStore, _ReadTimeoutAfterHeaders, make_broker,
+    DL_KEY, FakeLedgerStore, _ReadTimeoutAfterHeaders, _TrickleUntilCancelled,
+    _async_client_factory, make_broker,
 )
 
 
@@ -29,10 +30,10 @@ from tests.lab_arena.test_lab_arena_broker import (
       ("x-vercel-id", "iad1::other-1789361973860-8634524a6f3a")], None),
 ])
 def test_broken_body_retains_only_one_valid_native_header(headers, expected):
-    transport = br.HttpxProviderTransport(client=httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(
+    transport = br.HttpxProviderTransport(client_factory=_async_client_factory(
+        lambda _: httpx.Response(
             200, headers=headers, stream=_ReadTimeoutAfterHeaders(),
-        ))
+        )
     ))
     try:
         with pytest.raises(br.ProviderTransportError) as raised:
@@ -45,11 +46,11 @@ def test_broken_body_retains_only_one_valid_native_header(headers, expected):
 
 
 def test_foreign_provider_header_is_not_a_deepline_receipt():
-    transport = br.HttpxProviderTransport(client=httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(
+    transport = br.HttpxProviderTransport(client_factory=_async_client_factory(
+        lambda _: httpx.Response(
             200, headers={"x-vercel-id": NATIVE_REQUEST_ID},
             stream=_ReadTimeoutAfterHeaders(),
-        ))
+        )
     ))
     try:
         with pytest.raises(br.ProviderTransportError) as raised:
@@ -58,6 +59,31 @@ def test_foreign_provider_header_is_not_a_deepline_receipt():
         assert raised.value.deepline_job_id is None
     finally:
         transport.close()
+
+
+def test_absolute_deadline_retains_deepline_header_and_closes_stream():
+    stream = _TrickleUntilCancelled()
+    transport = br.HttpxProviderTransport(client_factory=_async_client_factory(
+        lambda _: httpx.Response(
+            200,
+            headers={"x-vercel-id": "iad1::" + NATIVE_REQUEST_ID},
+            stream=stream,
+        )
+    ))
+    try:
+        with pytest.raises(br.ProviderTransportError) as raised:
+            transport.send(
+                method="POST",
+                url="https://code.deepline.com/api/v2/execute",
+                headers={},
+                body=b"{}",
+                timeout_seconds=0.06,
+            )
+    finally:
+        transport.close()
+    assert str(raised.value) == "ReadTimeout"
+    assert raised.value.deepline_job_id == NATIVE_REQUEST_ID
+    assert stream.closed.is_set()
 
 
 @pytest.mark.parametrize("known_cost", [True, False])
@@ -72,7 +98,9 @@ def test_lost_body_uses_native_receipt_and_never_repeats_paid_call(known_cost):
             "entries": [_ledger_entry(credits=0.02, request_id=NATIVE_REQUEST_ID)]
             if known_cost else "invalid", "has_more": False,
         })
-    transport = br.HttpxProviderTransport(client=httpx.Client(transport=httpx.MockTransport(respond)))
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(respond)
+    )
     store = FakeLedgerStore(openrouter_capacity=49_945_650)
     broker, _, _ = make_broker(store=store, transport=transport,
         credential_for=lambda _context, _provider: DL_KEY,
@@ -104,7 +132,9 @@ def test_credential_shaped_like_native_id_is_never_retained():
             return httpx.Response(200, headers={"x-deepline-request-id": NATIVE_REQUEST_ID},
                                   stream=_ReadTimeoutAfterHeaders())
         return httpx.Response(200, json={"entries": "invalid"})
-    transport = br.HttpxProviderTransport(client=httpx.Client(transport=httpx.MockTransport(respond)))
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(respond)
+    )
     store = FakeLedgerStore(openrouter_capacity=49_945_650)
     broker, _, _ = make_broker(store=store, transport=transport,
         credential_for=lambda _context, _provider: NATIVE_REQUEST_ID,

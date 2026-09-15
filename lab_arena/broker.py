@@ -12,6 +12,7 @@ credential, or transport detail.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextvars
 import hashlib
@@ -540,10 +541,24 @@ def _deepline_response_header_request_id(headers: Mapping[str, str]) -> Optional
 class HttpxProviderTransport:
     """HTTPS to the constant provider hosts: HTTP/1.1, no redirects, bounded."""
 
-    def __init__(self, *, client: Optional[httpx.Client] = None, max_response_bytes: int = 4 * 1024 * 1024) -> None:
-        self._client = client or httpx.Client(http1=True, http2=False, follow_redirects=False, timeout=httpx.Timeout(30.0), trust_env=False)
+    def __init__(
+        self,
+        *,
+        client_factory: Optional[Callable[[], httpx.AsyncClient]] = None,
+        max_response_bytes: int = 4 * 1024 * 1024,
+    ) -> None:
+        self._client_factory = client_factory or (
+            lambda: httpx.AsyncClient(
+                http1=True,
+                http2=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(30.0),
+                trust_env=False,
+            )
+        )
         self._max_response_bytes = max_response_bytes
-        # These are the loggers used by the pinned synchronous HTTP/1.1 path.
+        self._closed = False
+        # These are the loggers used by the pinned asynchronous HTTP/1.1 path.
         # The context-local filter does not silence concurrent unrelated work.
         for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.proxy"):
             logging.getLogger(name).addFilter(_PROVIDER_HTTP_LOG_FILTER)
@@ -560,6 +575,14 @@ class HttpxProviderTransport:
     ) -> ProviderResponse:
         if not url.startswith("https://"):
             raise ProviderTransportError("non-https target")
+        if self._closed:
+            raise ProviderTransportError("transport closed")
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ProviderTransportError("invalid timeout") from exc
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ProviderTransportError("invalid timeout")
         response_limit = (
             self._max_response_bytes
             if max_response_bytes is None
@@ -573,23 +596,51 @@ class HttpxProviderTransport:
             raise ProviderTransportError("invalid response limit")
         openrouter_generation_id: Optional[str] = None
         deepline_job_id: Optional[str] = None
+        status = 0
+        response_headers: Dict[str, str] = {}
+        content = bytearray()
+        oversized = False
+
+        async def request_once() -> None:
+            nonlocal status, response_headers, openrouter_generation_id
+            nonlocal deepline_job_id, content, oversized
+            async with self._client_factory() as client:
+                async with client.stream(
+                    method,
+                    url,
+                    headers=dict(headers),
+                    content=body,
+                    timeout=httpx.Timeout(timeout),
+                ) as response:
+                    status = int(response.status_code)
+                    response_headers = {
+                        key.lower(): value
+                        for key, value in response.headers.items()
+                    }
+                    if urlsplit(url).hostname == "code.deepline.com":
+                        deepline_job_id = _deepline_response_header_request_id(
+                            response_headers
+                        )
+                    _, openrouter_generation_id = _openrouter_generation_identity(
+                        None, response_headers
+                    )
+                    async for chunk in response.aiter_bytes(
+                        chunk_size=64 * 1024
+                    ):
+                        if len(content) + len(chunk) > response_limit:
+                            oversized = True
+                            break
+                        content.extend(chunk)
+
         log_token = _PROVIDER_HTTP_IN_FLIGHT.set(True)
         try:
-            with self._client.stream(method, url, headers=dict(headers), content=body, timeout=httpx.Timeout(float(timeout_seconds))) as response:
-                status = int(response.status_code)
-                response_headers = {k.lower(): v for k, v in response.headers.items()}
-                if urlsplit(url).hostname == "code.deepline.com":
-                    deepline_job_id = _deepline_response_header_request_id(response_headers)
-                _, openrouter_generation_id = _openrouter_generation_identity(
-                    None, response_headers
-                )
-                content = bytearray()
-                oversized = False
-                for chunk in response.iter_bytes(chunk_size=64 * 1024):
-                    if len(content) + len(chunk) > response_limit:
-                        oversized = True
-                        break
-                    content.extend(chunk)
+            asyncio.run(asyncio.wait_for(request_once(), timeout=timeout))
+        except asyncio.TimeoutError as exc:
+            raise ProviderTransportError(
+                "ReadTimeout",
+                openrouter_generation_id=openrouter_generation_id,
+                deepline_job_id=deepline_job_id,
+            ) from exc
         except httpx.HTTPError as exc:
             raise ProviderTransportError(
                 type(exc).__name__,
@@ -612,7 +663,7 @@ class HttpxProviderTransport:
         return ProviderResponse(status, response_headers, bytes(content))
 
     def close(self) -> None:
-        self._client.close()
+        self._closed = True
 
 
 def _deepline_job_request_id(document: Any) -> Optional[str]:

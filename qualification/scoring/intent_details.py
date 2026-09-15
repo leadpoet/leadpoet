@@ -20,6 +20,9 @@ _CHECKS = (
     "facts_supported", "verified_signals_covered", "relevance_grounded",
     "final_sentence_connects_icp", "natural_paragraph",
 )
+_TYPOGRAPHIC_QUOTES = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+})
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -83,6 +86,12 @@ checks and signal_coverage. All checks and coverage must pass for acceptance.
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _quote_is_contained(quote: str, paragraph: str) -> bool:
+    return quote.translate(_TYPOGRAPHIC_QUOTES) in paragraph.translate(
+        _TYPOGRAPHIC_QUOTES
+    )
 
 
 def _texts(value: Any, *, maximum: int, length: int) -> list[str]:
@@ -221,7 +230,9 @@ missing review into an accepted paragraph or a terminal company mismatch.
         observed = {item["matched_icp_signal"] for item in coverage}
         complete = len(coverage) == len(expected) and observed == expected and all(
             item["paragraph_quote"].strip()
-            and item["paragraph_quote"] in document["intent_details"]
+            and _quote_is_contained(
+                item["paragraph_quote"], document["intent_details"]
+            )
             for item in coverage
         )
         checks["verified_signals_covered"] = checks["verified_signals_covered"] and bool(complete)

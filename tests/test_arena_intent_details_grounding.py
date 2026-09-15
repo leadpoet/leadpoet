@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -20,6 +21,33 @@ PARAGRAPH = (
     "make Acme relevant to the ICP for reporting software companies expanding "
     "their product and geographic reach."
 )
+FISERV_PARAGRAPH = (
+    "On October 29, 2025, Fiserv announced several executive changes, including "
+    "Paul Todd’s appointment as Chief Financial Officer effective October 31 and "
+    "the appointment of Takis Georgakopoulos and Dhivya Suryadevara as "
+    "Co-Presidents effective December 1. These changes placed new leadership over "
+    "finance and major operating areas including Financial Solutions, Sales and "
+    "Operations at a provider of account processing, digital banking, card "
+    "processing, and payment infrastructure; the transition may create a timely "
+    "need to coordinate and optimize the core banking and money-movement workflows "
+    "Fiserv delivers."
+)
+FISERV_REVIEW = {
+    "facts_supported": True,
+    "final_sentence_connects_icp": True,
+    "natural_paragraph": True,
+    "relevance_grounded": True,
+    "signal_coverage": [{
+        "matched_icp_signal": 0,
+        "paragraph_quote": (
+            "On October 29, 2025, Fiserv announced several executive changes, "
+            "including Paul Todd's appointment as Chief Financial Officer effective "
+            "October 31 and the appointment of Takis Georgakopoulos and Dhivya "
+            "Suryadevara as Co-Presidents effective December 1."
+        ),
+    }],
+    "verified_signals_covered": True,
+}
 
 
 def inputs():
@@ -140,6 +168,50 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
     assert result["input_hash"].startswith("sha256:")
 
 
+def test_saved_fiserv_review_accepts_ascii_apostrophe_in_exact_quote(monkeypatch):
+    company, icp, results, fit = inputs()
+    company.intent_details = FISERV_PARAGRAPH
+    prompts = []
+
+    async def judge(prompt, **_kwargs):
+        prompts.append(prompt)
+        return json.dumps(FISERV_REVIEW)
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results[:1], fit
+    ))
+
+    assert receipt["decision"] == "match"
+    assert receipt["checks"] == {
+        name: True for name in intent_details._CHECKS
+    }
+    assert json.loads(prompts[0])["intent_details"] == FISERV_PARAGRAPH
+    assert "Paul Todd’s" in prompts[0]
+    assert receipt["input_hash"] == (
+        "sha256:" + hashlib.sha256(prompts[0].encode("utf-8")).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(("quote", "paragraph"), [
+    ("Todd's \"Finance\" role in 2025", "Todd’s “Finance” role in 2025"),
+    ("Todd’s “Finance” role in 2025", "Todd's \"Finance\" role in 2025"),
+])
+def test_containment_treats_only_straight_and_curly_quotes_as_equivalent(
+    quote, paragraph
+):
+    assert intent_details._quote_is_contained(quote, paragraph)
+    assert not intent_details._quote_is_contained(
+        quote.replace("Finance", "Operations"), paragraph
+    )
+    assert not intent_details._quote_is_contained(
+        quote.replace("2025", "2026"), paragraph
+    )
+    assert not intent_details._quote_is_contained(
+        quote.replace("role in", "role-in"), paragraph
+    )
+
+
 @pytest.mark.parametrize("response", ["{}", "not json", "[]", json.dumps({name: "true" for name in intent_details._CHECKS})])
 def test_malformed_review_is_retryable_not_a_terminal_zero(monkeypatch, response):
     async def judge(*args, **kwargs):
@@ -167,6 +239,8 @@ def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
      {"matched_icp_signal": 1, "paragraph_quote": ""}],
     [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
      {"matched_icp_signal": 1, "paragraph_quote": "Words absent from the paragraph"}],
+    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
+     {"matched_icp_signal": 2, "paragraph_quote": PARAGRAPH}],
 ])
 def test_coverage_requires_an_exact_passage_for_each_verified_signal(monkeypatch, coverage):
     async def judge(*args, **kwargs):

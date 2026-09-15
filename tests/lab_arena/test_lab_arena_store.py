@@ -77,8 +77,8 @@ def test_select_does_not_retry_authorization_or_contract_errors(response):
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
-def test_rpc_does_not_retry_ambiguous_read_failure(error_type):
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError, httpx.ConnectError, httpx.WriteTimeout])
+def test_rpc_transport_failure_is_typed_without_replay(error_type):
     requests = []
 
     def handler(request):
@@ -87,10 +87,48 @@ def test_rpc_does_not_retry_ambiguous_read_failure(error_type):
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        with pytest.raises(ArenaStoreUnavailable) as caught:
+            transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-10", "p_reason": "test"})
+        assert isinstance(caught.value, ArenaStoreError)
+        assert isinstance(caught.value.__cause__, error_type)
+        assert "private transport diagnostic" not in str(caught.value)
+    assert len(requests) == 1 and requests[0].method == "POST"
+
+
+def test_rpc_other_http_error_stays_base_store_error_without_replay():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        raise httpx.HTTPStatusError(
+            "private response diagnostic", request=request,
+            response=httpx.Response(400, request=request),
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
         with pytest.raises(ArenaStoreError) as caught:
             transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-10", "p_reason": "test"})
         assert not isinstance(caught.value, ArenaStoreUnavailable)
-    assert len(requests) == 1 and requests[0].method == "POST"
+        assert "private response diagnostic" not in str(caught.value)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(403, json={"code": "42501", "message": "permission denied"}),
+    httpx.Response(200, content=b"invalid JSON"),
+])
+def test_rpc_response_status_and_schema_errors_remain_base(response):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return response
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-10", "p_reason": "test"})
+        assert not isinstance(caught.value, ArenaStoreUnavailable)
+    assert len(requests) == 1
 
 
 class RecordingTransport:

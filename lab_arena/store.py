@@ -239,7 +239,7 @@ class ArenaStoreError(RuntimeError):
 
 
 class ArenaStoreUnavailable(ArenaStoreError):
-    """A transient database read failed after one bounded retry."""
+    """A transient database transport failure; RPC transport errors are not replayed."""
 
 
 class ArenaRoleError(ArenaStoreError):
@@ -368,6 +368,10 @@ class PostgrestTransport(StoreTransport):
         for attempt in range(DEADLOCK_RETRIES + 1):
             try:
                 response = self._client.post("%s/rest/v1/rpc/%s" % (self._base_url, function), headers=self._headers, content=content)
+            except httpx.TransportError as exc:
+                # A mutating RPC may have committed before its response failed.
+                # Surface availability to the API, but never replay the POST.
+                raise ArenaStoreUnavailable("rpc %s transport failure: %s" % (function, type(exc).__name__)) from exc
             except httpx.HTTPError as exc:
                 raise ArenaStoreError("rpc %s transport failure: %s" % (function, type(exc).__name__)) from exc
             if response.status_code >= 400 and attempt < DEADLOCK_RETRIES:

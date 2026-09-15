@@ -94,6 +94,10 @@ AS $lab_arena__deepline_cost_binding_v1$
                AND p_uncertainty_doc #>> '{call,credential_fingerprint}' =
                    p_reservation_doc ->> 'credential_fingerprint'
                AND (NOT (p_uncertainty_doc -> 'call' ? 'deepline_job_id')
+                    OR (p_uncertainty_doc #>> '{call,deepline_job_id}' ~
+                          '^ctx-tool-[0-9a-f]{32}$'
+                        AND p_uncertainty_doc #>> '{call,deepline_job_id}' =
+                            p_reservation_doc ->> 'deepline_request_id')
                     OR p_uncertainty_doc #>> '{call,deepline_job_id}' ~
                       '^[a-z0-9]{3,8}::[a-z0-9]{1,16}-[0-9]{13}-[a-f0-9]{12,64}$'))
             )

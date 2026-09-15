@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts
+from lab_arena import contracts, provider_costs
 from lab_arena import broker as broker_module
 from lab_arena.store import hash_lease_token
 from tests.lab_arena.deepline_delayed_cost_reconciliation_postgres_test import _store
@@ -246,6 +246,67 @@ def test_partial_or_unbound_future_metadata_is_rejected(database, field):
                 "AND entry_kind='uncertain'", (json.dumps(full), identity),
             )
         assert store.list_deepline_cost_reconciliations(round_id) == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("echoes_reservation", [True, False])
+def test_retained_ctx_job_receipt_must_equal_reservation_id(
+    database, echoes_reservation
+):
+    store = _store(database)
+    psycopg2, dsn = database
+    try:
+        label = "echo" if echoes_reservation else "other"
+        round_id, _, identity, request_id, fingerprint = _uncertain(
+            store, label, _old_call()
+        )
+        other_id = (
+            "ctx-tool-" + "e" * 32 if request_id != "ctx-tool-" + "e" * 32
+            else "ctx-tool-" + "f" * 32
+        )
+        provider_id = request_id if echoes_reservation else other_id
+        response_doc = {
+            "job_id": provider_id, "status": "completed",
+            "billing": {"credits_charged": 0.02},
+        }
+        provider_cost = provider_costs.deepline_cost(response_doc)
+        assert provider_cost is not None
+        call = broker_module._missing_provider_cost_call_doc(
+            broker_module.ProviderResponse(
+                200, {}, json.dumps(response_doc).encode("utf-8")
+            ), response_doc, call_succeeded=True,
+            deepline_request_id=request_id,
+            deepline_response_request_id=provider_id,
+            deepline_operation="harvestapi_get_company",
+            credential_fingerprint=fingerprint,
+        )
+        call.update(
+            reason="settle_failure", failure_stage="settlement",
+            error_class="ArenaStoreError",
+            known_actual_microusd=provider_cost.microusd,
+            provider_cost=broker_module._provider_cost_record(
+                provider_cost, operation="harvestapi_get_company",
+                request_id=provider_id,
+            ),
+        )
+        assert call["call_succeeded"] is True
+        assert call["provider_status"] == 200
+        assert call["known_actual_microusd"] == 2_000
+        assert call["provider_cost"]["request_id"] == provider_id
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute(
+                "UPDATE public.lab_arena_ledger SET entry_doc=jsonb_set("
+                "entry_doc,'{call}',%s::jsonb) WHERE call_identity=%s "
+                "AND entry_kind='uncertain'", (json.dumps(call), identity),
+            )
+        candidates = store.list_deepline_cost_reconciliations(round_id)
+        if echoes_reservation:
+            assert len(candidates) == 1
+            assert candidates[0]["request_id"] == request_id
+        else:
+            assert candidates == []
     finally:
         store.close()
 
